@@ -528,6 +528,7 @@ import {
   runPreflightCoverage,
   runPreflightFast,
   runTreeAdvisoryLine,
+  type CiParityStepResult,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
 import {
@@ -22275,7 +22276,132 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs"] as const;
+
+/** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
+ *  base worktree, a real test run or a git call. */
+export interface PreflightProofsDeps {
+  spawn?: PreflightSpawn;
+  /** `git -C <repoRoot> …`, returning stdout. */
+  git?: (args: string[]) => string;
+  /** The reviewer's OWN resolver, injected so a test can vary the criteria without a plan. */
+  resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
+}
+
+/**
+ * W1-T3738 — RUN THE PROOF GATE AT HOME, FROM THE HEAD COMMIT'S OWN TRAILER.
+ *
+ * `proof-discrimination` refused on `executed_stale` six times in one session and every one cost a
+ * full CI round, while `rmd check-proof --base` answers the identical question offline in seconds.
+ * Nothing about it needs the network: the gate resolves criteria through
+ * {@link resolvePlanCriteriaAtHead}, whose input is the `Remudero-Task:` trailer the head commit
+ * already carries — so the same criteria resolve from the same plan at the same sha, with no pull
+ * request in existence yet.
+ *
+ * ONE RESOLUTION PATH, ONE EXECUTOR. Criteria come from the reviewer's resolver and each proof runs
+ * through the `check-proof` verb — never a second parser and never a second base worktree. A local
+ * tier that disagreed with the gate about WHICH criteria a branch is judged on would be worse than
+ * no tier at all.
+ *
+ * NO TRAILER, NO OPINION. A branch resolving no criteria reports that and passes: the same
+ * "no predicate ⇒ no opinion" contract every injected check in this repo keeps.
+ */
+export function runPreflightProofs(
+  repoRoot: string,
+  deps: PreflightProofsDeps = {},
+): { ok: boolean; steps: CiParityStepResult[] } {
+  const git =
+    deps.git ?? ((args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" }).toString());
+  const spawn = deps.spawn ?? ((file: string, args: string[], opts?: { cwd?: string }) => {
+    const r = spawnSync(file, args, { encoding: "utf8", cwd: opts?.cwd, maxBuffer: 1 << 26 });
+    return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  });
+  let headSha: string;
+  let mergeBase: string;
+  let body: string;
+  try {
+    headSha = git(["rev-parse", "HEAD"]).trim();
+    mergeBase = git(["merge-base", "origin/main", "HEAD"]).trim();
+    body = git(["log", "-1", "--format=%B"]);
+  } catch (err) {
+    // UNREADABLE IS NOT A REFUSAL. A shallow clone or an unfetched origin/main is an environment
+    // gap, and this tier must never invent a finding from one.
+    return {
+      ok: true,
+      steps: [
+        {
+          name: "proofs",
+          ok: true,
+          detail: "proofs: SKIPPED — could not read the head or merge-base: " + String(err).split("\n")[0],
+        },
+      ],
+    };
+  }
+
+  const criteria =
+    deps.resolveCriteria?.(body, headSha) ??
+    (() => {
+      const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", headSha);
+      return resolved.criteria.length > 0 ? resolved.criteria : parseAcceptanceBlock(body);
+    })();
+
+  // W1-T3729: a criterion the plan credits to an earlier merge carries no proof text and is stale
+  // BY CONSTRUCTION — the gate skips it, so this does too, on the same truthiness test.
+  const executable = criteria.filter((c) => !c.satisfied_by && parseWhitelistedProof((c.proof ?? "").trim()) !== null);
+  if (executable.length === 0) {
+    return {
+      ok: true,
+      steps: [
+        {
+          name: "proofs",
+          ok: true,
+          detail: "proofs: OK — no executable criterion resolved from this head (no trailer, or none parseable)",
+        },
+      ],
+    };
+  }
+
+  const stale: string[] = [];
+  for (const c of executable) {
+    const proof = (c.proof ?? "").trim();
+    const run = spawn(
+      process.execPath,
+      ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
+      { cwd: repoRoot },
+    );
+    // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
+    // to discriminate — reading any non-zero as stale would refuse on an environment gap.
+    if (run.status === CHECK_PROOF_EXIT.executedStale) stale.push(proof);
+  }
+
+  if (stale.length === 0) {
+    return {
+      ok: true,
+      steps: [
+        {
+          name: "proofs",
+          ok: true,
+          detail:
+            "proofs: OK — " + executable.length + " executable proof(s) discriminate against " + mergeBase.slice(0, 9),
+        },
+      ],
+    };
+  }
+  return {
+    ok: false,
+    steps: [
+      {
+        name: "proofs",
+        ok: false,
+        detail:
+          "proofs: FAIL — " + stale.length + " of " + executable.length + " proof(s) pass at BOTH head and " +
+          mergeBase.slice(0, 9) + "; they establish nothing and proof-discrimination will refuse this PR:\n" +
+          stale.map((x) => "  " + x).join("\n") +
+          "\n  Repoint each at behaviour this diff changes. A control assertion needs a corpus control of its own.",
+      },
+    ],
+  };
+}
 
 /** W1-T3737 — one tier of a preflight run, for the summary sentence below. */
 export interface PreflightTier {
@@ -22366,6 +22492,9 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
+  // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
+  // 29-second default tier cannot absorb that. Named in the coverage line below either way.
+  const proofs = rest.includes("--proofs") ? runPreflightProofs(repoRoot, { spawn: deps.spawn }) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -22385,7 +22514,12 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
       console.log(step.detail);
     }
   }
-  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
+  if (proofs) {
+    for (const step of proofs.steps) {
+      console.log(step.detail);
+    }
+  }
+  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true) && (proofs?.ok ?? true);
   // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
   //
   // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
@@ -22412,13 +22546,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     cpuCount: deps.cpuCount ?? osCpus().length,
     ...(pin !== undefined && "sha" in pin ? { baseSha: pin.sha } : {}),
   });
-  const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])];
+  const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? []), ...(proofs?.steps ?? [])];
   const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
   const tiers: PreflightTier[] = [
     { name: "commitlint/typecheck/emitter", enableWith: "always runs", ran: true },
     { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
     { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity !== undefined },
     { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
+    { name: "proof discrimination", enableWith: "--proofs", ran: proofs !== undefined },
   ];
   console.log(
     "\n" +
