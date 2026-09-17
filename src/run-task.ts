@@ -9556,8 +9556,7 @@ export async function runFixRung(opts: {
     const fixMode = deriveFixMode(evidence);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
-    const fixHarnessOwnsGit = opts.config.workerProviders?.harnessCommitsFix === true;
-    const fixCashTools = fixHarnessOwnsGit ? [...FIX_CASH_TOOLS] : undefined;
+    const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -32600,6 +32599,23 @@ export function commitWorkerEdits(
  * fallback push and PR creation carry the run home. No message, no commit: an invented subject
  * would attribute work to a run that never asked for it.
  */
+/**
+ * W1-T3727: WHO HOLDS A FIX ROUND'S GIT, as one value both the prompt and the tool bound read.
+ *
+ * EXPORTED SO IT CAN BE ASSERTED BY CALLING IT. The two facts worth testing — that the shell-less
+ * surface is offered only where the prompt already said the harness commits, and that nothing is
+ * offered otherwise — were first written as tests that read `run-task.ts` AS TEXT, which
+ * `source-text-assertion-census` refuses for good reason: such a test passes when the prose is
+ * right and the behaviour is wrong. Returning the pair from one function makes the coherence rule
+ * a property of the value rather than of two call sites that must be kept in step.
+ */
+export function fixRoundGitOwnership(
+  config: Pick<Config, "workerProviders">,
+): { harnessCommits: boolean; cashTools: string[] | undefined } {
+  const harnessCommits = config.workerProviders?.harnessCommitsFix === true;
+  return { harnessCommits, cashTools: harnessCommits ? [...FIX_CASH_TOOLS] : undefined };
+}
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that

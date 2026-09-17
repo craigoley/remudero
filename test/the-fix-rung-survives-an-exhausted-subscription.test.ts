@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "../src/lib/fix-fence.js";
 import { cashCanServeToolSurface, cashFallbackRefusal } from "../src/lib/worker.js";
@@ -57,19 +56,35 @@ test("a Claude round still pushes for itself — the default is unchanged", () =
   assert.doesNotMatch(p, /you have no shell/);
 });
 
-test("the cash surface is offered ONLY where the prompt already said the harness commits", () => {
-  // THE COHERENCE RULE. The prompt is built before the auction runs, so offering a shell-less
-  // surface to a worker whose prompt said `git push` hands it, on retry, a contract it cannot
-  // honour — the same rule W1-T3696 states for implement.
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(src, /const fixCashTools = fixHarnessOwnsGit \? \[\.\.\.FIX_CASH_TOOLS\] : undefined;/);
-  assert.match(src, /harnessCommits: fixHarnessOwnsGit,/, "the same value governs the prompt");
+// ── the coherence rule, asserted by CALLING it ──────────────────────────────────────────────────
+// These two facts were first written as tests that read `run-task.ts` AS TEXT, which
+// `source-text-assertion-census` refuses: such a test passes when the prose is right and the
+// behaviour is wrong. `fixRoundGitOwnership` returns BOTH halves from one call, so the rule is a
+// property of the value rather than of two call sites someone must keep in step.
+
+import { fixRoundGitOwnership } from "../src/run-task.js";
+
+test("with the opt-in, the harness holds git AND a shell-less surface is offered — together", () => {
+  const d = fixRoundGitOwnership({ workerProviders: { harnessCommitsFix: true } } as never);
+  assert.equal(d.harnessCommits, true);
+  assert.deepEqual(d.cashTools, [...FIX_CASH_TOOLS]);
+  assert.equal(cashCanServeToolSurface(d.cashTools), true, "and cash can actually run it");
 });
 
-test("the harness commit runs BEFORE the round's commits are counted, or the push carries nothing", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const commit = src.indexOf("harnessCommitForShellLessWorker({\n        harnessOwnsGit: true,");
-  const count = src.indexOf("deps.readRoundCommits", commit);
-  assert.ok(commit > 0, "the harness commit is wired into the fix round");
-  assert.ok(count > commit, "and it precedes readRoundCommits, which decides what the push carries");
+test("without it, NEITHER half appears — the default is untouched", () => {
+  for (const cfg of [{}, { workerProviders: {} }, { workerProviders: { harnessCommitsFix: false } }]) {
+    const d = fixRoundGitOwnership(cfg as never);
+    assert.equal(d.harnessCommits, false, JSON.stringify(cfg));
+    assert.equal(d.cashTools, undefined, "no surface is offered to a worker told to push");
+  }
+});
+
+test("the two halves cannot diverge — a surface is offered EXACTLY when the harness commits", () => {
+  // THE COHERENCE RULE ITSELF. The prompt is built before the auction runs, so offering a
+  // shell-less surface to a worker told to `git push` hands it, on retry, a contract it cannot
+  // honour. One return value makes that impossible to get half-right.
+  for (const on of [true, false]) {
+    const d = fixRoundGitOwnership({ workerProviders: { harnessCommitsFix: on } } as never);
+    assert.equal(d.harnessCommits, d.cashTools !== undefined, `both halves must agree at ${on}`);
+  }
 });
