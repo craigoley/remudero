@@ -867,6 +867,7 @@
     "test/lint-proof-name-resolution-wiring.test.ts": 1515,
     "test/lint-proof-name-resolution.test.ts": 648,
     "test/lint-proof-scope.test.ts": 901,
+    "test/lint-scope-narrows-output-not-corpus.test.ts": 0,
     "test/live-write-guard-command-sites.test.ts": 21544,
     "test/live-write-guard-leaves.test.ts": 2807,
     "test/live-write-guard.test.ts": 255,

@@ -866,9 +866,28 @@ function unmetOutsideDeps(
   return { unmet, unobservable };
 }
 
-function blockingLintMessages(basePlan: Plan, fragmentPlan: Plan): string[] {
+export function blockingLintMessages(
+  basePlan: Plan,
+  fragmentPlan: Plan,
+  // INJECTABLE so a test can assert WHAT THIS CALLER ASKS FOR, not merely that `lintPlan` can
+  // narrow when asked. A previous fix in this repo narrowed a predicate correctly and left its one
+  // caller still invoking the wide form (#5816); the saving lives entirely in the argument below.
+  lint: typeof lintPlan = lintPlan,
+): string[] {
   const merged = mergedPlan(basePlan, fragmentPlan);
-  const results = lintPlan(merged, () => ({}));
+  // LINT ONLY WHAT IS READ BACK. The loop below reads `results` for the FRAGMENT's tasks and
+  // nothing else, but this asked for every task in the merged plan — 1,849 of them on the live
+  // fleet — and discarded all but one or two. `classifyProposal` calls this once per proposal, so
+  // GET /v1/inbox ran ~783,000 task lints per request, synchronously, on the daemon's only thread.
+  //
+  // MEASURED 2026-09-16 against the live state: 61.9s inside this loop, 90% of it in task-linter.ts
+  // (surfaceOf, duplicateSurfaceViolations, advisoryRoutingViolations and its regex lexicon). A
+  // 296-byte GET /v1/daemon-health issued alongside took 61.2s; the same request took 0.25s once
+  // the inbox read finished. That is the whole of the console's "Inbox unavailable", and of Board
+  // and Analytics beside it: `boundConsoleReadRoute`'s 750ms budget is a `setTimeout` racing the
+  // handler, and a `setTimeout` cannot fire while the event loop is blocked.
+  const fragmentIds = new Set(fragmentPlan.tasks.map((t) => t.id));
+  const results = lint(merged, () => ({}), fragmentIds);
   const out: string[] = [];
   for (const task of fragmentPlan.tasks) {
     const violations = results.get(task.id)?.violations ?? [];
