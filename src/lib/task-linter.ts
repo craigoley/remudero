@@ -1470,35 +1470,23 @@ export function proofUnitTestUnresolvableViolations(task: Task, opts: LintOpts =
 }
 
 // ── PROOF-UNIT-TEST-BASE-WRAPPER (W1-T3651 — a title proof that reads pass on an empty base) ──
-// `proofBaseDiscriminationViolations` (W1-T2835) already asks whether a PATH-form `unit test:`
-// proof can tell head from base, and deliberately stays silent on a name-filtered (TITLE-form)
-// proof: "the discrimination turns on whether the TITLE matches at base, which a path predicate
-// cannot answer." That silence hid a false pass, MEASURED on #5739 (2026-09-16): a TITLE proof
-// whose only home is a file the diff itself ADDS reads `pass` on a base that has no such test.
+// `proofBaseDiscriminationViolations` (W1-T2835) judges only the PATH form; a name-filtered
+// (TITLE-form) `unit test:` proof stays silent there because its base outcome turns on whether
+// the title matches SOMETHING at base, not on one file's presence. TRAP, reproduced directly
+// (#5739, this task's own rationale): at base a title's file is absent, `node --test
+// --test-name-pattern` matches zero tests, and node STILL exits 0 (`ok 1 - <file>`) — the proof
+// reads pass on a base with none of the behaviour it claims, and `classifyBaseProofOutcome`
+// (review.ts) grades it `executed_stale` a CI round later, silently.
 //
-// THE WRAPPER, REPRODUCED DIRECTLY:
-//     node --test --test-name-pattern "<no match>" -> ok 1 - test/<file>.test.ts / # pass 1 / exit 0
-//     node --test <same file, absent at base>      -> exit 1, "Could not find '<path>'"
-// At the base the file does not exist, the pattern matches nothing, and node still exits 0 — the
-// single most misleading result a proof can produce, because it reads as evidence of exactly the
-// thing it disproves. `classifyBaseProofOutcome` (review.ts) reads that clean exit as `stale` one
-// CI round later, and the criterion falls back to the keyword floor SILENTLY.
+// SHAPE, NOT EXECUTION: reuses the SAME injected `resolveNameFilteredCandidates` {@link
+// proofUnitTestUnresolvableViolations} already calls, only to learn WHICH file a title resolves
+// into TODAY — never running a test itself. When that resolution is unambiguous, the file is a
+// member of THIS task's own `files:` (the diff holds it), and {@link LintOpts.pathExistsAtBase}
+// reports it absent, the base reading is structurally dishonest: no tree makes it true.
 //
-// SHAPE, NOT EXECUTION: this does not run anything, and never re-implements node's own
-// zero-match wrapper semantics. It reuses the SAME injected `resolveNameFilteredCandidates`
-// {@link proofUnitTestUnresolvableViolations} already calls — the reviewer's OWN resolver, bound
-// to the PR-head checkout — only to learn WHICH file the title's raw name resolves into TODAY.
-// When that resolution is unambiguous (exactly one file), that file is a member of THIS task's
-// own declared `files:` (the author is holding it in the same diff), and {@link
-// LintOpts.pathExistsAtBase} reports it ABSENT at the base ref, the base reading is structurally
-// a false pass: there is no tree on which this title proof is honest.
-//
-// BLOCK, NOT WARN, unlike proof-base-discrimination's warn-only default: that check's false
-// positive is a legitimate REPAIR (a task naming a currently-red, already-existing test); this
-// check's positive names a file that does not exist at base AT ALL, so there is no honest reading
-// to protect. Silent absent EITHER injected predicate — the same "no predicate, no opinion"
-// contract every base-scoped check here follows — so the whole-plan pass and pre-dispatch (which
-// wire neither) never see this fire, exactly like proof-base-discrimination itself.
+// BLOCK, unlike proof-base-discrimination's WARN: that check's false positive is a legitimate
+// REPAIR of an already-existing test; this one names a file absent at base ENTIRELY, so there is
+// no honest reading to protect. Silent absent either injected predicate, same as its sibling.
 
 /** W1-T3651 — every name-filtered `unit test:` proof whose raw title resolves, UNAMBIGUOUSLY, into
  *  a file this task's own `files:` declares, when that file is ABSENT at the base ref. BLOCK,
