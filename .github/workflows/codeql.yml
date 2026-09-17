@@ -5,6 +5,29 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # W1-T3725 — DO NOT ANALYSE JAVASCRIPT ON A DIFF THAT CANNOT CONTAIN ANY.
+    #
+    # MEASURED on #5891, a PLAN_ONLY pull request touching one file under plan/tasks.d/:
+    #   WALL CLOCK 3.8 min — of which 3.8 was Analyze (javascript-typescript), the critical path.
+    # Against 20.3 min for a code PR, so W1-T2428's fast-lane classifier in ci.yml is already
+    # doing real work and the coverage shards correctly skip. What remained was CodeQL: a
+    # SEPARATE workflow with no paths filter, which predates the classifier and never learned
+    # about it. It is not a required check either, so it gates nothing while setting the wall
+    # clock for every filing — and this fleet files many.
+    #
+    # ONLY SURFACES THAT CANNOT CARRY CODE. scripts/** and .github/** are DELIBERATELY absent: a
+    # script or a workflow IS code CodeQL reads, and adding either is the mistake this shape
+    # invites, because both merely LOOK like configuration. The task's own falsifier names it.
+    #
+    # THE SAFETY ARGUMENT, AND IT MUST HOLD: skipping a pull-request analysis is sound ONLY
+    # because the same commit is still analysed on push to main, and the weekly scan still
+    # sweeps the whole tree. Neither trigger below carries a filter, and a test asserts that
+    # rather than trusting it.
+    paths-ignore:
+      - "plan/**"
+      - "docs/**"
+      - "learnings/**"
+      - "**/*.md"
   schedule:
     # Weekly, off-peak (Mondays 04:17 UTC — deliberately not on :00/:30).
     - cron: "17 4 * * 1"
