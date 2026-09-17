@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import {
   decideRepairDispatch,
@@ -196,4 +196,32 @@ test("BEHAVIORAL: a real runTask dispatch of a linter-refused task drives repair
   ) as PriorRefusal;
   assert.equal(record.attempts, 1, "the real dispatch path persisted the first repair decision");
   assert.match(record.verdict, /sizing/, "the persisted repair decision carries the real linter verdict for this task");
+});
+
+test("BEHAVIORAL: the next real runTask reads that refusal and escalates without issuing a live GitHub write", async () => {
+  const planPath = fixturePlanPath();
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-repair-repeat-root-"));
+  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+  const spawn = (async () => {
+    throw new Error("spawn must never run for a linter-failing task, including its repeated refusal");
+  }) as typeof spawnWorker;
+  const first = await runTask("TST-REPAIR-BAD", { skipGitSync: true, planPath, config, github: OFFLINE_GITHUB, spawn });
+  assert.equal(first.verdict, "blocked_illformed");
+
+  const fakeGhDir = mkdtempSync(join(tmpdir(), "rmd-repair-no-gh-"));
+  const fakeGh = join(fakeGhDir, "gh");
+  writeFileSync(fakeGh, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const priorPath = process.env.PATH;
+  process.env.PATH = `${fakeGhDir}${delimiter}${priorPath ?? ""}`;
+  try {
+    const repeated = await runTask("TST-REPAIR-BAD", { skipGitSync: true, planPath, config, github: OFFLINE_GITHUB, spawn });
+    assert.equal(repeated.verdict, "blocked_illformed");
+  } finally {
+    process.env.PATH = priorPath;
+  }
+
+  const record = JSON.parse(
+    readFileSync(join(configRoot, "state", "dispatch-repair", "TST-REPAIR-BAD.json"), "utf8"),
+  ) as PriorRefusal;
+  assert.equal(record.attempts, 2, "the repeated real path reads the durable first refusal before escalating");
 });
