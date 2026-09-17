@@ -44,6 +44,7 @@
     "test/a-count-assertion-names-its-members.test.ts": 520,
     "test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts": 0,
     "test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts": 4548,
+    "test/a-criterion-credited-to-a-prior-merge-is-not-a-stale-proof.test.ts": 0,
     "test/a-criterion-names-the-test-that-proves-it.test.ts": 1300,
     "test/a-criterion-restated-is-not-a-claim.test.ts": 0,
     "test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts": 0,
