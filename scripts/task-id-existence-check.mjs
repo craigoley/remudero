@@ -205,6 +205,20 @@ export function shardNoteRecordsReservationHandoff(text, holderBranch, filerBran
   return false;
 }
 
+// W1-T3648: THE ONE LINE A FILER MUST BE ABLE TO PASTE VERBATIM, unmerged with anything else --
+// the matcher above is end-of-line anchored (`\s*$`), so ANY text trailing the hand-off ON THE
+// SAME PHYSICAL LINE swallows into the second capture group and silently defeats the match. The
+// gate used to print this fused into a one-line YAML fragment, `note: "reservation hand-off: X ->
+// Y"`, which reads as a complete note VALUE -- so a filer with an existing note prepended it into
+// that note's own quotes rather than adding a new line, producing exactly the kind of trailing
+// text that breaks the anchor (MEASURED on PR #5703, see plan/tasks.d/W1-T3648-...). This
+// function returns ONLY the bare hand-off text, with nothing before or after it, so whatever
+// prints it can guarantee -- by construction, not by instruction a reader might skip -- that nothing
+// else ever shares its line.
+export function reservationHandoffNoteLine(holderBranch, filerBranch) {
+  return `reservation hand-off: ${holderBranch} -> ${filerBranch}`;
+}
+
 function occurrenceFiles(occurrences) {
   return [...new Set(occurrences.map((o) => o.file))];
 }
@@ -738,8 +752,18 @@ export function main(argv) {
       // Print the EXACT line that clears this row when there is one, rather than a shape the
       // author has to guess the left-hand side of -- an unreadable holder has no branch name to
       // read off the failure, which is precisely why this remedy used to look inapplicable.
+      //
+      // W1-T3648: printed as a BLOCK, hand-off ALONE on its own line, never fused with existing
+      // note text on the same physical line -- see reservationHandoffNoteLine's comment for why
+      // the old one-line fragment silently failed the very matcher it named once a note already
+      // had content.
       if (c.recordedBranch !== undefined && c.filerBranch) {
-        console.error(`    remedy: note: "reservation hand-off: ${c.recordedBranch} -> ${c.filerBranch}"`);
+        console.error(
+          "    remedy: add this as a NEW line in the shard's note -- do not merge it into any " +
+            "existing note text on the same line, or the check that requires it will not see it:",
+        );
+        console.error("        note: |");
+        console.error(`          ${reservationHandoffNoteLine(c.recordedBranch, c.filerBranch)}`);
       }
     }
     console.error(

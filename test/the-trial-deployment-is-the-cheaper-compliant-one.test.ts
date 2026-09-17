@@ -40,6 +40,8 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MOUNTS = join(REPO_ROOT, ".remudero", "mounts.yaml");
 const NANO = "gpt-5-nano";
 const OSS = "gpt-oss-120b";
+const LUNA = "gpt-5.6-luna";
+const TERRA = "gpt-5.6-terra";
 
 function ladder(): Record<string, Record<string, string[]>> {
   const parsed = parseYaml(readFileSync(MOUNTS, "utf8")) as {
@@ -85,11 +87,12 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
   // back to one lead everywhere — the exact regression the measurement above argues against.
   assert.notEqual(rows.economy?.low?.[0], rows.balanced?.low?.[0], "economy and balanced must not share a lead");
 
-  // FRONTIER IS DELIBERATELY UNCHANGED: a nano-class model is not a frontier substitute. Asserting
-  // this is what stops the ladder collapsing back into one deployment for every tier.
+  // FRONTIER (measured 2026-09-16) LEADS WITH gpt-5.6-luna: it is on this row for capability alone
+  // (5x nano on both cost axes), and gpt-oss-120b trails as the fallback rather than being dropped
+  // -- a single-candidate row is what this ladder is deliberately no longer allowed to have.
   for (const effort of ["low", "medium", "high"] as const) {
     const row = rows.frontier?.[effort];
-    assert.deepEqual(row, [OSS], `frontier.${effort} must stay on ${OSS}`);
+    assert.deepEqual(row, [LUNA, TERRA], `frontier.${effort} must lead with ${LUNA} and keep ${TERRA} as the escalation`);
   }
 
   // And the real resolver agrees with the file, so this is about what the fleet SELECTS rather than
@@ -97,7 +100,7 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
   const capabilities = { openweight: rows } as never;
   assert.equal(openWeightCandidatesForCapability(capabilities, "economy", "low")[0], OSS);
   assert.equal(openWeightCandidatesForCapability(capabilities, "balanced", "high")[0], NANO);
-  assert.deepEqual(openWeightCandidatesForCapability(capabilities, "frontier", "medium"), [OSS]);
+  assert.deepEqual(openWeightCandidatesForCapability(capabilities, "frontier", "medium"), [LUNA, TERRA]);
 });
 
 test("gpt-5-nano reserves and settles strictly less than gpt-oss-120b", () => {
@@ -195,8 +198,11 @@ test("the code fallback and the mounts ladder name one leading deployment", () =
   // the DEARER deployment while the configured fleet routed the cheaper, and nothing would say so.
   // W1-T3614: economy's lead is gpt-oss (short prompts), balanced's is nano (large context). Both
   // are pinned here so a tableless checkout cannot quietly adopt a single lead for every capability.
+  // frontier's lead is gpt-5.6-luna, which replaced gpt-5-mini outright (cheaper on both
+  // axes, 0 reasoning tokens where mini spent 64 of 76). gpt-5.6-terra is the ESCALATION behind it,
+  // at 10x luna, reached only when luna is unavailable.
   assert.equal(openWeightCandidatesForCapability(undefined, "economy", "low")[0], OSS);
   assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(NANO), "the fallback keeps gpt-5-nano reachable too");
   assert.equal(openWeightCandidatesForCapability(undefined, "balanced", "high")[0], NANO);
-  assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), [OSS]);
+  assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), [LUNA, TERRA]);
 });

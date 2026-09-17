@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
-import { RETIREMENT_REASONS } from "./plan.js";
+import { RETIREMENT_REASONS, unmetDependencies } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
   explainUnitTestProofRefusal,
+  GREP_PROOF_FILE_TARGET_REQUIREMENT,
   grepProofTargetNamesNoFile,
   isDialectPrefixed,
   parseWhitelistedProof,
@@ -68,6 +69,7 @@ export type LintCheck =
   | "machine-author-verify"
   | "blocked-task-disposition"
   | "blocked-record-unruled"
+  | "blocked-without-disposition"
   | "provenance"
   | "call-site"
   | "monolith-filing"
@@ -81,7 +83,8 @@ export type LintCheck =
   | "declared-scope"
   | "advisory-routing"
   | "deferred-follow-up"
-  | "proof-base-discrimination";
+  | "proof-base-discrimination"
+  | "proof-unit-test-base-wrapper";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -819,8 +822,59 @@ export function breMetacharsIn(pattern: string): { blocking: string[]; warning: 
   return { blocking: [...new Set(blocking)], warning: [...new Set(warning)] };
 }
 
+// ── GREP-TARGET EXTENSIONLESS-FILE (W1-T3653) ───────────────────────────────
+// {@link grepProofTargetNamesNoFile} (review.ts) approximates "is this path a file" with a pure
+// textual heuristic — the final segment must carry an extension — because the PARSE it backs has no
+// checkout to ask. That heuristic is WRONG for a whole class this repo tracks: `hooks/pre-push`,
+// `hooks/pre-commit`, `hooks/commit-msg`, and any extensionless script under deploy/ are real,
+// tracked FILES with no dot in their name, so a `grep:` proof naming one is refused for reading no
+// file when it plainly does. The fix answers the question git already knows exactly — blob or
+// tree — through an INJECTED reader, so this module stays pure and unit-testable with no reader at
+// all, degrading to the extension heuristic exactly as before (a real directory keeps refusing
+// either way; an absent path now reads as absent, not as a directory, so a typo reads as a typo).
+
+/** What an injected {@link LintOpts.grepProofTargetKind} reader reports for a `grep:` proof's
+ *  target: a real BLOB (`"file"`, accepted regardless of extension), a real TREE (`"directory"`,
+ *  still refused — R-12's case), or nothing at that path at all (`"absent"`, refused with DIFFERENT
+ *  wording so a typo never reads as a deliberate directory target). `undefined` from the reader
+ *  itself (not this type) means "could not resolve" and degrades to the heuristic below. */
+export type GrepProofTargetKind = "file" | "directory" | "absent";
+
+/** Named so the FALLBACK path — no reader injected, or the reader could not resolve this path —
+ *  reads as a labelled decision in a grep search rather than an unlabeled `undefined`. This module
+ *  runs in contexts with no repo at all (a bare unit test, a plan loaded from text), so the fallback
+ *  is not an edge case: it is what runs whenever no checkout-aware caller has wired the reader in. */
+export const GREP_TARGET_EXTENSIONLESS = "grep-target-extensionless-heuristic";
+
+/** Resolve a `grep:` proof's target path to a refusal message, or `undefined` to accept it —
+ *  {@link proofGrepSafetyViolations}'s decision, pulled out so a caller with real git access (a
+ *  checkout-aware `readTargetKind`) and a caller with none (`undefined`, every existing test in this
+ *  file) both go through ONE function. A `"file"` verdict accepts outright, even extensionless —
+ *  that is the whole point (W1-T3653). `"directory"` and `"absent"` both still refuse, so the
+ *  check keeps the case R-12 was written for, but with DISTINCT sentences (an absent path is a typo,
+ *  a directory is a deliberate but unprovable target). No reader, or a reader that returns
+ *  `undefined` for this path (cannot resolve it — e.g. it does not run against a real checkout),
+ *  falls back to {@link grepProofTargetNamesNoFile}'s pure has-a-dot heuristic, unchanged. */
+export function grepProofTargetRefusal(
+  path: string,
+  readTargetKind?: (repoRelPath: string) => GrepProofTargetKind | undefined,
+): string | undefined {
+  const kind = readTargetKind?.(path);
+  if (kind === "file") return undefined;
+  if (kind === "directory") {
+    return `target \`${path}\` is a directory in this checkout — ${GREP_PROOF_FILE_TARGET_REQUIREMENT}`;
+  }
+  if (kind === "absent") {
+    return (
+      `target \`${path}\` does not exist in this checkout — a \`grep:\` proof must name a FILE that is ` +
+      "actually there; check the path for a typo (it is not being refused as a directory)"
+    );
+  }
+  return grepProofTargetNamesNoFile(path); // GREP_TARGET_EXTENSIONLESS: no reader, or an unresolved path
+}
+
 /** Every criterion whose `grep:` proof carries an unescaped BRE metacharacter. */
-export function proofGrepSafetyViolations(task: Task): LintViolation[] {
+export function proofGrepSafetyViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const violations: LintViolation[] = [];
   for (const [i, c] of (task.acceptance ?? []).entries()) {
     const proof = typeof c.proof === "string" ? c.proof : "";
@@ -835,18 +889,22 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
     const pattern = split[1].trim();
     if (!pattern) continue;
     const where = `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 56)}")`;
-    // (R-12) A DIRECTORY-SHAPED target is refused at filing time with the same rule and sentence
-    // `parseDialectGrep` applies at parse, so an author sees it when the shard is filed rather than
-    // at review time as a proof that silently never executes. The rule stays textual; the
-    // executor's `assertGrepTargetIsFile` catches the rest at run time.
-    const noFile = grepProofTargetNamesNoFile(split[2]);
+    // (R-12/W1-T3653) A DIRECTORY, or an ABSENT path, is refused at filing time. With no injected
+    // `opts.grepProofTargetKind` reader (every call site here except this task's own test), this is
+    // the SAME rule and sentence `parseDialectGrep` applies at parse — GREP_TARGET_EXTENSIONLESS,
+    // textual, has-a-dot. A checkout-aware caller that DOES inject a reader instead settles the
+    // question exactly: a tracked extensionless file (`hooks/pre-push`) is accepted, and a real
+    // directory or a genuinely absent path is still refused, each with its own sentence, so a typo
+    // reads as a typo rather than as a directory target.
+    const noFile = grepProofTargetRefusal(split[2], opts.grepProofTargetKind);
     if (noFile !== undefined) {
       violations.push({
         check: "proof-grep-safety",
         severity: "block",
         message:
-          `${where} \`grep:\` ${noFile}. The reviewer's parser refuses this proof, so it would never ` +
-          `execute and could certify nothing; name a file beneath that path instead (R-12).`,
+          `${where} \`grep:\` ${noFile}. Never certifiable as written — refused either at parse or by ` +
+          `the executor against the real checkout, so it would never execute cleanly and could ` +
+          `certify nothing; name a real file instead (R-12).`,
       });
       continue;
     }
@@ -1467,6 +1525,71 @@ export function proofUnitTestUnresolvableViolations(task: Task, opts: LintOpts =
   return violations;
 }
 
+// ── PROOF-UNIT-TEST-BASE-WRAPPER (W1-T3651 — a title proof that reads pass on an empty base) ──
+// `proofBaseDiscriminationViolations` (W1-T2835) judges only the PATH form; a name-filtered
+// (TITLE-form) `unit test:` proof stays silent there because its base outcome turns on whether
+// the title matches SOMETHING at base, not on one file's presence. TRAP, reproduced directly
+// (#5739, this task's own rationale): at base a title's file is absent, `node --test
+// --test-name-pattern` matches zero tests, and node STILL exits 0 (`ok 1 - <file>`) — the proof
+// reads pass on a base with none of the behaviour it claims, and `classifyBaseProofOutcome`
+// (review.ts) grades it `executed_stale` a CI round later, silently.
+//
+// SHAPE, NOT EXECUTION: reuses the SAME injected `resolveNameFilteredCandidates` {@link
+// proofUnitTestUnresolvableViolations} already calls, only to learn WHICH file a title resolves
+// into TODAY — never running a test itself. When that resolution is unambiguous, the file is a
+// member of THIS task's own `files:` (the diff holds it), and {@link LintOpts.pathExistsAtBase}
+// reports it absent, the base reading is structurally dishonest: no tree makes it true.
+//
+// BLOCK, unlike proof-base-discrimination's WARN: that check's false positive is a legitimate
+// REPAIR of an already-existing test; this one names a file absent at base ENTIRELY, so there is
+// no honest reading to protect. Silent absent either injected predicate, same as its sibling.
+
+/** W1-T3651 — every name-filtered `unit test:` proof whose raw title resolves, UNAMBIGUOUSLY, into
+ *  a file this task's own `files:` declares, when that file is ABSENT at the base ref. BLOCK,
+ *  unconditionally: see the section comment above for why this differs from {@link
+ *  proofBaseDiscriminationViolations}'s WARN. Silent absent either injected predicate. */
+export function proofUnitTestBaseWrapperViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const resolveNameFilteredCandidates = opts.resolveNameFilteredCandidates;
+  const pathExistsAtBase = opts.pathExistsAtBase;
+  if (!resolveNameFilteredCandidates || !pathExistsAtBase) return [];
+  const declared = new Set(task.files ?? []);
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to resolve
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted || whitelisted.kind !== "test" || !whitelisted.nameFiltered) return;
+    const rawName = whitelisted.label;
+    // The SAME resolver `execWhitelistedProof` itself calls — this reads WHERE the title lives at
+    // HEAD, never runs a test, and can never disagree with the reviewer over what "resolves" means.
+    const resolution = resolveNameFilteredCandidates(rawName);
+    // Zero matches is proof-unit-test-unresolvable's own concern (or a legitimate forward
+    // reference); more than one match means this title is not uniquely THIS file's, so "only
+    // home" cannot be claimed. Neither shape licenses a refusal here.
+    if (resolution.status !== "resolved" || resolution.files.length !== 1) return;
+    const path = resolution.files[0]!;
+    if (!declared.has(path)) return; // not THIS diff's own file — some other task's concern
+    if (pathExistsAtBase(path)) return; // already present at base — the legitimate repair case
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const head = rawName.slice(0, 70) + (rawName.length > 70 ? "…" : "");
+    violations.push({
+      check: "proof-unit-test-base-wrapper",
+      severity: "block",
+      message:
+        `criterion ${i + 1} ("${claimHead}") \`unit test:\` proof "${head}" resolves ONLY into ` +
+        `"${path}" today, a file this task's own files: declares and which does NOT exist at the ` +
+        "base ref. A zero-name-pattern match still prints `ok 1 - <file>` and exits 0 (node's own " +
+        "TAP wrapper, load-bearing elsewhere per CLAUDE.md's ledger section), so this proof reads " +
+        "PASS on a base that has none of the behaviour it claims, and classifyBaseProofOutcome " +
+        "(review.ts) grades it executed_stale one CI round later, degrading the criterion to the " +
+        `keyword floor SILENTLY. Unlike a pure-path reference, there is no tree on which this ` +
+        `TITLE reading is honest — rewrite it as the PATH form (\`unit test: ${path}\`), whose ` +
+        "absence at base exits non-zero and genuinely discriminates, or as a `grep:` proof on a " +
+        "line this diff introduces.",
+    });
+  });
+  return violations;
+}
+
 function exactUnitTestTargetPath(proof: string): string | undefined {
   const whitelisted = parseWhitelistedProof(proof);
   if (!whitelisted || whitelisted.kind !== "test" || whitelisted.nameFiltered) return undefined;
@@ -1783,6 +1906,70 @@ export function blockedRecordUnruledViolations(task: Task): LintViolation[] {
         `never ruled on (W1-T2634 only reports; it does not decide for you). Either record a ` +
         `\`retirement:\` ruling (one of ${RETIREMENT_REASONS.join("|")}), or state in prose why the ` +
         "record is waiting rather than retired.",
+    },
+  ];
+}
+
+// ── BLOCKED-WITHOUT-DISPOSITION CENSUS (W1-T3686) ───────────────────────────────────────────────
+// {@link blockedRecordUnruledViolations} above (W1-T2634) names every `status: blocked` task with
+// no legal `retirement:`, unconditionally — but it never asks whether `depends_on` is WHY the task
+// is blocked, so an ORDINARILY blocked task (one a real, unmet dependency explains) is reported
+// identically to one parked by NOTHING at all. This closes that gap: a task is named here only
+// when BOTH mechanisms this repo already has for moving a blocked task past it — dispatch's
+// `status: queued` gate, and W1-T1287's `retirement:` unparking — pass through it untouched. It
+// reads {@link unmetDependencies} (`plan.ts`), the SAME predicate the runner's own admission gate
+// (`assertRunnable`) uses, so "unmet" here means exactly what it means everywhere else in this
+// repo: not merged, not retired. WARN-ONLY BY CONSTRUCTION, like its sibling above — refusing here
+// would fail `lint-plan` over a task the contributor's diff never touched.
+// Why: plan/tasks.d/W1-T3686-a-task-blocked-by-nothing-and-retired-by-nothing-has-no-path-back.yaml.
+
+/** A prose fragment that READS like a retirement ruling, used ONLY to pick which message
+ *  {@link blockedWithoutDispositionViolations} emits below — NEVER to decide whether the task is
+ *  reported. Design point (i) of the task record: prose is not parsed to determine disposition, so
+ *  a task carrying this language is reported exactly as one carrying none; only the wording of the
+ *  report differs, distinguishing "no disposition at all" from "a disposition no mechanism can
+ *  read" (design point (iv)). */
+function proseReadsLikeRetirement(task: Task): boolean {
+  const prose = `${task.title}\n${task.note ?? ""}\n${task.rationale ?? ""}`;
+  return /\bretir(?:e|ed|ement|ing)\b|\bsupersede[ds]?\b|\bsuperseded\b|\bwithdraw(?:n)?\b/i.test(prose);
+}
+
+/** A `status: "blocked"` task carrying no LEGAL `retirement:` value AND no unmet `depends_on`
+ *  entry is NAMED — a park with no exit: dispatch skips it (its `status` is not `queued`) and
+ *  W1-T1287's retirement machinery never touches it (nothing depends on it needing to unpark).
+ *  A task blocked by a GENUINELY unmet dependency stays silent, deliberately — that is what
+ *  `status: blocked` means when a real dependency explains it, and reporting it would be the false
+ *  positive design point (ii) of the task record forbids. Length is always 0 or 1. WARN-ONLY BY
+ *  CONSTRUCTION: this function never returns `severity: "block"`, so it can never fail `lint-plan`
+ *  over a task the running diff did not touch. */
+export function blockedWithoutDispositionViolations(task: Task, plan: Plan): LintViolation[] {
+  if (task.status !== "blocked") return [];
+  const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
+  if (hasLegalDisposition) return [];
+  if (unmetDependencies(plan, task).length > 0) return []; // an ordinary block — a real dependency explains it
+  const legalValues = RETIREMENT_REASONS.join("|");
+  if (proseReadsLikeRetirement(task)) {
+    return [
+      {
+        check: "blocked-without-disposition",
+        severity: "warn",
+        message:
+          `task ${task.id} is status: blocked with no unmet dependency, and its retirement is recorded ` +
+          `only in prose — reported as UNREADABLE, not accepted: W1-T1287 made \`retirement:\` (one of ` +
+          `${legalValues}) the machine-readable field, and prose is not a second spelling of it. Move ` +
+          "the ruling into that field so it stops being invisible to every mechanical pass.",
+      },
+    ];
+  }
+  return [
+    {
+      check: "blocked-without-disposition",
+      severity: "warn",
+      message:
+        `task ${task.id} is status: blocked with no unmet dependency and no \`retirement:\` at all — ` +
+        "parked by nothing, reachable by nothing: dispatch skips it because its status is not " +
+        `queued, and retirement review never sees it because nothing depends on it needing to ` +
+        `unpark. Record a \`retirement:\` ruling (one of ${legalValues}), or return it to \`status: queued\`.`,
     },
   ];
 }
@@ -3014,17 +3201,20 @@ export interface LintOpts {
   /** W1-T2835 — did this repo-relative path exist at the BASE ref? The base-tree counterpart of
    *  {@link LintOpts.moduleExists}, and the only way the base fact reaches this pure module: the
    *  linter never reads disk and never shells git. ABSENT ⇒ {@link proofBaseDiscriminationViolations}
-   *  is SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and for
-   *  the same reason — a whole-plan run has no base and must not report the standing population. */
+   *  AND {@link proofUnitTestBaseWrapperViolations} (W1-T3651, its BLOCK-severity title-form sibling)
+   *  are both SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and
+   *  for the same reason — a whole-plan run has no base and must not report the standing population. */
   pathExistsAtBase?: (repoRelPath: string) => boolean;
   /** Severity for {@link proofBaseDiscriminationViolations}. Default "warn", and NO call site wires
    *  "block": path-presence at base is a HEURISTIC for "the proof passes at base", so a repair whose
    *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
   proofBaseDiscrimination?: LintSeverity;
   /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
-   *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations} AND {@link
+   *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations}, {@link
    *  proofUnitTestUnresolvableViolations} (W1-T3639, the block-severity sibling that also
-   *  requires the task's `files:` to name a test/ path) are both silent. */
+   *  requires the task's `files:` to name a test/ path), and {@link
+   *  proofUnitTestBaseWrapperViolations} (W1-T3651, which also needs {@link
+   *  LintOpts.pathExistsAtBase}) are all silent. */
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
   /** Other OPEN tasks' corpus entries for {@link duplicateTitleViolations} to compare this task
    *  against. Supplied by the caller, never fetched. Absent or empty ⇒ silent. */
@@ -3065,6 +3255,14 @@ export interface LintOpts {
    *  and {@link unboundCriterionViolations}: one contract for checks that need today's text.
    *  Absent ⇒ those checks are silent. */
   readGrepProofFile?: (repoRelPath: string) => string | undefined;
+  /** W1-T3653 — does a `grep:` proof's target resolve to a real blob, a tree, or nothing at all?
+   *  Consumed by {@link proofGrepSafetyViolations} through {@link grepProofTargetRefusal}: a
+   *  `"file"` verdict accepts the target even when its final segment carries no extension (a
+   *  tracked file such as `hooks/pre-push`), while `"directory"`/`"absent"` still refuse, each with
+   *  its own sentence. Absent, or `undefined` for a given path, ⇒ the pure has-a-dot heuristic
+   *  ({@link GREP_TARGET_EXTENSIONLESS}) decides exactly as before — this module never shells git
+   *  itself. */
+  grepProofTargetKind?: (repoRelPath: string) => GrepProofTargetKind | undefined;
   /** Recorded unbound-criterion count by path-form unit-test target. Absent ⇒
    *  {@link unboundCriterionViolations} reports warnings only; present ⇒ growth above the recorded
    *  per-file count blocks while at-or-below baseline remains advisory. */
@@ -3097,6 +3295,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-scope",
   "proof-name-resolution",
   "proof-base-discrimination",
+  "proof-unit-test-base-wrapper",
   "shared-proof",
   "unbound-criterion",
 ]);
@@ -3146,13 +3345,14 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofShapeViolations(task));
   violations.push(...proofDialectViolations(task, opts));
   violations.push(...proofResolvabilityViolations(task, opts));
-  violations.push(...proofGrepSafetyViolations(task));
+  violations.push(...proofGrepSafetyViolations(task, opts));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
+  violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
@@ -3192,8 +3392,28 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
  *  repo supplies one (W1-T2676): `lintPlan` derives it FOR FREE from `plan.tasks` -- the one
  *  thing every caller already holds -- unless `optsFor` sets one itself, including `[]` to opt
  *  out. So `lintPlan(merged, () => ({}))` (inbox.ts) and `lintPlan(plan)` (onboard/synthesize.ts)
- *  both see a real duplicate-surface finding today, no call-site change needed. */
-export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => ({})): Map<string, LintResult> {
+ *  both see a real duplicate-surface finding today, no call-site change needed.
+ *
+ *  `blockedWithoutDispositionViolations` (W1-T3686) is folded in here rather than into `lintTask`
+ *  for the same reason: it is the only check in this file that needs the WHOLE `Plan` (to resolve
+ *  `depends_on` against every other task's status), and `lintTask` takes a single `Task` and never
+ *  a `Plan` — a contract worth keeping so every other check stays testable in isolation. Appending
+ *  its (always warn-only) violations here and re-deriving `ok` cannot turn a passing task failing.
+ *
+ *  `only` (W1-T3710) narrows which task ids get a `LintResult` COMPUTED -- omitted, it lints the
+ *  whole plan exactly as before every caller here was written. It never narrows the corpus a
+ *  narrowed task is linted AGAINST: `surfaceCorpus` below is always built from every task in
+ *  `plan.tasks`, so a filtered call still sees a duplicate surface owned by a task outside `only`.
+ *  An id in `only` that the plan does not carry is silently skipped, never invented. */
+export function lintPlan(
+  plan: Plan,
+  optsFor: (task: Task) => LintOpts = () => ({}),
+  only?: ReadonlySet<string>,
+): Map<string, LintResult> {
+  // THE CORPUS IS ALWAYS THE WHOLE PLAN, never the filtered subset — `duplicateSurfaceViolations`
+  // asks "does any OTHER task already own this surface", so narrowing the corpus to the tasks being
+  // linted would stop it seeing the tasks a duplicate collides with. `only` narrows which results
+  // are COMPUTED; it must never narrow what they are computed AGAINST.
   const surfaceCorpus: DuplicateSurfaceCorpusEntry[] = plan.tasks.map((t) => ({
     id: t.id,
     files: t.files,
@@ -3201,9 +3421,13 @@ export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => (
   }));
   const out = new Map<string, LintResult>();
   for (const task of plan.tasks) {
+    if (only !== undefined && !only.has(task.id)) continue;
     const opts = optsFor(task);
     const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
-    out.set(task.id, lintTask(task, withSurfaces));
+    const base = lintTask(task, withSurfaces);
+    const blockedWithoutDisposition = blockedWithoutDispositionViolations(task, plan);
+    const violations = blockedWithoutDisposition.length > 0 ? [...base.violations, ...blockedWithoutDisposition] : base.violations;
+    out.set(task.id, { ok: base.ok && violations.every((v) => v.severity !== "block"), violations });
   }
   return out;
 }

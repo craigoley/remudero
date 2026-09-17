@@ -1,0 +1,105 @@
+- id: W1-T3706
+  title: "head-identity-gate ADMITS BY SUBJECT SPELLING, so the same ruling passes as `docs:` and is refused as `chore(docs):` — the admitted-form list has grown one incident at a time (plan filings, then dependency bumps, now a DECISIONS.md ruling) and the next unlisted spelling will be refused too"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 10.00
+  files:
+    - scripts/head-identity-gate.mjs
+    - src/run-task.ts
+    - test/a-non-code-head-is-identified-by-its-diff.test.ts
+  origin: "operator-session#the-third-incident-on-one-allowlist-2026-09-16"
+  plan_refs: ["W1-T3388", "W1-T1004", "W1-T3680"]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 by running `LINT_FILING_SUBJECT_RE` directly over real subjects:
+
+      REFUSE  chore(docs): rule that the implement lane stays claude-only
+      ADMIT   docs: update
+      ADMIT   chore: tidy
+      ADMIT   chore(plan): file x
+      REFUSE  chore(deps): bump
+
+      /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i
+
+    PR #5809 is refused RIGHT NOW on exactly this. Its head is
+    `chore/rule-implement-stays-claude-only-...` (not run-shaped), its subject is `chore(docs):`
+    (not listed), and ITS ENTIRE DIFF IS `DECISIONS.md`. The same ruling, committed as `docs:`,
+    would have been admitted with no other change.
+
+    THE LIST HAS GROWN ONCE PER INCIDENT:
+
+      W1-T1004   plan filings exempted          (a filing carries no trailer by design)
+      W1-T3680   dependency bumps exempted      (a bump builds no task to credit)
+      #5809      a DECISIONS.md ruling          -- refused; would be the third entry
+
+    Each was correct in isolation. Together they are an enumerated allowlist over a FORGEABLE,
+    FREE-FORM string, and the rule they are all approximating is not about spelling at all.
+  rationale: |
+    THE THREE EXEMPTIONS SHARE ONE PROPERTY AND IT IS NOT THE SUBJECT. A plan filing, a dependency
+    bump and a DECISIONS.md ruling all BUILD NO TASK -- so a `Remudero-Task` trailer would be a
+    FALSE CREDIT and a `run-<id>-<epoch>` branch a lie about origin. What makes them safe to admit
+    is that their diffs touch no code, and that is a fact about the DIFF, which no author can
+    misspell and no pusher can forge by renaming a branch.
+
+    W1-T3680 ALREADY PROVED THE SHAPE. The dependency-bump exemption does not trust
+    `dependabot/` or `chore(deps)` on their own: it requires that EVERY changed path be a
+    dependency manifest, and it fails closed when the diff is unreadable. A `dependabot/`-named
+    head touching `src/` is still refused. That path constraint is the whole reason the exemption
+    cannot become a credit hole, and it generalises directly.
+
+    WHY NOT JUST ADD `chore(docs)` TO THE REGEX. That is the fourth entry, and it fixes exactly one
+    spelling. `chore(decisions)`, `docs(architecture)`, `chore(rulings)` and every other reasonable
+    scope stay refused, each costing an incident to discover. An allowlist that only ever grows,
+    over a string a human types from memory, is the shape this repository refuses elsewhere.
+
+    THE GATE'S PURPOSE IS UNCHANGED AND MUST STAY. W1-T3388 exists so a merged PR is attributable.
+    A non-code diff has nothing to attribute -- that is precisely why it is exempt -- and a diff
+    that touches one line of `src/` is attributable and stays refused however it is named.
+  design: |
+    (i) A FOURTH ADMITTED FORM KEYED ON THE DIFF, NOT THE SUBJECT: a head whose changed paths are
+        ALL non-code is admitted. Non-code means the documentation and plan surfaces this
+        repository already treats as non-implementing -- `*.md` at any depth, `plan/**`,
+        `docs/**`, `learnings/**` -- derived from one exported list, never re-spelled per caller.
+
+    (ii) IT REUSES W1-T3680'S READER AND ITS FAIL-CLOSED RULE. `changedPathsAtHead` already exists
+         and already returns `undefined` on any git failure; `undefined` must refuse here for the
+         same reason it refuses a bump. An unreadable diff is not a non-code diff.
+
+    (iii) ONE PATH OUTSIDE THE LIST REFUSES THE WHOLE HEAD, exactly as one `src/` path sinks a
+          dependency bump. There is no majority rule and no threshold of "mostly docs".
+
+    (iv) THE EXISTING SPELLINGS KEEP WORKING, UNCHANGED. `LINT_FILING_SUBJECT_RE` is not narrowed
+         and no current exemption is removed -- this ADDS a form that does not depend on spelling.
+         The refusal text for a head that satisfies none of the forms stays byte-identical.
+
+    (v) THE NEW FORM IS ASKED LAST, so it can only ever admit a head the existing forms already
+        refused.
+
+    NO THRESHOLD AND NO NEW ALLOWLIST OF SUBJECTS. The one list this introduces is over PATH
+    SHAPES, which are evidence rather than assertion, and it is the same kind of list W1-T3680's
+    manifest set already is.
+
+    THE BAND RECORDS WIDTH, NOT DANGER: the predicate lives in the gate script and the non-code
+    path list belongs beside the filing-subject predicate it complements, so two files are declared.
+  acceptance:
+    - claim: "a head whose entire diff is documentation or plan is admitted whatever its subject spelling, so a ruling is not refused for how it was worded"
+      proof: "unit test: test/a-non-code-head-is-identified-by-its-diff.test.ts"
+    - claim: "one source path in an otherwise non-code diff refuses the whole head, so the exemption cannot become a credit hole"
+      proof: "unit test: test/a-non-code-head-is-identified-by-its-diff.test.ts"
+    - claim: "an unreadable diff refuses rather than admitting, the same fail-closed direction the dependency-bump form already takes"
+      proof: "unit test: test/a-non-code-head-is-identified-by-its-diff.test.ts"
+    - claim: "every subject spelling admitted today is still admitted, so no existing exemption is narrowed"
+      proof: "unit test: test/a-non-code-head-is-identified-by-its-diff.test.ts"
+    - claim: "the refusal text for a head satisfying no form is unchanged, so this adds a form rather than relaxing the gate"
+      proof: "unit test: test/a-non-code-head-is-identified-by-its-diff.test.ts"
+  falsifier: |
+    Refuse a docs-only head on subject spelling and the first test fails. Admit a diff carrying a
+    src/ path and the second fails. Admit on an unreadable diff and the third fails. Narrow any
+    current spelling and the fourth fails. Change the refusal text and the fifth fails.

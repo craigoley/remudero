@@ -636,6 +636,147 @@ export interface RegisteredFixOwnerRecoveryDeps {
   preserveDiverged?: SweepRuntimeFn;
 }
 
+// ── W1-T3691 — STALE-REVIEWER-CODE SKIP RECURRENCE. A `review.skipped_stale_reviewer_code` skip
+// (`buildReviewerCodeFreshnessGate`, src/run-task.ts) is re-derived every sweep and, on its own, is
+// silent and terminal: this tracks whether the SAME code sha keeps recurring across sweeps and
+// turns that into a tiered response -- silent, held-and-visible, restart, or (if a restart already
+// happened and the sha still has not moved) needs-human. A COUNTER, NOT A TIMER: sweep cadence
+// varies with load, so a wall-clock floor tuned on an idle fleet would be wrong on a busy one --
+// see this task's own plan record for the incident this closes. FALSIFIER:
+// test/a-repeated-stale-reviewer-skip-asks-for-a-restart.test.ts ─────────────────────────────
+
+/** How many consecutive sweep passes must observe the SAME stale code sha before the daemon asks
+ *  for its own freshness restart (the SAME exit `daemon.stale_code` already uses, daemon.ts's
+ *  `stopForFreshness`). A single skip is ordinary -- the daemon may already be seconds from a
+ *  restart it planned for an unrelated reason -- and must change nothing, so this floor is never 1. */
+export const STALE_REVIEWER_SKIP_RESTART_STREAK = 3;
+
+/** One sweep pass's own stale-reviewer-code reading, as `buildReviewerCodeFreshnessGate`'s
+ *  `staleThisPass()` (src/run-task.ts) reports it via `SweepCycleOutcome.reviewerCodeStale`
+ *  (daemon.ts). `prNumbers` is the pull requests this pass skipped review for at `codeSha` --
+ *  omitted where a caller does not yet carry that attribution, in which case a rendered blocker
+ *  names none rather than guessing. */
+export interface StaleReviewerSkipObservation {
+  codeSha: string;
+  originMainSha: string;
+  prNumbers?: readonly number[];
+}
+
+/** Carried by the daemon's own tick loop across sweep passes (never rebuilt per call), and
+ *  reconstructed at boot from the ledger's own history (`priorStaleReviewerRecurrenceState`,
+ *  daemon.ts) so a real process restart cannot forget it already asked once -- design (v)'s
+ *  falsifier: "restart again on an unchanged sha and the fourth test fails." */
+export interface StaleReviewerRecurrenceState {
+  /** The code sha the most recent observation was at. */
+  codeSha: string;
+  /** Consecutive sweep passes this sha has now been observed at, including the first sighting. */
+  streak: number;
+  /** True once a freshness restart has ACTUALLY been requested for this exact sha. Set by the
+   *  CALLER at the point it really acts on a `"restart"` action (daemon.ts), never by
+   *  `trackStaleReviewerSkipRecurrence` itself: a `"restart"` action the caller declines to act on
+   *  this tick (dispatch is mid-admission, see daemon.ts's `daemon.freshness_deferred`) must be
+   *  asked for again next tick, not silently believed already granted. */
+  restartRequested: boolean;
+}
+
+export type StaleReviewerRecurrenceAction =
+  | { kind: "silent" }
+  | { kind: "held"; codeSha: string; originMainSha: string; streak: number }
+  | { kind: "restart"; codeSha: string; originMainSha: string; streak: number }
+  | { kind: "needs_human"; codeSha: string; originMainSha: string; reason: string };
+
+export interface StaleReviewerRecurrenceResult {
+  /** The state to carry into the NEXT observation. `undefined` only when this pass had no stale
+   *  reading at all -- the daemon moved (or nothing needed review), so there is nothing left to
+   *  track. */
+  state: StaleReviewerRecurrenceState | undefined;
+  action: StaleReviewerRecurrenceAction;
+}
+
+/**
+ * W1-T3691 (design i, ii, iv, v) — the pure decision at the heart of the fix.
+ *
+ *  - No observation this pass ⇒ silent, state reset (iv: the daemon moved).
+ *  - A NEW sha ⇒ silent, streak resets to 1 (iii: a daemon that did move is not stuck).
+ *  - The SAME sha recurring, below the restart streak ⇒ "held" -- visible before it is acted on
+ *    (iii), but nothing else changes (iv: only the FIRST sighting of a sha is a single skip, but a
+ *    second one is still below the acted-on floor here).
+ *  - The SAME sha at or past the restart streak, no restart requested yet ⇒ "restart" (ii).
+ *  - The SAME sha with a restart already requested ⇒ "needs_human" (v) -- the pin looks
+ *    deliberate, so this never asks for another restart.
+ */
+export function trackStaleReviewerSkipRecurrence(
+  observation: StaleReviewerSkipObservation | undefined,
+  prior: StaleReviewerRecurrenceState | undefined,
+  restartStreak: number = STALE_REVIEWER_SKIP_RESTART_STREAK,
+): StaleReviewerRecurrenceResult {
+  if (!observation) {
+    return { state: undefined, action: { kind: "silent" } };
+  }
+  const sameSha = prior !== undefined && prior.codeSha === observation.codeSha;
+  if (!sameSha) {
+    return {
+      state: { codeSha: observation.codeSha, streak: 1, restartRequested: false },
+      action: { kind: "silent" },
+    };
+  }
+  const streak = prior!.streak + 1;
+  const state: StaleReviewerRecurrenceState = {
+    codeSha: observation.codeSha,
+    streak,
+    restartRequested: prior!.restartRequested,
+  };
+  if (prior!.restartRequested) {
+    return {
+      state,
+      action: {
+        kind: "needs_human",
+        codeSha: observation.codeSha,
+        originMainSha: observation.originMainSha,
+        reason:
+          `daemon requested a freshness restart over stale reviewer code at ${observation.codeSha.slice(0, 7)} ` +
+          `and came back on the SAME sha -- looks pinned behind origin/main ` +
+          `(${observation.originMainSha.slice(0, 7)}) rather than transiently behind it, not retrying`,
+      },
+    };
+  }
+  if (streak < restartStreak) {
+    return {
+      state,
+      action: { kind: "held", codeSha: observation.codeSha, originMainSha: observation.originMainSha, streak },
+    };
+  }
+  return {
+    state,
+    action: { kind: "restart", codeSha: observation.codeSha, originMainSha: observation.originMainSha, streak },
+  };
+}
+
+/** (design iii) — the BLOCKERS BY CLASS row a held review queue renders as once the daemon has
+ *  recorded the recurrence. Wiring this into the status board's own `BlockerRow` union
+ *  (status-board.ts) is out of this task's declared file scope (`src/lib/sweep.ts`,
+ *  `src/lib/daemon.ts` only) -- see this PR's Follow-ups. `renderHeldReviewQueueBlocker` is the
+ *  text an operator reads today, off the `review.stale_reviewer_held` /
+ *  `review.stale_reviewer_restart_requested` ledger lines the daemon writes for a
+ *  `"held"`/`"restart"` action. */
+export interface HeldReviewQueueBlocker {
+  kind: "held_review_queue";
+  codeSha: string;
+  originMainSha: string;
+  prNumbers: readonly number[];
+  streak: number;
+}
+
+export function renderHeldReviewQueueBlocker(blocker: HeldReviewQueueBlocker): string {
+  const prList =
+    blocker.prNumbers.length > 0 ? blocker.prNumbers.map((n) => `#${n}`).join(", ") : "no pull requests attributed yet";
+  return (
+    `held review queue: code ${blocker.codeSha.slice(0, 7)} has lagged origin/main ` +
+    `${blocker.originMainSha.slice(0, 7)} for ${blocker.streak} consecutive sweep${blocker.streak === 1 ? "" : "s"} ` +
+    `-- holding ${prList}`
+  );
+}
+
 export interface BuildSweepEffectsDeps {
   owner: string;
   repo: string;
@@ -918,6 +1059,61 @@ export function rebaseDirtyFleetBranchViaGit(
     }
   }
 }
+
+/**
+ * W1-T3654 — the ONE recorded member list for {@link buildSweepEffects}' return surface. Both
+ * `test/build-sweep-effects-takes-one-deps-object.test.ts` (the entrypoint-only suite) and
+ * `test/sweep-orchestration-lives-in-lib.test.ts` (the lib-vs-entrypoint suite) import this array
+ * rather than transcribing their own copy of it.
+ *
+ * THE INCIDENT THIS CLOSES: PR #5725 added `reviewerCodeStaleThisPass` to this surface and
+ * updated only one of the two hand-copied `EFFECT_KEYS` constants those suites used to carry. The
+ * failing job named the one that went green; the other stayed red for the REAL reason — W1-T2890's
+ * lib-vs-entrypoint invariant had genuinely broken — and was found only by a sweep of every suite,
+ * not by the failure report. A census whose population is transcribed by hand in two places is two
+ * censuses that can disagree, and the disagreement is exactly what neither copy could detect.
+ *
+ * Order is free — every reader sorts before comparing — so new members are appended rather than
+ * inserted in some canonical position.
+ */
+export const SWEEP_EFFECT_SURFACE = [
+  "arm",
+  "close",
+  "dispatchFix",
+  // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
+  // spent and the caller has wired it (see planCappedRepair, classify.ts).
+  "dispatchPlanOnlyRepair",
+  "escalate",
+  "readLiveState",
+  "terminalFixStandDown",
+  "readRedBaseRefreshFacts",
+  "depReview",
+  "postReview",
+  "repushAbsent",
+  "updateBranch",
+  "captureRepairFeedback",
+  "disarmAutoMerge",
+  "requeueCheck",
+  "escalateCancelledCheck",
+  "escalateInfrastructureCheck",
+  "readCiGateRollup",
+  "reaggregateCiGate",
+  "readMainTip",
+  "readMainRepair",
+  "readStaleRedWorkflowRuns",
+  "runStaleRedLocalRoute",
+  "releaseStaleRed",
+  "releaseBaseCausedStandDown",
+  "selectAdaptiveReviewWidth",
+  // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
+  // position is free — it is listed last because it is the newest, not because order matters.
+  "repairMissingTaskTrailer",
+  "rebaseDirtyFleetBranch",
+  // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
+  // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
+  // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
+  "reviewerCodeStaleThisPass",
+] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
@@ -2372,7 +2568,16 @@ export type Disposition =
   // W1-T3551: a draft PR that is otherwise checks-green/review-success. NEVER calls the arm
   // effector — GitHub refuses auto-merge on a draft — and, like "wait", seeds no dedup key so an
   // unchanged draft is held again on every later pass instead of silently promoting once.
-  | "held-draft";
+  | "held-draft"
+  // W1-T3704 (design ii) — a push orphaned the review, but {@link reviewReuseVerdict} finds the
+  // PR's own diff AND merge base both unchanged since the recorded verdict: the no-op push. The
+  // reviewer re-posts that SAME conclusion rather than re-deriving it, naming the head it
+  // originally judged so the reuse is auditable (acceptance criterion 4).
+  | "review-reused"
+  // W1-T3704 (design iii) — the "update branch" shape: the PR's own diff is unchanged but the
+  // merge base moved, so only discrimination (W1-T273/W1-T362) can differ. Re-runs discrimination
+  // alone rather than the whole review.
+  | "discriminate-only";
 
 /** W1-T920 — {@link SupersessionStatus} is THREE-VALUED, and "unreadable" is never collapsed into
  *  "unique". Only `"superseded"` may gate a CLOSE, and only carrying {@link SupersessionEvidence};
@@ -3209,6 +3414,13 @@ export interface OpenPrView {
    *  post-review row states, never the dispatch — either way the remedy is a FRESH verdict, and a
    *  verdict from a superseded head is never copied forward. */
   reviewOrphanedByPush?: boolean;
+  /** W1-T3704 — the five reuse-decision inputs ({@link ReviewReuseInputs}) are DELIBERATELY NOT
+   *  declared here. See that type's own doc for why: no producer in `src/` assigns any of them yet
+   *  (the real one is `run-task.ts`'s `buildOpenPrViews`, outside this task's declared scope), and
+   *  `test/producer-completeness.test.ts`'s census walks exactly this interface body for an
+   *  optional member with no producer literal. {@link reviewReuseVerdict} takes the overlay type
+   *  directly, so any `OpenPrView` value — none of which carry these keys today — still behaves
+   *  identically to before this feature existed. */
   /** Completed judgments for the exact current input: task key, PR URL, head sha and body digest. A
    *  new commit or body edit resets this to zero; refusals and legacy rows never count. Recovering
    *  from a GitHub FAILURE with no matching judgment additionally requires an explicit zero and
@@ -3430,6 +3642,59 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
     requeue: true,
     escalate: false,
     reason: "latest attempt was cancelled with no later attempt on this head — re-queueing the job once",
+  };
+}
+
+/** W1-T3652 — the verdict {@link cancelledRunCheckOutcome} returns: whether one check run's
+ *  conclusion should be trusted as a real CI failure, plus a stated reason. `isFailure: false`
+ *  is NOT a suppression — the caller still sees the check name and its own conclusion, only the
+ *  failure verdict is withheld — see that function's own doc. */
+export interface CancelledRunCheckOutcome {
+  isFailure: boolean;
+  reason: string;
+}
+
+/** W1-T3652 — ci.yml's `cancel-in-progress: true` kills every push's predecessor mid-flight, and
+ *  the jobs killed that way publish their OWN `conclusion` as `failure`, never `cancelled` — only
+ *  the PARENT workflow run says `cancelled`. Read alone, a killed job is indistinguishable from a
+ *  genuine one (MEASURED 2026-09-16: #5737/#5739 head-identity-gate and coverage-ratchet, each a
+ *  real-sounding "failure" that was purely an artifact of cancellation — this function's own
+ *  rationale, the plan's own W1-T3652 task record).
+ *
+ *  `checkConclusion` is judged EXACTLY as {@link REQUIRED_CHECK_FAIL} judges it today; the only
+ *  change is that a failing conclusion is DOWNGRADED when `parentRunConclusion` is the literal
+ *  string `CANCELLED` (case-insensitive) — the check was killed by its own successor, not a
+ *  verdict on anything.
+ *
+ *  FAILS TOWARD TREATING IT AS REAL: an unreadable `parentRunConclusion` (`undefined`, or any
+ *  value other than `CANCELLED`) leaves a failing check counted as a failure exactly as before
+ *  this function existed. The cost of wrongly keeping a stale-looking red is one wasted log read;
+ *  the cost of wrongly discarding a real one is a PR that merges broken.
+ *
+ *  NOT A SUPPRESSION: the check stays VISIBLE to every caller under its own name and conclusion —
+ *  it is how an operator notices a PR whose runs are being cancelled faster than they finish,
+ *  which is its own pathology. Only the "this is evidence of a defect" verdict is withheld. */
+export function cancelledRunCheckOutcome(
+  checkConclusion: string | undefined,
+  parentRunConclusion: string | undefined,
+): CancelledRunCheckOutcome {
+  const own = (checkConclusion ?? "").toUpperCase();
+  if (!REQUIRED_CHECK_FAIL.has(own)) {
+    return { isFailure: false, reason: "check's own conclusion is not in the failing set" };
+  }
+  const parent = (parentRunConclusion ?? "").toUpperCase();
+  if (parent === "CANCELLED") {
+    return {
+      isFailure: false,
+      reason: "parent workflow run concluded cancelled — killed by its own successor, not a verdict",
+    };
+  }
+  return {
+    isFailure: true,
+    reason:
+      parent === ""
+        ? "parent run conclusion unreadable — failing toward treating this check as real"
+        : "parent run concluded normally — this failure is real",
   };
 }
 
@@ -4748,6 +5013,91 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
   return activityAt > verdictAt;
 }
 
+/** W1-T3704 — THE REUSE DECISION (design ii-v). A verdict RECORDS what it judged (review.ts); this
+ *  decides what a LATER push, orphaning that verdict, is actually owed. Deliberately placed here
+ *  and not in review.ts: "the recorded verdict lives with the reviewer and the reuse decision lives
+ *  in the sweep, and the defect IS the edge between them" (the task's own design note).
+ *
+ *  FAILS TOWARD `"full-review"` WHENEVER ANY INPUT IS MISSING (design v) — an unreadable diff or an
+ *  unresolvable merge base on EITHER side of the comparison reuses nothing, the same direction
+ *  {@link reviewOrphanedByPush} itself already fails in. `"full-review"` is also what a change to
+ *  the PR's OWN diff produces, unconditionally (design iv): there is no threshold of smallness.
+ */
+export type ReviewReuseVerdict =
+  | { kind: "reuse"; judgedHeadSha: string }
+  | { kind: "discriminate-only"; judgedHeadSha: string }
+  | { kind: "full-review" };
+
+/**
+ * W1-T3704 — the five inputs {@link reviewReuseVerdict} compares, declared as their OWN overlay
+ * type rather than as members of {@link OpenPrView}. `OpenPrView`'s own doc explains why: nothing
+ * under `src/` assigns any of these five keys yet (the real producer is `run-task.ts`'s
+ * `buildOpenPrViews`, outside this task's declared file scope — see this PR's Follow-ups), and
+ * `test/producer-completeness.test.ts`'s census walks `OpenPrView`'s OWN declaration body for
+ * exactly that shape: an optional member with no producer literal anywhere in `src/`. Keeping the
+ * shape here instead — a caller merges it onto an `OpenPrView` value it already holds — ships the
+ * reuse decision fully implemented and unit-tested without asserting a census-tracked member the
+ * interface cannot yet back. Every field is ABSENT-MEANS-UNREADABLE (never a false-ish default),
+ * so a plain `OpenPrView` missing every one of these (every value that exists today) still reaches
+ * `"full-review"` below, unchanged from before this type existed.
+ */
+export interface ReviewReuseInputs {
+  /** The PR-owned diff's content hash the most recently posted verdict judged, read back from that
+   *  `review.posted` line's `own_diff_digest` key (see review.ts's `priorReviewVerdictFromLedger`).
+   *  `undefined` means either no such key was recorded (a line predating this field) or the
+   *  producer has not wired the compare yet — treated as UNREADABLE, never as "unchanged". */
+  reviewedOwnDiffDigest?: string;
+  /** The PR-owned diff's content hash for the CURRENT head, computed fresh each sweep pass so it
+   *  can be compared against {@link reviewedOwnDiffDigest}. Not yet populated by the real gateway;
+   *  the mechanism is wired and unit-tested here, the producer follows separately. */
+  currentOwnDiffDigest?: string;
+  /** The merge base the most recently posted verdict's discrimination check ran against, read back
+   *  from that line's `merge_base_sha` key. Same absent-means-unreadable rule as above. */
+  reviewedMergeBaseSha?: string;
+  /** The CURRENT merge base for this PR's head against its target branch, computed fresh each
+   *  pass. Not yet populated by the real gateway; see {@link currentOwnDiffDigest}'s own note. */
+  currentMergeBaseSha?: string;
+  /** The head sha the recorded verdict was ORIGINALLY posted against, distinct from `OpenPrView`'s
+   *  `headSha` (always the CURRENT head). Named on a reused/discriminate-only disposition so the
+   *  reuse is auditable rather than silent (acceptance criterion 4). */
+  reviewedHeadSha?: string;
+}
+
+export function reviewReuseVerdict(pr: ReviewReuseInputs): ReviewReuseVerdict {
+  const { reviewedOwnDiffDigest, currentOwnDiffDigest, reviewedMergeBaseSha, currentMergeBaseSha, reviewedHeadSha } =
+    pr;
+  if (
+    reviewedOwnDiffDigest === undefined ||
+    currentOwnDiffDigest === undefined ||
+    reviewedMergeBaseSha === undefined ||
+    currentMergeBaseSha === undefined ||
+    reviewedHeadSha === undefined
+  ) {
+    return { kind: "full-review" };
+  }
+  if (reviewedOwnDiffDigest !== currentOwnDiffDigest) return { kind: "full-review" };
+  return reviewedMergeBaseSha === currentMergeBaseSha
+    ? { kind: "reuse", judgedHeadSha: reviewedHeadSha }
+    : { kind: "discriminate-only", judgedHeadSha: reviewedHeadSha };
+}
+
+/** W1-T3704 — the ONE place `OpenPrView`'s missing {@link ReviewReuseInputs} keys are read. A cast
+ *  is required here, and only here: `OpenPrView` declares none of these five keys (see that
+ *  interface's own note for why), so TypeScript's weak-type check refuses a bare structural pass.
+ *  Every key reads `undefined` on every `OpenPrView` today (nothing produces them yet), which is
+ *  exactly the UNREADABLE input {@link reviewReuseVerdict} already handles by falling back to
+ *  `"full-review"` — this widens no behavior, it only lets the comparison compile. */
+function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
+  const withReuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
+  return {
+    reviewedOwnDiffDigest: withReuseInputs.reviewedOwnDiffDigest,
+    currentOwnDiffDigest: withReuseInputs.currentOwnDiffDigest,
+    reviewedMergeBaseSha: withReuseInputs.reviewedMergeBaseSha,
+    currentMergeBaseSha: withReuseInputs.currentMergeBaseSha,
+    reviewedHeadSha: withReuseInputs.reviewedHeadSha,
+  };
+}
+
 /**
  * THE POLICY TABLE — ordered rules mapping observed PR-state to a disposition. Each row carries its
  * own trap and citation; the per-row index is docs/forensics/sweep.md#second-pass-2026-09-06.
@@ -5199,6 +5549,52 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: () =>
       "required check (remudero-review) has zero observed check runs and the one deterministic post " +
       "attempt for this exact review input was refused — escalating rather than retrying indefinitely",
+  },
+  {
+    // W1-T3704 (design ii) — THE NO-OP PUSH: a review orphaned by a push whose PR-owned diff AND
+    // merge base are BOTH unchanged from the recorded verdict — a force-push of identical content,
+    // a rebase that changed nothing. Ordered STRICTLY BEFORE the orphan-cap and post-review rows
+    // below, both of which would otherwise treat this input as a total loss and re-derive a verdict
+    // that did not change. The reason NAMES the head the verdict actually judged (acceptance
+    // criterion 4) so the reuse is auditable, never a silent no-op.
+    disposition: "review-reused",
+    when: (pr) =>
+      pr.checksState === "green" &&
+      pr.reviewState === "none" &&
+      pr.reviewOrphanedByPush === true &&
+      pr.requiredContextsUnreadable !== true &&
+      reviewReuseVerdict(reviewReuseInputsFrom(pr)).kind === "reuse",
+    reason: (pr) => {
+      const verdict = reviewReuseVerdict(reviewReuseInputsFrom(pr));
+      const judgedHeadSha = verdict.kind === "reuse" ? verdict.judgedHeadSha : "unknown";
+      return (
+        `own diff and merge base both unchanged since the verdict judged on head ${judgedHeadSha.slice(0, 7)} — ` +
+        `reusing that verdict instead of re-deriving it (W1-T3704)`
+      );
+    },
+  },
+  {
+    // W1-T3704 (design iii) — THE "UPDATE BRANCH" SHAPE: a review orphaned by a push whose PR-owned
+    // diff is unchanged but whose merge base moved. The acceptance judgment over the PR's own work
+    // cannot have changed; only whether each proof still discriminates against the new base can
+    // (W1-T273/W1-T362), so this re-runs discrimination alone rather than the whole review — the
+    // graded response, ordered STRICTLY BEFORE the total-loss rows below for the same reason as the
+    // reuse row above.
+    disposition: "discriminate-only",
+    when: (pr) =>
+      pr.checksState === "green" &&
+      pr.reviewState === "none" &&
+      pr.reviewOrphanedByPush === true &&
+      pr.requiredContextsUnreadable !== true &&
+      reviewReuseVerdict(reviewReuseInputsFrom(pr)).kind === "discriminate-only",
+    reason: (pr) => {
+      const verdict = reviewReuseVerdict(reviewReuseInputsFrom(pr));
+      const judgedHeadSha = verdict.kind === "discriminate-only" ? verdict.judgedHeadSha : "unknown";
+      return (
+        `own diff unchanged since head ${judgedHeadSha.slice(0, 7)} but the merge base moved — re-running ` +
+        `discrimination alone, not the whole review (W1-T3704)`
+      );
+    },
   },
   {
     // W1-T225 — THE LOOP FALSIFIER: a PR whose review was orphaned by a push re-earns the review
@@ -5912,12 +6308,21 @@ export interface FixDispatchEvidence {
   proofDiscrimination?: ProofDiscriminationEvidence;
 }
 
-/** The only proof grades that establish the capped-green repair has a mechanical body remedy. */
+/** The only proof grades that establish the capped-green repair has a mechanical body remedy —
+ *  every {@link CriterionVerdict.proof_exec} outcome EXCEPT the two that mean "this DID execute"
+ *  (`executed_pass`/`executed_fail`) and `stale_self_path` (a PROVEN-bad proof, `met: false`,
+ *  which fails the verdict rather than capping it — see {@link cappedProofDiscriminationFromLedger}'s
+ *  own met-check, which never lets one reach here). */
+export type NonExecutedProofExecOutcome = Exclude<
+  CriterionVerdict["proof_exec"],
+  "executed_pass" | "executed_fail" | "stale_self_path"
+>;
+
 export interface ProofDiscriminationEvidence {
   readonly proofs: ReadonlyArray<{
     readonly claim: string;
     readonly proof: string;
-    readonly proofExec: "executed_stale" | "not_executable";
+    readonly proofExec: NonExecutedProofExecOutcome;
   }>;
 }
 
@@ -5925,16 +6330,98 @@ export interface ProofDiscriminationEvidence {
  * Extract the only proof rows a capped-green repair worker may act on. This is
  * deliberately structural: a reason string is rendered prose and must never
  * decide whether a strike is spent.
+ *
+ * W1-T3669: `capped` (review.ts) is defined as `executedCount === 0` over EXACTLY the two
+ * `executed_pass`/`executed_fail` grades — so ANY OTHER grade on a capped verdict's criterion is,
+ * by that same definition, "never executed", not only the two this function used to accept
+ * (`executed_stale`, `not_executable`). The narrower allowlist silently dropped `exec_error`,
+ * `base_unreadable` and `not_yet_built` — real, declared outcomes (see `isProofExecOutcome`) that
+ * a capped-but-all-criteria-met verdict can legitimately carry. MEASURED: PR #5683 (W1-T3610)
+ * posted `CAPPED — 0/2 proofs executed; not certified` and never reached this rung because one of
+ * those three excluded grades landed on both its criteria — the 98-refusals/0-dispatches gap this
+ * task diagnoses. `stale_self_path` is excluded deliberately: it always carries `met: false`, so
+ * a caller that pre-filters to all-met criteria (every caller does — see
+ * {@link cappedProofDiscriminationFromLedger} and run-task.ts's two call sites) never offers it
+ * here regardless.
  */
 export function proofDiscriminationEvidenceFromCriteria(
   criteria: readonly CriterionVerdict[],
 ): ProofDiscriminationEvidence | undefined {
   const proofs = criteria.flatMap((criterion) =>
-    criterion.proof_exec === "executed_stale" || criterion.proof_exec === "not_executable"
+    criterion.proof_exec !== "executed_pass" &&
+    criterion.proof_exec !== "executed_fail" &&
+    criterion.proof_exec !== "stale_self_path"
       ? [{ claim: criterion.claim, proof: criterion.proof, proofExec: criterion.proof_exec }]
       : [],
   );
   return proofs.length > 0 ? { proofs } : undefined;
+}
+
+/** One of the four preconditions {@link diagnoseCappedRoutingBlock} names — matched to this
+ *  task's own filed rationale (W1-T3669), in the SAME order the routing block in
+ *  {@link runSweep} reads them. */
+export type CappedRoutingPrecondition = "not-mergeable" | "held" | "no-proof-discrimination" | "arm-not-refused";
+
+export interface CappedRoutingDiagnosis {
+  /** `false` only when every precondition holds and the capped route would actually fire. */
+  blocked: boolean;
+  /** Which gate is false — absent when `blocked` is `false`. */
+  precondition?: CappedRoutingPrecondition;
+  /** A human-legible reading naming the fact this diagnosis rests on. */
+  detail: string;
+}
+
+/**
+ * W1-T3669 — LEGIBILITY FOR A ROUTE THAT SHIPPED SILENT. `runSweep`'s capped-routing block (W1-T3306)
+ * has four preconditions and, until this task, standing down on any of them looked identical to
+ * standing down on all of them: a `mergeable` disposition and nothing else. Mirrors the block's own
+ * four reads, in the SAME order, over the SAME functions — never a second implementation of any of
+ * them — so a PR the ledger already shows as capped-green for its own head can be probed directly,
+ * live or from a test fixture, for WHICH gate is refusing it. `disposition` is the caller's own
+ * already-derived value (from `postReviewFailureHistoryDisposition(...) ?? deriveDisposition(...)`),
+ * never re-derived here, so this stays a pure reader over the same inputs the block itself sees.
+ */
+export function diagnoseCappedRoutingBlock(
+  pr: OpenPrView,
+  disposition: Disposition,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): CappedRoutingDiagnosis {
+  if (disposition !== "mergeable") {
+    return {
+      blocked: true,
+      precondition: "not-mergeable",
+      detail: `disposition is "${disposition}", not "mergeable" — the capped route never reads a non-mergeable disposition`,
+    };
+  }
+  const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
+  if (hold !== undefined) {
+    return {
+      blocked: true,
+      precondition: "held",
+      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${hold.by}: ${hold.reason})`,
+    };
+  }
+  const proofDiscrimination = cappedProofDiscriminationFromLedger(pr, ledgerLines);
+  if (proofDiscrimination === undefined) {
+    return {
+      blocked: true,
+      precondition: "no-proof-discrimination",
+      detail:
+        "cappedProofDiscriminationFromLedger returned no evidence for this exact task/PR/head — either no " +
+        "capped review.posted row binds to it, or its criteria carried no repairable proof_exec grade",
+    };
+  }
+  if (decideSweepArm(pr, ledgerLines).arm) {
+    return {
+      blocked: true,
+      precondition: "arm-not-refused",
+      detail: "decideSweepArm reports arm:true for this head — the capped route only fires when the arm predicate itself refuses",
+    };
+  }
+  return {
+    blocked: false,
+    detail: "every precondition holds: an unheld capped-green PR has recoverable proof-discrimination evidence and the arm predicate refuses — the capped route fires",
+  };
 }
 
 function isProofExecOutcome(value: unknown): value is CriterionVerdict["proof_exec"] {
@@ -6974,6 +7461,8 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
   conflicted: 0,
   wait: 0,
   "held-draft": 0,
+  "review-reused": 0,
+  "discriminate-only": 0,
 });
 
 /** W1-T513 — THE CROSS-CALL REVIEW-KEY MUTEX. The claim set used to be declared FRESH INSIDE every
@@ -7990,6 +8479,19 @@ export async function runSweep(
         // to dedup (the arm effector is never reached), so forcing `alreadyDone` true keeps `acted`
         // false unconditionally and seeds no ledger key — a draft that stays a draft is re-derived
         // and re-ledgered EVERY pass, never promoted by a stale dedup entry once it goes green.
+        alreadyDone = true;
+        dedupStandDownReason = reason;
+        break;
+      case "review-reused":
+      case "discriminate-only":
+        // W1-T3704 — SAME SHAPE AS "wait"/"held-draft" above: this task ships the DECISION (which
+        // of reuse/discriminate-only/full-review applies, see {@link reviewReuseVerdict}) and the
+        // ledger-recorded evidence a decision reads, not the effector that re-posts a reused verdict
+        // or re-runs discrimination alone — that dispatch is a separate, not-yet-wired producer
+        // (mirrors how `pendingAnswer`/`workflowRuns` shipped their own mechanism ahead of theirs).
+        // Forcing `alreadyDone` true keeps `acted` false unconditionally and seeds no ledger key, so
+        // the PR is re-derived and re-ledgered every pass rather than silently marked acted-on for
+        // an effect nothing here actually performed.
         alreadyDone = true;
         dedupStandDownReason = reason;
         break;
@@ -9433,6 +9935,11 @@ const DISPOSITION_RENDER_ORDER: readonly Disposition[] = [
   "post-review",
   "wait",
   "held-draft",
+  // W1-T3704: keeping this list total over {@link Disposition} is the invariant the row above
+  // documents — an omitted disposition silently reopens the exact "counts do not sum to the open
+  // total" defect W1-T3027 fixed once already.
+  "review-reused",
+  "discriminate-only",
 ];
 
 /** One-line human render of a sweep summary, for both callers' console output. */

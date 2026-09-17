@@ -92,8 +92,11 @@
   acceptance:
     - claim: "with a live tree present, the rmd on PATH loads that tree rather than the baked snapshot"
       proof: "unit test: the cli on path loads the live tree"
-    - claim: "with no live tree present, resolution falls back to the baked snapshot exactly as it does today"
-      proof: "unit test: with no live tree the cli falls back to the snapshot"
+    # WITHDRAWN AS A CRITERION, KEPT AS A TEST. "with no live tree present, resolution falls back
+    # to the baked snapshot exactly as it does today" was a criterion here. proof-discrimination
+    # refused it as `executed_stale` on #5840 and was right: the snapshot fallback is what the base
+    # already did, so the proof passes at head and base alike and cannot witness this change. The
+    # test stays in the suite. See W1-T3721, which refuses this shape at author time.
     - claim: "a live tree whose cli is missing or unexecutable is reported as an error rather than silently falling back to a snapshot of unknown age"
       proof: "unit test: an unusable live tree cli is an error not a silent fallback"
     - claim: "the cli states which tree it loaded and that tree's revision, so staleness is answerable in one command"

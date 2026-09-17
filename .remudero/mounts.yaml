@@ -50,6 +50,19 @@ tiers:
   sonnet: 2
   opus: 3
   claude-opus-5: 4
+  # THE TOP TIER IS NO LONGER CLAUDE-ONLY. An Architect that exists only while the Claude
+  # subscription has headroom is a single point of failure, not a fleet -- so the two Azure
+  # deployments the fleet already trusts are rankable here and may hold a top-tier seat when
+  # nothing else can. These are the SAME models the Codex subscription routes (they lead its
+  # economy and balanced rows), so a squeeze diverts a seat to identical intelligence on a
+  # different bill, never to a cheaper substitute of unknown quality.
+  #
+  # THE RANKS ARE CAPABILITY PEERS, NOT NEW RUNGS. terra sits with `opus` at 3 and luna with
+  # `sonnet` at 2, so the Tier Invariant keeps meaning what it meant: a seat holding terra still
+  # dominates every worker capped at the sonnet/luna ceiling, and NOTHING here lowers that ceiling.
+  # sol is deliberately unranked: $5.00/$30.00 is 2.5x terra for the same band.
+  gpt-5.6-terra: 3
+  gpt-5.6-luna: 2
 
 # Effort ordering — same idea for the thinking-effort axis.
 efforts:
@@ -86,9 +99,16 @@ capabilities:
     balanced: 2
     frontier: 3
   claude:
+    # Despite the field name this is the MODEL -> CAPABILITY map for every model `tiers` ranks --
+    # the loader refuses a `tiers` key with no entry here -- so a rankable Azure deployment is
+    # declared alongside the Claude ones rather than in a parallel table that the invariant would
+    # not read (measured 2026-09-16).
     haiku: economy
     sonnet: balanced
     opus: frontier
+    # terra answers for a frontier seat under squeeze; luna is a balanced peer of sonnet.
+    gpt-5.6-terra: frontier
+    gpt-5.6-luna: balanced
     claude-opus-5: frontier
     claude-opus-4-8: frontier
     claude-opus-4-7: frontier
@@ -185,14 +205,25 @@ capabilities:
       low:    [gpt-oss-120b, gpt-5-nano]
       medium: [gpt-oss-120b, gpt-5-nano]
       high:   [gpt-oss-120b, gpt-5-nano]
+    # this change LEAVES ECONOMY AND BALANCED ALONE, DELIBERATELY. Luna is cheaper than gpt-5-mini,
+    # but nano is cheaper than LUNA per token ($0.05/$0.40 vs $0.20/$1.20). W1-T3614 fixed these
+    # two leads from MEASURED PER-TASK cost on real lane shapes, not per-token price, and luna has
+    # no such measurement yet -- so reversing them here would trade a measured ordering for a
+    # cheaper-looking table. Luna enters only where it replaces gpt-5-mini outright: frontier.
     balanced:
       low:    [gpt-5-nano, gpt-oss-120b]
       medium: [gpt-5-nano, gpt-oss-120b]
       high:   [gpt-5-nano, gpt-oss-120b]
+    # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
+    # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
+    # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.
+    # Terra TRAILS rather than leads: at 10x luna on both axes ($2.00/$12.00) it is reached only
+    # when luna is unavailable or below reserve -- "only when absolutely necessary", per operator
+    # direction. Sol ($5.00/$30.00) is deliberately absent: 2.5x terra for the same band.
     frontier:
-      low:    [gpt-oss-120b]
-      medium: [gpt-oss-120b]
-      high:   [gpt-oss-120b]
+      low:    [gpt-5.6-luna, gpt-5.6-terra]
+      medium: [gpt-5.6-luna, gpt-5.6-terra]
+      high:   [gpt-5.6-luna, gpt-5.6-terra]
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
 # claude-opus-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY

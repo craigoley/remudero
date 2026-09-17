@@ -32,6 +32,15 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  * W1-T228 IS UNTOUCHED. The publication guard (`reviewerCodePublicationRefusal`, src/lib/review.ts)
  * keeps deciding whether a COMPUTED verdict may post; these tests are about what happens BEFORE
  * that verdict is ever computed, never about the guard itself — see the PR body's grep proof.
+ *
+ * W1-T3697 — THE ONCE-PER-PASS CACHE COULD NOT SEE ITS OWN TARGET CASE. A pass that BEGAN fresh
+ * and went stale mid-flight (the shape W1-T3618's own measurement recorded — four withholds
+ * inside one cycle that began fresh) still paid in full for every remaining PR, because the gate
+ * above cached its first read for the rest of the pass. The block below drives the three
+ * mid-pass-transition cases the once-per-pass cache could never exercise: the cache is gone, and
+ * `readFreshness` is now called once PER `call()` invocation — i.e. once per PR, immediately
+ * before the spend it guards — so a reading that changes between two PRs is observed by the
+ * second PR even though the first already ran.
  */
 
 const OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -45,7 +54,7 @@ function freshReading(): ReviewerCodeFreshness {
   return { status: "fresh", codeSha: NEW_SHA, originMainSha: NEW_SHA, advance: "none" };
 }
 
-// ── claim 1: the gate reads freshness once and materializes nothing when stale ─────────────
+// ── claim 1: a pass that begins stale still skips every PR it sees ─────────────────────────
 
 test("W1-T3618: a stale reviewer reads freshness once and materializes nothing, across three PRs", async () => {
   let freshnessReads = 0;
@@ -72,7 +81,9 @@ test("W1-T3618: a stale reviewer reads freshness once and materializes nothing, 
     gate.call("103", [], {}),
   ]);
 
-  assert.equal(freshnessReads, 1, "exactly ONE freshness read for three PRs — never re-read per PR");
+  // W1-T3697: the once-per-pass cache is gone — `readFreshness` is now called once PER `call()`,
+  // immediately before the spend it guards, so a pass that STAYS stale reads three times, not one.
+  assert.equal(freshnessReads, 3, "read once per PR, immediately before the spend — never cached across a pass");
   assert.equal(materializations, 0, "ZERO materializations — the stale reading never reaches `next`");
   assert.deepEqual(results, [0, 0, 0], "each skipped PR resolves cleanly rather than throwing");
   assert.equal(logged.length, 3, "the skip is ledgered once PER PR, never silent");
@@ -86,7 +97,7 @@ test("W1-T3618: a stale reviewer reads freshness once and materializes nothing, 
 
 // ── the falsifier's other arm: a FRESH reading changes nothing about the ordinary path ─────
 
-test("W1-T3618: a fresh reviewer reading calls `next` for every PR, unchanged — the gate never over-fires", async () => {
+test("W1-T3618/W1-T3697: a pass that stays fresh still reaches every PR — the gate never over-fires", async () => {
   let freshnessReads = 0;
   let materializations = 0;
   const gate = buildReviewerCodeFreshnessGate(
@@ -105,12 +116,13 @@ test("W1-T3618: a fresh reviewer reading calls `next` for every PR, unchanged �
   await gate.call("202", [], {});
   await gate.call("203", [], {});
 
-  assert.equal(freshnessReads, 1, "still read once — the cache applies on the fresh path too");
+  // W1-T3697: re-read per PR applies on the fresh path too — no cache means no stale-cache risk.
+  assert.equal(freshnessReads, 3, "read once per PR — no cache to short-circuit the re-read");
   assert.equal(materializations, 3, "every PR reaches `next` when the reading is fresh");
   assert.equal(gate.staleThisPass(), undefined);
 });
 
-test("W1-T3618: an unreadable freshness reading fails toward attempting the review, never toward refusing it", async () => {
+test("W1-T3618/W1-T3697: an unreadable reading still attempts the review, never toward refusing it", async () => {
   let materializations = 0;
   const gate = buildReviewerCodeFreshnessGate(
     () => ({ status: "unreadable", reason: "git fetch origin failed" }),
@@ -124,6 +136,50 @@ test("W1-T3618: an unreadable freshness reading fails toward attempting the revi
   await gate.call("301", [], {});
   assert.equal(materializations, 1, "unreadable is not stale — the review still runs, matching checkReviewerCodeFreshness's own contract");
   assert.equal(gate.staleThisPass(), undefined);
+});
+
+// ── W1-T3697's own target case: fresh at the top of the pass, stale mid-flight ──────────────
+
+test("W1-T3697: a reading that goes stale mid-pass skips the remaining PRs", async () => {
+  // This is the exact shape the once-per-pass cache could never observe: the FIRST PR this pass
+  // sees a fresh reading and runs; by the SECOND PR, origin/main has advanced past the checked-out
+  // reviewer code, and every PR from there on must be skipped rather than paid for in full and
+  // discarded later by W1-T228's late guard.
+  let freshnessReads = 0;
+  let materializations = 0;
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const readings: ReviewerCodeFreshness[] = [freshReading(), staleReading(), staleReading()];
+  const gate = buildReviewerCodeFreshnessGate(
+    () => {
+      const reading = readings[freshnessReads] ?? staleReading();
+      freshnessReads++;
+      return reading;
+    },
+    (step, extra) => logged.push({ step, extra }),
+    async () => {
+      materializations++;
+      return 0;
+    },
+  );
+
+  const first = await gate.call("401", [], {});
+  const second = await gate.call("402", [], {});
+  const third = await gate.call("403", [], {});
+
+  assert.equal(freshnessReads, 3, "re-read before every PR — the mid-pass transition is observed");
+  assert.equal(materializations, 1, "only the PR that ran under a FRESH reading materializes anything");
+  assert.deepEqual([first, second, third], [0, 0, 0], "skipped PRs still resolve cleanly, not throw");
+  assert.equal(logged.length, 2, "the two PRs read after the transition are ledgered as skipped, the first is not");
+  for (const line of logged) {
+    assert.equal(line.step, "review.skipped_stale_reviewer_code");
+    assert.equal(line.extra?.code_sha, OLD_SHA);
+    assert.equal(line.extra?.origin_main_sha, NEW_SHA);
+  }
+  assert.deepEqual(
+    gate.staleThisPass(),
+    { oldSha: OLD_SHA, newSha: NEW_SHA },
+    "the pass-level signal still fires from the FIRST stale read, even though it was not the first PR",
+  );
 });
 
 // ── claim 2 & 3: the daemon's own reaction to a stale sweep discovery ───────────────────────
@@ -186,7 +242,7 @@ test("W1-T3618: a stale review cycle still dispatches work — W1-T2965 is prese
   assert.ok(sweepCalls >= 1, "the sweep really ran and really returned the stale signal this test asserts on");
 });
 
-test("W1-T3618: a stale reviewer signals the daemon to stop for freshness, with NO checkFreshness dependency at all", async () => {
+test("W1-T3618/W1-T3691: a SUSTAINED stale reviewer signal (not a single one) stops the daemon for freshness, with NO checkFreshness dependency at all", async () => {
   const plan = fixturePlan();
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
 
@@ -201,11 +257,40 @@ test("W1-T3618: a stale reviewer signals the daemon to stop for freshness, with 
     sweep: async () => ({ reviewerCodeStale: { oldSha: OLD_SHA, newSha: NEW_SHA } }),
   });
 
-  assert.equal(s.stopReason, "stale", "a mid-pass reviewer-code discovery ends the cycle through the freshness-stop path");
+  assert.equal(s.stopReason, "stale", "sustained recurrence still ends the cycle through the freshness-stop path");
   const restartLine = lines.find((l) => l.step === "daemon_selfrestart_for_freshness");
   assert.ok(restartLine, "the stop is ledgered under the SAME distinct step a checkFreshness-driven restart uses");
   assert.equal(restartLine?.extra.old_sha, OLD_SHA);
   assert.equal(restartLine?.extra.new_sha, NEW_SHA);
+  // W1-T3691 (design iv): the FIRST couple of sightings must not have stopped anything — only
+  // the held marker, never a restart, until the streak crosses the floor.
+  const heldLines = lines.filter((l) => l.step === "review.stale_reviewer_held");
+  assert.ok(heldLines.length >= 1, "the recurrence was visible before it was acted on");
+  const requestedLine = lines.find((l) => l.step === "review.stale_reviewer_restart_requested");
+  assert.ok(requestedLine, "the eventual restart is ledgered under its own W1-T3691 marker too");
+});
+
+test("W1-T3691: a SINGLE stale reviewer sighting changes nothing — no stop, no held row, no restart marker", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string }> = [];
+  let sweepCalls = 0;
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id) => okResult(id),
+    sleep: fakeClock().sleep,
+    log: (step) => lines.push({ step }),
+    // `checkStop` is consulted at the TOP of every tick, before `sweep` runs (W1-T1274) — so
+    // letting it through once (the first top-of-loop check) and only THEN stopping lets exactly
+    // one sweep pass run, a single sighting that never gets a chance to recur.
+    checkStop: () => (++sweepCalls >= 2 ? "test done after one sweep pass" : undefined),
+    sweep: async () => ({ reviewerCodeStale: { oldSha: OLD_SHA, newSha: NEW_SHA } }),
+  });
+
+  assert.equal(s.stopReason, "stopped", "a single sighting never itself ends the cycle for freshness");
+  assert.equal(lines.filter((l) => l.step === "daemon_selfrestart_for_freshness").length, 0);
+  assert.equal(lines.filter((l) => l.step === "review.stale_reviewer_held").length, 0);
+  assert.equal(lines.filter((l) => l.step === "review.stale_reviewer_restart_requested").length, 0);
 });
 
 test("W1-T3618: an ordinary sweep with no reviewer-code signal never triggers a freshness stop", async () => {

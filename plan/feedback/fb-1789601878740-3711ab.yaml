@@ -1,0 +1,44 @@
+id: fb-1789601878740-3711ab
+ts: 2026-09-16T23:37:58.756Z
+raw: "FOUR MEASURED SESSION TRAPS, landed here at discovery per the 2026-09-16 ruling
+  (DECISIONS.md, 'a session lesson is LANDED, not harvested'). All four come from one
+  interactive session, which retro's gather cannot see -- gatherRuns(records) reads the
+  LEDGER, and an interactive session writes no run rows. They are recorded here rather
+  than in learnings/ because that corpus sat at 41,714 of a 42,000 cap and could not
+  accept them; W1-T3709/#5830 restores headroom and (3) and (4) belong there once it
+  lands. (1) and (2) may belong in doctrine/ instead: they are traps of a dev machine,
+  and a dispatched worker never loads CLAUDE.md (spawnWorker passes settingSources: []).
+  TRAP 1 -- git add -A SWEEPS A KILLED TEST RUN'S LITTER. 'git add -A -- test' committed
+  test/fixtures/live-plan-writers/wiring/tasks.d/zzz-w1-t1225-wiring-probe.yaml onto two
+  branches, reddening task-linter-wiring.test.ts on PRs whose diffs never touched that
+  suite ('the probe shard must not already exist on disk'). The litter comes from
+  INTERRUPTING that suite, which is slow and writes the probe then deletes it -- a tool
+  timeout between the two leaves it behind. Stage by explicit path; after any interrupted
+  run sweep test/.tmp-w1-* and test/fixtures/**/zzz-*probe* BEFORE committing.
+  TRAP 2 -- THE SHARED GIT FIXTURE CARRIES NO IDENTITY. test/helpers/git-repo.ts's
+  gitRepo() sets committer identity only for the git calls IT makes. Code under test that
+  shells 'git commit' itself (run-task.ts's commitWorkerEdits) inherits the AMBIENT
+  environment, so a fixture passes on darwin -- which derives an identity from the OS user
+  record -- and fails on a Linux runner with 'fatal: empty ident name'. Set
+  user.email/user.name on the repo in the fixture. NOT REPRODUCIBLE ON DARWIN: the CI log
+  is the evidence, not a local falsifier.
+  TRAP 3 -- coverage-ratchet IS A REPORTER, NOT THE GATE. A red coverage-ratchet is rarely
+  a coverage threshold; it reports a failed shard, SUPERSEDED, a SHARD HANG, or a missing
+  artifact. The cause underneath is usually 'diff-coverage: BLOCKED -- adds source line(s)
+  with zero covering tests', which names each line. ALL FOUR SHARDS GREEN plus a red
+  ratchet means superseded: re-run the failed jobs, never push a fresh sha. Read its log
+  before changing code. Corollary measured the same day: a line added INLINE inside
+  runTask's dispatch cannot be covered (no test drives that function, and the
+  process-boundary directive is for re-exec glue only) -- extract it AND let the extracted
+  function own its precondition, so the call site is one unconditional line.
+  TRAP 4 -- MERGING THE TIP OF A STACK MERGES EVERYTHING BENEATH IT. #5817 was stacked on
+  #5811's branch; its squash carried both commits to main, leaving #5811 open with an EMPTY
+  diff and a proof-discrimination red reading '6 proof(s) pass at both PR head and merge
+  base'. That signal was correct and meant 'nothing left to merge', not 'repair the
+  proofs'. Before repairing a stacked PR's proofs run: git diff --name-only origin/main
+  <branch> -- an empty result means CLOSE it, not fix it.
+  ALSO, for coverage work: measure with --enable-source-maps. Without it tsx's transpiled
+  line numbers make covered lines read as uncovered, which sent this session chasing lines
+  that were already covered."
+origin: operator-session#shift-left-audit-2026-09-16
+status: open

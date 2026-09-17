@@ -1,0 +1,100 @@
+- id: W1-T3719
+  title: "A BASE-INHERITED FIXTURE CROSSING FAILS EVERY OPEN PR AND THE CENSUS SAYS SO ITSELF WHILE STILL BLOCKING — five of six PRs paid the same diagnosis in one session for a stamp neither of them planted: register the census on main, then stop failing a PR for what its base already carried"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    MEASURED 2026-09-17 on the live board: five of six open PRs red, all on the SAME inherited
+    stamp, none of which planted it:
+
+      #5831 #5840 #5841 #5843 #5844
+        expiring-fixture-census: BLOCKED -- 1 fixture(s) CROSS their threshold within 7 day(s)
+        - test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts:39
+          lastActivityAt="2026-09-10T00:00:00.000Z" vs sweep.staleDays -- goes red 2026-09-24
+          [inherited from the base -- NOT this diff]
+
+    THE CENSUS ALREADY KNOWS. It computes `r.inherited`, prints the attribution verbatim, and even
+    prints the remedy: "Every open PR is seeing the same one, and each will pay this diagnosis
+    separately until the base is repaired -- so fix it THERE, in one change, rather than defusing
+    it per branch." Then it fails the PR anyway, because `main()` blocks on
+    `result.reported.length > 0` without consulting `inherited`.
+
+    THE CODE NAMES ITS OWN PRECONDITION, and this task is that precondition plus the change:
+
+      "Letting an INHERITED crossing pass would be the obvious next step and is deliberately NOT
+       taken here: this census runs on `pull_request` only (ci.yml's comment-load-ratchet job is
+       event-guarded), so nothing else would ever observe a stamp sitting on main, and a warning
+       no gate enforces is how the bomb reaches its own red date unfixed. Non-blocking inheritance
+       needs a main-branch run to land WITH it, which is a separate, reviewed change to the
+       workflow's job registration."
+
+    So the objection is not that inheritance should block -- it is that nothing else would catch
+    it. Supply that, and the block stops earning its cost.
+
+    THE COST IS REAL AND REPEATING. Each PR pays a full CI cycle plus a human diagnosis, and the
+    diagnosis is doubly expensive because the failure is reported under ANOTHER check's name
+    (W1-T3720). One stamp, five diagnoses, one session.
+  design: |
+    (i) THE MAIN-BRANCH RUN LANDS FIRST, IN THE SAME CHANGE. The census gets a registration that
+        observes `push` to main, so a stamp sitting on the base is seen by something that is not a
+        pull request. Without this half the second half is the exact failure the existing comment
+        predicts, so they are one task and not two.
+
+    (ii) ONLY WHAT THIS DIFF PLANTED BLOCKS A PR. `blocked` becomes
+         `introduced.length > 0 || populationDrop.length > 0`, where `introduced` is the filter the
+         report already computes. An inherited crossing stays in the report, loudly, and stops
+         failing a PR that did not cause it.
+
+    (iii) INHERITED IS NEVER SILENT. On a PR it is reported and annotated as a warning; on main it
+          BLOCKS, because there the stamp is exactly this diff's problem. Same code, same census,
+          different owner -- which is the whole point of the attribution the census already does.
+
+    (iv) THE POPULATION-DROP REFUSAL IS UNTOUCHED. That one is a census integrity check, not an
+         expiry, and a diff that drops the measured population is always its own author's problem.
+
+    RISK-BASED, NOT A WEAKENED GATE: the question the gate should answer is "did this diff plant a
+    bomb", and it currently answers "does a bomb exist anywhere". The second question has an owner
+    already -- main -- and this gives it to them.
+  acceptance:
+    - claim: "a crossing that the base ref already carries does not fail the pull request that inherited it"
+      proof: "unit test: an inherited crossing does not block the pull request that inherited it"
+    - claim: "a crossing this diff introduced still blocks, so the gate is narrowed and not removed"
+      proof: "unit test: a crossing this diff planted still blocks"
+    - claim: "the same inherited crossing blocks on main, where it is that diff's own problem"
+      proof: "unit test: an inherited crossing blocks on the branch that carries it"
+    - claim: "an inherited crossing stays visible on a pull request rather than going silent"
+      proof: "unit test: an inherited crossing is still reported when it no longer blocks"
+    - claim: "a diff that drops the measured fixture population is refused exactly as before"
+      proof: "unit test: a population drop still refuses regardless of inheritance"
+  falsifier: |
+    Ship the non-blocking half without the main-branch registration and the third assertion goes
+    red -- which is precisely the failure the existing code comment predicts, so the suite refuses
+    the half-change by construction. Drop the report line for an inherited crossing and the fourth
+    fails. Widen the narrowing to population drops and the fifth fails.
+  risk: high
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3578]
+  # W1-T3578 owns the SELF-DESCRIBING FAILURE annotation on this same census and workflow -- it
+  # made a BLOCKED run publish its report where a reader can see it. This task changes WHO a
+  # crossing belongs to, not how it is published: the attribution W1-T3578 made visible is the
+  # input this one finally acts on. Neither supersedes the other.
+  #
+  # THE SUITE IS DELIBERATELY NOT IN files:. Standing rule 15 makes this filing ride alone, and a
+  # test/ path here reads as "this diff ships the suite", which turns every `unit test:` proof
+  # below into proof-unit-test-unresolvable in a tree that by rule cannot carry one. It is
+  # test/expiring-fixture-census.test.ts, and it lands with the implementation.
+  files: [scripts/expiring-fixture-census.mjs, .github/workflows/ci.yml]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> throughput
+
+    Minted by `rmd next-task-id` from a DETACHED HEAD, so the reservation recorded no readable
+    holder and task-id-existence reads it as `holder unreadable (missing branch)`. Handed off from
+    the literal `unknown`, which is the remedy the check names for exactly that case. Same id,
+    same author, same session -- renumbering would burn a reserved id to paper over a checkout
+    state.

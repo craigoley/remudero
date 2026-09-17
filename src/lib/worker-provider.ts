@@ -20,6 +20,13 @@ import {
   type ContainedProcess,
   type ContainedSpawnOptions,
 } from "./worker-containment.js";
+import {
+  CASH_WEB_SEARCH_KEY_ENV,
+  CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
+  cashWebSearchEnabled,
+  cashWebSearchEndpoint,
+  performCashWebSearch,
+} from "./cash-web-bridge.js";
 
 interface CodexSpawnArgs {
   cwd: string;
@@ -613,11 +620,15 @@ export function codexCandidatesForCapability(
  * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
  * asserts the two agree.
  *
- * FRONTIER STAYS ON gpt-oss-120b DELIBERATELY. A nano-class model is not a frontier substitute, and
- * before this every tier named one deployment — a ladder expressing no choice at all. gpt-oss-120b
- * TRAILS rather than being deleted from the rows nano now leads, the same shape the `codex` table
- * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
- * lane.
+ * FRONTIER NO LONGER NAMES ONE DEPLOYMENT (W1-T3689). gpt-oss-120b alone left frontier
+ * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
+ * gpt-5.6-luna now leads it (measured 2026-09-16), taking gpt-5-mini's place outright: cheaper on both axes
+ * and 0 reasoning tokens where mini spent 64 of 76. gpt-5.6-terra TRAILS as the escalation, at 10x
+ * luna, reached only when luna is unavailable. ECONOMY AND BALANCED ARE UNTOUCHED: nano is cheaper
+ * than luna per token, and W1-T3614 fixed those leads from measured PER-TASK cost, which luna has
+ * not yet been measured against. gpt-oss-120b TRAILS rather than being deleted,
+ * the same demotion shape the `codex` table uses for a demoted model, so a deployment that stops
+ * answering falls back instead of failing the lane.
  */
 // W1-T3614: economy leads with gpt-oss-120b and balanced with gpt-5-nano, MIRRORING
 // .remudero/mounts.yaml exactly -- a checkout with no mounts table must not silently prefer a
@@ -628,7 +639,7 @@ export function codexCandidatesForCapability(
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano"],
   balanced: ["gpt-5-nano", "gpt-oss-120b"],
-  frontier: ["gpt-oss-120b"],
+  frontier: ["gpt-5.6-luna", "gpt-5.6-terra"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -686,6 +697,14 @@ export interface OpenWeightContextWindow {
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
+  // A DELIBERATE FLOOR, NOT A MEASURED CEILING. Microsoft's published gpt-5.6 rates are
+  // labelled "short context" and disclose neither the window nor a long-context rate, and the
+  // account's per-request TPM ceiling refuses an oversized probe before the model can answer one.
+  // So the window is recorded LOW on purpose: a request above it refuses pre-transport rather than
+  // silently entering a tier whose price is unknown, which is the direction that keeps
+  // `dailyCapUsd` honest. Raise it only when a long-context rate has been read AND priced.
+  "gpt-5.6-luna": { totalTokens: 128_000, readAt: "2026-09-16" },
+  "gpt-5.6-terra": { totalTokens: 128_000, readAt: "2026-09-16" },
 };
 
 /**
@@ -1080,8 +1099,24 @@ interface CodexRuntimeReading {
 
 interface CodexRuntimeFailure extends ProviderCapacity {
   /** Internal retry classification; stripped before a capacity leaves this module. */
-  failureKind: "timeout" | "terminal";
+  failureKind: "timeout" | "terminal" | "starved";
 }
+
+/**
+ * How late a deadline may fire before it is read as THIS PROCESS stalling rather than the
+ * app-server being slow. A healthy loop delivers a timer within milliseconds of its deadline.
+ *
+ * WHY THE DISTINCTION IS LOAD-BEARING (W1-T3690). Node runs timers in the timers phase, which
+ * precedes the poll phase that delivers a child's stdout. If the main thread is blocked when the
+ * deadline passes, the timer callback runs on the NEXT free tick BEFORE any queued stdout is
+ * read -- so a child that answered in 300ms is recorded as "timed out after 10000ms; unfinished:
+ * initialize". MEASURED on the fleet 2026-09-16 inside the daemon's own container: a free loop
+ * replies in 366ms; a loop blocked 12s produces that exact string with a WALL TIME of 12000ms
+ * against a 10000ms deadline. The overrun is the only signal that separates the two, and the
+ * consequence of confusing them is severe: codex reads unreadable, the capacity auction gives it
+ * zero allocation, and every lane silently migrates onto the Claude subscription.
+ */
+const CODEX_DEADLINE_OVERRUN_MS = 1_000;
 
 type CodexRuntimeResult = CodexRuntimeReading | CodexRuntimeFailure;
 
@@ -1138,10 +1173,14 @@ export async function readCodexRuntime(
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {
     signal?: AbortSignal;
     onHedgeEligibility?: (eligible: boolean) => void;
+    /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
+     *  production would defeat the very stall this measurement exists to detect. */
+    monotonicNow?: () => number;
   },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
   const timeoutMs = deps.timeoutMs ?? 10_000;
+  const monotonicNow = deps.monotonicNow ?? Date.now;
   let child: ChildProcessWithoutNullStreams;
   try {
     child = spawn(bin, ["app-server", "--listen", "stdio://"], { env: codexControlEnv(config) });
@@ -1176,8 +1215,21 @@ export async function readCodexRuntime(
       if (!modelsReceived) pending.push("model/list");
       return pending;
     };
+    const deadlineSetAt = monotonicNow();
     const timer = setTimeout(() => {
       const malformed = malformedStdoutLines > 0 ? `; malformed app-server stdout: ${malformedStdoutLines} line(s)` : "";
+      // THE DEADLINE OVERRAN => WE STALLED, NOT THE APP-SERVER. See CODEX_DEADLINE_OVERRUN_MS.
+      // The child's reply may be sitting unread in the poll queue right now; this exchange
+      // observed nothing about Codex and must not be reported as evidence against it.
+      const elapsedMs = monotonicNow() - deadlineSetAt;
+      if (malformedStdoutLines === 0 && elapsedMs >= timeoutMs + CODEX_DEADLINE_OVERRUN_MS) {
+        finish(codexRuntimeFailure(
+          `app-server deadline overran: ${timeoutMs}ms budget fired after ${elapsedMs}ms, so this process was stalled ` +
+            `and the child was never given a readable turn; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
+          "starved",
+        ));
+        return;
+      }
       finish(codexRuntimeFailure(
         `app-server timed out after ${timeoutMs}ms${malformed}; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
         // Protocol noise is not the fleet-observed transient RPC stall and must not be retried.
@@ -1427,9 +1479,15 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     }
   }
   if ("provider" in value) {
-    const { failureKind: _failureKind, ...capacity } = value;
+    const { failureKind, ...capacity } = value;
     codexCapacityCache.delete(cacheKey);
-    if (!deps.forceRefresh) codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    // A STARVED READ IS NOT EVIDENCE ABOUT CODEX, so it must not buy a failure backoff. Caching it
+    // would suppress the next read for up to CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS on the strength
+    // of an exchange that observed nothing -- turning one blocked tick into a window in which the
+    // provider is declared unreadable and every lane routes to the subscription instead.
+    if (!deps.forceRefresh && failureKind !== "starved") {
+      codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    }
     return capacity;
   }
   codexCapacityCache.set(cacheKey, { at: now(), value });
@@ -1873,14 +1931,94 @@ export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
 /** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
 export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
 /**
+ * PRIMARY CONTROL (W1-T1266): the wall-clock bound on ONE cash request. Nothing else bounds a hung
+ * one -- before this the `fetch` carried no `signal` at all, so a stalled Azure request held the
+ * tool loop and its reservation for as long as the socket stayed open. It is not a backstop firing
+ * after some other guard failed; it IS the guard.
+ *
+ * Generous on purpose: a reasoning model on a large prompt is legitimately slow, and a deadline
+ * that fires early would refuse work the cap has already paid to reserve.
+ */
+export const OPENWEIGHT_REQUEST_TIMEOUT_MS = 180_000;
+
+/** Raised when a reply was cut off by the completion budget rather than finished. */
+export class OpenWeightTruncatedReplyError extends RmdError {
+  readonly finishReason: string;
+  constructor(finishReason: string, completionTokens: number) {
+    super(
+      "usage",
+      1,
+      `openweight reply was TRUNCATED by the completion budget (finish_reason=${JSON.stringify(finishReason)}, ` +
+        `${completionTokens} completion tokens against OPENWEIGHT_MAX_COMPLETION_TOKENS=${OPENWEIGHT_MAX_COMPLETION_TOKENS}). ` +
+        `Refusing to return a partial answer as a whole one — shrink the request or raise the budget.`,
+      { finishReason, completionTokens },
+    );
+    this.finishReason = finishReason;
+  }
+}
+
+/** Raised when a request passed its deadline. Distinct from a transport error so a caller can tell
+ *  "we stopped waiting" from "the endpoint refused". */
+export class OpenWeightRequestTimeoutError extends RmdError {
+  constructor(readonly timeoutMs: number, readonly deployment: string) {
+    super(
+      "usage",
+      1,
+      `openweight request to ${JSON.stringify(deployment)} exceeded ${timeoutMs}ms and was abandoned. ` +
+        `Its reservation stays CHARGED: the request may have been served and billed, so returning the ` +
+        `allowance would let a timeout buy free authority.`,
+      { timeoutMs, deployment },
+    );
+  }
+}
+
+/**
+ * Is this reply complete, or did the budget cut it off?
+ *
+ * `finish_reason` was never read. `length` means the model stopped because it ran out of completion
+ * budget, and the content returned is a PREFIX -- indistinguishable, to every caller, from a
+ * genuinely short answer. OPENWEIGHT_MAX_COMPLETION_TOKENS's own comment records a shard already
+ * truncated mid-string at 1,500, so this is a measured failure mode rather than a hypothetical one.
+ *
+ * `stop` and `tool_calls` are the two complete outcomes. An ABSENT reason is treated as complete:
+ * not every OpenAI-compatible endpoint sets it, and inventing a refusal from a missing field would
+ * fail closed on deployments that work.
+ */
+export function openWeightReplyIsTruncated(finishReason: unknown): boolean {
+  return finishReason === "length";
+}
+/**
  * Adapter-owned output constraints for every OpenWeight lane. Each rule is conditional: the
  * adapter must not turn a code-review or prose task into a YAML-only task by accident.
  */
+/**
+ * Strip a Markdown fence a model wrapped a structured reply in, and return the payload.
+ *
+ * ASK AND STRIP, NOT ASK ALONE. OPENWEIGHT_OUTPUT_CONTRACT already tells the model to emit a raw
+ * document "without Markdown fences", and that instruction is correct -- but an instruction is not
+ * a guarantee, and this adapter has less margin than most: it deliberately cannot lean on
+ * `response_format` for every deployment (gpt-oss-120b returns malformed JSON under json_object),
+ * so for those the prompt is the ONLY defence there is. synthwatch's production adapter asks AND
+ * strips; this closes the gap on the stripping half.
+ *
+ * DELIBERATELY NARROW. It removes ONE wrapping fence and nothing else: no trimming of prose around
+ * an unfenced reply, no outermost-brace slice, no JSON parse. A reply that is already raw comes
+ * back byte-identical, because the failure this fixes is a wrapper, not malformed content -- and a
+ * cleverer extractor would start silently editing answers rather than unwrapping them.
+ */
+export function openWeightUnfence(text: string): string {
+  const match = /^\s*```[A-Za-z0-9_-]*\r?\n([\s\S]*?)\r?\n?```\s*$/.exec(text);
+  return match?.[1] ?? text;
+}
+
 export const OPENWEIGHT_OUTPUT_CONTRACT = [
   "Apply each output rule below only when its condition is true:",
   "- When emitting YAML, double-quote every scalar value containing a colon (`:`), especially a `proof:` value.",
   "- When the request names a closed enum, emit exactly one listed literal; choose the nearest listed value rather than inventing `unknown` or `ambiguous`.",
   "- When the request asks for a raw document, emit that document without Markdown fences.",
+  "- When the request names literal output markers or delimiters (for example a fixed START/END " +
+    "line or a STAMP line), emit those markers verbatim and print the requested artifact between " +
+    "or after them instead of describing it in prose.",
 ].join("\n");
 /**
  * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
@@ -1915,6 +2053,19 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
   // `openai/deployments/...` route with no second endpoint shape.
   "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
+  // gpt-5-mini was REMOVED, not demoted. Luna is cheaper on BOTH axes ($0.20/$1.20 vs
+  // $0.25/$2.00) and measurably more efficient -- on an identical trivial prompt Luna spent 0
+  // reasoning tokens where mini spent 64 of 76 -- so mini had no lane left where it was the right
+  // row. Keeping it trailing would have implied a fallback worth reaching; there is none.
+  //
+  // PUBLISHED SHORT-CONTEXT RATES, read 2026-09-16 from Microsoft's GPT-5.6 Foundry announcement.
+  // These are the SAME models the Codex subscription already routes (`gpt-5.6-luna`/`-terra` lead
+  // the codex economy and balanced rows), so a squeeze diverts a lane to identical intelligence on
+  // a different bill rather than to a cheaper substitute of unknown quality.
+  "gpt-5.6-luna": { inputUsdPerMillion: 0.2, outputUsdPerMillion: 1.2, readAt: "2026-09-16" },
+  // TERRA IS 10x LUNA ON BOTH AXES. It exists for the frontier band alone; nothing else may lead
+  // with it. Sol ($5.00/$30.00) is deliberately NOT here -- 2.5x terra for the same band.
+  "gpt-5.6-terra": { inputUsdPerMillion: 2.0, outputUsdPerMillion: 12.0, readAt: "2026-09-16" },
 };
 
 /**
@@ -1931,9 +2082,68 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
  * substring match on the model id (W1-T2573): `gpt-5-nano` and `gpt-5.4-nano` are different
  * deployments with no guarantee of shared behaviour.
  */
+/**
+ * Which structured-output modes each deployment can actually honour.
+ *
+ * MEASURED, NOT ASSUMED, with the adapter's own URL and api-version:
+ *   gpt-5.6-luna   `response_format: {type:"json_object"}` -> HTTP 200, clean `{"ok":true}`
+ *   gpt-5.6-terra  same, HTTP 200
+ *   gpt-oss-120b   returns MALFORMED JSON under the same field (the measurement that put
+ *                  "Do not add `response_format` here" on spawnOpenWeightWorker)
+ *   gpt-5-nano     unmeasured, so it declares nothing and may not be asked
+ *
+ * A DEPLOYMENT WITH NO ROW SUPPORTS NOTHING, and an unmeasured one is exactly that: the refusal
+ * below is what stops a lane silently receiving prose where it required JSON, which is the failure
+ * gpt-oss-120b already demonstrated.
+ */
+export const OPENWEIGHT_RESPONSE_FORMATS: Readonly<Record<string, readonly string[]>> = {
+  "gpt-5.6-luna": ["json_object"],
+  "gpt-5.6-terra": ["json_object"],
+};
+
+/** Raised INSTEAD of sending a structured-output request a deployment cannot honour. Thrown before
+ *  transport, like its pricing and temperature siblings, so no reservation is spent proving it. */
+export class OpenWeightUnsupportedResponseFormatError extends RmdError {
+  readonly deployment: string;
+  readonly requested: string;
+  constructor(deployment: string, requested: string) {
+    const supported = OPENWEIGHT_RESPONSE_FORMATS[deployment] ?? [];
+    super(
+      "usage",
+      1,
+      `openweight deployment ${JSON.stringify(deployment)} cannot honour response_format ` +
+        `${JSON.stringify(requested)}: ${supported.length ? `supports ${supported.join(", ")}` : "declares no structured-output support"}. ` +
+        `Route this lane to a deployment that declares it, or ask for prose and parse defensively.`,
+      { deployment, requested },
+    );
+    this.deployment = deployment;
+    this.requested = requested;
+  }
+}
+
+/** The `response_format` field for one request, or nothing. REFUSES rather than silently dropping
+ *  an unsupported request: a caller that asked for JSON and quietly got prose is the exact failure
+ *  gpt-oss-120b produced under json_object. */
+export function openWeightResponseFormatField(
+  deployment: string,
+  requested: string | undefined,
+): { response_format: { type: string } } | Record<string, never> {
+  if (requested === undefined) return {};
+  const supported = OPENWEIGHT_RESPONSE_FORMATS[deployment] ?? [];
+  if (!supported.includes(requested)) throw new OpenWeightUnsupportedResponseFormatError(deployment, requested);
+  return { response_format: { type: requested } };
+}
+
 export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   "gpt-oss-120b": 0,
   "gpt-5-nano": null,
+  // MEASURED 2026-09-16 with the adapter's own URL and api-version: `temperature: 0` returns
+  // HTTP 400 ("does not support 0 with this model. Only the default (1) value is supported"),
+  // byte-identical to nano's refusal. So the field is OMITTED, never sent as 0.
+  // Both refuse `temperature: 0` with HTTP 400 ("only the default (1) value is supported"),
+  // measured 2026-09-16 -- the same refusal nano gives, so the field is omitted rather than sent.
+  "gpt-5.6-luna": null,
+  "gpt-5.6-terra": null,
 };
 
 /** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
@@ -2048,9 +2258,19 @@ export function openWeightCommittedUsd(state: OpenWeightAllowanceState): number 
  * over-estimate: no tokenizer emits more tokens than the UTF-8 bytes it consumed, so this can never
  * under-reserve. Over-reserving is the safe direction for a cap — settlement corrects it downward.
  */
-export function openWeightReservationUsd(deployment: string, requestBodyBytes: number): number {
+export function openWeightReservationUsd(
+  deployment: string,
+  requestBodyBytes: number,
+  extraInputTokens = 0,
+): number {
   const price = openWeightPriceFor(deployment);
-  return (requestBodyBytes * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+  // `extraInputTokens` is input the request BODY does not contain, and it exists because the
+  // byte-bound argument above holds only while the body is the whole input. A server-side tool —
+  // `web_search` is the first — makes the provider fetch pages we never sent and bill them as
+  // input, so a caller that turns one on MUST declare a ceiling for what it may retrieve or the
+  // reservation silently stops being an upper bound. W1-T3558.
+  const inputTokenCeiling = requestBodyBytes + Math.max(0, extraInputTokens);
+  return (inputTokenCeiling * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
@@ -2155,11 +2375,57 @@ function mutateOpenWeightAllowance<T>(
  * Called before the transport, never after. On refusal nothing is committed and {@link
  * OpenWeightAllowanceExhaustedError} is thrown by the caller, so no paid request is made.
  */
+/**
+ * the cash ceiling for THIS request's UTC day.
+ *
+ * A plain number is the whole cap, exactly as before. A pair raises it only when the request
+ * reached cash because the capacity auction found NO subscription with readable headroom -- the
+ * W1-T3692 fallback -- so routine mount-affinity work stays on the lower figure and the higher one
+ * is reachable only on a day the subscriptions are genuinely tapped out.
+ *
+ * IT IS A CEILING, NOT A BUDGET. `squeezed` does not authorise spending more; it stops the cap
+ * refusing work on the one day cash is the only thing that can do it.
+ *
+ * REFUSES A PAIR THAT INVERTS. A `squeezed` below `normal` would mean the squeeze DAY buys less
+ * than an ordinary one, which is never what an operator means -- far likelier a transposition, and
+ * silently honouring it would cap the fleet hardest exactly when it is most constrained.
+ */
+export function effectiveCashCapUsd(
+  cap: number | { normal: number; squeezed: number } | null | undefined,
+  opts: { squeezed?: boolean } = {},
+): number | undefined {
+  if (cap === undefined || cap === null) return undefined;
+  if (typeof cap === "number") return cap;
+  const { normal, squeezed } = cap;
+  if (!Number.isFinite(normal) || !Number.isFinite(squeezed)) {
+    throw new Error(`dailyCapUsd pair must be two finite numbers, got normal=${String(normal)} squeezed=${String(squeezed)}`);
+  }
+  if (squeezed < normal) {
+    throw new Error(
+      `dailyCapUsd.squeezed ($${squeezed}) is below dailyCapUsd.normal ($${normal}) — refusing: a squeeze day must not buy ` +
+        `LESS than an ordinary one. If the two were transposed, swap them.`,
+    );
+  }
+  return opts.squeezed === true ? squeezed : normal;
+}
+
 export function reserveOpenWeightBudget(
   config: Config,
-  input: { requestId: string; deployment: string; requestBodyBytes: number; atIso: string; beforeCommit?: () => void },
+  input: {
+    requestId: string;
+    deployment: string;
+    requestBodyBytes: number;
+    atIso: string;
+    beforeCommit?: () => void;
+    /** true when this request reached cash only because no subscription had readable
+     *  headroom. Selects `dailyCapUsd.squeezed` over `.normal`; ignored for a plain-number cap. */
+    squeezed?: boolean;
+    /** Input tokens this request may consume that its body does NOT carry — see
+     *  {@link openWeightReservationUsd}. Omitted for an ordinary chat turn. */
+    extraInputTokens?: number;
+  },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
-  const capUsd = config.dailyCapUsd;
+  const capUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: input.squeezed });
   // validateConfig already refuses an enabled cash provider (W1-T3607: canonical id, "openweight"
   // accepted as a deprecated alias) with no dailyCapUsd. This is the runtime half of that same rule:
   // an absent cap here means the transport must not run at all, rather than defaulting to unlimited.
@@ -2167,7 +2433,7 @@ export function reserveOpenWeightBudget(
     throw new Error("cash provider requires a dailyCapUsd before any paid request");
   }
   const utcDay = openWeightUtcDay(input.atIso);
-  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes);
+  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
   return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
     const committedUsd = openWeightCommittedUsd(state);
     if (committedUsd + wantUsd > capUsd) {
@@ -2209,6 +2475,9 @@ export function settleOpenWeightBudget(
 }
 
 export interface OpenWeightSpawnArgs {
+  /** set ONLY by W1-T3692's blocked-auction fallback. Selects `dailyCapUsd.squeezed`
+   *  over `.normal` for every reservation this run makes. */
+  cashSqueezed?: boolean;
   cwd: string;
   prompt: string;
   workerHome: string;
@@ -2217,8 +2486,19 @@ export interface OpenWeightSpawnArgs {
   tools?: string[];
   runId?: string;
   taskId?: string;
+  /** Opt-in structured output, e.g. "json_object". Honoured only by a deployment that
+   *  DECLARES it (OPENWEIGHT_RESPONSE_FORMATS); asking an undeclared one REFUSES before transport
+   *  rather than sending a field it mishandles. Absent means prose, which is every lane's default
+   *  and must stay so -- forcing JSON on a prose lane is the mistake OPENWEIGHT_OUTPUT_CONTRACT
+   *  already warns about. */
+  responseFormat?: string;
   /** Test-only override; production uses the global fetch implementation. */
   fetchImpl?: typeof fetch;
+  /** The request deadline, defaulting to {@link OPENWEIGHT_REQUEST_TIMEOUT_MS}. A seam ONLY so a
+   *  test can reach the aborted arm of the catch below: with the real 180s bound, covering it means
+   *  a test that waits three minutes, and an uncovered catch arm is how a refusal quietly stops
+   *  refusing. Production passes nothing and gets the constant. */
+  requestTimeoutMs?: number;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
@@ -2256,6 +2536,14 @@ export interface OpenWeightWorkerResult {
   compactionConfigured: false;
   qualitySuspect: false;
   workerDurationMs: number;
+  /** Brokered web search, metered apart from conversation tokens (W1-T3558). `webSearchUsd` is
+   *  INCLUDED in `costUsd` and in `budgetSettledUsd` — it is a breakdown of the bill, not an
+   *  addition to it. A refused search still counts in `webSearchRefused` and still costs, because
+   *  the provider billed the attempt whatever we decided to do with its answer. */
+  webSearchAttempted: number;
+  webSearchAccepted: number;
+  webSearchRefused: number;
+  webSearchUsd: number;
   /** Attributable cash fields for the ledger. Money, not prompts: no request body, no response
    *  text and no credential is carried here. `budgetRefused` is true only when the daily allowance
    *  refused this run BEFORE any paid request was made. */
@@ -2344,14 +2632,32 @@ export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
   return [...OPENWEIGHT_CHECKS[check]];
 }
 
-function openWeightTools(declared: readonly string[] | undefined): Array<Record<string, unknown>> {
+/** The one tool the adapter does NOT execute itself: the daemon brokers it. Declared to the model
+ *  only when the operator has consented, so without consent `WebSearch` stays unimplemented and the
+ *  refusal below fires exactly as it did before W1-T3558. */
+export const CASH_WEB_SEARCH_FUNCTION = {
+  name: "web_search",
+  description:
+    "Search the public web for current information. The daemon performs the search; you never reach the network. " +
+    "A result is returned only when the search actually ran and produced at least one source URL, and every " +
+    "returned document carries its sources. If the search is refused, do not invent the answer — say what is unknown.",
+  required: ["query"],
+} as const;
+
+function openWeightTools(
+  declared: readonly string[] | undefined,
+  webSearch = false,
+): Array<Record<string, unknown>> {
   const requested = [...new Set(declared ?? [])];
-  const unsupported = requested.filter((tool) => OPENWEIGHT_FUNCTIONS[tool] === undefined);
+  const brokered: string[] = webSearch ? requested.filter((tool) => tool === "WebSearch") : [];
+  const unsupported = requested.filter(
+    (tool) => OPENWEIGHT_FUNCTIONS[tool] === undefined && !brokered.includes(tool),
+  );
   // Never silently drop a declared tool: the prompt may rely on it (for example triage's
   // WebSearch), and a partial capability set would make the model fabricate a missing result.
   if (unsupported.length > 0) throw new Error(`openweight adapter does not implement declared tool(s): ${unsupported.join(", ")}`);
   return requested
-    .map((tool) => OPENWEIGHT_FUNCTIONS[tool]!)
+    .map((tool) => (brokered.includes(tool) ? CASH_WEB_SEARCH_FUNCTION : OPENWEIGHT_FUNCTIONS[tool]!))
     .map((tool) => ({
       type: "function",
       function: {
@@ -2466,6 +2772,31 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
   }
 }
 
+/**
+ * A NON-OPENAI DEPLOYMENT NEEDS NO SECOND SHAPE HERE. W1-T3598 ruled the wider catalog out on the
+ * premise that its cheapest non-OpenAI candidate "sits behind the Azure AI Model Inference
+ * `/models` route instead and would need an endpoint branch". W1-T3695 re-probed BOTH routes
+ * against a live DeepSeek-V4-Flash deployment (non-OpenAI family) on the same account:
+ *
+ *   POST {endpoint}/models/chat/completions                   -> HTTP 200
+ *   POST {endpoint}/openai/deployments/DeepSeek-V4-Flash/...  -> HTTP 200
+ *
+ * The second IS this function's own path. The deployment answered it unchanged -- tool calls
+ * (`finish_reason: tool_calls`), `temperature: 0` (HTTP 200, unlike the gpt-5 family's 400) and
+ * `response_format: json_object` all measured clean against it. So this class rides the adapter's existing route
+ * with no second endpoint shape required, and the branch W1-T3598 deferred is not needed for it
+ * at all.
+ *
+ * IT IS STILL NOT WIRED INTO {@link OPENWEIGHT_PRICES}, deliberately. No published rate for
+ * DeepSeek-V4-Flash could be confirmed (absent from the pricing page, the retail prices API and
+ * the catalog's `cost` field), and its billing is publicly disputed -- Microsoft Q&A threads
+ * report ~357x the published rate on cached tokens and 4.5x on V4 Pro. `OPENWEIGHT_PRICES`'s own
+ * contract is that a deployment with no row is refused rather than priced by a neighbour (see
+ * {@link openWeightPriceFor}), so naming this deployment in the cash ladder before a bill
+ * confirms its real rate would convert a disputed page number into an under-reservation. The
+ * route is proven here; the price is not, and only an OBSERVED bill (not this recon) closes that
+ * gap (W1-T3695).
+ */
 function openWeightEndpoint(config: Config, model: string): string {
   // W1-T3607: canonical `cashEndpoint` first, falling back to the deprecated `openweightEndpoint`
   // spelling so an already-deployed host's config.json need not be hand-edited the moment this ships.
@@ -2490,6 +2821,10 @@ function openWeightResult(input: {
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  webSearchAttempted?: number;
+  webSearchAccepted?: number;
+  webSearchRefused?: number;
+  webSearchUsd?: number;
 }): OpenWeightWorkerResult {
   const text = input.text ?? "";
   const error = input.error instanceof Error ? input.error.message : input.error === undefined ? undefined : String(input.error);
@@ -2504,9 +2839,12 @@ function openWeightResult(input: {
     // exists to hold. A run that never reached the transport has no tokens, hence no cost, and
     // saying so requires no rate.
     costUsd:
-      input.promptTokens === 0 && input.completionTokens === 0
+      (input.promptTokens === 0 && input.completionTokens === 0
         ? 0
-        : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens),
+        : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens)) +
+      // Brokered searches are billed on a DIFFERENT API than the conversation, so their tokens are
+      // not in `promptTokens`/`completionTokens` and pricing those alone would understate the run.
+      (input.webSearchUsd ?? 0),
     numTurns: input.turns,
     maxTurns: undefined,
     text,
@@ -2529,11 +2867,19 @@ function openWeightResult(input: {
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
+    webSearchAttempted: input.webSearchAttempted ?? 0,
+    webSearchAccepted: input.webSearchAccepted ?? 0,
+    webSearchRefused: input.webSearchRefused ?? 0,
+    webSearchUsd: input.webSearchUsd ?? 0,
   };
 }
 
-/** Run one bounded OpenAI-compatible Azure conversation. Do not add `response_format` here:
- * gpt-oss-120b returned malformed JSON under json_object in the measured probe. */
+/** Run one bounded OpenAI-compatible Azure conversation.
+ *
+ * `response_format` is now PER DEPLOYMENT, not forbidden outright. The original
+ * prohibition was measured against gpt-oss-120b, which returns malformed JSON under json_object --
+ * that deployment still declares no support and still refuses. The gpt-5.6 deployments answer it
+ * correctly, so they declare it and a caller may opt in through `args.responseFormat`. */
 export async function spawnOpenWeightWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
@@ -2548,12 +2894,21 @@ export async function spawnOpenWeightWorker(
   let text = "";
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
+  // Metered SEPARATELY from conversation turns (W1-T3558). They share the day cap — one cap is the
+  // only way it bounds total Azure spend — but are counted apart so an operator can read what web
+  // access cost, and how often it was refused, without inferring it from a conversation total.
+  let webSearchAttempted = 0;
+  let webSearchAccepted = 0;
+  let webSearchRefused = 0;
+  let webSearchUsd = 0;
   // Identity for this run's reservations. The run id is not sufficient on its own: the tool loop
   // sends one paid request PER TURN, and each needs its own settleable row.
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${Math.random().toString(36).slice(2, 10)}`;
   try {
-    const tools = openWeightTools(args.tools);
-    const key = (args.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
+    const env = args.env ?? process.env;
+    const webSearchConsented = cashWebSearchEnabled(config);
+    const tools = openWeightTools(args.tools, webSearchConsented);
+    const key = env[OPENWEIGHT_API_KEY_ENV];
     if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
     const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
     const messages: OpenWeightMessage[] = [
@@ -2570,12 +2925,16 @@ export async function spawnOpenWeightWorker(
     // reservation and silently changed that refusal's message. W1-T3608.
     openWeightPriceFor(selection.model);
     const temperatureField = openWeightTemperatureField(selection.model);
+    // Resolved ONCE, beside the temperature field and before the turn loop, so an unsupported
+    // request refuses before the first reservation rather than once per turn.
+    const responseFormatField = openWeightResponseFormatField(selection.model, args.responseFormat);
     for (;;) {
       turns += 1;
       const body = JSON.stringify({
         model: selection.model,
         messages,
         ...temperatureField,
+        ...responseFormatField,
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
@@ -2590,18 +2949,34 @@ export async function spawnOpenWeightWorker(
         deployment: selection.model,
         requestBodyBytes: Buffer.byteLength(body, "utf8"),
         atIso: clock.iso(),
+        squeezed: args.cashSqueezed === true,
       });
       budgetReservedUsd += reservation.reservedUsd;
-      const response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
-        method: "POST",
-        headers: { "content-type": "application/json", "api-key": key },
-        body,
-      });
+      // THE DEADLINE IS ARMED AROUND THE REQUEST, AND THE RESERVATION IS ALREADY COMMITTED. An
+      // abandoned request keeps its charge on purpose: the endpoint may have served and billed it,
+      // so handing the allowance back would let a timeout buy free authority against `dailyCapUsd`.
+      const abort = new AbortController();
+      const requestTimeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
+      const deadline = setTimeout(() => abort.abort(), requestTimeoutMs);
+      let response: Response;
+      try {
+        response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
+          method: "POST",
+          headers: { "content-type": "application/json", "api-key": key },
+          body,
+          signal: abort.signal,
+        });
+      } catch (error) {
+        if (abort.signal.aborted) throw new OpenWeightRequestTimeoutError(requestTimeoutMs, selection.model);
+        throw error;
+      } finally {
+        clearTimeout(deadline);
+      }
       if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
         id?: unknown;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
-        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
+        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
@@ -2620,9 +2995,21 @@ export async function spawnOpenWeightWorker(
       }
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
+      // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
+      // the turn is still billed honestly -- the tokens were spent whether or not the answer is
+      // usable -- and before the content can be returned or appended to the conversation.
+      if (openWeightReplyIsTruncated(payload.choices?.[0]?.finish_reason)) {
+        throw new OpenWeightTruncatedReplyError(String(payload.choices?.[0]?.finish_reason), turnCompletionTokens);
+      }
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
-      text = typeof message.content === "string" ? message.content : text;
-      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd });
+      // UNFENCED ONLY WHEN A STRUCTURED REPLY WAS ASKED FOR. A prose lane may legitimately contain a
+      // fenced code block as part of its answer, and unwrapping that would corrupt it; a lane that
+      // requested `responseFormat` asked for a document, so a fence around the whole reply is a
+      // wrapper rather than content.
+      if (typeof message.content === "string") {
+        text = args.responseFormat === undefined ? message.content : openWeightUnfence(message.content);
+      }
+      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd });
       if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
       for (const call of calls) {
@@ -2633,7 +3020,32 @@ export async function spawnOpenWeightWorker(
         }
         let content: string;
         try {
-          content = JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
+          // `web_search` is the one declared tool this process does not execute: the daemon brokers
+          // it against a different API, with its own credential, and returns a document only when
+          // the provider actually searched and cited a source.
+          content = name === CASH_WEB_SEARCH_FUNCTION.name
+            ? JSON.stringify(
+                await brokerCashWebSearch({
+                  args: objectArguments(call.function?.arguments),
+                  config,
+                  env,
+                  model: selection.model,
+                  clock,
+                  requestId: `${runRequestPrefix}-${turns}-search-${webSearchAttempted + 1}`,
+                  fetchImpl: args.fetchImpl,
+                  onMetered: (metered) => {
+                    webSearchAttempted += 1;
+                    if (metered.accepted) webSearchAccepted += 1;
+                    else webSearchRefused += 1;
+                    // Folded into the run totals as well as reported apart: a caller reading only
+                    // `budget*Usd` must not see an understated bill.
+                    budgetReservedUsd += metered.reservedUsd;
+                    budgetSettledUsd += metered.settledUsd;
+                    webSearchUsd += metered.settledUsd;
+                  },
+                }),
+              )
+            : JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
         } catch (error) {
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
@@ -2659,8 +3071,80 @@ export async function spawnOpenWeightWorker(
       // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
       // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
+      webSearchAttempted,
+      webSearchAccepted,
+      webSearchRefused,
+      webSearchUsd,
     });
   }
+}
+
+/**
+ * Reserve, perform and settle ONE brokered web search. The reservation commits BEFORE the request,
+ * as a chat turn's does; what differs is the ceiling, since a search's input is not bounded by the
+ * bytes we send (see {@link CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS}).
+ *
+ * SETTLEMENT FOLLOWS THE RECEIPT, NOT THE VERDICT: a refused search settles from its usage block
+ * like an accepted one, because the provider billed it either way. Refusing an un-attributed
+ * document does not refund the search that produced it.
+ */
+async function brokerCashWebSearch(input: {
+  args: Record<string, unknown>;
+  config: Config;
+  env: NodeJS.ProcessEnv;
+  model: string;
+  clock: Pick<Clock, "now" | "iso">;
+  requestId: string;
+  fetchImpl?: typeof fetch;
+  onMetered: (metered: { accepted: boolean; reservedUsd: number; settledUsd: number }) => void;
+}): Promise<unknown> {
+  const query = input.args.query;
+  if (typeof query !== "string" || query.trim() === "") throw new Error("web_search query must be a non-empty string");
+  const searchKey = input.env[CASH_WEB_SEARCH_KEY_ENV];
+  // A declared-but-unusable tool must refuse loudly rather than return an empty result the model
+  // would read as "the web knows nothing about this".
+  if (!searchKey) throw new Error(`web_search requires ${CASH_WEB_SEARCH_KEY_ENV} in the daemon environment`);
+  const rawEndpoint = input.config.workerProviders?.cashEndpoint ?? input.config.workerProviders?.openweightEndpoint;
+  const endpoint = cashWebSearchEndpoint(typeof rawEndpoint === "string" ? rawEndpoint : "", input.model);
+  const body = JSON.stringify({ model: input.model, input: query, tools: [{ type: "web_search" }] });
+  let reservation: { reservedUsd: number; committedUsd: number; capUsd: number };
+  try {
+    reservation = reserveOpenWeightBudget(input.config, {
+      requestId: input.requestId,
+      deployment: input.model,
+      requestBodyBytes: Buffer.byteLength(body, "utf8"),
+      extraInputTokens: CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
+      atIso: input.clock.iso(),
+    });
+  } catch (error) {
+    // AN EXHAUSTED ALLOWANCE REFUSES THE SEARCH, NOT THE RUN, and it is metered as a refusal at
+    // zero cost: the model asked, we declined, and no request was sent. Letting the exhaustion
+    // escape would abort a worker that could still finish without the search, and leaving it
+    // uncounted would hide "we ran out of money" among the searches that merely failed.
+    if (!(error instanceof OpenWeightAllowanceExhaustedError)) throw error;
+    input.onMetered({ accepted: false, reservedUsd: 0, settledUsd: 0 });
+    return { error: `web_search refused (allowance): ${error.message}`, sources: [] };
+  }
+  const result = await performCashWebSearch({
+    query,
+    endpoint,
+    apiKey: searchKey,
+    model: input.model,
+    fetchImpl: input.fetchImpl,
+  });
+  let settledUsd = reservation.reservedUsd;
+  if (result.usageRead) {
+    settledUsd = Math.min(
+      openWeightUsageUsd(input.model, result.usage.promptTokens, result.usage.completionTokens),
+      reservation.reservedUsd,
+    );
+    settleOpenWeightBudget(input.config, { requestId: input.requestId, actualUsd: settledUsd, atIso: input.clock.iso() });
+  }
+  input.onMetered({ accepted: result.outcome === "accepted", reservedUsd: reservation.reservedUsd, settledUsd });
+  if (result.outcome === "refused") {
+    return { error: `web_search refused (${result.reason}): ${result.detail}`, sources: [] };
+  }
+  return { text: result.text, sources: result.citations };
 }
 
 async function spawnCodexWorkerInPrivateTemp(

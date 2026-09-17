@@ -751,6 +751,7 @@ import {
   reconcileRetroChangesetClaim,
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
+  replaceAcceptanceBlock,
 } from "./lib/plan-pr-emitter.js";
 import {
   findTaskShard,
@@ -1319,14 +1320,21 @@ import {
 export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape };
 
 /**
- * W1-T3618 — reads reviewer-code freshness ONCE and in FRONT of `next` (production:
- * `reviewCommand`), so a stale reading calls `next` zero times for every PR this gate sees this
- * pass: no worktree materializes, no proof executes, no reviewer spawns. Previously this read
- * happened LAST, inside `runReview`, after all of that had already run.
+ * W1-T3618 — reads reviewer-code freshness in FRONT of `next` (production: `reviewCommand`), so a
+ * stale reading calls `next` zero times for the PR it guards: no worktree materializes, no proof
+ * executes, no reviewer spawns. Previously this read happened LAST, inside `runReview`, after all
+ * of that had already run.
  *
- * TRAP: re-reading per PR would multiply a `git fetch` by the pass's own PR count for a fact that
- * cannot change mid-pass — cached on first use instead. `buildSweepEffects` builds a fresh gate
- * every call, and both sweep hooks call it fresh every poll, so a gate's lifetime is one cycle.
+ * W1-T3697 — READS ONCE PER `call()`, NOT ONCE PER PASS. The original shape cached the first read
+ * for the rest of the pass, on the reasoning that the fact "cannot change mid-pass" — but it can:
+ * origin/main advances while a pass is still working through its PR list, and a pass that BEGINS
+ * fresh and goes stale mid-flight is exactly the shape W1-T3618's own measurement recorded (four
+ * withholds inside one cycle that began fresh at its top). A once-per-pass cache can only ever see
+ * a pass that was ALREADY stale before its first PR — structurally rare — so the counter it drives
+ * stayed at zero while the late W1-T228 guard kept discarding full-price verdicts underneath it.
+ * Re-reading before every PR trades one `git fetch` per PR (cheap; `checkReviewerCodeFreshness`'s
+ * own network call) for catching the transition the cache was blind to — the transition is exactly
+ * what makes the expensive path (materialize + prove + spawn) worth skipping.
  *
  * `reviewCommand`'s own late guard (W1-T228, `reviewerCodePublicationRefusal`) is UNCHANGED and
  * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
@@ -1338,17 +1346,20 @@ export function buildReviewerCodeFreshnessGate(
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
-  /** The sha pair the FIRST time this gate's (at most one) freshness read came back stale, or
-   *  `undefined` when it read fresh, was never read (no PR reached the gate this pass), or came
-   *  back unreadable. */
+  /** The sha pair the FIRST time THIS PASS'S freshness reads came back stale (there can be many,
+   *  one per `call()`), or `undefined` when every read so far came back fresh, no PR reached the
+   *  gate this pass, or every stale-looking read was actually unreadable. */
   staleThisPass: () => { oldSha: string; newSha: string } | undefined;
 } {
-  let cached: ReviewerCodeFreshness | undefined;
-  const once = (): ReviewerCodeFreshness => (cached ??= readFreshness());
+  let firstStale: { oldSha: string; newSha: string } | undefined;
   return {
     call: (prArg, rest, reviewDeps) => {
-      const freshness = once();
+      // Read fresh for THIS PR, immediately before the spend it guards — never cached across the
+      // pass (W1-T3697): a reading that changes between two PRs must be observed by the second PR
+      // even though the first already ran under the earlier reading.
+      const freshness = readFreshness();
       if (freshness.status === "stale") {
+        firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
         log("review.skipped_stale_reviewer_code", {
           pr: prArg,
           code_sha: freshness.codeSha,
@@ -1359,8 +1370,7 @@ export function buildReviewerCodeFreshnessGate(
       }
       return next(prArg, rest, reviewDeps);
     },
-    staleThisPass: () =>
-      cached?.status === "stale" ? { oldSha: cached.codeSha, newSha: cached.originMainSha } : undefined,
+    staleThisPass: () => firstStale,
   };
 }
 
@@ -1403,13 +1413,14 @@ export function buildSweepEffects(
   | "repairMissingTaskTrailer"
 > & {
   /**
-   * W1-T3618 — reviewer-code freshness for THIS call's own review effects, read at most once and
-   * cached for this call's whole lifetime (never per PR): see `buildReviewerCodeFreshnessGate`
-   * above for where the single read happens. Both `buildSweepHook` and `buildSweepLightHook`
-   * construct a fresh `buildSweepEffects(...)` every poll, so a cache scoped to one call is scoped
-   * to exactly one sweep cycle. Returns the sha pair the FIRST time this call's freshness read came
-   * back stale, or `undefined` when it read fresh, was never read (no review candidate reached the
-   * gate this pass), or came back unreadable (fails toward attempting the review, matching
+   * W1-T3618 — reviewer-code freshness for THIS call's own review effects. W1-T3697: read once PER
+   * PR reviewed this call, never cached across the whole call — see `buildReviewerCodeFreshnessGate`
+   * above for where each read happens, immediately before the spend it guards. Both `buildSweepHook`
+   * and `buildSweepLightHook` construct a fresh `buildSweepEffects(...)` every poll, so this call's
+   * reads are scoped to exactly one sweep cycle even though there can be many of them. Returns the
+   * sha pair the FIRST time any of this call's freshness reads came back stale, or `undefined` when
+   * every read so far came back fresh, no review candidate reached the gate this pass, or every
+   * stale-looking read was actually unreadable (fails toward attempting the review, matching
    * `checkReviewerCodeFreshness`'s own "unreadable never blocks" contract — this gate only ever
    * REFUSES to spend on a POSITIVELY confirmed stale reading).
    */
@@ -1530,6 +1541,9 @@ import {
   removeRunLock,
   renderWorkerSettings,
   resolveGenericRouteToolBound,
+  harnessOwnsGitFor,
+  IMPLEMENT_CASH_TOOLS,
+  implementToolBound,
   resolveDispatchLaneToolBound,
   resolveClaudeExecutable,
   claudeExecutableCache,
@@ -1720,6 +1734,7 @@ import {
   queryLaunchdServiceSensed,
   queryLaunchdListStatus,
   queryLaunchdListStatusSensed,
+  queryProcessServiceSensed,
   type LaunchdServiceState,
   type LaunchdListStatus,
   realUid,
@@ -7883,12 +7898,48 @@ export function runNpmScriptViaSpawn(script: string, cwd: string): { status: num
  * makes to the worktree beyond whatever the generator itself already wrote (acceptance criterion
  * 5: the rung commits the generator's OWN output, never a hand-composed edit). `changed: false`,
  * no commit made, when `git add -A` staged nothing.
+ *
+ * W1-T3243: a REFUSED commit (e.g. `hooks/pre-commit` rejecting the generator's own output) must
+ * not leave `git add -A`'s staging behind — the same shape and same fix as this file's sibling
+ * plan-write path, `lib/plan-architect.ts`'s `applyPlanProposalCommit` (design (iv): "the pair is
+ * the unit of repair"). `git write-tree` snapshots the index BEFORE this function's own `add`
+ * (touches neither index nor working tree); on a refused commit, `git read-tree <preTree>`
+ * restores ONLY the index to that snapshot — content the caller staged before this call survives,
+ * content this call staged is undone, and the working tree is never touched (never `git reset
+ * --hard` / `git checkout -- .`, which would also destroy working-tree content this function
+ * never staged). The commit's own refusal is always rethrown unchanged.
  */
 export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string }): { sha: string; changed: boolean } {
+  let preTree: string | null = null;
+  try {
+    preTree = execFileSync("git", ["-C", opts.cwd, "write-tree"], { encoding: "utf8" }).trim();
+  } catch (e) {
+    // No pre-add index snapshot to roll back to (e.g. an unmerged index) — record it; a refused
+    // commit below can then only log-and-skip its rollback, not restore. See (v) below.
+    process.stderr.write(
+      `commitGeneratorOutputViaGit: snapshot.error ${String((e as Error)?.message ?? e)}\n`,
+    );
+  }
   execFileSync("git", ["-C", opts.cwd, "add", "-A"], { stdio: "pipe" });
   const staged = execFileSync("git", ["-C", opts.cwd, "status", "--porcelain=v1"], { encoding: "utf8" });
   if (staged.trim().length === 0) return { sha: "", changed: false };
-  execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  try {
+    execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  } catch (commitError) {
+    if (preTree !== null) {
+      try {
+        execFileSync("git", ["-C", opts.cwd, "read-tree", preTree], { stdio: "pipe" });
+      } catch (rollbackError) {
+        // (v): a rollback that itself fails must say so, not fail silently — but the ORIGINAL
+        // commit error is still what gets rethrown below, never this one.
+        process.stderr.write(
+          `commitGeneratorOutputViaGit: rollback.error ${String((rollbackError as Error)?.message ?? rollbackError)}\n`,
+        );
+      }
+    }
+    // (iii): the commit's own refusal text must still reach the caller, unmodified.
+    throw commitError;
+  }
   const sha = execFileSync("git", ["-C", opts.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   return { sha, changed: true };
 }
@@ -12806,6 +12857,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // lanes the table declares.
   const genericRouteTools =
     task.type === "review" || task.type === "manual" ? [...resolveGenericRouteToolBound(task.type)] : undefined;
+  // W1-T3696 step (2): implement's surface is chosen from WHAT IS RUNNING IT. A cash-billed mount
+  // gets the bounded, shell-less surface; Claude keeps exactly what it has today (unrestricted for
+  // implement, the declared bound for review/manual) — this is a per-provider equivalence, never a
+  // narrowing of the Claude lane to fit a cheaper one.
+  const implementTools = implementToolBound(implementMount.provider, genericRouteTools);
+  // Read from the SAME value the spawn is bounded with, so the contract a worker was given and the
+  // verdict it is judged by cannot disagree. True for the shell-less cash surface above, and ALSO
+  // when the operator has handed implement's git effects to the harness on every provider — the
+  // opt-in that makes a Claude implement run divertible, because its prompt then already says so.
+  const harnessOwnsGit = config.workerProviders?.harnessCommitsImplement === true
+    || harnessOwnsGitFor(implementTools);
+  // THE COHERENCE RULE, AND IT IS ONE LINE ON PURPOSE: a spawn may offer a shell-less divert
+  // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
+  // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
+  const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
 
   // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count
   // history (see `deriveRunawayTurnBound`'s own doc), read ONCE here rather than re-derived on
@@ -13508,6 +13574,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // manifest disagree with the prompt (see renderImplementPromptWithParts).
     const { prompt: renderedImplementPrompt, parts: implementParts } = renderImplementPromptWithParts(
       task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
+      harnessOwnsGit,
     );
     // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
     // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
@@ -13544,7 +13611,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -13583,7 +13650,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           config: implementConfig,
           // W1-T3573: `undefined` for `implement`/`diagnose`/`recon` — byte-identical
           // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
-          tools: genericRouteTools,
+          tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
           // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
           // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
@@ -13832,11 +13900,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           config: implementConfig,
           // W1-T3573: same declared bound as the initial spawn above — a resumed session is
           // still the SAME lane, so it must not regain unrestricted tools on resume.
-          tools: genericRouteTools,
-          prompt:
-            `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
-            `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +
-            `and end with a REPORT whose last line is exactly: PR_URL: <url>`,
+          tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          // W1-T3696: the RESUMED turn must restate the SAME contract the initial spawn was given.
+          // A shell-less worker told here to `git push` would spend its remaining turns failing at
+          // a tool it does not have, which is the one place this lane cannot recover from.
+          prompt: harnessOwnsGit
+            ? `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
+              `save your edits to the files, run NO git or gh commands, and end with a REPORT carrying ` +
+              `a line \`COMMIT_MESSAGE: <type>(<scope>): <subject>\` — the harness commits, pushes and opens the PR.`
+            : `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
+              `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +
+              `and end with a REPORT whose last line is exactly: PR_URL: <url>`,
         }),
       );
       log("implement.resumed", {
@@ -13880,7 +13955,31 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // Computed ONCE and held in `commitCount` (W1-T407) rather than re-called inline: the guard's
     // predicate is unchanged (still `=== 0`), but the same value now also rides the `no_pr`
     // ledger row below instead of being thrown away after deciding the branch.
-    const commitCount = commitsAhead(worktreePath, "origin/main");
+    let commitCount = commitsAhead(worktreePath, "origin/main");
+
+    // W1-T3696 step (1), WIRED: a worker with no shell cannot commit its own edits, so the harness
+    // commits them here. This is the ONLY missing verb — the fallback push below and the
+    // orchestrator PR creation after it already exist, so once this produces a commit the rest of
+    // the run is the long-proven path, unchanged.
+    //
+    // GATED ON THE SPAWN'S OWN TOOL SURFACE, not on the provider. `harnessOwnsGit` is true exactly
+    // when this spawn was bounded without a shell, which is the condition under which the worker
+    // was TOLD the harness would commit (the same flag built its output contract). A shell-capable
+    // worker that committed nothing is left alone: it could have committed and chose not to, and
+    // turning that into a pull request would change a long-standing verdict rather than enable a
+    // new lane.
+    //
+    // THE MESSAGE IS THE WORKER'S, AND ONLY EVER DATA. It arrives as an anchored REPORT line and
+    // travels into an argv array; the harness never runs a command the worker composed. No message,
+    // no commit — an invented subject would attribute work to a run that never asked for it.
+    // CALLED UNCONDITIONALLY, and it owns its own precondition. Guarding here instead would put the
+    // decision on lines no test can reach without driving this entire dispatch — which is what
+    // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
+    // request must be exercised, not reasoned about from outside.
+    commitCount = harnessCommitForShellLessWorker({
+      harnessOwnsGit, commitCount, report: fullText(impl), worktreePath, declaredPaths: task.files ?? [], log, say,
+    });
+
     if (!prUrl && commitCount === 0) {
       // W1-T412: HARVEST BEFORE THIS BLOCK'S RETURNS, because every path out of it returns and
       // the implement phase's own harvest call sits far BELOW, after `gh pr create`/`pr.opened`
@@ -15341,6 +15440,29 @@ export async function withMaterializedWorktree<T>(
  * unchanged from before — the caller falls through to the PR body's `Acceptance:` block.
  */
 /**
+ * TRUE when the body's ONLY judgeable Acceptance block is the generic PR-open-time fallback
+ * ({@link PR_OPEN_TIME_ACCEPTANCE_FALLBACK} / {@link ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK} — both
+ * carry the SAME claim/proof pair, so one string comparison covers either origin).
+ *
+ * WHY THIS EXISTS: `ghPrCreateFillCommand` (the retro's own PR-creation call site) already installs
+ * that fallback whenever the commit-derived body carried no Acceptance block — BEFORE
+ * `repairRetroAcceptanceBlock` runs. Its proof, `grep: ^export function acceptanceAuthorTimeCheck in
+ * src/lib/review.ts`, greps a function that predates every PR that could ever reach this fallback,
+ * so `check-proof --base` reads it `executed_stale` on every retro that takes this path — measured
+ * live on #5769, which failed the REQUIRED `proof-discrimination` check for exactly this proof.
+ * `bodyNeedsAcceptanceRepair` alone does not see this: the fallback parses fine and its proof is
+ * non-empty, so it calls the body "healthy" — the retro's own non-dialect fallback below never gets
+ * a chance to replace it. This predicate closes that gap by recognising the ONE known-stale generic
+ * shape and routing it back into repair, without touching `bodyNeedsAcceptanceRepair` itself (which
+ * other callers, e.g. `acceptanceGateBodyRepair`, still need to read this same body as healthy).
+ */
+export function bodyCarriesGenericAcceptanceFallback(body: string): boolean {
+  const criteria = parseAcceptanceBlock(body);
+  if (criteria.length !== 1) return false;
+  return criteria[0].proof?.trim() === PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof;
+}
+
+/**
  * THE RETRO'S ACCEPTANCE-BLOCK REPAIR RUNG, extracted so the DECISION is reachable by a test.
  *
  * It was inline in `retroCommand`, which meant the trigger — the thing this change fixes — could
@@ -15372,16 +15494,23 @@ export function repairRetroAcceptanceBlock(
     // The SAME predicate ensureJudgeableBody itself uses (bodyNeedsAcceptanceRepair,
     // plan-pr-emitter.ts) — this call site used to carry its own `=== 0` copy, which meant widening
     // the repair would have left the duplicate here still declining to fire on a body that parses
-    // to one criterion with an empty proof. One definition, two consumers.
-    if (!bodyNeedsAcceptanceRepair(body)) return "healthy";
-    const repaired = ensureJudgeableBody(body, [
+    // to one criterion with an empty proof. One definition, two consumers. ALSO repair a body whose
+    // only criterion is the generic PR-open-time fallback: that proof is stale by construction
+    // (see bodyCarriesGenericAcceptanceFallback), so `proof-discrimination` REFUSES the retro
+    // otherwise, even though `bodyNeedsAcceptanceRepair` alone calls it healthy.
+    if (!bodyNeedsAcceptanceRepair(body) && !bodyCarriesGenericAcceptanceFallback(body)) return "healthy";
+    const fallback: AcceptanceCriterion[] = [
       {
         claim: "the retro's plan-only sync PR is gate-compliant",
         proof:
           "SHIPPED-log/NET-STATE/calibration-table updates and the COMPRESSION deletion are in this diff; " +
           "docs/ORIENTATION.md and plan/plan-index.json are harness-regenerated separately in this same PR",
       },
-    ]);
+    ];
+    // `ensureJudgeableBody` re-checks `bodyNeedsAcceptanceRepair` internally and no-ops when it reads
+    // healthy — exactly the generic-fallback case this function exists to catch. Use the unconditional
+    // half directly whenever THIS repair fired for a reason that predicate cannot see.
+    const repaired = bodyNeedsAcceptanceRepair(body) ? ensureJudgeableBody(body, fallback) : replaceAcceptanceBlock(body, fallback);
     editBody(prUrl, repaired);
     log("acceptance.repaired", { pr_url: prUrl });
     return "repaired";
@@ -17241,6 +17370,19 @@ export interface CheckAcceptanceDeps {
    * treats a throw as "cannot tell" and stays silent.
    */
   changedFiles?: () => string[];
+  /**
+   * (W1-T3687) `--base <ref>`'s merge-base worktree seam — IDENTICAL shape to
+   * `checkProofCommand`'s own `baseBlobDeps` (same field names, same defaults via
+   * {@link buildBaseProofDir}), injectable ONLY for tests. Real callers (the CLI dispatch below)
+   * omit it and get `buildBaseProofDir`'s own `git worktree add`/`git show` defaults — see that
+   * function's doc for why that is the right default.
+   */
+  baseBlobDeps?: {
+    showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
+    makeDir?: () => string;
+    addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
+    removeWorktree?: (repoDir: string, worktreePath: string) => void;
+  };
 }
 
 /**
@@ -17402,8 +17544,20 @@ export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDe
 }
 
 export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
-  const file = rest.find((a) => !a.startsWith("--"));
+  // design (i): `--base <ref>`, the same spelling/semantics as `check-proof --base`. Matched and
+  // its value token excluded BEFORE the body-file scan below — the identical guard
+  // `checkProofCommand` uses to keep an omitted `--base` from ever eating argv[0] (baseFlagIdx is
+  // -1, +1 is 0, and index 0 is never the flag's own value) — so a ref token can never be
+  // mistaken for the body-file argument.
+  const baseFlagIdx = rest.indexOf("--base");
+  const baseRef = baseFlagIdx >= 0 ? rest[baseFlagIdx + 1] : undefined;
+  if (baseFlagIdx >= 0 && baseRef === undefined) {
+    console.error("rmd check-acceptance: --base needs a <ref> argument, e.g. `--base origin/main`\n" + USAGE);
+    return 2;
+  }
+  const file = rest.find((a, i) => !a.startsWith("--") && !(baseFlagIdx >= 0 && i === baseFlagIdx + 1));
   if (!file) {
+    // Acceptance criterion 3: byte-identical to before this task when --base is never mentioned.
     console.error("usage: rmd check-acceptance <body-file>");
     return 2;
   }
@@ -17458,10 +17612,74 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
   if (unrelated) console.log(`WARNING:         ${unrelated}`);
   console.log(`criteria parsed: ${criteria.length}`);
   console.log(`empty proofs:    ${emptyProofs}`);
-  criteria.forEach((c, i) => {
-    console.log(`  [${i + 1}] claim: ${c.claim.slice(0, 88)}`);
-    console.log(`      proof: ${c.proof ? c.proof.slice(0, 88) : "(EMPTY — nothing will execute)"}`);
-  });
+
+  // design (i)-(ii): --base ABSENT ⇒ `built` stays undefined and nothing below ever runs a
+  // proof — acceptance criterion 3, every line and the exit code stay byte-identical to before
+  // this task. --base PRESENT ⇒ ONE call to {@link buildBaseProofDir} for the WHOLE body
+  // (acceptance criterion 4: never once per criterion), the SAME builder `rmd check-proof --base`
+  // and `rmd review` both use — never a second, hand-rolled comparison (this task's own
+  // rationale: "must CALL the existing executor, not restate it").
+  const { removeWorktree: baseRemoveWorktree, ...baseBuilderDeps } = deps.baseBlobDeps ?? {};
+  const built =
+    baseRef !== undefined
+      ? buildBaseProofDir(criteria, process.cwd(), { mergeBase: () => baseRef, ...baseBuilderDeps })
+      : undefined;
+  let staleCount = 0;
+  try {
+    criteria.forEach((c, i) => {
+      console.log(`  [${i + 1}] claim: ${c.claim.slice(0, 88)}`);
+      console.log(`      proof: ${c.proof ? c.proof.slice(0, 88) : "(EMPTY — nothing will execute)"}`);
+      if (!built || !c.proof) return;
+      const w = parseWhitelistedProof(c.proof);
+      if (!w) return; // prose/unparseable — nothing executes, so nothing can discriminate either way
+      let headOutcome: "pass" | "fail" | "no-match";
+      try {
+        headOutcome = execWhitelistedProof(w, process.cwd(), checkProofTimeoutMs());
+      } catch {
+        return; // exec_error is never evidence either way (W1-T219) — same posture check-proof takes
+      }
+      // Only a criterion that already passes on THIS tree can be "stale" — a failing/no-match
+      // proof is already unmet on its own terms, and staleness is a question about a PASS.
+      if (headOutcome !== "pass" || built.baseCheckoutDir === undefined) return;
+      const grepTargetPath = w.kind === "grep" && w.args.length >= 1 ? w.args[w.args.length - 1] : undefined;
+      // (W1-T3190) A target this diff itself ADDS discriminates by construction — grepping the
+      // copy `buildBaseProofDir` placed in the base tree only to re-run added unit tests would
+      // otherwise read as a false "matches base too".
+      if (w.kind === "grep" && grepTargetPath !== undefined && built.addedTestFiles.has(grepTargetPath)) return;
+      let baseOutcome: "pass" | "fail" | "no-match";
+      try {
+        baseOutcome = execWhitelistedProof(w, built.baseCheckoutDir, checkProofTimeoutMs());
+      } catch {
+        return; // base couldn't even execute — an environment gap, never counted as discrimination
+      }
+      if (baseOutcome !== "pass") return;
+      staleCount++;
+      // design (iii): the reviewer's OWN verdict word for this shape (W1-T273/W1-T362).
+      console.log(
+        "      discrimination: executed_stale — this proof matches BOTH head and base, so it " +
+          "discriminates NOTHING; the reviewer downgrades exactly this shape and this criterion " +
+          "counts for nothing in review",
+      );
+    });
+  } finally {
+    if (built?.baseIsCheckout && built.baseCheckoutDir !== undefined) {
+      removeBaseProofWorktree(process.cwd(), built.baseCheckoutDir, baseRemoveWorktree);
+    }
+  }
+
+  // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
+  // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
+  const okOrStale = (okLine: string): number => {
+    if (staleCount === 0) {
+      console.log(okLine);
+      return 0;
+    }
+    console.log(
+      `NOT OK — ${criteria.length - staleCount} of ${criteria.length} criteria discriminate a done state ` +
+        `from not-done; ${staleCount} report executed_stale and count for nothing in review (W1-T273/W1-T362).`,
+    );
+    return 1;
+  };
 
   if (trailerResolved) {
     // design (iii): once the trailer resolves, the body's OWN block is not what the gate reads —
@@ -17476,15 +17694,13 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
           `but UNUSED — the gate reads ${taskId}'s shard, never this body's block, once the trailer resolves.`,
       );
     }
-    console.log(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
-    return 0;
+    return okOrStale(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
   }
 
   // Untrailered (or trailer present but unresolved to any criteria): judged exactly as before —
   // acceptance criterion 4, no change in verdict or exit code.
   if (!d.defective) {
-    console.log("OK — the parser resolves exactly what was written, and every proof is non-empty.");
-    return 0;
+    return okOrStale("OK — the parser resolves exactly what was written, and every proof is non-empty.");
   }
   if (!d.headerFound) {
     console.error(
@@ -20658,6 +20874,20 @@ export function duplicateCorpusOpts(
  *  filing commits predating the scoped convention read as implementation evidence. */
 export const LINT_FILING_SUBJECT_RE =
   /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
+
+/** Path shapes this repository already treats as non-implementing — documentation and plan
+ *  surfaces, never source (W1-T3706). ONE exported list so `scripts/head-identity-gate.mjs`'s
+ *  diff-shaped admitted form matches these paths without re-spelling them per caller, the same
+ *  discipline {@link LINT_FILING_SUBJECT_RE} already holds for the subject-shaped form it sits
+ *  beside: `*.md` at any depth, plus everything under `plan/`, `docs/`, or `learnings/`. */
+export const NON_CODE_PATH_PATTERNS: RegExp[] = [/\.md$/i, /^plan\//, /^docs\//, /^learnings\//];
+
+/** Is `path` a non-code (documentation/plan) path per {@link NON_CODE_PATH_PATTERNS}? A path
+ *  matching NONE of the patterns is code (or at least not provably non-code), and the caller
+ *  must treat that as refusing the whole head — see the gate's own `isNonCodeHead`. */
+export function isNonCodePath(path: string): boolean {
+  return NON_CODE_PATH_PATTERNS.some((re) => re.test(path));
+}
 
 /** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
  *  format): a task "has a merged implementation" when any non-filing commit carries its id as a
@@ -28562,19 +28792,34 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const deps = realDeps().deployFor({
-    installPath: assessment.installRoot,
-    stateRoot: config.root,
-    daemonLabel: DAEMON_LABEL,
-    // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
-    // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
-    // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
-    // actually listens on.
-    serveLabel: SERVE_LABEL,
-    servePort: resolveServePort([], config.serve?.port),
-    uid,
-    ledgerPath: ledgerPathFor(config),
-  });
+  const deps = {
+    ...realDeps().deployFor({
+      installPath: assessment.installRoot,
+      stateRoot: config.root,
+      daemonLabel: DAEMON_LABEL,
+      // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
+      // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
+      // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
+      // actually listens on.
+      serveLabel: SERVE_LABEL,
+      servePort: resolveServePort([], config.serve?.port),
+      uid,
+      ledgerPath: ledgerPathFor(config),
+    }),
+    // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
+    // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
+    // launchctl — see deployer.ts's file header), so it read "not observed" on every tick,
+    // permanently. This override reads the SAME sensor chain `rmd status`'s LIVENESS section
+    // already falls back to (`statusCommand`'s own `queryService`, report-commands.ts): launchd
+    // when it can sense it, the process table (`queryProcessServiceSensed`) when it cannot — so
+    // the watchdog tick and `rmd status` can never disagree about whether the daemon is alive.
+    daemonAlive: (): boolean | undefined => {
+      const launchd = queryLaunchdServiceSensed(DAEMON_LABEL, uid, defaultLifecycleExec);
+      if (launchd.sensed) return launchd.pid !== null;
+      const processTable = queryProcessServiceSensed("daemon", defaultLifecycleExec);
+      return processTable.sensed ? processTable.running : undefined;
+    },
+  };
   // W1-T3245: `--image-drift-only` is the WATCHDOG TICK's reading — recycle for a new image,
   // never restart for mount staleness, which the daemon's own freshness exit already owns.
   const result = runDeployCycle(deps, {
@@ -28582,6 +28827,14 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
+  if (result.blocker) {
+    // W1-T3694 — legible without tailing a ledger: a stale-running daemon the tick declined to
+    // act on names both shas right here, in the one place an operator or an alarm already reads.
+    console.log(
+      `### rmd deploy-run — BLOCKER: ${result.blocker.note} ` +
+        `(running ${result.blocker.runningHead}, origin/main ${result.blocker.originMain})`,
+    );
+  }
   return result.reason.startsWith("dirty-tree-conflict") || result.rolledBackTo ? 1 : 0;
 }
 
@@ -32097,6 +32350,138 @@ function preserveFixHead(repoDir: string, branch: string, localSha: string): str
   }).trim();
   if (preserved !== localSha) throw new Error(`recovery ref ${recoveryRef} did not preserve ${localSha}`);
   return recoveryRef;
+}
+
+/** W1-T3696 A1. What {@link commitWorkerEdits} did, and what it refused to touch. */
+export interface WorkerEditCommit {
+  /** True only when a commit object was actually created. */
+  readonly committed: boolean;
+  /** The new HEAD sha, present only when `committed`. */
+  readonly sha?: string;
+  /** Paths the worker changed that its task did NOT declare. Reported, never staged. */
+  readonly undeclared: readonly string[];
+  /** Why nothing was committed, when `committed` is false. */
+  readonly reason?: string;
+}
+
+/**
+ * W1-T3696 A1: COMMIT A WORKER'S EDITS FROM THE HARNESS, so the worker never needs a git tool.
+ *
+ * This is the one verb missing beside {@link publishAbandonedFixOwnerAhead}'s CAS-guarded push.
+ * With it, an implement lane can be bounded to Read/Write/Edit/Grep/Glob plus checks -- no Bash,
+ * no forge authority -- and the same bound then constrains every provider identically rather than
+ * being a per-provider exception.
+ *
+ * STAGES BY EXPLICIT DECLARED PATH, NEVER `git add -A` BARE. `declaredPaths` is the task's own
+ * `files:` surface. Anything the worker changed outside it is REPORTED in `undeclared` and left
+ * uncommitted -- so a worker cannot widen its own blast radius by writing somewhere it never
+ * declared, and the caller can escalate loudly instead of discovering it in a diff later. This
+ * mirrors plan-architect.ts's existing `add -A -- plan/ MASTER-PLAN.md`, which is already
+ * path-scoped for the same reason.
+ *
+ * THE MESSAGE IS DATA, NOT A COMMAND. It reaches git as a single argv element through
+ * `execFileSync` -- there is no shell anywhere on this path, so a message cannot become a command
+ * however it is written. That is the whole point of doing this here rather than handing a cheap
+ * model a shell to run `git commit` with.
+ */
+export function commitWorkerEdits(
+  repoDir: string,
+  declaredPaths: readonly string[],
+  message: string,
+  // Reuses PublishAbandonedFixOwnerAheadDeps: the identical `{ runGit? }` seam its sibling
+  // already declares. A second interface of the same shape is what the Deps-count ratchet
+  // exists to prevent, and there is nothing this verb needs that the push verb did not.
+  deps: PublishAbandonedFixOwnerAheadDeps = {},
+): WorkerEditCommit {
+  const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
+    "git",
+    ["-C", repoDir, ...args],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ));
+  if (message.trim().length === 0) {
+    return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
+  }
+  if (declaredPaths.length === 0) {
+    return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
+  }
+
+  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z"]));
+  if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+
+  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths));
+  const undeclared = changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths));
+  if (declared.length === 0) {
+    return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
+  }
+
+  runGit(["add", "-A", "--", ...declared]);
+  runGit(["commit", "-m", message]);
+  return { committed: true, sha: runGit(["rev-parse", "HEAD"]).trim(), undeclared };
+}
+
+/**
+ * W1-T3696: the harness's own commit step for a worker that had no shell, extracted from the
+ * implement dispatch so it can be DRIVEN BY A TEST, and owning its own precondition so the caller
+ * is one unconditional line. Inline and guarded at the call site it was thirteen lines no test
+ * reached, and `diff-coverage` refused them by name.
+ *
+ * Returns the commits-ahead count the caller carries on with: unchanged when nothing was committed,
+ * re-read when something was — that re-read is what clears the `no_pr` guard and lets the existing
+ * fallback push and PR creation carry the run home. No message, no commit: an invented subject
+ * would attribute work to a run that never asked for it.
+ */
+export function harnessCommitForShellLessWorker(
+  input: {
+    /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
+     *  could have committed and chose not to keeps its long-standing `no_pr` verdict. */
+    harnessOwnsGit: boolean;
+    commitCount: number;
+    report: string;
+    worktreePath: string;
+    declaredPaths: readonly string[];
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+  },
+  deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
+): number {
+  if (!input.harnessOwnsGit || input.commitCount !== 0) return input.commitCount;
+  const commit = deps.commit ?? commitWorkerEdits;
+  const ahead = deps.ahead ?? commitsAhead;
+  const asked = parseReport(input.report)?.commitMessage;
+  if (asked === undefined) {
+    input.log("implement.harness_commit_refused", { reason: "no anchored COMMIT_MESSAGE line in the report" });
+    return input.commitCount;
+  }
+  const committed = commit(input.worktreePath, input.declaredPaths, asked);
+  input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
+    ...(committed.sha ? { sha: committed.sha } : {}),
+    ...(committed.reason ? { reason: committed.reason } : {}),
+    ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
+  });
+  if (!committed.committed) return input.commitCount;
+  input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
+  return ahead(input.worktreePath, "origin/main");
+}
+
+/** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is
+ *  read literally rather than through porcelain's quoting rules. */
+export function workerChangedPaths(raw: string): string[] {
+  const out: string[] = [];
+  for (const entry of raw.split("\0")) {
+    if (entry.length < 4) continue;          // "XY " + at least one character of path
+    out.push(entry.slice(3));
+  }
+  return out;
+}
+
+/** Is `path` inside the declared surface? A declared entry is either the path itself or a
+ *  directory prefix of it -- `src/lib/` covers `src/lib/a.ts`, and `src/lib` does NOT cover
+ *  `src/libel.ts`, which a bare `startsWith` would wrongly admit. */
+export function pathIsUnderDeclaredSurface(path: string, declaredPaths: readonly string[]): boolean {
+  return declaredPaths.some((declared) => {
+    const d = declared.endsWith("/") ? declared.slice(0, -1) : declared;
+    return path === d || path.startsWith(`${d}/`);
+  });
 }
 
 export interface PublishAbandonedFixOwnerAheadDeps {

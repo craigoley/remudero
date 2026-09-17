@@ -50,7 +50,16 @@ export interface Config {
   accessAudience?: string;
   notifyRecipient?: string;
   overflow?: "none" | "api_key";
-  dailyCapUsd?: number | null;
+  /** the cash (Azure) spend ceiling for one UTC day. A PLAIN NUMBER is the whole cap, as
+   *  before. A PAIR raises it only on a day the subscriptions are tapped out:
+   *
+   *      dailyCapUsd: { normal: 10, squeezed: 25 }
+   *
+   *  `normal` governs routine mount-affinity cash work; `squeezed` governs a request that only
+   *  reached cash because the capacity auction found NO subscription with readable headroom (the
+   *  W1-T3692 fallback). It is a CEILING on the day's committed total either way -- never a budget
+   *  the fleet is encouraged to spend. */
+  dailyCapUsd?: number | { normal: number; squeezed: number } | null;
   fixStrikeCap?: number;
   consoleUrl?: string;
   serve?: { host?: string; port?: number; identityCapability?: string; trustedProxy?: string };
@@ -58,6 +67,11 @@ export interface Config {
   headroom?: { enabled?: boolean };
   workerProviders?: {
     enabled?: WorkerProviderId[];
+    /** Operator consent for OUTBOUND WEB ACCESS on behalf of cash workers (W1-T3558). Default false,
+     * and deliberately separate from enabling the cash provider: enabling a provider authorises
+     * spending on inference, this authorises fetching arbitrary public pages on a worker's
+     * instruction. The search credential is environment-only, never a config field. */
+    cashWebSearch?: boolean;
     reservePercent?: number;
     capacityCacheMs?: number;
     codexBin?: string;
@@ -76,6 +90,19 @@ export interface Config {
      *  already-deployed host's config.json need not be hand-edited the moment this ships. Remove once no
      *  live host config carries it. */
     openweightEndpoint?: string;
+    /** W1-T3692: when the capacity auction finds NO subscription with usable headroom, dispatch
+     *  normally blocks. With this true, an eligible lane falls back to the cash provider instead of
+     *  stalling. DEFAULT FALSE and deliberately so: it spends real money, so it must be an
+     *  operator decision and must never arrive by upgrade. Bounded by `dailyCapUsd`, which the
+     *  cash adapter already refuses to run without. */
+    cashFallbackWhenBlocked?: boolean;
+    /** Hand the implement lane's git effects to the HARNESS on EVERY provider, not only where the
+     * worker has no shell (W1-T3696). Default false. Turning it on is what makes a Claude implement
+     * run DIVERTIBLE: its prompt then already says the harness commits, so a blocked auction may
+     * retry it on the shell-less cash surface without the prompt and the tools disagreeing. It is
+     * also the security direction W1-T3572 asked for — forge authority leaves every worker, not
+     * only the cheap ones. */
+    harnessCommitsImplement?: boolean;
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -142,12 +169,31 @@ const workerProvidersShape: ValueSchema = {
       stringArrayShape,
     ),
     configField("reservePercent", "number", true, 5, "config.json", "Provider capacity held in reserve.", numberShape),
+    configField("cashWebSearch", "boolean", true, false, "config.json", "Consent for daemon-brokered web search on behalf of cash workers.", booleanShape),
     configField("capacityCacheMs", "number", true, 60_000, "config.json", "Provider capacity cache lifetime.", numberShape),
     configField("codexBin", "string", true, undefined, "config.json", "Absolute Codex CLI path.", stringShape),
     configField("codexHome", "string", true, undefined, "config.json", "Codex state/auth home.", stringShape),
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
     configField("cashEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the cash (non-subscription) worker adapter.", stringShape),
+    configField(
+      "harnessCommitsImplement",
+      "boolean",
+      true,
+      false,
+      "config.json",
+      "Harness owns implement's git effects on every provider, which is what makes the lane divertible to cash (W1-T3696).",
+      booleanShape,
+    ),
+    configField(
+      "cashFallbackWhenBlocked",
+      "boolean",
+      true,
+      false,
+      "config.json",
+      "Fall back to the cash provider when no subscription has readable headroom, instead of blocking dispatch (W1-T3692).",
+      booleanShape,
+    ),
     configField(
       "openweightEndpoint",
       "string",
@@ -233,6 +279,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_ALLOW_LIVE_SPAWN", "Opt-in guard for live worker spawn boundaries.", ["src/lib/spawn-guard.ts"]),
   envEntry("RMD_ALLOW_LIVE_WRITES", "Opt-in guard for live write boundaries under tests.", ["src/lib/live-write-guard.ts", "src/run-task.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
+  envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),

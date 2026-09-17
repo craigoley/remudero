@@ -50,10 +50,72 @@ export function enabledWorkerProviders(config: Pick<Config, "workerProviders">):
   return raw.map((id) => canonicalWorkerProviderId(id) as WorkerProviderId);
 }
 
-/** True only when a subscription provider's local capacity routing replaces the Claude-only daemon gate.
- * The cash (non-subscription) provider deliberately has no window and is selected only by mount affinity. */
-export function providerRoutingOwnsHeadroom(config: Pick<Config, "workerProviders">): boolean {
-  return enabledWorkerProviders(config).includes("codex");
+/**
+ * W1-T3705: why a blocked auction may (or may not) RETRY this spawn on Claude billed to API credits.
+ *
+ * THE VALVE EXISTS FOR THIS MOMENT AND COULD NOT REACH IT. `config.overflow: "api_key"` is there to
+ * keep working when the subscription is exhausted, but the auction refuses ON an exhausted
+ * subscription and had no knowledge the valve was armed — measured on origin/main, `overflow`
+ * appeared nowhere in worker-provider.ts or provider-routing-policy.ts. Armed and unreachable at the
+ * one moment it exists for, on any host with more than one provider enabled.
+ *
+ * A SECOND FALLBACK ARM, NOT WIDER AUCTION ELIGIBILITY. The auction allocates SUBSCRIPTION headroom
+ * and an API-billed spawn is not competing for it; loosening its filter would quietly turn a
+ * capacity bound into a spend decision. A sibling arm beside the cash fallback keeps the auction's
+ * meaning intact and puts the spend behind the same shape of switch.
+ *
+ * Returns the REASON, like {@link cashFallbackRefusal}: a bare `false` reads, in the logs, exactly
+ * like the stall it is meant to explain.
+ */
+export function overflowFallbackRefusal(
+  config: Config,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (config.overflow !== "api_key") return 'operator has not set config.overflow to "api_key"';
+  // BOTH FACTORS, the two-factor rule `buildWorkerEnv` already enforces: the config switch alone
+  // must not bill the fleet to API, and a key sitting in a shell must not either.
+  if (!env.ANTHROPIC_API_KEY) return "ANTHROPIC_API_KEY is absent from the daemon environment";
+  if (config.dailyCapUsd === undefined || config.dailyCapUsd === null) {
+    return "dailyCapUsd is unset, so API-billed spend would be unbounded";
+  }
+  // The retry rides the claude mount-affinity path, which throws on a provider the committed host
+  // config does not enable. Naming it here reports the cause instead of throwing out of the retry.
+  if (!enabledWorkerProviders(config).includes("claude")) return "claude is not an enabled worker provider";
+  return undefined;
+}
+
+/**
+ * True when ROUTING, not the daemon's headroom governor, decides what happens at low headroom.
+ *
+ * THE OLD PREMISE WENT STALE AND THE TWO GATES BECAME A TRAP. This read `enabled.includes("codex")`
+ * alone, noting that cash "is selected only by mount affinity" — true when written, false since
+ * W1-T3692 made cash a blocked-auction FALLBACK and W1-T3705 added the API-credit arm. The
+ * consequence was a pair of gates that could not both be escaped: with codex enabled the AUCTION
+ * refuses on an exhausted subscription; dropping codex to skip the auction ARMED this governor
+ * instead, which pauses dispatch over the ceiling. Only `enabled: ["claude"]` together with
+ * `headroom.enabled: false` reached the overflow valve, and nothing said so.
+ *
+ * SO A DIVERT PATH COUNTS AS ROUTING OWNING THE DECISION. The governor holds back the last slice of
+ * SUBSCRIPTION headroom; if the work will be billed somewhere else entirely, pausing preserves
+ * nothing and only stalls the fleet. Standing down is also STRICTLY FINER-GRAINED — the governor
+ * pauses every lane at once, while the auction and its fallbacks decide per spawn, so a lane with no
+ * divert is still refused on its own merits.
+ *
+ * Both arms are checked at FULL STRENGTH — {@link overflowFallbackRefusal} for the API arm, cash
+ * needing both its switch and its provider. An armed switch whose key or cap is missing diverts
+ * nothing, so it must not stand the governor down. */
+export function providerRoutingOwnsHeadroom(
+  config: Pick<Config, "workerProviders" | "overflow" | "dailyCapUsd">,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const enabled = enabledWorkerProviders(config);
+  // A second SUBSCRIPTION window to allocate against — the original reason, unchanged.
+  if (enabled.includes("codex")) return true;
+  // The API-credit arm, read through the one predicate rather than a second copy of its rule.
+  if (overflowFallbackRefusal(config as Config, env) === undefined) return true;
+  // The cash arm needs its switch AND the provider enabled; either alone diverts nothing.
+  if (config.workerProviders?.cashFallbackWhenBlocked === true && enabled.includes("cash")) return true;
+  return false;
 }
 
 /** Thrown by {@link validateConfig} when a config violates a cross-field invariant. Named
@@ -147,9 +209,22 @@ export function workerModel(config: Config): string {
  * `opus`. Retro/triage/inbox-draft each resolve through their own `synthesis.<role>` row
  * instead — see {@link synthesisModel}.
  */
-export function architectModel(config: Config, mounts?: { architect: { model: string } }): string {
+export function architectModel(
+  config: Config,
+  mounts?: { architect: { model: string } },
+): string {
   return mounts?.architect.model ?? config.architectModel ?? "opus";
 }
+
+// W1-T3711: THE SQUEEZE-SEAT RESOLVERS ARE GONE, `judgeModel` INCLUDED — deleted rather than wired
+// because they were REDUNDANT, not merely unreachable. `selectOpenWeightModel` already maps a
+// requested Claude model onto a cash capability: MEASURED, `claude-opus-5` and `opus` both resolve
+// `frontier`, whose candidates are `[gpt-5.6-luna, gpt-5.6-terra]` at every effort — the same choice
+// a squeeze seat would make, decided once for every seat instead of per row. `judgeModel` had no
+// seat at all: `resolveRiskJudgeMount` reads `mounts.routes`, never `mounts.judge` (the Tier
+// Invariant's ceiling). The paths that DO carry work when the subscription is gone are
+// `cashFallbackWhenBlocked` (W1-T3692) and `config.overflow: "api_key"` (W1-T3705); `parseMount`
+// refuses a `squeeze_model` row by name so an old config fails loudly instead of silently.
 
 /** The three synthesis rungs (W1-T2559). Re-declared structurally here to avoid a config↔mounts
  *  import; `src/lib/mounts.ts` exports the canonical `SynthesisRole`. */

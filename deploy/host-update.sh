@@ -53,6 +53,42 @@
 
 set -euo pipefail
 
+# ── SUDO GUARD (W1-T3682) — an accidental `sudo` silently redirects every path to /root ─────────
+# MEASURED 2026-09-16, hit by hand on the Azure host: running this script under `sudo` resolves
+# ${HOME} to /root, so every RMD_*_DIR default derived below would come from /root instead of the
+# operator's own home. Every section then reports "no such directory, skipping" against a path
+# nothing ever wrote to, and the script exits 0 having reclaimed and pulled nothing — only caught
+# because the operator re-ran it as the owning user and saw different output.
+#
+# THIS REFUSES THE ACCIDENT, NOT THE CONFIGURATION. A deliberately root-owned fleet stays fully
+# supported: set ANY RMD_*_DIR override (RMD_STATE_DIR, RMD_CLAUDE_DIR, RMD_CODEX_DIR,
+# RMD_CONTAINER_CONFIG_DIR, RMD_OP_DIR) and this step aside, because at that point the operator has
+# said explicitly where things live rather than letting `sudo` decide silently. `id -u`, not
+# `${EUID}` — the external command, exactly as deploy/verify-image.sh and
+# deploy/install-container-runtime-mount-order.sh already read the effective uid, and the same
+# reason: a stubbed `id` on PATH is how a test exercises this without real root.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] \
+   && [ -z "${RMD_STATE_DIR:-}${RMD_CLAUDE_DIR:-}${RMD_CODEX_DIR:-}${RMD_CONTAINER_CONFIG_DIR:-}${RMD_OP_DIR:-}" ]; then
+  # `|| true` on both: `getent` exiting non-zero (no such user, or absent entirely) must not abort
+  # this refusal under `set -e pipefail` — an unresolvable home just falls back to the generic
+  # message below, it is never a reason to skip the refusal itself.
+  owning_home=""
+  if command -v getent >/dev/null 2>&1; then
+    owning_home="$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6)" || true
+  fi
+  echo "host-update: REFUSING — running via sudo as root with no RMD_*_DIR override set." >&2
+  echo "  Every path this script derives from \$HOME would resolve under /root instead of" >&2
+  echo "  ${SUDO_USER}'s home, and every section below would silently skip its real target." >&2
+  if [ -n "${owning_home}" ]; then
+    echo "  Re-run as ${SUDO_USER} (no sudo), or set the overrides explicitly, e.g.:" >&2
+    echo "  RMD_STATE_DIR=${owning_home}/rmd-state RMD_OP_DIR=${owning_home}/rmd-op $0" >&2
+  else
+    echo "  Re-run as ${SUDO_USER} (no sudo), or set RMD_STATE_DIR / RMD_OP_DIR / RMD_CLAUDE_DIR /" >&2
+    echo "  RMD_CODEX_DIR / RMD_CONTAINER_CONFIG_DIR explicitly for the fleet's real home." >&2
+  fi
+  exit 2
+fi
+
 # ── THE DECLARED RUNTIME VARIABLE NAMES — ONE LIST, READ HERE AND BY recycle-container.sh (W1-T1069)
 # `deploy/runtime-env-vars.sh` is the single source of truth for which environment variable NAMES
 # the daemon container carries at runtime; see that file's header for the full rationale, and
@@ -147,6 +183,35 @@ done
 REPO_REF="${REGISTRY}.azurecr.io/${IMAGE}"
 REF="${REPO_REF}:${TAG}"
 
+# ── SIBLING SCAN (W1-T3612's --print-daemon-run check, GENERALISED for W1-T3682) ────────────────
+# `--print-daemon-run` below has carried a sibling-drift detector since 2026-08-12: when the
+# derived STATE_DIR holds a stale (or absent) ledger, it scans "${STATE_DIR}"* for a sibling
+# directory that holds a NEWER one, and names it rather than staying silent — the rmd-state ->
+# rmd-state2 shape that actually happened on the Azure host. Section 4a's git reclaim consumes the
+# SAME STATE_DIR-derived default and never asked, which is the defect W1-T3682 exists to close.
+# This is that one scan, lifted into a function so both call sites share it rather than each
+# growing (and drifting from) their own copy.
+#
+# <base> is the directory whose SIBLINGS ("${base}"*, excluding <base> itself) are scanned;
+# <marker> is the path relative to each sibling that must exist for that sibling to qualify. A
+# directory marker (e.g. a checkout's `.git`) has no freshness to compare — existence is the whole
+# signal, so the first sibling found wins. A FILE marker (e.g. `state/ledger.ndjson`) is compared
+# by mtime so the most recently written sibling wins, matching the print-daemon-run check's
+# original behaviour exactly. Echoes the winning "<sibling>/<marker>" path, or nothing.
+find_sibling_with_marker() {
+  local base="$1" marker="$2" found="" cand cpath
+  for cand in "${base}"*; do
+    [ "${cand}" = "${base}" ] && continue
+    cpath="${cand}/${marker}"
+    if [ -d "${cpath}" ] || [ -s "${cpath}" ]; then
+      if [ -z "${found}" ] || { [ -f "${cpath}" ] && [ -f "${found}" ] && [ "${cpath}" -nt "${found}" ]; }; then
+        found="${cpath}"
+      fi
+    fi
+  done
+  printf '%s' "${found}"
+}
+
 # ── --print-daemon-run: PRINT THE INVOCATION, RUN NOTHING ────────────────────────────────────
 # This branch exists so the daemon-mode command lives somewhere an operator can find it, rather
 # than in a chat message. IT DELIBERATELY STARTS NOTHING and exits before this script touches
@@ -209,17 +274,13 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
     printf '%s bytes, %s' "$(wc -c <"$1" | tr -d ' ')" "$(date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || echo 'mtime unknown')"
   }
   # Siblings are only ever REPORTED, never chosen: silently mounting a different volume than the
-  # one printed last week is its own hazard. `${STATE_DIR}*` catches the rmd-state -> rmd-state2
-  # shape that actually happened without hardcoding either name.
+  # one printed last week is its own hazard. `find_sibling_with_marker "${STATE_DIR}" ...` catches
+  # the rmd-state -> rmd-state2 shape that actually happened without hardcoding either name.
   newer_sibling=""
-  for cand in "${STATE_DIR}"*; do
-    [ "${cand}" = "${STATE_DIR}" ] && continue
-    cand_ledger="${cand}/state/ledger.ndjson"
-    [ -s "${cand_ledger}" ] || continue
-    if [ ! -s "${state_ledger}" ] || [ "${cand_ledger}" -nt "${state_ledger}" ]; then
-      newer_sibling="${cand_ledger}"
-    fi
-  done
+  sib_ledger="$(find_sibling_with_marker "${STATE_DIR}" "state/ledger.ndjson")"
+  if [ -n "${sib_ledger}" ] && { [ ! -s "${state_ledger}" ] || [ "${sib_ledger}" -nt "${state_ledger}" ]; }; then
+    newer_sibling="${sib_ledger}"
+  fi
 
   if [ -n "${newer_sibling}" ]; then
     if [ -s "${state_ledger}" ]; then
@@ -716,6 +777,15 @@ fi
 #
 # Why: docs/forensics/host-update.md — the 2026-09-15 measurement (985 MiB, 53,380 loose objects,
 # root at 85%), the 2026-09-16 outage it corroborates, and the rejected alternatives.
+#
+# W1-T3682: A NAMED TARGET THAT DOES NOT RESOLVE IS A WARNING, NOT A NOTE — same discipline as
+# --print-daemon-run's own sibling check above, reused here via find_sibling_with_marker rather
+# than reimplemented, because this is the SAME STATE_DIR-derived default that check already knows
+# how to go stale. And a run that reaches NONE of its named targets is not a clean no-op: section
+# 4c below reads `git_reclaim_reached` (set per-target in the loop below) and exits non-zero when
+# it stayed 0, so an all-miss is distinguishable from a real reclaim that simply had nothing to
+# free. A single target reached is enough to succeed — this is about reaching NOTHING, never about
+# freeing nothing.
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
   if [ -n "${LIVE}" ]; then
@@ -725,12 +795,20 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
     echo "  above cannot do even while up. No checkout below was touched." >&2
   else
     IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${STATE_DIR}/remudero:${RMD_OP_DIR}}"
+    git_reclaim_reached=0
     for gdir in "${GIT_RECLAIM_DIRS[@]}"; do
       [ -n "${gdir}" ] || continue
       if [ ! -d "${gdir}/.git" ]; then
-        echo "host-update: git reclaim — ${gdir}: no .git here, skipping"
+        sib_git="$(find_sibling_with_marker "$(dirname "${gdir}")" "$(basename "${gdir}")/.git")"
+        if [ -n "${sib_git}" ]; then
+          echo "host-update: WARNING — git reclaim target ${gdir} has no .git, but" >&2
+          echo "  $(dirname "${sib_git}") does. Set RMD_GIT_RECLAIM_DIRS if that is the volume you mean." >&2
+        else
+          echo "host-update: WARNING — git reclaim target ${gdir} has no .git; skipping." >&2
+        fi
         continue
       fi
+      git_reclaim_reached=1
       gc_log="${gdir}/.git/gc.log"
       had_gc_log="(no gc.log)"
       [ -f "${gc_log}" ] && had_gc_log="(gc.log present — auto-gc has been declining forever)"
@@ -831,6 +909,18 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
+  # W1-T3682: a git object reclaim that reached none of its named targets must not report the same
+  # exit code as a clean run. `git_reclaim_reached` is set inside section 4a's loop and left unset
+  # whenever that loop never ran (RECLAIM_ONLY=0, unreachable here) or never entered it (the LIVE
+  # refusal) — `:-1` treats either of those as "not applicable", never as a false all-miss. The
+  # docker/image/build prune and agent-history reclaim above still ran and are still reported; only
+  # the verdict for THIS mode's exit code changes, so a monitor watching the exit code (rather than
+  # reading output) still catches the all-miss.
+  if [ -z "${LIVE}" ] && [ "${git_reclaim_reached:-1}" -eq 0 ]; then
+    echo "host-update: git object reclaim reached NONE of its named targets — see the WARNING(s)" >&2
+    echo "  above; the default RMD_GIT_RECLAIM_DIRS named a path that does not exist on this host." >&2
+    exit 1
+  fi
   exit 0
 fi
 

@@ -1,0 +1,122 @@
+- id: W1-T3718
+  title: "THE FIX RUNG CANNOT SPAWN A WORKER AT ALL AND BOTH FALLBACKS ARE OPERATOR-DISABLED, SO FLEET SELF-REPAIR IS STALLED AND EVERY RED PR WAITS FOR A HUMAN — the refusal is one ledger line nobody reads, there is no board surface for it, and 73% of a 95% weekly budget sits unused while the queue backs up: make the stall loud and give the operator one switch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    OPERATOR REPORT 2026-09-17, verbatim: "We spend way too much time manually working the queue."
+    This is why, and it is not the gates.
+
+    (1) THE FIX RUNG CANNOT SPAWN. Read from the live ledger at 01:18:55Z:
+
+          step: fix.spawn_infra_blocked
+          reason: "no configured worker subscription has readable headroom:
+                   claude=capacity unreadable,
+                   codex=balanced Codex models have no reserved headroom"
+          cost_tag: infra
+
+        And the daemon log, same window:
+
+          rmd sweep — fix rung: strike 1/2 REFUSED — spawn infrastructure blocked, not counted as
+          a strike: ... codex=app-server recovered by hedge after 6000ms; primary: app-server
+          deadline overran: 10000ms budget fired after 174321ms, so this process was stalled and
+          the child was never given a readable turn; unfinished: initialize
+
+    (2) IT IS NOT THE BUDGET, AND THAT IS THE POINT. `daemon.headroom` the same minute:
+        `percent_used: 73, limit_pct: 95, enforced: false` ("headroom governor disabled
+        (ruling a4153e) — telemetry only"). And `sweep.fix_capacity` reports
+        `fix_admissions_available: 6` of a `host_worker_budget: 8`. The fleet has admission room
+        and weekly headroom; what it lacks is a provider that will answer a capacity probe.
+
+    (3) BOTH FALLBACKS ARE SWITCHED OFF, so the ladder has no bottom rung:
+          worker.provider.cash_fallback_refused     — "operator has not enabled
+                                                       workerProviders.cashFallbackWhenBlocked"
+          worker.provider.overflow_fallback_refused — "operator has not set config.overflow to
+                                                       \"api_key\""
+        Each appears repeatedly in the last hour of daemon output.
+
+    (4) THE FAILURE IS SILENT WHERE IT MATTERS. `fix.spawn_infra_blocked` is ONE ledger row. It is
+        not on the board, not in /v1/status, not in daemon-health, and not in any digest. The
+        operator's only symptom is that red PRs stop moving — which is exactly how this went
+        unnoticed long enough to produce the report above. MEASURED: over the last 6h of ledger,
+        `fix.spawn_infra_blocked` = 1 row, `sweep.fix_capacity` = 2, against 731 rows total.
+
+    (5) THE COST, TODAY. Six open PRs, five of them red, none of them repaired by the fleet. Every
+        one of the five was diagnosed and fixed by a human in this session instead.
+  design: |
+    (i) A STALLED REPAIR LADDER IS A FLEET-LEVEL STATE, NOT A PER-RUN LINE. When every configured
+        provider refuses AND every fallback is disabled, that is not a strike against one task --
+        it is the repair mechanism being off. Record it as such: a single durable state with the
+        reason and the first-seen instant, cleared the moment any spawn succeeds.
+
+    (ii) IT SURFACES WHERE AN OPERATOR ALREADY LOOKS. `/v1/status` and `/v1/daemon-health` both
+         already carry honest unavailability fields the console renders; this rides those rather
+         than inventing a panel. The board says the repair ladder is down and for how long --
+         never a count of refusals, which is the shape nobody reads.
+
+    (iii) ONE SWITCH, NOT A TUNING EXERCISE. The two fallbacks are separate config keys with
+          separate failure text, and an operator hitting this has to discover both. Offer one
+          verb that reports the ladder's live state and what enabling each rung would cost, so the
+          decision is priced rather than guessed. THE VERB NEVER FLIPS THE SWITCH ITSELF: enabling
+          a paid fallback spends money and stays an operator act.
+
+    (iv) THE CAPACITY PROBE'S OWN FAILURE IS A FINDING, NOT A STATE. "claude=capacity unreadable"
+         and a 10s budget that fired after 174s are both infrastructure faults being reported as
+         absence of headroom. They must be distinguishable: a provider that is FULL and a provider
+         that CANNOT BE ASKED are different conditions and only one of them argues for paying for
+         a fallback.
+
+    NOT IN SCOPE: changing any default. Whether cashFallbackWhenBlocked or overflow=api_key should
+    be ON is an operator decision with a bill attached, and this task only makes the decision
+    visible and priced.
+  acceptance:
+    - claim: "a repair ladder with no reachable provider and no enabled fallback is recorded as one durable fleet state, not only as a per-attempt refusal"
+      proof: "unit test: a stalled repair ladder is one fleet state, not a per-attempt line"
+    - claim: "that state reaches the operator surface that already reports unavailability, with how long it has been down"
+      proof: "unit test: the stalled ladder reaches the status surface with its age"
+    - claim: "a provider that cannot be asked is distinguished from a provider that is full"
+      proof: "unit test: an unreadable capacity probe is not reported as no headroom"
+    - claim: "the state clears on the first successful spawn rather than needing a restart"
+      proof: "unit test: a successful spawn clears the stalled ladder state"
+    - claim: "the operator verb prices each disabled fallback and never enables one itself"
+      proof: "unit test: the ladder verb prices the rungs and flips nothing"
+  falsifier: |
+    Leave the refusal as a per-attempt ledger row and the first assertion goes red. Report it
+    without an age and the second fails. Fold "capacity unreadable" back into "no headroom" and the
+    third fails -- which is the one that matters most, because that conflation is what makes an
+    infrastructure fault look like a budget decision. Have the verb write config and the fifth
+    fails.
+  risk: high
+  band_meaning: blast-radius
+  origin: human
+  files: [src/lib/worker-provider.ts, src/lib/sweep.ts, src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> throughput
+
+    Minted by `rmd next-task-id` from a DETACHED HEAD, so the reservation recorded no readable
+    holder and task-id-existence reads it as `holder unreadable (missing branch)`. Handed off from
+    the literal `unknown`, which is the remedy the check names for exactly that case. Same id,
+    same author, same session -- renumbering would burn a reserved id to paper over a checkout
+    state.
+    CORRECTION, MEASURED 2026-09-17 ~02:20Z, about 90 minutes after this was filed.
+
+    THE STALL IS TRANSIENT, NOT A STANDING OUTAGE, and the title overstates it. The fix rung is
+    spawning again with NO config change: 6 `fix.dispatch` and 8 `run.start` in the last 90
+    minutes of ledger, and ZERO `fix.spawn_infra_blocked`. The provider capacity that read
+    "unreadable" recovered on its own.
+
+    THE TASK STANDS, AND ITS POINT IS SHARPER FOR IT. The defect was never "the fleet is
+    permanently dead" -- it is that a stall of the repair ladder is INVISIBLE while it lasts, and
+    recovers or does not without anyone knowing either way. An outage nobody can see costs the
+    same whether it lasts ninety minutes or a day, and the operator symptom is identical: red PRs
+    stop moving and a human works the queue.
+
+    READ (1)-(5) AS A MEASUREMENT OF ONE STALL, not as the fleet's steady state. Design (i)'s
+    durable state with a first-seen instant and (iii)'s priced switch are what turn a stall like
+    this one into something an operator can see and decide about; neither is an argument that a
+    paid fallback is needed today.

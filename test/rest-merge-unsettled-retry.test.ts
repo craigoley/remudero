@@ -260,7 +260,12 @@ test("realArmDeps: readMergeFacts (W1-T1280) reaches fixRebaseMergeFactsFromRest
     const d = realArmDeps();
     assert.deepEqual(
       d.readMergeFacts?.(PR),
-      { mergeable: "MERGEABLE", behindBy: 0 },
+      // `mergeableState` is carried through from the SAME payload this stub already returned
+      // (`"mergeable_state":"clean"` above) -- W1-T3694 stopped discarding it, because GitHub
+      // reports `behind` only when the base branch requires branches to be up to date, which is
+      // what decides whether a behind head must be rewritten before merging. The exact-shape
+      // assertion is kept exact; only the expected shape grew.
+      { mergeable: "MERGEABLE", behindBy: 0, mergeableState: "clean" },
       "a resolvable PR URL reaches the stubbed gh api reads and maps their payload",
     );
     assert.deepEqual(

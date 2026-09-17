@@ -10,6 +10,7 @@
   budget_usd: 6.00
   files:
     - scripts/head-identity-gate.mjs
+    - test/a-dependabot-head-is-identified-without-a-task.test.ts
   origin: "operator-session#dependabot-triage-2026-09-16"
   plan_refs: ["W1-T1004"]
   status: queued
@@ -56,6 +57,15 @@
     Refusal text for every other head stays byte-identical: this adds an admitted form, it does
     not relax the existing ones.
 
+    THAT LAST SENTENCE IS A CONTROL AND WAS WRONGLY WRITTEN AS CRITERION 3 WHEN THIS WAS FILED.
+    `grep: matches neither conforming form in scripts/head-identity-gate.mjs` names text this task
+    deliberately leaves UNCHANGED, so it matches the merge base too and discriminates nothing --
+    measured at `rmd check-proof --base origin/main`: 2 hits at head, 2 at base, `executed_stale`,
+    exit 5. The proof-discrimination gate FAILS a pull request on that shape rather than degrading
+    it, so the criterion made the task unbuildable. Criterion 3 is now the fail-closed arm, whose
+    test reddens when the fix is removed; the unchanged-refusal claim stays here as the control it
+    always was, checked by a test that is deliberately NOT an acceptance proof.
+
     THE SUITE GOES IN test/a-dependabot-head-is-identified-without-a-task.test.ts. It is NOT in
     files: on purpose: lint-plan's proof-unit-test-unresolvable rule requires every `unit test:`
     proof to resolve in the HEAD TREE OF THE DIFF once files: names a test/ path, and a filing
@@ -66,5 +76,5 @@
       proof: "unit test: a manifest-only dependabot head is admitted"
     - claim: "a dependabot-NAMED head carrying a src/ change is still refused, so the exemption cannot become a credit hole"
       proof: "unit test: a dependabot-named head touching src is still refused"
-    - claim: "the refusal text for a non-exempt head is unchanged, so this adds an admitted form rather than relaxing the gate"
-      proof: "grep: matches neither conforming form in scripts/head-identity-gate.mjs"
+    - claim: "an UNREADABLE diff refuses rather than admitting on a forgeable branch name, so the exemption fails closed"
+      proof: "unit test: an UNREADABLE diff refuses rather than admitting on the branch name alone"
