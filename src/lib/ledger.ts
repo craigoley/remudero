@@ -323,6 +323,10 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
+  // second fix lane may claim a PR already under repair, so it is decision-relevant by the same
+  // test that derives this set from its consumers -- not a log line nobody reads.
+  "repair.lease_posted",
   "pr.opened",
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.

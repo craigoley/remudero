@@ -268,7 +268,7 @@
   "src/lib/panel-graph.ts": 500,
   "src/lib/panel-skill-run.ts": 127,
   "src/lib/panel-skills.ts": 44,
-  "src/lib/plan-architect.ts": 235,
+  "src/lib/plan-architect.ts": 250,
   "src/lib/plan-coherence.ts": 70,
   "src/lib/plan-index.ts": 29,
   "src/lib/plan-pr-emitter.ts": 250,

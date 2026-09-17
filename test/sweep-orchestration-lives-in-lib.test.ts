@@ -11,47 +11,38 @@ import {
   buildSweepEffects as buildLibSweepEffects,
   DEFAULT_SWEEP_POLICY,
   requiredSweepRuntimeCtor,
+  SWEEP_EFFECT_SURFACE,
   sweepArmAttemptOutcome,
   type BuildSweepEffectsDeps,
 } from "../src/lib/sweep.js";
 import { buildSweepEffects as buildEntrypointSweepEffects } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
-const EFFECT_KEYS = [
-  "arm",
-  "captureRepairFeedback",
-  "close",
-  "depReview",
-  "disarmAutoMerge",
-  "dispatchFix",
-  // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
-  // spent and the caller has wired it (see planCappedRepair, classify.ts).
-  "dispatchPlanOnlyRepair",
-  "escalate",
-  "escalateCancelledCheck",
-  "escalateInfrastructureCheck",
-  "postReview",
-  "readCiGateRollup",
-  "readLiveState",
-  "readMainRepair",
-  "readMainTip",
-  "readRedBaseRefreshFacts",
-  "readStaleRedWorkflowRuns",
-  "reaggregateCiGate",
-  "releaseBaseCausedStandDown",
-  "releaseStaleRed",
-  "repairMissingTaskTrailer",
-  "rebaseDirtyFleetBranch",
-  "repushAbsent",
-  "requeueCheck",
-  // W1-T3618: injected by the entrypoint adapter, surfaced by BOTH builders so the key-identity
-  // this suite asserts holds structurally.
-  "reviewerCodeStaleThisPass",
-  "runStaleRedLocalRoute",
-  "selectAdaptiveReviewWidth",
-  "terminalFixStandDown",
-  "updateBranch",
-] as const;
+// W1-T3654: this suite used to carry its OWN `EFFECT_KEYS` constant, independently ordered from
+// the one `test/build-sweep-effects-takes-one-deps-object.test.ts` carried. Both now read
+// `SWEEP_EFFECT_SURFACE` from `src/lib/sweep.ts` — see that export's own doc for the incident
+// (#5725) this closes: one hand-copied list updated, the other silently left stale.
+
+/**
+ * The two directional halves of "the lib and entrypoint surfaces are the same set", asserted
+ * separately rather than as one symmetric `deepEqual`. A member present on ONE builder and absent
+ * from the other then fails exactly the one half whose SIDE is the one missing it, instead of a
+ * single symmetric mismatch that names neither.
+ */
+function assertSameEffectSurface(libKeys: readonly string[], entrypointKeys: readonly string[]): void {
+  const missingFromLib = entrypointKeys.filter((k) => !libKeys.includes(k));
+  const missingFromEntrypoint = libKeys.filter((k) => !entrypointKeys.includes(k));
+  assert.deepEqual(
+    missingFromLib,
+    [],
+    `the lib-built sweep effects are missing what the entrypoint builder exposes: ${missingFromLib.join(", ")}`,
+  );
+  assert.deepEqual(
+    missingFromEntrypoint,
+    [],
+    `the entrypoint-built sweep effects are missing what the lib builder exposes: ${missingFromEntrypoint.join(", ")}`,
+  );
+}
 
 test("W1-T2890: sweep effects are built from the lib module with the same effect surface", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-sweep-effects-in-lib-"));
@@ -85,12 +76,8 @@ test("W1-T2890: sweep effects are built from the lib module with the same effect
     const libEffects = buildLibSweepEffects(deps);
     const entrypointEffects = buildEntrypointSweepEffects(deps);
 
-    assert.deepEqual(Object.keys(libEffects).sort(), [...EFFECT_KEYS].sort());
-    assert.deepEqual(
-      Object.keys(libEffects).sort(),
-      Object.keys(entrypointEffects).sort(),
-      "the lib-built orchestration must expose the same sweep effect set the entrypoint exposed before the move",
-    );
+    assert.deepEqual(Object.keys(libEffects).sort(), [...SWEEP_EFFECT_SURFACE].sort());
+    assertSameEffectSurface(Object.keys(libEffects), Object.keys(entrypointEffects));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

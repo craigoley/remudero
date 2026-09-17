@@ -7898,12 +7898,48 @@ export function runNpmScriptViaSpawn(script: string, cwd: string): { status: num
  * makes to the worktree beyond whatever the generator itself already wrote (acceptance criterion
  * 5: the rung commits the generator's OWN output, never a hand-composed edit). `changed: false`,
  * no commit made, when `git add -A` staged nothing.
+ *
+ * W1-T3243: a REFUSED commit (e.g. `hooks/pre-commit` rejecting the generator's own output) must
+ * not leave `git add -A`'s staging behind — the same shape and same fix as this file's sibling
+ * plan-write path, `lib/plan-architect.ts`'s `applyPlanProposalCommit` (design (iv): "the pair is
+ * the unit of repair"). `git write-tree` snapshots the index BEFORE this function's own `add`
+ * (touches neither index nor working tree); on a refused commit, `git read-tree <preTree>`
+ * restores ONLY the index to that snapshot — content the caller staged before this call survives,
+ * content this call staged is undone, and the working tree is never touched (never `git reset
+ * --hard` / `git checkout -- .`, which would also destroy working-tree content this function
+ * never staged). The commit's own refusal is always rethrown unchanged.
  */
 export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string }): { sha: string; changed: boolean } {
+  let preTree: string | null = null;
+  try {
+    preTree = execFileSync("git", ["-C", opts.cwd, "write-tree"], { encoding: "utf8" }).trim();
+  } catch (e) {
+    // No pre-add index snapshot to roll back to (e.g. an unmerged index) — record it; a refused
+    // commit below can then only log-and-skip its rollback, not restore. See (v) below.
+    process.stderr.write(
+      `commitGeneratorOutputViaGit: snapshot.error ${String((e as Error)?.message ?? e)}\n`,
+    );
+  }
   execFileSync("git", ["-C", opts.cwd, "add", "-A"], { stdio: "pipe" });
   const staged = execFileSync("git", ["-C", opts.cwd, "status", "--porcelain=v1"], { encoding: "utf8" });
   if (staged.trim().length === 0) return { sha: "", changed: false };
-  execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  try {
+    execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  } catch (commitError) {
+    if (preTree !== null) {
+      try {
+        execFileSync("git", ["-C", opts.cwd, "read-tree", preTree], { stdio: "pipe" });
+      } catch (rollbackError) {
+        // (v): a rollback that itself fails must say so, not fail silently — but the ORIGINAL
+        // commit error is still what gets rethrown below, never this one.
+        process.stderr.write(
+          `commitGeneratorOutputViaGit: rollback.error ${String((rollbackError as Error)?.message ?? rollbackError)}\n`,
+        );
+      }
+    }
+    // (iii): the commit's own refusal text must still reach the caller, unmodified.
+    throw commitError;
+  }
   const sha = execFileSync("git", ["-C", opts.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   return { sha, changed: true };
 }

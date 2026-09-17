@@ -1060,6 +1060,61 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
+/**
+ * W1-T3654 — the ONE recorded member list for {@link buildSweepEffects}' return surface. Both
+ * `test/build-sweep-effects-takes-one-deps-object.test.ts` (the entrypoint-only suite) and
+ * `test/sweep-orchestration-lives-in-lib.test.ts` (the lib-vs-entrypoint suite) import this array
+ * rather than transcribing their own copy of it.
+ *
+ * THE INCIDENT THIS CLOSES: PR #5725 added `reviewerCodeStaleThisPass` to this surface and
+ * updated only one of the two hand-copied `EFFECT_KEYS` constants those suites used to carry. The
+ * failing job named the one that went green; the other stayed red for the REAL reason — W1-T2890's
+ * lib-vs-entrypoint invariant had genuinely broken — and was found only by a sweep of every suite,
+ * not by the failure report. A census whose population is transcribed by hand in two places is two
+ * censuses that can disagree, and the disagreement is exactly what neither copy could detect.
+ *
+ * Order is free — every reader sorts before comparing — so new members are appended rather than
+ * inserted in some canonical position.
+ */
+export const SWEEP_EFFECT_SURFACE = [
+  "arm",
+  "close",
+  "dispatchFix",
+  // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
+  // spent and the caller has wired it (see planCappedRepair, classify.ts).
+  "dispatchPlanOnlyRepair",
+  "escalate",
+  "readLiveState",
+  "terminalFixStandDown",
+  "readRedBaseRefreshFacts",
+  "depReview",
+  "postReview",
+  "repushAbsent",
+  "updateBranch",
+  "captureRepairFeedback",
+  "disarmAutoMerge",
+  "requeueCheck",
+  "escalateCancelledCheck",
+  "escalateInfrastructureCheck",
+  "readCiGateRollup",
+  "reaggregateCiGate",
+  "readMainTip",
+  "readMainRepair",
+  "readStaleRedWorkflowRuns",
+  "runStaleRedLocalRoute",
+  "releaseStaleRed",
+  "releaseBaseCausedStandDown",
+  "selectAdaptiveReviewWidth",
+  // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
+  // position is free — it is listed last because it is the newest, not because order matters.
+  "repairMissingTaskTrailer",
+  "rebaseDirtyFleetBranch",
+  // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
+  // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
+  // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
+  "reviewerCodeStaleThisPass",
+] as const;
+
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "arm"
@@ -3587,6 +3642,59 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
     requeue: true,
     escalate: false,
     reason: "latest attempt was cancelled with no later attempt on this head — re-queueing the job once",
+  };
+}
+
+/** W1-T3652 — the verdict {@link cancelledRunCheckOutcome} returns: whether one check run's
+ *  conclusion should be trusted as a real CI failure, plus a stated reason. `isFailure: false`
+ *  is NOT a suppression — the caller still sees the check name and its own conclusion, only the
+ *  failure verdict is withheld — see that function's own doc. */
+export interface CancelledRunCheckOutcome {
+  isFailure: boolean;
+  reason: string;
+}
+
+/** W1-T3652 — ci.yml's `cancel-in-progress: true` kills every push's predecessor mid-flight, and
+ *  the jobs killed that way publish their OWN `conclusion` as `failure`, never `cancelled` — only
+ *  the PARENT workflow run says `cancelled`. Read alone, a killed job is indistinguishable from a
+ *  genuine one (MEASURED 2026-09-16: #5737/#5739 head-identity-gate and coverage-ratchet, each a
+ *  real-sounding "failure" that was purely an artifact of cancellation — this function's own
+ *  rationale, the plan's own W1-T3652 task record).
+ *
+ *  `checkConclusion` is judged EXACTLY as {@link REQUIRED_CHECK_FAIL} judges it today; the only
+ *  change is that a failing conclusion is DOWNGRADED when `parentRunConclusion` is the literal
+ *  string `CANCELLED` (case-insensitive) — the check was killed by its own successor, not a
+ *  verdict on anything.
+ *
+ *  FAILS TOWARD TREATING IT AS REAL: an unreadable `parentRunConclusion` (`undefined`, or any
+ *  value other than `CANCELLED`) leaves a failing check counted as a failure exactly as before
+ *  this function existed. The cost of wrongly keeping a stale-looking red is one wasted log read;
+ *  the cost of wrongly discarding a real one is a PR that merges broken.
+ *
+ *  NOT A SUPPRESSION: the check stays VISIBLE to every caller under its own name and conclusion —
+ *  it is how an operator notices a PR whose runs are being cancelled faster than they finish,
+ *  which is its own pathology. Only the "this is evidence of a defect" verdict is withheld. */
+export function cancelledRunCheckOutcome(
+  checkConclusion: string | undefined,
+  parentRunConclusion: string | undefined,
+): CancelledRunCheckOutcome {
+  const own = (checkConclusion ?? "").toUpperCase();
+  if (!REQUIRED_CHECK_FAIL.has(own)) {
+    return { isFailure: false, reason: "check's own conclusion is not in the failing set" };
+  }
+  const parent = (parentRunConclusion ?? "").toUpperCase();
+  if (parent === "CANCELLED") {
+    return {
+      isFailure: false,
+      reason: "parent workflow run concluded cancelled — killed by its own successor, not a verdict",
+    };
+  }
+  return {
+    isFailure: true,
+    reason:
+      parent === ""
+        ? "parent run conclusion unreadable — failing toward treating this check as real"
+        : "parent run concluded normally — this failure is real",
   };
 }
 

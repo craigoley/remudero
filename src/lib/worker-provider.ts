@@ -2792,6 +2792,31 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
   }
 }
 
+/**
+ * A NON-OPENAI DEPLOYMENT NEEDS NO SECOND SHAPE HERE. W1-T3598 ruled the wider catalog out on the
+ * premise that its cheapest non-OpenAI candidate "sits behind the Azure AI Model Inference
+ * `/models` route instead and would need an endpoint branch". W1-T3695 re-probed BOTH routes
+ * against a live DeepSeek-V4-Flash deployment (non-OpenAI family) on the same account:
+ *
+ *   POST {endpoint}/models/chat/completions                   -> HTTP 200
+ *   POST {endpoint}/openai/deployments/DeepSeek-V4-Flash/...  -> HTTP 200
+ *
+ * The second IS this function's own path. The deployment answered it unchanged -- tool calls
+ * (`finish_reason: tool_calls`), `temperature: 0` (HTTP 200, unlike the gpt-5 family's 400) and
+ * `response_format: json_object` all measured clean against it. So this class rides the adapter's existing route
+ * with no second endpoint shape required, and the branch W1-T3598 deferred is not needed for it
+ * at all.
+ *
+ * IT IS STILL NOT WIRED INTO {@link OPENWEIGHT_PRICES}, deliberately. No published rate for
+ * DeepSeek-V4-Flash could be confirmed (absent from the pricing page, the retail prices API and
+ * the catalog's `cost` field), and its billing is publicly disputed -- Microsoft Q&A threads
+ * report ~357x the published rate on cached tokens and 4.5x on V4 Pro. `OPENWEIGHT_PRICES`'s own
+ * contract is that a deployment with no row is refused rather than priced by a neighbour (see
+ * {@link openWeightPriceFor}), so naming this deployment in the cash ladder before a bill
+ * confirms its real rate would convert a disputed page number into an under-reservation. The
+ * route is proven here; the price is not, and only an OBSERVED bill (not this recon) closes that
+ * gap (W1-T3695).
+ */
 function openWeightEndpoint(config: Config, model: string): string {
   // W1-T3607: canonical `cashEndpoint` first, falling back to the deprecated `openweightEndpoint`
   // spelling so an already-deployed host's config.json need not be hand-edited the moment this ships.

@@ -9,6 +9,7 @@ import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
+import { systemClock, type Clock } from "./clock.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
@@ -7359,8 +7360,11 @@ export function inverseScopeAdvisorySection(advisories: readonly UnwiredAdvisory
     `**Untouched declared scope (advisory — does not affect remudero-review's verdict)**\n\n` +
     `The task declares ${paths.length === 1 ? "a file" : "files"} this diff never touched. That is ` +
     `not by itself a fault — a \`files:\` list written ahead of the work, or work split across more ` +
-    `than one PR, looks identical here. It is flagged so the gap is visible at the gate rather than ` +
-    `only in the ledger, and never blocks:\n\n` +
+    `than one PR, looks identical here. It is not free, though: Rule 19's subsystem tally ` +
+    `(\`subsystemsOf\`) reads the task's declared \`files:\`, not the diff, so a phantom path here ` +
+    `can supply the extra concern that forces a \`risk:\` band this diff never actually earned. It ` +
+    `is flagged so the gap is visible at the gate rather than only in the ledger, and never ` +
+    `blocks:\n\n` +
     `${paths.map((p) => `- \`${p}\``).join("\n")}\n\n` +
     `If the remaining ${paths.length === 1 ? "path lands" : "paths land"} in a later PR, no action is ` +
     `needed. If the declaration was wrong, narrow the task's \`files:\` — this is where a scope that ` +
@@ -8187,6 +8191,25 @@ export async function postReviewStatusGuarded(
 
 // ── W1-T913: post remudero-review=pending at DETECTION, before judging ──────
 
+/** W1-T3647: the TTL beyond which a `remudero-review=pending` claim is RECLAIMABLE rather than
+ *  deferred to forever (see {@link postReviewPending}'s idempotent-no-op guard, below). #5672
+ *  measured the failure this closes: a claim taken at 23:42 was still pending at 01:42 (2h) while
+ *  its owning run was demonstrably dead — busy on a different PR.
+ *
+ *  DERIVED, NOT A ROUND GUESS, from two numbers already measured and checked into this repo:
+ *  (1) 14 — the WIDEST acceptance-criteria count across the whole live plan, measured 2026-09-17
+ *  over every `plan/tasks.d/*.yaml` (1,613 criteria total; max 14 in one task file). A review
+ *  posts pending BEFORE it runs a single proof, then executes its criteria's proofs serially, so
+ *  this is a real, checked-in bound on how many proof-runs ONE review may need to finish — not a
+ *  guessed multiplier. (2) `proofTimeoutMs` (plan/policy.yaml) — this repo's own MEASURED per-proof
+ *  ceiling, 180_000ms; see that file's "THE 30000 REGRESSION" comment for the measurement (a real,
+ *  passing suite timed at 52.9s on a dev host and still over 60s on the reviewer host) that set it.
+ *
+ *  14 * 180_000ms = 2_520_000ms (42m): comfortably above a real review's serial proof-execution
+ *  time, and comfortably inside #5672's observed 2h-stale window, which the falsifier requires
+ *  this constant to treat as reclaimable. */
+export const REVIEW_LOCK_TTL_MS = 14 * 180_000;
+
 export interface PostReviewPendingOpts {
   owner: string;
   repo: string;
@@ -8204,6 +8227,11 @@ export interface PostReviewPendingOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
+  /** The wall clock the TTL is measured against. Defaults to {@link systemClock}, so production
+   *  reads real time and nothing is handed a frozen instant it did not ask for — this is a CLOCK,
+   *  not the fixed `now` field the comment below rules out. Present so the TTL boundary is
+   *  testable, the same reason `ownerIdentity` above is injectable. */
+  clock?: Clock;
 }
 
 export interface PostReviewPendingResult {
@@ -8218,10 +8246,13 @@ export interface PostReviewPendingResult {
  * HERE before touching the lock or network. (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING:
  * {@link decideReviewStatusPost}'s precedence only refuses `executed -> no_evidence`, and a pending attempt is always
  * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
- * input and may post again. (2) IDEMPOTENT PER INPUT: a `review.pending_posted` line for this exact head+body digest
- * is a no-op, and a dead owner's stuck pending is re-driven by the sweep recognising staleness rather than by racing.
- * The posted status carries the posting `run_id`, which is what sweep.ts's `OpenPrView.reviewPendingSince` producer
- * derives its staleness clock from. */
+ * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
+ * `review.pending_posted` line for this exact head+body digest is a no-op while its own `ts` reads younger than the
+ * TTL, OR while its age cannot be read at all — an unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
+ * the alternative is two reviewers judging the same head. Only a READABLE age at or past the TTL reclaims: this call
+ * posts itself as the new holder and names the run it took over from, rather than deferring forever to a claim its
+ * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
+ * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
   const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
@@ -8253,15 +8284,35 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       break;
     }
   }
+  // W1-T3647: a same-sha claim is a no-op ONLY while it is inside the TTL. Age is read off the
+  // claim's OWN ledger `ts` (`priorPending.postedAt`) against the wall clock right now — never a
+  // fixed field on the OPTS, so nothing here can be handed a stale "now" by a caller.
+  let takenOverFrom: PendingReviewStatusRecord | undefined;
   if (priorPending && priorPending.headSha === opts.sha) {
-    return {
-      posted: false,
-      reason:
-        `remudero-review is already pending for ${opts.sha.slice(0, 7)} (owned by run ${priorPending.runId}) ` +
-        "— no-op (W1-T913 idempotent-per-input)",
-    };
+    const claimedAtMs = Date.parse(priorPending.postedAt);
+    const ageMs = Number.isNaN(claimedAtMs) ? undefined : (opts.clock ?? systemClock).now() - claimedAtMs;
+    // FAIL TOWARD HOLDING (design (c)): an age this process cannot read (missing/garbled `ts`) is
+    // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
+    // is two reviewers judging the same head and posting conflicting verdicts.
+    if (ageMs === undefined || ageMs < REVIEW_LOCK_TTL_MS) {
+      return {
+        posted: false,
+        reason:
+          `remudero-review is already pending for ${opts.sha.slice(0, 7)} (owned by run ${priorPending.runId}) ` +
+          "— no-op (W1-T913 idempotent-per-input)",
+      };
+    }
+    // RECLAIM, DO NOT DELETE (design (b)): the stale claim is evidence a run died mid-review, so
+    // fall through and post a fresh pending as the NEW holder, naming what it took over from
+    // rather than silently overwriting it.
+    takenOverFrom = priorPending;
   }
-  const description = `remudero-review: review in progress (owned by run ${opts.runId})`.slice(0, 140);
+  const description = (
+    takenOverFrom
+      ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
+        `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
+      : `remudero-review: review in progress (owned by run ${opts.runId})`
+  ).slice(0, 140);
   const ownerIdentity = opts.ownerIdentity ?? { pid: process.pid, startedAt: new Date().toISOString() };
   const result = await postReviewStatusGuarded({
     owner: opts.owner,
@@ -8295,4 +8346,132 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     });
   }
   return result;
+}
+
+// ── W1-T3646: a repair lease names its holder on the head sha ──────────────
+// {@link postReviewPending}, above, is the REVIEW half of a PR's lifecycle: a lane about to judge
+// posts a named claim before it does. Nothing held the REPAIR half — the longer, more
+// collision-prone one — so independent lanes rediscovered one defect and wrote the same remedy
+// twice (see the task's own rationale, #5684/#5673/#5697-8/#5699-704). This reuses the review
+// lock's SHAPE (a status naming the holder, keyed to the head sha it was taken against) but
+// deliberately NOT its mutex: this is a LEASE, advisory and time-scoped to a sha, never a
+// permission check on pushing (design notes, W1-T3646). W1-T3647 supplies its TTL.
+
+/** The commit-status context a repair lease posts under — distinct from {@link REVIEW_CONTEXT} so
+ *  a repair claim can never be mistaken for a review verdict, and never a required check, so it
+ *  cannot block a merge the way `remudero-review` does. */
+export const REPAIR_LEASE_CONTEXT = "remudero-repair-lease";
+
+export interface RepairLeaseRecord {
+  headSha: string;
+  runId: string;
+  postedAt: string;
+}
+
+function repairLeaseRecord(line: Record<string, unknown>): RepairLeaseRecord | undefined {
+  if (typeof line.head_sha !== "string") return undefined;
+  return {
+    headSha: line.head_sha,
+    runId: typeof line.run_id === "string" ? line.run_id : "",
+    postedAt: typeof line.ts === "string" ? line.ts : "",
+  };
+}
+
+/** The current holder of a repair lease on `sha`, or `undefined` when no lane holds one for
+ *  `taskId` — INCLUDING when the most recent lease line names an OLDER sha. The claim dies with
+ *  the sha it was taken against by construction: a pushed fix changes the head sha, so the next
+ *  read here simply finds nothing, releasing the claim rather than letting it outlive the code it
+ *  was protecting (criterion 3, the design's "lease, not a mutex" requirement). */
+export function currentRepairLeaseHolder(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string | undefined,
+  sha: string,
+): RepairLeaseRecord | undefined {
+  if (!taskId) return undefined;
+  let prior: RepairLeaseRecord | undefined;
+  for (const line of lines) {
+    if (line.step !== "repair.lease_posted" || line.task_id !== taskId) continue;
+    prior = repairLeaseRecord(line) ?? prior;
+  }
+  return prior && prior.headSha === sha ? prior : undefined;
+}
+
+/** ADVISORY, NOT A MUTEX (W1-T3646 design: "must not block a human, and never gate CI... it is
+ *  not a permission check on pushing"). The answer is unconditionally `true` regardless of
+ *  `holder`, so nothing that calls this before letting a push through can accidentally turn a
+ *  visible claim into a refusal — a claimed PR stays repairable by anyone who decides to
+ *  (criterion 2). Exported so an integration point has one obvious call to make instead of
+ *  inventing its own (wrong) check against the holder. */
+export function repairLeaseAllowsPush(_holder: RepairLeaseRecord | undefined): true {
+  return true;
+}
+
+export interface PostRepairLeaseOpts {
+  owner: string;
+  repo: string;
+  sha: string;
+  /** The PR the ledger keys off — same convention as {@link PostReviewPendingOpts.taskId}. */
+  taskId: string;
+  runId: string;
+  ledgerPath: string;
+  /** Injected raw poster (tests). Defaults to a real `gh api` status POST under {@link
+   *  REPAIR_LEASE_CONTEXT}, reusing {@link execGhStatusPost} unchanged. */
+  post?: (o: { owner: string; repo: string; sha: string; description?: string }) => void | Promise<void>;
+}
+
+export interface PostRepairLeaseResult {
+  posted: boolean;
+  holder?: RepairLeaseRecord;
+  reason?: string;
+}
+
+/** Posts `remudero-repair-lease: repair in progress (owned by run <runId>)` on `opts.sha` and
+ *  ledgers `repair.lease_posted`, so a second lane calling {@link currentRepairLeaseHolder} with
+ *  the SAME sha sees who is already repairing it (criterion 1). Idempotent per sha, like {@link
+ *  postReviewPending}: a lane that finds a live holder on this exact sha does not re-post over it
+ *  — but unlike that reviewer path, this NEVER acquires a lock, NEVER retries, and a failed
+ *  courtesy post is swallowed rather than thrown, because a `gh` hiccup must not interrupt the
+ *  repair it only narrates (criterion 2's advisory guarantee, made concrete: this can never block
+ *  the caller on network I/O the way a mutex-backed poster could). */
+export async function postRepairLease(opts: PostRepairLeaseOpts): Promise<PostRepairLeaseResult> {
+  const lines = readLiveLedgerRecords(opts.ledgerPath);
+  const holder = currentRepairLeaseHolder(lines, opts.taskId, opts.sha);
+  if (holder) {
+    return {
+      posted: false,
+      holder,
+      reason:
+        `a repair lease is already held for ${opts.sha.slice(0, 7)} (owned by run ${holder.runId}) ` +
+        "— visible, not enforced (W1-T3646)",
+    };
+  }
+  const description = `${REPAIR_LEASE_CONTEXT}: repair in progress (owned by run ${opts.runId})`.slice(0, 140);
+  const post = opts.post ?? defaultPostRepairLeaseStatus;
+  try {
+    await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, description });
+  } catch {
+    // Advisory only: a failed courtesy post never blocks the repair it is narrating.
+  }
+  appendLedger(opts.ledgerPath, {
+    run_id: opts.runId,
+    task_id: opts.taskId,
+    step: "repair.lease_posted",
+    head_sha: opts.sha,
+  });
+  return { posted: true, holder: { headSha: opts.sha, runId: opts.runId, postedAt: systemClock.iso() } };
+}
+
+async function defaultPostRepairLeaseStatus(o: { owner: string; repo: string; sha: string; description?: string }): Promise<void> {
+  const args = [
+    "api",
+    "-X",
+    "POST",
+    `repos/${o.owner}/${o.repo}/statuses/${o.sha}`,
+    "-f",
+    `context=${REPAIR_LEASE_CONTEXT}`,
+    "-f",
+    "state=success",
+  ];
+  if (o.description) args.push("-f", `description=${o.description.slice(0, 140)}`);
+  execGhStatusPost(args, process.env);
 }
