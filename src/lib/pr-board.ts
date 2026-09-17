@@ -1,34 +1,25 @@
 /**
  * src/lib/pr-board.ts — W1-T3685.
  *
- * THE ONE QUESTION AN OPERATOR ASKS FIRST AND THE CLI COULD NOT ANSWER: what is open, across
- * every repository the fleet drains, and what is red. `rmd status` renders THIS DAEMON'S OWN
- * board from local state — its own doc comment says "GITHUB IS DECORATION, NEVER A GATE" — and
- * `rmd ci-failures` answers a narrower question (failures, one repo, by day). Neither reads
- * GitHub cross-repo, so the operator's substitute was a 20-line script calling `gh pr list`
- * once per repo, rewritten from a container scratch directory three times in one day.
+ * Surveys open pull requests across the fleet's repositories. `rmd status` renders THIS
+ * daemon's own board from local state; `rmd ci-failures` answers a narrower question (one
+ * repo, by day). Neither reads GitHub cross-repo, which is the gap this module fills.
  *
- * THREE DESIGN RULES, EACH A REFUSAL:
+ * INVARIANT (i): ONE `gh pr list` call per repository — `--json` already returns the check
+ * rollup, so a per-PR follow-up read is refused by construction (secondary-rate-limit hazard).
  *
- * (i) ONE `gh pr list` CALL PER REPOSITORY. `gh pr list --json … --limit N` already returns the
- *     check rollup, so a per-PR follow-up read is refused by construction — the secondary-rate-
- *     limit hazard is real even against a clean quota (a burst of per-PR calls 403s).
+ * INVARIANT (ii): an UNREADABLE repository is never rendered as zero open.
+ * {@link RepoPullRequestBoard} carries `available: false` with the read error, distinct from
+ * an empty `pullRequests: []` — the two are opposite facts.
  *
- * (ii) A REPOSITORY THAT CANNOT BE READ IS NAMED UNAVAILABLE, never rendered as zero open. An
- *      empty queue and an unreachable queue are opposite facts and must not print the same —
- *      {@link RepoPullRequestBoard} carries the distinction in its own return shape rather than
- *      collapsing a thrown read into `[]`.
+ * INVARIANT (iii): this module never chooses which repositories to survey —
+ * {@link surveyPullRequestBoard} takes the list as an argument; the caller (run-task.ts) owns
+ * sourcing a default from configuration, never a hardcoded list here.
  *
- * (iii) THIS MODULE NEVER CHOOSES WHICH REPOSITORIES TO SURVEY. {@link surveyPullRequestBoard}
- *       takes the repository list as an argument and walks exactly that list — the caller
- *       (the CLI dispatch in run-task.ts) owns sourcing a default set from configuration. A
- *       hardcoded list INSIDE this function would be indistinguishable, from the caller's side,
- *       from one it actually asked for, which is the exact defect the first acceptance test
- *       (a survey covering a DIFFERENT list than any default) is built to catch.
+ * PURE otherwise (Law 5): `fetch` is injected, defaulting to the real {@link ghJson}; this
+ * module opens no socket, writes no file, and mints no id of its own.
  *
- * PURE BY CONSTRUCTION otherwise (Law 5): this module opens no socket of its own — `fetch` is
- * injected, defaulting to the real {@link ghJson} — writes no file, mints no id, and files
- * nothing. It only ever returns data.
+ * FALSIFIER: test/the-board-verb-distinguishes-empty-from-unreadable.test.ts.
  */
 
 import { ghJson } from "./github-transport.js";
