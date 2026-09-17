@@ -186,6 +186,7 @@
     "test/a-refused-commit-leaves-no-staged-residue.test.ts": 0,
     "test/a-refused-draft-waits-out-the-stated-window.test.ts": 1506,
     "test/a-refused-push-is-not-an-unreachable-origin.test.ts": 0,
+    "test/a-refused-task-is-repaired-not-re-attempted.test.ts": 0,
     "test/a-relocation-across-files-is-still-a-relocation.test.ts": 0,
     "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 0,
     "test/a-renamed-shard-reads-as-a-re-issued-id.test.ts": 0,

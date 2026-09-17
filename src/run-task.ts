@@ -917,6 +917,12 @@ import {
   type LintOpts,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
+import {
+  readPriorRefusal,
+  writePriorRefusal,
+  repairRefusedTask,
+  type RefusalViolation,
+} from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
@@ -12809,6 +12815,52 @@ async function runTask(
       say(
         `REFUSED: task ${taskId} failed the pre-dispatch linter — ${e.violations.length} violation(s):\n` +
           e.violations.map((v) => `  • [${v.check}] ${v.message}`).join("\n"),
+      );
+      // W1-T3657: A TASK THE LINTER REFUSES IS REPAIRED, NOT RE-ATTEMPTED FOREVER. Deterministic
+      // re-attempts of the SAME task reach the IDENTICAL verdict every tick (measured: 1,232
+      // refusals of one already-shipped task in 10.4h) — no strike spent, no escalation, nothing
+      // touched. `repairRefusedTask` (src/lib/dispatch-repair.ts) spends the decision instead:
+      // dispatch ONE repair lane carrying `e.violations` VERBATIM, or, on a SECOND refusal
+      // carrying the SAME verdict, escalate to the operator rather than re-reconning. NEVER
+      // spawns (`dispatchRepairLaneDefault` below only logs+says) — the "no spawn on a
+      // linter-failing task" invariant (W1-T20c criterion 5, test/task-linter-wiring.test.ts)
+      // holds exactly as it did before this task.
+      const dispatchRepairLaneDefault = (input: { taskId: string; verdict: string; progress: boolean }) => {
+        log("dispatch.repair.dispatched", input);
+        say(
+          `REPAIR: dispatching one repair lane for ${input.taskId} (${input.progress ? "verdict changed — progress" : "first refusal"}) ` +
+            `carrying the linter's own verdict:\n${input.verdict}`,
+        );
+      };
+      const escalateDefault = (input: { taskId: string; verdict: string; attempts: number }) => {
+        const escalation: Escalation = {
+          class: "BLOCKED",
+          taskId: input.taskId,
+          runId,
+          summary: `pre-dispatch linter refused ${input.taskId} again with the SAME verdict (${input.attempts}x) — repair lane made no progress`,
+          detail:
+            `A repair lane already ran once for this exact verdict and the task still refuses to dispatch:\n\n${input.verdict}\n\n` +
+            `A second automatic repair lane would only repeat it — this is why the loop stops here instead of re-reconning.`,
+          options: [
+            {
+              label: "restructure-task",
+              detail: "edit the task's plan record to resolve the named linter violation(s), then re-dispatch.",
+            },
+          ],
+          recommendation: "restructure-task",
+        };
+        const issueUrl = escalate(escalation, { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId });
+        log("dispatch.repair.escalated", { ...input, issue_url: issueUrl });
+      };
+      const violations: RefusalViolation[] = e.violations.map((v) => ({ check: v.check, message: v.message }));
+      const refusalStateRoot = join(config.root, "state");
+      repairRefusedTask(
+        taskId,
+        violations,
+        (id) => readPriorRefusal(refusalStateRoot, id),
+        (id, prior) => writePriorRefusal(refusalStateRoot, id, prior),
+        dispatchRepairLaneDefault,
+        escalateDefault,
       );
       return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_illformed" };
     }
