@@ -5620,7 +5620,7 @@ async function runReview(args: {
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
             // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
             tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review", sandboxReadRoots: snapshot.dependencyReadRoots,
-            // W1-T3731: OFFER THE CASH SURFACE. Without this the auction's divert chain refuses
+            // REVIEW-CASH-DIVERT: OFFER THE CASH SURFACE. Without this the auction's divert chain refuses
             // this spawn outright ("tool surface is not implementable by cash"), which under a
             // full squeeze takes the REQUIRED `remudero-review` check down and with it every
             // merge on the board. One unconditional line, exactly like recon/diagnose — the

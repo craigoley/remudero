@@ -145,7 +145,7 @@ esac
     assert.equal(reviewerCwdWasGit, true, "the reviewer cwd must be a real Git checkout");
     assert.equal(reviewerHead, headSha, "the reviewer must inspect the exact PR head");
     assert.deepEqual(observedTools, ["Read", "Grep", "Glob", "Bash"], "the production call site must preserve inspection while excluding write tools");
-    // W1-T3731 — THE PRODUCTION CALL SITE MUST ALSO OFFER THE CASH SURFACE. This is the assertion
+    // REVIEW-CASH-DIVERT — THE PRODUCTION CALL SITE MUST ALSO OFFER THE CASH SURFACE. This is the assertion
     // that makes `cashDivertSpawnFields("review")` load-bearing at the spawn itself rather than
     // only in the lane table: the table can be perfectly correct while nothing reads it, which is
     // the exact shape of the outage measured on 2026-09-17 (the auction refused this spawn for

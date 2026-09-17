@@ -1090,30 +1090,20 @@ export const DISPATCH_LANE_TOOL_BOUNDS = {
   recon: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   diagnose: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   retro: { claude: ["Read", "Grep", "Glob", "Edit", "Bash"], openweight: ["Read", "Grep", "Glob", "Edit", "RunCheck"] },
-  // `review` — the acceptance reviewer (`runReview`'s reviewer spawn, run-task.ts). Its claude row
-  // is `SPECIALIST_TOOLS` VERBATIM, and that identity is pinned by
-  // test/the-review-lane-diverts-to-cash-under-a-squeeze.test.ts rather than by an import:
-  // specialist-panel.ts imports worker.ts, so the reverse import would close a cycle.
+  // `review` — the acceptance reviewer (`runReview`'s spawn, run-task.ts). Same shape as
+  // `recon`/`diagnose` above; never added to this table until W1-T3726's successor. Its claude row
+  // is `SPECIALIST_TOOLS` verbatim, pinned by
+  // test/the-review-lane-diverts-to-cash-under-a-squeeze.test.ts, not by an import — specialist-
+  // panel.ts imports this module, so the reverse edge would close a cycle.
   //
-  // IT IS THE SAME SHAPE AS `recon`/`diagnose` ABOVE, and was simply never added to this table.
-  // The reviewer is READ-ONLY by construction (`SPECIALIST_TOOLS` carries no Write/Edit — see
-  // `isReadOnlyToolset`), so the coherence rule W1-T3696 states has nothing to reconcile here:
-  // this lane never commits, so no prompt of its ever promised that it would. Bash buys it two
-  // things, a read-only git query and running the project's checks, and `OPENWEIGHT_CHECKS` covers
-  // both — which is exactly why recon and diagnose already carry this identical row.
+  // Bash buys this lane only a read-only git query and the project's checks, both covered by
+  // `OPENWEIGHT_CHECKS`. Proof execution is the HARNESS's (`ProofExecContext.exec`, lib/review.ts),
+  // so a shell-less reviewer loses none of it, and the coherence rule has nothing to reconcile: a
+  // read-only lane commits nothing, so no prompt of its ever promised it would.
   //
-  // THE PROOFS ARE NOT WHAT THIS SURFACE RUNS. `ProofExecContext.exec` (lib/review.ts) is the
-  // HARNESS executing every `unit test:`/`grep:` proof; the spawned reviewer only judges claims
-  // against the diff. So a shell-less reviewer loses no proof execution at all — `proof_exec`
-  // stays whatever the harness measured.
-  //
-  // MEASURED on the live fleet 2026-09-17, with claude weekly exhausted:
-  //   worker.provider.cash_fallback_refused
-  //     {"refusal":"this spawn's tool surface is not implementable by cash (Read, Grep, Glob, Bash)"}
-  //   remudero-review=failure posted to 7d1a71f ... (reviewer_outcome: spawn_error)
-  // `remudero-review` is a REQUIRED check, so with this lane undivertable nothing on the board can
-  // reach a merge for the whole squeeze window — the reviewer is the one rung whose absence stops
-  // every other rung's work from landing.
+  // MEASURED 2026-09-17, claude weekly exhausted: "not implementable by cash (Read, Grep, Glob,
+  // Bash)" -> spawn_error. `remudero-review` is REQUIRED, so this one refusal held the whole board
+  // unmergeable for the squeeze window.
   review: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   // alert_fix commits and pushes, which the check-runner deliberately cannot do (no git write, no
   // forge). It has no open-weight equivalent and stays Claude-only until one is ruled on.

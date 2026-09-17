@@ -1,5 +1,5 @@
 /**
- * W1-T3731 — THE REVIEW LANE MUST SURVIVE AN EXHAUSTED SUBSCRIPTION.
+ * REVIEW-CASH-DIVERT (successor to W1-T3726) — THE REVIEW LANE MUST SURVIVE AN EXHAUSTED SUBSCRIPTION.
  *
  * MEASURED on the live fleet 2026-09-17, with the claude weekly allowance at 100% used:
  *
@@ -36,14 +36,14 @@ import {
 import { cashCanServeToolSurface } from "../src/lib/worker.js";
 import { SPECIALIST_TOOLS, isReadOnlyToolset } from "../src/lib/specialist-panel.js";
 
-test("W1-T3731: the review lane declares a cash surface, and it carries no shell", () => {
+test("review-cash-divert: the review lane declares a cash surface, and it carries no shell", () => {
   const tools = cashDivertToolsForLane("review");
   assert.notEqual(tools, undefined, "review must be divertable — an undefined row IS the outage");
   assert.deepEqual([...tools!], ["Read", "Grep", "Glob", "RunCheck"]);
   assert.equal(tools!.includes("Bash"), false, "a shell is the one thing cash refuses");
 });
 
-test("W1-T3731: the review lane's cash surface is identical to recon's and diagnose's", () => {
+test("review-cash-divert: the review lane's cash surface is identical to recon's and diagnose's", () => {
   // Not decoration: the argument for diverting review AT ALL is that its Claude surface is the
   // same as theirs, so its cash surface must be too. If someone widens one and not the others,
   // that argument has quietly stopped holding.
@@ -52,7 +52,7 @@ test("W1-T3731: the review lane's cash surface is identical to recon's and diagn
   assert.deepEqual([...review!], [...cashDivertToolsForLane("diagnose")!]);
 });
 
-test("W1-T3731: the table's claude row for review still equals SPECIALIST_TOOLS", () => {
+test("review-cash-divert: the table's claude row for review still equals SPECIALIST_TOOLS", () => {
   // THE ANTI-ROT ASSERTION. worker.ts cannot import specialist-panel.ts (that module imports
   // worker.ts, so the edge would close a cycle), so the claude row is a hand copy. This test is
   // the only thing keeping the copy honest — delete it and the table can describe a surface the
@@ -60,7 +60,7 @@ test("W1-T3731: the table's claude row for review still equals SPECIALIST_TOOLS"
   assert.deepEqual([...DISPATCH_LANE_TOOL_BOUNDS.review.claude], [...SPECIALIST_TOOLS]);
 });
 
-test("W1-T3731: cashDivertSpawnFields('review') yields a spread-able cashTools field", () => {
+test("review-cash-divert: cashDivertSpawnFields('review') yields a spread-able cashTools field", () => {
   // The call site spreads this unconditionally (run-task.ts, the reviewer spawn). An empty object
   // there would be a SILENT no-op — the spawn would look wired and still refuse under a squeeze.
   const fields = cashDivertSpawnFields("review");
@@ -68,7 +68,7 @@ test("W1-T3731: cashDivertSpawnFields('review') yields a spread-able cashTools f
   assert.deepEqual([...fields.cashTools!], ["Read", "Grep", "Glob", "RunCheck"]);
 });
 
-test("W1-T3731: diverting review grants no write authority and no forge verbs", () => {
+test("review-cash-divert: diverting review grants no write authority and no forge verbs", () => {
   // The reviewer is read-only BY CONSTRUCTION on Claude; the divert must not quietly buy it more.
   const tools = [...cashDivertToolsForLane("review")!];
   assert.equal(isReadOnlyToolset(tools), true, "a reviewer that can write is not a reviewer");
@@ -77,7 +77,7 @@ test("W1-T3731: diverting review grants no write authority and no forge verbs", 
   }
 });
 
-test("W1-T3731: the harness owns git for review's cash surface — and the lane never needed it to", () => {
+test("review-cash-divert: the harness owns git for review's cash surface — and the lane never needed it to", () => {
   // `harnessOwnsGitFor` reads true for any shell-less bound. For review that is a statement about
   // nothing: this lane commits no work, so unlike implement/fix there is no output contract to
   // re-word and no `harnessCommitForShellLessWorker` call to make. Pinned so a later reader does
@@ -86,7 +86,7 @@ test("W1-T3731: the harness owns git for review's cash surface — and the lane 
   assert.equal(harnessOwnsGitFor(DISPATCH_LANE_TOOL_BOUNDS.review.claude), false);
 });
 
-test("W1-T3731: THE REAL PREDICATE — the cash adapter can serve review's surface, and refuses today's", () => {
+test("review-cash-divert: THE REAL PREDICATE — the cash adapter can serve review's surface, and refuses today's", () => {
   // THIS IS THE ONE THAT MATTERS. Every assertion above reads the table; the auction reads
   // `cashCanServeToolSurface`, which asks `OPENWEIGHT_FUNCTIONS` whether each tool is actually
   // implemented. A table row naming a tool the adapter cannot run would turn a clean capacity
