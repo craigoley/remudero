@@ -91,8 +91,15 @@
   acceptance:
     - claim: "a non-OpenAI cash deployment is reachable on the adapter's existing route, so no endpoint branch is needed for this class"
       proof: "grep: rides the adapter's existing route in src/lib/worker-provider.ts"
-    - claim: "a deployment whose price has not been observed from a bill is refused before transport rather than priced by a neighbour"
-      proof: "unit test: every deployment named in the cash ladder is priced, shaped and bounded"
+  # WITHDRAWN AS A CRITERION, KEPT AS A TEST. "a deployment whose price has not been observed from
+  # a bill is refused before transport rather than priced by a neighbour" was a criterion here,
+  # proven by `unit test: every deployment named in the cash ladder is priced, shaped and bounded`.
+  # proof-discrimination refused it as `executed_stale` on #5864, and that PR's own body says why
+  # it had to: "all 4 cases green BEFORE AND AFTER this diff ... deliberately unchanged behaviour,
+  # not new code". OPENWEIGHT_PRICES' fail-closed lookup already refuses an unpriced deployment,
+  # and #5864 deliberately does NOT add a price row -- the rate must be observed from a bill. A
+  # proof that holds on both trees by the author's own account cannot be evidence of the diff.
+  # The test stays green. See W1-T3721, which refuses this shape at author time.
   falsifier: |
     Close without implementing if the observed bill shows this class is dearer than gpt-5-mini per
     accepted task, or if the RPM ceiling makes it unusable for a real lane. Cheapness on a page is
