@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
@@ -62,8 +63,12 @@ const LIVE_MARKER = "LIVE-TREE-RMD-RAN";
  *  - "absent": no `bin/rmd` at all.
  */
 function makeOrigin(rmdMode: "executable" | "not-executable" | "absent"): string {
-  const origin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cli-on-path-origin-`));
-  git(origin, ["init", "-q", "-b", "main"]);
+  // THE SHARED BUILDER, not a 146th hand-rolled `git init`. `fixture-copy-census.test.ts`
+  // ratchets the number of test files that init a repo themselves, and this file was one over
+  // (gitInitFiles: 146 > baseline 145). `gitRepo` does exactly what this did — mkdtemp under the
+  // same RMD_TMP_PREFIX, `init --quiet -b main` — so the migration is a drop-in, and the file's
+  // own `git`/`commit` helpers still drive everything after the repo exists.
+  const origin = gitRepo({ kind: "cli-on-path-origin", seedCommit: false }).dir;
   writeFileSync(join(origin, "package.json"), '{"name":"fixture","version":"1.0.0"}\n');
   if (rmdMode !== "absent") {
     mkdirSync(join(origin, "bin"), { recursive: true });
