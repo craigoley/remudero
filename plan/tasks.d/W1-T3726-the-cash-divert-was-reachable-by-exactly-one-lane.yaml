@@ -12,7 +12,7 @@
   retirement: withdrawn
   attempts: 0
   rationale: |
-    WITHDRAWN AS ALREADY SATISFIED BY PR #5899, opened in the same session that found it. Filed as a
+    WITHDRAWN AS ALREADY SATISFIED BY PR #5911, opened in the same session that found it. Filed as a
     record rather than as work, so the reserved id has a readable holder and the finding survives.
 
     THE DEFECT. `spawnWorker`'s blocked-auction fallback judges eligibility on
@@ -42,11 +42,11 @@
 
   acceptance:
     - claim: "a lane can be asked for the surface it would divert to, separately from the one it dispatches on"
-      satisfied_by: "PR #5899 — cashDivertToolsForLane in src/lib/worker.ts"
+      proof: "unit test: W1-T3726: each read-only lane now OFFERS a surface the fallback accepts"
     - claim: "the read-only dispatch sites hand that surface to the spawn, so the auction stops judging their Claude tools"
-      satisfied_by: "PR #5899 — cashTools passed at the recon and diagnose dispatches"
+      proof: "unit test: W1-T3726: the spread helper carries the surface for a divertible lane and nothing for the rest"
     - claim: "a lane that commits offers no divert, so a cheap model is never handed authority it cannot exercise"
-      satisfied_by: "PR #5899 — alert_fix returns undefined, pinned by test"
+      proof: "unit test: W1-T3726: alert_fix offers NO divert — it commits and pushes, which the check-runner cannot"
   note: |
     reservation hand-off: main -> plan/file-the-squeeze-readiness-gaps-1789647960
 
