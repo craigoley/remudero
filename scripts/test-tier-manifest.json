@@ -1302,6 +1302,7 @@
     "test/stale-git-config-lock.test.ts": 1771,
     "test/stale-green-direct-merge.test.ts": 1865,
     "test/stale-lock-host-ordering.test.ts": 265,
+    "test/staleness-is-answerable-without-a-liveness-sensor.test.ts": 0,
     "test/state-backup.test.ts": 261,
     "test/state-citation-check.test.ts": 1213,
     "test/status-atomic-write.test.ts": 1364,
