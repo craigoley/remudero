@@ -6,6 +6,7 @@ import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
   explainUnitTestProofRefusal,
+  GREP_PROOF_FILE_TARGET_REQUIREMENT,
   grepProofTargetNamesNoFile,
   isDialectPrefixed,
   parseWhitelistedProof,
@@ -821,8 +822,59 @@ export function breMetacharsIn(pattern: string): { blocking: string[]; warning: 
   return { blocking: [...new Set(blocking)], warning: [...new Set(warning)] };
 }
 
+// ── GREP-TARGET EXTENSIONLESS-FILE (W1-T3653) ───────────────────────────────
+// {@link grepProofTargetNamesNoFile} (review.ts) approximates "is this path a file" with a pure
+// textual heuristic — the final segment must carry an extension — because the PARSE it backs has no
+// checkout to ask. That heuristic is WRONG for a whole class this repo tracks: `hooks/pre-push`,
+// `hooks/pre-commit`, `hooks/commit-msg`, and any extensionless script under deploy/ are real,
+// tracked FILES with no dot in their name, so a `grep:` proof naming one is refused for reading no
+// file when it plainly does. The fix answers the question git already knows exactly — blob or
+// tree — through an INJECTED reader, so this module stays pure and unit-testable with no reader at
+// all, degrading to the extension heuristic exactly as before (a real directory keeps refusing
+// either way; an absent path now reads as absent, not as a directory, so a typo reads as a typo).
+
+/** What an injected {@link LintOpts.grepProofTargetKind} reader reports for a `grep:` proof's
+ *  target: a real BLOB (`"file"`, accepted regardless of extension), a real TREE (`"directory"`,
+ *  still refused — R-12's case), or nothing at that path at all (`"absent"`, refused with DIFFERENT
+ *  wording so a typo never reads as a deliberate directory target). `undefined` from the reader
+ *  itself (not this type) means "could not resolve" and degrades to the heuristic below. */
+export type GrepProofTargetKind = "file" | "directory" | "absent";
+
+/** Named so the FALLBACK path — no reader injected, or the reader could not resolve this path —
+ *  reads as a labelled decision in a grep search rather than an unlabeled `undefined`. This module
+ *  runs in contexts with no repo at all (a bare unit test, a plan loaded from text), so the fallback
+ *  is not an edge case: it is what runs whenever no checkout-aware caller has wired the reader in. */
+export const GREP_TARGET_EXTENSIONLESS = "grep-target-extensionless-heuristic";
+
+/** Resolve a `grep:` proof's target path to a refusal message, or `undefined` to accept it —
+ *  {@link proofGrepSafetyViolations}'s decision, pulled out so a caller with real git access (a
+ *  checkout-aware `readTargetKind`) and a caller with none (`undefined`, every existing test in this
+ *  file) both go through ONE function. A `"file"` verdict accepts outright, even extensionless —
+ *  that is the whole point (W1-T3653). `"directory"` and `"absent"` both still refuse, so the
+ *  check keeps the case R-12 was written for, but with DISTINCT sentences (an absent path is a typo,
+ *  a directory is a deliberate but unprovable target). No reader, or a reader that returns
+ *  `undefined` for this path (cannot resolve it — e.g. it does not run against a real checkout),
+ *  falls back to {@link grepProofTargetNamesNoFile}'s pure has-a-dot heuristic, unchanged. */
+export function grepProofTargetRefusal(
+  path: string,
+  readTargetKind?: (repoRelPath: string) => GrepProofTargetKind | undefined,
+): string | undefined {
+  const kind = readTargetKind?.(path);
+  if (kind === "file") return undefined;
+  if (kind === "directory") {
+    return `target \`${path}\` is a directory in this checkout — ${GREP_PROOF_FILE_TARGET_REQUIREMENT}`;
+  }
+  if (kind === "absent") {
+    return (
+      `target \`${path}\` does not exist in this checkout — a \`grep:\` proof must name a FILE that is ` +
+      "actually there; check the path for a typo (it is not being refused as a directory)"
+    );
+  }
+  return grepProofTargetNamesNoFile(path); // GREP_TARGET_EXTENSIONLESS: no reader, or an unresolved path
+}
+
 /** Every criterion whose `grep:` proof carries an unescaped BRE metacharacter. */
-export function proofGrepSafetyViolations(task: Task): LintViolation[] {
+export function proofGrepSafetyViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const violations: LintViolation[] = [];
   for (const [i, c] of (task.acceptance ?? []).entries()) {
     const proof = typeof c.proof === "string" ? c.proof : "";
@@ -837,18 +889,22 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
     const pattern = split[1].trim();
     if (!pattern) continue;
     const where = `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 56)}")`;
-    // (R-12) A DIRECTORY-SHAPED target is refused at filing time with the same rule and sentence
-    // `parseDialectGrep` applies at parse, so an author sees it when the shard is filed rather than
-    // at review time as a proof that silently never executes. The rule stays textual; the
-    // executor's `assertGrepTargetIsFile` catches the rest at run time.
-    const noFile = grepProofTargetNamesNoFile(split[2]);
+    // (R-12/W1-T3653) A DIRECTORY, or an ABSENT path, is refused at filing time. With no injected
+    // `opts.grepProofTargetKind` reader (every call site here except this task's own test), this is
+    // the SAME rule and sentence `parseDialectGrep` applies at parse — GREP_TARGET_EXTENSIONLESS,
+    // textual, has-a-dot. A checkout-aware caller that DOES inject a reader instead settles the
+    // question exactly: a tracked extensionless file (`hooks/pre-push`) is accepted, and a real
+    // directory or a genuinely absent path is still refused, each with its own sentence, so a typo
+    // reads as a typo rather than as a directory target.
+    const noFile = grepProofTargetRefusal(split[2], opts.grepProofTargetKind);
     if (noFile !== undefined) {
       violations.push({
         check: "proof-grep-safety",
         severity: "block",
         message:
-          `${where} \`grep:\` ${noFile}. The reviewer's parser refuses this proof, so it would never ` +
-          `execute and could certify nothing; name a file beneath that path instead (R-12).`,
+          `${where} \`grep:\` ${noFile}. Never certifiable as written — refused either at parse or by ` +
+          `the executor against the real checkout, so it would never execute cleanly and could ` +
+          `certify nothing; name a real file instead (R-12).`,
       });
       continue;
     }
@@ -3199,6 +3255,14 @@ export interface LintOpts {
    *  and {@link unboundCriterionViolations}: one contract for checks that need today's text.
    *  Absent ⇒ those checks are silent. */
   readGrepProofFile?: (repoRelPath: string) => string | undefined;
+  /** W1-T3653 — does a `grep:` proof's target resolve to a real blob, a tree, or nothing at all?
+   *  Consumed by {@link proofGrepSafetyViolations} through {@link grepProofTargetRefusal}: a
+   *  `"file"` verdict accepts the target even when its final segment carries no extension (a
+   *  tracked file such as `hooks/pre-push`), while `"directory"`/`"absent"` still refuse, each with
+   *  its own sentence. Absent, or `undefined` for a given path, ⇒ the pure has-a-dot heuristic
+   *  ({@link GREP_TARGET_EXTENSIONLESS}) decides exactly as before — this module never shells git
+   *  itself. */
+  grepProofTargetKind?: (repoRelPath: string) => GrepProofTargetKind | undefined;
   /** Recorded unbound-criterion count by path-form unit-test target. Absent ⇒
    *  {@link unboundCriterionViolations} reports warnings only; present ⇒ growth above the recorded
    *  per-file count blocks while at-or-below baseline remains advisory. */
@@ -3281,7 +3345,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofShapeViolations(task));
   violations.push(...proofDialectViolations(task, opts));
   violations.push(...proofResolvabilityViolations(task, opts));
-  violations.push(...proofGrepSafetyViolations(task));
+  violations.push(...proofGrepSafetyViolations(task, opts));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
