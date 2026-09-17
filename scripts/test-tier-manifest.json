@@ -1567,6 +1567,7 @@
     "test/worker-state-sensor.test.ts": 1424,
     "test/worker-stderr-persist.test.ts": 937,
     "test/worker.test.ts": 7283,
+    "test/workflow-guard-mutation-ratchet.test.ts": 0,
     "test/workflow-harness-import-parity.test.ts": 465,
     "test/workflow-job-timeouts.test.ts": 548,
     "test/workflow-playwright-install.test.ts": 1384,
