@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,8 +43,9 @@ const mod = (await import(GATE_URL)) as {
     body: string;
     taskAcceptanceForId?: TaskAcceptanceForId;
   }) => GateVerdict | undefined;
+  planTaskAcceptanceResolver: (root?: string) => TaskAcceptanceForId | undefined;
 };
-const { evaluateGate, trailerBodyProofDivergenceRefusal } = mod;
+const { evaluateGate, planTaskAcceptanceResolver, trailerBodyProofDivergenceRefusal } = mod;
 
 const TASK_ID = "CONSOLE-T12";
 
@@ -198,4 +200,14 @@ test("reordered bullets that name the same proofs are not a divergence", () => {
   ].join("\n");
   const result = evaluateGate({ body: reordered, authorLogin: "a-human", taskAcceptanceForId });
   assert.equal(result.ok, true, result.message);
+});
+
+test("a root with no readable plan supplies no acceptance resolver, rather than one that answers nothing", () => {
+  // THE FAIL-CLOSED HALF OF THE RESOLVER CONTRACT, and the reason it is `undefined` and not a
+  // function returning `undefined`: a resolver that answers "this task declares no acceptance"
+  // for EVERY id would silence `trailerBodyProofDivergenceRefusal` on every PR while looking
+  // like it had run. `planTaskAcceptanceResolver` therefore returns nothing at all when
+  // `loadPlan` throws, so `evaluateGate` has no structural evidence and adds no refusal — the
+  // same contract `planTaskFilesResolver` keeps (test/acceptance-author-gate.test.ts).
+  assert.equal(planTaskAcceptanceResolver(join(tmpdir(), "rmd-acceptance-gate-no-plan")), undefined);
 });
