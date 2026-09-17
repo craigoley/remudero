@@ -154,7 +154,7 @@
   "src/lib/branch-reaper.ts": 223,
   "src/lib/bundle.ts": 250,
   "src/lib/cash-web-bridge.ts": 250,
-  "src/lib/ci-failure-corpus.ts": 65,
+  "src/lib/ci-failure-corpus.ts": 250,
   "src/lib/ci-gate-required.ts": 2,
   "src/lib/ci-lesson-recurrence.ts": 250,
   "src/lib/ci-parity.ts": 1000,

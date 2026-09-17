@@ -535,6 +535,7 @@
     "test/cost-ceiling-per-instance.test.ts": 1694,
     "test/cost-ceiling-visibility.test.ts": 906,
     "test/cost-governor.test.ts": 11375,
+    "test/could-we-have-caught-it-at-home.test.ts": 0,
     "test/count-arm-diffstat-token.test.ts": 977,
     "test/coverage-improvement-cadence.test.ts": 1934,
     "test/coverage-improvement.test.ts": 1110,
