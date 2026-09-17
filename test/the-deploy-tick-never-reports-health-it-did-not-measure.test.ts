@@ -16,7 +16,6 @@
  * already computed (FACT 2) — and the skip line said "up-to-date" through both.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +24,7 @@ import { test } from "node:test";
 import { decideDeployTrigger, runDeployCycle, type DeployDeps, type IdleProbe } from "../src/lib/deployer.js";
 import { main } from "../src/run-task.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // ── claim 1: an unobserved liveness tick does not report up-to-date ─────────────────────────
 
@@ -241,31 +241,23 @@ test("runDeployCycle carries the blocker through to its result and the ledger ro
 // exercises the REAL wiring end to end — a real git install root, the real `queryLaunchdServiceSensed`
 // / `queryProcessServiceSensed` sensor chain, and the real stdout the operator reads.
 
-function git(dir: string, args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
-}
-
 /** A real bare origin + a clone on `main`, HEAD == origin/main — "healthy" per
- *  `inspectInstallRoot`, the same real-git discipline test/install-root.test.ts's own
- *  `buildOrigin`/`cloneFrom` use (not imported from there — that file is outside this task's
- *  declared scope, so this is a small local duplicate, not a shared helper). */
-function healthyInstallRoot(dir: string): { installDir: string; headSha: string } {
-  const originDir = join(dir, "origin.git");
-  const seedDir = join(dir, "seed");
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", originDir]);
-  execFileSync("git", ["init", "--quiet", "-b", "main", seedDir]);
-  git(seedDir, ["config", "user.email", "t@example.invalid"]);
-  git(seedDir, ["config", "user.name", "Test"]);
-  git(seedDir, ["remote", "add", "origin", originDir]);
-  writeFileSync(join(seedDir, "marker.txt"), "v1\n");
-  git(seedDir, ["add", "."]);
-  git(seedDir, ["commit", "--quiet", "-m", "v1"]);
-  git(seedDir, ["push", "--quiet", "origin", "main"]);
+ *  `inspectInstallRoot`. Built on the shared `test/helpers/git-repo.ts` fixture (its own
+ *  pre-set committer identity, tmp-hygiene tracked) rather than a hand-rolled `git init` —
+ *  `test/fixture-copy-census.test.ts` counts raw init call sites in `test/*.test.ts` directly,
+ *  and the shared helper (under `test/helpers/`) is its own declared exclusion from that count. */
+function healthyInstallRoot(): { installDir: string; headSha: string } {
+  const origin = gitRepo({ bare: true, branch: "main", kind: "t3694-origin" });
+  const seed = gitRepo({ branch: "main", seedCommit: false, kind: "t3694-seed" });
+  seed.addRemote("origin", origin.dir);
+  writeFileSync(join(seed.dir, "marker.txt"), "v1\n");
+  seed.git("add", ".");
+  seed.git("commit", "--quiet", "-m", "v1");
+  seed.git("push", "--quiet", "origin", "main");
 
-  const installDir = join(dir, "install");
-  execFileSync("git", ["clone", "--quiet", originDir, installDir]);
-  const headSha = git(installDir, ["rev-parse", "HEAD"]);
-  return { installDir, headSha };
+  const install = gitRepo({ cloneFrom: origin.dir, kind: "t3694-install" });
+  const headSha = install.git("rev-parse", "HEAD");
+  return { installDir: install.dir, headSha };
 }
 
 class ProcessExitCalled extends Error {
@@ -304,7 +296,7 @@ async function callMain(t: import("node:test").TestContext, argv: string[]): Pro
 
 test("`rmd deploy-run --image-drift-only`, against a real install root, reaches the real daemonAlive producer and prints the blocker line", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t3694-deployrun-"));
-  const { installDir, headSha } = healthyInstallRoot(dir);
+  const { installDir, headSha } = healthyInstallRoot();
   const home = join(dir, "home");
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
