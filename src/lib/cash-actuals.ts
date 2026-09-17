@@ -2,29 +2,21 @@
  * W1-T3729 — WHAT AZURE ACTUALLY BILLED, read from Azure rather than inferred from our own
  * reservations.
  *
- * WHY THIS EXISTS. `openWeightCommittedUsd` charges `settledUsd ?? reservedUsd`, so a request that
- * never settles counts at its conservative CEILING for the rest of the UTC day. MEASURED on the
- * live fleet allowance for 2026-09-15, against Azure's own token counters for the same day:
+ * INVARIANT: `openWeightCommittedUsd` charges `settledUsd ?? reservedUsd`, so an unsettled request
+ * holds its conservative ceiling all day and a cap compared against that number can refuse work at
+ * a fraction of what was actually spent. This reads Azure's own per-deployment token counters
+ * instead, priced with the same {@link OPENWEIGHT_PRICES} table the adapter already bills against.
+ * Full before/after figures, and why Cost Management was rejected in favour of Metrics, live in
+ * learnings/platform.yaml#azure-metrics-lag-and-throttle.
  *
- *     Azure truth (InputTokens/OutputTokens x OPENWEIGHT_PRICES)   $0.9646
- *     local settled sum                                            $0.9270   -4%
- *     local charge against dailyCapUsd                             $2.6771  +189%
+ * TRAP: authorised by the host's SystemAssigned managed identity via IMDS, a short-lived ARM token
+ * minted in-process and written nowhere -- deliberately unlike {@link OPENWEIGHT_API_KEY_ENV}, whose
+ * only copy lived in the container's environment and was lost to a container replacement on
+ * 2026-09-15, taking the cash lane down for two days (W1-T3728). Two more IMDS/ARM traps (a missing
+ * `$filter` reading as a quiet day; a cached token outliving its own role grant) are noted at their
+ * call sites below and recorded in the same learnings entry.
  *
- * So the local ledger is not vaguely wrong, it is wrong in exactly one place -- and Azure can say
- * what it actually billed to within 4%. A `dailyCapUsd` of $25 was refusing work at roughly a third
- * of the figure it names.
- *
- * WHY THE METRICS API AND NOT COST MANAGEMENT. Cost Management reports DOLLARS, which would need no
- * price table at all -- and is the wrong instrument twice over: its ActualCost data lags hours, and
- * it is aggressively throttled (MEASURED 2026-09-17: HTTP 429 on three of five attempts, spaced
- * over minutes). Azure Monitor's per-deployment token counters lag MINUTES and are not throttled
- * that way, so they are the only reading a same-day cap can act on.
- *
- * WHY THERE IS NO SECRET HERE. The reading is authorised by the host's SystemAssigned MANAGED
- * IDENTITY via IMDS, which mints a short-lived ARM token in-process and writes nothing to disk --
- * deliberately unlike {@link OPENWEIGHT_API_KEY_ENV}, whose only copy lives in the running
- * container's environment and was lost by a container replacement on 2026-09-15, taking the whole
- * cash lane down for two days (W1-T3728).
+ * FALSIFIER: test/cash-actuals.test.ts.
  */
 import type { Config } from "./config-schema.js";
 import { OPENWEIGHT_PRICES } from "./worker-provider.js";

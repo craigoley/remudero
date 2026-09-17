@@ -137,6 +137,7 @@
       "entries": [
         "askuserquestion-auto-resolves-empty-headless",
         "askuserquestion-headless-unverified",
+        "azure-metrics-lag-and-throttle",
         "bashrc-accident",
         "browser-egress-needs-dedicated-profile",
         "canonical-checkout-lags-by-design",
@@ -158,6 +159,7 @@
       ],
       "globs": [
         "settings/worker.json",
+        "src/lib/cash-actuals.ts",
         "src/lib/containment.ts",
         "src/lib/daemon.ts",
         "src/lib/env.ts",
@@ -173,7 +175,10 @@
         "src/lib/worker.ts",
         "src/run-task.ts"
       ],
-      "symbols": [],
+      "symbols": [
+        "metricsUrl",
+        "readCashActuals"
+      ],
       "error_signatures": []
     },
     "testing.yaml": {
@@ -214,6 +219,9 @@
       "testing.yaml"
     ],
     "budget": [
+      "platform.yaml"
+    ],
+    "cash": [
       "platform.yaml"
     ],
     "ci": [

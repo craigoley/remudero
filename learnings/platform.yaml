@@ -312,3 +312,22 @@
     observed and all harmless.
   src: operator-session#14-day-retro-replay-2026-09-09
   cited: "2026-09-09"
+- id: azure-metrics-lag-and-throttle
+  subsystem: cash
+  lifecycle: active
+  files: [ src/lib/cash-actuals.ts ]
+  symbols: [ readCashActuals, metricsUrl ]
+  fact: >-
+    Azure Monitor's per-deployment token-count metrics are the only same-day cash reading worth
+    acting on. MEASURED 2026-09-15 against Azure's own counters for that day: Azure truth $0.9646,
+    local settledUsd sum $0.9270 (-4%), local charge against dailyCapUsd $2.6771 (+189%, because
+    `openWeightCommittedUsd` charges `settledUsd ?? reservedUsd` and an unsettled request holds its
+    conservative ceiling all day). Cost Management was tried first and rejected: its ActualCost data
+    lags HOURS, and it 429'd on three of five attempts spaced over minutes (MEASURED 2026-09-17);
+    Metrics lags only minutes and was not throttled that way. Two more traps found the same day: a
+    metrics call with no `$filter` answers HTTP 200 with an EMPTY series (reads exactly like a quiet
+    day — only a positive control over a known-busy day caught it), and a freshly-granted
+    Monitoring Reader role can still 403 for ~15 minutes against a cached IMDS token, which the
+    error body itself names the remedy for (bypass the cache).
+  src: PR#5912 (W1-T3729), live-account measurement 2026-09-15/2026-09-17
+  cited: "2026-09-17"
