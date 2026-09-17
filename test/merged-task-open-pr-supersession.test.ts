@@ -118,9 +118,22 @@ test("W1-T2794 (falsifier): W1-T2779's complement rule is not weakened", () => {
 test("W1-T2794 (falsifier): ordinary open-peer supersession is untouched", () => {
   // THE CONTROL THAT MUST STAY GREEN when the projection is neutered — it proves the new row did
   // not simply absorb the old one.
-  const d = dispose(openPr({ supersededBy: 3999 }), undefined);
+  // W1-T3731: the open-peer row now requires a positive `superseded` verdict, so this control
+  // carries one. What it controls for — that the merged-evidence row did not simply absorb the
+  // open-peer row — is unchanged.
+  const d = dispose(
+    openPr({
+      supersededBy: 3999,
+      supersessionVerdict: {
+        status: "superseded",
+        evidence: { supersedingPrNumber: 3999, taskId: "W1-T2786", diff: { rawLineCount: 30, matchedHunks: 2 } },
+        detail: "every changed path is also changed by #3999",
+      },
+    }),
+    undefined,
+  );
   assert.equal(d.disposition, "stale");
-  assert.equal(d.reason, "superseded-by #3999");
+  assert.match(d.reason, /^superseded-by #3999/);
 });
 
 test("W1-T2794 criterion 1: merged evidence OUTRANKS the open-peer row when both are present", () => {

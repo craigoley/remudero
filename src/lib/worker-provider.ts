@@ -2257,11 +2257,18 @@ export function openWeightUtcDay(atIso: string): string {
 /**
  * One day's committed allowance. `reservations` is keyed by request identity so a settlement can
  * find the row it is settling; a row whose `settledUsd` is still null counts at its CONSERVATIVE
- * `reservedUsd`, which is what keeps a failed, unreadable or crashed request charged.
+ * `reservedUsd`, which is what keeps a crashed request (one that never reached ANY settlement call
+ * -- the process died before its `catch` could run) charged.
+ *
+ * `settledReason` is present ONLY when a failure, not a usage receipt, is what settled the row --
+ * see {@link settleOpenWeightBudget}. Its presence is itself the ledger entry W1-T3666 asks for:
+ * an ordinary settle-from-receipt leaves it absent, so a reader can tell "this figure came from
+ * the provider's own bill" from "this figure was corrected after the request failed" without
+ * parsing anything else.
  */
 export interface OpenWeightAllowanceState {
   utcDay: string;
-  reservations: Record<string, { reservedUsd: number; settledUsd: number | null }>;
+  reservations: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string }>;
 }
 
 /** Committed spend = the settled figure where one was read back, the conservative reservation
@@ -2467,16 +2474,19 @@ export function reserveOpenWeightBudget(
 }
 
 /**
- * Settle a committed reservation DOWN to the provider's own reported usage.
+ * Settle a committed reservation DOWN, either to the provider's own reported usage, or — W1-T3666
+ * — to the input-only portion of the same conservative estimate when the request FAILED before any
+ * usage could be read.
  *
- * Only ever called with a receipt that was actually read off a response. A request that failed, or
- * whose response could not be parsed, never reaches this — its reservation stays at the
- * conservative figure, which is the whole point: unreadable spend is assumed to have happened.
- * Settlement never raises a reservation above what was reserved; the reservation is a ceiling.
+ * `reason`, present only on the failure path, is what makes settlement recorded rather than
+ * inferred: an ordinary settle-from-receipt passes nothing, so the ledger row itself distinguishes
+ * a bill it actually read from a figure it corrected after a failure (see
+ * {@link OpenWeightAllowanceState}). Settlement never raises a reservation above what was
+ * reserved; the reservation is a ceiling either way.
  */
 export function settleOpenWeightBudget(
   config: Config,
-  input: { requestId: string; actualUsd: number; atIso: string },
+  input: { requestId: string; actualUsd: number; atIso: string; reason?: string },
 ): void {
   const utcDay = openWeightUtcDay(input.atIso);
   mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
@@ -2487,7 +2497,14 @@ export function settleOpenWeightBudget(
     return {
       next: {
         ...state,
-        reservations: { ...state.reservations, [input.requestId]: { ...row, settledUsd: Math.min(input.actualUsd, row.reservedUsd) } },
+        reservations: {
+          ...state.reservations,
+          [input.requestId]: {
+            ...row,
+            settledUsd: Math.min(input.actualUsd, row.reservedUsd),
+            ...(input.reason !== undefined ? { settledReason: input.reason } : {}),
+          },
+        },
       },
       result: undefined,
     };
@@ -2914,6 +2931,12 @@ export async function spawnOpenWeightWorker(
   let text = "";
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
+  // W1-T3666: the reservation the CURRENT turn is still carrying, cleared the instant its own
+  // settlement question (settle down from a receipt, or leave the conservative figure standing --
+  // see the usage block below) is decided. If the turn throws before that point, this is what the
+  // outer `catch` settles down instead of stranding: everything before it in a PRIOR turn already
+  // reached its own decision and is no longer "pending".
+  let pendingReservation: { requestId: string; deployment: string; requestBodyBytes: number } | undefined;
   // Metered SEPARATELY from conversation turns (W1-T3558). They share the day cap — one cap is the
   // only way it bounds total Azure spend — but are counted apart so an operator can read what web
   // access cost, and how often it was refused, without inferring it from a conversation total.
@@ -2964,14 +2987,20 @@ export async function spawnOpenWeightWorker(
       // declared intention. Reserve FIRST, then send: the reservation is committed to disk before
       // the money can be spent, so a crash between the two leaves the allowance charged, never free.
       const requestId = `${runRequestPrefix}-${turns}`;
+      const requestBodyBytes = Buffer.byteLength(body, "utf8");
       const reservation = reserveOpenWeightBudget(config, {
         requestId,
         deployment: selection.model,
-        requestBodyBytes: Buffer.byteLength(body, "utf8"),
+        requestBodyBytes,
         atIso: clock.iso(),
         squeezed: args.cashSqueezed === true,
       });
       budgetReservedUsd += reservation.reservedUsd;
+      // ARMED THE MOMENT THE RESERVATION COMMITS, CLEARED ONLY ONCE ITS SETTLEMENT IS DECIDED
+      // (below). Anything that throws in between -- a transport error, a non-2xx status, an
+      // unparseable body -- leaves this set, which is exactly what the outer `catch` reads to know
+      // there is a reservation still to settle down (W1-T3666).
+      pendingReservation = { requestId, deployment: selection.model, requestBodyBytes };
       // THE DEADLINE IS ARMED AROUND THE REQUEST, AND THE RESERVATION IS ALREADY COMMITTED. An
       // abandoned request keeps its charge on purpose: the endpoint may have served and billed it,
       // so handing the allowance back would let a timeout buy free authority against `dailyCapUsd`.
@@ -3013,6 +3042,10 @@ export async function spawnOpenWeightWorker(
       } else {
         budgetSettledUsd += reservation.reservedUsd;
       }
+      // THIS TURN'S SETTLEMENT QUESTION IS NOW DECIDED, one way or the other, so it is no longer
+      // "pending" for the failure-settlement catch below -- a later throw in this same turn (an
+      // undeclared tool, `maxTurns` exceeded) must not re-settle a row already resolved above.
+      pendingReservation = undefined;
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
@@ -3073,6 +3106,25 @@ export async function spawnOpenWeightWorker(
       }
     }
   } catch (error) {
+    // W1-T3666: A RESERVATION STILL PENDING WHEN THE TURN FAILS IS SETTLED DOWN HERE, NOT
+    // STRANDED. `pendingReservation` is set only between a reservation's commit and its own
+    // settlement decision (above), so reaching this with it defined means a 429, a transport
+    // fault or an unparseable body cut the turn short before any usage receipt could be read --
+    // exactly the gap `settleOpenWeightBudget`'s own doc names. Settled to the INPUT-ONLY portion
+    // of the same byte-bound estimate the reservation used (zero completion tokens): a failed
+    // request produced no completion, so it must not be charged for the
+    // `OPENWEIGHT_MAX_COMPLETION_TOKENS` ceiling the reservation assumed it might. `reason` is the
+    // failure's own message, so the ledger row itself says which failure settled it.
+    if (pendingReservation !== undefined) {
+      const inputOnlyUsd = openWeightUsageUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes, 0);
+      settleOpenWeightBudget(config, {
+        requestId: pendingReservation.requestId,
+        actualUsd: inputOnlyUsd,
+        atIso: clock.iso(),
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      budgetSettledUsd += inputOnlyUsd;
+    }
     // Preserve the transport/tool failure in the result's stderr + error flags; a failure must not
     // collapse into an ordinary empty worker response for callers or the catch-erasure census.
     return openWeightResult({
