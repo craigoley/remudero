@@ -21872,6 +21872,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // already resolved above (`plan.tasks`, and `projectPlan`'s batched `statusByTaskId`).
   const surfaceCorpus = surfaceCorpusFrom(plan);
   const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
+  // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
+  let planOnlyFilingDiff: boolean | undefined;
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -21945,6 +21947,24 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // PR actually touches. Never reimplemented, so lint and review can never disagree about what
     // a proof's raw title resolves to.
     if (scope) {
+      // W1-T3730: THE FILING FACT, from the diff this pass is already scoped to. `planOnlyDiff` is
+      // review.ts's own predicate — the one Standing rule 15 uses for exactly this filing/build
+      // distinction — so the linter and rule 15 can never disagree about what a filing is. Read
+      // once per pass, not per task. An unreadable diff leaves it undefined, which is today's
+      // behaviour: this only ever ADMITS a forward reference, never refuses one.
+      if (planOnlyFilingDiff === undefined) {
+        try {
+          planOnlyFilingDiff = planOnlyDiff(
+            execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", `${baseRef}...HEAD`], {
+              encoding: "utf8",
+              maxBuffer: 1 << 26,
+            }),
+          );
+        } catch {
+          planOnlyFilingDiff = undefined;
+        }
+      }
+      if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
       opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
