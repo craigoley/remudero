@@ -21,7 +21,7 @@ import { createService } from "../src/lib/service.js";
 import { buildStatusRoute, RECAP_ACK_HEADER, type BoardDeps } from "../src/lib/board.js";
 import { createLastSeenStore, hashToken, type LastSeenStore } from "../src/lib/last-seen.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const READ_TOKEN = "recap-checkpoint-read-token";
 const OTHER_TOKEN = "recap-checkpoint-other-token";
@@ -43,15 +43,6 @@ function task(over: Partial<Task> = {}): Task {
 
 function planOf(tasks: Task[]): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
-}
-
-function fakeGitHub(): GitHub {
-  return {
-    prByRef: () => null,
-    findMergedByTrailer: () => null,
-    headRefName: () => undefined,
-    prBody: () => undefined,
-  };
 }
 
 function tmpLedgerPath(): string {
@@ -89,6 +80,13 @@ function get(base: string, token: string, ack: boolean): Promise<Response> {
   return fetch(`${base}/v1/status`, { headers });
 }
 
+/** `collectSince` deliberately includes its timestamp boundary. Wait until a new ledger event can
+ * be strictly after one acknowledged marker before using it to test a later acknowledgement. */
+async function waitUntilAfter(marker: string): Promise<void> {
+  const boundary = Date.parse(marker);
+  while (Date.now() <= boundary) await new Promise<void>((resolve) => setTimeout(resolve, 1));
+}
+
 // ── criterion 1: a poll must not advance the checkpoint ─────────────────────────────────────
 
 test("a poll (no ack header) never advances the recap checkpoint", async () => {
@@ -104,6 +102,7 @@ test("a poll (no ack header) never advances the recap checkpoint", async () => {
     assert.ok(established, "the ack view must have established a marker");
 
     // New activity lands, then FIVE bare polls (no ack header) read it.
+    await waitUntilAfter(established);
     appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
     let lastBody: { recap: unknown[]; sinceCheckpoint?: string } | undefined;
     for (let i = 0; i < 5; i++) {
@@ -129,10 +128,16 @@ test("an explicit acknowledgement advances the checkpoint, so the NEXT recap is 
     // First ack establishes the checkpoint.
     await get(base, READ_TOKEN, true);
     const established = store.get(tokenId);
+    assert.ok(established, "the first ack must establish the marker used for this window");
 
     // Two events land after the checkpoint.
-    appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
-    appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), task_id: "W1-T2", step: "verdict", verdict: "merged" }) + "\n");
+    await waitUntilAfter(established);
+    const eventTs = new Date().toISOString();
+    appendFileSync(ledgerPath, JSON.stringify({ ts: eventTs, task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
+    appendFileSync(ledgerPath, JSON.stringify({ ts: eventTs, task_id: "W1-T2", step: "verdict", verdict: "merged" }) + "\n");
+    // The acknowledgement must advance from a snapshot after these events, not from their
+    // inclusive timestamp boundary (which deliberately remains visible on the next window).
+    await waitUntilAfter(eventTs);
 
     const beforeAck = (await (await get(base, READ_TOKEN, false)).json()) as { recap: unknown[] };
     assert.equal(beforeAck.recap.length, 2, "both events are still unread before the next ack");
@@ -159,8 +164,12 @@ test("one token's acknowledgement leaves ANOTHER token's checkpoint and recap in
     // Both tokens establish their own marker first.
     await get(base, READ_TOKEN, true);
     await get(base, OTHER_TOKEN, true);
+    const readBefore = store.get(hashToken(READ_TOKEN));
+    const otherBefore = store.get(hashToken(OTHER_TOKEN));
+    assert.ok(readBefore && otherBefore, "each token must establish its own marker before activity arrives");
 
     // New activity lands after both markers were established.
+    await waitUntilAfter(otherBefore);
     appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
 
     // READ_TOKEN acknowledges — its own checkpoint advances.
@@ -173,10 +182,7 @@ test("one token's acknowledgement leaves ANOTHER token's checkpoint and recap in
     assert.equal(otherStillPending.recap.length, 1, "OTHER_TOKEN's recap must be untouched by READ_TOKEN's acknowledgement");
     assert.equal(otherStillPending.recap[0]!.taskId, "W1-T1");
 
-    assert.notEqual(
-      store.get(hashToken(READ_TOKEN)),
-      store.get(hashToken(OTHER_TOKEN)),
-      "the two tokens' checkpoints must be independent values, not one shared marker",
-    );
+    assert.notEqual(store.get(hashToken(READ_TOKEN)), readBefore, "READ_TOKEN's acknowledged view must advance its own marker");
+    assert.equal(store.get(hashToken(OTHER_TOKEN)), otherBefore, "READ_TOKEN's acknowledgement must not write OTHER_TOKEN's marker");
   });
 });
