@@ -13396,10 +13396,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T3616: recon's prompt names `git remote -v`, `git log --oneline -5` and `ls`, so its
         // honest bound includes Bash. Read-only, so no Write/Edit.
         tools: [...resolveDispatchLaneToolBound("recon", reconMount?.provider ?? "claude")],
-        // W1-T3726: and the surface this lane would run on if the auction BLOCKS. Read-only by
-        // prompt (no Write/Edit, no commit), so the shell-less equivalent is an honest swap:
-        // RunCheck carries the pinned read-only `git log/status/diff/remote` its prompt names.
-        // Without this the divert judged `args.tools` -- which names Bash -- and refused.
+        // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
         ...cashDivertSpawnFields("recon"),
         settingsFile,
         model: reconMount?.model,
@@ -13833,10 +13830,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3616: diagnose inspects `git diff`/`git status` and re-runs whatever failed, so it
           // declares Bash. "Do NOT modify, commit, or push ANYTHING" — hence no Write/Edit.
           tools: [...resolveDispatchLaneToolBound("diagnose", diagnoseMount.provider ?? "claude")],
-          // W1-T3726: and the surface this lane would run on if the auction BLOCKS. Read-only by
-          // prompt (no Write/Edit, no commit), so the shell-less equivalent is an honest swap:
-          // RunCheck carries the pinned read-only `git log/status/diff/remote` its prompt names.
-          // Without this the divert judged `args.tools` -- which names Bash -- and refused.
+          // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
           ...cashDivertSpawnFields("diagnose"),
           model: diagnoseMount.model,
           mountProvider: diagnoseMount.provider,
