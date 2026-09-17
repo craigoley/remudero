@@ -1373,6 +1373,7 @@
     "test/the-census-bound-ejects-the-suites-it-admitted.test.ts": 1346,
     "test/the-census-map-names-four-suites-and-no-verb-reads-it.test.ts": 998,
     "test/the-census-roster-is-named-not-numbered.test.ts": 8673,
+    "test/the-census-watches-its-own-base.test.ts": 0,
     "test/the-changed-files-block-has-no-production-caller.test.ts": 1053,
     "test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts": 2141,
     "test/the-ci-entry-shells-the-argv-ci-runs.test.ts": 0,
