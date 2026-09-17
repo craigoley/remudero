@@ -67,7 +67,29 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
   const stale = [];
   const unreadable = [];
   let executed = 0;
+  let credited = 0;
   for (const criterion of criteria) {
+    // W1-T3729 — A CRITERION THE PLAN CREDITS TO AN EARLIER MERGE IS STALE BY CONSTRUCTION.
+    //
+    // `satisfied_by` is Architect-only (§12 rule 16) and stands IN PLACE OF a proof: it says the
+    // criterion was met by the PR it cites. Such a criterion passes at THIS PR's merge base by
+    // definition, so running it can only ever return `executed_stale` — arithmetic, not a finding.
+    // MEASURED on #5852: all four of W1-T3693's criteria carry it, and the gate refused 4-over-0
+    // while naming two remedies that both fail here (the proofs are correctly pointed, and the
+    // baseline it offers says of itself that its allowance never rises).
+    //
+    // THE FILTER IS THE REVIEWER'S OWN, NOT A SECOND NOTION OF IT: review.ts:3718 already names
+    // this set — `executableCriteria = criteria.filter((c) => !c.satisfied_by)` — and review.ts
+    // grades these MET without executing anything (2359) and counts them as no hole (2752). This
+    // file's header says it runs the reviewer's parser and executor; walking a criterion the
+    // reviewer never walks is the divergence, not the fix.
+    //
+    // COUNTED SEPARATELY, NEVER AS `executed`: `executed` is this gate's evidence that it did
+    // work, and a task of entirely-credited criteria must not report a green it did not earn.
+    if (criterion.satisfied_by) {
+      credited += 1;
+      continue;
+    }
     const proof = criterion.proof?.trim() ?? "";
     if (!proof || parseWhitelistedProof(proof) === null) continue;
     const result = runProof(proof, mergeBase);
@@ -80,7 +102,7 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
       stale.push({ proof, ...proofCounts(result.stdout), output: result.stdout.trim() });
     }
   }
-  return { stale, unreadable, executed };
+  return { stale, unreadable, executed, credited };
 }
 
 /**
@@ -168,6 +190,14 @@ export function main(argv, {
   const taskId = extractTaskTrailerId(payload.body ?? "");
   const allowed = staleAllowanceFor(taskId, baseline(root));
   const verdict = judgeStaleAgainstAllowance(result.stale.length, allowed);
+  // W1-T3729 design (ii): SKIPPED IS REPORTED, NEVER SILENT — on every verdict path below, so a
+  // reader of a pass and a reader of a refusal both learn the same thing.
+  if (result.credited > 0) {
+    log.log(
+      `proof-discrimination: ${result.credited} criterion(s) credited to a prior merge by \`satisfied_by\` and not executed ` +
+        "— review grades these MET without running them (review.ts:2359), so they cannot discriminate this PR's work.",
+    );
+  }
   if (result.unreadable.length > 0) {
     for (const row of result.unreadable) log.error(`proof-discrimination: REFUSED — could not run ${JSON.stringify(row.proof)}: ${row.detail}`);
     return 1;

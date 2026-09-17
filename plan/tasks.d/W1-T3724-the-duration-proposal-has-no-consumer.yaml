@@ -1,0 +1,112 @@
+- id: W1-T3724
+  title: "CI MEASURES EVERY TEST FILE'S REAL DURATION ON EVERY RUN, BUILDS A CORRECTED MANIFEST, AND THROWS IT AWAY AFTER SEVEN DAYS — 338 of 1,604 files still shard as duration 0, the worst coverage shard runs 30% over ideal, and that shard IS the critical path: consume the proposal the pipeline already produces"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    OPERATOR REPORT 2026-09-17: "they are like 40 minutes old and just one got to green. Why does
+    CI take this long?"
+
+    (1) THE CRITICAL PATH IS ONE JOB, MEASURED on two merged PRs' completed check runs:
+
+          #5876  WALL 20.3 min          #5870  WALL 20.3 min
+            20.3  ci-gate (barrier)       20.3  ci-gate
+            16.6  coverage-shard (4/4)    16.3  coverage-shard (1/4)
+            16.4  coverage-shard (2/4)    15.8  coverage-shard (4/4)
+            15.7  coverage-shard (1/4)    13.1  coverage-shard (3/4)
+            13.3  coverage-shard (3/4)    12.4  coverage-shard (2/4)
+             3.4  coverage-ratchet         3.1  coverage-ratchet  (starts at +16)
+
+        Everything else finishes inside 3 minutes. `coverage-ratchet` cannot start until the LAST
+        shard lands, and `ci-gate` spans the whole run. So the wall clock is
+        `worst_shard + ratchet`, and nothing else on the board moves it.
+
+    (2) THE SHARDS ARE UNBALANCED BECAUSE A FIFTH OF THE CORPUS CLAIMS TO TAKE NO TIME.
+        `scripts/test-tier-manifest.json`: 1,604 files, 51.0 minutes measured in total, and
+        338 of them (21%) recorded at `durationMs: 0`. A file at zero is free to the packer, so it
+        lands anywhere. Ideal split is 51.0/4 = 12.75 min; the worst observed shard is 16.6 --
+        30% over. Balance alone is worth roughly FOUR MINUTES PER PULL REQUEST.
+
+    (3) THE FIX IS ALREADY COMPUTED, EVERY RUN, AND DISCARDED. ci.yml, after the shards:
+
+          node scripts/test-tier-manifest.mjs --record-evidence "${DURATION_FILES[@]}" \
+            --output test-tier-manifest.next.json
+          - uses: actions/upload-artifact
+            name: test-tier-manifest-proposal
+            retention-days: 7
+
+        A corrected manifest, built from real per-shard duration evidence, uploaded as an artifact
+        NOTHING CONSUMES. It expires in seven days. The data that would close (2) is produced on
+        every pull request and thrown away.
+
+    (4) WHY THE ZEROS PERSIST. W1-T3205 (merged) made `hooks/pre-push` seed a new test file into
+        the manifest so a PR adding one is not born red -- seeded at `durationMs: 0`, "a real
+        number replaces the placeholder on the next --record-evidence pass" (the script's own
+        words). There IS no next pass that lands: the proposal is an artifact, not a commit. Every
+        new test file therefore enters at zero and stays there.
+    (5) W1-T3302 IS THE OTHER HALF AND SAYS SO. It makes SLOW-TIER evidence exist -- every
+        duration-recording path today runs the fast lane, so a file freezes at the value that
+        promoted it -- and its design (v) scopes the rest out in its own words: "EVIDENCE STAYS A
+        PROPOSAL ... applying it is its own step. This task does not change that: it makes
+        slow-tier evidence EXIST, not auto-apply." THIS task is that step. They share two files and
+        neither supersedes the other: T3302 widens what is measured, this one lands what is
+        measured. Its design (iv) -- "A MISSING MEASUREMENT IS UNKNOWN, NEVER ZERO" -- is the same
+        rule as (iii) below, and both must hold for either task to be worth anything.
+  design: |
+    (i) LAND THE PROPOSAL, DO NOT RE-MEASURE. The evidence pipeline is correct and stays untouched;
+        what is missing is a consumer. The proposal already produced becomes a committed manifest
+        update, so the next run's split is packed from real numbers.
+
+    (ii) A DURATION UPDATE IS NOT A CODE REVIEW. It must not ride in an unrelated PR (it would
+         change the diff under a reviewer) and must not require a human to shepherd a number. The
+         plan-filing path this repo already runs for machine-authored records is the shape to
+         reuse -- the ci-learning landing bridge (W1-T3492) is the existing precedent for "a rung
+         opens its own gated PR".
+
+    (iii) MONOTONIC IN TRUST, NOT IN VALUE. A duration may legitimately fall as well as rise, so
+          this is NOT a ratchet. What must never happen is a measured number being replaced by a
+          placeholder: once a file has a real duration, a later run that failed to measure it must
+          leave the old number, never reset it to 0.
+
+    (iv) PARTIAL EVIDENCE IS PARTIAL, NOT WRONG. A run where one shard died produces evidence for
+         three. Those three still land; the fourth keeps its previous numbers. The alternative --
+         refusing the whole update -- is what keeps 338 files at zero today.
+
+    (v) THE ZERO POPULATION IS THE MEASURE OF SUCCESS and belongs on the step summary, so the
+        number falling (or not) is visible without anyone opening a manifest.
+
+    NOT IN SCOPE, each its own filing: raising the shard count from 4 (balance first -- a better
+    split of a bad manifest is still bad), and `ci-gate`'s own barrier cost.
+  acceptance:
+    - claim: "a run's measured durations reach the committed manifest instead of expiring as an artifact"
+      proof: "unit test: measured durations from a run land in the committed manifest"
+    - claim: "a file that already has a measured duration is never reset to the zero placeholder by a run that could not measure it"
+      proof: "unit test: an unmeasured run never resets a file already carrying a real duration"
+    - claim: "evidence from a partial run lands for the shards that produced it rather than being refused whole"
+      proof: "unit test: partial shard evidence lands for the shards that reported"
+    - claim: "the count of files still at the zero placeholder is reported, so the measure of success is visible"
+      proof: "unit test: the zero-duration population is reported on every update"
+  falsifier: |
+    Make the update a ratchet that only ever raises a duration and the second assertion still
+    passes while real speed-ups stop being recorded -- so the suite asserts the DIRECTION-FREE
+    property (a real number may move either way) and only the placeholder is protected. Refuse an
+    update when any shard is missing and the third goes red. Drop the zero-population line and the
+    fourth goes red; that line is how anyone can tell whether this task worked at all.
+  risk: high
+  band_meaning: span
+  # BREADTH, NOT BLAST RADIUS. Rule 19 counts two concerns (ci, test-tier-manifest) because the
+  # consumer and the workflow step that feeds it are one change across two files. Splitting leaves
+  # a consumer nothing hands evidence to.
+  origin: human
+  plan_refs: [W1-T3205, W1-T2904, W1-T3492, W1-T3302]
+  files: [scripts/test-tier-manifest.mjs, .github/workflows/ci.yml]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: planshard -> planshard
+
+    Minted by `rmd next-task-id` from the branch that files it, recorded because the branch is not
+    `run-` shaped.

@@ -2020,6 +2020,26 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
     "line or a STAMP line), emit those markers verbatim and print the requested artifact between " +
     "or after them instead of describing it in prose.",
 ].join("\n");
+
+/**
+ * W1-T3693(d) — THE GROUNDING/CITATION CONTRACT — DELIBERATELY NOT BUILT HERE.
+ *
+ * The task's own falsifier: "Close (d) without implementing if no lane wants a grounding
+ * contract -- it is machinery for a judgement lane, and building it before one exists would be
+ * the shipped-unwired shape." CHECKED 2026-09-17: `ruling-judge.ts` and `verify-human-judge.ts`
+ * carry no reference to this provider at all, and the one judgement lane that CAN route through
+ * `cash` -- `Mounts.escalation_judge` (escalate.ts) -- is ROUTING-ONLY: it parses a single
+ * `ESCALATION_JUDGE_DECISION`/`ESCALATION_JUDGE_REASON` pair, not a list of asserted, citable
+ * items. No lane asserts observed facts through this adapter today, so there is nothing for a
+ * citation validator to guard, and imposing one unconditionally would be the "turn every task
+ * into a YAML task" mistake this same file's output contract already warns against.
+ *
+ * (a) the request deadline ({@link OPENWEIGHT_REQUEST_TIMEOUT_MS}/{@link
+ * OpenWeightRequestTimeoutError}), (b) the truncation refusal ({@link openWeightReplyIsTruncated}/
+ * {@link OpenWeightTruncatedReplyError}) and (c) the fence-tolerant extractor ({@link
+ * openWeightUnfence}) above are the transport fixes the falsifier says "stand regardless": they
+ * are correctness on the transport, not a feature gated on a consumer wanting it.
+ */
 /**
  * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
  *

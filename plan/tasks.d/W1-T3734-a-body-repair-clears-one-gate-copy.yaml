@@ -1,0 +1,83 @@
+- id: W1-T3734
+  title: "A BODY-ONLY REPAIR CLEARS ONE COPY OF THE ACCEPTANCE GATE AND NOT THE OTHER — the standalone workflow listens for `edited`, ci.yml's `squash-trailer-gate` runs the same script and does not, so a corrected pull request body leaves a required check red until someone pushes a commit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    MEASURED 2026-09-17 across SIX pull requests in one session — #5885, #5852, #5887, #5895,
+    #5861 and #5913. In every case the PR body had ALREADY been corrected, the gate's own parser
+    agreed (`parseAcceptanceBlock` returned exactly what the shard declares, or nothing at all),
+    and the check was still red. Each needed a no-op amend + force-push to clear.
+
+    (1) THE SAME SCRIPT RUNS IN TWO WORKFLOWS WITH DIFFERENT TRIGGERS.
+
+          .github/workflows/acceptance-author-gate.yml
+            on: pull_request: types: [opened, synchronize, reopened, edited]   <- self-heals
+          .github/workflows/ci.yml  (job: squash-trailer-gate)
+            on: pull_request: <default types>                                  <- no `edited`
+
+        Both run `node --import tsx scripts/acceptance-author-gate.mjs`, so both produce the
+        `trailer-body-proof-divergence` refusal — and only one of them can ever observe the repair.
+
+    (2) THE STANDALONE FILE'S OWN HEADER ALREADY ARGUES THIS EXACT POINT, at length: "a hand-opened
+        PR body that fails only because a claim wrapped onto a second line should cost a two-minute
+        correction, not a fresh head plus a full CI cycle", and it explains that folding the job
+        into ci.yml would "leave it unable to react to a body-only correction (reproducing the
+        exact defect this task fixes)". W1-T3414 then added a SECOND caller inside ci.yml for the
+        squash-trailer concern, and it reproduces that defect for the body half.
+
+    (3) A RE-RUN CANNOT FIX IT. `rerun-failed-jobs` replays the FROZEN `pull_request` payload, so
+        it re-reads the old body and refuses identically. The only exit is a new commit — which is
+        precisely the "fresh head plus a full CI cycle" the standalone workflow exists to avoid.
+
+    (4) THE COST IS A MANUAL LOOP ON A CHECK THAT IS ALREADY SATISFIED. Six PRs in one session, each
+        needing an operator to notice that the red is stale and push an empty change. That is the
+        queue-working this fleet is supposed to have stopped doing.
+  design: |
+    (i) SPLIT THE CONCERN, NOT THE SCRIPT. `squash-trailer-gate`'s own reason to exist (W1-T3414) is
+        the COMMIT-trailer question: a branch commit can add a trailer after a plan-only filing was
+        opened without one, and squash merge preserves commit bodies. That question genuinely needs
+        ci.yml's checkout. The BODY question does not, and it already has a home that reacts to
+        `edited`. The ci.yml job stops emitting body-derived refusals; the standalone workflow keeps
+        owning them.
+
+    (ii) NOTHING STOPS BEING CHECKED. Every refusal this ci.yml job can produce is either still
+         produced by it (the commit-trailer ones) or already produced by the standalone workflow
+         (the body ones), and both are required contexts through `ci-gate`. The test that matters
+         is the one proving no refusal class is dropped on the floor.
+
+    (iii) DO NOT WIDEN ci.yml's TRIGGER. Adding `edited` to ci.yml would re-run the full suite on
+          every description edit — the regression the standalone workflow's own rationale measured
+          against, and the reason it is a separate file at all.
+
+    NOT IN SCOPE: `proof-discrimination`, which reads the same frozen payload and has the same
+    shape — it is a required ci.yml job with no standalone twin, so giving it one is a different
+    change with a different cost.
+  acceptance:
+    - claim: "the ci.yml job no longer refuses on a divergence derived from the pull request body, because a body-only repair can never clear it there"
+      proof: "unit test: the squash-trailer caller emits no body-derived refusal"
+    - claim: "the commit-trailer refusal that job exists for is still produced, so nothing it owns is dropped"
+      proof: "unit test: a follow-up commit trailer is still refused by the squash-trailer caller"
+    - claim: "every body-derived refusal is still produced by the caller that reacts to an edit, so no refusal class is lost"
+      proof: "unit test: the body-derived refusals still fire on the edit-aware caller"
+  falsifier: |
+    Delete the ci.yml job outright and the second assertion goes red — the commit-trailer question
+    is real and squash merge is why. Widen ci.yml's `on:` to include `edited` instead and the full
+    suite re-runs on every description edit, which is the cost the standalone workflow was created
+    to avoid; no assertion here would catch that, so it is stated in the design rather than pinned.
+    Move the body refusals out of BOTH callers and the third goes red.
+  risk: medium
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3414, W1-T1060, W1-T3658]
+  files: [scripts/acceptance-author-gate.mjs]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3734-6-three-findings
+
+    `files:` names no test path, deliberately: `proof-unit-test-unresolvable` refuses a filing that
+    declares one (W1-T3730). The build adds it back.
