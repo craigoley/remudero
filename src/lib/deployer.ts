@@ -27,6 +27,7 @@
 // Why: the full design rationale and every measured incident this module was built to
 // fix — docs/forensics/deployer.md#file-header
 
+import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -141,10 +142,18 @@ export function sameCommit(a: string | undefined, b: string | undefined): boolea
  *  which is what decides whether a new image is even built. */
 export const IMAGE_BAKED_PATHS: readonly string[] = ["deploy/Dockerfile", "deploy/entrypoint.sh"];
 
-/** W1-T3732 — the instance registry, relative to the deploy checkout. `recycle-container.sh`
- *  resolves the SAME file from its own `${SCRIPT_DIR%/deploy}`, so the script and its only
- *  automated caller cannot disagree about which registry is in force. */
-export const DAEMON_INSTANCE_REGISTRY_RELATIVE_PATH = ".remudero/daemon-instances.yaml";
+/** W1-T3732 — the instance registry's BASENAME. Its directory comes from
+ *  `resolveRepoLayout(root).stateDir`, never an inline state-directory literal: `repo-layout.test.ts`
+ *  ratchets how many non-test src files assume the house layout inline, and one more would be one
+ *  more place a repo that overrides its layout silently reads the wrong file.
+ *  `recycle-container.sh` resolves the SAME path from its own `${SCRIPT_DIR%/deploy}`, so the
+ *  script and its only automated caller cannot disagree about which registry is in force. */
+export const DAEMON_INSTANCE_REGISTRY_BASENAME = "daemon-instances.yaml";
+
+/** The registry on a given deploy checkout, resolved through the house layout. */
+export function daemonInstanceRegistryPath(installPath: string): string {
+  return join(resolveRepoLayout(installPath).stateDir, DAEMON_INSTANCE_REGISTRY_BASENAME);
+}
 
 /**
  * W1-T3732 — each declared instance mapped to the `state_dir` the registry records for it.
@@ -1284,10 +1293,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     o.instance ??
     (() => {
       try {
-        return instanceForStateRoot(
-          readFileSync(join(o.installPath, DAEMON_INSTANCE_REGISTRY_RELATIVE_PATH), "utf8"),
-          o.stateRoot,
-        );
+        return instanceForStateRoot(readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8"), o.stateRoot);
       } catch {
         return undefined;
       }
