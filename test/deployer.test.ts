@@ -726,7 +726,9 @@ test("running-sha trigger: a daemon that has JUST restarted onto the CURRENT sha
   const cur = "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682";
   const d = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: cur, originMain: cur, runningHead: cur });
   assert.equal(d.deploy, false, "a current daemon must never be restarted — the supervisor runs every 120s");
-  assert.match(d.reason, /up-to-date/);
+  // W1-T3694: daemonAlive is omitted here (undefined) — liveness was never observed, so the
+  // reason must say so rather than claim "up-to-date" over an unmeasured quantity.
+  assert.match(d.reason, /liveness not observed/);
 
   // SHORT-vs-FULL sha: a format mismatch would read as stale and loop forever.
   const shortSide = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: cur, originMain: cur, runningHead: cur.slice(0, 12) });
