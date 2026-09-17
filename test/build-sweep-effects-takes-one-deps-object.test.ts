@@ -6,48 +6,14 @@ import test from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, SWEEP_EFFECT_SURFACE } from "../src/lib/sweep.js";
 import { buildSweepEffects, defaultSweepGhRun, fixCommand, type BuildSweepEffectsDeps } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
-const EFFECT_KEYS = [
-  "arm",
-  "close",
-  "dispatchFix",
-  // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
-  // spent and the caller has wired it (see planCappedRepair, classify.ts).
-  "dispatchPlanOnlyRepair",
-  "escalate",
-  "readLiveState",
-  "terminalFixStandDown",
-  "readRedBaseRefreshFacts",
-  "depReview",
-  "postReview",
-  "repushAbsent",
-  "updateBranch",
-  "captureRepairFeedback",
-  "disarmAutoMerge",
-  "requeueCheck",
-  "escalateCancelledCheck",
-  "escalateInfrastructureCheck",
-  "readCiGateRollup",
-  "reaggregateCiGate",
-  "readMainTip",
-  "readMainRepair",
-  "readStaleRedWorkflowRuns",
-  "runStaleRedLocalRoute",
-  "releaseStaleRed",
-  "releaseBaseCausedStandDown",
-  "selectAdaptiveReviewWidth",
-  // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
-  // position is free — it is listed last because it is the newest, not because order matters.
-  "repairMissingTaskTrailer",
-  "rebaseDirtyFleetBranch",
-  // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
-  // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
-  // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
-  "reviewerCodeStaleThisPass",
-] as const;
+// W1-T3654: the recorded member list used to be transcribed here as a local `EFFECT_KEYS`
+// constant, separately from the one `test/sweep-orchestration-lives-in-lib.test.ts` carried. Both
+// suites now read `SWEEP_EFFECT_SURFACE` from `src/lib/sweep.ts` — see that export's own doc for
+// the incident (#5725) this closes.
 
 test("buildSweepEffects takes one typed deps object and returns the sweep effects surface", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-build-sweep-effects-deps-"));
@@ -78,7 +44,7 @@ test("buildSweepEffects takes one typed deps object and returns the sweep effect
 
     const effects = buildSweepEffects(deps);
 
-    assert.deepEqual(Object.keys(effects).sort(), [...EFFECT_KEYS].sort());
+    assert.deepEqual(Object.keys(effects).sort(), [...SWEEP_EFFECT_SURFACE].sort());
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
