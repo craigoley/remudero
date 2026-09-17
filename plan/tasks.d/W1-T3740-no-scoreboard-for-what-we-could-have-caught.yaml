@@ -1,0 +1,94 @@
+- id: W1-T3740
+  title: "THE FLEET LEARNS FROM CI FAILURES WITHOUT EVER ASKING WHICH ONES IT COULD HAVE CAUGHT AT HOME — join the failure corpus against the parity registry and the retro gets a scoreboard that only falls when the local mirror actually grows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    OPERATOR REPORT 2026-09-17: "it doesn't seem like our regular process is working well to review
+    prs, find what blocked and fixed them, and improve the automation and flow from those findings."
+
+    (1) THE LEARNING LOOP PRODUCES KNOWLEDGE, AND KNOWLEDGE IS THE ONE THING THAT CANNOT LAND.
+        W1-T2959/W1-T3542's ci-learning rung mints drafts from repaired CI failures into
+        `learnings/*.yaml`. Its own description records why it may not name CLAUDE.md: "spawnWorker
+        passes settingSources: [] and no dispatched worker reads it." So the loop's output reaches
+        an operator and a reviewer, and never the builder that will repeat the failure.
+
+    (2) NOTHING MEASURES THE GAP THE LOOP EXISTS TO CLOSE. MEASURED over one session: of roughly
+        thirty CI refusals worked through, about TWENTY were answerable by a local command in
+        seconds — `comment-load-signal` (4), `check-proof --base` (10), `lint-plan --base`,
+        `task-id-existence --base`, the censuses. Each cost a full CI round instead; a code pull
+        request's cycle measured 20.3 min. That ratio is the only number that says whether any of
+        this is working, and nothing computes it.
+
+    (3) BOTH HALVES OF THE JOIN ALREADY EXIST. `src/lib/ci-failure-corpus.ts` holds the failures,
+        deduped per sha. `ci-parity`'s registry maps every one of the 42 pull-request workflow jobs
+        to `mirrored` or `excluded-with-reason`, and `FAST_GATE_STEPS` names which of those the
+        29-second default tier runs. Joining a refusal's JOB NAME against that registry answers
+        "could this have been caught at home" mechanically, with no judgement and no model.
+
+    (4) IT TURNS EVERY FINDING INTO A QUESTION WITH A MECHANICAL ANSWER. Today a finding becomes
+        prose, a ratchet, or a rule — and this session measured all three failing to shorten the
+        loop. The join forces a different question per refusal: WHICH TIER CATCHES THIS NEXT TIME?
+        A refusal whose job is mirrored-but-not-in-the-default is a tier promotion. One that is
+        excluded-with-reason is a decision to revisit. One that is mirrored and in the default was
+        a builder who did not run preflight, which is a different problem with a different fix.
+
+    (5) AND IT MAKES THE SCOREBOARD UNGAMEABLE IN THE RIGHT DIRECTION. The count only falls when a
+        gate moves INTO the local mirror or a failure class stops happening. It cannot be lowered
+        by writing a better comment, which is precisely the move this repo has been making and
+        which has not worked.
+  design: |
+    (i) A JOIN, NOT A JUDGEMENT. Each refusal's job name is looked up in the parity registry and
+        classified into exactly one of: `in-default-tier`, `mirrored-not-default`,
+        `excluded-with-reason`, `unmirrored`, `unknown-job`. No model, no heuristic, no
+        per-refusal opinion — the registry already made every one of these calls.
+
+    (ii) `unknown-job` IS A REAL OUTCOME AND MUST NOT COLLAPSE INTO `unmirrored`. A job the
+         registry does not name is a DRIFT signal — `ci-parity:drift` exists to refuse exactly
+         that — and reporting it as "not mirrored" would silently absorb the drift into the
+         backlog it is supposed to flag.
+
+    (iii) REPORT, DO NOT GATE. This is a measurement, and a measurement that can refuse a pull
+          request acquires an incentive to be wrong. It prints, and it writes its counts where a
+          retro reads them; nothing fails because the number moved.
+
+    (iv) THE NUMBER THAT MATTERS IS `in-default-tier` + `mirrored-not-default`, because that is the
+         count of refusals the fleet ALREADY had the ability to catch at home and did not. Named
+         explicitly in the output so it cannot be diluted by reporting a total.
+
+    NOT IN SCOPE: acting on the classification — promoting a gate into the default tier is a
+    judgement with a wall-clock cost (W1-T3737 measured 29s for twenty checks and 556s for the next
+    tier), and it stays an operator's call on this task's own numbers.
+  acceptance:
+    - claim: "a refusal whose job the default tier already runs is counted as one the fleet could have caught at home"
+      proof: "unit test: a default-tier job counts as locally catchable"
+    - claim: "a refusal whose job is mirrored but outside the default tier is counted separately, because the remedy is a tier promotion rather than a new check"
+      proof: "unit test: a mirrored job outside the default is counted apart"
+    - claim: "a job the parity registry does not name is reported as unknown rather than as unmirrored, so registry drift is not absorbed into the backlog"
+      proof: "unit test: an unregistered job reports unknown, never unmirrored"
+    - claim: "the report names the count of refusals that were already catchable at home, rather than only a total"
+      proof: "unit test: the report names the already-catchable count"
+  falsifier: |
+    Collapse `unknown-job` into `unmirrored` and the third assertion goes red — that is the
+    tempting simplification, and it turns a drift signal into a backlog entry nobody will look at.
+    Report only a total and the fourth goes red: a total falls when CI gets quieter for any reason,
+    while the already-catchable count falls only when the mirror grows. Classify by a heuristic on
+    the job name rather than by registry lookup and the second goes red, because
+    `mirrored-not-default` and `in-default-tier` are indistinguishable from a name. Make it gate a
+    pull request and the measurement acquires a reason to be wrong; no assertion catches that, so
+    it is stated in the design instead.
+  risk: medium
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3737, W1-T2959, W1-T3542]
+  files: [src/lib/ci-failure-corpus.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3738-40-the-cycle
+
+    THIS IS THE CYCLE'S OWN SCOREBOARD. W1-T3738 and W1-T3739 each close one class; this task is
+    what says whether closing them worked, and what the next class is. Filed together deliberately.
