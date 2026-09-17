@@ -3604,7 +3604,7 @@ export interface CancelledRunCheckOutcome {
  *  the PARENT workflow run says `cancelled`. Read alone, a killed job is indistinguishable from a
  *  genuine one (MEASURED 2026-09-16: #5737/#5739 head-identity-gate and coverage-ratchet, each a
  *  real-sounding "failure" that was purely an artifact of cancellation — this function's own
- *  rationale, plan/tasks.d/W1-T3652-*.yaml).
+ *  rationale, the plan's own W1-T3652 task record).
  *
  *  `checkConclusion` is judged EXACTLY as {@link REQUIRED_CHECK_FAIL} judges it today; the only
  *  change is that a failing conclusion is DOWNGRADED when `parentRunConclusion` is the literal
