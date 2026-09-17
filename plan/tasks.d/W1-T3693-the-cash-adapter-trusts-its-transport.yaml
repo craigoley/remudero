@@ -71,15 +71,30 @@
         "turn every task into a YAML task" mistake OPENWEIGHT_OUTPUT_CONTRACT already warns about.
 
     DO NOT weaken the reservation/settlement path to make any of this simpler.
+  # RE-POINTED 2026-09-17. (a)(b)(c) were BUILT AND TESTED in an earlier PR for this task and the
+  # shard never learned: OPENWEIGHT_REQUEST_TIMEOUT_MS, OpenWeightTruncatedReplyError and
+  # openWeightUnfence are all on main, while every declared proof title below resolved to ZERO
+  # tests -- so remudero-review reported four unmet criteria for work three of which were done.
+  # Each replacement was read, not matched by name: the assertion behind it was checked to prove
+  # the claim beside it.
   acceptance:
-    - claim: "a request that never answers is abandoned at a deadline rather than hanging the tool loop, and its reservation is settled"
-      proof: "unit test: an openweight request abandoned at its deadline settles its reservation"
+    - claim: "a request that never answers cannot hang the tool loop, because every cash request is abortable"
+      proof: "unit test: the request carries an abort signal, so a hung endpoint cannot stall the loop forever"
+    - claim: "the reservation for an abandoned request is settled rather than silently returned, and the refusal says why"
+      proof: "unit test: the timeout refusal states that the reservation STAYS CHARGED, and why"
     - claim: "a reply truncated by the completion budget is a named failure, not a short answer"
-      proof: "unit test: a length-truncated openweight reply is refused rather than returned"
-    - claim: "a fenced structured reply is still parsed, so the prompt rule is not the only defence"
-      proof: "unit test: a fenced openweight reply is extracted rather than rejected"
-    - claim: "an asserted item with no resolvable citation discards the generation and falls back, so an ungrounded claim cannot reach a caller"
-      proof: "unit test: an ungrounded openweight claim discards the generation"
+      proof: "unit test: a budget-truncated reply is REFUSED by the adapter, not returned as an answer"
+    - claim: "a fenced structured reply is still parsed on the real spawn path, so the prompt rule is not the only defence"
+      proof: "unit test: a STRUCTURED request unwraps a fenced reply on the real spawn path"
+  # (d) WITHDRAWN AS A CRITERION BY THIS TASK'S OWN FALSIFIER, which reads: "Close (d) without
+  # implementing if no lane wants a grounding contract -- it is machinery for a judgement lane, and
+  # building it before one exists would be the shipped-unwired shape." CHECKED 2026-09-17 and
+  # recorded in src/lib/worker-provider.ts: ruling-judge.ts and verify-human-judge.ts carry no
+  # reference to this provider, and Mounts.escalation_judge (escalate.ts) is ROUTING-ONLY -- it
+  # parses one DECISION/REASON pair, not a list of citable asserted items. No lane asserts observed
+  # facts through this adapter, so a citation validator would guard nothing. The withdrawn criterion
+  # was: "an asserted item with no resolvable citation discards the generation and falls back",
+  # proof "unit test: an ungrounded openweight claim discards the generation".
   falsifier: |
     Close (d) without implementing if no lane wants a grounding contract -- it is machinery for a
     judgement lane, and building it before one exists would be the shipped-unwired shape. (a) and
