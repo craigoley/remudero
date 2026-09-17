@@ -14,6 +14,15 @@
   status: queued
   attempts: 0
   rationale: |
+    PROOFS REPOINTED 2026-09-17 (the work is unchanged; #5887 passes 21/21). A `unit test:` proof
+    is matched as a LITERAL SUBSTRING of a real test title, and four of these five were
+    PARAPHRASES of the titles #5887 ships -- "dispatches one repair lane, not another attempt"
+    against "dispatches exactly one repair lane, never an escalation"; "carries the refusal verdict
+    verbatim" against "carries the linter's own refusal verdict TEXT verbatim"; and so on. Each
+    resolved to ZERO tests, so `rmd review` returned FAIL -- "unmet: a task refused by the
+    pre-dispatch linter dispatches a repair lane instead of being re-attempted" -- against a branch
+    whose own suite is green. Claims unchanged; only the strings addressing the tests moved. Each
+    new proof verified to match exactly one title on #5887's head.
     OPERATOR, 2026-09-16: "if rmd doesn't like how those tasks are structured, why didn't it create
     a worker to recon and restructure them? That is a good automation fix."
 
@@ -57,13 +66,13 @@
     progress and starts a fresh count.
   acceptance:
     - claim: "a task refused by the pre-dispatch linter dispatches a repair lane instead of being re-attempted on the next tick"
-      proof: "unit test: a refused task dispatches one repair lane, not another attempt"
+      proof: "unit test: a first refusal dispatches exactly one repair lane"
     - claim: "the repair lane receives the linter's own verdict text, so it repairs the stated defect rather than guessing"
-      proof: "unit test: the repair lane carries the refusal verdict verbatim"
+      proof: "unit test: the repair lane carries the linter's own refusal verdict text verbatim"
     - claim: "a second refusal carrying the same verdict escalates to the operator rather than starting a second repair"
-      proof: "unit test: an unchanged verdict escalates rather than re-reconning"
+      proof: "unit test: a second refusal carrying the SAME verdict escalates"
     - claim: "a task whose verdict changes counts as progress and is not treated as a repeat"
-      proof: "unit test: a changed verdict is progress, not a repeat"
+      proof: "unit test: a changed verdict is treated as progress"
     - claim: "the repair is reached from the dispatch path that prints the refusal today, not only from its own tests"
       proof: "grep: repairRefusedTask( in src/run-task.ts"
   falsifier: |
