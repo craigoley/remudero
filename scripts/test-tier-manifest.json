@@ -242,6 +242,7 @@
     "test/a-title-proof-that-passes-on-an-empty-base-is-refused.test.ts": 0,
     "test/a-tool-bound-resolves-per-provider.test.ts": 0,
     "test/a-top-tier-seat-survives-a-maxed-subscription.test.ts": 0,
+    "test/a-trailer-pr-is-judged-against-the-task-it-credits.test.ts": 0,
     "test/a-union-read-of-an-unretained-step-is-refused.test.ts": 0,
     "test/a-unit-test-proof-that-resolves-to-no-test-is-refused.test.ts": 0,
     "test/a-verdict-class-is-not-a-failure-class-until-its-members-are-joined-to-merge-state.test.ts": 1115,
