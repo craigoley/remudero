@@ -445,24 +445,26 @@
     Treat a step NAME as a claim, not evidence — check what the function that
     wrote it can actually return. `armAutoMerge` returns one of seven outcomes
     and never throws; five arm nothing, yet five Architect lanes logged
-    `automerge.armed` unconditionally. Measured over the unioned ledger: 176
-    rows; 135 blind, 17 provably false, 119 undecidable (overlapping categories)
-    — the blind rows recorded no `head_sha`, so they can never be adjudicated.
-    And the lanes are not equally gated, the obvious reading is backwards: `grep
-    -n 'return attemptArm' src/run-task.ts` prints them side by side.
-    `triageCommand` arms only after `waitForCiGreen` returns green, and
-    `armAutoMerge` then reads `priorReviewVerdictFromLedger` and gates on
-    `decideArmFromLedgerVerdict` — TWO gates; it never branches on
-    `reviewCommand`'s exit code. `armAutoMergeAtOpen` is `return
-    attemptArm(prUrl, deps);` — no verdict gate and no ci gate — and the
-    implement lane calls it at PR-open, before any review. So implementation
-    PRs, which change source, self-merge earlier and with fewer checks than
-    triage PRs, which only add plan text (operator ruling on W1-T489:
-    documented, not changed). The unattended rate is real now that W1-T469 fires
-    the rung on `partition.serialized.length > 0` rather than idleness, bounded
-    by `autoTriage.maxPerDay`/`minIntervalMinutes` (`plan/policy.yaml`). Cost
-    per run is a QUERY, not a number to carry — re-derive it over the ledger
-    union rather than quoting `src/lib/auto-triage.ts`'s figure.
+    `automerge.armed` unconditionally. The lanes are not equally gated, and the
+    obvious reading is backwards: `grep -n 'return attemptArm' src/run-task.ts`
+    prints them side by side.
+  evidence: >-
+    MEASURED over the unioned ledger: 176 rows; 135 blind, 17 provably false,
+    119 undecidable (overlapping categories) — the blind rows recorded no
+    `head_sha`, so they can never be adjudicated. `triageCommand` arms only
+    after `waitForCiGreen` returns green, and `armAutoMerge` then reads
+    `priorReviewVerdictFromLedger` and gates on `decideArmFromLedgerVerdict` —
+    TWO gates; it never branches on `reviewCommand`'s exit code.
+    `armAutoMergeAtOpen` is `return attemptArm(prUrl, deps);` — no verdict gate
+    and no ci gate — and the implement lane calls it at PR-open, before any
+    review. So implementation PRs, which change source, self-merge earlier and
+    with fewer checks than triage PRs, which only add plan text (operator ruling
+    on W1-T489: documented, not changed). The unattended rate is real now that
+    W1-T469 fires the rung on `partition.serialized.length > 0` rather than
+    idleness, bounded by `autoTriage.maxPerDay`/`minIntervalMinutes`
+    (`plan/policy.yaml`). Cost per run is a QUERY, not a number to carry —
+    re-derive it over the ledger union rather than quoting
+    `src/lib/auto-triage.ts`'s figure.
   src: '#981; the lane-asymmetry half W1-T489, 2026-08-14; migrated from
     CLAUDE.md''s Ledger-and-evidence-discipline section, W1-T2507'
   cited: "2026-08-31"
