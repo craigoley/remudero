@@ -50,3 +50,22 @@ export function neutralizeFenceMarkers(text: string): string {
  * the rung, not just the injection.
  */
 export const FIX_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+
+/**
+ * W1-T3727: the fix rung's surface when a NON-SUBSCRIPTION provider runs it.
+ *
+ * SHELL-LESS, AND THE RUNG SURVIVES IT. `FIX_WORKER_TOOLS`'s own doc gives two reasons Bash is in
+ * the set: "git commit/push per the fix contract's footer, and running the project's own
+ * test/build commands". `RunCheck` covers the second (unit_test, typecheck, read-only git), and
+ * the HARNESS already performs the first half of the first -- this rung's caller pushes through
+ * `deps.push`/`gitPushRunBranch`, never the worker. Only the COMMIT was the worker's, and
+ * `harnessCommitForShellLessWorker` already does that for the implement lane.
+ *
+ * MEASURED 2026-09-17, the first live squeeze: with claude weekly at 100% and codex unreadable,
+ * this rung logged `fix rung: strike 1/2 REFUSED -- spawn infrastructure blocked` on every attempt,
+ * because `cashCanServeToolSurface` refuses any bound naming Bash. Automated repair of red pull
+ * requests was dead for the whole window, which is the work a squeeze most needs.
+ *
+ * NOT A NARROWING OF THE CLAUDE LANE: `FIX_WORKER_TOOLS` is unchanged and still what Claude gets.
+ */
+export const FIX_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];

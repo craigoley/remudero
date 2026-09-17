@@ -1714,7 +1714,7 @@ import {
   sweepStaleWorkerHomes,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
-import { FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
+import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
   checkCliFreshness,
@@ -9554,8 +9554,14 @@ export async function runFixRung(opts: {
             constraint: opts.constraint,
           };
     const fixMode = deriveFixMode(evidence);
+    // W1-T3727: WHO HOLDS THIS ROUND'S GIT, decided once and read by BOTH the prompt and the
+    // tool bound, so the contract a worker was given and the surface it is handed cannot disagree.
+    // The caller already pushes (`deps.push`/`gitPushRunBranch`); only the commit moves.
+    const fixHarnessOwnsGit = opts.config.workerProviders?.harnessCommitsFix === true;
+    const fixCashTools = fixHarnessOwnsGit ? [...FIX_CASH_TOOLS] : undefined;
     const prompt = [
       renderFixPrompt({
+        harnessCommits: fixHarnessOwnsGit,
         task: opts.task,
         round: attempt,
         branch: opts.branch,
@@ -9604,6 +9610,10 @@ export async function runFixRung(opts: {
       // prompt-injection payload riding in that log can't reach the
       // network via WebFetch/WebSearch.
       tools: FIX_WORKER_TOOLS,
+      // W1-T3727: the surface a BLOCKED auction would divert this round to. Offered only when the
+      // prompt above already said the harness commits — otherwise a retry hands a shell-less
+      // worker a contract asking for `git push`.
+      ...(fixCashTools === undefined ? {} : { cashTools: fixCashTools }),
       // W1-T2261: the attribution markers `reclaimAbandonedWorker` later matches an abandoned
       // spawn's live process against (worker.ts's `workerMarkerEnv` merges these into the
       // child's env as REMUDERO_RUN_ID/REMUDERO_TASK_ID). Omitting them — the defect this
@@ -9662,6 +9672,26 @@ export async function runFixRung(opts: {
     }
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
+
+    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, and it must happen HERE — before
+    // `readRoundCommits` below, which is what decides whether this round produced anything and
+    // what the existing `deps.push` then carries. A cash worker cannot have committed (it has no
+    // git), so the count it starts from is 0 by construction rather than by measurement.
+    //
+    // The helper is the implement lane's, reused rather than re-spelled: it owns its own
+    // precondition (`!harnessOwnsGit || commitCount !== 0` returns untouched), so a Claude round
+    // passes through it unchanged and keeps committing for itself exactly as before.
+    if (fixHarnessOwnsGit) {
+      harnessCommitForShellLessWorker({
+        harnessOwnsGit: true,
+        commitCount: 0,
+        report: workerTranscript(fixResult),
+        worktreePath: opts.worktreePath,
+        declaredPaths: opts.task.files ?? [],
+        log: deps.log,
+        say: deps.say,
+      });
+    }
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
