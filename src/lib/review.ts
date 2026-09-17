@@ -7360,8 +7360,11 @@ export function inverseScopeAdvisorySection(advisories: readonly UnwiredAdvisory
     `**Untouched declared scope (advisory — does not affect remudero-review's verdict)**\n\n` +
     `The task declares ${paths.length === 1 ? "a file" : "files"} this diff never touched. That is ` +
     `not by itself a fault — a \`files:\` list written ahead of the work, or work split across more ` +
-    `than one PR, looks identical here. It is flagged so the gap is visible at the gate rather than ` +
-    `only in the ledger, and never blocks:\n\n` +
+    `than one PR, looks identical here. It is not free, though: Rule 19's subsystem tally ` +
+    `(\`subsystemsOf\`) reads the task's declared \`files:\`, not the diff, so a phantom path here ` +
+    `can supply the extra concern that forces a \`risk:\` band this diff never actually earned. It ` +
+    `is flagged so the gap is visible at the gate rather than only in the ledger, and never ` +
+    `blocks:\n\n` +
     `${paths.map((p) => `- \`${p}\``).join("\n")}\n\n` +
     `If the remaining ${paths.length === 1 ? "path lands" : "paths land"} in a later PR, no action is ` +
     `needed. If the declaration was wrong, narrow the task's \`files:\` — this is where a scope that ` +
