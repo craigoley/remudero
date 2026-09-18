@@ -66,3 +66,4 @@
     shard is filed in a plan-only PR; declaring that record alongside the source/test scope would
     trip rule15-filing and make the record's review structurally unmergeable. W1-T384 establishes
     this exact declaration pattern for an implementation task.
+    reservation hand-off: main -> plan/W1-T3763-1789753690256
