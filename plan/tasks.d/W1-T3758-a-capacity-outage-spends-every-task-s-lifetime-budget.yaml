@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 25.00
-  files: [src/lib/status.ts, src/run-task.ts]
+  files: [src/lib/status.ts, src/run-task.ts, src/lib/ledger-union.ts]
   origin: oper#squeeze-session-2026-09-18
   plan_refs: ["W1-T2423", "W1-T3523", "W1-T271"]
   status: queued
@@ -78,3 +78,12 @@
 
     Minted on `main` from the operator checkout; recorded here because the filing branch is not
     that ref.
+
+    Scope amendment, 2026-09-18: the live corpus now has 354 rotations. The existing audited
+    synchronous union reached all of them in 4.0 s but added 605 MiB RSS even for W1-T3718's
+    207 matching rows; it is unsafe on a daemon admission path. The existing stream took 9.1 s
+    and 54 MiB but deliberately hides unread archives, so it cannot establish a retrospective
+    exclusion safely. This task therefore also owns an audited, bounded-memory streaming union
+    read. It must never subtract a capacity refusal from a partial history; if an archive is
+    unreadable, the existing live-only lifetime decision remains unchanged. It is not permission
+    to use a best-effort partial history to clear a cap.
