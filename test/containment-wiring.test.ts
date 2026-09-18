@@ -11,6 +11,7 @@ import type { spawnWorker } from "../src/lib/worker.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import { ProviderCapacityBlockedError } from "../src/lib/worker-provider.js";
 import { IsolationError } from "../src/lib/isolation.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
@@ -128,7 +129,7 @@ test("BEHAVIORAL: a dropped containment probe drives the REAL runTask to a block
 });
 
 test("BEHAVIORAL: a blocked subscription containment probe establishes the cash boundary, then refuses if the cash isolation proof cannot complete", async () => {
-  const root = mkdtempSync(join(tmpdir(), "runtask-cash-containment-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-cash-containment-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
   let boundaryCalls = 0;
