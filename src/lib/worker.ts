@@ -1227,7 +1227,19 @@ export function harnessOwnsGitFor(tools: readonly string[] | undefined): boolean
 }
 
 export function cashCanServeToolSurface(tools: readonly string[] | undefined): boolean {
-  if (tools === undefined || tools.length === 0) return false;
+  // AN EMPTY BOUND IS NOT AN ABSENT ONE. `tools: []` is a DELIBERATE declaration carried by every
+  // pure-judge rung here — `RISK_JUDGE_TOOLS` (lib/risk-judge.ts) is literally `[]`, and both
+  // feedback judges say why inline: "everything it needs is in the prompt — no exploration". Such
+  // a spawn asks for NO capability, so there is nothing for the check-runner to be unable to
+  // implement, and `every(...)` over an empty list is vacuously true — the correct answer, never
+  // reached while this shared the `undefined` early return.
+  //
+  // MEASURED 2026-09-17, retro's promotion judge under a squeeze: cash_fallback_refused "not
+  // implementable by cash ()" — the empty parenthesis is the bug rendering itself.
+  //
+  // `undefined` STILL REFUSES for its own stated reason: it inherits the UNRESTRICTED surface,
+  // which includes Bash. Absent is not empty.
+  if (tools === undefined) return false;
   return tools.every((tool) => OPENWEIGHT_FUNCTIONS[tool] !== undefined);
 }
 
