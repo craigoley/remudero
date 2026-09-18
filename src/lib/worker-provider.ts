@@ -1928,8 +1928,13 @@ export async function spawnCodexWorker(
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
  * config field and never enters a worker environment or a ledger row. */
 export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
-/** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
-export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
+/**
+ * PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the
+ * live probe. The live cash union then recorded 54 replies truncated at the 5,000-token ceiling
+ * (53 inbox drafts and one review). 8,000 is a bounded increase, not a removal: this exact value
+ * still limits both context admission and the maximum cash reservation for every request.
+ */
+export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 8_000;
 /**
  * PRIMARY CONTROL (W1-T1266): the wall-clock bound on ONE cash request. Nothing else bounds a hung
  * one -- before this the `fetch` carried no `signal` at all, so a stalled Azure request held the
