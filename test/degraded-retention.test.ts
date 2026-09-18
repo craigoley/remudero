@@ -141,9 +141,20 @@ test("dual membership DOWNGRADES protection — the measured reason not to use a
   // windows it anyway. That is deliberate for daemon.boot, but it means any prefix rule added later
   // silently reduces whatever DECISION step it catches. Asserted against the real rotation so the
   // hazard is demonstrated rather than described.
+  //
+  // W1-T3755 EXEMPTS EXACTLY ONE daemon.boot — the NEWEST — so the running head outlives the health
+  // window and `readLatestBootSha` stops returning `undefined` on a healthy daemon. The hazard this
+  // test pins is untouched for every other row, so the fixture now carries a newer boot and asserts
+  // on the OLD one. Both halves are asserted deliberately: if the exemption ever widened from one
+  // ROW to the whole STEP, the first assertion below would go green and this test would stop
+  // demonstrating anything.
   const old = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+  const newer = new Date(NOW.getTime() - 30 * 60 * 1000).toISOString();
+  const OLD_BOOT_SHA = "0000000000000000000000000000000000000000";
+  const NEW_BOOT_SHA = "1111111111111111111111111111111111111111";
   const { ledgerPath, dir } = ledgerWith([
-    line("daemon.boot", old),
+    line("daemon.boot", old, { head_sha: OLD_BOOT_SHA }),
+    line("daemon.boot", newer, { head_sha: NEW_BOOT_SHA }),
     line("run.start", old),
     ...Array.from({ length: 40 }, (_, i) => line("daemon.idle", new Date(NOW.getTime() - i * 1000).toISOString())),
   ]);
@@ -152,9 +163,10 @@ test("dual membership DOWNGRADES protection — the measured reason not to use a
     const after = readFileSync(ledgerPath, "utf8");
     assert.ok(after.includes('"step":"run.start"'), "DECISION-only: kept unconditionally");
     assert.ok(
-      !after.includes('"step":"daemon.boot"'),
+      !after.includes(OLD_BOOT_SHA),
       "DECISION + health match: windowed and shed — this is why a prefix rule is not a safe generalisation",
     );
+    assert.ok(after.includes(NEW_BOOT_SHA), "the newest boot row is the one exemption (W1-T3755)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

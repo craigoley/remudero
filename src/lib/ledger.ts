@@ -1119,9 +1119,39 @@ function rotateLedgerLocked(
   // ── PASS 2: recency-window bound — health and render steps are heartbeats, not one-shot
   // decisions, so only lines inside their own window are retained; that stops a restart storm's
   // boot spam bloating the core. A line with no parseable `ts` is kept, never guessed away. ────
+  // W1-T3755 — EXACTLY ONE BOOT ROW OUTLIVES THE HEALTH WINDOW, AND IT IS THE NEWEST.
+  //
+  // MEASURED 2026-09-18: a daemon booted at 00:49 and was still running at 06:00, but its
+  // `daemon.boot` row — the only record of the sha that process booted on — was gone. Present in
+  // the 00:52 and 01:52 rotation snapshots, absent from 04:28, zero in the live ledger. So
+  // `readLatestBootSha` (deployer.ts) returned `undefined`, the deployer could not rule out mount
+  // staleness, and the board reported STALE against a sha the running process had never booted on
+  // while prescribing `rmd deploy` — which skips on the same missing record.
+  //
+  // THE WINDOW WAS SIZED FOR A DIFFERENT CONSUMER. Its comment says so: comfortably larger than
+  // `assessBootHealth`'s window (45s). `readLatestBootSha`'s need is not a health window at all —
+  // it lasts as long as the PROCESS. HEALTH_STEP_RETENTION_WINDOW_MS is not the seam for that, and
+  // widening it would re-couple two consumers whose needs have nothing to do with each other; the
+  // next one with a longer need would break the same way, silently.
+  //
+  // WHY EXACTLY ONE, AND WHY THE NEWEST. PASS 2 exists to stop "a restart storm's boot spam
+  // bloating the core" (its own comment, directly below). Exempting every `daemon.boot` would
+  // restore precisely that bloat — the one way this fix could be worse than the bug it repairs —
+  // so a storm still collapses to a single line. The NEWEST because any older one names a process
+  // that has since been replaced, which is a wrong answer rather than a missing one.
+  //
+  // In one line: exactly one boot row outlives the health window, every older one ages out as
+  // before, and HEALTH_STEP_RETENTION_WINDOW_MS is not the seam this repair touches.
+  const newestBootLine = candidates.reduce<ParsedLedgerLine | undefined>(
+    (best, p) =>
+      p.step === "daemon.boot" && p.tsMs !== undefined && (best?.tsMs === undefined || p.tsMs > best.tsMs) ? p : best,
+    undefined,
+  );
+
   candidates = candidates.filter((p) => {
     if (!p.step) return true;
     if (isModelAttributionStep(p.step)) return true;
+    if (newestBootLine !== undefined && p === newestBootLine) return true;
     const isHealth = isHealthOrDeployStep(p.step);
     const isRender = isRenderRelevantStep(p.step);
     if (!isHealth && !isRender) return true;
