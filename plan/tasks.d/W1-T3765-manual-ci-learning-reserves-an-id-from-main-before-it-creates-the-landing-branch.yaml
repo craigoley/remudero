@@ -1,0 +1,38 @@
+- id: W1-T3765
+  title: "MANUAL CI-LEARNING RESERVES ITS TASK ID FROM `main` BEFORE IT CREATES THE CI-LEARNING LANDING BRANCH — the reservation correctly refuses an unmatchable main holder, the command catches it as best effort, and a successful manual run silently stages zero durable shards"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 8.00
+  files: [src/run-task.ts, test/ci-learning-safe-landing.test.ts]
+  origin: oper#squeeze-session-2026-09-18
+  plan_refs: ["W1-T3542", "W1-T1055"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at cd33f6fcd1ad689d4e627a9f64e8e3c3132d349f on 2026-09-18. The exact
+    W1-T3542 control runs `ciLearningCommand(["--force"])` on a checkout whose branch is main.
+    It returns success but leaves zero files in `state/ci-learning-pending`.
+
+    The causal chain is direct. `ciLearningCommand` at `src/run-task.ts:19228` creates its minter
+    with `ciLearningTaskIdMinter(checkoutRoot)`. That minter constructs `gitRemoteRefReserver`,
+    whose `filingBranch()` reads the current checkout branch. `reserveTaskIdRemote` at
+    `src/lib/task-id-reservation.ts:735` correctly refuses `main`: a reservation anchored to main
+    cannot match the later filing branch. The command catches that refusal as a best-effort landing
+    failure, so the operator receives exit 0 and the draft is never staged.
+
+    The landing destination is already deterministic: `CI_LEARNING_LANDING_BRANCH`. Reserve with
+    that actual future filing branch as the anchor identity, while retaining the existing remote
+    atomic reservation, collision advance, and fail-closed transport behavior. Do not weaken the
+    general prohibition on reservations made from main.
+  acceptance:
+    - claim: "a manual forced CI-learning run from main stages its exact durable shard and reaches the dedicated landing branch"
+      proof: "unit test: W1-T3542 criterion 1: manual ci-learning uses the isolated landing queue too"
+  note: |
+    reservation hand-off: chore/amend-W1-T3758-streaming-union -> plan/file-W1-T3765-ci-learning-landing-reservation
+
+    Falsifier: retain the current-branch minter at the manual call site. The W1-T3542 control must
+    again observe no pending shard because reservation from main is refused before staging.
