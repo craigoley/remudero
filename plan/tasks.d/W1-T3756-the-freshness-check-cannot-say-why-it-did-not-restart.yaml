@@ -9,7 +9,7 @@
   budget_usd: 25.00
   files: [src/lib/self-sync.ts, src/lib/daemon.ts]
   origin: oper#squeeze-session-2026-09-18
-  plan_refs: ["W1-T2964", "W1-T2965", "W1-T3245"]
+  plan_refs: ["W1-T2964", "W1-T2965", "W1-T3245", "W1-T3755"]
   status: queued
   attempts: 0
   rationale: |
@@ -64,6 +64,15 @@
           fail silent: an unreadable freshness check that persists across N consecutive ticks is
           itself a reason to restart, because a process that cannot tell whether its code is
           current is in exactly the state the restart exists to end.
+
+    SIBLING, NOT A DUPLICATE — W1-T3755 (#5974), filed independently by the fleet the same night.
+    That one is about the fleet REPORTING staleness wrongly: `readLatestBootSha` returns undefined,
+    so `rmd status` prints a STALE line that is false and `deploy.skip` says the running head is
+    "not recorded". This one is about the daemon DECIDING not to restart and leaving no record of
+    why. They are the two halves of one blindness — nothing can say what code the daemon is
+    running, and the daemon cannot say why it kept running it — and they are worth fixing together
+    even though neither subsumes the other. Whoever takes the second should read the first's
+    evidence: an unrecorded boot sha is a candidate input to this silence, not obviously unrelated.
 
     DO NOT "FIX" THIS BY MAKING EVERY NON-ASSESSED READING RESTART. That reopens W1-T936's relaunch
     storm, which the current shape exists to prevent. The bound belongs on REPEATED unreadability,
