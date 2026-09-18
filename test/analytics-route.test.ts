@@ -10,6 +10,7 @@ import {
   ANALYTICS_COLLECTION_STARTED_AT,
   ANALYTICS_SCOPE_NOTE,
   buildAnalyticsRoute,
+  createAnalyticsSnapshotCache,
   deriveAnalyticsSnapshot,
   deriveAnalyticsSnapshotFromLedger,
   deriveAnalyticsSnapshotFromStream,
@@ -312,6 +313,53 @@ test("W1-T3762 criterion 2: routing telemetry names incomplete joins instead of 
   const bucket = snap.routingTelemetry.buckets[0];
   assert.deepEqual(bucket?.fallbackReasons, []);
   assert.equal(bucket?.terminalResults, 0, "an assignment without a receipt is not reported as a completed call");
+});
+
+test("W1-T3762: routing fallbacks are counted and a populated telemetry snapshot is frozen before cache publication", async () => {
+  const populated = deriveAnalyticsSnapshot(
+    [
+      { step: "run.start", run_id: "R3", type: "implement" },
+      {
+        step: "worker.assignment",
+        run_id: "R3",
+        worker_assignment: {
+          version: 1,
+          id: "assignment-3",
+          selected: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
+          routing: {
+            mode: "multi-provider",
+            selectionPath: "auction",
+            preferenceBypass: { provider: "codex", reason: "higher headroom" },
+          },
+        },
+      },
+      {
+        step: "verdict",
+        run_id: "R3",
+        selection_assignment_id: "assignment-3",
+        success: false,
+        served_model: "gpt-5.6-terra",
+        ts: "2026-09-18T12:00:00.000Z",
+      },
+    ],
+    "2026-09-18T12:05:00.000Z",
+  );
+  assert.deepEqual(populated.routingTelemetry.buckets[0]?.fallbackReasons, [
+    { reason: "provider-preference-bypass", count: 1 },
+    { reason: "provider-served-different-model", count: 1 },
+  ]);
+
+  const cache = createAnalyticsSnapshotCache({
+    stateDir: "/unused",
+    readSnapshot: async () => populated,
+    schedule: () => ({ unref() {}, cancel() {} }),
+  });
+  await cache.refresh();
+  const published = cache.current();
+  const bucket = published.routingTelemetry.buckets[0]!;
+  assert.ok(Object.isFrozen(bucket.fallbackReasons[0]), "fallback rows are immutable after publication");
+  assert.ok(Object.isFrozen(bucket.fallbackReasons), "fallback list is immutable after publication");
+  assert.ok(Object.isFrozen(bucket), "routing bucket is immutable after publication");
 });
 
 test("deriveAnalyticsSnapshot: question 3 — run.start-to-verdict join per run_id, no-terminal counted explicitly, never dropped", () => {
