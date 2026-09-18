@@ -1237,8 +1237,12 @@ function acknowledgeMergedCiLearningShards(stateRoot: string, shardRelDir: strin
 export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
   /** Daemon state root; staged shards live under `state/ci-learning-pending`, never the checkout. */
   stateRoot: string;
-  /** THE RESERVATION PATH (task-id-reservation.ts), never `max(id)+1`. */
-  mintTaskId: () => string;
+  /**
+   * THE RESERVATION PATH (task-id-reservation.ts), never `max(id)+1`. The landing identity
+   * supplies the branch it will actually push, so a command started on `main` never creates an
+   * unmatchable holder claim for its isolated landing PR.
+   */
+  mintTaskId: (filingBranch: string) => string;
   /** Every `origin:` the plan ALREADY holds. */
   planOrigins: readonly string[];
   /** Render one draft as the shard's YAML bytes. INJECTED rather than imported from
@@ -1259,6 +1263,7 @@ export function landCiLearningShards(
   deps: LandCiLearningShardsOptions,
 ): CiLearningFilingResult {
   const git = deps.git ?? defaultGit(checkoutRoot);
+  const kind = ciLearningLandingKind(checkoutRoot, deps, git);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
   const held = new Set([...deps.planOrigins, ...ciLearningPendingOrigins(deps.stateRoot, checkoutRoot)]);
   const skipped: string[] = [];
@@ -1276,7 +1281,7 @@ export function landCiLearningShards(
       skipped.push(draft.findingId);
       continue;
     }
-    const taskId = deps.mintTaskId();
+    const taskId = deps.mintTaskId(kind.branch);
     const content = deps.renderShard(draft, taskId);
     const verdict = deps.recordVerdict(content, `ci-learning:${taskId}`);
     if (!verdict.ok) {
@@ -1293,7 +1298,7 @@ export function landCiLearningShards(
   const inputs = readPendingCiLearningInputs(deps.stateRoot, shardRelDir);
   if (inputs.length === 0) return { filed: [], skipped, refused };
 
-  const landing = landContent(checkoutRoot, ciLearningLandingKind(checkoutRoot, deps, git), inputs, deps);
+  const landing = landContent(checkoutRoot, kind, inputs, deps);
   try {
     acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git);
   } catch {

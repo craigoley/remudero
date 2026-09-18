@@ -19265,11 +19265,17 @@ export function ciLearningPlanOrigins(root: string): string[] {
 /** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
  *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
  *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
-export function ciLearningTaskIdMinter(root: string): () => string {
-  return () => {
+export function ciLearningTaskIdMinter(root: string): (filingBranch?: string) => string {
+  return (filingBranch) => {
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
     const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
-    const held = reserveTaskIdRemote(mint.n, gitRemoteRefReserver({ run: gitRunAdapter(runGit) }));
+    // The bridge supplies its actual landing identity, even when this manual command starts from
+    // main. Reserving under the checkout's source branch would create a holder claim its true
+    // landing branch cannot satisfy.
+    const held = reserveTaskIdRemote(
+      mint.n,
+      gitRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch }),
+    );
     return held.taskId;
   };
 }
@@ -27946,7 +27952,7 @@ export function buildCiLearningCadenceRunner(deps: {
   landShards?: typeof landCiLearningShards;
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
-  mintTaskId?: () => string;
+  mintTaskId?: (filingBranch?: string) => string;
   recordFire?: (root: string, at: Date) => void;
   releaseFire?: (root: string) => void;
   windowDays?: number;
