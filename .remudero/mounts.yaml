@@ -149,6 +149,14 @@ capabilities:
   # (terra), never a cross-band promotion (W1-T2842 forbids promoting beyond a band without
   # measured task outcomes).
   #
+  # W1-T3762: Luna now LEADS eligible Codex balanced rows, with Terra retained as the immediate
+  # same-capability fallback and the existing terminal telemetry as the rollback signal. This is
+  # a subscription-capacity policy experiment, not a claim that the non-cash subscription has a
+  # per-request dollar price: the aggregate exposes assignment, receipt, success, tokens and
+  # duration before this ordering is reconsidered. Frontier remains Sol-first; no frontier work
+  # is silently demoted by a balanced-row edit. Cash rows remain independently measured by their
+  # own per-task price and context evidence below.
+  #
   # EVERY ECONOMY ROW IS LEFT EXACTLY AS W1-T2842 RULED. Spark leading economy/low and /high is
   # harmless precisely because the eligibility filter drops a model that is not account-visible
   # with no edit here, so those rows already resolve to Luna today and will resolve to Spark again,
@@ -161,9 +169,9 @@ capabilities:
       medium: [gpt-5.6-luna, gpt-5.3-codex-spark, gpt-5.4-mini]
       high:   [gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
     balanced:
-      low:    [gpt-5.6-terra, gpt-5.4, gpt-5.5]
-      medium: [gpt-5.6-terra, gpt-5.4, gpt-5.5]
-      high:   [gpt-5.6-terra, gpt-5.4, gpt-5.5]
+      low:    [gpt-5.6-luna, gpt-5.6-terra, gpt-5.5]
+      medium: [gpt-5.6-luna, gpt-5.6-terra, gpt-5.5]
+      high:   [gpt-5.6-luna, gpt-5.6-terra, gpt-5.5]
     frontier:
       low:    [gpt-5.6-sol, gpt-5.5]
       medium: [gpt-5.6-sol, gpt-5.5]
