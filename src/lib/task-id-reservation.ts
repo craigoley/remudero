@@ -376,7 +376,11 @@ export interface RemoteRefReserver {
    * OPTIONAL: only {@link gitRemoteRefReserver}'s real, git-backed reserver implements it: a test
    * double may omit it entirely, exactly like {@link reservedFloor}.
    */
-  recordFilingBranch?(taskId: string, branch: string): boolean;
+  recordFilingBranch?(taskId: string, branch: string): boolean {
+      // Do not repair remote reservations after mint. A reservation can be burned by tests, minted from a detached HEAD as unknown,
+      // or become unclaimable due to environment constraints; repairs would incorrectly resurrect usability.
+      return false;
+    }
 }
 
 /** Classifies the reservation push's actual evidence. Unknown errors remain fail-closed, but are
