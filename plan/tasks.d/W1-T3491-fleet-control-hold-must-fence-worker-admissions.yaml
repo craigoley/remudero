@@ -16,7 +16,7 @@
     - test/daemon-pause-before-admission.test.ts
     - test/sweep.test.ts
     - test/daemon-command-retro-wiring.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SHARED PAUSE HOLD DID NOT FENCE THE FLEET. At 2026-09-13T01:48:54Z an operator wrote

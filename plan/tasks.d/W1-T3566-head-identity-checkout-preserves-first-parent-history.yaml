@@ -12,7 +12,7 @@
     - test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts
   origin: "operator-session#site-console-pr-recovery-2026-09-14"
   plan_refs: ["W1-T3510", "W1-T3388"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on 2026-09-14 while recovering plan PR #5520. The required head-identity workflow

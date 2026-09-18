@@ -14,7 +14,7 @@
     - test/review-engine-revision-rearm.test.ts
   origin: "operator-session#4970-conflict-resolution-2026-09-10"
   plan_refs: ["W1-T3272"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10, by accident, while judging two competing fixes to the same expiry bomb.

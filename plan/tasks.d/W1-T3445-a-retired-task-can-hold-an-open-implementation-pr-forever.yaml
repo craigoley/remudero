@@ -15,7 +15,7 @@
     - scripts/test-tier-manifest.json
   origin: "operator-session#rmd-must-resolve-retired-prs-2026-09-12"
   plan_refs: ["W1-T1287", "W1-T2794", "W1-T3331", "W1-T3422"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main c94456b9 on 2026-09-12, then rechecked after main advanced to

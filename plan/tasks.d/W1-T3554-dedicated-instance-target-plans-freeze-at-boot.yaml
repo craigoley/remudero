@@ -84,5 +84,5 @@
   origin: "feedback#fb-1789349833277-20ca42"
   plan_refs: ["W1-T1062", "W1-T403", "W1-T340", "W1-T978"]
   files: [src/run-task.ts, test/dedicated-target-plan-freshness.test.ts]
-  status: queued
+  status: merged
   attempts: 0

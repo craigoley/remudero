@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/run-review-evidence-target.test.ts]
   origin: "feedback#fb-1789312874382-b6f4b1"
   plan_refs: ["W1-T3525", "W1-T1062"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     `runReview` (src/run-task.ts:4985) already receives `owner` and `repo` in its own args

@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/a-proof-can-name-an-extensionless-file.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3388"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #5740, 2026-09-16. That PR's subject was hooks/pre-push, and its acceptance could

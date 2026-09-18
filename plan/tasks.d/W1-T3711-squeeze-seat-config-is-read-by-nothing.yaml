@@ -13,7 +13,7 @@
     - src/run-task.ts
   origin: "operator-session#squeeze-readiness-2026-09-16"
   plan_refs: ["W1-T3692", "W1-T3705", "W1-T3696"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED ON origin/main 2026-09-16, after #5793 merged the seat work:

@@ -11,7 +11,7 @@
   files: [src/lib/sweep.ts, test/build-sweep-effects-takes-one-deps-object.test.ts, test/sweep-orchestration-lives-in-lib.test.ts, test/one-effect-surface-has-one-recorded-list.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T2890", "W1-T3618"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #5725, 2026-09-16. It added one member, `reviewerCodeStaleThisPass`, to the sweep

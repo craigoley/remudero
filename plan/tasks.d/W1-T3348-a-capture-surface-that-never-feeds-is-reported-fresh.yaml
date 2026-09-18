@@ -11,7 +11,7 @@
   files: [src/lib/doctor.ts, test/a-capture-surface-that-never-feeds-is-refused.test.ts, test/doctor.test.ts]
   origin: "oper#operator-feedback-loop-does-not-close-2026-09-10"
   plan_refs: ["W1-T436", "W1-T1273", "W1-T3236"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10 on the daemon host over the ledger union (919 archives + the live file,

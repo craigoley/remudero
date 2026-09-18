@@ -11,7 +11,7 @@
   files: [src/lib/disk-artifact-reclaim.ts, src/lib/daemon.ts, src/run-task.ts, test/disk-artifact-reclaim-refuses-a-live-or-dirty-target.test.ts]
   origin: "operator-session#azure-disk-2026-09-13"
   plan_refs: ["W1-T1082", "W1-T3378", "W1-T175", "W1-T2507"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED by hand on the Azure fleet host 2026-09-13, which was at 3.6GiB free / 88% and had

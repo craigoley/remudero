@@ -10,7 +10,7 @@
   files: [src/lib/worker.ts, src/run-task.ts, test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts]
   origin: oper#squeeze-readiness-audit-2026-09-17
   plan_refs: ["W1-T3696", "W1-T3726", "W1-T3692"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3726 gave recon and diagnose a divert surface and DELIBERATELY STOPPED THERE. The two

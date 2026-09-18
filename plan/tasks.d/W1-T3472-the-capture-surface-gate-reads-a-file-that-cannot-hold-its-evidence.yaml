@@ -10,7 +10,7 @@
   origin: "operator-session#capture-gate-cannot-fire-2026-09-13"
   plan_refs: ["W1-T3348", "W1-T1273"]
   files: [src/run-task.ts, src/lib/doctor.ts, test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A GATE THAT CANNOT REACH ITS OWN THRESHOLD IS NOT A GATE. `judgeCaptureSurfaceLiveness`

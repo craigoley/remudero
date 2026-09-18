@@ -16,7 +16,7 @@
     - test/a-tool-bound-resolves-per-provider.test.ts
   origin: oper#subscription-offload-2026-09-16
   plan_refs: ["W1-T3617", "W1-T3616", "W1-T3572", "W1-T3569"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CAPABILITY IS ON MAIN AND NOTHING USES IT. `OPENWEIGHT_CHECKS` ships five entries --

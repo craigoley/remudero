@@ -15,7 +15,7 @@
     - test/branch-reaper-landing-family.test.ts
   origin: architect
   plan_refs: ["W1-T530", "W1-T191", "W1-T447", "W1-T3532", "W1-T3554", "§7B"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ AT THIS COMMIT, NOT INFERRED.

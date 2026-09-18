@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/lib/review.ts, src/lib/arm-auto-merge.ts, test/draft-pr-merge-hold.test.ts]
   origin: "feedback#fb-1789331541509-6463e8"
   plan_refs: ["W1-T528", "W1-T1000002", "W1-T93"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED FROM SOURCE IN THIS WORKTREE, NOT ASSUMED. `src/lib/sweep.ts`'s `DISPOSITION_RULES`

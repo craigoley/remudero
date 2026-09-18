@@ -13,7 +13,7 @@
     - src/lib/daemon.ts
   origin: "operator-session#the-board-could-not-clear-2026-09-16"
   plan_refs: ["W1-T490", "W1-T1021"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: |

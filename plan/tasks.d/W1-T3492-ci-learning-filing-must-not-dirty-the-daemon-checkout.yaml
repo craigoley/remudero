@@ -14,7 +14,7 @@
     - src/run-task.ts
     - test/ci-learning-safe-landing.test.ts
     - test/the-scheduled-learning-rung-drafts-and-discards.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE DAEMON STOPPED ADVANCING BECAUSE ITS OWN CI-LEARNING RUNG DIRTIED THE CHECKOUT

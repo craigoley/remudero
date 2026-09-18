@@ -14,7 +14,7 @@
     - test/feedback-record-monotonic.test.ts
   origin: architect
   plan_refs: ["W1-T3559", "W1-T3560", "W1-T2278", "W1-T530", "W1-T191", "§7B"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (1) MEASURED AND REPORTED, feedback#fb-1789304804534-e29e68 (2026-09-13): PR #5382 merged

@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh, test/recycle-container-bash3-portability.test.ts]
   origin: "operator-session#pr-automation-and-daemon-recon-2026-09-14"
   plan_refs: ["W1-T2234", "W1-T2555", "W1-T2588", "W1-T2598", "W1-T3200"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE macOS worker host, 2026-09-14, by a full `npm run --silent test:fast` run:

@@ -12,7 +12,7 @@
   files: [src/lib/skill-workshop.ts, src/lib/inbox.ts, src/run-task.ts, test/skill-lifecycle.test.ts, test/skill-workshop.test.ts]
   origin: "operator-session#skill-workshop-next-lifecycle-2026-09-11"
   plan_refs: ["W1-T110", "W1-T111", "W1-T241", "W1-T2766", "W1-T3101", "W1-T3379", "W1-T3385c"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main baae0218. The workshop already mines two-or-more-run procedures,

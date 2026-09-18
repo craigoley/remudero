@@ -10,7 +10,7 @@
   origin: "issue#5325"
   plan_refs: ["W1-T2748", "W1-T2750", "W1-T2840", "W1-T2859"]
   files: [src/lib/worker-provider.ts, test/worker-provider.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE AUTOMATED DAEMON CRASHED, NOT THE CONTAINER. At 2026-09-13T01:45Z, its Node process

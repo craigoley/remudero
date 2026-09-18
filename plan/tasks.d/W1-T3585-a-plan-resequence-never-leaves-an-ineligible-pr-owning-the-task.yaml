@@ -15,7 +15,7 @@
     - test/plan-resequence-pr-invalidation-wiring.test.ts
   origin: "operator-session#pr-5545-plan-resequence-reconciliation-2026-09-14"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T3219", "W1-T3558", "W1-T3570"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on PR #5545 / W1-T3558 (2026-09-14). The worker started at

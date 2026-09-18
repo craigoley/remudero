@@ -11,7 +11,7 @@
   files: [src/lib/inbox.ts, test/a-draft-failure-names-which-marker-was-missing.test.ts, test/session-limit-is-a-refusal-not-a-success.test.ts]
   origin: "oper#operator-feedback-loop-does-not-close-2026-09-10"
   plan_refs: ["W1-T2564", "W1-T3094", "W1-T436"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10 over the ledger union (919 archives + live file). `inbox.draft_error` reads

@@ -11,7 +11,7 @@
   files: [.remudero/mounts.yaml, src/lib/worker-provider.ts, test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts]
   origin: "operator-session#openweight-model-economics-2026-09-15"
   plan_refs: ["W1-T3546", "W1-T3567", "W1-T3569", "W1-T3570", "W1-T3575", "W1-T3597"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RESEARCHED 2026-09-15 against published Azure pricing, and read against this repo's own

@@ -93,7 +93,7 @@
   origin: human
   plan_refs: [W1-T2810, W1-T2646, W1-T3099]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3737-the-mirror-nobody-runs

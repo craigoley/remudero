@@ -12,7 +12,7 @@
   files: [src/lib/dispatch-value.ts, src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/dispatch-value.test.ts, test/drain.test.ts]
   origin: "operator-session#w1-t3075-ratified-2026-09-11"
   plan_refs: ["W1-T3075", "W1-T3074", "W1-T476", "W1-T12a", "W1-T143", "W1-T147", "W1-T148", "W1-T151", "W1-T160", "W1-T172", "P48"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main baae0218. `dispatchOrder` -> `compareDispatch` (`src/lib/drain.ts`)

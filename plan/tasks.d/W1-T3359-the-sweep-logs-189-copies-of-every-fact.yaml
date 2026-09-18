@@ -11,7 +11,7 @@
   files: [src/lib/sweep.ts, src/lib/ledger.ts, test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts]
   origin: "operator-session#fleet-oom-2026-09-10"
   plan_refs: ["W1-T3352", "W1-T3335", "W1-T503"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED ON THE LIVE FLEET CORPUS 2026-09-10T23:30Z, after compaction:

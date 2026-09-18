@@ -13,7 +13,7 @@
     - test/a-stale-gate-cannot-publish-a-verdict.test.ts
   origin: "operator-session#stale-gate-2026-09-10"
   plan_refs: ["W1-T3312", "W1-T2813", "W1-T2630", "W1-T2964"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CLEANEST POSSIBLE EVIDENCE: THE SAME HEAD SHA, TWICE, WITH OPPOSITE VERDICTS AND NO CODE

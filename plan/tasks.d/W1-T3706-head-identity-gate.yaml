@@ -14,7 +14,7 @@
     - test/a-non-code-head-is-identified-by-its-diff.test.ts
   origin: "operator-session#the-third-incident-on-one-allowlist-2026-09-16"
   plan_refs: ["W1-T3388", "W1-T1004", "W1-T3680"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |
