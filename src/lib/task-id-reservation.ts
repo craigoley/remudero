@@ -349,9 +349,19 @@ export interface RemoteRefReserver {
   /** A payload unique to THIS writer. Two writers must never produce the same value, or a
    *  shared-anchor remote (which treats a matching push as a no-op success) stops locking. */
   mintAnchor(): string;
+  /** The branch that will file this reservation, when the reserver can determine one. `main`
+   *  cannot ever be that filer, so {@link reserveTaskIdRemote} refuses before it writes a claim
+   *  that a later branch could never match. */
+  filingBranch?(): string;
   /** Create-if-absent of {@link taskIdReservationRef}. Never throws — an unreachable remote is an
    *  OUTCOME, because a thrown error at this seam reads identically to contention at the caller. */
   attempt(taskId: string, anchor: string): RemoteReserveOutcome;
+  /**
+   * Reclaims a taken reservation only when its parsed holder is provably unfileable or its named
+   * branch no longer exists. A successful repair advances the existing ref to a child commit;
+   * it never deletes or replaces the original claim. An extant foreign branch stays `taken`.
+   */
+  reclaim?(taskId: string): RemoteReserveOutcome;
   /** Stderr from the latest failed attempt, retained so a refusal can name the evidence. */
   lastAttemptStderr?(): string | undefined;
   /** OPTIONAL, an optimisation only: the lowest id above every reservation this remote already
@@ -408,6 +418,7 @@ export interface ReservationHolderLine {
   host?: string;
   startedAt?: string;
   source?: string;
+  takenOverFrom?: string;
 }
 
 export type ParsedReservationHolderLine =
@@ -443,6 +454,7 @@ export function formatReservationHolderLine(holder: ReservationHolderLine): stri
   if (holder.host !== undefined) parts.push(`host=${holderValue(holder.host)}`);
   if (holder.startedAt !== undefined) parts.push(`started_at=${holderValue(holder.startedAt)}`);
   if (holder.source !== undefined) parts.push(`source=${holderValue(holder.source)}`);
+  if (holder.takenOverFrom !== undefined) parts.push(`taken_over_from=${holderValue(holder.takenOverFrom)}`);
   return `rmd-id holder ${parts.join(" ")}`;
 }
 
@@ -484,8 +496,48 @@ export function parseReservationHolderLine(message: string): ParsedReservationHo
       host: values.get("host"),
       startedAt: values.get("started_at"),
       source: values.get("source"),
+      takenOverFrom: values.get("taken_over_from"),
     },
   };
+}
+
+/** The one condition behind repairable reservations. `unreadable` is deliberately separate from
+ * `unattributable`: the latter is an explicit `unknown` or `main` holder, while the former lacks
+ * enough evidence to take over safely. */
+export type ReservationHolderDrift = "reclaimable" | "held" | "unattributable" | "unreadable";
+
+/** Whether the remote could prove the named holder branch is still present. */
+export type ReservationHolderBranchPresence = "present" | "absent" | "unreadable";
+
+export function reservationHolderDrift(
+  parsed: ParsedReservationHolderLine,
+  branchPresence: ReservationHolderBranchPresence,
+): ReservationHolderDrift {
+  if (parsed.status === "known") {
+    if (parsed.holder.branch === "main") return "unattributable";
+    if (branchPresence === "present") return "held";
+    if (branchPresence === "absent") return "reclaimable";
+    return "unreadable";
+  }
+  if (parsed.status === "unreadable" && parsed.reason === "missing branch") return "unattributable";
+  return "unreadable";
+}
+
+type RemoteHolderBranchRead = { presence: ReservationHolderBranchPresence; reason?: string };
+
+function remoteHolderBranchPresence(
+  branch: string,
+  run: RemoteReserveDeps["run"],
+): RemoteHolderBranchRead {
+  let result: { status: number; stdout: string; stderr: string };
+  try {
+    result = run(["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`]);
+  } catch (error) {
+    return { presence: "unreadable", reason: `holder branch read threw: ${String(error)}` };
+  }
+  if (result.status === 0 && result.stdout.trim()) return { presence: "present" };
+  if (result.status === 2) return { presence: "absent" };
+  return { presence: "unreadable", reason: result.stderr || `holder branch read exited ${result.status}` };
 }
 
 /** The real reserver: an orphan commit over the empty tree, pushed to the id's own ref. `commit-tree`
@@ -503,6 +555,9 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
   // itself confirmed it holds.
   const wonAnchors = new Map<string, string>();
   return {
+    filingBranch() {
+      return currentBranch(deps.run);
+    },
     lastAttemptStderr() {
       return lastStderr;
     },
@@ -532,6 +587,53 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       }
       lastStderr = res.stderr;
       return classifyReservationPushFailure(res.stderr);
+    },
+    reclaim(taskId) {
+      const filingBranch = currentBranch(deps.run);
+      if (filingBranch === "unknown" || filingBranch === "main") {
+        lastStderr = `cannot reclaim ${taskId} without a filing branch`;
+        return "unknown";
+      }
+      const ref = taskIdReservationRef(taskId);
+      const fetched = deps.run(["fetch", "origin", ref]);
+      if (fetched.status !== 0) {
+        lastStderr = fetched.stderr;
+        return classifyReservationPushFailure(fetched.stderr) === "unreachable" ? "unreachable" : "unknown";
+      }
+      const body = deps.run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
+      if (body.status !== 0 || !body.stdout.trim()) {
+        lastStderr = body.stderr || "reservation holder is unreadable";
+        return "unknown";
+      }
+      const parsed = parseReservationHolderLine(body.stdout);
+      const branchRead = parsed.status === "known"
+        ? remoteHolderBranchPresence(parsed.holder.branch, deps.run)
+        : { presence: "unreadable" as const };
+      const drift = reservationHolderDrift(parsed, branchRead.presence);
+      if (drift === "held") return "taken";
+      if (drift === "unreadable") {
+        lastStderr = branchRead.reason ?? "reservation holder is unreadable; refusing takeover";
+        return "unknown";
+      }
+      const takenOverFrom = parsed.status === "known" ? parsed.holder.branch : "unknown";
+      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
+      const message = formatReservationAnchorMessage({
+        branch: filingBranch,
+        pid: process.pid,
+        host: hostname(),
+        startedAt: reservationNowIso(),
+        source: "reclaimed",
+        takenOverFrom,
+      });
+      const amended = deps.run(["commit-tree", tree, "-p", "FETCH_HEAD", "-m", message]).stdout.trim();
+      const pushed = deps.run(["push", "origin", `${amended}:${ref}`]);
+      if (pushed.status !== 0) {
+        lastStderr = pushed.stderr;
+        return classifyReservationPushFailure(pushed.stderr);
+      }
+      lastStderr = undefined;
+      wonAnchors.set(taskId, amended);
+      return "created";
     },
     recordFilingBranch(taskId, branch) {
       if (!branch || branch === "unknown") return false;
@@ -617,11 +719,18 @@ export function reserveTaskIdRemote(
   // `Math.max` only ever moves the floor UP, and only for the default id family.
   const floor = opts.idFor ? "unknown" : (reserver.reservedFloor?.() ?? "unknown");
   const from = floor === "unknown" ? startId : Math.max(startId, floor);
+  if (reserver.filingBranch?.() === "main") {
+    throw new TaskIdReservationError(
+      "cannot reserve a task id from main — main can never be the filing branch, so this claim would be unmatchable",
+      { taskId: idFor(from), ref: taskIdReservationRef(idFor(from)), outcome: "local" },
+    );
+  }
   const anchor = reserver.mintAnchor();
   let attempts = 0;
   for (let n = from; n < from + maxScan; n++) {
     attempts++;
-    const outcome = reserver.attempt(idFor(n), anchor);
+    let outcome = reserver.attempt(idFor(n), anchor);
+    if (outcome === "taken" && reserver.reclaim) outcome = reserver.reclaim(idFor(n));
     if (outcome === "created") return { id: n, taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), anchor, attempts };
     if (outcome === "unreachable") {
       throw new TaskIdReservationError(
