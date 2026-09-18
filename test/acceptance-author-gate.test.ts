@@ -432,7 +432,7 @@ test("W1-T3414: source-changing and plan-only task controls pass, and unreadable
   );
 });
 
-test("W1-T3734: the CI trailer caller ignores a body divergence that the edit-aware caller still refuses", () => {
+test("the squash-trailer caller emits no body-derived refusal", () => {
   const body = [
     "## Acceptance",
     "",
@@ -471,7 +471,7 @@ test("W1-T3734: the CI trailer caller ignores a body divergence that the edit-aw
   assert.match(ciWorkflow, /acceptance-author-gate\.mjs --commit-trailer-only/, "CI must select only the concern it owns");
 });
 
-test("W1-T3734: the CI trailer caller still refuses a follow-up commit that credits unshipped implementation", () => {
+test("a follow-up commit trailer is still refused by the squash-trailer caller", () => {
   const result = evaluateCommitTrailerGate({
     trailerCommits: [{ sha: "d".repeat(40), subject: "chore: add credit", taskId: IMPLEMENTATION_TASK }],
     changedPaths: ["plan/tasks.d/W1-T3149.yaml"],
@@ -479,6 +479,23 @@ test("W1-T3734: the CI trailer caller still refuses a follow-up commit that cred
   });
   assert.equal(result.ok, false);
   assert.equal(result.defect, "follow-up-implementation-trailer");
+});
+
+test("the body-derived refusals still fire on the edit-aware caller", () => {
+  const body = [
+    "## Acceptance",
+    "",
+    "- claim: a stale body claim",
+    "  proof: grep: stale-body-only in src/lib/example.ts",
+    "",
+    "Remudero-Task: W1-T3734",
+  ].join("\n");
+  const taskAcceptanceForId = (taskId: string) =>
+    taskId === "W1-T3734" ? [{ claim: "the plan is authoritative", proof: "grep: plan-owned-proof in src/lib/example.ts" }] : undefined;
+
+  const verdict = evaluateGate({ body, authorLogin: "a-human", trailerResolves: (id) => id === "W1-T3734", taskAcceptanceForId });
+  assert.equal(verdict.ok, false, "the edit-aware caller remains responsible for body-derived refusals");
+  assert.equal(verdict.defect, "trailer-body-proof-divergence");
 });
 
 test("acceptance gate: a block truncated at a wrapped claim is refused", () => {
