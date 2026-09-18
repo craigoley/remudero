@@ -1016,6 +1016,7 @@ import {
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
+import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "./lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
@@ -1675,6 +1676,7 @@ import {
   implementToolBound,
   resolveDispatchLaneToolBound,
   cashDivertSpawnFields,
+  cashFallbackRefusal,
   resolveClaudeExecutable,
   claudeExecutableCache,
   runAdhocLaneReapRung,
@@ -12209,6 +12211,11 @@ interface RunTaskBodyOptions {
 }
 
 export interface RunTaskContext {
+  /**
+   * Shared with the one real spawn wrapper.  The preflight runs in runTaskBody, while the wrapper
+   * is built in runTask, so a scalar in either scope would silently describe different runs.
+   */
+  cashContainmentState?: { contained: boolean };
   config: Config;
   fetchPrBodyFn: typeof fetchPrBodyViaGh;
   github: GitHub;
@@ -12686,20 +12693,24 @@ async function runTask(
    * real observer, wired at the real spawn path rather than merely available (Standing rule
    * 14) — and polls the quiet floor for exactly the duration this ONE spawn is in flight.
    */
+  // Set only after a blocked subscription containment/isolation probe is replaced by the cash
+  // adapter's structural boundary proof below.  Ordinary runs keep the existing per-spawn auction.
+  const cashContainmentState = { contained: false };
   const spawn: typeof spawnWorker = (spawnArgs) => {
+    const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
     return rawSpawn({
-      ...spawnArgs,
+      ...effectiveSpawnArgs,
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
       // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
-      runId: spawnArgs.runId ?? runId,
-      taskId: spawnArgs.taskId ?? taskId,
+      runId: effectiveSpawnArgs.runId ?? runId,
+      taskId: effectiveSpawnArgs.taskId ?? taskId,
       onSelectionAssignment: (assignment) => {
         log("worker.assignment", { worker_assignment: assignment });
-        spawnArgs.onSelectionAssignment?.(assignment);
+        effectiveSpawnArgs.onSelectionAssignment?.(assignment);
       },
       onSpawnError:
-        spawnArgs.onSpawnError ??
+        effectiveSpawnArgs.onSpawnError ??
         ((err) =>
           log("worker.spawn_error", {
             // The errno IS the finding — everything else is context for it.
@@ -12709,12 +12720,12 @@ async function runTask(
             path: err.path ?? null,
             error: String(err.message ?? err),
           })),
-      streamObserver: spawnArgs.streamObserver ?? workerStateSensor.observer,
+      streamObserver: effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer,
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
-      clockBound: spawnArgs.clockBound ?? { boundMs: workerAbandonMs },
+      clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
     }).finally(stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
@@ -12963,6 +12974,7 @@ async function runTask(
   }
   try {
     const ctx: RunTaskContext = {
+      cashContainmentState,
       config,
       fetchPrBodyFn,
       github,
@@ -13013,6 +13025,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     taskId,
     workerStateSensor,
   } = ctx;
+  // Direct callers of the exported body retain ordinary routing.  Production runTask always
+  // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
+  const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
@@ -13106,6 +13121,28 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
   // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
   const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
+
+  /**
+   * The subscription probes are intentionally shell-backed, so a blocked auction cannot run
+   * them on cash. Cash has a different structural boundary: no shell, a fixed check table, and
+   * a scrubbed environment. Accept it only when every later worker in this run has an explicit
+   * cash equivalent, then pin all later spawns to cash so a recovered subscription cannot inherit
+   * a proof for the wrong execution boundary.
+   */
+  const establishCashContainedRun = (preflight: "containment" | "isolation"): string | undefined => {
+    const refusal = cashContainmentState.contained ? undefined : cashContainedRunRefusal(config, implementCashTools);
+    if (refusal !== undefined) return refusal;
+    const reason = assertOpenWeightToolBoundary(config.root);
+    cashContainmentState.contained = true;
+    log(`${preflight}.probe`, {
+      provider: "cash",
+      method: "structural-adapter-boundary",
+      reason,
+      subscription_probe: "blocked",
+    });
+    say(`${preflight} preflight PASSED on the cash adapter — ${reason}`);
+    return undefined;
+  };
 
   // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count
   // history (see `deriveRunawayTurnBound`'s own doc), read ONCE here rather than re-derived on
@@ -13217,7 +13254,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     });
     costUsd += probe.costUsd; // meter the probe spawn (notional; the ledger has it)
     say(`containment preflight PASSED — ${probe.reason}`);
-  } catch (e) {
+  } catch (caught) {
+    let e: unknown = caught;
+    // A capacity block says the shell-backed probe cannot run, not that containment failed.  The
+    // cash adapter has no shell to probe; establish its separate boundary and pin this run to it.
+    if (e instanceof ProviderCapacityBlockedError && cashContainedRunRefusal(config, implementCashTools) === undefined) {
+      try {
+        establishCashContainedRun("containment");
+        e = undefined;
+      } catch (error) {
+        const detail = String((error as Error)?.message ?? error);
+        log("containment.probe", {
+          provider: "cash",
+          method: "structural-adapter-boundary",
+          reason: "cash_adapter_boundary_unproven",
+          detail,
+        });
+        e = new ContainmentError(
+          `containment preflight: cash adapter boundary could not be proven — ${detail}`,
+          "cash-adapter-boundary",
+          "unproven",
+        );
+      }
+    }
     if (e instanceof ContainmentError) {
       log("verdict", {
         verdict: "blocked_containment",
@@ -13236,7 +13295,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(`verdict: blocked_containment — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
     }
-    throw e;
+    if (e !== undefined) throw e;
   }
 
   // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the
@@ -13248,16 +13307,42 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // (recon/implement) runs. FAIL CLOSED: a nonzero count means isolation is not
   // holding on this host — the run refuses to start.
   try {
-    const isoProbe = await probeIsolation({
-      settingsFile,
-      config,
-      budgetUsd,
-      log: (s, extra) => log(s, extra),
-      exec: opts.isolationExec,
-    });
-    costUsd += isoProbe.costUsd; // meter the probe spawn (notional; the ledger has it)
-    say(`isolation preflight PASSED — ${isoProbe.reason}`);
-  } catch (e) {
+    if (cashContainmentState.contained) {
+      // No shell exists on the cash adapter, so the shell alias/function probe is inapplicable.
+      // Re-run the adapter's executable boundary check rather than treating an absent shell probe
+      // as a successful one.
+      establishCashContainedRun("isolation");
+    } else {
+      const isoProbe = await probeIsolation({
+        settingsFile,
+        config,
+        budgetUsd,
+        log: (s, extra) => log(s, extra),
+        exec: opts.isolationExec,
+      });
+      costUsd += isoProbe.costUsd; // meter the probe spawn (notional; the ledger has it)
+      say(`isolation preflight PASSED — ${isoProbe.reason}`);
+    }
+  } catch (caught) {
+    let e: unknown = caught;
+    if (e instanceof ProviderCapacityBlockedError && cashContainedRunRefusal(config, implementCashTools) === undefined) {
+      try {
+        establishCashContainedRun("isolation");
+        e = undefined;
+      } catch (error) {
+        const detail = String((error as Error)?.message ?? error);
+        log("isolation.probe", {
+          provider: "cash",
+          method: "structural-adapter-boundary",
+          reason: "cash_adapter_boundary_unproven",
+          detail,
+        });
+        e = new IsolationError(
+          `isolation preflight: cash adapter boundary could not be proven — ${detail}`,
+          "unproven",
+        );
+      }
+    }
     if (e instanceof IsolationError) {
       log("verdict", {
         verdict: "blocked_isolation",
@@ -13275,7 +13360,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(`verdict: blocked_isolation — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
     }
-    throw e;
+    if (e !== undefined) throw e;
   }
 
   // ── Clone + worktree.
@@ -14577,6 +14662,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say,
       account,
       reviewerMount,
+      // A run that established the cash adapter as its containment boundary must keep this
+      // reviewer on that same boundary; otherwise a recovered subscription could run after a
+      // cash-only proof. Ordinary runs retain runReview's existing default router.
+      reviewerSpawnWorker: cashContainmentState.contained ? spawn : undefined,
       // W1-T65 (ratifies P15) — HEAD DISCIPLINE: worktreePath IS the PR head here
       // (this run's own worktree, checked out at the branch it just pushed; CI
       // that follows never mutates it). NEVER the operator's working checkout —
@@ -32978,6 +33067,50 @@ export function fixRoundGitOwnership(
 ): { harnessCommits: boolean; cashTools: string[] | undefined } {
   const harnessCommits = config.workerProviders?.harnessCommitsFix === true;
   return { harnessCommits, cashTools: harnessCommits ? [...FIX_CASH_TOOLS] : undefined };
+}
+
+/**
+ * A run may replace its subscription-only containment/isolation preflights with the cash
+ * adapter's structural proof only when EVERY worker it can dispatch afterwards has an explicit,
+ * shell-less cash surface.  Checking just recon would be a false proof: a later unbounded
+ * implement or fix worker could win a recovered subscription auction without the empirical
+ * sandbox evidence that cash mode replaces.
+ */
+export function cashContainedRunRefusal(
+  config: Config,
+  implementCashTools: readonly string[] | undefined,
+): string | undefined {
+  const required: Array<{ lane: string; tools: readonly string[] | undefined }> = [
+    { lane: "recon", tools: cashDivertSpawnFields("recon").cashTools },
+    { lane: "implement", tools: implementCashTools },
+    { lane: "diagnose", tools: cashDivertSpawnFields("diagnose").cashTools },
+    { lane: "review", tools: cashDivertSpawnFields("review").cashTools },
+    { lane: "fix", tools: fixRoundGitOwnership(config).cashTools },
+  ];
+  for (const requirement of required) {
+    const refusal = cashFallbackRefusal(config, requirement.tools);
+    if (refusal !== undefined) return `${requirement.lane}: ${refusal}`;
+  }
+  return undefined;
+}
+
+/**
+ * Once the cash adapter supplied this run's containment proof, later workers must stay on that
+ * adapter.  A later provider auction may observe newly-restored subscription headroom; allowing
+ * it to select Claude/Codex would apply a cash-only proof to a different boundary.  This preserves
+ * the proof's scope without inventing a capacity window or claiming the raised squeeze-day cap.
+ */
+export function forceCashContainedRunSpawn(args: SpawnWorkerArgs, config: Config): SpawnWorkerArgs {
+  const tools = args.cashTools ?? args.tools;
+  const refusal = cashFallbackRefusal(config, tools);
+  if (refusal !== undefined) {
+    throw new Error(`cash-contained run refuses a worker without a cash-equivalent surface: ${refusal}`);
+  }
+  return {
+    ...args,
+    mountProvider: "cash",
+    ...(tools === undefined ? {} : { tools: [...tools] }),
+  };
 }
 
 export function harnessCommitForShellLessWorker(

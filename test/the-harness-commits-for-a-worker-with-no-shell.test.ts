@@ -19,7 +19,8 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -34,7 +35,10 @@ import {
   implementToolBound,
   parseReport,
   spawnWorker,
+  type SpawnWorkerArgs,
 } from "../src/lib/worker.js";
+import type { Config } from "../src/lib/config.js";
+import { assertOpenWeightToolBoundary, runOpenWeightCheck, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
 import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
 import { FIX_WORKER_TOOLS } from "../src/lib/fix-fence.js";
 import {
@@ -42,7 +46,12 @@ import {
   renderImplementPrompt,
   renderImplementPromptWithParts,
 } from "../src/lib/prompt-render.js";
-import { commitWorkerEdits, harnessCommitForShellLessWorker } from "../src/run-task.js";
+import {
+  cashContainedRunRefusal,
+  commitWorkerEdits,
+  forceCashContainedRunSpawn,
+  harnessCommitForShellLessWorker,
+} from "../src/run-task.js";
 // The SHARED builder, not a hand-rolled `git init`: test/fixture-copy-census.test.ts holds the
 // population of files that shell git themselves at a baseline, and one more copy of this fixture
 // is exactly what it exists to refuse.
@@ -391,5 +400,156 @@ test("the declared implement bound drops only what no build lane was ever grante
   //     and gh, all of which are Bash, plus file editing.
   for (const needed of ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]) {
     assert.ok(IMPLEMENT_CLAUDE_TOOLS.includes(needed), `implement must keep ${needed}`);
+  }
+});
+
+function cashContainmentConfig(root: string, harnessCommitsFix = true): Config {
+  return {
+    claudeBin: "/unused/claude",
+    root,
+    dailyCapUsd: 5,
+    workerProviders: {
+      enabled: ["claude", "codex", "cash"],
+      cashFallbackWhenBlocked: true,
+      harnessCommitsImplement: true,
+      harnessCommitsFix,
+      cashEndpoint: "https://example.test/",
+    },
+  } as Config;
+}
+
+test("cash containment recovery proves the adapter boundary and pins every later worker to its declared cash surface", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-containment-"));
+  try {
+    const cfg = cashContainmentConfig(root);
+    assert.equal(cashContainedRunRefusal(cfg, IMPLEMENT_CASH_TOOLS), undefined);
+    let sandboxArgs: readonly string[] | undefined;
+    assert.match(
+      assertOpenWeightToolBoundary(root, {
+        platform: "linux",
+        runSandbox: (argv) => { sandboxArgs = argv; },
+      }),
+      /outside-cwd writes refused/,
+    );
+    assert.ok(sandboxArgs?.includes("--unshare-net"), "the structural proof must require a fresh network namespace");
+    assert.ok(sandboxArgs?.includes("--unshare-user"), "the structural proof must require a fresh user namespace");
+    assert.equal(
+      sandboxArgs?.some((arg, index, all) => arg === "--ro-bind" && all[index + 1] === "/" && all[index + 2] === "/"),
+      false,
+      "the host root must never be readable by model-authored test code",
+    );
+
+    const original: SpawnWorkerArgs = {
+      cwd: root,
+      permissionMode: "bypassPermissions",
+      settingsFile: join(root, "worker.json"),
+      prompt: "make the bounded edit",
+      model: "claude-sonnet",
+      tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash"],
+      cashTools: IMPLEMENT_CASH_TOOLS,
+    };
+    const forced = forceCashContainedRunSpawn(original, cfg);
+    assert.equal(forced.mountProvider, "cash");
+    assert.deepEqual(forced.tools, IMPLEMENT_CASH_TOOLS);
+    assert.equal(forced.cashSqueezed, undefined, "a preflight observation does not claim the raised squeeze-day cap");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cash containment recovery refuses rather than pinning a run whose later fix worker lacks a cash-equivalent surface", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-containment-refusal-"));
+  try {
+    const cfg = cashContainmentConfig(root, false);
+    const refusal = cashContainedRunRefusal(cfg, IMPLEMENT_CASH_TOOLS);
+    assert.match(refusal ?? "", /^fix: /);
+    assert.match(refusal ?? "", /unbounded|not implementable/);
+
+    assert.throws(
+      () => forceCashContainedRunSpawn({
+        cwd: root,
+        permissionMode: "bypassPermissions",
+        settingsFile: join(root, "worker.json"),
+        prompt: "unsafe later worker",
+      }, cashContainmentConfig(root)),
+      /cash-contained run refuses a worker without a cash-equivalent surface/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cash RunCheck reaches the Linux bubblewrap runner and refuses rather than running unsandboxed when it is absent", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-check-runner-"));
+  try {
+    assert.throws(
+      () => runOpenWeightCheck({
+        argv: ["/bin/true"],
+        cwd: root,
+        workerHome: root,
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+        // The macOS test host deliberately lacks bwrap. Making the argv look Linux reaches the
+        // real execFileSync default, which must fail rather than silently running `/bin/true`.
+        platform: "linux",
+      }),
+      /bwrap/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a real fixed-argv cash check cannot inherit the daemon Azure credential", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-check-env-"));
+  const previous = process.env.RMD_OPENWEIGHT_API_KEY;
+  process.env.RMD_OPENWEIGHT_API_KEY = "cash-boundary-daemon-secret";
+  try {
+    const checkDir = join(root, "node_modules", ".bin");
+    mkdirSync(checkDir, { recursive: true });
+    const check = join(checkDir, "tsc");
+    writeFileSync(check, "#!/usr/bin/env node\nprocess.stdout.write(process.env.RMD_OPENWEIGHT_API_KEY ?? 'CASH_KEY_ABSENT')\n");
+    chmodSync(check, 0o755);
+
+    const requests: string[] = [];
+    let turn = 0;
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "run the declared typecheck",
+        tools: ["RunCheck"],
+        maxTurns: 2,
+        env: { RMD_OPENWEIGHT_API_KEY: "cash-boundary-daemon-secret" },
+        // Test-only port: production passes no runner and must use bubblewrap. This exercises a
+        // real child process on macOS, where bubblewrap is deliberately absent.
+        runCheck: ({ argv, cwd, env }) => {
+          const [command, ...rest] = argv;
+          return execFileSync(command!, rest, { cwd, env, encoding: "utf8" });
+        },
+        fetchImpl: async (_input, init) => {
+          requests.push(String(init?.body ?? ""));
+          turn += 1;
+          const message = turn === 1
+            ? { tool_calls: [{ id: "check-1", type: "function", function: { name: "run_check", arguments: JSON.stringify({ check: "typecheck" }) } }] }
+            : { content: "done" };
+          return new Response(JSON.stringify({
+            id: `turn-${turn}`,
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+            choices: [{ message, finish_reason: "stop" }],
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      },
+      cashContainmentConfig(root),
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+
+    assert.equal(result.isError, false);
+    assert.equal(requests.length, 2, "the real check result must return to the model on a second turn");
+    assert.match(requests[1]!, /CASH_KEY_ABSENT/);
+    assert.doesNotMatch(requests[1]!, /cash-boundary-daemon-secret/);
+  } finally {
+    if (previous === undefined) delete process.env.RMD_OPENWEIGHT_API_KEY;
+    else process.env.RMD_OPENWEIGHT_API_KEY = previous;
+    rmSync(root, { recursive: true, force: true });
   }
 });
