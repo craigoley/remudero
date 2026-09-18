@@ -59,6 +59,68 @@ test("adapter: every 'I could not tell' status fails SAFE (no restart) — guard
   assert.equal(daemonFreshnessFromService({ status: "degraded", reason: "git fetch origin failed" }).stale, false);
 });
 
+test("W1-T3756: each not-stale arm names itself", async () => {
+  const docsOnly: ServiceFreshness = {
+    status: "assessed",
+    dirty: false,
+    behind: { oldSha: "c".repeat(40), newSha: "d".repeat(40), changedPaths: ["docs/guide.md"] },
+  };
+  const cases: Array<[ServiceFreshness, Record<string, unknown>]> = [
+    [{ status: "guarded" }, { arm: "unassessed", service_status: "guarded" }],
+    [{ status: "degraded", reason: "fetch failed" }, { arm: "unassessed", service_status: "degraded", detail: "fetch failed" }],
+    [{ ...CLEAN_BEHIND, dirty: true }, { arm: "dirty", old_sha: "a".repeat(40), new_sha: "b".repeat(40) }],
+    [{ status: "assessed", dirty: false, behind: null }, { arm: "up_to_date" }],
+    [docsOnly, { arm: "immaterial", old_sha: "c".repeat(40), new_sha: "d".repeat(40) }],
+  ];
+
+  for (const [service, expectedRow] of cases) {
+    const freshness = daemonFreshnessFromService(service);
+    assert.equal(freshness.stale, false);
+    if (freshness.stale) assert.fail("each fixture must remain on the non-stale path");
+    assert.equal(freshness.notStale?.arm, expectedRow.arm);
+
+    const plan = fixturePlan();
+    const root = mkdtempSync(join(tmpdir(), "daemon-freshness-arm-"));
+    const logs: Array<{ step: string; data: Record<string, unknown> }> = [];
+    let ticks = 0;
+    const summary = await runDaemon(plan, {
+      refreshMerged: () => () => true,
+      runOne: async (id) => okResult(id),
+      sleep: async () => {},
+      log: (step, data = {}) => logs.push({ step, data }),
+      checkFreshness: () => freshness,
+      checkStop: () => (++ticks >= 3 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),
+    });
+    assert.equal(summary.stopReason, "stopped");
+    assert.deepEqual(logs.find((entry) => entry.step === "daemon.freshness_not_stale")?.data, expectedRow);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3756: degraded is not silently a pass", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-freshness-degraded-"));
+  const logs: Array<{ step: string; data: Record<string, unknown> }> = [];
+  let ticks = 0;
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id) => okResult(id),
+    sleep: async () => {},
+    log: (step, data = {}) => logs.push({ step, data }),
+    checkFreshness: () => daemonFreshnessFromService({ status: "degraded", reason: "git fetch origin failed" }),
+    checkStop: () => (++ticks >= 3 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),
+  });
+
+  assert.equal(summary.stopReason, "stopped");
+  const row = logs.find((entry) => entry.step === "daemon.freshness_not_stale");
+  assert.deepEqual(row?.data, {
+    arm: "unassessed",
+    service_status: "degraded",
+    detail: "git fetch origin failed",
+  });
+  rmSync(root, { recursive: true, force: true });
+});
+
 // ── the REMOTE-read proof (a check comparing a checkout to itself is always fresh) ────────────
 
 function gitFixture(): { originDir: string; localDir: string } {
