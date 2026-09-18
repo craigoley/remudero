@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 25.00
-  files: [src/lib/status.ts]
+  files: [src/lib/status.ts, src/run-task.ts]
   origin: oper#squeeze-session-2026-09-18
   plan_refs: ["W1-T2423", "W1-T3523", "W1-T271"]
   status: queued
