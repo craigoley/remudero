@@ -58,6 +58,33 @@ test("W1-T3762 criterion 1: the terminal verdict receipt carries the assignment 
   });
 });
 
+test("W1-T3762: terminal receipt keeps the existing clean post-envelope success rule while rejecting API errors and usage refusals", () => {
+  const base = {
+    model: "gpt-5.6-luna",
+    servedModel: "gpt-5.6-luna",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    costUsd: 0,
+    isError: true,
+    subtype: "success",
+  } as WorkerResult;
+
+  assert.equal(
+    terminalVerdictFields({ ...base, apiError: false }).success,
+    true,
+    "the existing verdict classifier treats a post-envelope non-API iterator error as clean success",
+  );
+  assert.equal(
+    terminalVerdictFields({ ...base, apiError: true }).success,
+    false,
+    "an API error remains an unsuccessful worker call despite its success envelope",
+  );
+  assert.equal(
+    terminalVerdictFields({ ...base, apiError: false, usageRefusal: { matched: "usage limit" } }).success,
+    false,
+    "a usage refusal outranks the envelope subtype",
+  );
+});
+
 // ── falsifier (v), direction 1: the rotation union must equal the single-file aggregate ───────
 
 test("streamed analytics: rows split across the live file and TWO rotation archives aggregate identically to one file", async () => {

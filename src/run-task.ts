@@ -10803,6 +10803,12 @@ export function terminalVerdictFields(r: WorkerResult | null): {
   success?: boolean;
 } {
   if (!r) return { model: null, served_model: null };
+  // A successful result envelope can be followed by an SDK iterator error. The existing terminal
+  // verdict classifier treats that exact `{ isError: true, subtype: "success", apiError: false }`
+  // shape as clean success; routing telemetry must use the same outcome rather than reporting a
+  // completed call as a model failure. API errors and usage refusals remain unsuccessful even when
+  // their envelope subtype says `success`.
+  const success = !r.usageRefusal && (!r.isError || (r.subtype === "success" && !r.apiError));
   return {
     model: r.model,
     served_model: r.servedModel ?? null,
@@ -10811,7 +10817,7 @@ export function terminalVerdictFields(r: WorkerResult | null): {
     tokens: r.tokens,
     ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
     total_cost_usd: r.costUsd,
-    success: !r.isError && !r.usageRefusal,
+    success,
   };
 }
 

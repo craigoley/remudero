@@ -240,6 +240,16 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
         },
       ],
     },
+    routingTelemetry: {
+      version: "routing-v1",
+      evidenceState: "not-collected-in-retained-ledger",
+      assignmentsObserved: 0,
+      terminalResultsObserved: 0,
+      terminalResultsWithoutAssignment: 0,
+      assignmentsWithoutTerminalResult: 0,
+      buckets: [],
+      daily: [],
+    },
   });
   assert.ok(Object.isFrozen(cold), "the process-owned value is immutable");
   await cache.refresh();
