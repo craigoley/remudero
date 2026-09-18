@@ -1,0 +1,74 @@
+- id: W1-T3759
+  title: "A MISSING RUNNING HEAD RENDERS AS A CONFIDENT STALE VERDICT AND A NEXT ACTION THAT CANNOT WORK — the board already has an `unknown` state and does not reach it, so an absent input reads as a precise finding and sends the operator to `rmd deploy`, which skips on the same absence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: "decomposed from W1-T3755 under Rule 19 — that task is the deployer-side record's lifetime; this is what the board must render when the record is absent regardless"
+  plan_refs: [W1-T3755, W1-T3756]
+  files: [src/lib/status-board.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> amend-t3755-scope
+  rationale: |
+    MEASURED 2026-09-18, before a recycle. The daemon had started that morning on a checkout ONE
+    commit behind origin/main and was healthy. The board said:
+
+      daemon : running — boot 8d7h ago (3b8a43554f7f)
+      head vs origin/main : STALE (3b8a43554f7f vs 326f8cda4e90)
+      next action: the daemon is running stale code — `rmd deploy` to fast-forward + restart
+
+    (1) THE `unknown` STATE ALREADY EXISTS AND IS NOT REACHED. `StaleFlag` has three states and
+        `renderLivenessBlock` prints all three — the initialiser is even
+        `{ status: "unknown" }`. But the comparison runs on `boots.headSha` whenever one can be
+        produced, so an input that is merely OLD becomes a confident verdict instead of the third
+        state the type was given for.
+
+    (2) THE VERDICT IS CONVINCING BECAUSE THE SHA IS REAL. `3b8a43554f7f` is a genuine commit —
+        the sha the image was built from. A reader sees two shas and a comparison between them and
+        has no way to tell that the left-hand side is not the running process's head. Measured
+        cost: reading this board twice in one session I twice concluded the fleet was running
+        eight-day-old code. It was not.
+
+    (3) THE PRESCRIBED REMEDY CANNOT CLEAR IT. `rmd deploy` is what the next action names, and the
+        deploy path skips for the very same missing record ("daemon running head not recorded —
+        mount staleness cannot be ruled out"). The operator is sent to the one command guaranteed
+        not to help, which is worse than being told nothing.
+
+    CONFIRMED BY EXPERIMENT. After `recycle-container --instance core`, with a fresh `daemon.boot`
+    row, the same board printed `head vs origin/main : fresh` and NO next action — nothing changed
+    but the age of the input. W1-T3755 is why the input expires; this task is what the board owes a
+    reader when it has expired, which stays true however that one is fixed.
+  design: |
+    (i) UNKNOWN RENDERS AS UNKNOWN. When no running head can be established, `headVsOriginMain` is
+        `{ status: "unknown" }` — never a comparison against a substitute. The renderer already
+        handles it; this is about reaching it.
+
+    (ii) NO NEXT ACTION THAT CANNOT WORK. Under an unknown comparison the board must not name
+         `rmd deploy`. It should name the missing input, so the reader learns what is absent rather
+         than running a command that will skip.
+
+    (iii) THE OTHER TWO STATES ARE UNTOUCHED. `fresh` and `stale` keep today's wording and today's
+          next action byte-for-byte; a real stale install must still read stale and still be given
+          the deploy remedy. This task narrows exactly one case.
+
+    NOT IN SCOPE: the lifetime of the record itself (W1-T3755), and `deriveDaemonBoots`' choice of
+    WHICH boot row to surface. This task is about what happens when that choice yields nothing
+    trustworthy, not about improving the choice.
+  acceptance:
+    - claim: "no establishable running head renders as unknown rather than as a comparison against a substitute sha"
+      proof: "grep: unknown running head in src/lib/status-board.ts"
+    - claim: "an unknown comparison names the missing input instead of prescribing a deploy that would skip"
+      proof: "grep: cannot clear this in src/lib/status-board.ts"
+    - claim: "a genuinely stale install still reads stale and is still given the deploy remedy"
+      proof: "grep: rmd deploy in src/lib/status-board.ts"
+  falsifier: |
+    Suppress the next action for every state and the third assertion goes red — a real stale install
+    must still be told what to do. Render unknown as `fresh` and the first passes while the board
+    now hides a real gap, so the first must assert the UNKNOWN state by name, not merely "not
+    stale". Leave the comparison running on a substitute sha and the first goes red. Keep
+    `rmd deploy` as the unknown-state action and the second goes red.
