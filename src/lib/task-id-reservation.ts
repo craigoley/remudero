@@ -376,11 +376,7 @@ export interface RemoteRefReserver {
    * OPTIONAL: only {@link gitRemoteRefReserver}'s real, git-backed reserver implements it: a test
    * double may omit it entirely, exactly like {@link reservedFloor}.
    */
-  recordFilingBranch?(taskId: string, branch: string): boolean {
-      // Do not repair remote reservations after mint. A reservation can be burned by tests, minted from a detached HEAD as unknown,
-      // or become unclaimable due to environment constraints; repairs would incorrectly resurrect usability.
-      return false;
-    }
+  recordFilingBranch?(taskId: string, branch: string): boolean;
 }
 
 /** Classifies the reservation push's actual evidence. Unknown errors remain fail-closed, but are
@@ -538,21 +534,11 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       return classifyReservationPushFailure(res.stderr);
     },
     recordFilingBranch(taskId, branch) {
-      if (!branch || branch === "unknown") return false; // nothing NEW to record — unknown stays representable
+      if (!branch || branch === "unknown") return false;
       const previousAnchor = wonAnchors.get(taskId);
-      if (!previousAnchor) return false; // never won taskId through THIS reserver — nothing safe to amend
+      if (!previousAnchor) return false;
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const msg = formatReservationAnchorMessage({
-        branch,
-        pid: process.pid,
-        host: hostname(),
-        startedAt: reservationNowIso(),
-        source: "automatic",
-      });
-      // A CHILD of the anchor this instance already holds — `-p previousAnchor` — so the update is
-      // a genuine fast-forward and the push below can stay the SAME plain refspec `attempt` uses
-      // for the very first claim: never `+`, never `--force-with-lease` (see the module-level note
-      // on why either one would silently defeat the CAS this whole scheme rests on).
+      const msg = formatReservationAnchorMessage({ branch, pid: process.pid, host: hostname(), startedAt: reservationNowIso(), source: "automatic" });
       const amended = deps.run(["commit-tree", tree, "-p", previousAnchor, "-m", msg]).stdout.trim();
       const res = deps.run(["push", "origin", `${amended}:${taskIdReservationRef(taskId)}`]);
       if (res.status !== 0) {
