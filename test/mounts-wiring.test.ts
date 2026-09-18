@@ -63,6 +63,19 @@ test("an implement task resolves its max_turns FROM .remudero/mounts.yaml (the f
   assert.equal(typeof hi.effort, "string");
 });
 
+test("W1-T3762 criterion 3: the committed Codex balanced ladder is Luna-first with Terra fallback, while frontier stays Sol-first", () => {
+  const capabilities = loadMounts(mountsPath(repoRoot)).capabilities;
+  assert.ok(capabilities, "the committed provider-neutral capability ladder must load");
+  for (const effort of ["low", "medium", "high"] as const) {
+    assert.deepEqual(
+      capabilities.codex.balanced[effort].slice(0, 2),
+      ["gpt-5.6-luna", "gpt-5.6-terra"],
+      `balanced/${effort} must prefer Luna and retain Terra as its immediate fallback`,
+    );
+    assert.equal(capabilities.codex.frontier[effort][0], "gpt-5.6-sol", `frontier/${effort} must not be silently demoted`);
+  }
+});
+
 // ── W1-T63/P10: reviewer/fix/diagnose are MOUNT-GOVERNED, not hardcoded ─────
 
 test("resolveMount('reviewer'|'fix'|'diagnose', risk) each resolve a real mount whose max_turns >> the old 12", () => {

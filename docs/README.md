@@ -37,6 +37,7 @@ the kind decides how a change lands:
 | [deploy-supervisor.md](deploy-supervisor.md) | hand-written | How the daemon updates itself, and what needs an image rebuild. |
 | [deploy-image-forensics.md](deploy-image-forensics.md) | hand-written | The measured record behind every `deploy/Dockerfile` layer: incidents, rejected alternatives, evidence. |
 | [operator-message-standard.md](operator-message-standard.md) | hand-written | The shape every operator-facing message must take. |
+| [model-routing.md](model-routing.md) | hand-written | Balanced Codex routing policy, ledger attribution, and measurement limits. |
 | [probe.md](probe.md) | hand-written | Mount routing: deterministic task-class → model routing, proven by probe. |
 | [adr/](adr/README.md) | hand-written | Architecture Decision Records for one-way-door changes (and the test for which changes need one). |
 | [audits/](audits/README.md) | fixtures | Dated production-readiness reviews, kept byte-identical; corrections are recorded in the README, never in the fixture. |

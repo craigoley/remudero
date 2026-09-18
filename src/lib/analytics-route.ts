@@ -77,6 +77,52 @@ export interface WorkerDurationLaneBucket {
   avgDurationMs: number;
 }
 
+/**
+ * One bounded model-routing aggregate. `assignments` records the pre-execution policy decision;
+ * terminal counters and measurements stay zero until a durable worker result joins that decision.
+ * This deliberately never exposes prompts, account labels, raw capacity responses, or ledger
+ * excerpts through the analytics route.
+ */
+export interface RoutingTelemetryBucket {
+  provider: string;
+  assignedModel: string;
+  taskType: string;
+  routingRule: string;
+  assignments: number;
+  terminalResults: number;
+  successes: number;
+  failures: number;
+  totalTokens: number;
+  totalDurationMs: number;
+  totalCostUsd: number;
+  fallbackReasons: Array<{ reason: string; count: number }>;
+}
+
+/** One UTC-day point for the operator's token-per-terminal-result efficiency trend. */
+export interface RoutingTelemetryDay {
+  day: string;
+  terminalResults: number;
+  totalTokens: number;
+  totalCostUsd: number;
+}
+
+/**
+ * The routing-v1 aggregate consumes the assignment/terminal evidence that already exists in the
+ * ledger. It intentionally distinguishes an assignment with no terminal receipt from a completed
+ * call, because treating the former as a failed or zero-cost call would manufacture evidence.
+ */
+export interface RoutingTelemetrySnapshot {
+  version: "routing-v1";
+  /** No retained assignment event means the dashboard has no routing sample; it is not a zero. */
+  evidenceState: "observed" | "not-collected-in-retained-ledger";
+  assignmentsObserved: number;
+  terminalResultsObserved: number;
+  terminalResultsWithoutAssignment: number;
+  assignmentsWithoutTerminalResult: number;
+  buckets: RoutingTelemetryBucket[];
+  daily: RoutingTelemetryDay[];
+}
+
 /** `GET /v1/analytics`'s body — the four questions, one field group each. */
 export interface AnalyticsSnapshot {
   /** `null` until this process has completed its first ledger-union refresh. */
@@ -106,6 +152,8 @@ export interface AnalyticsSnapshot {
    *  four questions above — see {@link ConsoleV1Projection}'s doc for the contract-gap this
    *  closes. */
   consoleV1: ConsoleV1Projection;
+  /** Bounded routing policy/receipt attribution for the operator console. */
+  routingTelemetry: RoutingTelemetrySnapshot;
 }
 
 /** A console-v1 metric's provenance, carried explicitly because the console renders it and
@@ -293,6 +341,52 @@ interface AnalyticsAccumulator {
    *  (worker.ts's `workerLedgerFields`) — the SAME lines already discriminated by `model !==
    *  undefined` above, so this adds no new pass over the corpus. */
   tokensTotal: CacheHitTokens & { output: number };
+  routingTelemetry: RoutingTelemetryAccumulator;
+}
+
+type RoutingAssignment = {
+  id: string;
+  provider: string;
+  model: string;
+  taskType: string;
+  routingRule: string;
+  preferenceBypassed: boolean;
+};
+
+/** The minimum terminal receipt needed for aggregation. Raw terminal ledger rows can carry
+ * stderr excerpts, so the streaming accumulator never retains them while waiting for a join. */
+type RoutingTerminalReceipt = {
+  success?: boolean;
+  tokens: number;
+  durationMs: number;
+  costUsd: number;
+  servedModel?: string;
+  capabilityFallback: boolean;
+  day?: string;
+};
+
+type RoutingTelemetryBucketState = Omit<RoutingTelemetryBucket, "fallbackReasons"> & {
+  fallbackReasons: Map<string, number>;
+};
+
+interface RoutingTelemetryAccumulator {
+  taskTypesByRun: Map<string, string>;
+  assignmentsById: Map<string, RoutingAssignment>;
+  terminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
+  pendingTerminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
+  bucketsByKey: Map<string, RoutingTelemetryBucketState>;
+  daysByDay: Map<string, RoutingTelemetryDay>;
+}
+
+function routingTelemetryAccumulator(): RoutingTelemetryAccumulator {
+  return {
+    taskTypesByRun: new Map(),
+    assignmentsById: new Map(),
+    terminalsByAssignmentId: new Map(),
+    pendingTerminalsByAssignmentId: new Map(),
+    bucketsByKey: new Map(),
+    daysByDay: new Map(),
+  };
 }
 
 function analyticsAccumulator(): AnalyticsAccumulator {
@@ -305,11 +399,188 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     workerDurationsByLane: new Map(),
     workerDurationsMeasured: false,
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    routingTelemetry: routingTelemetryAccumulator(),
+  };
+}
+
+function routingBucketFor(
+  acc: RoutingTelemetryAccumulator,
+  assignment: RoutingAssignment,
+): RoutingTelemetryBucketState {
+  const key = [assignment.provider, assignment.model, assignment.taskType, assignment.routingRule].join("\0");
+  const existing = acc.bucketsByKey.get(key);
+  if (existing) return existing;
+  const created: RoutingTelemetryBucketState = {
+    provider: assignment.provider,
+    assignedModel: assignment.model,
+    taskType: assignment.taskType,
+    routingRule: assignment.routingRule,
+    assignments: 0,
+    terminalResults: 0,
+    successes: 0,
+    failures: 0,
+    totalTokens: 0,
+    totalDurationMs: 0,
+    totalCostUsd: 0,
+    fallbackReasons: new Map(),
+  };
+  acc.bucketsByKey.set(key, created);
+  return created;
+}
+
+function tokensOnLine(line: Record<string, unknown>): number {
+  const tokens = line.tokens;
+  if (!tokens || typeof tokens !== "object") return 0;
+  const value = tokens as Record<string, unknown>;
+  return (num(value.input) ?? 0) + (num(value.output) ?? 0) + (num(value.cacheRead) ?? 0) + (num(value.cacheCreation) ?? 0);
+}
+
+function boundedRoutingRule(assignment: Record<string, unknown>): string {
+  const routing = assignment.routing;
+  if (!routing || typeof routing !== "object") return "unreported";
+  const value = routing as Record<string, unknown>;
+  const mode = str(value.mode) ?? "unreported";
+  const selectionPath = str(value.selectionPath);
+  return selectionPath ? `${mode}:${selectionPath}` : mode;
+}
+
+function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Record<string, unknown>): RoutingAssignment | undefined {
+  if (line.step !== "worker.assignment" || !line.worker_assignment || typeof line.worker_assignment !== "object") return undefined;
+  const raw = line.worker_assignment as Record<string, unknown>;
+  const selected = raw.selected;
+  if (!selected || typeof selected !== "object") return undefined;
+  const selection = selected as Record<string, unknown>;
+  const id = str(raw.id);
+  const provider = str(selection.provider);
+  const model = str(selection.model);
+  if (!id || !provider || !model) return undefined;
+  const runId = str(line.run_id);
+  const routing = raw.routing;
+  const preferenceBypassed = Boolean(
+    routing && typeof routing === "object" && (routing as Record<string, unknown>).preferenceBypass,
+  );
+  return {
+    id,
+    provider,
+    model,
+    taskType: (runId && acc.taskTypesByRun.get(runId)) ?? "unknown",
+    routingRule: boundedRoutingRule(raw),
+    preferenceBypassed,
+  };
+}
+
+function routingTerminalReceipt(line: Record<string, unknown>): RoutingTerminalReceipt {
+  const ts = str(line.ts);
+  return {
+    ...(typeof line.success === "boolean" ? { success: line.success } : {}),
+    tokens: tokensOnLine(line),
+    durationMs: num(line.worker_duration_ms) ?? 0,
+    costUsd: num(line.total_cost_usd) ?? 0,
+    ...(str(line.served_model) ? { servedModel: str(line.served_model) } : {}),
+    capabilityFallback: Boolean(line.codex_capability_fallback && typeof line.codex_capability_fallback === "object"),
+    ...(ts && Number.isFinite(Date.parse(ts)) ? { day: new Date(ts).toISOString().slice(0, 10) } : {}),
+  };
+}
+
+function terminalFallbackReasons(assignment: RoutingAssignment, terminal: RoutingTerminalReceipt): string[] {
+  const reasons: string[] = [];
+  if (assignment.preferenceBypassed) reasons.push("provider-preference-bypass");
+  if (terminal.capabilityFallback) reasons.push("capability-table-unavailable");
+  const served = terminal.servedModel;
+  if (served && served !== assignment.model) reasons.push("provider-served-different-model");
+  return reasons;
+}
+
+function applyRoutingTerminal(
+  acc: RoutingTelemetryAccumulator,
+  assignment: RoutingAssignment,
+  terminal: RoutingTerminalReceipt,
+): void {
+  const bucket = routingBucketFor(acc, assignment);
+  bucket.terminalResults += 1;
+  if (terminal.success === true) bucket.successes += 1;
+  else if (terminal.success === false) bucket.failures += 1;
+  bucket.totalTokens += terminal.tokens;
+  bucket.totalDurationMs += terminal.durationMs;
+  bucket.totalCostUsd += terminal.costUsd;
+  for (const reason of terminalFallbackReasons(assignment, terminal)) {
+    bucket.fallbackReasons.set(reason, (bucket.fallbackReasons.get(reason) ?? 0) + 1);
+  }
+  if (terminal.day) {
+    const current = acc.daysByDay.get(terminal.day) ?? { day: terminal.day, terminalResults: 0, totalTokens: 0, totalCostUsd: 0 };
+    current.terminalResults += 1;
+    current.totalTokens += terminal.tokens;
+    current.totalCostUsd += terminal.costUsd;
+    acc.daysByDay.set(terminal.day, current);
+  }
+}
+
+function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: Record<string, unknown>): void {
+  if (line.step === "run.start") {
+    const runId = str(line.run_id);
+    const taskType = str(line.type);
+    if (runId && taskType) acc.taskTypesByRun.set(runId, taskType);
+  }
+
+  const assignment = routingAssignmentFromLine(acc, line);
+  if (assignment) {
+    if (acc.assignmentsById.has(assignment.id)) return;
+    acc.assignmentsById.set(assignment.id, assignment);
+    routingBucketFor(acc, assignment).assignments += 1;
+    const pending = acc.pendingTerminalsByAssignmentId.get(assignment.id);
+    if (pending) {
+      acc.pendingTerminalsByAssignmentId.delete(assignment.id);
+      acc.terminalsByAssignmentId.set(assignment.id, pending);
+      applyRoutingTerminal(acc, assignment, pending);
+    }
+    return;
+  }
+
+  // `workerLedgerFields` appears on intermediate worker rows such as `implement.done` as
+  // well as on the run's final `verdict`. The assignment is a pre-execution policy fact, but
+  // only the verdict names the terminal outcome. Treating the first intermediate row as the
+  // receipt would turn a completed call into an `unreported` failure and discard its final
+  // token/duration/cost envelope.
+  if (line.step !== "verdict") return;
+  const assignmentId = str(line.selection_assignment_id);
+  if (!assignmentId || acc.terminalsByAssignmentId.has(assignmentId) || acc.pendingTerminalsByAssignmentId.has(assignmentId)) return;
+  const terminal = routingTerminalReceipt(line);
+  const selected = acc.assignmentsById.get(assignmentId);
+  if (selected) {
+    acc.terminalsByAssignmentId.set(assignmentId, terminal);
+    applyRoutingTerminal(acc, selected, terminal);
+  } else {
+    acc.pendingTerminalsByAssignmentId.set(assignmentId, terminal);
+  }
+}
+
+function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTelemetrySnapshot {
+  return {
+    version: "routing-v1",
+    evidenceState: acc.assignmentsById.size > 0 ? "observed" : "not-collected-in-retained-ledger",
+    assignmentsObserved: acc.assignmentsById.size,
+    terminalResultsObserved: acc.terminalsByAssignmentId.size,
+    terminalResultsWithoutAssignment: acc.pendingTerminalsByAssignmentId.size,
+    assignmentsWithoutTerminalResult: acc.assignmentsById.size - acc.terminalsByAssignmentId.size,
+    buckets: [...acc.bucketsByKey.values()]
+      .map((bucket) => ({
+        ...bucket,
+        fallbackReasons: [...bucket.fallbackReasons.entries()]
+          .map(([reason, count]) => ({ reason, count }))
+          .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason)),
+      }))
+      .sort((left, right) => right.assignments - left.assignments || left.assignedModel.localeCompare(right.assignedModel)),
+    daily: [...acc.daysByDay.values()].sort((left, right) => left.day.localeCompare(right.day)).slice(-30),
   };
 }
 
 /** Fold one logical ledger event into all four analytics questions in one pass. */
 function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
+  // Assignment/terminal attribution is folded from this SAME union pass. It has its
+  // own bounded, join-aware accumulator because an assignment is a policy fact and a terminal
+  // row is an outcome fact; neither may be inferred from the other.
+  accumulateRoutingTelemetryLine(acc.routingTelemetry, line);
+
   if (line.step === "cli.invoked") {
     acc.invocationsMeasured = true;
     const verb = str(line.verb) ?? "(unknown)";
@@ -400,6 +671,7 @@ function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): Ana
       costModeledUsd,
       taskDurationsMs: taskDurationsMs.map((entry) => entry.durationMs),
     }),
+    routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -497,6 +769,15 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   for (const metric of value.consoleV1.metrics) Object.freeze(metric);
   Object.freeze(value.consoleV1.metrics);
   Object.freeze(value.consoleV1);
+  for (const bucket of value.routingTelemetry.buckets) {
+    for (const reason of bucket.fallbackReasons) Object.freeze(reason);
+    Object.freeze(bucket.fallbackReasons);
+    Object.freeze(bucket);
+  }
+  Object.freeze(value.routingTelemetry.buckets);
+  for (const day of value.routingTelemetry.daily) Object.freeze(day);
+  Object.freeze(value.routingTelemetry.daily);
+  Object.freeze(value.routingTelemetry);
   return Object.freeze(value) as AnalyticsSnapshot;
 }
 
@@ -520,6 +801,16 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
       costModeledUsd: 0,
       taskDurationsMs: [],
     }),
+    routingTelemetry: {
+      version: "routing-v1",
+      evidenceState: "not-collected-in-retained-ledger",
+      assignmentsObserved: 0,
+      terminalResultsObserved: 0,
+      terminalResultsWithoutAssignment: 0,
+      assignmentsWithoutTerminalResult: 0,
+      buckets: [],
+      daily: [],
+    },
   });
 }
 
