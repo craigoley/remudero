@@ -83,7 +83,15 @@ test("a tracked extensionless file (hooks/pre-push) is ACCEPTED by the injected 
 test("the extensionless file's grep proof actually executes — real grep, real file, real match", () => {
   assert.ok(existsSync(join(REPO_ROOT, "hooks/pre-push")), "the fixture file this task names is really tracked here");
   const out = execFileSync("grep", ["-arn", "--", "#!/bin/sh", "hooks/pre-push"], { cwd: REPO_ROOT, encoding: "utf8" });
-  assert.match(out, /^1:#!\/bin\/sh$/m, "grep ran against the real extensionless file and found the real line");
+  assert.match(out, /^(?:hooks\/pre-push:)?1:#!\/bin\/sh$/m, "grep ran against the real extensionless file and found the real line");
+});
+
+test("the extensionless grep proof accepts a path-prefixed line from grep", () => {
+  assert.match(
+    "hooks/pre-push:1:#!/bin/sh\n",
+    /^(?:hooks\/pre-push:)?1:#!\/bin\/sh$/m,
+    "the proof accepts grep implementations that include the file operand",
+  );
 });
 
 // ── criterion 2: a directory target is still refused ──────────────────────────────────────────
