@@ -13,7 +13,7 @@
   files: [scripts/generate-agents-md.mjs, AGENTS.md, src/lib/worker-provider.ts, test/a-dispatched-codex-worker-loads-the-whole-file.test.ts, package.json]
   origin: "operator-session#ratifying-W1-T3135-2026-09-09"
   plan_refs: ["W1-T3135", "W1-T2508"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     CARRIED FROM W1-T3135, which merged a DIFFERENT remedy than it designed. See that shard's

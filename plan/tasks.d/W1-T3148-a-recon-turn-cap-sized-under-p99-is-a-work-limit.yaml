@@ -11,7 +11,7 @@
   files: [.remudero/mounts.yaml, test/a-recon-turn-cap-sized-under-p99-is-a-work-limit.test.ts]
   origin: "operator-directive#tripwires-are-for-runaways-2026-09-08"
   plan_refs: ["P7", "§9", "W1-T54b", "W1-T167"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR DIRECTIVE, 2026-09-08: the tripwires "need to be more for runaways, not every day

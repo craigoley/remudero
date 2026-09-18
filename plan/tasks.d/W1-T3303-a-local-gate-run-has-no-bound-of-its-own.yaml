@@ -13,7 +13,7 @@
     - test/a-local-gate-run-has-no-bound-of-its-own.test.ts
   origin: "operator-session#ci-parity-cost-2026-09-09"
   plan_refs: ["W1-T294", "W1-T2597", "W1-T3266", "W1-T2433"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09, AS A 97-MINUTE STALL DURING AN ORDINARY PR FIX.

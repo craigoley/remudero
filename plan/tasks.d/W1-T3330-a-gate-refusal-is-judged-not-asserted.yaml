@@ -11,7 +11,7 @@
   files: [src/lib/risk-judge.ts, src/lib/gate-posture.ts, test/a-gate-refusal-is-judged-not-asserted.test.ts]
   origin: "operator-session#risk-judged-gates-2026-09-10"
   plan_refs: ["W1-T3318", "W1-T3321", "W1-T3329", "W1-T3320", "W1-T297", "W1-T58"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE OPERATOR'S DIRECTION, 2026-09-10, and the frame that decides the design: "for all of these

@@ -17,7 +17,7 @@
     - .github/workflows/recovery-drill.yml
   origin: "operator-request#follow-up-work-2026-09-07"
   plan_refs: ["W1-T2603", "W1-T2514"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LIFECYCLE HAS AN OPEN END. OBSERVED in scripts/needs-human-issue.mjs: the script is a

@@ -11,7 +11,7 @@
   files: [src/lib/learnings.ts, test/doctrine-resolves-for-its-reader.test.ts]
   origin: "operator-session#doctrine-modularization-2026-09-10"
   plan_refs: ["W1-T2508", "W1-T2507", "W1-T3320", "W1-T3323"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS IS THE PREREQUISITE, NOT THE MIGRATION. W1-T3323 moves the bodies; this makes the move

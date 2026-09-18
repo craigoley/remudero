@@ -15,7 +15,7 @@
     - test/fix-strikes-reset-on-new-head.test.ts
   origin: "operator-ruling#changed-pr-head-resets-fix-cap-2026-09-03"
   plan_refs: ["W1-T78", "W1-T199", "W1-T2306", "W1-T2452", "W1-T2520"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on PRs #3837, #3838 and #3839 after merged #3840 removed their only failing

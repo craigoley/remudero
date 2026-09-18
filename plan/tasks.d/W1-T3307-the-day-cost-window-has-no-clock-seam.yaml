@@ -10,7 +10,7 @@
   origin: "operator-session#4889-midnight-2026-09-10"
   plan_refs: ["W1-T317", "W1-T331", "W1-T3207"]
   files: [src/run-task.ts, test/the-day-cost-window-has-no-clock-seam.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09/10 from a live CI failure and reproduced directly.

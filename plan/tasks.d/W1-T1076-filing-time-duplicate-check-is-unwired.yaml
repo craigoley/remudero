@@ -236,7 +236,7 @@
   origin: "recon#filing-time-duplicate-check-unwired-2026-08-20"
   plan_refs: ["W1-T420", "W1-T497", "W1-T1004", "W1-T1059"]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/knowledge-dedup.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads three

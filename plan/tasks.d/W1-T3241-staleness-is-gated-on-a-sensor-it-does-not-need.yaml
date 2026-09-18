@@ -10,7 +10,7 @@
   files: [src/lib/status-board.ts, test/staleness-is-answerable-without-a-liveness-sensor.test.ts]
   origin: "operator-session#deploy-visibility-2026-09-09"
   plan_refs: ["W1-T2450", "W1-T301", "W1-T126"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

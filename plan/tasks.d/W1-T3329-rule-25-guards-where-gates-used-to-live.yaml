@@ -11,7 +11,7 @@
   files: [src/lib/review.ts, test/rule-25-guards-the-gates-that-exist.test.ts]
   origin: "operator-session#rule-25-2026-09-10"
   plan_refs: ["W1-T297", "W1-T2521", "W1-T402", "W1-T3318", "W1-T3321"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE RULE IS NOT THE PROBLEM AND MUST NOT BE DELETED. Its motivating incident is measured and

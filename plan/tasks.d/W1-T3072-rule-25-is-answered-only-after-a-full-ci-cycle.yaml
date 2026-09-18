@@ -52,4 +52,4 @@
     - claim: "an unreadable diff refuses rather than reporting clean"
       proof: "grep: REFUSING to report clean in scripts/rule25-precheck.mjs"
   files: [scripts/rule25-precheck.mjs, test/rule25-precheck-refuses-before-the-push.test.ts, test/prepush-gates-refuse.test.ts, scripts/comment-load-baseline.json, hooks/pre-push, package.json]
-  status: queued
+  status: merged

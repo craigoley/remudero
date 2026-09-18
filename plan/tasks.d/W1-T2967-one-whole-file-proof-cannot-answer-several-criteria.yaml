@@ -12,7 +12,7 @@
     - test/task-linter-wiring.test.ts
   origin: "operator-session#whole-file-proof-cannot-discriminate-2026-09-06"
   plan_refs: ["W1-T2263", "W1-T178", "W1-T2676"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON MAIN 2026-09-06: of 1135 shards carrying two or more acceptance criteria, 830 (73%)

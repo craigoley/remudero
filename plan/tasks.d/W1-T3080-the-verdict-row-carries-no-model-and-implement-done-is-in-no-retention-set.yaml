@@ -11,7 +11,7 @@
   files: [src/run-task.ts, src/lib/ledger.ts, test/a-terminal-verdict-names-the-model-that-earned-it.test.ts]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["P53", "W1-T2239", "W1-T167", "W1-T2383"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 at b8892bc4: `grep -n 'log("verdict"' src/run-task.ts` returns 23 sites;

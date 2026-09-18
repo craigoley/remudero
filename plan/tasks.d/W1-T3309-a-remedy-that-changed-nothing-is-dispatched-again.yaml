@@ -10,7 +10,7 @@
   origin: "operator-session#4851-five-hours-2026-09-10"
   plan_refs: ["W1-T1269", "W1-T3172", "W1-T78", "W1-T2436"]
   files: [src/lib/sweep.ts, test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09/10 on #4851, which stood open five hours. Its disposition history, verbatim

@@ -13,7 +13,7 @@
     - test/adhoc-lane-reap.test.ts
   origin: "operator-session#registration-driven-lane-reap-2026-09-06"
   plan_refs: ["W1-T2847", "W1-T2950", "W1-T175"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-06 on the Mac host, and the numbers are the whole argument.

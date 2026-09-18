@@ -15,7 +15,7 @@
     - test/stale-base-release-before-exhaustion.test.ts
   origin: "operator-session#red-prs-remain-stuck-after-main-repairs-them-2026-09-03"
   plan_refs: ["W1-T527", "W1-T2520", "W1-T2620", "W1-T2671", "W1-T2782"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED after #3840 repaired the repository-wide mkdtemp scanner baseline: PRs #3837,

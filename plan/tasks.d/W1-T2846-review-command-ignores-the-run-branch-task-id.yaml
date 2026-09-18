@@ -12,7 +12,7 @@
     - test/review-command-task-id.test.ts
   origin: "incident#3970-3972-3973-split-review-identity-2026-09-04"
   plan_refs: ["W1-T453", "W1-T913", "W1-T2439", "W1-T2511"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PRS #3970, #3972 AND #3973 ON 2026-09-04. Each implementation lived on a

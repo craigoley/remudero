@@ -10,7 +10,7 @@
   origin: operator#maintenance-efficiency-2026-09-08
   plan_refs: ["§5", "§9"]
   files: [test/catch-erasure-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main 41231c670: the isolated catch-erasure suite reports 25 pass / 1 fail.

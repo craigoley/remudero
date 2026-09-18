@@ -115,7 +115,7 @@
     branch, the successful-leaf marker assertion must fail while the aggregate/failure controls
     remain green. With unknown changed from wake to suppress, the malformed-payload control must
     fail. Report both `# fail` movements.
-  status: queued
+  status: merged
   attempts: 0
   plan_refs: ["W1-T139", "W1-T164", "W1-T252", "W1-T264", "W1-T516", "W1-T2568", "W1-T2741", "W1-T2787", "W1-T1033"]
   note: |

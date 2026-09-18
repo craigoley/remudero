@@ -14,7 +14,7 @@
     - test/review-status-pending.test.ts
   origin: "incident#3960-restart-orphaned-review-2026-09-04"
   plan_refs: ["W1-T913", "W1-T978", "W1-T2753", "W1-T2721"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #3960. `remudero-review` was posted pending at 19:57:56Z by run

@@ -10,7 +10,7 @@
   origin: "operator-session#the-corpus-that-oom-killed-the-retro-2026-09-09"
   plan_refs: ["W1-T3229", "W1-T3234", "W1-T2833"]
   files: [src/lib/ledger.ts, test/the-ledger-archive-is-compacted-never-truncated.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THE FLEET HOST, 2026-09-09: 646 `ledger.*.ndjson.gz` rotations plus 2 plain

@@ -13,7 +13,7 @@
     - test/fix-branch-checkout-serialization.test.ts
   origin: "fleet-incident#pr-4236-dead-registered-fix-owner-2026-09-06"
   plan_refs: ["W1-T2863", "W1-T378", "W1-T381", "W1-T2609", "W1-T2950"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET FOR PR #4236. A W1-T2949 fix worker used registered worktree

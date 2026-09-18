@@ -10,7 +10,7 @@
   files: [scripts/test-tier-manifest.mjs, test/a-shard-split-balances-by-measured-duration.test.ts]
   origin: "operator-session#review-parallelism-2026-09-09"
   plan_refs: ["W1-T2904", "W1-T1049", "W1-T2853", "W1-T3207", "W1-T2428"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

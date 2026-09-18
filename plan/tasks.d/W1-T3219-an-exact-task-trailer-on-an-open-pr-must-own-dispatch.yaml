@@ -13,7 +13,7 @@
     - test/an-open-trailered-build-owns-dispatch.test.ts
   origin: "operator-session#queue-lag-duplicate-dispatch-2026-09-08"
   plan_refs: ["W1-T377", "W1-T2397", "W1-T2429", "W1-T2491"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED INCIDENT, NOT INFERRED. PR #4729 was open with exact body trailer
