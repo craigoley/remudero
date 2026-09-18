@@ -472,6 +472,13 @@ export function followupCommitImplementationTrailerRefusal({ trailerCommits, cha
   return undefined;
 }
 
+/** CI owns commit trailers; the standalone `edited` caller owns PR-body facts. */
+export function evaluateCommitTrailerGate({ trailerCommits, changedPaths, taskFilesForId }) {
+  const refusal = followupCommitImplementationTrailerRefusal({ trailerCommits, changedPaths, taskFilesForId });
+  if (refusal !== undefined) return refusal;
+  return { ok: true, message: "no follow-up commit trailer credits an implementation absent from this pull request" };
+}
+
 /**
  * The gate's own verdict: the bot exemption first, then Rule 15 and the three structural refusals
  * (plan-only-implementation, follow-up-commit-implementation, and W1-T3658's trailer/body proof
@@ -596,7 +603,10 @@ export function resolveEventPath(flagValue, env = process.env) {
 }
 
 export function main(argv) {
-  const { values } = parseArgs({ args: argv, options: { "event-path": { type: "string" } } });
+  const { values } = parseArgs({
+    args: argv,
+    options: { "event-path": { type: "string" }, "commit-trailer-only": { type: "boolean" } },
+  });
   const resolved = resolveEventPath(values["event-path"]);
   if (!resolved.ok) {
     console.error(resolved.message);
@@ -612,17 +622,22 @@ export function main(argv) {
     return;
   }
 
-  const result = evaluateGate({
-    body: payload.body,
-    authorLogin: payload.authorLogin,
-    trailerResolves: planTrailerResolver(),
-    introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
-    trailerCommits: commitTaskTrailersAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
-    changedPaths: changedPathsAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
-    taskFilesForId: planTaskFilesResolver(),
-    taskAcceptanceForId: planTaskAcceptanceResolver(),
-    rule15Verdict: rule15SplitAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
-  });
+  const trailerCommits = commitTaskTrailersAtRange({ baseSha: payload.baseSha, headSha: payload.headSha });
+  const changedPaths = changedPathsAtRange({ baseSha: payload.baseSha, headSha: payload.headSha });
+  const taskFilesForId = planTaskFilesResolver();
+  const result = values["commit-trailer-only"]
+    ? evaluateCommitTrailerGate({ trailerCommits, changedPaths, taskFilesForId })
+    : evaluateGate({
+      body: payload.body,
+      authorLogin: payload.authorLogin,
+      trailerResolves: planTrailerResolver(),
+      introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
+      trailerCommits,
+      changedPaths,
+      taskFilesForId,
+      taskAcceptanceForId: planTaskAcceptanceResolver(),
+      rule15Verdict: rule15SplitAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
+    });
   if (!result.ok) {
     console.error(`acceptance-author-gate: REFUSED (${result.defect}) — ${result.message}`);
     process.exitCode = 1;
