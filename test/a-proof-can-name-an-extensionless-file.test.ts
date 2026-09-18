@@ -86,6 +86,14 @@ test("the extensionless file's grep proof actually executes — real grep, real 
   assert.match(out, /^(?:hooks\/pre-push:)?1:#!\/bin\/sh$/m, "grep ran against the real extensionless file and found the real line");
 });
 
+test("the extensionless grep proof accepts a path-prefixed line from grep", () => {
+  assert.match(
+    "hooks/pre-push:1:#!/bin/sh\n",
+    /^(?:hooks\/pre-push:)?1:#!\/bin\/sh$/m,
+    "the proof accepts grep implementations that include the file operand",
+  );
+});
+
 // ── criterion 2: a directory target is still refused ──────────────────────────────────────────
 
 test("a directory target is still refused", () => {
