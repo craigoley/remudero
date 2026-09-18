@@ -1,0 +1,65 @@
+- id: W1-T3754
+  title: "THE CI-LEARNING LANDING BRIDGE RE-EMITS EVERY SHARD FROM ITS OWN DRAFT AND REVERTS WHAT WAS REPAIRED ON MAIN — eleven of fifteen entries in one PR did nothing but strip a note main already carried"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/feedback-landing.ts, src/run-task.ts]
+  origin: oper#squeeze-session-2026-09-17
+  plan_refs: ["W1-T2959", "W1-T3542"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON #5967, 2026-09-18. The PR carried 15 shard entries. Eleven were MODIFIES, and
+    every one of them had the identical diff shape:
+
+        +2 / -5  (or +2 / -9)   strips_handoff=1
+
+    The whole of each change was REMOVING the line
+
+        reservation hand-off: unknown -> ci-learning-landing
+
+    that those shards already carry ON MAIN, collapsing the `note:` block scalar back to a
+    single-line quoted string. They added nothing. They reverted a repair.
+
+    `proof-discrimination` caught it, and its reading is the tell: each of those eleven proofs
+    read `head hits: 1; base hits: 1`. A proof that passes identically on both sides is the gate's
+    definition of establishing nothing — and here it was literally true, because after the revert
+    the file was the pre-repair file.
+
+    THE MECHANISM. The rung drafts a shard, parks it in the queue-backed landing bridge OUTSIDE the
+    checkout, and later re-emits it into a PR from that draft. Nothing re-reads the shard's CURRENT
+    content on main first, so any repair made in between — a hand-off note, a renumber, an
+    operator's edit — is silently overwritten by the stale draft.
+
+    WHY IT COMPOUNDS. The repair those eleven reverted was itself a `reservation hand-off` note
+    added to satisfy `task-id-existence`. So the bridge reverts exactly the class of fix its own
+    gates demand, and the next landing re-fails the same gate for the same reason. That is a loop,
+    not a one-off: this session added hand-off notes to W1-T3750/3751/3752 for that gate, and the
+    next landing would strip them again.
+
+    THE FIX IS A MERGE, NOT A WRITE. On landing, a shard that ALREADY EXISTS on main must be
+    reconciled against main's current content rather than overwritten — or, if the rung has nothing
+    new to say about an existing shard, it must EMIT NOTHING for it. The second is likely correct
+    and far cheaper: the eleven modifies carried no new information at all, so the honest diff for
+    them was empty.
+
+    DO NOT FIX THIS BY WIDENING proof-discrimination. The gate was right. A landing that emits a
+    no-op modify should produce no entry, and then there is no proof to discriminate.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add — the only way past
+    `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
+
+  acceptance:
+    - claim: "a landing that has nothing new to say about an existing shard emits no entry for it"
+      proof: "unit test: W1-T3754: an unchanged shard produces no landing entry"
+    - claim: "a landing never overwrites a shard's current content on main with a stale draft"
+      proof: "unit test: W1-T3754: a landing reconciles against main, never overwrites it"
+  note: |
+    reservation hand-off: main -> plan/file-landing-bridge-1789692205
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.
