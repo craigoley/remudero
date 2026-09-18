@@ -1,0 +1,65 @@
+- id: W1-T3761
+  title: "`rmd plan-reconcile` PRESCRIBES A PULL REQUEST THAT CANNOT BE REVIEWED — it says land the flip as ONE plan-only PR, and past 300 files the diff API refuses, so runReview cannot fetch a diff and the required remudero-review can never be posted"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/run-task.ts]
+  origin: oper#squeeze-session-2026-09-18
+  plan_refs: ["W1-T3758"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-18. `rmd plan-reconcile` found 331 shards whose credit projection says merged
+    while their record still read queued, and ended with its own instruction:
+
+        re-run with --write to apply, then land the diff as one plan-only PR
+
+    Following that instruction produces a pull request that CANNOT BE REVIEWED:
+
+        $ gh pr diff 5987
+        could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of
+        files (300). Consider using 'List pull requests files' API or locally cloning the repository
+        PullRequest.diff too_large
+
+    `runReview` fetches the diff through that path (`ghExec` -> `gh pr diff`, run-task.ts), so
+    it throws before judging anything, and `remudero-review` — a REQUIRED check — is never posted.
+    The PR is not slow or degraded. It is structurally unmergeable, and the only signal is a
+    crash in the reviewer rather than a verdict anyone can read.
+
+    THE COMMAND THAT CREATED IT HAS NO IDEA. `plan-reconcile` counts shards and prints the
+    instruction unconditionally; nothing compares that count against the ceiling the instruction
+    will hit. 331 was not an unusual backlog — the same command landed 85 shards in #4776 and 20 in
+    #4846, so the population grows until it silently crosses 300.
+
+    WORKED AROUND BY HAND THIS TIME: closed #5987 and split it into #5988 (165) and #5989 (166),
+    both of which review cleanly. That is the right shape and the command should produce it.
+
+    THE FIX: `plan-reconcile --write` knows exactly how many shards it touched. It must either
+    BATCH its own output beneath the ceiling, or refuse to print the one-PR instruction when the
+    count would exceed it and say what to do instead. Printing an instruction that cannot be
+    followed is worse than printing nothing, because the failure surfaces three steps later as an
+    unexplained reviewer crash on a PR that already exists.
+
+    A SECOND CONSUMER TO CHECK BEFORE ASSUMING THIS IS ONE COMMAND'S PROBLEM: any lane that opens a
+    PR over 300 files hits the same wall, and the reviewer's behaviour there is the same crash.
+    Whether `runReview` should DEGRADE on a 406 (judge from the file list, or post a legible
+    refusal) rather than throw is a separate and probably larger question — name it, size it, and
+    do not fold it into this task silently.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add — the only way past
+    `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
+
+  acceptance:
+    - claim: "a reconcile whose shard count would exceed the diff ceiling does not tell the operator to land it as one PR"
+      proof: "unit test: W1-T3761: an over-ceiling reconcile does not prescribe one PR"
+    - claim: "a reconcile below the ceiling is unchanged"
+      proof: "unit test: W1-T3761: an under-ceiling reconcile keeps today's instruction"
+  note: |
+    reservation hand-off: main -> plan/file-diff-ceiling-1789718578
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.
