@@ -10780,27 +10780,44 @@ export interface WorkerErrorVerdict {
 }
 
 /**
- * `{ model, served_model, routed_model }` for a terminal `verdict` row — the ONE helper every
- * terminal `verdict` writer in `runTaskBody` spreads (W1-T3080), so the model that actually
- * SERVED a call — not just the mount RESOLVED for it — reaches the row the class-routing
- * decision (W1-T167) reads. `routed_model` rides along only when present, the same "absent
- * when unset" discipline {@link workerLedgerFields} already keeps.
+ * The routing receipt fields for a terminal `verdict` row — the ONE helper every terminal
+ * `verdict` writer in `runTaskBody` spreads. The assignment ID joins the pre-execution policy
+ * decision to this terminal receipt; the receipt then names the worker result's served model,
+ * token envelope, duration, cost, and worker-level success separately from the run verdict.
+ * `routed_model` rides along only when present, the same "absent when unset" discipline
+ * {@link workerLedgerFields} already keeps.
  *
  * `r === null` names a PRE-SPAWN refusal (e.g. a containment/isolation preflight failure, or a
  * worker abandoned before its completion envelope arrived) — no worker outcome exists to read a
  * model off, so `model`/`served_model` are written `null` explicitly rather than omitted:
  * absent means "not written"; `null` means "checked, no worker ran" (P48).
  */
-function terminalVerdictFields(r: WorkerResult | null): {
+export function terminalVerdictFields(r: WorkerResult | null): {
   model: string | null;
   served_model: string | null;
   routed_model?: string;
+  selection_assignment_id?: string;
+  tokens?: WorkerResult["tokens"];
+  worker_duration_ms?: number;
+  total_cost_usd?: number;
+  success?: boolean;
 } {
   if (!r) return { model: null, served_model: null };
+  // A successful result envelope can be followed by an SDK iterator error. The existing terminal
+  // verdict classifier treats that exact `{ isError: true, subtype: "success", apiError: false }`
+  // shape as clean success; routing telemetry must use the same outcome rather than reporting a
+  // completed call as a model failure. API errors and usage refusals remain unsuccessful even when
+  // their envelope subtype says `success`.
+  const success = !r.usageRefusal && (!r.isError || (r.subtype === "success" && !r.apiError));
   return {
     model: r.model,
     served_model: r.servedModel ?? null,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
+    ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
+    tokens: r.tokens,
+    ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
+    total_cost_usd: r.costUsd,
+    success,
   };
 }
 
