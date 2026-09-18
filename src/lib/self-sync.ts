@@ -499,11 +499,27 @@ export function checkServiceFreshness(
  * Why: docs/forensics/self-sync.md#daemonfreshnessfromservice.
  */
 export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshness {
-  if (svc.status !== "assessed") return { stale: false };
-  if (svc.dirty) return { stale: false };
-  if (!svc.behind) return { stale: false };
+  if (svc.status === "guarded") return { stale: false, notStale: { arm: "unassessed", serviceStatus: "guarded" } };
+  if (svc.status === "degraded") {
+    return { stale: false, notStale: { arm: "unassessed", serviceStatus: "degraded", detail: svc.reason } };
+  }
+  if (svc.dirty) {
+    return {
+      stale: false,
+      notStale: {
+        arm: "dirty",
+        ...(svc.behind ? { oldSha: svc.behind.oldSha, newSha: svc.behind.newSha } : {}),
+      },
+    };
+  }
+  if (!svc.behind) return { stale: false, notStale: { arm: "up_to_date" } };
   // An advance that cannot change this process's module graph is no reason to replace it (W1-T2964).
-  if (!advanceIsMaterial(svc.behind.changedPaths)) return { stale: false };
+  if (!advanceIsMaterial(svc.behind.changedPaths)) {
+    return {
+      stale: false,
+      notStale: { arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha },
+    };
+  }
   return { stale: true, oldSha: svc.behind.oldSha, newSha: svc.behind.newSha };
 }
 
