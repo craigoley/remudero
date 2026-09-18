@@ -11,7 +11,7 @@
   files: [scripts/diff-coverage.mjs, test/a-required-comment-must-not-cost-a-relocation.test.ts]
   origin: "operator-session#4522-merge-2026-09-09"
   plan_refs: ["W1-T3189", "W1-T2325", "W1-T2902", "W1-T212"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09 while merging #4522 (W1-T2902, the console-shell client extraction).

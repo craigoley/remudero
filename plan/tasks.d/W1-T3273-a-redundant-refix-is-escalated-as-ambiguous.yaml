@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts]
   origin: "operator-session#conflicted-lane-2026-09-09"
   plan_refs: ["W1-T106", "W1-T984", "W1-T2536", "W1-T2548"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

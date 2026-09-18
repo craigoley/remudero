@@ -10,7 +10,7 @@
   origin: "operator-session#4915-false-review-refusal-2026-09-10"
   plan_refs: ["W1-T3266", "W1-T3177", "W1-T1036"]
   files: [src/lib/review.ts, test/ensure-deps-mistakes-a-symlink-for-an-install.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10 on #4915. The reviewer refused two acceptance criteria, both citing

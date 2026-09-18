@@ -15,7 +15,7 @@
     - CLAUDE.md
   origin: "operator-session#gh-cadence-2026-09-09"
   plan_refs: ["W1-T1066", "W1-T203", "W1-T2312"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The diff is one shell function

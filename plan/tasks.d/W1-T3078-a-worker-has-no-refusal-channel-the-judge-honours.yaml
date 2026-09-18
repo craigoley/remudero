@@ -11,7 +11,7 @@
   files: [src/run-task.ts, src/lib/review.ts, src/lib/sweep.ts, test/a-refusal-is-a-verdict-not-a-strike.test.ts]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T423", "W1-T2236", "W1-T1282", "P43"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at b8892bc4. `renderImplementPrompt`'s output contract (`src/run-task.ts`) requires

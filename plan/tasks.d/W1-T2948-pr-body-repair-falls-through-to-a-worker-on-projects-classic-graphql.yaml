@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/pr-body-rest-write.test.ts]
   origin: "fleet-lifeguard#4228-projectcards-body-repair-2026-09-06"
   plan_refs: ["W1-T2541", "W1-T307", "W1-T2542"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT THE PRODUCTION EFFECT, NOT INFERRED FROM SOURCE. PR #4228 first failed

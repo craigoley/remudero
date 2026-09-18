@@ -12,7 +12,7 @@
     - test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts
   origin: "operator-request#follow-up-work-2026-09-07"
   plan_refs: ["W1-T2987"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ROW OMITS THE FIELD THAT DECIDED IT. OBSERVED in src/lib/review-capacity.ts: the

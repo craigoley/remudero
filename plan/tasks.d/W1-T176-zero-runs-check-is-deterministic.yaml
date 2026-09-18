@@ -53,7 +53,7 @@
   origin: architect
   plan_refs: ["§4", "§9"]
   files: [src/lib/sweep.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "SIBLING of W1-T174 (drain no-attempt) and W1-T168 (rung futile-attempt) on the same calibration axis —
     this is the NEEDLESS-ASK end: the rung asks the operator for a decision the observed facts already settle.

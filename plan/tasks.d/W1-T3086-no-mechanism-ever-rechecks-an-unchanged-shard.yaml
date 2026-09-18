@@ -11,7 +11,7 @@
     - test/every-shard-on-main-is-lintable.test.ts
   origin: "operator-session#reconcile-930-blocked-by-latent-shard-debt-2026-09-07"
   plan_refs: ["W1-T1033", "W1-T491", "W1-T3043"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS TASK DOES NOT ARGUE THAT `lint-plan` SHOULD GATE `main`. W1-T1033 made that job PR-only on

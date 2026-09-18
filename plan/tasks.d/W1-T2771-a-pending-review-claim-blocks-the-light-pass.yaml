@@ -15,7 +15,7 @@
     - test/review-claim-timing.test.ts
   origin: "operator-session#green-review-queue-wedged-2026-09-03"
   plan_refs: ["W1-T513", "W1-T1049", "W1-T2379", "W1-T2582", "W1-T2584"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON AZURE, daemon run DAEMON-1788435477771. The daemon stayed alive and its light

@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/a-status-flip-is-not-a-task-edit.test.ts]
   origin: "operator-session#reconcile-lint-2026-09-09"
   plan_refs: ["W1-T3226", "W1-T3235", "W1-T122"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

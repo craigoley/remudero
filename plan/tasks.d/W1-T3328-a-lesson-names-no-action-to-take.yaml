@@ -12,7 +12,7 @@
     - test/a-lesson-names-no-action-to-take.test.ts
   origin: "operator-session#ci-learning-repair-2026-09-10"
   plan_refs: ["W1-T3044", "W1-T3327", "W1-T2959"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR DIRECTION 2026-09-10: "make sure it is prioritizing the most important learnings to

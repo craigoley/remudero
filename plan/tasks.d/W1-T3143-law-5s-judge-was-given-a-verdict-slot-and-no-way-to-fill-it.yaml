@@ -11,7 +11,7 @@
   files: [src/lib/risk-judge.ts, src/run-task.ts, test/a-filing-time-ruling-nothing-produces.test.ts]
   origin: "operator-session#verify-flexibility-2026-09-08"
   plan_refs: ["W1-T2977", "W1-T2959", "W1-T2694", "W1-T186", "W1-T248"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-08 at origin/main (41231c67), with a positive control on the same search shape.

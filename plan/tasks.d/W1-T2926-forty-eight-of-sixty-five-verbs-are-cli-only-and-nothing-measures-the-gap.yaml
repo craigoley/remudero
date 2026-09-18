@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§7", "§7A", "§5C", "W1-T47"]
   files: [scripts/console-parity-ratchet.mjs, scripts/console-parity-baseline.json, .github/workflows/ci.yml, src/lib/ci-parity.ts, test/console-parity-ratchet.test.ts, docs/control-surface.md]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 §6, move 5 (route and verb counts OBSERVED; the 19-of-95 reachable

@@ -12,7 +12,7 @@
     - test/mkdtemp-callsite-ci-wiring.test.ts
   origin: "operator-session#mkdtemp-ci-wiring-gap-2026-09-03"
   plan_refs: ["W1-T2735", "W1-T2773", "Rule 25"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on PR #3808 head 003730ac and rechecked after its proof repair: the new

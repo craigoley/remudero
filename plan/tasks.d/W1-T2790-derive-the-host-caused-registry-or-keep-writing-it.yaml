@@ -11,7 +11,7 @@
   files: [DECISIONS.md]
   origin: "operator-decision#w1-t2790-file-registry-derivation-question-2026-09-03"
   plan_refs: ["W1-T2776", "W1-T2785", "W1-T2770"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS IS A QUESTION, NOT A BUILD. `verify: human` on purpose: a grep can confirm a decision

@@ -14,7 +14,7 @@
     - test/host-units-install.test.ts
   origin: "operator-session#post-install-verification-2026-09-09"
   plan_refs: ["W1-T3233", "W1-T2877", "W1-T2953"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span`. `lint-plan` places the file set in two concerns

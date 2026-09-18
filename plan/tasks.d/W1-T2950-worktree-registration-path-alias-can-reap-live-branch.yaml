@@ -13,7 +13,7 @@
     - test/adhoc-lane-reap.test.ts
   origin: "operator-session#macos-worktree-path-alias-live-branch-reap-2026-09-06"
   plan_refs: ["W1-T2847", "W1-T378", "W1-T381"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT 50e10545 AND REPRODUCED ON MACOS 26.0.1. The W1-T2847 real-git

@@ -13,7 +13,7 @@
     - test/fix-branch-checkout-serialization.test.ts
   origin: "operator-session#daemon-self-refresh-duplicate-fix-worker-2026-09-05"
   plan_refs: ["W1-T2609", "W1-T2845"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET AT 2026-09-05T02:51Z-03:02Z. A full sweep dispatched a fix for

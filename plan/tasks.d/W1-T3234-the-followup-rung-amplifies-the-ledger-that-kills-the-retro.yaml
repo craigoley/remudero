@@ -10,7 +10,7 @@
   origin: "operator-session#14-day-retro-replay-2026-09-09"
   plan_refs: ["W1-T3229", "W1-T1013", "W1-T105", "W1-T2833"]
   files: [src/run-task.ts, src/lib/followup-dedup-census.ts, test/the-followup-rung-amplifies-the-ledger.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FOUND BY REPLAYING THE RETRO OVER THE LAST FOURTEEN DAYS, ONE DAY AT A TIME (2026-09-09), which

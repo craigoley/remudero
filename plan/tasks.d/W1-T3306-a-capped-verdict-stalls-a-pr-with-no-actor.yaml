@@ -14,7 +14,7 @@
     - test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts
   origin: "operator-session#capped-stall-2026-09-09"
   plan_refs: ["W1-T93", "W1-T230", "W1-T1020", "W1-T273", "W1-T362"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR DIRECTION 2026-09-09, verbatim: "why would it review something and fail to act?! ...

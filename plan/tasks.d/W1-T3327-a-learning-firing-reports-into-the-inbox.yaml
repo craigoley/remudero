@@ -12,7 +12,7 @@
     - test/a-learning-firing-reports-into-the-inbox.test.ts
   origin: "operator-session#ci-learning-repair-2026-09-10"
   plan_refs: ["W1-T2959", "W1-T3324", "W1-T110"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR DIRECTION 2026-09-10: "I do want to get a report of what it found in my inbox on the

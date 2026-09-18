@@ -12,7 +12,7 @@
     - test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts
   origin: "operator-session#diff-coverage-stale-base-repair-2026-09-03"
   plan_refs: ["W1-T2671", "W1-T2298", "W1-T2774"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on PR #3821 head 32cdf119: the coverage-ratchet job started against base

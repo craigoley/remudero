@@ -12,7 +12,7 @@
     - test/a-near-miss-run-branch-earns-no-credit.test.ts
   origin: "operator-session#pr-fix-sweep-2026-09-09"
   plan_refs: ["W1-T2491", "W1-T2530", "W1-T3166", "W1-T3201"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09 by running the gate itself:

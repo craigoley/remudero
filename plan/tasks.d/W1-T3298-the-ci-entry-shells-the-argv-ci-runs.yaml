@@ -13,7 +13,7 @@
     - test/the-ci-entry-shells-the-argv-ci-runs.test.ts
   origin: "operator-session#ci-parity-cost-2026-09-09"
   plan_refs: ["W1-T294", "W1-T3207", "W1-T3191", "W1-T2597"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE MODULE'S OWN STATED INVARIANT IS THE FINDING. `src/lib/ci-parity.ts`'s header:

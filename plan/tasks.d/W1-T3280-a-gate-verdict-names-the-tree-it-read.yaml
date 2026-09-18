@@ -12,7 +12,7 @@
     - test/a-gate-verdict-names-the-tree-it-read.test.ts
   origin: "operator-session#pr-fix-sweep-2026-09-09"
   plan_refs: ["W1-T294", "W1-T338", "W1-T2630"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09 ON PR #4790, THE SAME COMMAND ON TWO TREES:

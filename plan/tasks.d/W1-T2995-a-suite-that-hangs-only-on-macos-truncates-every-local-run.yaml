@@ -10,7 +10,7 @@
   origin: "operator-session#a-second-suite-hangs-2026-09-07"
   plan_refs: ["W1-T2994", "W1-T2993", "W1-T2597"]
   files: [test/base-lint-attributes-pre-existing-violations.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 on clean origin/main, the SAME command in two places:

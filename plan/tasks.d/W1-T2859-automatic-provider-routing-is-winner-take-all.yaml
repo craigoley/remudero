@@ -17,7 +17,7 @@
     - test/provider-routing-console.test.ts
   origin: "operator-session#relative-subscription-headroom-weighting-2026-09-04"
   plan_refs: ["W1-T2577", "W1-T2709", "W1-T2774"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT 33f4418e. `selectWorkerProvider` excludes unreadable and reserve-boundary

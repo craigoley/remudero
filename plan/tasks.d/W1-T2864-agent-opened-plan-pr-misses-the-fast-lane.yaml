@@ -14,7 +14,7 @@
     - test/plan-filing-admission-bound.test.ts
   origin: "operator-session#agent-opened-plan-pr-misses-fast-review-lane-2026-09-05"
   plan_refs: ["W1-T2439", "W1-T2472"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET AT 2026-09-05T03:18:42Z. PR #4030 changed exactly one path,

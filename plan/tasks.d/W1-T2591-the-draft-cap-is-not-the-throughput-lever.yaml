@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, src/run-task.ts, test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts]
   origin: "operator-request#raise-the-cap-2026-09-01"
   plan_refs: ["W1-T2561", "W1-T2582", "W1-T2569", "W1-T2590", "W1-T192"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE REQUEST WAS TO RAISE THE CAP. MEASUREMENT SAYS THAT DELIVERS NOTHING ────────────────

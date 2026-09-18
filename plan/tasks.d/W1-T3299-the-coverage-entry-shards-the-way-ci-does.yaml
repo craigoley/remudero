@@ -12,7 +12,7 @@
     - test/the-coverage-entry-shards-the-way-ci-does.test.ts
   origin: "operator-session#ci-parity-cost-2026-09-09"
   plan_refs: ["W1-T294", "W1-T3207", "W1-T2597"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE TWO ARGVS ARE THE SAME COMMAND MINUS ONE FLAG. MEASURED 2026-09-09:
