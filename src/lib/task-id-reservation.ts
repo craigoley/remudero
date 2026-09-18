@@ -400,6 +400,14 @@ export function classifyReservationPushFailure(stderr: string): RemoteReserveOut
   return "unknown";
 }
 
+/** A rejected create can mean a protected remote refused a ref that was never created. The
+ * follow-up fetch proves that distinct case: there is no holder to parse or reclaim, so preserve
+ * the original contention outcome and let the bounded scan advance. Any other fetch failure stays
+ * indeterminate rather than being mistaken for an absent reservation. */
+function reservationRefIsConfirmedAbsent(stderr: string): boolean {
+  return /couldn't find remote ref|remote ref .* not found/i.test(stderr);
+}
+
 /** Distinguishes CONTENTION from an unreachable remote for existing non-reservation claim callers. */
 export function classifyPushFailure(stderr: string): "taken" | "unreachable" {
   return /non-fast-forward|already exists|fetch first|rejected/i.test(stderr) ? "taken" : "unreachable";
@@ -598,7 +606,12 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       const fetched = deps.run(["fetch", "origin", ref]);
       if (fetched.status !== 0) {
         lastStderr = fetched.stderr;
-        return classifyReservationPushFailure(fetched.stderr) === "unreachable" ? "unreachable" : "unknown";
+        if (classifyReservationPushFailure(fetched.stderr) === "unreachable") return "unreachable";
+        // `attempt` already observed a contention-style rejection. When fetch confirms the ref
+        // does not exist, that rejection was a protected write rather than a holder, so there is
+        // nothing to repair and the caller must continue its bounded scan.
+        if (reservationRefIsConfirmedAbsent(fetched.stderr)) return "taken";
+        return "unknown";
       }
       const body = deps.run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
       if (body.status !== 0 || !body.stdout.trim()) {

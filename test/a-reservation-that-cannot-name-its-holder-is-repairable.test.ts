@@ -30,7 +30,7 @@ function withNoHeadRef<T>(body: () => T): T {
   }
 }
 
-function remoteWithHolder(opts: { branchPresent: boolean; fail?: "branch" | "fetch" | "body" | "push" }): { run: (args: string[]) => GitResult; calls: string[][]; reclaimedMessage: () => string } {
+function remoteWithHolder(opts: { branchPresent: boolean; fail?: "branch" | "fetch" | "missing-ref" | "body" | "push" }): { run: (args: string[]) => GitResult; calls: string[][]; reclaimedMessage: () => string } {
   const calls: string[][] = [];
   let reclaimedMessage = "";
   const holderMessage = `rmd-id reservation 1@old-host 2026-09-01T00:00:00.000Z\n\nrmd-id holder branch=${staleHolder} source=automatic\n`;
@@ -54,7 +54,11 @@ function remoteWithHolder(opts: { branchPresent: boolean; fail?: "branch" | "fet
         if (opts.fail === "push") return result(1, "", "could not resolve host: github.com");
         return result(0);
       }
-      if (args[0] === "fetch") return opts.fail === "fetch" ? result(1, "", "could not resolve host: github.com") : result(0);
+      if (args[0] === "fetch") {
+        if (opts.fail === "fetch") return result(1, "", "could not resolve host: github.com");
+        if (opts.fail === "missing-ref") return result(128, "", "fatal: couldn't find remote ref refs/rmd-id/W1-T3674");
+        return result(0);
+      }
       if (args[0] === "log") return opts.fail === "body" ? result(1, "", "cannot read object") : result(0, holderMessage);
       if (args[0] === "ls-remote") {
         if (opts.fail === "branch") throw new Error("branch lookup failed");
@@ -89,6 +93,25 @@ test("unit test: a live holder still refuses the filer", () => {
     remote.calls.some((args) => args[0] === "commit-tree" && args.includes("FETCH_HEAD")),
     false,
     "no takeover child may be created for a live holder",
+  );
+});
+
+test("unit test: a protected write with no created reservation ref remains contention and exhausts the bounded scan", () => {
+  const remote = remoteWithHolder({ branchPresent: false, fail: "missing-ref" });
+
+  assert.throws(
+    () => withNoHeadRef(() => reserveTaskIdRemote(3674, gitRemoteRefReserver({ run: remote.run }), { maxScan: 1 })),
+    (error: unknown) => {
+      assert.ok(error instanceof TaskIdReservationError);
+      assert.equal(error.outcome, "exhausted");
+      assert.equal(error.ref, undefined, "the protected write did not create a holder ref");
+      return true;
+    },
+  );
+  assert.equal(
+    remote.calls.some((args) => args[0] === "commit-tree" && args.includes("FETCH_HEAD")),
+    false,
+    "a confirmed-absent ref is not a holder and must never receive a takeover child",
   );
 });
 
