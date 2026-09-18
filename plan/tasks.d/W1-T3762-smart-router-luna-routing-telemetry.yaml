@@ -26,9 +26,10 @@
     OBSERVED in the read-only, rotation-safe production-ledger census (2026-09-18): 326 retained
     `worker.assignment` records from 2026-09-11 through 2026-09-17 selected Claude 208 times and
     Codex 118 times; Codex selected GPT-5.5 80 times, Terra 28, Luna 9, and Spark 1. The same
-    census found 229 terminal `verdict` rows, but none carried `selection_assignment_id`. The
-    analytics route therefore could not join a routing choice to its final worker outcome, tokens,
-    latency, cost, or fallback evidence.
+    census joined only 140 assignments to a retained task type (138 `implement`, 2 `diagnose`),
+    observed no Haiku selection and no commodity task type, and found 229 terminal `verdict` rows
+    with no `selection_assignment_id`. The analytics route therefore could not join a routing
+    choice to its final worker outcome, tokens, latency, cost, or fallback evidence.
 
     The user directs Luna-first use for Codex subscription work and commodity work off subscription.
     The committed cash ladder already owns task-shape and per-request-cost choices; changing it
