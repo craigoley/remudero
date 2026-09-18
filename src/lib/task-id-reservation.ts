@@ -418,6 +418,13 @@ export interface RemoteReserveDeps {
   run(args: string[]): { status: number; stdout: string; stderr: string };
   /** Overrides the anchor for a test that needs two writers to be distinguishable. */
   anchor?: () => string;
+  /**
+   * The branch that will file this reservation when the caller owns an explicit, isolated landing
+   * branch rather than its current checkout's branch. `main` remains refused by
+   * {@link reserveTaskIdRemote}; this only lets a caller name the real non-main filer before the
+   * landing branch exists locally.
+   */
+  filingBranch?: string;
 }
 
 export interface ReservationHolderLine {
@@ -562,9 +569,10 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
   // caller-supplied sha — the only anchors it is safe to fast-forward past are ones this instance
   // itself confirmed it holds.
   const wonAnchors = new Map<string, string>();
+  const filingBranch = () => deps.filingBranch ?? currentBranch(deps.run);
   return {
     filingBranch() {
-      return currentBranch(deps.run);
+      return filingBranch();
     },
     lastAttemptStderr() {
       return lastStderr;
@@ -578,7 +586,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
       const startedAt = reservationNowIso();
       const msg = formatReservationAnchorMessage({
-        branch: currentBranch(deps.run),
+        branch: filingBranch(),
         pid: process.pid,
         host: hostname(),
         startedAt,
@@ -597,8 +605,8 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       return classifyReservationPushFailure(res.stderr);
     },
     reclaim(taskId) {
-      const filingBranch = currentBranch(deps.run);
-      if (filingBranch === "unknown" || filingBranch === "main") {
+      const branch = filingBranch();
+      if (branch === "unknown" || branch === "main") {
         lastStderr = `cannot reclaim ${taskId} without a filing branch`;
         return "unknown";
       }
@@ -631,7 +639,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       const takenOverFrom = parsed.status === "known" ? parsed.holder.branch : "unknown";
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
       const message = formatReservationAnchorMessage({
-        branch: filingBranch,
+        branch,
         pid: process.pid,
         host: hostname(),
         startedAt: reservationNowIso(),
