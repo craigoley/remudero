@@ -11,7 +11,7 @@
   files: [src/lib/serve.ts, deploy/serve-container.sh, scripts/test-tier-manifest.json, test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts]
   origin: "operator-session#azure-console-2026-09-11"
   plan_refs: ["W1-T255", "W1-T152", "W1-T2924"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED ON THE LIVE AZURE HOST 2026-09-11T00:1xZ:

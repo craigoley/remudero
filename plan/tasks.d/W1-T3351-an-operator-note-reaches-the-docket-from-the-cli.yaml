@@ -11,7 +11,7 @@
   files: [src/run-task.ts, test/an-operator-note-reaches-the-docket-from-the-cli.test.ts, test/help-renders-a-summary-not-a-paragraph.test.ts, scripts/console-parity-ratchet.mjs, docs/cli-reference.md, docs/operator-guide.md]
   origin: "oper#operator-feedback-loop-does-not-close-2026-09-10"
   plan_refs: ["W1-T436", "W1-T3348", "W1-T164"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10 over the ledger union (919 archives + live file), exact-step queries with

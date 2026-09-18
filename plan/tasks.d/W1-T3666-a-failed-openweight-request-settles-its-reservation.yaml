@@ -10,7 +10,7 @@
   files: [src/lib/worker-provider.ts, test/a-failed-openweight-request-settles-its-reservation.test.ts]
   origin: oper#smart-routing-audit-2026-09-15
   plan_refs: ["W1-T3619", "W1-T3575"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED from state/openweight-allowance.json on 2026-09-15, 104 requests against the $10 cap:

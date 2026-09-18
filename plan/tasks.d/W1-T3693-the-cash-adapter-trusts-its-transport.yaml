@@ -12,7 +12,7 @@
     - src/lib/worker-provider.ts
   origin: "operator-session#synthwatch-comparison-2026-09-16"
   plan_refs: ["W1-T3567", "W1-T3575"]
-  status: queued
+  status: merged
   priority: 2
   note: |
     COMPARED 2026-09-16 against synthwatch's production Azure adapter (`runner/aoai.ts`,

@@ -11,7 +11,7 @@
   files: [src/lib/daemon.ts, src/lib/status.ts, test/blocked-status-survives-plan-reload.test.ts]
   origin: "operator-session#site-daemon-admission-recovery-2026-09-14"
   plan_refs: ["W1-T2910", "W1-T46", "W1-T174", "W1-T340"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The site cell refused PORTAL-T4 before any worker launch because its task was correctly

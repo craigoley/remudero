@@ -13,7 +13,7 @@
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-ruling#W1-T3572-check-runner-2026-09-15"
   plan_refs: ["W1-T3572", "W1-T3613", "W1-T3608", "W1-T3569", "W1-T2"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: main -> chore/file-openweight-checkrunner-1789493010

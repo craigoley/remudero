@@ -13,7 +13,7 @@
     - test/host-units-install.test.ts
   origin: "operator-session#azure-recycle-control-checkout-advance-2026-09-14"
   plan_refs: ["W1-T924", "W1-T3199", "W1-T3201", "W1-T3245", "W1-T3269"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED from the deployed Azure control path on 2026-09-14. The daemon's bind-mounted

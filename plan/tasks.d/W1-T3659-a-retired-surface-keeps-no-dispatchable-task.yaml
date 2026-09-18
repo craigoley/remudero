@@ -10,7 +10,7 @@
   files: [test/a-retired-surface-keeps-no-dispatchable-task.test.ts]
   origin: oper#instance-scope-audit-2026-09-16
   plan_refs: ["W1-T1287", "W1-T3196"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE SEVEN RETIREMENTS ARE NOT THIS TASK'S WORK — they land in the pull request that files this

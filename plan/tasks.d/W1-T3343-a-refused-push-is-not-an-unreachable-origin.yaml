@@ -11,7 +11,7 @@
   files: [src/lib/task-id-reservation.ts, test/a-refused-push-is-not-an-unreachable-origin.test.ts]
   origin: "operator-session#doctrine-modularization-2026-09-10"
   plan_refs: ["W1-T1055", "W1-T3323"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     OBSERVED, NOT INFERRED, 2026-09-10 while building W1-T3323. `rmd next-task-id --reserve` printed:

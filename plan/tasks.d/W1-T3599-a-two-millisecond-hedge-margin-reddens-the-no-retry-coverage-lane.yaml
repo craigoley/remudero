@@ -11,7 +11,7 @@
   files: [test/codex-capacity-singleflight.test.ts]
   origin: "operator-session#openweight-model-economics-2026-09-15"
   plan_refs: ["W1-T3207", "W1-T1041", "W1-T2904"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-15, not inferred from a single red.

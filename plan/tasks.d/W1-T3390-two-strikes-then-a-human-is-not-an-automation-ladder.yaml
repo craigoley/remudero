@@ -10,7 +10,7 @@
   origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
   plan_refs: ["W1-T3386", "W1-T3389", "W1-T3391"]
   files: [src/lib/classify.ts, src/lib/sweep.ts, test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LADDER HAS TWO RUNGS AND THEN A PERSON. `classify.ts` sets `MAX_STRIKES = 2` and gives up with

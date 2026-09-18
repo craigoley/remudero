@@ -10,7 +10,7 @@
   files: [src/lib/task-id-reservation.ts, test/a-reservation-records-the-branch-that-files-it.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T278", "W1-T509"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED: on PR #5703 alone, EIGHT shards each needed the same note added by hand before

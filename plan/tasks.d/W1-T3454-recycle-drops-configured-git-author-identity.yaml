@@ -12,7 +12,7 @@
   files: [deploy/runtime-env-vars.sh, deploy/recycle-container.sh, deploy/host-update.sh, test/recycle-container.test.ts]
   origin: "operator-session#private-portal-vercel-preview-identity-2026-09-12"
   plan_refs: ["W1-T1010", "W1-T1069"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PRIVATE PORTAL PR #8 at 04d634087e2fe755c3b3fb8ee488289fab46c862. Vercel blocked

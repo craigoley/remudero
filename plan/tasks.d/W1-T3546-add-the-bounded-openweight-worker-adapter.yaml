@@ -21,7 +21,7 @@
     - test/retro-marker-atomic.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
   plan_refs: ["W1-T110", "W1-T111", "W1-T241", "W1-T3545", "W1-T3547", "W1-T2573", "W1-T258", "W1-T3094", "W1-T62", "W1-T94"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS IS PHASE TWO. It introduces the `openweight` provider identity and an unused adapter for

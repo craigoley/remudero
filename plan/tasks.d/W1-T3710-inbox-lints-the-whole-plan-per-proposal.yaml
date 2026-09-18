@@ -141,7 +141,7 @@
   # in opposite directions on the same filing. The suite is
   # test/lint-scope-narrows-output-not-corpus.test.ts and it lands in the implementation PR.
   files: [src/lib/task-linter.ts, src/lib/inbox.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: inboxlint -> plan3710

@@ -13,7 +13,7 @@
     - test/fix-rung-report-provenance.test.ts
   origin: "operator-session#fix-rung-stale-contract-2026-09-14"
   plan_refs: ["W1-T2462", "W1-T3501", "W1-T3545"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     OBSERVED 2026-09-14: daemon run DAEMON-1789351932540 began before W1-T3545 was split.

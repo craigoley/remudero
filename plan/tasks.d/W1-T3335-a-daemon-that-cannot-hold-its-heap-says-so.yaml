@@ -12,7 +12,7 @@
     - test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts
   origin: "operator-session#fleet-halt-2026-09-10"
   plan_refs: ["W1-T3331", "W1-T3309"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10T13:49Z, from the container itself, not inferred:

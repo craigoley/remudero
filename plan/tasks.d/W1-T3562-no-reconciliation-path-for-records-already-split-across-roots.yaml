@@ -14,7 +14,7 @@
     - test/feedback-landing-reconcile.test.ts
   origin: architect
   plan_refs: ["W1-T3559", "W1-T3560", "W1-T3561", "W1-T530", "W1-T2749", "W1-T3532", "§7B"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (1) THE FORWARD FIXES DO NOT REPAIR THE PAST. W1-T3560 stops a disjoint batch from replacing

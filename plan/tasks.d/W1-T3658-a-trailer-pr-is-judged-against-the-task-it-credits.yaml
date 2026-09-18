@@ -10,7 +10,7 @@
   files: [scripts/acceptance-author-gate.mjs, test/a-trailer-pr-is-judged-against-the-task-it-credits.test.ts]
   origin: oper#dispatch-refusal-audit-2026-09-16
   plan_refs: ["W1-T1060", "W1-T952", "W1-T2297"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16. `CONSOLE-T12` declared four criteria, every one proved by a named unit

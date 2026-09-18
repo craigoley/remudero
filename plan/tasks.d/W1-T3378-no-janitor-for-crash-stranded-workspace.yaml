@@ -11,7 +11,7 @@
   files: [src/lib/review-worktree-reclaim.ts, src/lib/daemon.ts, test/a-review-worktree-stranded-by-a-kill-is-swept-later.test.ts]
   origin: "operator-session#mac-mini-disk-2026-09-11"
   plan_refs: ["W1-T233", "W1-T175", "W1-T1082", "W1-T3320"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED ON THE MAC MINI (the operator host, NOT the Azure fleet volume) 2026-09-11:

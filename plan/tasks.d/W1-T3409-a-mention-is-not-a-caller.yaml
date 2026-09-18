@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   files:
     - src/lib/measurement-cadence.ts

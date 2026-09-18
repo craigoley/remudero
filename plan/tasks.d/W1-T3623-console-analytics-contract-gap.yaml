@@ -11,7 +11,7 @@
   files: [src/lib/analytics-route.ts, test/console-analytics-contract-gap.test.ts]
   origin: oper#console-analytics-unavailable-2026-09-15
   plan_refs: ["W1-T425"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-15, after RMD_CONTROL_ANALYTICS_INSTANCES was finally configured. The

@@ -5,7 +5,7 @@
   type: diagnose
   verify: auto
   risk: medium
-  status: queued
+  status: merged
   attempts: 0
   files:
     - test/the-census-admission-set-is-derived-not-enumerated.test.ts

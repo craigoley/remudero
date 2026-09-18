@@ -11,7 +11,7 @@
   files: [.github/workflows/ci.yml, test/fast-lane-classifier.test.ts]
   origin: "operator-session#board-green-2026-09-13"
   plan_refs: ["W1-T2428", "W1-T2680", "W1-T3177"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED on origin/main 2026-09-13 by parsing ci-gate.yml's REQUIRED list against ci.yml's jobs:

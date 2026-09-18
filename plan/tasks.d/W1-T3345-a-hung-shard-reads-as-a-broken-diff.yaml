@@ -13,7 +13,7 @@
     - test/a-hung-shard-does-not-read-as-a-broken-diff.test.ts
   origin: "operator-session#shard-hang-2026-09-10"
   plan_refs: ["W1-T3303", "W1-T3338", "W1-T2340"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10, 64 shard jobs across the 8 most recent completed `ci.yml` runs:

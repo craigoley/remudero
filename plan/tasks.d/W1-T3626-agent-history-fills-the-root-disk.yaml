@@ -11,7 +11,7 @@
   files: [deploy/host-update.sh, test/agent-history-does-not-fill-the-root-disk.test.ts]
   origin: oper#host-wedged-2026-09-16
   plan_refs: ["W1-T3612", "W1-T3611"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE INCIDENT, 2026-09-16. The host stopped answering ssh while still serving HTTP. Ordered

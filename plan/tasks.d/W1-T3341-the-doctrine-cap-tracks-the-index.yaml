@@ -11,7 +11,7 @@
   files: [scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts, test/the-doctrine-cap-tracks-the-index.test.ts]
   origin: "operator-session#doctrine-modularization-2026-09-10"
   plan_refs: ["W1-T3323", "W1-T3320", "W1-T2507", "W1-T503", "W1-T297"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     WHY THIS IS A SEPARATE TASK AND NOT THE LAST COMMIT OF W1-T3323. `scripts/[^/]*-baseline\.json$`

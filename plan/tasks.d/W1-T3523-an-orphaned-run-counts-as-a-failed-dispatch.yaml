@@ -11,7 +11,7 @@
   files: [src/lib/status.ts, test/an-orphaned-run-is-not-a-failed-dispatch.test.ts]
   origin: "operator-session#azure-ledger-2026-09-13"
   plan_refs: ["W1-T271", "W1-T1010", "W1-T2270", "W1-T1210"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED on the LIVE fleet ledger 2026-09-13, /home/craigoleyagent/rmd-state2/state/ledger.ndjson

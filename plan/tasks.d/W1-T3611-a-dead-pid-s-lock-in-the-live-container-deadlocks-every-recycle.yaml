@@ -13,7 +13,7 @@
     - test/recycle-container.test.ts
   origin: "operator-session#openweight-trial-2026-09-15"
   plan_refs: ["W1-T2556", "W1-T978", "W1-T3603"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     OBSERVED TWICE on the live Azure host 2026-09-15 while placing the openweight key.

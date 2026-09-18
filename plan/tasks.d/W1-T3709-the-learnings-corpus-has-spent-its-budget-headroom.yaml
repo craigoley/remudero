@@ -15,7 +15,7 @@
     - learnings/failures.yaml
   origin: "operator-session#is-the-shift-left-loop-effective-2026-09-16"
   plan_refs: ["W1-T38", "W1-T2507", "W1-T88", "W1-T33"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     CRITERIA SET TO THE DELIVERED DESIGN, 2026-09-16, BEFORE THE BUILD LANDED. The first draft of

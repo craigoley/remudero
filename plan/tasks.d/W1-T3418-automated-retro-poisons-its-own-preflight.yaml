@@ -10,7 +10,7 @@
   origin: "operator-session#daemon-lifeguard-2026-09-11"
   plan_refs: ["W1-T2769", "W1-T3069", "W1-T2870"]
   files: [src/lib/retro-preflight.ts, test/automated-retro-preflight-scrubs-self-sync.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-11 on the Azure fleet host at origin/main d4b7de5f. The automated parent
