@@ -9,7 +9,7 @@
   risk: low
   origin: "measured 2026-09-18 on the live board — both CADENCE rows reading stale are false alarms, and they are exactly the two rows lacking a policyKey"
   plan_refs: [W1-T436]
-  files: [src/lib/status-board.ts]
+  files: [src/lib/status-board.ts, test/the-cadence-fallback-does-not-over-report.test.ts]
   status: queued
   attempts: 0
   note: |
@@ -66,8 +66,14 @@
     - claim: "the feedback docket is judged against the weekly gate that actually governs it"
       proof: "grep: SEVEN_DAY in src/lib/status-board.ts"
     - claim: "the fallback interval itself is unchanged — the fix is not a longer default"
-      proof: "grep: CADENCE_DEFAULT_INTERVAL_MINUTES = 24 in src/lib/status-board.ts"
+      proof: "grep: the fallback interval is unchanged in test/the-cadence-fallback-does-not-over-report.test.ts"
   falsifier: |
+    NOTE ON CRITERION 3's PROOF. Grepping the unchanged constant was refused by
+    proof-discrimination on #5982, and correctly: an unchanged line matches the merge base too,
+    so it establishes nothing. The claim is a NEGATIVE one, and its discriminating evidence is
+    the assertion that would fail if the default were lengthened — which lives in a test file
+    absent at the base. Do not repoint it back at the constant.
+
     Lengthen `CADENCE_DEFAULT_INTERVAL_MINUTES` and the third assertion goes red while the first
     two would pass on it — which is why the third exists. Declare the docket's interval as a day
     rather than a week and the second goes red. Drop the enforcement and leave only the comment,
