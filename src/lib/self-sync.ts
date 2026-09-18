@@ -493,11 +493,9 @@ export function checkServiceFreshness(
  * HEAD (how the daemon boots) with no sha pair, and it mutates, which a daemon must never do.
  *
  * Every non-`assessed` status maps to `{ stale: false }`: "I could not tell" is never a restart
- * trigger. Its decision arm remains attached so the daemon can ledger that it declined to restart
- * because it was guarded or because its read degraded; those are operationally different outcomes.
- * A dirty tree is also never stale — entrypoint.sh refuses to sync one, so a restarted container
- * would come back on the same sha and loop (the relaunch storm `DaemonStopReason`'s doc forbids).
- * `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
+ * trigger. A dirty tree is also never stale — entrypoint.sh refuses to sync one, so a restarted
+ * container would come back on the same sha and loop (the relaunch storm `DaemonStopReason`'s doc
+ * forbids). `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
  * Why: docs/forensics/self-sync.md#daemonfreshnessfromservice.
  */
 export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshness {

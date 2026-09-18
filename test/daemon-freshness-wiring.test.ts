@@ -10,6 +10,7 @@ import { daemonCommand } from "../src/run-task.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T126's MISSING PRODUCER ────────────────────────────────────────────────────────────────
 //
@@ -80,7 +81,7 @@ test("W1-T3756: each not-stale arm names itself", async () => {
     assert.equal(freshness.notStale?.arm, expectedRow.arm);
 
     const plan = fixturePlan();
-    const root = mkdtempSync(join(tmpdir(), "daemon-freshness-arm-"));
+    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-freshness-arm-`));
     const logs: Array<{ step: string; data: Record<string, unknown> }> = [];
     let ticks = 0;
     const summary = await runDaemon(plan, {
@@ -99,7 +100,7 @@ test("W1-T3756: each not-stale arm names itself", async () => {
 
 test("W1-T3756: degraded is not silently a pass", async () => {
   const plan = fixturePlan();
-  const root = mkdtempSync(join(tmpdir(), "daemon-freshness-degraded-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-freshness-degraded-`));
   const logs: Array<{ step: string; data: Record<string, unknown> }> = [];
   let ticks = 0;
   const summary = await runDaemon(plan, {
