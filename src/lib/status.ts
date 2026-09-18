@@ -1365,11 +1365,54 @@ export function dispatchesEver(
   taskId: string,
   index?: LedgerIndex,
 ): number {
-  let count = 0;
+  return lifetimeDispatchTally(lines, taskId, index).starts;
+}
+
+/** The two facts the lifetime cap needs. `daemon.spawn_infra_blocked` is written by the daemon
+ * only after `runOne(task)` rejects before any provider can serve a turn; it deliberately names
+ * the task in `task`, while the child writes its preceding `run.start` under `task_id`. Keeping
+ * both counters visible prevents an absence-based exemption from forgiving a task-owned crash. */
+export interface LifetimeDispatchTally {
+  starts: number;
+  capacityBlocked: number;
+}
+
+/** Derive one task's durable lifetime-dispatch inputs from either the live ledger or an audited
+ * archive projection. A capacity receipt is a fleet-wide refusal stamped by its writer; every
+ * other worker outcome, including an orphan with no terminal row, stays charged. */
+export function lifetimeDispatchTally(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+): LifetimeDispatchTally {
+  let starts = 0;
+  let capacityBlocked = 0;
   for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (line.task_id === taskId && line.step === "run.start") count++;
+    if (line.task_id === taskId && line.step === "run.start") starts += 1;
+    if (line.task === taskId && line.step === "daemon.spawn_infra_blocked") capacityBlocked += 1;
   }
-  return count;
+  return { starts, capacityBlocked };
+}
+
+/** Combine independently-read archive and live tallies without making the live file immutable at
+ * daemon boot. Exported so the command layer can discard an incomplete archive projection rather
+ * than guessing from a partial corpus. */
+export function addLifetimeDispatchTallies(
+  ...tallies: readonly LifetimeDispatchTally[]
+): LifetimeDispatchTally {
+  let starts = 0;
+  let capacityBlocked = 0;
+  for (const tally of tallies) {
+    starts += tally.starts;
+    capacityBlocked += tally.capacityBlocked;
+  }
+  return { starts, capacityBlocked };
+}
+
+/** Capacity receipts cannot outnumber starts in a complete corpus. If they do, retain the old
+ * all-starts count: a partial or malformed join must never make a task dispatchable. */
+export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): number {
+  return tally.capacityBlocked > tally.starts ? tally.starts : tally.starts - tally.capacityBlocked;
 }
 
 /** THE THRESHOLD IS A MEASUREMENT, NOT A GUESS (W1-T271): 274 of 282 ever-dispatched tasks (97%) were
@@ -1385,7 +1428,7 @@ export function isLifetimeDispatchCapExceeded(
   maxLifetimeDispatches: number = DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   index?: LedgerIndex,
 ): boolean {
-  return dispatchesEver(lines, taskId, index) >= maxLifetimeDispatches;
+  return effectiveLifetimeDispatches(lifetimeDispatchTally(lines, taskId, index)) >= maxLifetimeDispatches;
 }
 
 /**
