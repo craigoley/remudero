@@ -40,6 +40,7 @@ type GateInput = {
   trailerCommits?: Array<{ sha: string; subject: string; taskId: string }>;
   changedPaths?: readonly string[];
   taskFilesForId?: TaskFilesForId;
+  taskAcceptanceForId?: (taskId: string) => readonly { claim: string; proof: string }[] | undefined;
   rule15Verdict?: { refused: boolean; reason?: string };
 };
 type GateVerdict = { ok: boolean; defect?: string; message: string };
@@ -65,6 +66,7 @@ const mod = (await import(GATE_URL)) as {
   }) => { refused: boolean; reason?: string } | undefined;
   planTaskFilesResolver: (root?: string) => TaskFilesForId | undefined;
   readEventPayload: (eventPath: string) => { readable: boolean; body?: string; authorLogin?: string; reason?: string };
+  evaluateCommitTrailerGate: (input: Pick<GateInput, "trailerCommits" | "changedPaths" | "taskFilesForId">) => GateVerdict;
   evaluateGate: (input: GateInput) => GateVerdict;
   main: (argv: string[]) => void;
   resolveEventPath: (
@@ -72,7 +74,7 @@ const mod = (await import(GATE_URL)) as {
     env?: Record<string, string | undefined>,
   ) => { ok: boolean; eventPath?: string; message?: string };
 };
-const { EXEMPT_BOT_LOGINS, changedPathsAtRange, commitTaskTrailersAtRange, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath, rule15SplitAtRange } = mod;
+const { EXEMPT_BOT_LOGINS, changedPathsAtRange, commitTaskTrailersAtRange, evaluateCommitTrailerGate, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath, rule15SplitAtRange } = mod;
 
 /** Byte-identical in shape to test/acceptance-block-diagnostics.test.ts's own WRAPPED fixture —
  *  a claim long enough that an author wrapped it onto a second line. `parseAcceptanceBlock`
@@ -105,8 +107,8 @@ function tmpEventFile(json: unknown): { dir: string; path: string; cleanup: () =
   return { dir, path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function runGate(eventPath: string) {
-  return spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--event-path", eventPath], {
+function runGate(eventPath: string, rest: string[] = []) {
+  return spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--event-path", eventPath, ...rest], {
     cwd: REPO_ROOT,
     encoding: "utf8",
   });
@@ -428,6 +430,72 @@ test("W1-T3414: source-changing and plan-only task controls pass, and unreadable
     }),
     existing,
   );
+});
+
+test("the squash-trailer caller emits no body-derived refusal", () => {
+  const body = [
+    "## Acceptance",
+    "",
+    "- claim: a stale body claim",
+    "  proof: grep: stale-body-only in src/lib/example.ts",
+    "",
+    "Remudero-Task: W1-T3734",
+  ].join("\n");
+  const taskAcceptanceForId = (taskId: string) =>
+    taskId === "W1-T3734" ? [{ claim: "the plan is authoritative", proof: "grep: plan-owned-proof in src/lib/example.ts" }] : undefined;
+
+  const authorVerdict = evaluateGate({ body, authorLogin: "a-human", trailerResolves: (id) => id === "W1-T3734", taskAcceptanceForId });
+  assert.equal(authorVerdict.ok, false, "the normal caller remains responsible for the body-derived refusal");
+  assert.equal(authorVerdict.defect, "trailer-body-proof-divergence");
+
+  const trailerVerdict = evaluateCommitTrailerGate({
+    trailerCommits: [],
+    changedPaths: ["src/lib/example.ts"],
+    taskFilesForId: implementationTaskFiles,
+  });
+  assert.equal(trailerVerdict.ok, true, trailerVerdict.message);
+
+  const event = tmpEventFile({ pull_request: { body, user: { login: "a-human" } } });
+  try {
+    const standalone = runGate(event.path);
+    assert.equal(standalone.status, 1, standalone.stderr);
+    const ciCopy = runGate(event.path, ["--commit-trailer-only"]);
+    assert.equal(ciCopy.status, 0, ciCopy.stderr);
+  } finally {
+    event.cleanup();
+  }
+
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "acceptance-author-gate.yml"), "utf8");
+  const ciWorkflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  assert.match(workflow, /types: \[opened, synchronize, reopened, edited\]/, "the body caller must run for a body-only edit");
+  assert.match(ciWorkflow, /acceptance-author-gate\.mjs --commit-trailer-only/, "CI must select only the concern it owns");
+});
+
+test("a follow-up commit trailer is still refused by the squash-trailer caller", () => {
+  const result = evaluateCommitTrailerGate({
+    trailerCommits: [{ sha: "d".repeat(40), subject: "chore: add credit", taskId: IMPLEMENTATION_TASK }],
+    changedPaths: ["plan/tasks.d/W1-T3149.yaml"],
+    taskFilesForId: implementationTaskFiles,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.defect, "follow-up-implementation-trailer");
+});
+
+test("the body-derived refusals still fire on the edit-aware caller", () => {
+  const body = [
+    "## Acceptance",
+    "",
+    "- claim: a stale body claim",
+    "  proof: grep: stale-body-only in src/lib/example.ts",
+    "",
+    "Remudero-Task: W1-T3734",
+  ].join("\n");
+  const taskAcceptanceForId = (taskId: string) =>
+    taskId === "W1-T3734" ? [{ claim: "the plan is authoritative", proof: "grep: plan-owned-proof in src/lib/example.ts" }] : undefined;
+
+  const verdict = evaluateGate({ body, authorLogin: "a-human", trailerResolves: (id) => id === "W1-T3734", taskAcceptanceForId });
+  assert.equal(verdict.ok, false, "the edit-aware caller remains responsible for body-derived refusals");
+  assert.equal(verdict.defect, "trailer-body-proof-divergence");
 });
 
 test("acceptance gate: a block truncated at a wrapped claim is refused", () => {

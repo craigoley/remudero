@@ -60,7 +60,7 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Refuse trailer credit added by any branch commit
-        run: node --import tsx scripts/acceptance-author-gate.mjs
+        run: node --import tsx scripts/acceptance-author-gate.mjs --commit-trailer-only
 
   ci:
     name: ci-shard (${{ matrix.shard }}/4)
