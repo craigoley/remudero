@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/a-title-proof-that-passes-on-an-empty-base-is-refused.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3639", "W1-T2339"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #5739, 2026-09-16, on a PR whose own subject was gate repair.

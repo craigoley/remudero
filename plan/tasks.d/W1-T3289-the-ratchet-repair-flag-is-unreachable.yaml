@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, plan/policy.yaml, test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts]
   origin: "operator-session#ratchet-repair-ratified-2026-09-09"
   plan_refs: ["W1-T2998", "W1-T3015", "W1-T2650"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

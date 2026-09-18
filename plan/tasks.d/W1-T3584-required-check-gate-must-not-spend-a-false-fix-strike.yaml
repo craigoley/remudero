@@ -14,7 +14,7 @@
     - test/check-wait-progress.test.ts
   origin: "operator-session#console-pr-22-false-ci-timeout-2026-09-14"
   plan_refs: ["W1-T382", "W1-T1211", "W1-T2268", "W1-T2804", "W1-T3554"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on remudero-console PR #22 at head 122cc3608c06c20cd19fec2ad790283f768f7aaa

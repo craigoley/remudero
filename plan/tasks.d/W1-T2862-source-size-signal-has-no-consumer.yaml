@@ -19,7 +19,7 @@
     - test/source-size-followup.test.ts
   origin: "operator-session#source-growth-files-high-priority-refactor-work-2026-09-05"
   plan_refs: ["W1-T2734", "W1-T2861"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT ab669883. W1-T2734's `source-size-signal` prints a schema-versioned JSON

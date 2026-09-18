@@ -53,7 +53,7 @@
   origin: architect
   plan_refs: ["§7B", "§7"]
   files: [src/lib/ask-classification.ts, src/lib/serve.ts, test/ask-classification.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Ratifies W1-T3186 clause (i) — the mechanical backbone that makes NEEDS ME's dissolution enforceable

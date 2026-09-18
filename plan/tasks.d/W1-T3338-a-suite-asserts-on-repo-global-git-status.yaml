@@ -11,7 +11,7 @@
     - test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts
   origin: "operator-session#shard2-global-status-2026-09-10"
   plan_refs: ["W1-T2957", "W1-T2905"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on #4992, coverage-shard (2/4), job 102951750313:

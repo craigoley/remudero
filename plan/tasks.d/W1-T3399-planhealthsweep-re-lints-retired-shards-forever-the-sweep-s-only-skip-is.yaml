@@ -10,7 +10,7 @@
   files: [src/lib/retro.ts, test/retro.test.ts]
   origin: "oper#w1-t3076-retirement-ruling-2026-09-09"
   plan_refs: ["W1-T3076", "W1-T1287", "W1-T3074", "W1-T2474"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED AT SOURCE 2026-09-09. `planHealthSweep` (`src/lib/retro.ts:1945-1966`) loops every task

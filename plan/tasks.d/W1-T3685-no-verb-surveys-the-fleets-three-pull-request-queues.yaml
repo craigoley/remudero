@@ -13,7 +13,7 @@
     - src/run-task.ts
   origin: "operator-session#board-script-rewritten-three-times-2026-09-16"
   plan_refs: ["W1-T3683"]
-  status: queued
+  status: merged
   priority: 4
   attempts: 0
   note: |

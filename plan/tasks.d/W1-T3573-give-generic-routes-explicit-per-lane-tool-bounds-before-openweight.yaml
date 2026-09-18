@@ -14,7 +14,7 @@
     - test/a-generic-route-has-an-explicit-tool-bound.test.ts
   origin: "operator-session#open-weight-resequence-2026-09-14"
   plan_refs: ["W1-T62", "W1-T94", "W1-T3545", "W1-T3569", "W1-T3570", "W1-T3572", "W1-T2591"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-lane-tool-bounds-1789389121907

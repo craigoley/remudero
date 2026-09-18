@@ -11,7 +11,7 @@
   files: [src/lib/analytics-route.ts, src/lib/ledger-union.ts, src/lib/serve.ts, test/an-analytics-request-returns-under-its-own-ceiling.test.ts]
   origin: "operator-session#analytics-route-host-validation-2026-09-11"
   plan_refs: ["W1-T477", "W1-T2484", "W1-T2562"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS REPLACES THE ORIGINAL DAEMON-OOM SCOPE. The fleet outage named by the old title ended after

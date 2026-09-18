@@ -11,7 +11,7 @@
     - test/stale-ci-gate-wiring.test.ts
   origin: "operator-session#main-red-clock-boundary-2026-09-09"
   plan_refs: ["W1-T3001", "W1-T1275", "W1-T2250"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     SHIPPED AS #4845 BEFORE THIS SHARD WAS FILED, DELIBERATELY. `main` was red and every PR in the

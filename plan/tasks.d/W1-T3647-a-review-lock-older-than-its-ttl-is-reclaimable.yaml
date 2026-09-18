@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-review-lock-older-than-its-ttl-is-reclaimable.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3646"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #5672. At 23:42 the reviewer posted:

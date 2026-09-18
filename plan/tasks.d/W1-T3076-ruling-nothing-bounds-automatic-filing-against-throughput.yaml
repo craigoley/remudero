@@ -11,7 +11,7 @@
   files: [DECISIONS.md]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T2456", "W1-T1287", "W1-T2657", "P46"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 on `origin/main` (3,586 commits, history deepened to 2026-07-01):

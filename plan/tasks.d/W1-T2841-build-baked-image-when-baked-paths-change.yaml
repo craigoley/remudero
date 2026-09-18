@@ -12,7 +12,7 @@
     - test/acr-build-trigger.test.ts
   origin: "operator-session#automatic-baked-path-build-2026-09-04"
   plan_refs: ["W1-T496", "W1-T1021", "W1-T2770"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main on 2026-09-04: `.github/workflows/acr-build.yml` accepts only

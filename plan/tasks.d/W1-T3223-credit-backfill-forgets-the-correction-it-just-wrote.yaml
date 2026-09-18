@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/lib/status.ts, test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts]
   origin: "lifeguard#daemon-efficiency-2026-09-09"
   plan_refs: ["W1-T103", "W1-T150", "W1-T951", "W1-T3019"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED FROM LIVE TELEMETRY, NOT INFERRED FROM THE PLAN. This filing follows W1-T3019's

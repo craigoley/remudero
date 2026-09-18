@@ -11,7 +11,7 @@
   files: [hooks/pre-commit, test/a-new-test-file-tiers-itself.test.ts]
   origin: "operator-session#daemon-health-2026-09-10"
   plan_refs: ["W1-T3205", "W1-T3310", "W1-T2734"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: medium` with `band_meaning: blast-radius`: the diff is a seeding call and a hook

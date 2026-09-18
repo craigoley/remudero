@@ -12,7 +12,7 @@
     - test/codex-capacity-singleflight.test.ts
   origin: "operator-session#codex-capacity-timeout-2026-09-03"
   plan_refs: ["W1-T2572", "W1-T2573", "W1-T2704", "W1-T2711", "W1-T2756"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET HOST. In the 24 hours ending 2026-09-03T13:45Z, the daemon

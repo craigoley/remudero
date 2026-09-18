@@ -10,7 +10,7 @@
   origin: "operator-session#three-partial-fixes-in-one-session-2026-09-09"
   plan_refs: ["W1-T3229", "W1-T3232", "W1-T2833", "W1-T2737", "W1-T2870"]
   files: [src/lib/review.ts, test/an-unaudited-sibling-call-site-is-named.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THREE INCIDENTS IN ONE SESSION, ALL THE SAME SHAPE, ALL FOUND BY HAND.

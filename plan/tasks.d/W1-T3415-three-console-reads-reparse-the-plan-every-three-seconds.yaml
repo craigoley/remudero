@@ -10,7 +10,7 @@
   origin: "operator-session#daemon-lifeguard-2026-09-11"
   plan_refs: ["W1-T3192", "W1-T2920", "W1-T3352"]
   files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/console-read-routes-share-the-serve-plan.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-11 on the Azure fleet host after #5146 merged. The remudero-serve main

@@ -12,7 +12,7 @@
     - src/run-task.ts
   origin: "operator-session#i1-early-gate-2026-09-16"
   plan_refs: ["W1-T3618", "W1-T228", "W1-T2965"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: |

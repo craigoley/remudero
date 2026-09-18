@@ -10,7 +10,7 @@
   origin: "issue#5319"
   plan_refs: ["W1-T416", "W1-T137"]
   files: [src/lib/plan-architect.ts, test/plan-architect.test.ts, test/commit-message.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "reservation hand-off: run-TRIAGE-fb-1789261381180-c02132-1789261879686 -> codex/plan-w1-t3483-plan-message"
   rationale: |

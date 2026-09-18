@@ -13,7 +13,7 @@
     - test/install-host-units.test.ts
   origin: "operator-session#openweight-trial-2026-09-15"
   plan_refs: ["W1-T3269", "W1-T3583", "W1-T924"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED on the live Azure host 2026-09-15, `journalctl -u rmd-fleet-watchdog.service

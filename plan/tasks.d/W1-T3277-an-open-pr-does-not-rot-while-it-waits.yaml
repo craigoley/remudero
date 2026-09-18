@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/an-open-pr-does-not-rot-while-it-waits.test.ts]
   origin: "operator-session#board-drive-2026-09-09"
   plan_refs: ["W1-T528", "W1-T3273", "W1-T106", "W1-T3144"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

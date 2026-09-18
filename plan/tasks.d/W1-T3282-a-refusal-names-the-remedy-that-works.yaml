@@ -12,7 +12,7 @@
     - test/a-refusal-names-the-remedy-that-works.test.ts
   origin: "operator-session#pr-fix-sweep-2026-09-09"
   plan_refs: ["W1-T221", "W1-T83", "W1-T1075", "W1-T3266"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09 ON PR #4841, AS A SPENT STRIKE. The PR added `killSignal: "SIGKILL"` to three

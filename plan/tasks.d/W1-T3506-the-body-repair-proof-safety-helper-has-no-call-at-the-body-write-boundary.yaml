@@ -11,7 +11,7 @@
   origin: "operator-session#daemon-build-followups-2026-09-13"
   plan_refs: ["W1-T3389", "W1-T2544", "W1-T3504"]
   files: [src/run-task.ts, test/a-body-repair-proof-safety-is-enforced-at-the-write-boundary.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     REISSUE OF W1-T3504, NOT A SECOND BODY-REPAIR DESIGN. W1-T3504 was filed on PR #5344 after

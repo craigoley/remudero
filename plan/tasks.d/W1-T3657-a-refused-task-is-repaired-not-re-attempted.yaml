@@ -11,7 +11,7 @@
   files: [src/lib/dispatch-repair.ts, src/run-task.ts, test/a-refused-task-is-repaired-not-re-attempted.test.ts]
   origin: oper#dispatch-refusal-audit-2026-09-16
   plan_refs: ["W1-T1287", "W1-T2503"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR, 2026-09-16: "if rmd doesn't like how those tasks are structured, why didn't it create

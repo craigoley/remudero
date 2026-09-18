@@ -51,7 +51,7 @@
   origin: architect
   plan_refs: ["W1-T370", "W1-T3212", "W1-T1260", "W1-T369", "W1-T367"]
   files: [test/w1-t370-ruling-content.test.ts, plan/decisions.d]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high with band_meaning: span is Rule 19 span, not blast radius: one deterministic test file

@@ -12,7 +12,7 @@
     - test/workflow-guard-mutation-ratchet.test.ts
   origin: "operator-session#ratchet-sweep-2026-09-16"
   plan_refs: ["W1-T3701"]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   note: |

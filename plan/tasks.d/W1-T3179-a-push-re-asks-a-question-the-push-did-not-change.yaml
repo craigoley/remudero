@@ -10,7 +10,7 @@
   files: [src/lib/escalate.ts, test/a-push-does-not-re-ask-a-head-independent-question.test.ts]
   origin: "operator-session#console-architecture-2026-09-08"
   plan_refs: ["W1-T195", "W1-T345", "W1-T3167", "W1-T3168", "W1-T104"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-08, and this record exists because its author FIRST GOT IT WRONG. W1-T3167's

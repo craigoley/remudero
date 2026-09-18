@@ -11,7 +11,7 @@
     - scripts/test-tier-manifest.mjs
   origin: "operator-session#why-is-5771-taking-so-long-2026-09-16"
   plan_refs: ["W1-T2904", "W1-T3311"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |

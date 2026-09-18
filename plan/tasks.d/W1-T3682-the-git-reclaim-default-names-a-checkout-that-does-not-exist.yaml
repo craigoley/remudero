@@ -11,7 +11,7 @@
     - deploy/host-update.sh
   origin: "operator-session#first-reclaim-run-2026-09-16"
   plan_refs: ["W1-T2725", "W1-T3676"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |

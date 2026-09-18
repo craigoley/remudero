@@ -11,7 +11,7 @@
   files: [src/lib/gate-posture.ts, test/the-blocked-resting-state-has-many-producers.test.ts]
   origin: "operator-session#gate-posture-2026-09-10"
   plan_refs: ["W1-T3318", "W1-T3319", "W1-T3320", "W1-T3311", "W1-T3206", "W1-T3275"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE FALSIFIER IS NAMED FOR THIS SHARD'S SLUG, AND THAT DIRECTION IS FORCED. Rule 19 refused the

@@ -14,7 +14,7 @@
     - test/a-generic-route-has-an-explicit-tool-bound.test.ts
   origin: "operator-question#subscription-offload-sweep-2026-09-15"
   plan_refs: ["W1-T3573", "W1-T2591", "W1-T3615", "W1-T3614", "W1-T3569"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FOUND BY ENUMERATING EVERY SPAWN, not by reading the mount table. Auditing all 30

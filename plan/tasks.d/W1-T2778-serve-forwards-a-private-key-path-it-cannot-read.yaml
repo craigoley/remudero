@@ -12,7 +12,7 @@
     - test/console-token-refresh.test.ts
   origin: "operator-session#serve-github-app-key-mount-2026-09-03"
   plan_refs: ["W1-T1024", "W1-T1069", "W1-T1222", "W1-T2269", "W1-T2434", "W1-T2568"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the Azure fleet host at 2026-09-03T16:35Z: `remudero-serve` carries non-empty

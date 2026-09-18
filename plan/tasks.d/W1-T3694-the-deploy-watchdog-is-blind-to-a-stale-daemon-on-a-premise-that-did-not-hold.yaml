@@ -13,7 +13,7 @@
     - src/run-task.ts
   origin: "operator-session#three-manual-fast-forwards-in-one-afternoon-2026-09-16"
   plan_refs: ["W1-T3245", "W1-T3240", "W1-T3691"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |

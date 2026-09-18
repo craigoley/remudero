@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8A", "W1-T2883", "W1-T2889"]
   files: [src/run-task.ts, src/lib/composition-root.ts, test/composition-root.test.ts, test/deps-interface-census.test.ts, scripts/deps-interface-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Step 11, the last of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-33).

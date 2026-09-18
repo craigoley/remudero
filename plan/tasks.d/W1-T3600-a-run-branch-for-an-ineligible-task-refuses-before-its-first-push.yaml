@@ -13,7 +13,7 @@
     - test/a-run-branch-for-an-ineligible-task-refuses-before-its-first-push.test.ts
   origin: "operator-session#openweight-model-economics-2026-09-15"
   plan_refs: ["W1-T3598", "W1-T3597", "W1-T1048"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-15, at full cost, in this repository.

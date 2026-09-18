@@ -11,7 +11,7 @@
   files: [test/credential-arms-match-the-observed-text.test.ts, test/root-level-markdown-census.test.ts, scripts/test-tier-manifest.json]
   origin: "operator-session#pr-4707-post-merge-review-race-2026-09-08"
   plan_refs: ["W1-T2918", "W1-T2593", "W1-T1020", "W1-T2443"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #4707 AT HEAD 0540902c. W1-T2918's filed `files:` and acceptance proof both

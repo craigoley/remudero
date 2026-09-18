@@ -11,7 +11,7 @@
   files: [DECISIONS.md, test/a-gate-repairs-or-routes.test.ts]
   origin: "operator-session#gate-posture-2026-09-10"
   plan_refs: ["W1-T3311", "W1-T3319", "W1-T3320", "W1-T3321", "W1-T3205"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     TRANSCRIBED, NOT AUTHORED. DECISIONS.md's own decision-authority ruling

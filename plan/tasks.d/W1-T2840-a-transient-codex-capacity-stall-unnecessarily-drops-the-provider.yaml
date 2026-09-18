@@ -12,7 +12,7 @@
     - test/codex-capacity-singleflight.test.ts
   origin: "operator-session#codex-capacity-transient-retry-2026-09-04"
   plan_refs: ["W1-T2772", "W1-T2756", "W1-T2711"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET HOST WITH THE PINNED CODEX CLI 0.152.0. The daemon

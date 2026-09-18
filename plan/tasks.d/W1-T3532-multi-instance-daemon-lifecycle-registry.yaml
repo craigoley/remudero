@@ -15,7 +15,7 @@
     - test/multi-instance-daemon-lifecycle-registry.test.ts
   origin: "feedback#fb-1789311638612-56d5bd"
   plan_refs: ["W1-T2877", "W1-T2953", "W1-T3245", "MASTER-PLAN.md D-11"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE HOST 2026-09-13: only `rmd-fleet.service` and `rmd-fleet-watchdog.timer`

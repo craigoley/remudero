@@ -11,7 +11,7 @@
     - deploy/entrypoint.sh
   origin: "operator-session#stale-cli-found-through-an-unrelated-assertion-2026-09-16"
   plan_refs: ["W1-T1021", "W1-T3687"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |

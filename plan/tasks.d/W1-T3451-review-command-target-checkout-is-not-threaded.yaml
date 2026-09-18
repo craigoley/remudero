@@ -12,7 +12,7 @@
   files: [src/run-task.ts, test/review-command-target-repository.test.ts]
   origin: "operator-session#private-portal-rmd-review-2026-09-12"
   plan_refs: ["W1-T1062", "W1-T2462", "W1-T2868"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PRIVATE PORTAL PR #8 at 04d634087e2fe755c3b3fb8ee488289fab46c862. Its

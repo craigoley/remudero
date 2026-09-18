@@ -11,7 +11,7 @@
     - src/lib/task-linter.ts
   origin: "operator-session#nothing-dropped-sweep-2026-09-16"
   plan_refs: ["W1-T1287", "W1-T1070"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |

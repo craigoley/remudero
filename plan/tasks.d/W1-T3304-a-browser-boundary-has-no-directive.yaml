@@ -50,7 +50,7 @@
   origin: "operator-session#4865-blocked-2026-09-09"
   plan_refs: ["W1-T3185"]
   files: [scripts/diff-coverage.mjs, test/a-browser-boundary-has-no-directive.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     INSTRUMENT-ONLY BY CONSTRUCTION. `scripts/diff-coverage.mjs` is named in INSTRUMENT_SURFACE

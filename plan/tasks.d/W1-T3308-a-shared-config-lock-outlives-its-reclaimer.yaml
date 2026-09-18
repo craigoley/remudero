@@ -10,7 +10,7 @@
   origin: "operator-session#config-lock-2026-09-10"
   plan_refs: ["W1-T1036", "W1-T3224"]
   files: [src/lib/worker.ts, test/a-shared-config-lock-outlives-its-reclaimer.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10 on the live daemon host, from the running tree and the filesystem.

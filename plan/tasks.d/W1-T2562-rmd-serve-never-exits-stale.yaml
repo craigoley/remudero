@@ -10,7 +10,7 @@
   files: [deploy/entrypoint.sh, test/serve-freshness-restart.test.ts]
   origin: "operator-brief#seven-hour-daemon-review-2026-09-01"
   plan_refs: ["W1-T1134", "W1-T1222", "W1-T2561"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── MEASURED ─────────────────────────────────────────────────────────────────────────────────

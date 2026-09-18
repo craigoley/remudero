@@ -12,7 +12,7 @@
     - test/a-pr-names-the-lane-that-owns-it.test.ts
   origin: "operator-session#pr-fix-sweep-2026-09-09"
   plan_refs: ["W1-T945", "W1-T43", "W1-T1066"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09, AS WASTED WORK. An operator session diagnosed PR #4844's red checks, wrote

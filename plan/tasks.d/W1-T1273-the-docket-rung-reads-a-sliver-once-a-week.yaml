@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/feedback-docket-union-corpus.test.ts]
   origin: oper#feedback-docket-starved-and-locked-2026-08-23
   plan_refs: ["W1-T1262", "W1-T110"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ★ CLOSED UNBUILT. THE UNBLOCKING MEASUREMENT WAS TAKEN AND IT CLOSED THE TASK RATHER THAN

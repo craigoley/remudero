@@ -103,7 +103,7 @@
   origin: human
   plan_refs: [W1-T3205, W1-T2904, W1-T3492, W1-T3302]
   files: [scripts/test-tier-manifest.mjs, .github/workflows/ci.yml]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: planshard -> planshard

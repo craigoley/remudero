@@ -111,7 +111,7 @@
   origin: human
   plan_refs: [W1-T2779, W1-T3535, W1-T297, W1-T920]
   files: [src/lib/sweep.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3731-a-prerequisite-is-not-a-supersession

@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts]
   origin: "operator-session#reviews-stopped-posting-2026-09-09"
   plan_refs: ["W1-T2582", "W1-T2742", "W1-T253"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

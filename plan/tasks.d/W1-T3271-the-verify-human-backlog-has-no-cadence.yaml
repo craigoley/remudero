@@ -10,7 +10,7 @@
   files: [src/lib/verify-human-judge.ts, src/lib/measurement-cadence.ts, test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts]
   origin: "operator-session#verify-human-cadence-2026-09-09"
   plan_refs: ["W1-T3188", "W1-T3206", "W1-T3226", "W1-T3183"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

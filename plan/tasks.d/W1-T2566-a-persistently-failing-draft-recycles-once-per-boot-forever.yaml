@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, src/run-task.ts, test/reopened-keys-are-reopened-once.test.ts]
   origin: "operator-brief#migration-bound-check-2026-09-01"
   plan_refs: ["W1-T2564", "W1-T2561", "W1-T192"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── WHAT WAS CHECKED, AND WHAT IT ACTUALLY SHOWS ─────────────────────────────────────────────

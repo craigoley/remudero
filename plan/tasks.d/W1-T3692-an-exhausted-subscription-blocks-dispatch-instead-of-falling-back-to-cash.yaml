@@ -13,7 +13,7 @@
     - src/lib/config-schema.ts
   origin: "operator-session#subscription-squeeze-2026-09-16"
   plan_refs: ["W1-T3607", "W1-T3656", "W1-T3575"]
-  status: queued
+  status: merged
   priority: 0
   note: |
     OPERATOR INTENT, STATED 2026-09-16: subscription headroom is expected to run out this week

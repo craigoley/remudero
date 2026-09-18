@@ -11,7 +11,7 @@
   files: [scripts/prompt-surface-gate.mjs, .github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/a-prompt-surface-edit-carries-its-own-fixture.test.ts]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T423", "W1-T2689", "W1-T2424", "W1-T297"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MASTER-PLAN §Self-improvement, "Knowledge system (the RSI-safety rule)": knowledge and prompt

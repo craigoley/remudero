@@ -74,7 +74,7 @@
   origin: human
   plan_refs: [W1-T3648, W1-T3658, W1-T3737]
   files: [scripts/task-id-existence-check.mjs]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3738-40-the-cycle

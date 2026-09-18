@@ -15,7 +15,7 @@
     - .github/workflows/ci.yml
   origin: "operator-session#ci-parity-cost-2026-09-09"
   plan_refs: ["W1-T3191", "W1-T3207", "W1-T294"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09 ON origin/main, IN ISOLATION ON AN OTHERWISE IDLE HOST:

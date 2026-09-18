@@ -11,7 +11,7 @@
   files: [src/lib/review.ts, plan/policy.yaml, test/a-proof-timeout-is-not-a-failed-proof.test.ts, test/policy.test.ts]
   origin: "operator-decision#pr-3719-refused-on-a-passing-suite-2026-09-03"
   plan_refs: ["W1-T253", "W1-T2728", "W1-T499"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the fix and

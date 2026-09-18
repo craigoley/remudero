@@ -11,7 +11,7 @@
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-fix-worker-is-pointed-at-its-predecessors-transcript.test.ts]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T2733", "W1-T2236", "W1-T1269", "W1-T2205"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MASTER-PLAN §Self-improvement: "Transcript archive + predecessor query: every worker session

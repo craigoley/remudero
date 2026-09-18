@@ -12,7 +12,7 @@
     - src/lib/worker-provider.ts
   origin: "operator-session#cash-catalog-2026-09-16"
   plan_refs: ["W1-T3598", "W1-T3546", "W1-T3692"]
-  status: queued
+  status: merged
   priority: 4
   attempts: 0
   note: |
