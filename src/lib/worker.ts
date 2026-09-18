@@ -482,7 +482,7 @@ export function workerLedgerFields(r: WorkerResult): {
     tokens: r.tokens,
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
-    billing_mode: billingMode(r.childEnvKeys),
+    billing_mode: r.provider === "cash" ? "api" : billingMode(r.childEnvKeys),
     max_turns: r.maxTurns,
     // The account this spend is attributed to — a NAME, never a credential, carried verbatim off `WorkerResult.accountLabel`.
     // `undefined`, never guessed, when none resolved (W1-T268).
