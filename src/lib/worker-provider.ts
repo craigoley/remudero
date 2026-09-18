@@ -2538,6 +2538,12 @@ export interface OpenWeightSpawnArgs {
   requestTimeoutMs?: number;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Test-only port around the bubblewrap check runner. Production always starts the fixed argv
+   * in a fresh user and network namespace; tests use this port to exercise child-env handling on
+   * hosts where bubblewrap is intentionally unavailable.
+   */
+  runCheck?: (input: OpenWeightCheckInput) => string;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
    *  `now` because the daily allowance keys on a UTC calendar day, which is read off the ISO
    *  instant rather than re-derived from milliseconds. */
@@ -2625,6 +2631,99 @@ export const OPENWEIGHT_READONLY_GIT_SUBCOMMANDS: readonly string[] = ["log", "s
  *  cash cap bounds spend, this bounds time — so this is what normally ends the loop, not a
  *  fallback behind some other limit. */
 export const OPENWEIGHT_CHECK_TIMEOUT_MS = 10 * 60_000;
+
+/** The Linux-only runner that gives a fixed check a new user and network namespace. */
+export const OPENWEIGHT_CHECK_SANDBOX = "bwrap";
+
+export interface OpenWeightCheckInput {
+  argv: readonly string[];
+  cwd: string;
+  env: Record<string, string>;
+  workerHome: string;
+  /** Test-only platform port. Production leaves this absent and uses the host platform. */
+  platform?: NodeJS.Platform;
+}
+
+/**
+ * Environment for a fixed-argv cash check.  The Azure key is deliberately read by the daemon
+ * before the tool loop, but a model-selected check must never inherit it (or any other daemon
+ * credential) merely because the adapter itself runs in this process.  `HOME` and `TMPDIR` are
+ * private per-worker paths, so a check cannot rediscover operator shell state through either.
+ *
+ * This is intentionally narrower than the Claude/Codex worker environments: the check table has
+ * no forge, shell, or network command, and it needs only executable discovery plus locale.  Add a
+ * variable here only with a demonstrated fixed-check need; copying `process.env` would turn the
+ * adapter boundary into a claim rather than a control.
+ */
+export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const tmp = join(workerHome, "tmp");
+  mkdirSync(tmp, { recursive: true });
+  const out: Record<string, string> = {
+    HOME: workerHome,
+    TMPDIR: tmp,
+    PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+  };
+  for (const key of ["LANG", "LC_ALL"] as const) {
+    const value = env[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Bubblewrap arguments for a model-selected fixed check. The worktree and isolated worker home
+ * are the only application mounts; the host root is NOT mounted at all. A small read-only runtime
+ * plus a new network namespace denies both host-secret reads and routes to the daemon, forge, or
+ * public network. `argv` is already an internal table entry — never model-supplied text.
+ */
+export function openWeightCheckSandboxArgv(
+  input: Pick<OpenWeightCheckInput, "argv" | "cwd" | "workerHome"> & { platform?: NodeJS.Platform },
+): string[] {
+  const platform = input.platform ?? process.platform;
+  if (platform !== "linux") {
+    throw new Error("cash RunCheck requires Linux bubblewrap; refusing an unsandboxed local check");
+  }
+  const cwd = realpathSync(input.cwd);
+  const workerHome = realpathSync(input.workerHome);
+  if (cwd === "/" || workerHome === "/") throw new Error("cash RunCheck refuses / as a writable sandbox bind");
+  const runtimeRoots = ["/usr", "/lib", "/lib64", "/bin", "/usr/local"].filter(existsSync);
+  const dirs = new Set<string>();
+  for (const path of [cwd, workerHome]) {
+    let current = path;
+    while (current !== "/") {
+      dirs.add(current);
+      current = dirname(current);
+    }
+  }
+  const createDirs = [...dirs].sort((a, b) => a.split("/").length - b.split("/").length);
+  return [
+    "--die-with-parent",
+    "--unshare-user",
+    "--unshare-net",
+    ...runtimeRoots.flatMap((path) => ["--ro-bind", path, path]),
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    ...createDirs.flatMap((path) => ["--dir", path]),
+    "--bind", cwd, cwd,
+    ...(workerHome === cwd ? [] : ["--bind", workerHome, workerHome]),
+    "--chdir", cwd,
+    "--",
+    ...input.argv,
+  ];
+}
+
+/** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
+export function runOpenWeightCheck(input: OpenWeightCheckInput): string {
+  return execFileSync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv(input), {
+    cwd: realpathSync(input.cwd),
+    env: input.env,
+    encoding: "utf8",
+    timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
 
 /** Raised INSTEAD of executing an unlisted check, before any process spawns. */
 export class OpenWeightUnlistedCheckError extends RmdError {
@@ -2744,7 +2843,14 @@ function objectArguments(raw: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd: string): unknown {
+function executeOpenWeightTool(
+  name: string,
+  args: Record<string, unknown>,
+  cwd: string,
+  checkEnv: Record<string, string>,
+  workerHome: string,
+  runCheck: ((input: OpenWeightCheckInput) => string) | undefined,
+): unknown {
   switch (name) {
     case "read_file":
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
@@ -2768,16 +2874,15 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
     }
     case "run_check": {
       // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
-      // takes an array and never a shell, so metacharacters are inert rather than discouraged.
+      // takes an array and never a shell, while runOpenWeightCheck puts even repository code in a
+      // fresh network namespace before it runs.
       const argv = openWeightCheckArgv(args.check, args.paths);
-      const [command, ...rest] = argv;
       try {
-        const stdout = execFileSync(command, rest, {
+        const stdout = (runCheck ?? runOpenWeightCheck)({
+          argv,
           cwd: realpathSync(cwd),
-          encoding: "utf8",
-          timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
-          maxBuffer: 8 * 1024 * 1024,
-            stdio: ["ignore", "pipe", "pipe"],
+          workerHome,
+          env: checkEnv,
         });
         return { check: args.check, exitCode: 0, output: stdout.slice(-20_000) };
       } catch (err) {
@@ -2807,6 +2912,80 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
     default:
       throw new Error(`openweight tool '${name}' is not implemented`);
   }
+}
+
+/**
+ * Verify the boundary a cash worker actually receives, without asking a model to simulate a
+ * shell it is never offered.  This is the cash counterpart to the subscription containment probe:
+ * an outside-cwd write must be rejected by the same resolver `write_file` uses, while every
+ * runnable command remains an internally-declared, shell-less, non-network argv.
+ *
+ * The check is deliberately executable at run time.  A CI-only census would not protect a daemon
+ * that is running a mounted checkout whose capability table has drifted from the image.
+ */
+export function assertOpenWeightToolBoundary(
+  cwd: string,
+  deps: {
+    platform?: NodeJS.Platform;
+    runSandbox?: (argv: readonly string[]) => void;
+    /** Test seam for the real bubblewrap invocation. Production defaults to execFileSync. */
+    execFile?: typeof execFileSync;
+    /** Test seam for the resolver that every cash file tool uses in production. */
+    resolveContainedPath?: typeof openWeightContainedPath;
+  } = {},
+): string {
+  const root = realpathSync(cwd);
+  const resolveContainedPath = deps.resolveContainedPath ?? openWeightContainedPath;
+  const allowed = resolveContainedPath(root, "cash-boundary-probe.txt");
+  const allowedRelative = relative(root, allowed);
+  if (allowedRelative === ".." || allowedRelative.startsWith(`..${sep}`) || isAbsolute(allowedRelative)) {
+    throw new Error("cash containment probe resolved an inside-cwd path outside the worker root");
+  }
+
+  let outsideWriteRefused = false;
+  try {
+    resolveContainedPath(root, "../cash-boundary-probe.txt");
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "tool path escapes the worker cwd") throw error;
+    outsideWriteRefused = true;
+  }
+  if (!outsideWriteRefused) {
+    throw new Error("cash containment probe could not prove outside-cwd writes are refused");
+  }
+
+  if (OPENWEIGHT_FUNCTIONS.Bash !== undefined) {
+    throw new Error("cash containment probe found a shell capability");
+  }
+  const forbidden = new Set(["gh", "curl", "wget", "ssh", "scp", "npm", "npx", "pnpm", "yarn", "pip", "docker", "nc", "sh", "bash", "zsh", "env", "eval"]);
+  const checks = Object.entries(OPENWEIGHT_CHECKS);
+  if (checks.length === 0) throw new Error("cash containment probe found no fixed check table");
+  for (const [name, argv] of checks) {
+    const command = argv[0]?.split("/").at(-1);
+    if (!command || forbidden.has(command)) {
+      throw new Error(`cash containment probe found unsafe fixed check '${name}'`);
+    }
+    if (command === "git" && !OPENWEIGHT_READONLY_GIT_SUBCOMMANDS.includes(argv[1] ?? "")) {
+      throw new Error(`cash containment probe found non-read-only git check '${name}'`);
+    }
+    if (argv.some((part) => /:\/\/|^https?:|^git@|[;&|`$><]/.test(part))) {
+      throw new Error(`cash containment probe found network or shell syntax in check '${name}'`);
+    }
+  }
+  const sandboxArgs = openWeightCheckSandboxArgv({
+    argv: ["/bin/true"],
+    cwd: root,
+    workerHome: root,
+    platform: deps.platform,
+  });
+  (deps.runSandbox ?? ((argv) => {
+    (deps.execFile ?? execFileSync)(OPENWEIGHT_CHECK_SANDBOX, argv, {
+      cwd: root,
+      env: openWeightCheckEnv(root),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }))(sandboxArgs);
+  return "cash adapter boundary proved: outside-cwd writes refused; fixed checks require a fresh network namespace";
 }
 
 /**
@@ -2949,6 +3128,9 @@ export async function spawnOpenWeightWorker(
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     const env = args.env ?? process.env;
+    // Built once, before any model tool call.  The Azure key stays in `env` for the HTTPS request
+    // below, but never crosses this distinct process boundary into `run_check`.
+    const checkEnv = openWeightCheckEnv(args.workerHome, env);
     const webSearchConsented = cashWebSearchEnabled(config);
     const tools = openWeightTools(args.tools, webSearchConsented);
     const key = env[OPENWEIGHT_API_KEY_ENV];
@@ -3098,7 +3280,14 @@ export async function spawnOpenWeightWorker(
                   },
                 }),
               )
-            : JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
+            : JSON.stringify(executeOpenWeightTool(
+                name,
+                objectArguments(call.function?.arguments),
+                args.cwd,
+                checkEnv,
+                args.workerHome,
+                args.runCheck,
+              ));
         } catch (error) {
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }

@@ -958,6 +958,11 @@ test("a permitted openweight check that exits non-zero is fed back as a result, 
         tools: ["Read", "RunCheck"],
         maxTurns: 3,
         env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        // This test owns the tool-result contract, not the Linux Bubblewrap boundary. Exercise
+        // execFileSync's real non-zero path through the test-only runner port: CI images do not
+        // promise Bubblewrap, while production cash checks refuse if it is unavailable.
+        runCheck: ({ argv, cwd, env }) =>
+          execFileSync(argv[0]!, argv.slice(1), { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
         fetchImpl: async (_input, init) => {
           bodies.push(String(init?.body ?? ""));
           turn += 1;

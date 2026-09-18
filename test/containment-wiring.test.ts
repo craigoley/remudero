@@ -9,6 +9,9 @@ import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
+import { ProviderCapacityBlockedError } from "../src/lib/worker-provider.js";
+import { IsolationError } from "../src/lib/isolation.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
@@ -76,6 +79,21 @@ const droppedContainmentExec = (token: string): Promise<ProbeExecResult> =>
     costUsd: 0,
   });
 
+function cashContainmentConfig(root: string): Config {
+  return {
+    claudeBin: "/bin/true",
+    root,
+    dailyCapUsd: 5,
+    workerProviders: {
+      enabled: ["claude", "codex", "cash"],
+      cashFallbackWhenBlocked: true,
+      cashEndpoint: "https://example.test/",
+      harnessCommitsImplement: true,
+      harnessCommitsFix: true,
+    },
+  } as Config;
+}
+
 test("BEHAVIORAL: a dropped containment probe drives the REAL runTask to a blocked_containment verdict whose ledgered line carries guard/check/observed", async () => {
   const root = mkdtempSync(join(tmpdir(), "runtask-containment-"));
   const planPath = join(root, "tasks.yaml");
@@ -108,4 +126,39 @@ test("BEHAVIORAL: a dropped containment probe drives the REAL runTask to a block
   assert.match(verdictLine.observed, /sandbox did not engage/, "the ledgered verdict carries the structured observed field");
 
   rmSync(root, { recursive: true, force: true });
+});
+
+test("BEHAVIORAL: a blocked subscription containment probe establishes the cash boundary, then refuses if the cash isolation proof cannot complete", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-cash-containment-`));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FIXTURE_PLAN);
+  let boundaryCalls = 0;
+  try {
+    const res = await runTask("TST-CONTAINMENT", {
+      skipGitSync: true,
+      planPath,
+      config: cashContainmentConfig(root),
+      github: OFFLINE_GITHUB,
+      spawn: (async () => { throw new Error("the recovered preflight must refuse before any task worker spawns"); }) as typeof spawnWorker,
+      containmentExec: async () => { throw new ProviderCapacityBlockedError([]); },
+      cashContainmentBoundary: () => {
+        boundaryCalls += 1;
+        if (boundaryCalls === 1) return "cash boundary held";
+        throw new IsolationError("cash isolation boundary did not complete", "cash boundary failed");
+      },
+    });
+
+    assert.equal(res.verdict, "blocked_isolation");
+    assert.equal(boundaryCalls, 2, "containment recovery and cash isolation must each establish the same boundary");
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const containment = ledger.find((line) => line.step === "containment.probe" && line.provider === "cash");
+    assert.equal(containment?.method, "structural-adapter-boundary");
+    const verdict = ledger.find((line) => line.step === "verdict" && line.verdict === "blocked_isolation");
+    assert.match(verdict?.reason ?? "", /cash isolation boundary did not complete/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
