@@ -1069,6 +1069,7 @@
     "test/producer-completeness.test.ts": 777,
     "test/project-init.test.ts": 366,
     "test/project-plan-is-indexed.test.ts": 1338,
+    "test/project-plan-trailer-lookup.test.ts": 0,
     "test/promotion-judge-supplied.test.ts": 1419,
     "test/prompt-manifest.test.ts": 1201,
     "test/prompt-render.test.ts": 1282,
