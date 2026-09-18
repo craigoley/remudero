@@ -137,6 +137,17 @@ function parseObject(raw: string): Record<string, unknown> | undefined {
 
 export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   dedupe?: boolean;
+  /** Excludes the mutable live ledger from this scan. Archive-only audit readers use this so
+   * callers can overlay the current live file at decision time instead of freezing it at boot. */
+  includeLive?: boolean;
+  /** Reports an unread ARCHIVE to an audit caller. The ordinary stream remains best-effort: it
+   * yields every later readable source, while the caller decides whether partial history is safe
+   * for its decision. A missing or unreadable live file is deliberately not reported here. */
+  onUnreadArchive?: (path: string) => void;
+  /** Called only for a row that survived the union's exact replay dedupe. The normalized raw
+   * line lets a bounded audit projection seed a later live-file overlay without reserializing
+   * JSON and changing its identity. */
+  onAcceptedRecord?: (row: Record<string, unknown>, raw: string) => void;
   /** Cancels the active source and refuses to open a later rotation. An abort is never swallowed
    * by the best-effort corrupt-file boundary below. */
   signal?: AbortSignal;
@@ -180,7 +191,7 @@ export async function* openLedgerUnion(
   }
   const { rotations } = listedLedgerFiles(stateDir, io);
   const livePath = ledgerLivePath(stateDir);
-  const entries = [...rotations, { path: livePath, form: "plain" as const }];
+  const entries = opts.includeLive === false ? rotations : [...rotations, { path: livePath, form: "plain" as const }];
   const seen = new Set<string>();
   const recentByStep = new Map<string, { order: string[]; next: number; seen: Set<string> }>();
   const minimumTs = sinceMs(opts);
@@ -207,15 +218,29 @@ export async function* openLedgerUnion(
     opts.signal?.throwIfAborted();
     if (entry.path === livePath && !io.existsSync(entry.path)) continue;
     if (rotationBeforeWindow(entry, minimumTs)) continue;
-    const source = io.createReadStream(entry.path);
-    const gunzip = entry.form === "gzip" ? createGunzip() : undefined;
-    const input = gunzip ? source.pipe(gunzip) : source;
-    if (opts.signal) {
-      addAbortSignal(opts.signal, source);
-      if (gunzip) addAbortSignal(opts.signal, gunzip);
-    }
-    const rl = createInterface({ input, crlfDelay: Infinity });
+    let source: Readable | undefined;
+    let gunzip: ReturnType<typeof createGunzip> | undefined;
+    let input: Readable | undefined;
+    let rl: ReturnType<typeof createInterface> | undefined;
+    let archiveUnread = false;
     try {
+      source = io.createReadStream(entry.path);
+      // `error` is otherwise only observable through readline's async iterator. Keep this
+      // explicit so an audited reader can refuse a partial archive corpus rather than treating
+      // a silently skipped rotation as proof that old attempts never happened.
+      source.once("error", () => {
+        archiveUnread = true;
+      });
+      gunzip = entry.form === "gzip" ? createGunzip() : undefined;
+      if (gunzip) gunzip.once("error", () => {
+        archiveUnread = true;
+      });
+      input = gunzip ? source.pipe(gunzip) : source;
+      if (opts.signal) {
+        addAbortSignal(opts.signal, source);
+        if (gunzip) addAbortSignal(opts.signal, gunzip);
+      }
+      rl = createInterface({ input, crlfDelay: Infinity });
       for await (const raw of rl) {
         opts.signal?.throwIfAborted();
         const line = String(raw).trim();
@@ -234,22 +259,89 @@ export async function* openLedgerUnion(
         if (parsed === undefined || !recordMatchesFilters(parsed, opts, minimumTs)) continue;
         const step = typeof parsed.step === "string" ? parsed.step : "";
         if (replayedInsideWindow(step, line)) continue;
+        opts.onAcceptedRecord?.(parsed, line);
         yield parsed;
       }
     } catch (error) {
       if (opts.signal?.aborted) throw opts.signal.reason ?? error;
       // deliberate: an unreadable file costs that file, not the whole best-effort stream.
       // Console-style readers are best effort; audit-style refusal is handled by resolveLedgerUnion.
+      archiveUnread = true;
     } finally {
+      if (entry.path !== livePath && archiveUnread) opts.onUnreadArchive?.(entry.path);
       // Explicit ownership rather than relying only on async-iterator return semantics: timeout,
       // server close and stale-code exit all need the active descriptor/gunzip/readline released
       // before this generator can settle and before another rotation can open.
-      rl.close();
-      input.destroy();
+      rl?.close();
+      input?.destroy();
       gunzip?.destroy();
-      source.destroy();
+      source?.destroy();
     }
   }
+}
+
+/** Result of {@link auditLedgerUnion}. Unlike {@link openLedgerUnion}, this names every unread
+ * archive and retains no corpus rows. It is for a decision that may only use rotated history when
+ * the whole archive side was readable; its callback is the bounded projection. */
+export interface AuditedLedgerUnionResult {
+  stateDir: string;
+  archiveFiles: string[];
+  archiveCount: number;
+  unread: string[];
+  unclassified: string[];
+  records: number;
+  ok: boolean;
+}
+
+export interface AuditedLedgerUnionOptions extends LedgerUnionOptions {
+  /** Required: exact replay dedupe must remain bounded to the producer retention width. */
+  dedupeWindowPerStep: number;
+  onRecord: (row: Record<string, unknown>, raw: string) => void;
+}
+
+/**
+ * Stream every archive through a caller-owned bounded projection. The live file is intentionally
+ * excluded: a long-lived decision gate overlays it freshly for each consultation, while the
+ * immutable archive scan happens once at boot. An unread archive makes `ok` false even though
+ * readable earlier files were offered to `onRecord`; callers MUST discard that partial projection.
+ */
+export async function auditLedgerUnion(
+  stateDir: string,
+  opts: AuditedLedgerUnionOptions,
+  io: LedgerUnionStreamIO = realLedgerUnionStreamIO,
+): Promise<AuditedLedgerUnionResult> {
+  const { rotations, unclassified } = listedLedgerFiles(stateDir, io);
+  const unread: string[] = [];
+  let records = 0;
+  if (rotations.length === 0) {
+    return { stateDir, archiveFiles: [], archiveCount: 0, unread, unclassified, records, ok: false };
+  }
+  for await (const row of openLedgerUnion(
+    stateDir,
+    {
+      ...opts,
+      includeLive: false,
+      onUnreadArchive: (path) => unread.push(path),
+      onAcceptedRecord: (accepted, raw) => {
+        records += 1;
+        opts.onRecord(accepted, raw);
+      },
+    },
+    io,
+  )) {
+    // The callback above receives raw identity only after the union's dedupe accepts this row.
+    // Keep consuming so its stream owns all file descriptors until the audit settles.
+    void row;
+  }
+  return {
+    stateDir,
+    archiveFiles: rotations.map((entry) => entry.path),
+    archiveCount: rotations.length,
+    unread,
+    unclassified,
+    records,
+    ok: unread.length === 0,
+  };
 }
 
 export async function readLedgerUnionRecords(

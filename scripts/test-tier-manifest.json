@@ -18,6 +18,7 @@
     "test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts": 367,
     "test/a-cancelled-run-is-not-a-failing-check.test.ts": 0,
     "test/a-cancelled-shard-is-not-a-broken-diff.test.ts": 0,
+    "test/a-capacity-blocked-dispatch-is-not-charged-to-the-task.test.ts": 0,
     "test/a-capability-ladder-is-data-not-a-substring-match.test.ts": 385,
     "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts": 0,
     "test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts": 0,
