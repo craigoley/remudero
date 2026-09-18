@@ -38,7 +38,13 @@ import {
   type SpawnWorkerArgs,
 } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config.js";
-import { assertOpenWeightToolBoundary, runOpenWeightCheck, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+import {
+  assertOpenWeightToolBoundary,
+  OPENWEIGHT_CHECKS,
+  OPENWEIGHT_FUNCTIONS,
+  runOpenWeightCheck,
+  spawnOpenWeightWorker,
+} from "../src/lib/worker-provider.js";
 import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
 import { FIX_WORKER_TOOLS } from "../src/lib/fix-fence.js";
 import {
@@ -453,6 +459,74 @@ test("cash containment recovery proves the adapter boundary and pins every later
     assert.deepEqual(forced.tools, IMPLEMENT_CASH_TOOLS);
     assert.equal(forced.cashSqueezed, undefined, "a preflight observation does not claim the raised squeeze-day cap");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the cash containment boundary refuses a non-Linux, escaping, shell-bearing, unsafe, or networked adapter and invokes its real bubblewrap default", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-boundary-guards-"));
+  const checks = OPENWEIGHT_CHECKS as Record<string, readonly string[]>;
+  const functions = OPENWEIGHT_FUNCTIONS as Record<string, { name: string; description: string; required: string[] }>;
+  const originalBash = functions.Bash;
+  try {
+    assert.throws(
+      () => assertOpenWeightToolBoundary(root, { platform: "darwin" }),
+      /requires Linux bubblewrap/,
+      "cash checks must refuse rather than run without their Linux namespace boundary",
+    );
+    assert.throws(
+      () => assertOpenWeightToolBoundary(root, {
+        platform: "linux",
+        runSandbox: () => {},
+        resolveContainedPath: (base) => join(base, "..", "escaped"),
+      }),
+      /inside-cwd path outside the worker root/,
+    );
+    assert.throws(
+      () => assertOpenWeightToolBoundary(root, {
+        platform: "linux",
+        runSandbox: () => {},
+        resolveContainedPath: (base) => join(base, "not-an-escape"),
+      }),
+      /could not prove outside-cwd writes are refused/,
+    );
+
+    functions.Bash = { name: "bash", description: "mutation guard", required: [] };
+    assert.throws(
+      () => assertOpenWeightToolBoundary(root, { platform: "linux", runSandbox: () => {} }),
+      /shell capability/,
+    );
+    delete functions.Bash;
+
+    checks.unsafe = [];
+    assert.throws(
+      () => assertOpenWeightToolBoundary(root, { platform: "linux", runSandbox: () => {} }),
+      /unsafe fixed check 'unsafe'/,
+    );
+    checks.unsafe = ["git", "push"];
+    assert.throws(
+      () => assertOpenWeightToolBoundary(root, { platform: "linux", runSandbox: () => {} }),
+      /non-read-only git check 'unsafe'/,
+    );
+    checks.unsafe = ["node", "https://example.test/"];
+    assert.throws(
+      () => assertOpenWeightToolBoundary(root, { platform: "linux", runSandbox: () => {} }),
+      /network or shell syntax in check 'unsafe'/,
+    );
+    delete checks.unsafe;
+
+    let invocation: { command: unknown; argv: unknown; options: unknown } | undefined;
+    const execFile = ((command: string, argv: readonly string[], options: unknown) => {
+      invocation = { command, argv, options };
+      return "";
+    }) as unknown as typeof execFileSync;
+    assert.match(assertOpenWeightToolBoundary(root, { platform: "linux", execFile }), /boundary proved/);
+    assert.equal(invocation?.command, "bwrap", "the default boundary runner must execute bubblewrap");
+    assert.ok((invocation?.argv as readonly string[] | undefined)?.includes("--unshare-net"));
+  } finally {
+    delete checks.unsafe;
+    if (originalBash === undefined) delete functions.Bash;
+    else functions.Bash = originalBash;
     rmSync(root, { recursive: true, force: true });
   }
 });

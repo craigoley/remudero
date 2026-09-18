@@ -12216,6 +12216,8 @@ export interface RunTaskContext {
    * is built in runTask, so a scalar in either scope would silently describe different runs.
    */
   cashContainmentState?: { contained: boolean };
+  /** One shared proof function for both preflights and the spawn wrapper of this run. */
+  cashContainmentBoundary?: typeof assertOpenWeightToolBoundary;
   config: Config;
   fetchPrBodyFn: typeof fetchPrBodyViaGh;
   github: GitHub;
@@ -12551,6 +12553,9 @@ async function runTask(
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
     isolationExec?: IsolationProbeExecutor;
+    /** Injectable cash boundary proof. Default executes the production bubblewrap-backed proof;
+     * behavioral tests use this only to drive the capacity-recovery terminal paths. */
+    cashContainmentBoundary?: typeof assertOpenWeightToolBoundary;
     /** Injectable reads for the BINARY-PIN rung. Default: {@link defaultBinaryPinDeps} over the
      *  resolved `config.claudeBin` — a test drives a chosen version pair through this seam without
      *  a real binary, and test/binary-pin-rung.test.ts separately exercises the DEFAULT for real. */
@@ -12696,6 +12701,7 @@ async function runTask(
   // Set only after a blocked subscription containment/isolation probe is replaced by the cash
   // adapter's structural boundary proof below.  Ordinary runs keep the existing per-spawn auction.
   const cashContainmentState = { contained: false };
+  const cashContainmentBoundary = opts.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
   const spawn: typeof spawnWorker = (spawnArgs) => {
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
@@ -12974,6 +12980,7 @@ async function runTask(
   }
   try {
     const ctx: RunTaskContext = {
+      cashContainmentBoundary,
       cashContainmentState,
       config,
       fetchPrBodyFn,
@@ -13028,6 +13035,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
   // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
+  const cashContainmentBoundary = ctx.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
@@ -13132,7 +13140,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const establishCashContainedRun = (preflight: "containment" | "isolation"): string | undefined => {
     const refusal = cashContainmentState.contained ? undefined : cashContainedRunRefusal(config, implementCashTools);
     if (refusal !== undefined) return refusal;
-    const reason = assertOpenWeightToolBoundary(config.root);
+    const reason = cashContainmentBoundary(config.root);
     cashContainmentState.contained = true;
     log(`${preflight}.probe`, {
       provider: "cash",

@@ -2925,10 +2925,18 @@ function executeOpenWeightTool(
  */
 export function assertOpenWeightToolBoundary(
   cwd: string,
-  deps: { platform?: NodeJS.Platform; runSandbox?: (argv: readonly string[]) => void } = {},
+  deps: {
+    platform?: NodeJS.Platform;
+    runSandbox?: (argv: readonly string[]) => void;
+    /** Test seam for the real bubblewrap invocation. Production defaults to execFileSync. */
+    execFile?: typeof execFileSync;
+    /** Test seam for the resolver that every cash file tool uses in production. */
+    resolveContainedPath?: typeof openWeightContainedPath;
+  } = {},
 ): string {
   const root = realpathSync(cwd);
-  const allowed = openWeightContainedPath(root, "cash-boundary-probe.txt");
+  const resolveContainedPath = deps.resolveContainedPath ?? openWeightContainedPath;
+  const allowed = resolveContainedPath(root, "cash-boundary-probe.txt");
   const allowedRelative = relative(root, allowed);
   if (allowedRelative === ".." || allowedRelative.startsWith(`..${sep}`) || isAbsolute(allowedRelative)) {
     throw new Error("cash containment probe resolved an inside-cwd path outside the worker root");
@@ -2936,7 +2944,7 @@ export function assertOpenWeightToolBoundary(
 
   let outsideWriteRefused = false;
   try {
-    openWeightContainedPath(root, "../cash-boundary-probe.txt");
+    resolveContainedPath(root, "../cash-boundary-probe.txt");
   } catch (error) {
     if (!(error instanceof Error) || error.message !== "tool path escapes the worker cwd") throw error;
     outsideWriteRefused = true;
@@ -2970,7 +2978,7 @@ export function assertOpenWeightToolBoundary(
     platform: deps.platform,
   });
   (deps.runSandbox ?? ((argv) => {
-    execFileSync(OPENWEIGHT_CHECK_SANDBOX, argv, {
+    (deps.execFile ?? execFileSync)(OPENWEIGHT_CHECK_SANDBOX, argv, {
       cwd: root,
       env: openWeightCheckEnv(root),
       encoding: "utf8",
