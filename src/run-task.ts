@@ -448,6 +448,12 @@ import {
   prStateFromRest,
   rollupFor,
   singlePrRestArgs,
+  // review-reuse-producer: the ONE producer of the review-reuse pair, called from both sides of the comparison
+  // — the review records it, a later sweep pass asks what is true now. See its own header doc for
+  // why two representations would be a silent, permanent bug.
+  tryFetchReviewReuseFacts,
+  hydrateReviewReuseFacts,
+  type ReviewReuseFacts,
   type GhApiFetcher,
   type GhCallPacer,
   createPlanFilingFileCache,
@@ -528,6 +534,7 @@ import {
   runPreflightCoverage,
   runPreflightFast,
   runTreeAdvisoryLine,
+  type CiParityStepResult,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
 import {
@@ -1060,6 +1067,9 @@ import {
   cappedAnnotation,
   automergeHoldFromLedger,
   cappedOverrideFromLedger,
+  // CAPPED-ARM-ESCALATION: the SAME reader `decideSweepArm` uses, so the board's terminal-refusal
+  // verdict and the arming path's refusal can never be derived from different facts.
+  postedArmFactsFromLedger,
   cappedWordingApplies,
   decideAutoMergeArm,
   decideArmFromLedgerVerdict,
@@ -1712,7 +1722,7 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
-import { gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
+import { defaultGitCapture, gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -5336,6 +5346,13 @@ async function runReview(args: {
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
+  /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
+   *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
+   *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
+   *  network, the same seam discipline `reviewerQueryFn` and `reviewerSpawnWorker` already use
+   *  here. Returning `undefined` is a FIRST-CLASS answer, not an error: it means "unreadable",
+   *  and every reader of the pair treats absence as "re-review in full". */
+  readReviewReuseFacts?: () => ReviewReuseFacts | undefined;
   report: string;
   /** The implementation worker's complete final report. Kept separate from `report`, which must
    * remain the PR body for body/diff integrity. `judgeReview` reads this only for the strict,
@@ -5607,6 +5624,12 @@ async function runReview(args: {
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
             // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
             tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review", sandboxReadRoots: snapshot.dependencyReadRoots,
+            // REVIEW-CASH-DIVERT: OFFER THE CASH SURFACE. Without this the auction's divert chain refuses
+            // this spawn outright ("tool surface is not implementable by cash"), which under a
+            // full squeeze takes the REQUIRED `remudero-review` check down and with it every
+            // merge on the board. One unconditional line, exactly like recon/diagnose — the
+            // branch lives in `cashDivertSpawnFields`, where a unit test can reach it.
+            ...cashDivertSpawnFields("review"),
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
@@ -5722,6 +5745,24 @@ async function runReview(args: {
     ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+
+  // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
+  // it instead of re-deriving a verdict that did not change. `ReviewVerdict.ownDiffDigest` and
+  // `mergeBaseSha` have existed since W1-T3704 and NOTHING EVER SET EITHER — which is why
+  // `reviewReuseVerdict` (lib/sweep.ts) returned `full-review` unconditionally and an orphaned
+  // review was always re-run from scratch.
+  //
+  // ATTACHED HERE, AFTER `applyVerdictStability`, ON PURPOSE. These two values describe the PR
+  // this pass looked at; they are not an input to the pass/fail judgment and must not be able to
+  // influence it. Everything above this line — `computed`, the stability suppression, the floor —
+  // is byte-identical with this block deleted, which is the falsifier the PR body reports.
+  //
+  // BEST-EFFORT, AND ITS FAILURE DIRECTION IS THE SAFE ONE: an unreadable compare leaves both
+  // fields absent, the ledger line omits them, and every reader treats absence as "re-review in
+  // full". The reuse path can only ever be *skipped* by a failure here, never wrongly taken.
+  const reuseFacts = (args.readReviewReuseFacts ?? (() => tryFetchReviewReuseFacts(owner, repo, "main", headSha, ghJson)))();
+  if (reuseFacts) verdict = { ...verdict, ...reuseFacts };
+
   let decisionDisposition: "computed" | "conflict" = "computed";
   if (suppressed) {
     // VISIBLE, not silently swallowed: names the sha + both verdicts + the
@@ -22222,7 +22263,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
 }
 
 /**
- * `rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--summary-file <path>]` —
+ * `rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]` —
  * W1-T221's hand-route commit gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`,
  * and lib/commit-message.ts's own header/body checks) over the commit range not yet on
  * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
@@ -22275,7 +22316,133 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast", "--proofs"] as const;
+
+/** W1-T3738 — what {@link runPreflightProofs} needs, all injected so a test drives it without a
+ *  base worktree, a real test run or a git call. */
+export interface PreflightProofsDeps {
+  spawn?: PreflightSpawn;
+  /** `git -C <repoRoot> …`, returning stdout. */
+  git?: (args: string[]) => string;
+  /** The reviewer's OWN resolver, injected so a test can vary the criteria without a plan. */
+  resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
+}
+
+/**
+ * W1-T3738 — RUN THE PROOF GATE AT HOME, FROM THE HEAD COMMIT'S OWN TRAILER.
+ *
+ * `proof-discrimination` refused on `executed_stale` six times in one session and every one cost a
+ * full CI round, while `rmd check-proof --base` answers the identical question offline in seconds.
+ * Nothing about it needs the network: the gate resolves criteria through
+ * {@link resolvePlanCriteriaAtHead}, whose input is the `Remudero-Task:` trailer the head commit
+ * already carries — so the same criteria resolve from the same plan at the same sha, with no pull
+ * request in existence yet.
+ *
+ * ONE RESOLUTION PATH, ONE EXECUTOR. Criteria come from the reviewer's resolver and each proof runs
+ * through the `check-proof` verb — never a second parser and never a second base worktree. A local
+ * tier that disagreed with the gate about WHICH criteria a branch is judged on would be worse than
+ * no tier at all.
+ *
+ * NO TRAILER, NO OPINION. A branch resolving no criteria reports that and passes: the same
+ * "no predicate ⇒ no opinion" contract every injected check in this repo keeps.
+ */
+export function runPreflightProofs(
+  repoRoot: string,
+  deps: PreflightProofsDeps = {},
+): { ok: boolean; steps: CiParityStepResult[] } {
+  // BOTH DEFAULTS ARE THE REPO'S EXISTING ONES, NOT NEW ONES. `diff-coverage` refused the
+  // hand-written pair these replace, and it was right twice over: their bodies were unreachable
+  // whenever a test injected a seam, and a second spawn default is a second set of environment
+  // rules for child processes to drift from (`defaultPreflightSpawn` scrubs the self-sync guard;
+  // a local `spawnSync` does not). One default, already covered, already correct.
+  const git = deps.git ?? ((args: string[]) => defaultGitCapture("git", ["-C", repoRoot, ...args]));
+  const spawn = deps.spawn ?? defaultPreflightSpawn;
+  let headSha: string;
+  let mergeBase: string;
+  let body: string;
+  try {
+    headSha = git(["rev-parse", "HEAD"]).trim();
+    mergeBase = git(["merge-base", "origin/main", "HEAD"]).trim();
+    body = git(["log", "-1", "--format=%B"]);
+  } catch (err) {
+    // UNREADABLE IS NOT A REFUSAL. A shallow clone or an unfetched origin/main is an environment
+    // gap, and this tier must never invent a finding from one.
+    return {
+      ok: true,
+      steps: [
+        {
+          name: "proofs",
+          ok: true,
+          detail: "proofs: SKIPPED — could not read the head or merge-base: " + String(err).split("\n")[0],
+        },
+      ],
+    };
+  }
+
+  const criteria =
+    deps.resolveCriteria?.(body, headSha) ??
+    (() => {
+      const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", headSha);
+      return resolved.criteria.length > 0 ? resolved.criteria : parseAcceptanceBlock(body);
+    })();
+
+  // W1-T3729: a criterion the plan credits to an earlier merge carries no proof text and is stale
+  // BY CONSTRUCTION — the gate skips it, so this does too, on the same truthiness test.
+  const executable = criteria.filter((c) => !c.satisfied_by && parseWhitelistedProof((c.proof ?? "").trim()) !== null);
+  if (executable.length === 0) {
+    return {
+      ok: true,
+      steps: [
+        {
+          name: "proofs",
+          ok: true,
+          detail: "proofs: OK — no executable criterion resolved from this head (no trailer, or none parseable)",
+        },
+      ],
+    };
+  }
+
+  const stale: string[] = [];
+  for (const c of executable) {
+    const proof = (c.proof ?? "").trim();
+    const run = spawn(
+      process.execPath,
+      ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
+      { cwd: repoRoot },
+    );
+    // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
+    // to discriminate — reading any non-zero as stale would refuse on an environment gap.
+    if (run.status === CHECK_PROOF_EXIT.executedStale) stale.push(proof);
+  }
+
+  if (stale.length === 0) {
+    return {
+      ok: true,
+      steps: [
+        {
+          name: "proofs",
+          ok: true,
+          detail:
+            "proofs: OK — " + executable.length + " executable proof(s) discriminate against " + mergeBase.slice(0, 9),
+        },
+      ],
+    };
+  }
+  return {
+    ok: false,
+    steps: [
+      {
+        name: "proofs",
+        ok: false,
+        detail:
+          "proofs: FAIL — " + stale.length + " of " + executable.length + " proof(s) pass at BOTH head and " +
+          mergeBase.slice(0, 9) + "; they establish nothing and proof-discrimination will refuse this PR:\n" +
+          stale.map((x) => "  " + x).join("\n") +
+          "\n  Repoint each at behaviour this diff changes. A control assertion needs a corpus control of its own.",
+      },
+    ],
+  };
+}
 
 /** W1-T3737 — one tier of a preflight run, for the summary sentence below. */
 export interface PreflightTier {
@@ -22366,6 +22533,9 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
+  // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
+  // 29-second default tier cannot absorb that. Named in the coverage line below either way.
+  const proofs = rest.includes("--proofs") ? runPreflightProofs(repoRoot, { spawn: deps.spawn }) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -22385,7 +22555,12 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
       console.log(step.detail);
     }
   }
-  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
+  if (proofs) {
+    for (const step of proofs.steps) {
+      console.log(step.detail);
+    }
+  }
+  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true) && (proofs?.ok ?? true);
   // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
   //
   // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
@@ -22412,13 +22587,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     cpuCount: deps.cpuCount ?? osCpus().length,
     ...(pin !== undefined && "sha" in pin ? { baseSha: pin.sha } : {}),
   });
-  const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])];
+  const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? []), ...(proofs?.steps ?? [])];
   const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
   const tiers: PreflightTier[] = [
     { name: "commitlint/typecheck/emitter", enableWith: "always runs", ran: true },
     { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
     { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity !== undefined },
     { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
+    { name: "proof discrimination", enableWith: "--proofs", ran: proofs !== undefined },
   ];
   console.log(
     "\n" +
@@ -30605,6 +30781,37 @@ interface ReviewOrphanFacts {
  * already-orphaned PRs). Until that wiring lands, every prior head still counts individually in
  * this diagnostic result. That limitation no longer affects retry/backoff behavior.
  */
+/**
+ * CAPPED-ARM-ESCALATION — is the arm refusal for this exact head TERMINAL?
+ *
+ * PURE, AND EXPORTED SO A TEST CAN REACH IT. `buildOpenPrViews`, the only caller, is not evaluated
+ * by any unit test here, so a branch written inline there would be untestable added lines — the
+ * same reason `cashDivertSpawnFields` and `harnessCommitForShellLessWorker` live where they do.
+ *
+ * DERIVED FROM THE SAME TWO READS `decideSweepArm` (lib/sweep.ts) MAKES, deliberately: this value
+ * exists to warn that arming will refuse, so deriving it from different facts than the refusal
+ * itself would let the warning and the behaviour drift apart.
+ *
+ * THE THREE ANSWERS, and why the middle one is not a boolean:
+ *   - `true`   capped, non-plan-only, no override at this head. Nothing re-judges a fixed head into
+ *              an uncapped verdict, so the refusal is permanent until a new head or an override.
+ *   - `false`  a verdict IS recoverable and WILL arm — uncapped, plan-only (the W1-T205 carve-out
+ *              arms with no override), or already overridden.
+ *   - `undefined` NO verdict recoverable at all. Not "fine" and not "terminal": `decideSweepArm`
+ *              ARMS on this absence ("no evidence to refuse on"), so there is nothing to warn
+ *              about, and a rotated or unreadable ledger cannot manufacture an escalation.
+ */
+export function terminalArmRefusal(
+  ledger: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  headSha: string | undefined,
+): boolean | undefined {
+  const facts = postedArmFactsFromLedger(ledger, taskId, headSha);
+  if (!facts) return undefined;
+  if (!facts.capped || facts.planOnly) return false;
+  return cappedOverrideFromLedger(ledger, taskId!, headSha!) === undefined;
+}
+
 export function reviewOrphansFor(
   ledger: Array<Record<string, unknown>>,
   taskId: string | undefined,
@@ -31579,6 +31786,30 @@ export function buildOpenPrViews(
   }
   const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch, isInPlanScope);
 
+  // W1-T3704 (completed here) — THE CURRENT SIDE OF THE REVIEW-REUSE COMPARISON, hydrated ONCE for a bounded set.
+  //
+  // SCOPED TO ALREADY-ORPHANED PRs, and the scoping is the cost argument, not an optimisation. A
+  // compare per open PR per pass is exactly the fan-out GitHub's SECONDARY limit punishes — it
+  // counts request CADENCE, not volume, so it trips while `rate_limit` still reads full. Only a PR
+  // whose review was orphaned by a push can reach the `review-reused`/`discriminate-only` rows at
+  // all, so only those are asked about. On a healthy board that set is empty and this costs zero
+  // requests; `hydrateReviewReuseFacts` caps it either way.
+  //
+  // The orphan test is `reviewOrphansFor` — the SAME call the per-PR walk below makes for
+  // `reviewOrphanedByPush`, over the SAME ledger already in hand, so this adds no read and cannot
+  // disagree with the field the disposition rows gate on.
+  const reviewOrphanedPrs = raw
+    .filter(
+      (pr) =>
+        reviewOrphansFor(
+          ledger,
+          resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false),
+          pr.headRefOid,
+        ).orphanedByPush,
+    )
+    .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
+  const reviewReuseCurrent = hydrateReviewReuseFacts(owner, repo, "main", reviewOrphanedPrs, fetch);
+
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     // W1-T3505: thread the SAME classification this view stamps below into task-identity
@@ -31620,6 +31851,12 @@ export function buildOpenPrViews(
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
+    // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
+    // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
+    // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
+    // carries that sha so the disposition's reason names the head the reused verdict judged,
+    // rather than asserting a reuse no reader can audit.
+    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, taskId) : undefined;
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
@@ -31762,6 +31999,32 @@ export function buildOpenPrViews(
       // producer-completeness test anchors on an object literal assigning every required
       // OpenPrView field, so an assignment made anywhere else would still read as unwired.
       reviewOrphanedByPush: reviewOrphans.orphanedByPush,
+      // W1-T3704 (completed here) — THE FIVE REVIEW-REUSE INPUTS, ASSIGNED HERE AS TOP-LEVEL KEYS. W1-T3704 shipped
+      // `reviewReuseVerdict` and both disposition rows that call it, and NOTHING EVER PRODUCED ANY
+      // OF THESE — the function's own comment said "Not yet populated by the real gateway", so its
+      // five-way absence guard returned `full-review` on every call and every orphaned review was
+      // re-derived from scratch. That is the "why does it want ANOTHER review?" #5941 hit.
+      //
+      // ASSIGNED DIRECTLY, NOT THROUGH A CONDITIONAL SPREAD, for the reason the `requiredContexts-
+      // ReadFailure` comment below states at length: `producerAssignedKeys`
+      // (lib/producer-completeness.ts) resolves an object literal's keys STATICALLY, so a field
+      // written inside `...(cond ? {f} : {})` reads as having NO PRODUCER — which is the exact
+      // census result these five fields have carried since they were declared.
+      //
+      // The `reviewed*` three come from the ledger line the review itself wrote; the `current*` two
+      // from the bounded compare hydrated above. `undefined` on any of them is a FIRST-CLASS answer
+      // meaning "unreadable", and `reviewReuseVerdict` refuses to reuse on it — absence degrades
+      // toward a full re-review, never toward reusing a verdict on evidence nobody recorded.
+      // CAPPED-ARM-ESCALATION — CAN THE VERDICT LEDGERED FOR THIS EXACT HEAD EVER ARM? Derived
+      // from the SAME two ledger reads `decideSweepArm` makes, over the SAME lines already in hand
+      // — no extra request, and no second opinion that could disagree with the arming path it
+      // warns about. TERMINAL means capped, NOT plan-only, and no override recorded for this head.
+      armRefusalIsTerminal: terminalArmRefusal(ledger, taskId, pr.headRefOid),
+      reviewedOwnDiffDigest: priorReviewForReuse?.ownDiffDigest,
+      reviewedMergeBaseSha: priorReviewForReuse?.mergeBaseSha,
+      reviewedHeadSha: priorReviewForReuse?.headSha,
+      currentOwnDiffDigest: reviewReuseCurrent.get(pr.number)?.ownDiffDigest,
+      currentMergeBaseSha: reviewReuseCurrent.get(pr.number)?.mergeBaseSha,
       priorReviewAttemptsForInput: reviewAttempts.attempts,
       // Exact-input elapsed-time-backoff clock; see `reviewInputBackoffElapsed`.
       reviewInputLastAttemptAt: reviewAttempts.lastAttemptAt,
@@ -40253,7 +40516,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--summary-file <path>]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +

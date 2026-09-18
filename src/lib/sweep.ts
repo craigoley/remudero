@@ -3230,6 +3230,32 @@ export function usableInstrumentEntanglementPaths(value: unknown): value is Inst
  *  gateway builds this from `gh pr list --state open --json …` plus the review/CI derivation
  *  status.ts already does; tests inject fixtures. */
 export interface OpenPrView {
+  /** W1-T3704/W1-T3704 (completed here) — the five review-reuse inputs. DECLARED IN THIS BODY, NOT INHERITED, and
+   *  that is a deliberate, load-bearing choice rather than a style one:
+   *  `test/producer-completeness.test.ts`'s census walks `OpenPrView`'s OWN declaration body, so a
+   *  member reached through `extends` is INVISIBLE to it. Measured while building W1-T3704 (completed here) —
+   *  with these five inherited from `ReviewReuseInputs`, deleting all five producer assignments
+   *  from `buildOpenPrViews` left the census green (11/11). Declared here, the gate that already
+   *  exists refuses the regression by name, which is the only kind of rule this repo trusts.
+   *  {@link ReviewReuseInputs} is now a `Pick` of these, so there is exactly one declaration. */
+  /** CAPPED-ARM-ESCALATION — TRUE when the verdict ledgered for THIS EXACT head can never arm
+   *  auto-merge, and only a NEW HEAD or an operator override can change that. Produced by
+   *  `buildOpenPrViews` (run-task.ts) from the same two ledger reads `decideSweepArm` makes, so the
+   *  board and the arming path can never disagree about it.
+   *
+   *  A capped, non-plan-only verdict at a FIXED head is terminal by construction — nothing
+   *  re-judges the same head into an uncapped verdict — so the first pass already knows the refusal
+   *  will repeat forever, and counting repeats would only delay telling somebody.
+   *
+   *  ABSENT MEANS UNKNOWN, NEVER "FINE": undefined leaves the escalation row unmatched and the PR
+   *  on exactly today's stand-down path, so an unreadable ledger cannot manufacture a question. */
+  armRefusalIsTerminal?: boolean;
+  reviewedOwnDiffDigest?: string;
+  currentOwnDiffDigest?: string;
+  reviewedMergeBaseSha?: string;
+  currentMergeBaseSha?: string;
+  reviewedHeadSha?: string;
+
   prNumber: number;
   prUrl: string;
   /** The task this PR credits (its `Remudero-Task:` trailer), if resolved. */
@@ -5029,39 +5055,34 @@ export type ReviewReuseVerdict =
   | { kind: "full-review" };
 
 /**
- * W1-T3704 — the five inputs {@link reviewReuseVerdict} compares, declared as their OWN overlay
- * type rather than as members of {@link OpenPrView}. `OpenPrView`'s own doc explains why: nothing
- * under `src/` assigns any of these five keys yet (the real producer is `run-task.ts`'s
- * `buildOpenPrViews`, outside this task's declared file scope — see this PR's Follow-ups), and
- * `test/producer-completeness.test.ts`'s census walks `OpenPrView`'s OWN declaration body for
- * exactly that shape: an optional member with no producer literal anywhere in `src/`. Keeping the
- * shape here instead — a caller merges it onto an `OpenPrView` value it already holds — ships the
- * reuse decision fully implemented and unit-tested without asserting a census-tracked member the
- * interface cannot yet back. Every field is ABSENT-MEANS-UNREADABLE (never a false-ish default),
- * so a plain `OpenPrView` missing every one of these (every value that exists today) still reaches
- * `"full-review"` below, unchanged from before this type existed.
+ * The five inputs {@link reviewReuseVerdict} compares.
+ *
+ * W1-T3704 declared these as a standalone OVERLAY type, deliberately kept off {@link OpenPrView},
+ * because nothing under `src/` assigned any of the five and
+ * `test/producer-completeness.test.ts`'s census refuses an `OpenPrView` member with no producer
+ * literal. That was an honest accommodation of a real gap, and it had a cost the gap's own shape
+ * hid: with the fields off the interface, `reviewReuseInputsFrom` reached them through an `as`
+ * cast, so "no producer exists" and "a producer exists and works" were indistinguishable at the
+ * type level — and the mechanism sat fully built, fully tested, and completely inert from
+ * 2026-09-16 until it was measured on #5941.
+ *
+ * W1-T3704's producer wired that producer (`buildOpenPrViews`, run-task.ts), so `OpenPrView` now EXTENDS this
+ * type, the cast is gone, and the census asserts all five the way it asserts every other board
+ * field. The overlay survives as the argument type of the pure decision below, which is the one
+ * thing it was always good for: `reviewReuseVerdict` takes exactly what it reads.
+ *
+ * Every field remains ABSENT-MEANS-UNREADABLE, never a false-ish default — so a view missing any
+ * one of them still reaches `"full-review"`, and the failure direction of a bad read is always a
+ * wasted review rather than a diff that was never judged.
  */
-export interface ReviewReuseInputs {
-  /** The PR-owned diff's content hash the most recently posted verdict judged, read back from that
-   *  `review.posted` line's `own_diff_digest` key (see review.ts's `priorReviewVerdictFromLedger`).
-   *  `undefined` means either no such key was recorded (a line predating this field) or the
-   *  producer has not wired the compare yet — treated as UNREADABLE, never as "unchanged". */
-  reviewedOwnDiffDigest?: string;
-  /** The PR-owned diff's content hash for the CURRENT head, computed fresh each sweep pass so it
-   *  can be compared against {@link reviewedOwnDiffDigest}. Not yet populated by the real gateway;
-   *  the mechanism is wired and unit-tested here, the producer follows separately. */
-  currentOwnDiffDigest?: string;
-  /** The merge base the most recently posted verdict's discrimination check ran against, read back
-   *  from that line's `merge_base_sha` key. Same absent-means-unreadable rule as above. */
-  reviewedMergeBaseSha?: string;
-  /** The CURRENT merge base for this PR's head against its target branch, computed fresh each
-   *  pass. Not yet populated by the real gateway; see {@link currentOwnDiffDigest}'s own note. */
-  currentMergeBaseSha?: string;
-  /** The head sha the recorded verdict was ORIGINALLY posted against, distinct from `OpenPrView`'s
-   *  `headSha` (always the CURRENT head). Named on a reused/discriminate-only disposition so the
-   *  reuse is auditable rather than silent (acceptance criterion 4). */
-  reviewedHeadSha?: string;
-}
+export type ReviewReuseInputs = Pick<
+  OpenPrView,
+  | "reviewedOwnDiffDigest"
+  | "currentOwnDiffDigest"
+  | "reviewedMergeBaseSha"
+  | "currentMergeBaseSha"
+  | "reviewedHeadSha"
+>;
 
 export function reviewReuseVerdict(pr: ReviewReuseInputs): ReviewReuseVerdict {
   const { reviewedOwnDiffDigest, currentOwnDiffDigest, reviewedMergeBaseSha, currentMergeBaseSha, reviewedHeadSha } =
@@ -5088,13 +5109,17 @@ export function reviewReuseVerdict(pr: ReviewReuseInputs): ReviewReuseVerdict {
  *  exactly the UNREADABLE input {@link reviewReuseVerdict} already handles by falling back to
  *  `"full-review"` — this widens no behavior, it only lets the comparison compile. */
 function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
-  const withReuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
+  // review-reuse-producer: THE CAST IS GONE. `OpenPrView` now extends `ReviewReuseInputs` and
+  // `buildOpenPrViews` assigns all five as top-level keys, so this reads declared members rather
+  // than smuggling undeclared ones through `as`. That cast was load-bearing evidence of the defect
+  // this task fixed: it existed precisely because nothing produced the fields, and it would have
+  // gone on compiling silently no matter how long that stayed true.
   return {
-    reviewedOwnDiffDigest: withReuseInputs.reviewedOwnDiffDigest,
-    currentOwnDiffDigest: withReuseInputs.currentOwnDiffDigest,
-    reviewedMergeBaseSha: withReuseInputs.reviewedMergeBaseSha,
-    currentMergeBaseSha: withReuseInputs.currentMergeBaseSha,
-    reviewedHeadSha: withReuseInputs.reviewedHeadSha,
+    reviewedOwnDiffDigest: pr.reviewedOwnDiffDigest,
+    currentOwnDiffDigest: pr.currentOwnDiffDigest,
+    reviewedMergeBaseSha: pr.reviewedMergeBaseSha,
+    currentMergeBaseSha: pr.currentMergeBaseSha,
+    reviewedHeadSha: pr.reviewedHeadSha,
   };
 }
 
@@ -5543,6 +5568,38 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: () =>
       "open pull request is a draft — GitHub refuses auto-merge on a draft; held until marked " +
       "ready for review",
+  },
+  {
+    // CAPPED-ARM-ESCALATION (on W1-T185/W1-T229) — THE GREEN PR THAT CAN NEVER MERGE, AND SAID
+    // SO TO NOBODY. A CAPPED verdict posts `state: "success"` on purpose (W1-T185 criterion 3
+    // forbids reddening a PR for an unparseable proof) and `decideAutoMergeArm` refuses to arm it.
+    // Both halves are right; their COMBINATION is the defect. GitHub renders the PR fully green,
+    // the `mergeable` row below matches, the act arm stands down on `decideSweepArm`, and the pass
+    // records `acted: false` with a reason nobody reads. Next pass, identically. Forever.
+    //
+    // THE STAND-DOWN IS NOT CHANGED HERE — see the act arm's own comment: no dedup key is seeded,
+    // so the PR re-derives and arms the instant executed proof or a ledgered override lands. The
+    // bug was that standing down was the WHOLE response, so a PR with structurally broken proofs
+    // (#5941: a task record naming a test file that does not exist) sits green and unmergeable
+    // with no human told. A stuck PR that LOOKS fine is worse than one that looks broken.
+
+    // ORDERED STRICTLY BEFORE `mergeable`, on that row's own predicate plus a POSITIVE
+    // `armRefusalIsTerminal === true` — never inferred from the absence of `false`, the discipline
+    // the draft row above and `mergeable` itself use. An unreadable ledger leaves the field
+    // undefined, this row unmatched, and the PR exactly where it is today.
+    //
+    // AN EARLIER STOP, NEVER A LONGER LEASH, like W1-T1269 and W1-T225 above: it merges nothing,
+    // weakens no floor, grants no override. `blocked-ambiguous` dedups per `pr@sha`, so a new head
+    // re-earns its question and an override stops this row matching — `mergeable` then arms it.
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true,
+    reason: () =>
+      "every required check is green and remudero-review reports success, but the verdict ledgered " +
+      "for this head is CAPPED (zero proofs executed) with no operator override — so auto-merge " +
+      "refuses and no future pass at this head can decide differently. Escalating once rather than " +
+      "standing down silently forever: this PR looks mergeable on GitHub and is not. Resolve it by " +
+      "repairing the proofs so they execute (a new head re-earns the arm automatically), or by " +
+      "recording an explicit override with `rmd review <pr> --override-capped-by`",
   },
   {
     // POSITIVE MATCH ONLY (W1-T93): mergeable is NEVER inferred from the mere absence of a
