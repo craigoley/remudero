@@ -62,7 +62,7 @@ function report(overrides: Partial<VerdictCalibrationReport> = {}): VerdictCalib
   };
 }
 
-test("W1-T3795 criterion 1: reports revert and follow-up-fix rates with policy and denominators", () => {
+test("W1-T3795 criterion 1 in test/operator-agent-outcomes.test.ts: reports revert and follow-up-fix rates with policy and denominators", () => {
   const source = report();
   const signal = adaptVerdictCalibrationReport(source);
 
@@ -86,7 +86,7 @@ test("W1-T3795 criterion 1: reports revert and follow-up-fix rates with policy a
   assert.notEqual(signal.policy, source.policy);
 });
 
-test("W1-T3795 criterion 2: preserves below-floor, mixed-lane, and unmeasurable rows", () => {
+test("W1-T3795 criterion 2 in test/operator-agent-outcomes.test.ts: preserves below-floor, mixed-lane, and unmeasurable rows", () => {
   const signal = adaptVerdictCalibrationReport(
     report({
       classes: [
@@ -140,7 +140,7 @@ test("W1-T3795 criterion 2: preserves below-floor, mixed-lane, and unmeasurable 
   assert.equal(signal.unmeasurableByCause["no-review-posted"], 1);
 });
 
-test("W1-T3795 criterion 3: a failed worker result is not classified as a reverted task", () => {
+test("W1-T3795 criterion 3 in test/operator-agent-outcomes.test.ts: a failed worker result is not classified as a reverted task", () => {
   const failedWorkerRow: VerdictRow = {
     taskId: "W1-T11",
     armedTs: "2026-09-19T00:00:00.000Z",
