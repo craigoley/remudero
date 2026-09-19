@@ -1720,6 +1720,7 @@ import {
   type WorkerStreamObserver,
   WorkerAbandonedError,
 } from "./lib/worker.js";
+import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
@@ -15293,6 +15294,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         log("worktree.remove", { on: "worker.abandoned" });
       } catch (e) {
         log("worktree.remove.error", { on: "worker.abandoned", error: String((e as Error)?.message ?? e) });
+      }
+      return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+    }
+    if (isCodexWorkerOutputLimitError(err)) {
+      log("verdict", {
+        verdict: "failed",
+        reason: err.message,
+        stage: "worker.bounded_output",
+        stream: err.stream,
+        limit_bytes: err.limitBytes,
+        observed_bytes: err.observedBytes,
+        cost_usd: costUsd,
+        ...terminalVerdictFields(null),
+      });
+      say(
+        `verdict: failed — Codex worker ${err.stream} output exceeded ${err.limitBytes} bytes ` +
+          `(${err.observedBytes} observed)`,
+      );
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "worker.bounded_output" });
+      } catch (e) {
+        log("worktree.remove.error", { on: "worker.bounded_output", error: String((e as Error)?.message ?? e) });
       }
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
