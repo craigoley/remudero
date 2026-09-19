@@ -62,6 +62,12 @@
       "grepHint": "NNNN. Short title, imperative mood"
     },
     {
+      "path": "docs/aiuc-1-gap-assessment.md",
+      "title": "Remudero AIUC-1 internal gap assessment",
+      "summary": "This document is a dated engineering assessment of Remudero against the AIUC-1 control",
+      "grepHint": "Remudero AIUC-1 internal gap assessment"
+    },
+    {
       "path": "docs/alert-lane.md",
       "title": "Alert-fix lane (W1-T90, ratifies P20)",
       "summary": "§5D lane 2 (W1-T55 surface → W1-T56 triage, both SHIPPED — `src/lib/ops.ts`)",
