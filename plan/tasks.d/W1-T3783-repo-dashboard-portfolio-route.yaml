@@ -45,12 +45,12 @@
     request. OAuth, settings, logs, dry-run, and telemetry stay unavailable until separate contracts
     can name their durable source and write/auth semantics.
   acceptance:
-    - claim: "GET /v1/repos returns the validated managed-repo catalog and preserves an empty catalog as a measured result"
-      proof: "grep: /v1/ in openapi/daemon.yaml"
-    - claim: "missing repo measurements remain explicitly unknown rather than becoming zero or healthy"
-      proof: "grep: getJson< in packages/api-client/src/client.ts"
-    - claim: "the route is read-scoped, mounted, and exposed through the generated client boundary"
-      proof: "grep: buildServeRoutes( in src/lib/serve.ts"
+      - claim: "GET /v1/repos returns the validated managed-repo catalog and preserves an empty catalog as a measured result"
+        proof: "grep: path: \"/v1/repos\" in src/lib/repo-dashboard-route.ts"
+      - claim: "missing repo measurements remain explicitly unknown rather than becoming zero or healthy"
+        proof: "grep: listRepos(): Promise<RepoDashboardResult> in packages/api-client/src/client.ts"
+      - claim: "the route is read-scoped, mounted, and exposed through the generated client boundary"
+        proof: "grep: buildRepoDashboardRoute({ root: deps\\.questionsRoot }) in src/lib/serve.ts"
   falsifier: |
     Close without implementation if current main already mounts `/v1/repos`, its OpenAPI schema
     names the same response, and `DaemonClient.listRepos()` reaches that route through `getJson`.
