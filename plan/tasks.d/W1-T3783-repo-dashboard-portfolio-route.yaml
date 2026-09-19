@@ -1,0 +1,64 @@
+- id: W1-T3783
+  title: "API-T3783 — Serve a read-only managed-repo portfolio contract for the dashboard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  origin: human
+  plan_refs: ["§7A"]
+  files:
+    - src/lib/repo-dashboard-route.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - packages/api-client/src/client.ts
+    - test/repo-dashboard-route.test.ts
+    - test/api-client-client.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on current main at c2bcff0259c01f4143902050a7c17c8b8268352c: the dashboard's repo
+    API is a placeholder, while the daemon already has one validated multi-repo source of truth,
+    `.remudero/managed-repos.json`, used by issues intake. The live service has no `/v1/repos` route,
+    and the generated api-client has no repo catalog method. The dashboard therefore cannot distinguish
+    an empty managed set from an unavailable read, and it cannot load the identity of a managed repo
+    without inventing browser-only state.
+
+    This task establishes the smallest honest server boundary: a read-only portfolio catalog sourced
+    from the validated managed-repo file. It does not claim that OAuth, settings persistence, dry-run
+    execution, logs, or per-repo telemetry already exist.
+  design: |
+    (i) Add a typed `GET /v1/repos` response with generated OpenAPI and api-client types. The response
+    carries the repo identity and source/read state. Fields without a daemon source remain explicit
+    `null`/`unknown`; the route must not turn missing telemetry into zeroes or claim that a repo is
+    active merely because it is listed in the managed set.
+
+    (ii) Build the route as read-scoped and mount it through `buildServeRoutes` using the existing
+    `questionsRoot`/repo root, so the route reads the same `.remudero/managed-repos.json` that issues
+    intake validates. A malformed present file is an honest server error, not an empty catalog.
+
+    (iii) Add one sanctioned `DaemonClient.listRepos()` method over the existing `getJson` helper.
+    The dashboard adapter may consume the typed result, but no dashboard component may hand-roll a
+    request. OAuth, settings, logs, dry-run, and telemetry stay unavailable until separate contracts
+    can name their durable source and write/auth semantics.
+  acceptance:
+    - claim: "GET /v1/repos returns the validated managed-repo catalog and preserves an empty catalog as a measured result"
+      proof: "grep: /v1/ in openapi/daemon.yaml"
+    - claim: "missing repo measurements remain explicitly unknown rather than becoming zero or healthy"
+      proof: "grep: getJson< in packages/api-client/src/client.ts"
+    - claim: "the route is read-scoped, mounted, and exposed through the generated client boundary"
+      proof: "grep: buildServeRoutes( in src/lib/serve.ts"
+  falsifier: |
+    Close without implementation if current main already mounts `/v1/repos`, its OpenAPI schema
+    names the same response, and `DaemonClient.listRepos()` reaches that route through `getJson`.
+    The checked head has none of those three surfaces: `buildServeRoutes` has no repo catalog route,
+    `openapi/daemon.yaml` has no `/v1/repos` path, and `packages/api-client/src/client.ts` has no
+    `listRepos` method.
+  note: |
+    This record is filed in a plan-only PR and is intentionally omitted from its own `files:` list.
+    The implementation PR must use the session branch shape `run-W1-T3783-<epochMs>` and carry the
+    `Remudero-Task: W1-T3783` trailer. This is a read-only contract slice; OAuth, durable settings,
+    logs, dry-run, and per-repo telemetry remain separate follow-up concerns.
