@@ -3,202 +3,202 @@
   "entries": [
     {
       "heading": "Mission",
-      "line": 122,
+      "line": 123,
       "summary": "A plan-stewarding orchestration harness on top of Claude Code. A durable main agent runs the"
     },
     {
       "heading": "NET STATE",
-      "line": 142,
+      "line": 143,
       "summary": "Derived present-tense capability facts (lane count, cost ceiling, recon cap, ci-gate roster),"
     },
     {
       "heading": "SHIPPED log",
-      "line": 715,
+      "line": 717,
       "summary": "Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose)."
     },
     {
-      "heading": "Calibration (observed — current R62 first; prior-cycle evidence follows)",
-      "line": 1549,
-      "summary": "**RETRO-1789847242565 (2026-09-19) — observed task-type calibration. THE GATHER'S OWN TABLE, PRINTED"
+      "heading": "Calibration (observed — current R63 first; prior-cycle evidence follows)",
+      "line": 1565,
+      "summary": "**RETRO-1789853462330 (2026-09-19) — observed task-type calibration. THE GATHER'S OWN TABLE, PRINTED"
     },
     {
       "heading": "Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)",
-      "line": 1806,
+      "line": 1824,
       "summary": "★ THE LIVE RANKING IS RETIRED — DELETED, NOT FOLDED (R53-4's arm, fired 2026-09-15). This section"
     },
     {
       "heading": "FIELD FINDINGS (from the mini, 2026-07-14 — ground truth, not docs)",
-      "line": 5175,
+      "line": 5194,
       "summary": "1, 2, 4. *★ RESOLVED AND FOLDED (R20) — the ANTHROPIC_ precedence family.** `ANTHROPIC_API_KEY` in"
     },
     {
       "heading": "Bootstrap ladder — Remudero builds Remudero",
-      "line": 5269,
+      "line": 5288,
       "summary": "The dogfooding requirement, made structural. Each rung uses the previous rung to build the next:"
     },
     {
       "heading": "1. Architecture — four planes",
-      "line": 5287,
+      "line": 5306,
       "summary": "Control plane — deterministic TypeScript daemon (launchd/systemd-supervised). Owns: task DAG"
     },
     {
       "heading": "2. Plan format & contracts",
-      "line": 5328,
+      "line": 5347,
       "summary": "Per product: the design repo holds `MASTER-PLAN.md` (human narrative, this document's format)"
     },
     {
       "heading": "3. The loop (per task)",
-      "line": 5394,
+      "line": 5413,
       "summary": "queued → recon → prompt (provenance-linted) → running (implement worker) → PR open →"
     },
     {
       "heading": "3A. Campaigns (cross-repo improvement cycles)",
-      "line": 5402,
+      "line": 5421,
       "summary": "Injectable, reusable improvement sweeps — \"recon and implement across all repos for X\" as a"
     },
     {
       "heading": "4. Autonomy doctrine",
-      "line": 5428,
+      "line": 5447,
       "summary": "The loop never waits on a human unless the plan says `verify: human`."
     },
     {
       "heading": "4A. Workspace containment (fleet-wide)",
-      "line": 5456,
+      "line": 5475,
       "summary": "Everything lives under one root (`~/Remudero`, configurable `REMUDERO_ROOT`); the main agent"
     },
     {
       "heading": "4B. Flight control (in-flight supervision, risk-graded gates, on-demand review)",
-      "line": 5493,
+      "line": 5512,
       "summary": "Why. Today's only guards are terminal cliffs — budget, turns, strikes. They catch a worker"
     },
     {
       "heading": "4C. External scan (2026-09-02): OpenClaw 2.0 and Grok Bot — taken, refused, already held (★ FOLDED BY R57)",
-      "line": 5561,
+      "line": 5580,
       "summary": "★ FOLDED FROM 79 LINES TO THIS BLOCK BY R57 — the scan's argument was made once, in the pass that"
     },
     {
       "heading": "4D. Concept scan (2026-09-03): a compact dialect for the fleet — taken, refused, already held (★ FOLDED BY R57)",
-      "line": 5583,
+      "line": 5602,
       "summary": "★ FOLDED FROM 69 LINES TO THIS BLOCK BY R57, on the same doctrine. [research: compact-dialect-2026-09-03]"
     },
     {
       "heading": "5. Principles engine",
-      "line": 5606,
+      "line": 5625,
       "summary": "Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet"
     },
     {
       "heading": "5A. The fleet bar is inherited, not optional",
-      "line": 5715,
+      "line": 5734,
       "summary": "Meeting the bar on `remudero` is necessary but not the point. The point is that **every project Remudero"
     },
     {
       "heading": "5B. The Architect-worker primitive & the skill registry",
-      "line": 5742,
+      "line": 5761,
       "summary": "OBSERVATION (the unification): Setup, Plan, Refine, Expand, Feedback/triage, Refactor, Design Review,"
     },
     {
       "heading": "5C. Task pre-flight: the plan gate",
-      "line": 5773,
+      "line": 5792,
       "summary": "**Task quality is a GATED, LEARNED property — caught BEFORE dispatch by a deterministic linter, refined by"
     },
     {
       "heading": "5D. Fleet operations — the ongoing-response loop",
-      "line": 5814,
+      "line": 5833,
       "summary": "Provisioning the gate stack (§5/§5A) is ONE-TIME; OPERATING it is CONTINUOUS. Setting up CodeQL/OSV/"
     },
     {
       "heading": "5E. Decision quality — the two-system model",
-      "line": 5839,
+      "line": 5858,
       "summary": "**The harness makes thousands of judgments an hour under uncertainty, and its observed failure modes are,"
     },
     {
       "heading": "6. Open-source packaging",
-      "line": 5884,
+      "line": 5903,
       "summary": "- License: Apache-2.0 (patent grant, enterprise-friendly). D-2."
     },
     {
       "heading": "6A. Open-source governance & the commercial boundary",
-      "line": 5929,
+      "line": 5948,
       "summary": "Not legal advice; a qualified attorney reviews this before any money changes hands. Sourced from"
     },
     {
       "heading": "7A. The API contract is the product boundary",
-      "line": 5975,
+      "line": 5994,
       "summary": "This is the crux, and it is logically PRIOR to every client below. Three clients (dashboard,"
     },
     {
       "heading": "7. The control panel — ONE web app, three shells",
-      "line": 5999,
+      "line": 6018,
       "summary": "**Every client here is a PROJECTION of the API contract (§7A) — no client talks to the daemon any other"
     },
     {
       "heading": "7B. Feedback intake: the Architect's front door",
-      "line": 6050,
+      "line": 6069,
       "summary": "Today the harness has no front door: every piece of operator feedback goes chat with an external"
     },
     {
       "heading": "7C. Design Review (the visual/UX skill)",
-      "line": 6125,
+      "line": 6144,
       "summary": "The one genuinely-MISSING capability: an Architect-tier skill that validates and improves UI/UX. It is"
     },
     {
       "heading": "8. Security posture (consolidated)",
-      "line": 6148,
+      "line": 6167,
       "summary": "Worker credential = fine-grained PAT scoped to the product's repos, via GH_TOKEN env only. No MCP in"
     },
     {
       "heading": "8A. Knowledge architecture & context economy",
-      "line": 6163,
+      "line": 6182,
       "summary": "W1-T19 shipped the READ side of the compounding loop, which makes the knowledge ARCHITECTURE"
     },
     {
       "heading": "8B. Compaction doctrine",
-      "line": 6193,
+      "line": 6212,
       "summary": "Compaction is a SAFETY NET, never a strategy — one-concern sessions should END before it matters"
     },
     {
       "heading": "9. Resource doctrine — mounts, windows & context",
-      "line": 6210,
+      "line": 6229,
       "summary": "Mounts — model selection is the remudero's core act. `.remudero/mounts.yaml` is a"
     },
     {
       "heading": "Self-improvement: flywheel, retros, knowledge & the commons",
-      "line": 6373,
+      "line": 6392,
       "summary": "The mechanism behind L3, the answer to \"verdicting is where this succeeds or dies,\" and — per"
     },
     {
       "heading": "10. Workstreams",
-      "line": 6466,
+      "line": 6485,
       "summary": "WS-0 — Spike — ✅ SHIPPED & MERGED (PR #1; see SHIPPED log). Ground truth in FIELD FINDING 10;"
     },
     {
       "heading": "11. Open decisions",
-      "line": 6591,
+      "line": 6610,
       "summary": "- D-1 Name — CLOSED 2026-07-14: Remudero (domains purchased). Alias `rmd`; binary `remudero` with"
     },
     {
       "heading": "12. Standing rules",
-      "line": 6671,
+      "line": 6690,
       "summary": "1. PROVENANCE OR IT DOESN'T GO IN A PROMPT."
     },
     {
       "heading": "12A. Documentation as a gated artifact, in tiers",
-      "line": 6986,
+      "line": 7005,
       "summary": "Docs are scattered (W1-T30 skeleton, W1-T39 ORIENTATION, WS-12 website) with no coherence and no anti-rot"
     },
     {
       "heading": "13. Plan-sync: the in-repo PR flow (never scp again)",
-      "line": 7020,
+      "line": 7039,
       "summary": "`MASTER-PLAN.md` and `plan/tasks.yaml` were once copied into the tree"
     },
     {
       "heading": "14. Immediate queue",
-      "line": 7030,
+      "line": 7049,
       "summary": "SETUP COMPLETE (2026-07-14) — the full inventory (repos, org settings, workspace, auth, deny-floor)"
     },
     {
       "heading": "Banked queue",
-      "line": 7058,
+      "line": 7077,
       "summary": "- Grill-me protocol as in-harness interactive intake (`rmd chat`) — post-WS-4."
     }
   ]
