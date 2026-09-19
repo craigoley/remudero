@@ -318,6 +318,7 @@ test("W1-T3762 criterion 2: routing telemetry names incomplete joins instead of 
 test("W1-T3762: routing fallbacks are counted and a populated telemetry snapshot is frozen before cache publication", async () => {
   const populated = deriveAnalyticsSnapshot(
     [
+      { step: "panel.manual_approved", task_id: "W1-T-cache", task_class: "chore", origin: "operator" },
       { step: "run.start", run_id: "R3", type: "implement" },
       {
         step: "worker.assignment",
@@ -360,6 +361,10 @@ test("W1-T3762: routing fallbacks are counted and a populated telemetry snapshot
   assert.ok(Object.isFrozen(bucket.fallbackReasons[0]), "fallback rows are immutable after publication");
   assert.ok(Object.isFrozen(bucket.fallbackReasons), "fallback list is immutable after publication");
   assert.ok(Object.isFrozen(bucket), "routing bucket is immutable after publication");
+  const decisionClass = published.consoleV1.operatorAgent.decisions.classes[0]!;
+  assert.ok(Object.isFrozen(decisionClass.taskIds), "operator decision task ids are immutable after publication");
+  assert.ok(Object.isFrozen(decisionClass.actorIds), "operator decision actor ids are immutable after publication");
+  assert.ok(Object.isFrozen(decisionClass), "operator decision classes are immutable after publication");
 });
 
 test("deriveAnalyticsSnapshot: question 3 — run.start-to-verdict join per run_id, no-terminal counted explicitly, never dropped", () => {
