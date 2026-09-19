@@ -1,0 +1,8 @@
+id: healthy-control
+description: no deterministic finding is the normal autonomous path
+finding: null
+expected:
+  outcome: LAND
+  judgmentSpawned: false
+  fallback: false
+  sideEffect: none

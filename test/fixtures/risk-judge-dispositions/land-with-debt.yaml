@@ -1,0 +1,17 @@
+id: recoverable-land-with-debt
+description: a safe incompleteness can land while the bounded follow-up is filed
+finding:
+  gate: documentation
+  finding: supporting documentation is incomplete but the change is reversible
+  recoverability: recoverable
+  currentConsequence: REPAIR
+judge:
+  verdict: low
+  confidence: 0.91
+  reasons: ["the omission is safe to defer"]
+  gateConsequence: LAND+DEBT
+expected:
+  outcome: LAND+DEBT
+  judgmentSpawned: true
+  fallback: false
+  sideEffect: fileDebt
