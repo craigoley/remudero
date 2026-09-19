@@ -50,13 +50,6 @@ export interface RepoDashboardResult {
   repos: RepoDashboardEntry[];
 }
 
-export interface RepoDashboardRouteDeps {
-  /** Repository root containing `.remudero/managed-repos.json`. */
-  root: string;
-  /** Injectable clock for a stable generated_at in route tests. */
-  now?: () => number;
-}
-
 function toDashboardEntry(owner: string, repo: string): RepoDashboardEntry {
   const id = `${owner}/${repo}`;
   return {
@@ -88,7 +81,12 @@ function toDashboardEntry(owner: string, repo: string): RepoDashboardEntry {
 }
 
 /** GET /v1/repos — the validated, read-only managed-repo portfolio. */
-export function buildRepoDashboardRoute(deps: RepoDashboardRouteDeps): Route {
+export function buildRepoDashboardRoute(deps: {
+  /** Repository root containing `.remudero/managed-repos.json`. */
+  root: string;
+  /** Injectable clock for a stable generated_at in route tests. */
+  now?: () => number;
+}): Route {
   return {
     method: "GET",
     path: "/v1/repos",
