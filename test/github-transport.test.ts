@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   DEFAULT_GH_CALL_TIMEOUT_MS,
+  ghExecFile,
   ghJson,
   ghJsonAsync,
   ghOptionsWithDefaultTimeout,
@@ -337,6 +338,26 @@ test("ghOptionsWithDefaultTimeout preserves caller options and adds the transpor
   assert.equal(opts.timeout, DEFAULT_GH_CALL_TIMEOUT_MS);
   assert.equal(opts.encoding, "utf8");
   assert.equal(opts.maxBuffer, 12);
+});
+
+test("W1-T3782: default gh transport captures output past Node's 1 MiB ceiling", () => {
+  const bytesPastNodeDefault = (1 << 20) + 1024;
+  const output = ghExecFile(process.execPath, ["-e", `process.stdout.write("x".repeat(${bytesPastNodeDefault}))`], {
+    encoding: "utf8",
+  });
+
+  assert.equal(output.length, bytesPastNodeDefault);
+});
+
+test("W1-T3782: an explicit gh transport buffer remains authoritative", () => {
+  assert.throws(
+    () =>
+      ghExecFile(process.execPath, ["-e", 'process.stdout.write("x".repeat(2048))'], {
+        encoding: "utf8",
+        maxBuffer: 1024,
+      }),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOBUFS",
+  );
 });
 
 test("ghOptionsWithDefaultTimeout preserves an explicit tighter caller timeout", () => {
