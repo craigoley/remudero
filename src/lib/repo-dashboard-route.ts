@@ -1,14 +1,15 @@
 /**
  * The read-only managed-repository portfolio surface for the console dashboard.
  *
- * This route deliberately reports only what the daemon can observe today: the validated
- * validated managed-repository manifest set. A repository being listed there is not proof that GitHub
+ * This route deliberately reports only what the daemon can observe today: the managed-repos state
+ * file set. A repository being listed there is not proof that GitHub
  * OAuth completed, that a worker is active, or that health/telemetry/settings have a value. Those
  * fields stay explicit `null`/`unknown` until their durable sources and refresh semantics exist.
  */
 
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
+import { systemClock, type Clock } from "./clock.js";
 import { loadManagedRepos } from "./managed-repos.js";
 
 export interface RepoDashboardHealth {
@@ -82,11 +83,12 @@ function toDashboardEntry(owner: string, repo: string): RepoDashboardEntry {
 
 /** GET /v1/repos — the validated, read-only managed-repo portfolio. */
 export function buildRepoDashboardRoute(deps: {
-  /** Repository root containing the managed-repository manifest. */
+  /** Repository root containing the managed-repos state file. */
   root: string;
   /** Injectable clock for a stable generated_at in route tests. */
-  now?: () => number;
+  clock?: Clock;
 }): Route {
+  const clock = deps.clock ?? systemClock;
   return {
     method: "GET",
     path: "/v1/repos",
@@ -94,7 +96,7 @@ export function buildRepoDashboardRoute(deps: {
     handler: (_req, res) => {
       const repos = loadManagedRepos(deps.root).map(({ owner, repo }) => toDashboardEntry(owner, repo));
       const body: RepoDashboardResult = {
-        generated_at: new Date((deps.now ?? Date.now)()).toISOString(),
+        generated_at: clock.iso(),
         source: "managed-repos",
         repos,
       };

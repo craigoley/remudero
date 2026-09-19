@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createService } from "../src/lib/service.js";
 import { buildRepoDashboardRoute } from "../src/lib/repo-dashboard-route.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 const READ_TOKEN = "repo-dashboard-read-token";
 
@@ -18,7 +19,7 @@ function fixtureRoot(): string {
 async function withRoute<T>(root: string, run: (baseUrl: string) => Promise<T>): Promise<T> {
   const server = createService({
     tokens: { read: READ_TOKEN, write: "unused-write-token" },
-    routes: [buildRepoDashboardRoute({ root, now: () => Date.parse("2026-09-19T00:00:00.000Z") })],
+    routes: [buildRepoDashboardRoute({ root, clock: fixedClock(Date.parse("2026-09-19T00:00:00.000Z")) })],
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
