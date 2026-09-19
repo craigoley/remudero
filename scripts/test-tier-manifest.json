@@ -993,6 +993,7 @@
     "test/open-pr-liveness-decoration.test.ts": 1193,
     "test/open-prs-rest.test.ts": 2042,
     "test/openpr-taskid-resolver.test.ts": 1195,
+    "test/operator-agent.test.ts": 1500,
     "test/operator-gated-default-reachability.test.ts": 4097,
     "test/operator-macros-are-generated.test.ts": 1078,
     "test/operator-merge-hold-command.test.ts": 1583,
