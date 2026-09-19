@@ -7,14 +7,7 @@
  * A missing or unusable join is not a healthy zero.
  */
 
-import type {
-  AttributionPolicy,
-  ClassOutcome,
-  UnmeasurableCause,
-  UnmeasurableRow,
-  VerdictCalibrationReport,
-  VerdictClass,
-} from "./verdict-calibration.js";
+import type { AttributionPolicy, ClassOutcome, UnmeasurableCause, UnmeasurableRow, VerdictCalibrationReport, VerdictClass } from "./verdict-calibration.js";
 
 export const OPERATOR_AGENT_TASK_OUTCOME_SIGNAL = "task-outcomes" as const;
 
