@@ -1,0 +1,92 @@
+- id: W1-T3814
+  title: "PLAN-ONLY VALIDATION LETS NEW TASK SHARDS AUTO-MERGE WITH SUBSTANTIVE LINT WARNINGS — shared-proof, unreachable-new-module/call-site, and proof-scope diagnostics are useful authoring signals but inherited warnings must not strand an unrelated filing, so fail only when one of those diagnostics is introduced or remains on a newly added or changed task shard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/plan-only-new-task-diagnostics.test.ts]
+  origin: "feedback#fb-1789845848265-8919ba"
+  plan_refs: ["W1-T2967", "W1-T2835", "W1-T3218", "W1-T310", "W1-T3719"]
+  status: queued
+  attempts: 0
+  rationale: |
+    INCIDENT. PR #6127 was plan-only and auto-merged while `rmd lint-plan --base origin/main`
+    warned that every criterion shared a whole-file proof, three new modules had no production
+    call-site proof, and one task declared fields the live console could not read. The current
+    policy has three separate histories: W1-T2967 made shared-proof advisory because legitimate
+    shared falsifiers exist; the call-site rung is wired but defaults to `warn` and MASTER-PLAN
+    records the severity flip as an operator decision; proof-scope is an advisory authoring
+    diagnostic in the linter even though the changed-tasks review path can block some cases.
+    None of those decisions answers whether a NEW or CHANGED task shard in a plan-only PR may
+    pass validation with substantive diagnostics, and none distinguishes a warning inherited from
+    main from one planted by the filing.
+
+    THIS IS NOT A GLOBAL SEVERITY FLIP. Existing queued shards deliberately carry measured
+    warnings, and making every warning fatal would turn an attribution defect into a backlog-wide
+    migration. The bounded owner is the plan-only validation path: compare the diagnostics for
+    the shard's base and head, fail only for the named substantive classes on a shard added or
+    changed by this diff, and retain inherited findings as visible nonblocking warnings. The
+    guard must also preserve the existing proof-shape/resolvability and review-time semantics.
+
+    THE CONSOLE DETAIL IS PART OF THE SAME FAILURE CLASS. A task can carry a plausible field or
+    module claim while no live console reader reaches it; the guard must use the existing
+    call-site/reachability diagnostic rather than inventing a second console census.
+  design: |
+    (i) Add a bounded plan-only result over the existing diagnostic records. Its input must
+    identify the changed task-shard paths and the base diagnostic set, so a diagnostic is
+    classified as introduced only when it is absent on the base or attached to a newly added
+    shard. Do not infer ownership from task status, ledger credit, or PR-body strings.
+
+    (ii) The blocking classes are exactly shared-proof, unreachable-new-module/call-site, and
+    proof-scope. Preserve their existing diagnostic names/messages and retain their current
+    defaults for whole-plan and implementation validation. A plan-only filing with no changed
+    task shard, or with only inherited instances, remains passing while reporting those warnings.
+
+    (iii) Keep the check in the real plan-only validation path used by CI, after the stored task
+    shard has been loaded and before the pass returns success. Do not make `lintTask` globally
+    fatal, do not change review's proof grading, and do not make a plan-only PR that also changes
+    src/ or test/ use this exemption; mixed/source diffs remain on the existing gate.
+
+    (iv) Tests must be discriminating and fixture-driven: a newly added bad shard with each named
+    diagnostic fails the plan-only validation, an unchanged historical shard carrying the same
+    warning does not, and a clean new shard passes. Assert inherited findings remain visible as
+    warnings so the guard cannot be satisfied by silently filtering them. Include the console
+    no-reader/call-site case specifically, since a generic warning count would not prove the
+    incident's live-reader failure.
+
+    (v) Keep the base/head comparison deterministic and injected at the existing seam. No GitHub
+    API, network lookup, or shelling git from the linter; the caller already owns the plan-only
+    diff/base facts. If the current caller cannot provide a complete base diagnostic set, add the
+    narrowest pure adapter there and document why an absent base fact fails closed for a changed
+    shard rather than treating it as inherited.
+  acceptance:
+    - claim: "a plan-only validation fails for a newly added task shard with a shared whole-file proof diagnostic"
+      proof: "unit test: test/plan-only-new-task-diagnostics.test.ts"
+    - claim: "a plan-only validation fails for a newly added task shard with an unreachable-new-module or missing call-site diagnostic"
+      proof: "unit test: test/plan-only-new-task-diagnostics.test.ts"
+    - claim: "a plan-only validation fails for a newly added task shard with a proof-scope diagnostic"
+      proof: "unit test: test/plan-only-new-task-diagnostics.test.ts"
+    - claim: "an unchanged historical shard carrying the same substantive warning remains nonblocking and the warning is still reported"
+      proof: "unit test: test/plan-only-new-task-diagnostics.test.ts"
+    - claim: "a clean new shard passes and a mixed source diff does not take the plan-only exemption"
+      proof: "unit test: test/plan-only-new-task-diagnostics.test.ts"
+    - claim: "the guard is wired into the CI plan-only validation path rather than only exposed as an unused helper"
+      proof: "grep: plan-only in src/run-task.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if the current plan-only CI gate already compares base and head
+    diagnostics and refuses exactly these three introduced classes while preserving inherited
+    warnings; prove it by driving the real validation entry point with the two fixtures, not by
+    reading a helper.
+
+    Deleting the introduced-diagnostic predicate must make the new bad-shard fixture pass again,
+    while removing inherited-warning reporting must make the unchanged historical fixture lose its
+    warning. A guard that blocks every warning, filters inherited warnings, changes global linter
+    severity defaults, or applies to mixed/source diffs is the wrong fix.
+  note: |
+    This task is deliberately one shard. It owns the policy seam and its discriminating tests;
+    it does not rewrite existing task records or touch the feedback entry. The three reserved ids
+    after this one are unnecessary.
