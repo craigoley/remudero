@@ -1,0 +1,31 @@
+- id: W1-T3776
+  title: "API-T3776 — Wire: telemetry endpoints for repo health"
+  repo: remudero
+  depends_on: [W1-T3772]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["§7A"]
+  files: [apps/dashboard/src/api/repoTelemetry.ts, apps/dashboard/src/hooks/useRepoTelemetry.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Repo health and spend cannot be claimed from the current task-only daemon status route. This
+    task names the future contract and the consumer seam so the server and generated api-client can
+    land without dashboard consumers inventing direct fetches or silently treating unavailable data
+    as zero.
+  design: |
+    Add typed endpoint names and a client interface first. Until the daemon schema exposes the routes,
+    the placeholder client returns unavailable with null metrics. A later server/API-client change
+    can implement the interface without changing cards, detail panels, or analytics rendering.
+  acceptance:
+    - claim: "unavailable telemetry is represented explicitly rather than as zero spend or zero tokens"
+      proof: "grep: unavailable in apps/dashboard/src/api/repoTelemetry.ts"
+    - claim: "the telemetry contract names repo telemetry, settings, logs, dry-run, and OAuth endpoints"
+      proof: "grep: REPO_API_ENDPOINTS in apps/dashboard/src/api/repoTelemetry.ts"
+  note: |
+    Brief-facing alias: API-T3776. The repository's executable task namespace is W1-T3776.

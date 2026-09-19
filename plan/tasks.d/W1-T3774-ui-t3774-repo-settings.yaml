@@ -1,0 +1,29 @@
+- id: W1-T3774
+  title: "UI-T3774 — Implement: repo settings modal"
+  repo: remudero
+  depends_on: [W1-T3772, W1-T3773]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7A"]
+  files: [apps/dashboard/src/pages/RepoSettingsPage.tsx]
+  status: queued
+  attempts: 0
+  rationale: |
+    Proof policy, worker pool size, and alert threshold are per-repo controls. They must be edited
+    from a repo-specific route and must state whether a value is local draft or persisted, because
+    a settings form is not evidence that the daemon accepted a write.
+  design: |
+    Use a typed settings hook over the store today and keep the persistence route named as a
+    placeholder. The form validates numeric bounds in the browser and reports local-only saves
+    explicitly until a generated write method exists in the api-client.
+  acceptance:
+    - claim: "repo settings expose proof policy, worker pool size, and alert threshold fields"
+      proof: "grep: alertthreshold in apps/dashboard/src/pages/RepoSettingsPage.tsx"
+    - claim: "a local settings save states that server persistence is not wired"
+      proof: "grep: Saved locally in apps/dashboard/src/pages/RepoSettingsPage.tsx"
+  note: |
+    Brief-facing alias: UI-T3774. The repository's executable task namespace is W1-T3774.

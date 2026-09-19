@@ -668,6 +668,12 @@
       "grepHint": "Recon: per-tool approval (W1-T3668)"
     },
     {
+      "path": "docs/repo-dashboard-research.md",
+      "title": "Repo dashboard research",
+      "summary": "Checked 2026-09-19 against public product documentation. This is a design input for the",
+      "grepHint": "Repo dashboard research"
+    },
+    {
       "path": "docs/research/README.md",
       "title": "Recovered research artefacts",
       "summary": "Four agent-written reports, recovered and committed verbatim. They are dated artefacts: each records",
