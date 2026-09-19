@@ -1,0 +1,32 @@
+- id: W1-T3775
+  title: "UI-T3775 — Implement: onboarding wizard"
+  repo: remudero
+  depends_on: [W1-T3772, W1-T3774, W1-T3175, W1-T3176]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7A"]
+  files: [apps/dashboard/src/pages/OnboardingPage.tsx]
+  status: blocked
+  retirement: retired
+  attempts: 0
+  rationale: |
+    First-run setup must make the activation boundary visible: OAuth, repository selection, task
+    types, proof policy, dry-run, and confirmation. A single wizard keeps incomplete configuration
+    from looking live and gives the operator one place to review the choices before activation.
+  design: |
+    Keep six explicit steps with validation at each transition. OAuth, GitHub discovery, and dry-run
+    are clearly marked placeholders. Confirmation creates a local active record only; it does not
+    claim that GitHub authorization or daemon persistence succeeded.
+  acceptance:
+    - claim: "the wizard validates prerequisites and creates an active local repo only after the dry-run step"
+      proof: "grep: Confirm and go live in apps/dashboard/src/pages/OnboardingPage.tsx"
+    - claim: "the wizard declares all six onboarding steps"
+      proof: "grep: const STEPS = in apps/dashboard/src/pages/OnboardingPage.tsx"
+  note: |
+    Brief-facing alias: UI-T3775. The repository's executable task namespace is W1-T3775.
+    reservation hand-off: feat/repo-dashboard-2026-09-19 -> plan/repo-dashboard-2026-09-19
+    Blocked until the daemon can serve and deploy the dashboard build (W1-T3175/W1-T3176).
