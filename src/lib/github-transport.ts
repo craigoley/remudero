@@ -125,13 +125,31 @@ const execFileAsync = promisify(execFile) as (
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
+/** A successful `gh` process whose JSON response cannot be read is a transport failure, not a
+ * worker/parser failure. The operation is deliberately reduced to the command family so an error
+ * can be logged without carrying request arguments, headers, tokens, or response contents. */
+export class GhJsonUnreadableResponseError extends Error {
+  readonly reasonClass = "gh_json_unreadable_response" as const;
+  readonly operation: "api" | "command";
+
+  constructor(operation: "api" | "command", cause: unknown) {
+    super(`gh ${operation} response body was unreadable`, { cause });
+    this.name = "GhJsonUnreadableResponseError";
+    this.operation = operation;
+  }
+}
+
 export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsync = execFileAsync): Promise<unknown> {
   const { stdout } = await execAsync("gh", args, {
     encoding: "utf8",
     maxBuffer: DEFAULT_GH_MAX_BUFFER,
     timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
   });
-  return JSON.parse(stdout);
+  try {
+    return JSON.parse(stdout);
+  } catch (cause) {
+    throw new GhJsonUnreadableResponseError(args[0] === "api" ? "api" : "command", cause);
+  }
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
