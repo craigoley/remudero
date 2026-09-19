@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GhJsonUnreadableResponseError, ghJsonAsync } from "../src/lib/github-transport.js";
+import { GhJsonUnreadableResponseError, ghJson, ghJsonAsync } from "../src/lib/github-transport.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
 import type { MergedSet } from "../src/lib/drain.js";
@@ -25,6 +25,16 @@ async function captureUnreadable(body: string): Promise<GhJsonUnreadableResponse
   const result = await ghJsonAsync(["api", "repos/o/r", "-f", "token=fixture-secret"], async () => ({ stdout: body, stderr: "" })).catch((error: unknown) => error);
   assert.ok(result instanceof GhJsonUnreadableResponseError);
   return result;
+}
+
+function captureUnreadableSync(body: string): GhJsonUnreadableResponseError {
+  try {
+    ghJson(["api", "repos/o/r", "-f", "token=fixture-secret"], undefined, () => body);
+  } catch (error) {
+    assert.ok(error instanceof GhJsonUnreadableResponseError);
+    return error;
+  }
+  assert.fail("expected ghJson to reject an unreadable response");
 }
 
 async function runRejected(error: unknown): Promise<Awaited<ReturnType<typeof runDaemon>>> {
@@ -53,8 +63,17 @@ test("ghJsonAsync names a successful but unreadable JSON body", async () => {
   }
 });
 
+test("ghJson names a successful but unreadable JSON body", () => {
+  for (const body of ["", "{malformed"]) {
+    const error = captureUnreadableSync(body);
+    assert.equal(error.reasonClass, "gh_json_unreadable_response");
+    assert.equal(error.operation, "api");
+    assert.match(error.message, /gh api response body was unreadable/);
+  }
+});
+
 test("runDaemon defers a typed unreadable gh response", async () => {
-  const error = await captureUnreadable("");
+  const error = captureUnreadableSync("");
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const summary = await runDaemon(
     onePlan(),
@@ -85,7 +104,7 @@ test("unreadable gh response deferral excludes 404 and arbitrary SyntaxError", a
 });
 
 test("unreadable gh response ledger evidence is bounded and secret-free", async () => {
-  const error = await captureUnreadable("");
+  const error = captureUnreadableSync("");
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const summary = await runDaemon(
     onePlan(),
