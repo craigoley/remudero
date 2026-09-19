@@ -1,0 +1,38 @@
+- id: W1-T3803
+  title: "WIRE LIVE QUEUE AND PROVIDER ALLOWANCE INTO console-v1 — one request-time composition over process-owned snapshots, never a second probe"
+  repo: remudero
+  depends_on: [W1-T3802]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 55.00
+  origin: architect
+  plan_refs: ["W1-T3623", "W1-T3802"]
+  files: [src/lib/analytics-route.ts, src/lib/serve.ts, test/console-analytics-live-metrics.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3623 intentionally leaves queue.pending null because the ledger refresh cannot observe the
+    live queue. The serve process already owns bounded status and provider-routing snapshots, but
+    GET /v1/analytics receives only analyticsCache.current. Without an explicit composition seam,
+    adding live metrics either stays dead code or starts expensive/provider-sensitive work on the
+    request path.
+  design: |
+    Extend the console-v1 catalog with provider.allowance.remaining and compose W1-T3802's two live
+    readings with the cached historical projection at the route boundary. Read only process-owned
+    snapshots: an analytics request must not refresh the board, probe a provider, read credentials,
+    or mutate routing. Carry each live reading's state and as-of independently so a fresh historical
+    snapshot cannot make a stale live value look fresh. Preserve the no-version-opinion behavior and
+    the explicit unsupported-version refusal from W1-T3623.
+  acceptance:
+    - claim: "GET /v1/analytics emits queue.pending and provider.allowance.remaining from the process-owned live snapshots"
+      proof: "unit test: test/console-analytics-live-metrics.test.ts"
+    - claim: "a request invokes no status refresh, provider probe, credential read, or routing write"
+      proof: "unit test: test/console-analytics-live-metrics.test.ts"
+    - claim: "each live metric retains its own stale, unavailable, unauthorized, or not-collected state and as-of"
+      proof: "unit test: test/console-analytics-live-metrics.test.ts"
+    - claim: "projection-version mismatch still refuses instead of returning a partial payload"
+      proof: "unit test: test/console-analytics-live-metrics.test.ts"
+
