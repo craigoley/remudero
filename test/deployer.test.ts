@@ -540,6 +540,65 @@ test("marker helpers: requestDeploy writes DEPLOY_REQUESTED; the path helpers re
   });
 });
 
+test("the deploy cycle writes its ledger rows under the state root it was given", () => {
+  withTemp((root) => {
+    const legacyLedger = join(root, "legacy-ledger.ndjson");
+    const deps = realDeployDeps({
+      installPath: "/inst",
+      stateRoot: root,
+      daemonLabel: "d",
+      serveLabel: "s",
+      servePort: 4317,
+      uid: 1,
+      ledgerPath: legacyLedger,
+      execFile: () => "",
+      sleep: () => {},
+    });
+    deps.log("deploy.skip", { reason: "state-root-test" });
+    const ownLedger = join(root, "state", "ledger.ndjson");
+    assert.ok(existsSync(ownLedger), "the supervisor writes under its state root");
+    assert.match(readFileSync(ownLedger, "utf8"), /state-root-test/);
+    assert.equal(existsSync(legacyLedger), false, "the caller's legacy ledger path is not used");
+  });
+});
+
+test("an unresolvable state root refuses instead of falling back", () => {
+  assert.throws(
+    () => realDeployDeps({
+      installPath: "/inst",
+      stateRoot: "relative-state-root",
+      daemonLabel: "d",
+      serveLabel: "s",
+      servePort: 4317,
+      uid: 1,
+      ledgerPath: "/tmp/legacy-ledger.ndjson",
+      execFile: () => "",
+      sleep: () => {},
+    }),
+    /state root refused/,
+  );
+});
+
+test("the default state root still records where it always did", () => {
+  withTemp((root) => {
+    const deps = realDeployDeps({
+      installPath: "/inst",
+      stateRoot: root,
+      daemonLabel: "d",
+      serveLabel: "s",
+      servePort: 4317,
+      uid: 1,
+      ledgerPath: join(root, "ignored-default.ndjson"),
+      execFile: () => "",
+      sleep: () => {},
+    });
+    deps.log("deploy.skip", { reason: "default-root-test" });
+    const ledger = join(root, "state", "ledger.ndjson");
+    assert.match(readFileSync(ledger, "utf8"), /default-root-test/);
+    assert.equal(readFileSync(ledger, "utf8").trim().split("\n").length, 1);
+  });
+});
+
 test("realDeployDeps: git/pgrep/launchctl route through the injected exec with the right argv", () => {
   withTemp((root) => {
     const calls: string[][] = [];
