@@ -26313,9 +26313,7 @@ interface LifetimeReplayWindow {
   seen: Set<string>;
 }
 
-/** Mirror the ledger union's producer-sized exact replay window. A retained live line can only
- * repeat an archive line while it remains in this window, so this stays bounded per step rather
- * than retaining every line or every run. */
+/** Keep the bounded replay window in step order. */
 function replayedLifetimeLedgerLine(
   recentByStep: Map<string, LifetimeReplayWindow>,
   step: string,
