@@ -109,7 +109,14 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
   const discovered = new Set<string>();
   for (const rel of consumerFiles) {
     const src = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
-    for (const m of src.matchAll(equalityRead)) discovered.add(m[1]);
+    for (const m of src.matchAll(equalityRead)) {
+      // `typeof row.step === "string"` validates a row shape; it does not consult a ledger
+      // step to make a decision. The source census must not turn that type guard into a literal
+      // step named `string` when a consumer happens to use the same property name.
+      const prefix = src.slice(Math.max(0, m.index ?? 0) - 32, m.index ?? 0);
+      if (/typeof\s+[A-Za-z_$][\w$]*\s*$/.test(prefix)) continue;
+      discovered.add(m[1]);
+    }
     for (const sw of src.matchAll(switchOnStep)) {
       for (const m of sw[1].matchAll(caseLiteral)) discovered.add(m[1]);
     }

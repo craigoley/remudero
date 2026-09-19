@@ -340,6 +340,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
   // as if it had never failed — the exact "derived from consumers, not hardcoded" case this set exists for.
   "dispatch.blocked_independent",
+  // W1-T3758: lifetime dispatch eligibility subtracts these capacity refusals from the
+  // historical start count. Rotating one away would make an infrastructure outage spend task
+  // lifetime budget after the next daemon boot.
+  "daemon.spawn_infra_blocked",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",
