@@ -128,14 +128,16 @@ const execFileAsync = promisify(execFile) as (
 /** A successful `gh` process whose JSON response cannot be read is a transport failure, not a
  * worker/parser failure. The operation is deliberately reduced to the command family so an error
  * can be logged without carrying request arguments, headers, tokens, or response contents. */
-export class GhJsonUnreadableResponseError extends Error {
+export class GhJsonUnreadableResponseError extends RmdError {
   readonly reasonClass = "gh_json_unreadable_response" as const;
   readonly operation: "api" | "command";
+  readonly cause: unknown;
 
   constructor(operation: "api" | "command", cause: unknown) {
-    super(`gh ${operation} response body was unreadable`, { cause });
+    super("github", 1, `gh ${operation} response body was unreadable`, { operation });
     this.name = "GhJsonUnreadableResponseError";
     this.operation = operation;
+    this.cause = cause;
   }
 }
 
