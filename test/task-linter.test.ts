@@ -605,6 +605,16 @@ test("an empty proof is FLAGGED", () => {
   assert.equal(proofShapeViolations(t).length, 1);
 });
 
+test("a satisfied_by criterion is exempt from proof-shape — it is credited to a prior merge", () => {
+  const t = task({
+    id: "FIX-PROOF-SHAPE-SATISFIED-BY",
+    files: ["src/lib/task-linter.ts"],
+    acceptance: [{ claim: "already shipped elsewhere", proof: "", satisfied_by: "#363" }],
+  });
+  assert.deepEqual(proofShapeViolations(t), []);
+  assert.equal(lintTask(t).ok, true);
+});
+
 test("an observable proof (a grep/test/transcript reference) is NOT flagged", () => {
   const t = task({
     id: "FIX-OBSERVABLE",

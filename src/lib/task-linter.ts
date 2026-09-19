@@ -527,6 +527,7 @@ function isVibeProof(proof: string): boolean {
 export function proofShapeViolations(task: Task): LintViolation[] {
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; prior-merge credit stands in place of a proof.
     if (isVibeProof(c.proof ?? "")) {
       violations.push({
         check: "proof-shape",
