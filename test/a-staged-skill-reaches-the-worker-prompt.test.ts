@@ -530,8 +530,8 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated a
     }, {
       run_id: `T-SKILL-OBSERVATION-${fixedNow}`,
       task_type: "implement",
-      approved_eligible_names: ["proof-preflight"],
-      selected_names: ["proof-preflight"],
+      approved_eligible_names: ["ci-state-forensics", "proof-preflight"],
+      selected_names: ["ci-state-forensics", "proof-preflight"],
       budget_omitted_names: [],
       zero_selection: false,
     });

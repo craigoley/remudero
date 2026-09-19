@@ -17,9 +17,17 @@ interface Workflow {
 }
 
 const workflowPath = new URL("../.github/workflows/acr-build.yml", import.meta.url);
+const dockerignorePath = new URL("../.dockerignore", import.meta.url);
 
 function workflow(): Workflow {
   return parseYaml(readFileSync(workflowPath, "utf8")) as Workflow;
+}
+
+function dockerignoreEntries(): string[] {
+  return readFileSync(dockerignorePath, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#"));
 }
 
 function executableText(value: unknown): string {
@@ -29,10 +37,10 @@ function executableText(value: unknown): string {
   return "";
 }
 
-test("a push to main that changes either authoritative baked path starts the ACR build workflow", () => {
+test("a push to main that changes an authoritative baked or build-context path starts the ACR build workflow", () => {
   const push = workflow().on?.push;
   assert.deepEqual(push?.branches, ["main"]);
-  assert.deepEqual(push?.paths, ["deploy/Dockerfile", "deploy/entrypoint.sh"]);
+  assert.deepEqual(push?.paths, ["deploy/Dockerfile", "deploy/entrypoint.sh", ".dockerignore"]);
 });
 
 test("a push to main that changes only mounted source paths does not start the ACR build workflow", () => {
@@ -68,4 +76,11 @@ test("the workflow builds only and contains no container replacement or recycle 
   const text = executableText(workflow().jobs);
   assert.doesNotMatch(text, /\b(?:docker\s+(?:run|stop|rm)|recycle-container|host-update|az\s+containerapp|ssh)\b/i);
   assert.match(text, /\baz acr build\b/);
+});
+
+test("the ACR build excludes the live instance registry but keeps public Remudero policy files", () => {
+  const entries = dockerignoreEntries();
+  assert.equal(entries.includes(".remudero/daemon-instances.yaml"), true);
+  assert.equal(entries.includes(".remudero/"), false, "the whole public .remudero policy tree must remain available");
+  assert.equal(entries.includes(".remudero/mounts.yaml"), false, "the public capability table must remain in the image");
 });

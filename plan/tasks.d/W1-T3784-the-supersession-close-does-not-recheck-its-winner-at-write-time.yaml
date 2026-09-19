@@ -1,0 +1,88 @@
+- id: W1-T3784
+  title: "THE SUPERSESSION CLOSE DOES NOT RECHECK ITS WINNER AT WRITE TIME — #6071 was closed as a duplicate of #6070, then the stale sweep snapshot closed #6070 as superseded by the already-closed #6071, leaving both implementations closed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  origin: operator-session#daemon-health-2026-09-19
+  plan_refs: [W1-T3731, W1-T921, W1-T177]
+  files:
+    - src/lib/sweep.ts
+    - test/a-supersession-close-rechecks-the-winner.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE LIVE QUEUE, 2026-09-19. Two independent workers opened the
+    same W1-T3502 implementation: #6070 and #6071. At 13:55:24Z, #6071's author
+    closed #6071 with the explicit comment "Duplicate of #6070 for W1-T3502;
+    keeping the earlier implementation PR and its CI history." At 13:57:03Z,
+    remudero-fleet[bot] closed #6070 with "superseded-by #6071 — every one of
+    its 2 changed path(s) is also changed there." Both heads and both changed
+    paths were real duplicates; the winner was no longer open when the second
+    destructive write ran. The head branch survived, so #6070 was reopened by
+    the operator lane, but no automatic reconciler detected the double closure.
+
+    THE POSITIVE-EVIDENCE FIX IS PRESENT AND INSUFFICIENT FOR THIS RACE.
+    W1-T3731 narrowed `DISPOSITION_RULES` in src/lib/sweep.ts to
+    `pr.supersededBy != null && pr.supersessionVerdict?.status === "superseded"`.
+    That is the correct read-time rule: `fetchSupersessionVerdict` has seen each
+    changed path in the older PR in the newer PR. But `runSweep` later handles
+    `case "stale"` by calling `deps.close(pr, reason)`, and
+    `buildSweepEffects(...).close` invokes `gh pr close` immediately. Neither
+    call re-reads whether `pr.supersededBy` is still an OPEN PR. A truthful
+    snapshot can therefore become false between classification and write.
+
+    CLOSING IS THE HIGHEST-RISK SWEEP WRITE. authority.ts identifies
+    `sweep-close-superseded-pr` as closing an unmerged PR. W1-T921 made the
+    branch-preserving close reversible, which allowed recovery here, but
+    reversibility is not a reason to make a stale destructive write. The same
+    admission pattern already exists for worker-spending dispositions: W1-T177
+    reads fresh state immediately before acting and stands down only on a
+    positive terminal result.
+  design: |
+    Add a narrow, read-only writer-side confirmation for ONLY a stale disposition
+    whose reason is positive supersession evidence. Immediately before invoking
+    `close`, read the identified superseding pull request through the existing
+    GitHub transport. Close only when that read positively says `state: open`.
+    A closed, merged, missing, malformed, or unreadable successor is a named
+    stand-down: emit one bounded `sweep.supersession_close.stood_down` ledger row
+    with the losing and supposed-winning numbers and perform no close. This is a
+    new read, not a cache reuse; the whole defect is that the pass snapshot aged.
+
+    Keep other stale closures unchanged. A task already proven merged, explicit
+    retirement, and plan resequencing have different evidence and must not be
+    held behind this successor-state check. Keep W1-T3731's genuine-duplicate
+    behavior: a still-open successor with a positive supersession verdict must
+    close the loser normally. Do not infer that a failed refresh means open, and
+    do not delete branches or alter supersession verdict production in this PR.
+  acceptance:
+    - claim: "a supersession winner closed after the pass snapshot produces a named stand-down and never invokes the PR-close writer"
+      proof: "grep: sweep\\.supersession_close\\.stood_down in src/lib/sweep.ts"
+    - claim: "a fresh positive read that the supersession winner remains open preserves the genuine-duplicate close"
+      proof: "grep: W1-T3784 winner remains open closes duplicate in test/a-supersession-close-rechecks-the-winner.test.ts"
+    - claim: "an unreadable or malformed writer-side successor read fails closed rather than closing the older PR"
+      proof: "grep: W1-T3784 unreadable successor stands down in test/a-supersession-close-rechecks-the-winner.test.ts"
+    - claim: "a non-supersession stale disposition retains its existing close path and makes no successor-state read"
+      proof: "grep: W1-T3784 non-supersession stale does not read winner in test/a-supersession-close-rechecks-the-winner.test.ts"
+  falsifier: |
+    Delete the writer-side successor-state check. Criterion 1 must then invoke
+    the close writer for the production-shaped #6070/#6071 ordering; restoring
+    the check must remove that invocation and produce the named stand-down.
+    Change the fresh state from `open` to `closed` in criterion 2: a close must
+    no longer occur. Make the reader throw in criterion 3: a close must still
+    not occur. If any of these variants closes the loser, the check is decorative.
+  note: |
+    This task owns the write-time state race only. A successor whose head changes
+    while remaining open is a distinct evidence-freshness question; do not widen
+    this repair into a new supersession detector or silently reclassify task
+    ownership. The filed record is separate from W1-T3731 because that task's
+    positive path-based disposition is correct at its own decision time.
+
+    The new regression suite is explicitly in `files:` so the implementation can
+    make its decision semantics executable without widening scope. This filing is
+    plan-only, so its future-discriminating proof strings are intentionally absent
+    until the implementation PR adds both the writer-side guard and that suite.
