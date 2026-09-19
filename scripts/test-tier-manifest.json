@@ -1524,6 +1524,7 @@
     "test/three-retries-in-three-seconds-against-a-lockout.test.ts": 311,
     "test/tier-invariant-evidence.test.ts": 753,
     "test/tier.test.ts": 232,
+    "test/title-edit-commitlint-workflow.test.ts": 0,
     "test/tmp.test.ts": 1098,
     "test/token-authenticated-worker.test.ts": 1310,
     "test/token-refresh-reason-provenance.test.ts": 931,
