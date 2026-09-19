@@ -1,0 +1,55 @@
+- id: W1-T3779
+  title: "NON-SELF DAEMONS LOOK FOR COMMIT-TRAILER CREDIT IN THE ENGINE CHECKOUT INSTEAD OF THE TARGET CHECKOUT — merged work with a valid target-repo trailer stays dispatchable and a sizing refusal repeats forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 36.00
+  origin: "operator-session#all-daemons-healthy-2026-09-19"
+  plan_refs: ["W1-T2387", "W1-T119", "W1-T1062"]
+  files:
+    - src/run-task.ts
+    - test/nonself-commit-trailer-credit.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED while diagnosing the console daemon's CONSOLE-T12 loop on 2026-09-19. Console PR #40
+    is merged and its merge commit carries the exact `Remudero-Task: CONSOLE-T12` trailer, but its
+    body does not carry the trailer. The console target checkout's `git log origin/main` finds that
+    commit; the engine checkout at `/home/node/Remudero/remudero` finds zero matching commits.
+
+    `buildCommitTrailerIndex` correctly rejects a foreign checkout by comparing its origin URL with
+    the gateway slug. However, `daemonCommand` constructs `buildBatchedGithub(target.owner,
+    target.repo)` without a `commitTrailerIndex` option. Its lazy fallback therefore calls
+    `buildCommitTrailerIndex({ slug })` in the process working directory, the core engine checkout.
+    For a non-self target this is a proved foreign checkout and deliberately returns an empty map.
+    `status: merged` in the console plan is decorative, so CONSOLE-T12 remained eligible and its
+    deterministic sizing rejection was escalated thousands of times without a worker spawn.
+  design: |
+    At the daemon composition root, give the target projection gateway a commit-trailer reader rooted
+    in the target checkout that supplied `target.planPath`: the engine checkout for a self target and
+    `<config.root>/repos/<target.repo>` for a synchronized non-self target. The existing origin-slug
+    check remains authoritative; a mismatched or unreadable target checkout must keep its existing
+    empty-or-unreadable outcome and never borrow commit credit from the engine repository.
+
+    Thread the same target-rooted reader to target-repo lane gateways only. A task whose `repo:` is
+    different from the daemon target must not inherit the target checkout's commit history. Preserve
+    body-trailer precedence, lazy one-time index construction, cache behavior, and every self-target
+    call site byte-for-byte. Do not use a plan `status:` field as a substitute for verified credit.
+  acceptance:
+    - claim: "a non-self target commit trailer credits a merged target PR even when the engine checkout has no matching trailer"
+      proof: "grep: W1-T3779 criterion 1 in test/nonself-commit-trailer-credit.test.ts"
+    - claim: "a different task repository cannot borrow target-checkout commit credit and a self target keeps its existing reader"
+      proof: "grep: W1-T3779 criterion 2 in test/nonself-commit-trailer-credit.test.ts"
+  falsifier: |
+    Reject this task if the target projection already supplies a `cwd` for its target checkout and
+    CONSOLE-T12 resolves as merged from its commit trailer. The measured source instead constructs
+    the gateway with no commit-index option and the two real `git log` controls disagree. Delete
+    the target checkout reader in the new fixture and require criterion 1 to fail; restore it and
+    require the same case to credit only the target-repo PR.
+  note: |
+    This implementation task deliberately omits its own shard from `files:`. The shard is filed in a
+    plan-only PR; declaring that record alongside the source/test scope would trip rule15-filing.
