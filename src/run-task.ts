@@ -26313,7 +26313,6 @@ interface LifetimeReplayWindow {
   seen: Set<string>;
 }
 
-/** Keep the bounded replay window in step order. */
 function replayedLifetimeLedgerLine(
   recentByStep: Map<string, LifetimeReplayWindow>,
   step: string,
