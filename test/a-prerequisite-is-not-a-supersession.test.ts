@@ -102,5 +102,5 @@ test("a genuine duplicate is still closed", () => {
   const d = deriveDisposition(openPr({ supersessionVerdict: SUPERSEDED }), DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(d.disposition, "stale");
   assert.match(d.reason, /superseded-by #5886/);
-  assert.match(d.reason, /12 changed path\(s\) is also changed there/, "the reason carries the evidence, not just the number");
+  assert.match(d.reason, /12 patch hunk\(s\) is contained there/, "the reason carries containment evidence, not just the number");
 });
