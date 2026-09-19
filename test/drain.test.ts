@@ -1101,6 +1101,30 @@ test("curated selection: an id already merged or in-flight (open PR) is skipped,
   assert.ok(skips.every((s) => s.id === "B" && s.prNumber === 77), "every skip logged names B's open PR #77 — never A or C");
 });
 
+test("curated selection: a pushed run branch is skipped without derailing the rest of the curated order", async () => {
+  const plan = chainAbcPlan();
+  const selection: CuratedSelection = { taskIds: ["A", "B"], depth: 2 };
+  const opts = applyCuratedSelection({}, selection);
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      readPushedRunBranches: () => lsRemoteRunBranches("A"),
+      log: (step, extra = {}) => lines.push({ step, extra }),
+      runOne: async (id) => {
+        ran.push(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.1, verdict: "merged" };
+      },
+    },
+    opts,
+  );
+  assert.deepEqual(ran, ["B"], "A's already-pushed branch is skipped and B remains dispatchable");
+  assert.ok(lines.some((l) => l.step === "dispatch.skipped" && l.extra.task === "A" && l.extra.reason === "run-branch-already-pushed"));
+  assert.equal(s.stopReason, "no_runnable");
+});
+
 test("P29(ii) curated selection: a circuit-broken id is skipped, never re-dispatched, without derailing the rest of the curated order", async () => {
   const plan = chainAbcPlan();
   const selection: CuratedSelection = { taskIds: ["A", "B", "C"], depth: 3 };
