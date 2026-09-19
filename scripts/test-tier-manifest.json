@@ -1002,6 +1002,7 @@
     "test/operator-agent-capacity.test.ts": 500,
     "test/operator-agent-decisions.test.ts": 1000,
     "test/operator-agent-outcomes.test.ts": 0,
+    "test/operator-agent-proof.test.ts": 500,
     "test/operator-gated-default-reachability.test.ts": 4097,
     "test/operator-macros-are-generated.test.ts": 1078,
     "test/operator-merge-hold-command.test.ts": 1583,

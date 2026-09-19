@@ -263,6 +263,7 @@
   "src/lib/operator-agent-capacity.ts": 250,
   "src/lib/operator-agent-decisions.ts": 250,
   "src/lib/operator-agent-outcomes.ts": 250,
+  "src/lib/operator-agent-proof.ts": 250,
   "src/lib/operator-agent.ts": 250,
   "src/lib/operator-merge-hold.ts": 14,
   "src/lib/operator-message.ts": 90,
