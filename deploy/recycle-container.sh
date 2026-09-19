@@ -1127,6 +1127,10 @@ WORKERS
 waited=0
 while :; do
   reclaim_dead_inflight_locks
+  if [ "${CONTAINER_EXISTS}" -eq 0 ]; then
+    echo "recycle-container: no existing container; aborting before bounded safety wait" >&2
+    exit 0
+  fi
   n=0
   if [ -d "${INFLIGHT_DIR}" ]; then
     n="$(find "${INFLIGHT_DIR}" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
