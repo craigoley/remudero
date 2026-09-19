@@ -1,0 +1,22 @@
+id: fb-1789845848265-8919ba
+ts: 2026-09-19T19:24:08.265Z
+raw: "Prevent plan-only PRs from auto-merging when newly added or changed task
+  shards have substantive plan-linter diagnostics. Incident: PR #6127
+  auto-merged the console analytics tasks although rmd lint-plan --base
+  origin/main warned that every criterion shared a whole-file proof and three
+  new modules had no production call-site proof; one task also placed fields
+  where the live console cannot read them. Research current CI and task-linter
+  severity policy. Implement a bounded guard that fails plan-only PR validation
+  for new/changed tasks on shared-proof, unreachable-new-module/call-site, and
+  proof-scope diagnostics, while leaving inherited warnings outside the diff
+  nonblocking. Add discriminating tests for a new bad task that fails and an
+  unchanged historical warning that does not."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
