@@ -81,6 +81,7 @@ import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, typ
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import type { DispatchValueContext } from "./dispatch-value.js";
+import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
@@ -1085,6 +1086,7 @@ function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolc
  * transient. This prevents arbitrary worker prose such as "internal server error" from being
  * swallowed while retaining the stderr/code fields Node does not always copy into Error.message. */
 function transientGhDispatchFailure(err: unknown): { detail: string } | undefined {
+  if (err instanceof GhJsonUnreadableResponseError) return { detail: err.message };
   if (typeof err !== "object" || err === null) return undefined;
   const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
   const message = String(failure.message ?? "");

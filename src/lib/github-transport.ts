@@ -113,10 +113,10 @@ export function ghJson(
   const isApiCall = args[0] === "api";
   const execArgs = isApiCall ? [...args, "-i"] : args;
   const out = exec("gh", execArgs, { encoding: "utf8", maxBuffer: DEFAULT_GH_MAX_BUFFER, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
-  if (!isApiCall) return JSON.parse(out);
+  if (!isApiCall) return parseGhJsonBody(args, out);
   const { headers, body } = splitGhHeaderBlock(out);
   if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
-  return JSON.parse(body);
+  return parseGhJsonBody(args, body);
 }
 
 const execFileAsync = promisify(execFile) as (
@@ -125,13 +125,37 @@ const execFileAsync = promisify(execFile) as (
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
+/** A successful `gh` process whose JSON response cannot be read is a transport failure, not a
+ * worker/parser failure. The operation is deliberately reduced to the command family so an error
+ * can be logged without carrying request arguments, headers, tokens, or response contents. */
+export class GhJsonUnreadableResponseError extends RmdError {
+  readonly reasonClass = "gh_json_unreadable_response" as const;
+  readonly operation: "api" | "command";
+  readonly cause: unknown;
+
+  constructor(operation: "api" | "command", cause: unknown) {
+    super("github", 1, `gh ${operation} response body was unreadable`, { operation });
+    this.name = "GhJsonUnreadableResponseError";
+    this.operation = operation;
+    this.cause = cause;
+  }
+}
+
+function parseGhJsonBody(args: string[], body: string): unknown {
+  try {
+    return JSON.parse(body);
+  } catch (cause) {
+    throw new GhJsonUnreadableResponseError(args[0] === "api" ? "api" : "command", cause);
+  }
+}
+
 export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsync = execFileAsync): Promise<unknown> {
   const { stdout } = await execAsync("gh", args, {
     encoding: "utf8",
     maxBuffer: DEFAULT_GH_MAX_BUFFER,
     timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
   });
-  return JSON.parse(stdout);
+  return parseGhJsonBody(args, stdout);
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;

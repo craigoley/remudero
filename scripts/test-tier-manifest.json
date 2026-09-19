@@ -763,6 +763,7 @@
     "test/gateway-lives-across-ticks.test.ts": 4753,
     "test/generated-text-message-standard.test.ts": 1053,
     "test/gh-call-timeout.test.ts": 1547,
+    "test/gh-json-unreadable-dispatch.test.ts": 0,
     "test/gh-read-cadence-floor.test.ts": 0,
     "test/gh-token-worker-env.test.ts": 178,
     "test/gh-transport-census.test.ts": 351,
