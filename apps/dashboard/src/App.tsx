@@ -1,5 +1,5 @@
 // apps/dashboard/src/App.tsx — the first screen on the new stack.
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { DaemonClient } from "@remudero/api-client/client";
 
 import { Now } from "./Now";
@@ -7,6 +7,10 @@ import { Overview } from "./Overview";
 import { Series } from "./SeriesChart";
 import { bucketSamples, type SeriesSpec } from "./series";
 import { useFleet } from "./useFleet";
+import { OnboardingPage } from "./pages/OnboardingPage";
+import { ConsoleNav, pathWithoutConsole } from "./pages/navigation";
+import { RepoDashboardPage } from "./pages/RepoDashboardPage";
+import { RepoSettingsPage } from "./pages/RepoSettingsPage";
 
 /** THE BUCKET IS PART OF THE CLAIM (design (ii)). Two minutes over two hours, because the defect
  *  this series exists to surface is a sub-hourly repeat — a 2.5-minute dispatch loop — and an
@@ -38,6 +42,13 @@ function statusPriority(status: string): number {
 }
 
 export function App({ client, nowMs = Date.now }: { client: DaemonClient | null; nowMs?: () => number }) {
+  const [path, setPath] = useState(() => pathWithoutConsole());
+  useEffect(() => {
+    const refresh = () => setPath(pathWithoutConsole());
+    window.addEventListener("popstate", refresh);
+    return () => window.removeEventListener("popstate", refresh);
+  }, []);
+
   const fleet = useFleet(client, nowMs);
   // useMemo is deliberate and rare here: the React Compiler memoises rendering, not this call's
   // dependency on a clock read that must NOT be taken again on every unrelated re-render.
@@ -47,8 +58,25 @@ export function App({ client, nowMs = Date.now }: { client: DaemonClient | null;
     return priority === 0 ? a.taskId.localeCompare(b.taskId) : priority;
   });
   const attentionCount = tasks.filter((p) => p.status === "blocked").length;
+
+  if (path === "/repos" || path === "/repos/") {
+    return <><ConsoleNav /><RepoDashboardPage /></>;
+  }
+  const repoMatch = /^\/repos\/([^/]+)$/.exec(path);
+  if (repoMatch !== null) {
+    return <><ConsoleNav /><RepoDashboardPage repoId={decodeURIComponent(repoMatch[1])} /></>;
+  }
+  const settingsMatch = /^\/repos\/([^/]+)\/settings$/.exec(path);
+  if (settingsMatch !== null) {
+    return <><ConsoleNav /><RepoSettingsPage repoId={decodeURIComponent(settingsMatch[1])} /></>;
+  }
+  if (path === "/onboard" || path === "/onboard/") {
+    return <><ConsoleNav /><OnboardingPage /></>;
+  }
+
   return (
     <>
+      <ConsoleNav />
       <header className="status-bar" data-max-phone-height={STATUS_BAR_BUDGETS[2].maxHeight}>
         <div className="status-bar__identity">
           <h1>Remudero</h1>
