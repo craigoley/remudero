@@ -26371,8 +26371,11 @@ function lifetimeHistory(
       fd = openSync(ledgerPath, "r");
       const stat = fstatSync(fd);
       snapshot = { identity: `${stat.dev}:${stat.ino}`, content: readFileSync(fd, "utf8") };
-    } catch {
-      return;
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : "live ledger unreadable",
+      };
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
