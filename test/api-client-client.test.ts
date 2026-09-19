@@ -15,6 +15,7 @@ import { buildFeedbackInboxRoute, buildPanelGraphRoutes, buildSubmitFeedbackRout
 import { buildPanelSkillsRoutes, type PanelSkillsDeps } from "../src/lib/panel-skills.js";
 import { buildPanelSkillRunRoutes, type PanelSkillRunDeps } from "../src/lib/panel-skill-run.js";
 import { buildRepoDashboardRoute } from "../src/lib/repo-dashboard-route.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { skillsDir } from "../src/lib/skill.js";
 import { setFeedbackStatus } from "../src/lib/feedback.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -534,7 +535,7 @@ test("createDaemonClient.listRepos(): GETs the read-scoped managed-repo portfoli
   writeFileSync(join(root, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["acme/alpha"] }));
   const server = createService({
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
-    routes: [buildRepoDashboardRoute({ root, now: () => Date.parse("2026-09-19T00:00:00.000Z") })],
+    routes: [buildRepoDashboardRoute({ root, clock: fixedClock(Date.parse("2026-09-19T00:00:00.000Z")) })],
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
