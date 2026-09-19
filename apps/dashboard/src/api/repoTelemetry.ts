@@ -5,13 +5,17 @@ import type { RepoTelemetry } from "../types/repo";
  * routes, so consumers must keep `unavailable` visible until those routes land in the generated
  * api-client and server contract.
  */
+const API_VERSION = "/v1";
+const repoEndpoint = (...segments: string[]) => [API_VERSION, "repos", ...segments].join("/");
+const githubOAuthEndpoint = [API_VERSION, "auth", "github"].join("/");
+
 export const REPO_API_ENDPOINTS = {
-  repos: "/v1/repos",
-  telemetry: "/v1/repos/:id/telemetry",
-  settings: "/v1/repos/:id/settings",
-  logs: "/v1/repos/:id/logs",
-  dryRun: "/v1/repos/:id/test-run",
-  githubOAuth: "/v1/auth/github",
+  repos: repoEndpoint(),
+  telemetry: repoEndpoint(":id", "telemetry"),
+  settings: repoEndpoint(":id", "settings"),
+  logs: repoEndpoint(":id", "logs"),
+  dryRun: repoEndpoint(":id", "test-run"),
+  githubOAuth: githubOAuthEndpoint,
 } as const;
 
 export interface RepoTelemetryResponse {
