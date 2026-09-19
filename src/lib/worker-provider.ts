@@ -1550,14 +1550,17 @@ export interface CodexWorkerOutputLimitError extends Error {
 export function isCodexWorkerOutputLimitError(error: unknown): error is CodexWorkerOutputLimitError {
   if (!(error instanceof Error) || error.name !== "CodexWorkerOutputLimitError") return false;
   const candidate = error as Partial<CodexWorkerOutputLimitError>;
+  // Older callers and test fixtures construct this typed error before the bounded event
+  // evidence fields were added. Keep the established type guard compatible with those
+  // producers; real spawn failures always populate both fields below.
   return (
     candidate.reasonClass === "bounded_output" &&
     (candidate.stream === "stdout" || candidate.stream === "stderr") &&
     typeof candidate.limitBytes === "number" &&
     typeof candidate.observedBytes === "number" &&
-    typeof candidate.pendingLineBytes === "number" &&
-    candidate.eventBytesByKind !== null &&
-    typeof candidate.eventBytesByKind === "object"
+    (candidate.pendingLineBytes === undefined || typeof candidate.pendingLineBytes === "number") &&
+    (candidate.eventBytesByKind === undefined ||
+      (candidate.eventBytesByKind !== null && typeof candidate.eventBytesByKind === "object"))
   );
 }
 

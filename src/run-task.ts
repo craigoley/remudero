@@ -1731,8 +1731,8 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
     stream: error.stream,
     limit_bytes: error.limitBytes,
     observed_bytes: error.observedBytes,
-    event_bytes_by_kind: error.eventBytesByKind,
-    pending_line_bytes: error.pendingLineBytes,
+    event_bytes_by_kind: error.eventBytesByKind ?? {},
+    pending_line_bytes: error.pendingLineBytes ?? 0,
   };
 }
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
