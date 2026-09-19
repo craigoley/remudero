@@ -56,7 +56,7 @@
     - claim: "a missing start identity or identity-ceiling bind refuses archive subtraction explicitly"
       proof: "unit test: W1-T3780: unindexable archive history fails closed"
   note: |
-    Reservation W1-T3780 was acquired on branch plan/W1-T3780-1789815725000.
+    reservation hand-off: plan/cap-replay-17898157033N -> plan/W1-T3780-1789815725000
 
     This is a successor to W1-T3758, not a rewrite of its plan record. The original capacity
     distinction remains correct; only the archive replay implementation failed its live
