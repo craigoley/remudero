@@ -1,7 +1,7 @@
 - id: W1-T3774
   title: "UI-T3774 — Implement: repo settings modal"
   repo: remudero
-  depends_on: [W1-T3772, W1-T3773]
+  depends_on: [W1-T3772, W1-T3773, W1-T3175, W1-T3176]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,7 +10,8 @@
   origin: architect
   plan_refs: ["§7", "§7A"]
   files: [apps/dashboard/src/pages/RepoSettingsPage.tsx]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     Proof policy, worker pool size, and alert threshold are per-repo controls. They must be edited
@@ -27,3 +28,5 @@
       proof: "grep: Saved locally in apps/dashboard/src/pages/RepoSettingsPage.tsx"
   note: |
     Brief-facing alias: UI-T3774. The repository's executable task namespace is W1-T3774.
+    reservation hand-off: feat/repo-dashboard-2026-09-19 -> plan/repo-dashboard-2026-09-19
+    Blocked until the daemon can serve and deploy the dashboard build (W1-T3175/W1-T3176).

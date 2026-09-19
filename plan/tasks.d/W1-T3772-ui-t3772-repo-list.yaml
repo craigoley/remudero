@@ -1,7 +1,7 @@
 - id: W1-T3772
   title: "UI-T3772 — Implement: repo list component"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T3175, W1-T3176]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,7 +10,8 @@
   origin: architect
   plan_refs: ["§7", "§7A"]
   files: [apps/dashboard/src/components/RepoList.tsx]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     A multi-repo console needs one portfolio surface rather than one hard-coded daemon board. The
@@ -27,3 +28,5 @@
       proof: "grep: RepoCard in apps/dashboard/src/components/RepoList.tsx"
   note: |
     Brief-facing alias: UI-T3772. The repository's executable task namespace is W1-T3772.
+    reservation hand-off: feat/repo-dashboard-2026-09-19 -> plan/repo-dashboard-2026-09-19
+    Blocked until the daemon can serve and deploy the dashboard build (W1-T3175/W1-T3176).

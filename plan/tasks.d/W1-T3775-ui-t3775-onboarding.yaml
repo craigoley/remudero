@@ -1,7 +1,7 @@
 - id: W1-T3775
   title: "UI-T3775 — Implement: onboarding wizard"
   repo: remudero
-  depends_on: [W1-T3772, W1-T3774]
+  depends_on: [W1-T3772, W1-T3774, W1-T3175, W1-T3176]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,7 +10,8 @@
   origin: architect
   plan_refs: ["§7", "§7A"]
   files: [apps/dashboard/src/pages/OnboardingPage.tsx]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     First-run setup must make the activation boundary visible: OAuth, repository selection, task
@@ -27,3 +28,5 @@
       proof: "grep: const STEPS = in apps/dashboard/src/pages/OnboardingPage.tsx"
   note: |
     Brief-facing alias: UI-T3775. The repository's executable task namespace is W1-T3775.
+    reservation hand-off: feat/repo-dashboard-2026-09-19 -> plan/repo-dashboard-2026-09-19
+    Blocked until the daemon can serve and deploy the dashboard build (W1-T3175/W1-T3176).
