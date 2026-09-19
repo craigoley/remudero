@@ -228,6 +228,12 @@ export interface GitHub {
   /** BATCHED form of {@link findMergedByHeadBranch} (W1-T257): ONE list read carrying every merged PR's head
    *  ref, matched CLIENT-SIDE. On the STRUCTURED ref, NEVER the body index. null on FAILURE. */
   listMergedHeadBranches?(): PrRef[] | null;
+  /** W1-T3763 — capture ONE merged-row snapshot as an exact anchored-trailer lookup. Calling the returned
+   *  function never re-enters the board index, so one `projectPlan` pass cannot let a 15-second cache expire
+   *  and restart its own merged-board read while it derives every task. `null` means that snapshot could not be
+   *  read; an absent method preserves the per-task gateway path for non-batched implementations. The lookup
+   *  keeps the existing body-first, commit-trailer-fallback precedence. */
+  mergedTrailerLookup?(): ((taskId: string) => PrRef | null) | null;
   /** The OPEN twin of {@link listMergedHeadBranches} (W1-T377): rung (a) is the only other route to an OPEN
    *  association and it reads the ledger, so a task whose `pr.opened` never landed is otherwise invisible.
    *  null on FAILURE, never []. Why: a run rebuilt its own work — docs/forensics/status.md */
@@ -347,6 +353,10 @@ export interface DeriveDeps {
    *  `null` when the BATCH FAILED — then the per-task method runs, and if that fails too, W1-T119
    *  defers rather than reporting a false none. Why: five 07-23 GraphQL exhaustions */
   mergedHeadBranches?: (taskId: string) => PrRef[] | null;
+  /** W1-T3763: an exact merged-trailer lookup captured once by {@link projectPlan}. `null` means the
+   *  captured board read failed, so every task keeps the same fail-closed answer without reopening the gateway;
+   *  omission preserves the direct lookup for standalone derivations and non-batched gateways. */
+  mergedTrailerLookup?: (taskId: string) => PrRef | null;
   /** The OPEN twin of {@link DeriveDeps.mergedHeadBranches} (W1-T377), backing the (c3) rung — the
    *  only thing here that can see an open PR the ledger never recorded. SAME "ABSENT ⇒ SKIP"
    *  contract: `undefined` falls back per-task, `null` skips the rung so W1-T119 defers rather than
@@ -1355,11 +1365,54 @@ export function dispatchesEver(
   taskId: string,
   index?: LedgerIndex,
 ): number {
-  let count = 0;
+  return lifetimeDispatchTally(lines, taskId, index).starts;
+}
+
+/** The two facts the lifetime cap needs. `daemon.spawn_infra_blocked` is written by the daemon
+ * only after `runOne(task)` rejects before any provider can serve a turn; it deliberately names
+ * the task in `task`, while the child writes its preceding `run.start` under `task_id`. Keeping
+ * both counters visible prevents an absence-based exemption from forgiving a task-owned crash. */
+export interface LifetimeDispatchTally {
+  starts: number;
+  capacityBlocked: number;
+}
+
+/** Derive one task's durable lifetime-dispatch inputs from either the live ledger or an audited
+ * archive projection. A capacity receipt is a fleet-wide refusal stamped by its writer; every
+ * other worker outcome, including an orphan with no terminal row, stays charged. */
+export function lifetimeDispatchTally(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+): LifetimeDispatchTally {
+  let starts = 0;
+  let capacityBlocked = 0;
   for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (line.task_id === taskId && line.step === "run.start") count++;
+    if (line.task_id === taskId && line.step === "run.start") starts += 1;
+    if (line.task === taskId && line.step === "daemon.spawn_infra_blocked") capacityBlocked += 1;
   }
-  return count;
+  return { starts, capacityBlocked };
+}
+
+/** Combine independently-read archive and live tallies without making the live file immutable at
+ * daemon boot. Exported so the command layer can discard an incomplete archive projection rather
+ * than guessing from a partial corpus. */
+export function addLifetimeDispatchTallies(
+  ...tallies: readonly LifetimeDispatchTally[]
+): LifetimeDispatchTally {
+  let starts = 0;
+  let capacityBlocked = 0;
+  for (const tally of tallies) {
+    starts += tally.starts;
+    capacityBlocked += tally.capacityBlocked;
+  }
+  return { starts, capacityBlocked };
+}
+
+/** Capacity receipts cannot outnumber starts in a complete corpus. If they do, retain the old
+ * all-starts count: a partial or malformed join must never make a task dispatchable. */
+export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): number {
+  return tally.capacityBlocked > tally.starts ? tally.starts : tally.starts - tally.capacityBlocked;
 }
 
 /** THE THRESHOLD IS A MEASUREMENT, NOT A GUESS (W1-T271): 274 of 282 ever-dispatched tasks (97%) were
@@ -1375,7 +1428,7 @@ export function isLifetimeDispatchCapExceeded(
   maxLifetimeDispatches: number = DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   index?: LedgerIndex,
 ): boolean {
-  return dispatchesEver(lines, taskId, index) >= maxLifetimeDispatches;
+  return effectiveLifetimeDispatches(lifetimeDispatchTally(lines, taskId, index)) >= maxLifetimeDispatches;
 }
 
 /**
@@ -2302,7 +2355,11 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       : undefined;
   };
 
-  const trailerPr = deps.github.findMergedByTrailer(task.id);
+  // W1-T3763: projectPlan captures the batched gateway's merged rows once before its task loop. Using that
+  // lookup here keeps body-first/commit-fallback credit semantics while avoiding one full merged-body scan per
+  // task. Standalone derivations and non-batched gateways have no captured lookup, so their established path
+  // remains the direct query.
+  const trailerPr = deps.mergedTrailerLookup ? deps.mergedTrailerLookup(task.id) : deps.github.findMergedByTrailer(task.id);
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
     const body = deps.github.prBody(trailerPr.url);
@@ -3070,9 +3127,15 @@ export function projectPlan(
     // W1-T2392: the SAME rows, walked once more in memory for the prose index — no second fetch, and skipped
     // entirely when the batched read failed.
     const prose = allMerged !== null ? indexProseNamedTaskIds(allMerged) : undefined;
+    // W1-T3763: capture the exact trailer lookup from this projection's SAME merged snapshot. A failed merged
+    // read must stay a failure for every task, never fall back into N direct probes that can restart the board
+    // walk. A gateway without this optional batched surface keeps its existing direct lookup.
+    const batchedTrailerLookup = allMerged === null ? null : effectiveDeps.github.mergedTrailerLookup?.();
+    const trailerLookup = batchedTrailerLookup === null ? (() => null) : batchedTrailerLookup;
     effectiveDeps = {
       ...effectiveDeps,
       ...(prose ? { proseNamedTaskIds: prose } : {}),
+      ...(trailerLookup ? { mergedTrailerLookup: trailerLookup } : {}),
       mergedHeadBranches: captured ? (taskId: string) => captured.get(taskId) ?? [] : () => null,
     };
   }
@@ -4127,6 +4190,26 @@ export function buildBatchedGithub(
   // W1-T2387: the re-verify half, over the SAME memoised index — never a second `git` call.
   const commitCreditsFor = (taskId: string, prUrl: string): boolean =>
     commitTrailerFallback(taskId).some((r) => r.url === prUrl);
+  /** W1-T3763: materialize every exact body trailer ONCE against the current merged snapshot. The direct
+   *  `findMergedByTrailer` path only needs one task at a time and is deliberately left as-is for callers that
+   *  do not already hold a board snapshot. `projectPlan`, however, derives every task: rescanning thousands of
+   *  bodies for every absent id lets its gateway TTL expire mid-pass and restarts the same GitHub walk. */
+  const mergedTrailerLookup = (): ((taskId: string) => PrRef | null) | null => {
+    const idx = index();
+    if (lastFetchFailed()) return null;
+    const byTask = new Map<string, PrRef>();
+    for (const pr of idx.mergedNewestFirst) {
+      for (const rawLine of (pr.body ?? "").split(/\r?\n/)) {
+        // `[ \t]*` keeps the established anchored-trailer dialect while the captured value remains exact.
+        const match = /^Remudero-Task:[ \t]*(.*?)[ \t]*$/.exec(rawLine);
+        const taskId = match?.[1];
+        if (taskId !== undefined && !byTask.has(taskId)) byTask.set(taskId, asRef(pr));
+      }
+    }
+    // The old lookup falls back to the memoized commit index only after a body miss. Keep that laziness and
+    // precedence; the difference is that the body miss is now O(1), not a fresh O(merged PRs) scan per task.
+    return (taskId: string): PrRef | null => byTask.get(taskId) ?? commitTrailerFallback(taskId)[0] ?? null;
+  };
   const lookup = (ref: string | number): BatchedPr | undefined => {
     const idx = index();
     const s = String(ref);
@@ -4330,6 +4413,7 @@ export function buildBatchedGithub(
       const idx = index();
       return lastFetchFailed() ? null : idx.mergedNewestFirst.map(asRef);
     },
+    mergedTrailerLookup,
     listOpenHeadBranches() {
       // W1-T2323: THE OPEN HALF ONLY — the single behavioural change to a public method. MEASURED, a cold
       // gateway answering this walked 26 REST requests over 22.2 s for 6 open rows; it now walks 1 request over

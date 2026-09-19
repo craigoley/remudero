@@ -100,3 +100,89 @@ button:disabled { color: var(--fg-dim); }
   position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }
+
+/* Repo dashboard scaffold */
+.console-nav {
+  display: flex;
+  gap: 14px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--grid);
+  background: #10161e;
+  font-size: 12px;
+}
+.console-nav a { color: var(--fg-dim); text-decoration: none; }
+.console-nav a:hover, .console-nav a:focus { color: var(--accent); text-decoration: underline; }
+.repo-page { max-width: 1180px; margin: 0 auto; padding: 18px 12px 36px; }
+.page-heading, .page-toolbar, .repo-card__heading, .repo-card__footer, .repo-list__toolbar, .wizard-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.page-heading { margin-bottom: 18px; }
+.page-heading h1, .page-heading h2, .repo-list h2, .settings-panel h1, .wizard-panel h2 { margin: 0; }
+.page-heading h1 { font-size: 28px; letter-spacing: -0.04em; }
+.page-heading h2 { font-size: 22px; }
+.eyebrow { margin: 0 0 4px; color: var(--accent); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
+.muted, .source-note { color: var(--fg-dim); font-size: 12px; }
+.page-heading .muted { margin: 6px 0 0; max-width: 680px; }
+.page-toolbar { margin-bottom: 12px; }
+.repo-list, .repo-detail, .settings-panel, .wizard-panel { background: var(--panel); border: 1px solid var(--grid); border-radius: 8px; padding: 14px; }
+.repo-list__toolbar { align-items: end; margin-bottom: 12px; }
+.repo-list__toolbar h2 { font-size: 15px; }
+.repo-list__toolbar p { margin: 4px 0 0; }
+.repo-list__filters { display: flex; gap: 10px; flex-wrap: wrap; padding: 8px 0 14px; border-top: 1px solid var(--grid); border-bottom: 1px solid var(--grid); margin-bottom: 14px; }
+.repo-list__filters label, .wizard-form label, .settings-panel label { display: grid; gap: 5px; color: var(--fg-dim); font-size: 11px; }
+input, select { min-height: 30px; border: 1px solid var(--grid); border-radius: 4px; background: var(--bg); color: var(--fg); font: inherit; padding: 4px 7px; }
+.repo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px; }
+.repo-card { display: grid; gap: 12px; min-width: 0; padding: 12px; border: 1px solid var(--grid); border-radius: 6px; background: #111821; }
+.repo-card__name { display: block; border: 0; padding: 0; background: transparent; color: var(--fg); font-size: 16px; font-weight: 700; text-align: left; }
+.repo-card__name:hover, .repo-card__name:focus { color: var(--accent); }
+.repo-card__url { display: block; max-width: 260px; overflow: hidden; color: var(--fg-dim); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.health-badge { display: inline-flex; align-items: center; border: 1px solid currentColor; border-radius: 999px; padding: 2px 7px; font-size: 11px; font-weight: 700; }
+.health-badge--healthy { color: var(--running); }
+.health-badge--degraded { color: var(--warn); }
+.health-badge--error { color: var(--blocked); }
+.health-badge--unknown { color: var(--fg-dim); }
+.repo-card__alerts, .alert-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.alert, .alert-list li { border-left: 3px solid var(--warn); padding: 4px 7px; background: #1d2023; font-size: 11px; }
+.alert--error { border-color: var(--blocked); }
+.alert--info { border-color: var(--accent); }
+.repo-card__quiet { margin: 0; color: var(--fg-dim); font-size: 11px; }
+.repo-card__metrics, .metric-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0; }
+.repo-card__metrics div, .metric-list div { min-width: 0; padding: 6px; border: 1px solid var(--grid); border-radius: 4px; }
+dt { color: var(--fg-dim); font-size: 10px; }
+dd { margin: 2px 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.repo-card__footer { align-items: end; }
+.repo-card__actions, .repo-detail__actions { display: flex; gap: 5px; flex-wrap: wrap; justify-content: end; }
+.repo-card__actions button { font-size: 11px; }
+.repo-activity { font-size: 11px; }
+.repo-activity--on { color: var(--running); }
+.repo-activity--off { color: var(--fg-dim); }
+.empty-state { display: grid; gap: 4px; padding: 32px 12px; border: 1px dashed var(--grid); color: var(--fg-dim); text-align: center; }
+.detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.detail-panel { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--grid); border-radius: 6px; }
+.detail-panel h3 { margin: 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.detail-panel .metric-list { grid-template-columns: 1fr; }
+.unknown-state, .inline-notice { margin: 0; padding: 7px 9px; border-left: 3px solid var(--warn); background: #1d2023; color: var(--warn); font-size: 12px; }
+.error-text { margin: 0; color: var(--blocked); font-size: 12px; }
+.trend-bars { display: flex; align-items: end; gap: 3px; min-height: 72px; padding: 8px; border-bottom: 1px solid var(--grid); }
+.trend-bars span { flex: 1; min-width: 4px; background: var(--accent); opacity: 0.8; }
+.repo-detail__actions { margin-top: 14px; justify-content: start; }
+.settings-panel { max-width: 620px; }
+.settings-panel form, .wizard-form { display: grid; gap: 14px; margin-top: 18px; }
+.settings-panel form button, .wizard-actions { margin-top: 4px; }
+.wizard-steps { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin: 0 0 14px; padding: 0; list-style: none; }
+.wizard-step { min-height: 32px; padding: 7px 5px; border: 1px solid var(--grid); color: var(--fg-dim); font-size: 10px; text-align: center; }
+.wizard-step--current { border-color: var(--accent); color: var(--accent); }
+.wizard-copy, .dry-run-panel { display: grid; gap: 12px; max-width: 680px; }
+.wizard-copy p, .dry-run-panel p { margin: 0; }
+.choice-grid { display: grid; gap: 8px; max-width: 680px; margin: 16px 0; padding: 0; border: 0; }
+.choice-grid legend { margin-bottom: 8px; color: var(--fg-dim); font-size: 11px; }
+.check-row, .policy-choice { display: flex; align-items: center; gap: 8px; padding: 9px; border: 1px solid var(--grid); border-radius: 4px; }
+.policy-choice { align-items: start; }
+.policy-choice span { display: grid; gap: 3px; }
+.policy-choice small { color: var(--fg-dim); }
+.dry-run-output { overflow: auto; margin: 0; padding: 10px; border: 1px solid var(--grid); background: var(--bg); color: var(--running); }
+code { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .repo-card__metrics { grid-template-columns: 1fr; }
+  .wizard-steps { grid-template-columns: repeat(3, 1fr); }
+}

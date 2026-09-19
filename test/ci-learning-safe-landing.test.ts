@@ -7,7 +7,12 @@ import { test } from "node:test";
 
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { CI_LEARNING_LANDING_BRANCH, ciLearningPendingOrigins, landCiLearningShards } from "../src/lib/feedback-landing.js";
+import {
+  CI_LEARNING_LANDING_BRANCH,
+  ciLearningPendingOrigins,
+  landCiLearningShards,
+  landingIdentity,
+} from "../src/lib/feedback-landing.js";
 import { buildCiLearningCadenceRunner, ciLearningCommand } from "../src/run-task.js";
 import {
   ciLearningRecordVerdict,
@@ -41,7 +46,10 @@ function makeBareOrigin(): string {
 }
 
 function cloneRoot(bareOrigin: string): string {
-  return gitRepo({ cloneFrom: bareOrigin, kind: "ci-learning-landing-checkout" }).dir;
+  const checkout = gitRepo({ cloneFrom: bareOrigin, kind: "ci-learning-landing-checkout" });
+  checkout.git("config", "user.name", "remudero ci-learning fixture");
+  checkout.git("config", "user.email", "ci-learning-fixture@remudero.invalid");
+  return checkout.dir;
 }
 
 function stateRoot(): string {
@@ -50,7 +58,7 @@ function stateRoot(): string {
   return root;
 }
 
-function fakeGh(prUrl: string) {
+function fakeGh(prUrl: string, expectedBranch = CI_LEARNING_LANDING_BRANCH) {
   const calls: string[][] = [];
   let createCount = 0;
   const gh = (args: string[]): string => {
@@ -60,7 +68,7 @@ function fakeGh(prUrl: string) {
     }
     if (args[0] === "pr" && args[1] === "create") {
       createCount++;
-      assert.ok(args.includes(CI_LEARNING_LANDING_BRANCH), "the CI-learning landing PR uses its dedicated branch");
+      assert.ok(args.includes(expectedBranch), "the CI-learning landing PR uses its dedicated branch");
       return `Creating pull request for ${CI_LEARNING_LANDING_BRANCH} into main\n${prUrl}\n`;
     }
     if (args[0] === "pr" && args[1] === "merge") return "";
@@ -108,8 +116,8 @@ function pendingFiles(root: string): string[] {
     .filter(Boolean);
 }
 
-function landingBranchFiles(bareOrigin: string): string[] {
-  return execFileSync("git", ["--git-dir", bareOrigin, "ls-tree", "-r", "--name-only", CI_LEARNING_LANDING_BRANCH], {
+function landingBranchFiles(bareOrigin: string, branch = CI_LEARNING_LANDING_BRANCH): string[] {
+  return execFileSync("git", ["--git-dir", bareOrigin, "ls-tree", "-r", "--name-only", branch], {
     encoding: "utf8",
     env: GIT_ENV,
     stdio: ["ignore", "pipe", "ignore"],
@@ -342,6 +350,52 @@ test("W1-T3542 criterion 1: manual ci-learning uses the isolated landing queue t
     1,
     "the manual run reaches the same dedicated landing branch",
   );
+  const reservationRef = git(manualBare, "for-each-ref", "--format=%(refname)", "refs/rmd-id/").trim();
+  assert.ok(reservationRef, "the manual run reserves its generated task id before publishing the landing branch");
+  const reservation = git(manualBare, "log", "-1", "--format=%B", reservationRef);
+  assert.match(
+    reservation,
+    /branch=ci-learning-landing/,
+    "the reservation names the dedicated landing branch rather than the manual checkout's main branch",
+  );
+});
+
+test("the CI-learning reservation names the scoped landing branch that will file it", () => {
+  const bareOrigin = makeBareOrigin();
+  const checkout = cloneRoot(bareOrigin);
+  const root = stateRoot();
+  const targetRepository = { owner: "other", repo: "lessons" };
+  const sourceRepository = { owner: "source", repo: "remudero" };
+  const landingOwner = "fleet-east";
+  const branch = landingIdentity({
+    family: "ci-learning",
+    targetRepository,
+    sourceRepository,
+    landingOwner,
+  }).branch;
+  const { gh } = fakeGh("https://github.com/o/r/pull/3543", branch);
+  let reservedFor: string | undefined;
+
+  const result = withLiveWritesAllowed(() =>
+    landCiLearningShards([draft("ci-learning:4321:scoped")], checkout, {
+      stateRoot: root,
+      mintTaskId: (filingBranch) => {
+        reservedFor = filingBranch;
+        return "W1-T9008";
+      },
+      planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
+      targetRepository,
+      sourceRepository,
+      landingOwner,
+      gh,
+    }),
+  );
+
+  assert.equal(reservedFor, branch, "the reservation holder is the same scoped branch the landing bridge pushes");
+  assert.equal(result.filed.length, 1, "the scoped landing branch receives the staged shard");
+  assert.equal(landingBranchFiles(bareOrigin, branch).filter((f) => f.startsWith("plan/tasks.d/")).length, 1);
 });
 
 test("W1-T3542 criterion 3: generated CLI and operator docs describe queue-backed CI-learning", () => {

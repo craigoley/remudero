@@ -10,6 +10,7 @@ import {
   ANALYTICS_COLLECTION_STARTED_AT,
   ANALYTICS_SCOPE_NOTE,
   buildAnalyticsRoute,
+  createAnalyticsSnapshotCache,
   deriveAnalyticsSnapshot,
   deriveAnalyticsSnapshotFromLedger,
   deriveAnalyticsSnapshotFromStream,
@@ -17,6 +18,8 @@ import {
 } from "../src/lib/analytics-route.js";
 import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
 import { clockFromIsoFn, fixedClock } from "../src/lib/clock.js";
+import { terminalVerdictFields } from "../src/run-task.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -33,6 +36,55 @@ function writePlainArchive(stateDir: string, name: string, lines: string[]): voi
 function writeLive(stateDir: string, lines: string[]): void {
   writeFileSync(join(stateDir, "ledger.ndjson"), lines.join("\n") + "\n");
 }
+
+test("W1-T3762 criterion 1: the terminal verdict receipt carries the assignment join key and worker outcome instead of treating task verdict as model success", () => {
+  const receipt = terminalVerdictFields({
+    model: "gpt-5.6-luna",
+    servedModel: "gpt-5.6-luna",
+    selectionAssignmentId: "assignment-1",
+    tokens: { input: 100, output: 25, cacheRead: 0, cacheCreation: 0 },
+    workerDurationMs: 1500,
+    costUsd: 0,
+    isError: false,
+  } as WorkerResult);
+
+  assert.deepEqual(receipt, {
+    model: "gpt-5.6-luna",
+    served_model: "gpt-5.6-luna",
+    selection_assignment_id: "assignment-1",
+    tokens: { input: 100, output: 25, cacheRead: 0, cacheCreation: 0 },
+    worker_duration_ms: 1500,
+    total_cost_usd: 0,
+    success: true,
+  });
+});
+
+test("W1-T3762: terminal receipt keeps the existing clean post-envelope success rule while rejecting API errors and usage refusals", () => {
+  const base = {
+    model: "gpt-5.6-luna",
+    servedModel: "gpt-5.6-luna",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    costUsd: 0,
+    isError: true,
+    subtype: "success",
+  } as WorkerResult;
+
+  assert.equal(
+    terminalVerdictFields({ ...base, apiError: false }).success,
+    true,
+    "the existing verdict classifier treats a post-envelope non-API iterator error as clean success",
+  );
+  assert.equal(
+    terminalVerdictFields({ ...base, apiError: true }).success,
+    false,
+    "an API error remains an unsuccessful worker call despite its success envelope",
+  );
+  assert.equal(
+    terminalVerdictFields({ ...base, apiError: false, usageRefusal: { matched: "usage limit" } }).success,
+    false,
+    "a usage refusal outranks the envelope subtype",
+  );
+});
 
 // ── falsifier (v), direction 1: the rotation union must equal the single-file aggregate ───────
 
@@ -168,6 +220,146 @@ test("deriveAnalyticsSnapshot: a pre-W1-T477 worker row with no lane field group
   );
   assert.equal(snap.workersByLaneModel.length, 1);
   assert.equal(snap.workersByLaneModel[0].lane, "unknown");
+});
+
+test("W1-T3762 criterion 1: routing telemetry joins the immutable assignment to its terminal receipt without copying a configured model into served-model evidence", () => {
+  const snap = deriveAnalyticsSnapshot(
+    [
+      { step: "run.start", run_id: "R1", type: "implement" },
+      {
+        step: "worker.assignment",
+        run_id: "R1",
+        worker_assignment: {
+          version: 1,
+          id: "assignment-1",
+          selected: { provider: "codex", model: "gpt-5.6-luna", effort: "high" },
+          routing: { mode: "multi-provider", selectionPath: "auction" },
+        },
+      },
+      {
+        step: "implement.done",
+        run_id: "R1",
+        selection_assignment_id: "assignment-1",
+        served_model: "gpt-5.6-luna",
+        tokens: { input: 900 },
+      },
+      {
+        step: "verdict",
+        run_id: "R1",
+        selection_assignment_id: "assignment-1",
+        verdict: "merged",
+        success: true,
+        served_model: "gpt-5.6-luna",
+        worker_duration_ms: 1500,
+        total_cost_usd: 0,
+        tokens: { input: 100, output: 25, cacheRead: 0, cacheCreation: 0 },
+        ts: "2026-09-18T12:00:00.000Z",
+      },
+    ],
+    "2026-09-18T12:05:00.000Z",
+  );
+
+  assert.equal(snap.routingTelemetry.assignmentsObserved, 1);
+  assert.equal(snap.routingTelemetry.evidenceState, "observed");
+  assert.equal(snap.routingTelemetry.terminalResultsObserved, 1);
+  assert.equal(snap.routingTelemetry.assignmentsWithoutTerminalResult, 0);
+  assert.deepEqual(snap.routingTelemetry.buckets, [
+    {
+      provider: "codex",
+      assignedModel: "gpt-5.6-luna",
+      taskType: "implement",
+      routingRule: "multi-provider:auction",
+      assignments: 1,
+      terminalResults: 1,
+      successes: 1,
+      failures: 0,
+      totalTokens: 125,
+      totalDurationMs: 1500,
+      totalCostUsd: 0,
+      fallbackReasons: [],
+    },
+  ]);
+  assert.deepEqual(snap.routingTelemetry.daily, [{ day: "2026-09-18", terminalResults: 1, totalTokens: 125, totalCostUsd: 0 }]);
+});
+
+test("W1-T3762 criterion 2: routing telemetry names incomplete joins instead of inventing a success, a cost, or a provider receipt", () => {
+  const snap = deriveAnalyticsSnapshot(
+    [
+      {
+        step: "worker.assignment",
+        run_id: "R2",
+        worker_assignment: {
+          version: 1,
+          id: "assignment-2",
+          selected: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
+          routing: { mode: "multi-provider", preferenceBypass: { provider: "codex", reason: "higher headroom" } },
+        },
+      },
+      {
+        step: "verdict",
+        selection_assignment_id: "missing-assignment",
+        success: true,
+        total_cost_usd: 99,
+      },
+    ],
+    "2026-09-18T12:05:00.000Z",
+  );
+
+  assert.equal(snap.routingTelemetry.assignmentsObserved, 1);
+  assert.equal(snap.routingTelemetry.evidenceState, "observed");
+  assert.equal(snap.routingTelemetry.terminalResultsObserved, 0);
+  assert.equal(snap.routingTelemetry.terminalResultsWithoutAssignment, 1);
+  assert.equal(snap.routingTelemetry.assignmentsWithoutTerminalResult, 1);
+  const bucket = snap.routingTelemetry.buckets[0];
+  assert.deepEqual(bucket?.fallbackReasons, []);
+  assert.equal(bucket?.terminalResults, 0, "an assignment without a receipt is not reported as a completed call");
+});
+
+test("W1-T3762: routing fallbacks are counted and a populated telemetry snapshot is frozen before cache publication", async () => {
+  const populated = deriveAnalyticsSnapshot(
+    [
+      { step: "run.start", run_id: "R3", type: "implement" },
+      {
+        step: "worker.assignment",
+        run_id: "R3",
+        worker_assignment: {
+          version: 1,
+          id: "assignment-3",
+          selected: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
+          routing: {
+            mode: "multi-provider",
+            selectionPath: "auction",
+            preferenceBypass: { provider: "codex", reason: "higher headroom" },
+          },
+        },
+      },
+      {
+        step: "verdict",
+        run_id: "R3",
+        selection_assignment_id: "assignment-3",
+        success: false,
+        served_model: "gpt-5.6-terra",
+        ts: "2026-09-18T12:00:00.000Z",
+      },
+    ],
+    "2026-09-18T12:05:00.000Z",
+  );
+  assert.deepEqual(populated.routingTelemetry.buckets[0]?.fallbackReasons, [
+    { reason: "provider-preference-bypass", count: 1 },
+    { reason: "provider-served-different-model", count: 1 },
+  ]);
+
+  const cache = createAnalyticsSnapshotCache({
+    stateDir: "/unused",
+    readSnapshot: async () => populated,
+    schedule: () => ({ unref() {}, cancel() {} }),
+  });
+  await cache.refresh();
+  const published = cache.current();
+  const bucket = published.routingTelemetry.buckets[0]!;
+  assert.ok(Object.isFrozen(bucket.fallbackReasons[0]), "fallback rows are immutable after publication");
+  assert.ok(Object.isFrozen(bucket.fallbackReasons), "fallback list is immutable after publication");
+  assert.ok(Object.isFrozen(bucket), "routing bucket is immutable after publication");
 });
 
 test("deriveAnalyticsSnapshot: question 3 — run.start-to-verdict join per run_id, no-terminal counted explicitly, never dropped", () => {

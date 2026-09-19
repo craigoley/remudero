@@ -482,7 +482,7 @@ export function workerLedgerFields(r: WorkerResult): {
     tokens: r.tokens,
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
-    billing_mode: billingMode(r.childEnvKeys),
+    billing_mode: r.provider === "cash" ? "api" : billingMode(r.childEnvKeys),
     max_turns: r.maxTurns,
     // The account this spend is attributed to — a NAME, never a credential, carried verbatim off `WorkerResult.accountLabel`.
     // `undefined`, never guessed, when none resolved (W1-T268).
@@ -2079,6 +2079,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       args.model,
       args.effort,
       Buffer.byteLength(args.prompt ?? "", "utf8"),
+      { cashSqueezed: args.cashSqueezed === true },
     );
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "cash",

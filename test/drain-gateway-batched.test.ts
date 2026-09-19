@@ -341,15 +341,16 @@ test("the gateway is constructed ONCE per drain, and each pass clears its failur
 
 // ── 5. the two commands' factories must not drift apart again ───────────────────────────────
 
-test("drainCommand and daemonCommand build their gateway with the SAME expression — the drift that caused #1532", () => {
+test("drainCommand keeps its batched gateway while daemonCommand adds target-rooted trailer credit", () => {
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   const factories = src.split("\n").filter((l) => l.includes("const githubFactory = deps.githubFactory ??"));
-  assert.equal(factories.length, 2, "exactly two commands build a status gateway this way");
+  assert.equal(factories.length, 2, "exactly two commands assign the status gateway factory");
   assert.equal(
-    factories[0].trim(),
-    factories[1].trim(),
-    "byte-identical, deliberately: #1532 was one command reading a gateway the other did not, and the " +
-      "two share refreshMerged/isOpenPr/openPrCount/isIndeterminate verbatim — the factory was the one line they did not",
+    factories[0].includes("buildBatchedGithub"),
+    true,
+    "drainCommand retains the direct batched gateway construction",
   );
-  assert.match(factories[0], /buildBatchedGithub/, "and both are the BATCHED form");
+  assert.match(factories[1], /gatewayFor/, "daemonCommand routes through its target-aware gateway factory");
+  assert.match(src, /targetCommitTrailerIndex/);
+  assert.match(src, /commitTrailerIndex: targetCommitTrailerIndex/);
 });

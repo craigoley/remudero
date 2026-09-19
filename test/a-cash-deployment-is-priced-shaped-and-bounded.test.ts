@@ -50,6 +50,16 @@ test("W1-T3689: no cash ladder row is single-candidate", () => {
   }
 });
 
+test("cash economy and balanced rows retain Luna as the independent squeeze candidate", () => {
+  const mounts = loadMounts(".remudero/mounts.yaml");
+  const cash = mounts.capabilities?.cash;
+  assert.ok(cash, "the cash ladder must exist");
+  for (const effort of ["low", "medium", "high"] as const) {
+    assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"]);
+    assert.deepEqual(cash.balanced[effort], ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"]);
+  }
+});
+
 // Terra earns its place on CAPABILITY, not price: it is 10x luna on both axes and may lead the
 // frontier band only. A test keeps the price table saying so.
 test("terra is recorded as dearer than luna on both axes, so nothing routes to it to save money", () => {

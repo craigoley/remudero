@@ -76,10 +76,11 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
       const trail = lead === NANO ? OSS : NANO;
       assert.ok(Array.isArray(row), `${capability}.${effort} must be an ordered candidate list`);
       assert.equal(row[0], lead, `${capability}.${effort} must LEAD with the deployment measured cheaper for its prompt shape`);
-      // THE FALLBACK ARM. Without this, deleting the trailing deployment would pass — and that is
+      // THE FALLBACK ARMS. Without these, deleting a trailing deployment would pass — and that is
       // the regression that turns a bad deployment day into a dead lane rather than a degraded one.
       assert.ok(row.includes(trail), `${capability}.${effort} must keep ${trail} reachable as a fallback`);
       assert.ok(row.indexOf(lead) < row.indexOf(trail), "the measured-cheaper deployment must be preferred, not merely present");
+      assert.equal(row.at(-1), LUNA, `${capability}.${effort} must keep Luna available to the cash squeeze selector`);
     }
   }
 
@@ -203,6 +204,7 @@ test("the code fallback and the mounts ladder name one leading deployment", () =
   // at 10x luna, reached only when luna is unavailable.
   assert.equal(openWeightCandidatesForCapability(undefined, "economy", "low")[0], OSS);
   assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(NANO), "the fallback keeps gpt-5-nano reachable too");
+  assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(LUNA), "the fallback keeps Luna reachable for a cash squeeze too");
   assert.equal(openWeightCandidatesForCapability(undefined, "balanced", "high")[0], NANO);
   assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), [LUNA, TERRA]);
 });

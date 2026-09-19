@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_REQUEST_TIMEOUT_MS,
   OpenWeightRequestTimeoutError,
   OpenWeightTruncatedReplyError,
@@ -29,9 +30,9 @@ test("an ABSENT finish_reason reads as complete — a missing field must not inv
 });
 
 test("the truncation refusal names the budget it hit, so the remedy is readable from the error", () => {
-  const e = new OpenWeightTruncatedReplyError("length", 5000);
+  const e = new OpenWeightTruncatedReplyError("length", OPENWEIGHT_MAX_COMPLETION_TOKENS);
   assert.match(e.message, /TRUNCATED by the completion budget/);
-  assert.match(e.message, /OPENWEIGHT_MAX_COMPLETION_TOKENS=5000/);
+  assert.match(e.message, /OPENWEIGHT_MAX_COMPLETION_TOKENS=8000/);
   assert.match(e.message, /shrink the request or raise the budget/);
   assert.match(e.message, /Refusing to return a partial answer as a whole one/);
 });
@@ -82,6 +83,36 @@ function harness(root: string, body: unknown) {
     { model: "gpt-5-nano", effort: "low" },
   ] as const;
 }
+
+test("the bounded 8,000-token ceiling reaches the Azure request", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-completion-ceiling-"));
+  let requestBody: Record<string, unknown> | undefined;
+  try {
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "classify",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async (_input, init) => {
+          requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({
+            id: "completion-ceiling",
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+            choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 5, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } } as Config,
+      { model: "gpt-5-nano", effort: "low" },
+    );
+    assert.equal(result.isError, false);
+    assert.equal(OPENWEIGHT_MAX_COMPLETION_TOKENS, 8_000, "the ceiling remains bounded after accommodating observed truncations");
+    assert.equal(requestBody?.max_completion_tokens, 8_000, "the Azure request must receive the bounded ceiling");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a budget-truncated reply is REFUSED by the adapter, not returned as an answer", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-truncated-"));

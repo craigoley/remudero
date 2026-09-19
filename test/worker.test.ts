@@ -541,6 +541,17 @@ test("workerLedgerFields: billing_mode is DERIVED 'api' when the child spawned W
   );
 });
 
+test("workerLedgerFields: a cash result is api-billed even though the Foundry key stays out of its worker environment", async () => {
+  const r = await collectWorkerResult(usageStream(), {
+    childEnvKeys: [],
+    model: "gpt-5-nano",
+  });
+  const fields = workerLedgerFields({ ...r, provider: "cash" });
+  assert.equal(fields.billing_mode, "api", "cash spend is real API spend, not a subscription run");
+  assert.equal(fields.provider, "cash");
+  assert.equal(JSON.stringify(fields).includes("RMD_OPENWEIGHT_API_KEY"), false, "the daemon-only key name never enters a ledger row");
+});
+
 // ── W1-T35: cache tokens ledgered as NAMED COLUMNS (flat, snake_case — matching
 // the SDK envelope's own field names) so the cache-reuse signal (MASTER-PLAN
 // §8A: "near-zero cache reads on the second worker of a run means the ordering
