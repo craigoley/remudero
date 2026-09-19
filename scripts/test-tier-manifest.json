@@ -999,6 +999,7 @@
     "test/open-prs-rest.test.ts": 2042,
     "test/openpr-taskid-resolver.test.ts": 1195,
     "test/operator-agent.test.ts": 1500,
+    "test/operator-agent-capacity.test.ts": 500,
     "test/operator-agent-decisions.test.ts": 1000,
     "test/operator-agent-outcomes.test.ts": 0,
     "test/operator-gated-default-reachability.test.ts": 4097,
