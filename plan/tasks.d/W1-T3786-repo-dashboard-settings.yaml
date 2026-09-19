@@ -1,0 +1,60 @@
+- id: W1-T3786
+  title: "API-T3786 — Persist repo activation and dashboard settings"
+  repo: remudero
+  depends_on: [W1-T3783]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  origin: human
+  plan_refs: ["§7A"]
+  files:
+    - src/lib/repo-dashboard-config.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - packages/api-client/src/client.ts
+    - test/repo-dashboard-config.test.ts
+    - test/api-client-client.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on current main at 6e238588a18afc4329441de00235b27c20e77daf: `.remudero/managed-repos.json`
+    is a validated identity allow-list used by issues intake, and the merged dashboard scaffold
+    has no durable settings or activation source. Treating local React state as proof policy,
+    worker-pool size, alert threshold, or live activation would make a reload and the daemon
+    disagree.
+
+    This task adds a separate non-secret configuration concern after W1-T3783. It does not store
+    OAuth credentials and does not claim GitHub connection; those require a separate auth contract.
+  design: |
+    (i) Add a validated `.remudero/repo-dashboard.json` document keyed by canonical `owner/repo`
+    identity. It stores only activation, task types, proof policy, worker-pool size, and alert
+    threshold. The existing managed-repo identity file remains unchanged for issues intake.
+
+    (ii) Add read/write-scoped daemon routes for reading and updating one repo's dashboard config,
+    with strict validation, unknown-repo refusal, atomic persistence, and no secret material in the
+    file. The portfolio response should expose configured values only when this document contains
+    them; otherwise it must retain explicit unknowns.
+
+    (iii) Extend OpenAPI and `DaemonClient` through the generated schema/client boundary. Add
+    falsifier tests for malformed config, unknown repo ids, read-vs-write scope, and a write followed
+    by a fresh read. Do not add OAuth, logs, dry-run, or telemetry attribution to this task.
+  acceptance:
+    - claim: "dashboard activation and settings have one validated durable daemon source"
+      proof: "grep: repo-dashboard\\.json in src/lib/repo-dashboard-config.ts"
+    - claim: "settings writes are exposed through the generated client rather than dashboard fetch"
+      proof: "grep: updateRepoSettings in packages/api-client/src/client.ts"
+    - claim: "malformed and unknown-repo configuration states are refused by tests"
+      proof: "grep: unknown repo in test/repo-dashboard-config.test.ts"
+    - claim: "the settings work remains reachable from the mounted portfolio surface"
+      proof: "grep: buildRepoDashboardRoute( in src/lib/serve.ts"
+  falsifier: |
+    Close without implementation if the daemon already persists the requested per-repo settings,
+    validates them independently of the issues-intake allow-list, and exposes a typed read/write
+    client path. Current main has none of those three surfaces.
+  note: |
+    OAuth credentials are explicitly out of scope and must not be placed in the new JSON document.
+    This task must use a session branch shaped `run-W1-T3786-<epochMs>` and carry
+    `Remudero-Task: W1-T3786` when built.

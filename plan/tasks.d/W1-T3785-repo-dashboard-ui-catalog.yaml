@@ -1,0 +1,59 @@
+- id: W1-T3785
+  title: "UI-T3785 — Wire the repo dashboard to the daemon portfolio contract"
+  repo: remudero
+  depends_on: [W1-T3783]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  origin: human
+  plan_refs: ["§7A", "§7B"]
+  files:
+    - apps/dashboard/src/api/repoTelemetry.ts
+    - apps/dashboard/src/types/repo.ts
+    - apps/dashboard/src/store/repos.ts
+    - apps/dashboard/src/hooks/useRepos.ts
+    - apps/dashboard/src/components/RepoCard.tsx
+    - apps/dashboard/src/components/RepoDetail.tsx
+    - apps/dashboard/src/__tests__/repo-dashboard.test.tsx
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on current main at 6e238588a18afc4329441de00235b27c20e77daf: the React dashboard
+    still seeds its repo store locally and labels every repo endpoint as a placeholder, while
+    W1-T3783's implementation PR adds a typed daemon portfolio read. The UI therefore cannot show
+    the managed-repo set from the server and its non-null local defaults would misrender missing
+    connection/settings state as inactive or configured.
+
+    This task consumes W1-T3783 after it lands. It does not add OAuth, write settings, telemetry,
+    logs, or dry-run behavior; it makes the existing list/card/detail surfaces honest and live for
+    the one read contract that now has a durable source.
+  design: |
+    (i) Add one dashboard adapter around `DaemonClient.listRepos()` from the generated client. The
+    adapter must use the existing `readConfig`/`clientFor` seam and must not hand-roll `fetch`.
+
+    (ii) Make the dashboard repo model null-safe for fields the daemon reports as unknown. The card
+    and detail views render `Unknown`/`—` for null connection, activation, health, telemetry, and
+    settings values; they must not substitute `new Date(0)`, false, or local default settings for a
+    server response.
+
+    (iii) Preserve the existing store filtering, sorting, selection, and local action affordances.
+    Actions whose daemon write contracts do not exist remain visibly unavailable/placeholders, and
+    tests prove that a server catalog response replaces local seed data without losing unknowns.
+  acceptance:
+    - claim: "the dashboard loads its repo catalog through the generated daemon client"
+      proof: "grep: daemonRepoCatalog in apps/dashboard/src/api/repoTelemetry.ts"
+    - claim: "dashboard repo identity and connection state preserve an explicit unknown value"
+      proof: "grep: connected_at: string | null in apps/dashboard/src/types/repo.ts"
+    - claim: "the UI has a regression test for the server catalog and unknown state"
+      proof: "grep: unknown repo state in apps/dashboard/src/__tests__/repo-dashboard.test.tsx"
+  falsifier: |
+    Close without implementation if the dashboard already calls `DaemonClient.listRepos()` and
+    renders nullable connection/settings/telemetry fields from that response. Current main has no
+    `daemonRepoCatalog` adapter, `Repo.connected_at` is non-null, and the dashboard test suite only
+    exercises local `makeRepo` seed data plus placeholder telemetry.
+  note: |
+    This task is intentionally blocked behind W1-T3783's server/client contract. It must use a
+    session branch shaped `run-W1-T3785-<epochMs>` and carry `Remudero-Task: W1-T3785` when built.
+
