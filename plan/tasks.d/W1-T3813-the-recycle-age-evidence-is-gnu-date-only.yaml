@@ -1,0 +1,59 @@
+- id: W1-T3813
+  title: "THE RECYCLE AGE-EVIDENCE PATH IS GNU-date-only — its Bash-3.2 portability claim omits the BSD date parser"
+  repo: remudero
+  depends_on: [W1-T3799]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [deploy/recycle-container.sh]
+  origin: "recon#core-preflight-recycle-first-run-2026-09-19"
+  plan_refs: ["W1-T2598", "W1-T3595", "W1-T3799"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE MACOS BASH-3.2 HOST, 2026-09-19. `oldest_inflight_age_s` reads each lock's
+    ISO `startedAt`, then calls `date -u -d "${started_at}" +%s`. BSD date rejects `-d`; the
+    guarded command therefore produces an empty epoch and the function returns no age. The
+    W1-T2598 timeout refusal still names the distribution and lock, but omits its promised
+    "oldest in-flight work this run observed" sentence. The existing real-script test exposed
+    this only after W1-T3799's empty-array repair allowed it to reach the wait refusal.
+
+    This is a runtime evidence defect, not a wait-policy defect. The 3000-second bound, the
+    in-flight lock read, and refusal behavior remain correct. The source explicitly claims Bash
+    3.2 portability after W1-T3595, but that claim is incomplete while its timestamp parser is
+    GNU-only. The direct falsifier is available without inference: on this host, `date -u -d
+    2020-01-01T00:00:00.000Z +%s` exits non-zero; the existing lock timestamp has that exact
+    portable ISO shape.
+  design: |
+    Add one shell helper that turns a lock's ISO UTC timestamp into epoch seconds. It must try
+    GNU date's `-d` form first, then the BSD `date -j -u -f` form after removing the fractional
+    suffix from the known `YYYY-MM-DDTHH:MM:SS.000Z` lock shape. An unreadable or malformed time
+    remains an empty result and is skipped exactly as today; the helper must not turn it into zero
+    or a fabricated age.
+
+    Route only `oldest_inflight_age_s` through that helper. Extend the existing real-script test
+    with a controlled BSD-date fallback fixture and a macOS-host run: each must reach the ordinary
+    bounded-wait refusal and print an age near the fixture timestamp. Keep the W1-T3799 empty
+    array regression intact, but do not change its safety semantics.
+
+    Do not lower or widen W1-T2598's wait, change the hung-worker age threshold, change lock
+    reclamation, parse timestamps with a new runtime dependency, or suppress a parse failure.
+    Those change recycle safety rather than make its existing evidence portable.
+  acceptance:
+    - claim: "a BSD-date fallback parses the lock's ISO timestamp and causes the bounded-wait refusal to name the oldest observed age"
+      proof: "unit test: W1-T3813: BSD-date fallback preserves oldest-lock age evidence"
+    - claim: "a malformed lock timestamp remains unmeasured rather than becoming a fabricated zero age"
+      proof: "unit test: W1-T3813: malformed timestamp stays absent from age evidence"
+  falsifier: |
+    Remove the BSD fallback while the controlled date fixture rejects GNU `-d`: the first
+    regression must again omit the oldest-age sentence. Change the helper to return zero after
+    both parsers fail: the malformed-timestamp regression must fail by observing a fabricated
+    zero age. Restoring the two-path parser and empty-on-failure behavior makes both pass.
+  note: |
+    reservation hand-off: chore/amend-W1-T3793-freshness-proof-1789849419529 -> plan/file-W1-T3813-bash3-date
+
+    FILES NOTE (W1-T3730): the build extends the existing real-script suite after this filing.
+    It is omitted from `files:` so the plan-only record does not claim test titles that do not
+    exist until the implementation PR adds them.
