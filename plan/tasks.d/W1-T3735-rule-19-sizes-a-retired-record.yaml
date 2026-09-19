@@ -52,7 +52,7 @@
     - claim: "the downgraded message says why it was downgraded, so the observation is not silently lost"
       proof: "unit test: the downgraded sizing violation names the retirement"
     - claim: "a live record of the same shape still blocks, so the rule is not weakened for anything dispatchable"
-      proof: "unit test: a withdrawn record is downgraded while a live record with the same span still blocks"
+      proof: "unit test: a live record with the same span still blocks"
   falsifier: |
     Drop the violation entirely for a retired record rather than downgrading it and the second
     assertion goes red — a record that is later un-retired would come back with no sizing
