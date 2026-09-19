@@ -12,8 +12,10 @@ import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.j
  * naming the OBSERVED blocker (W1-T186). Judgment ({@link RiskJudgeVerdict}) and action
  * ({@link planRiskJudgeAction}) stay separate — the mapping is pure, no LLM call inside it.
  *
- * JUDGE-UNAVAILABLE (spawn error, timeout, unparseable response) always falls back to
- * ESCALATE, never silent-proceeds (W1-T130) — enforced inside {@link assessRisk} itself.
+ * JUDGE-UNAVAILABLE (spawn error, timeout, unparseable response) is represented as a distinct
+ * availability state. The reusable/default controller remains fail-closed to ESCALATE (W1-T130),
+ * while an explicitly configured autonomous caller may retain its deterministic gate behavior
+ * without manufacturing an LLM risk decision.
  *
  * STABLE ON UNCHANGED INPUT (W1-T178): an optional {@link RiskJudgeCache}, keyed on {@link
  * canonicalRiskJudgeInputKey}, reuses a prior verdict rather than risking a flapped re-judgment.
@@ -28,6 +30,7 @@ import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.j
 // ── The verdict contract ────────────────────────────────────────────────
 
 export type RiskJudgeVerdictLabel = "low" | "high";
+export type RiskJudgeAvailability = "available" | "unavailable";
 export type RiskJudgeGateConsequence = "LAND" | "REPAIR" | "LAND+DEBT" | "STOP";
 
 export const RISK_JUDGE_GATE_CONSEQUENCES: readonly RiskJudgeGateConsequence[] = [
@@ -41,6 +44,8 @@ export const RISK_JUDGE_GATE_CONSEQUENCES: readonly RiskJudgeGateConsequence[] =
  *  criterion 6 names verbatim: `{verdict, reasons, confidence}`. */
 export interface RiskJudgeVerdict {
   verdict: RiskJudgeVerdictLabel;
+  /** Absent for the historical parsed shape; present when no LLM decision was available. */
+  availability?: RiskJudgeAvailability;
   /** Concrete, OBSERVED reasons (W1-T186) — never an inferred symptom. Ledgered verbatim. */
   reasons: string[];
   /** 0..1, the judge's OWN self-reported confidence. Ledgered verbatim (round ii). */
@@ -430,9 +435,10 @@ export function parseRiskJudgeVerdict(text: string): RiskJudgeVerdict {
  *  Why: docs/forensics/risk-judge.md#malformed_response_verdict. */
 const MALFORMED_RESPONSE_VERDICT: RiskJudgeVerdict = {
   verdict: "high",
+  availability: "unavailable",
   confidence: 0,
   reasons: [
-    "judge output carried no parseable RISK_VERDICT — failing closed (never silent-proceed); " +
+    "judge output carried no parseable RISK_VERDICT — no LLM risk decision was made; " +
       "this is a MALFORMED RESPONSE, not an adverse risk judgment",
   ],
 };
@@ -449,6 +455,8 @@ export interface RiskJudgeAction {
 export interface RiskJudgeConfig {
   /** Below this self-reported confidence, even a `low` verdict escalates. Default 0.7. */
   confidenceThreshold?: number;
+  /** Default is fail-closed ESCALATE. Autonomous callers may retain deterministic gate behavior. */
+  judgeUnavailableAction?: RiskJudgeActionKind;
 }
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
@@ -543,8 +551,9 @@ export interface RiskJudgeDeps {
 
 /** Assess ONE candidate change: `{change, gatesState, planContext} -> {verdict, reasons,
  *  confidence}` (acceptance criterion 6). JUDGE-UNAVAILABLE (spawn error, timeout, thrown
- *  rejection) is caught HERE and turned into a fail-closed `high`/confidence-0 verdict —
- *  never silent-proceed (W1-T130); every reuse site inherits the guarantee. STABLE ON
+ *  rejection) is caught HERE and turned into a compatibility `high`/confidence-0 verdict with
+ *  `availability: "unavailable"`; the availability marker prevents an autonomous caller from
+ *  confusing an observation failure with an adverse LLM judgment. STABLE ON
  *  UNCHANGED INPUT (W1-T178): with `deps.cache`, an unchanged input returns the cached
  *  verdict rather than re-invoking `judge`. */
 export async function assessRisk(input: RiskJudgeInput, deps: RiskJudgeDeps): Promise<RiskJudgeVerdict> {
@@ -558,10 +567,10 @@ export async function assessRisk(input: RiskJudgeInput, deps: RiskJudgeDeps): Pr
   } catch (err) {
     verdict = {
       verdict: "high",
+      availability: "unavailable",
       confidence: 0,
       reasons: [
-        `judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing closed to ESCALATE, ` +
-          "never silent-proceed (the cannot-observe→wait polarity, W1-T130, applied to the judge itself)",
+        `judge unavailable (${err instanceof Error ? err.message : String(err)}) — no LLM risk decision was made`,
       ],
     };
   }
@@ -640,7 +649,9 @@ export interface RiskJudgeResult {
 }
 
 /** Assess one candidate change and act deterministically: PROCEED (nothing further
- *  happens) or ESCALATE (`deps.escalate` is called). Ledgers ONE `risk_judge.decision`
+ *  happens) or ESCALATE (`deps.escalate` is called). The default remains fail-closed for an
+ *  unavailable judge; an explicit `judgeUnavailableAction: "proceed"` lets an autonomous
+ *  caller retain the deterministic gates that already ran. Ledgers ONE `risk_judge.decision`
  *  line, verdict/reasons/confidence verbatim, before deciding whether to escalate. */
 export async function runRiskJudge(
   input: RiskJudgeInput,
@@ -649,12 +660,19 @@ export async function runRiskJudge(
 ): Promise<RiskJudgeResult> {
   const log = deps.log ?? (() => {});
   const verdict = await assessRisk(input, deps);
-  const action = planRiskJudgeAction(verdict, config);
+  const action =
+    verdict.availability === "unavailable" && config.judgeUnavailableAction === "proceed"
+      ? {
+          kind: "proceed" as const,
+          reason: "risk judge unavailable — retaining the deterministic gate behavior; no LLM risk decision was made",
+        }
+      : planRiskJudgeAction(verdict, config);
 
   // Read once, after assessRisk's own spawning is done, onto the same row (keys OMITTED when unwired).
   const spent = deps.spend?.total();
   log("risk_judge.decision", {
     verdict: verdict.verdict,
+    ...(verdict.availability === undefined ? {} : { availability: verdict.availability }),
     reasons: verdict.reasons,
     confidence: verdict.confidence,
     ...(verdict.gateConsequence === undefined ? {} : { gate_consequence: verdict.gateConsequence }),
@@ -766,8 +784,9 @@ export const RISK_JUDGE_MAX_ATTEMPTS = 3;
 /** Build a `judge` function wired to a real spawn. THE RETRY RE-REQUESTS, NEVER RE-ASKS
  *  (W1-T2212): the same args (prompt included) go to `spawn` on every attempt. Only an
  *  `unparseable` outcome retries, bounded at {@link RISK_JUDGE_MAX_ATTEMPTS}; a parsed
- *  verdict returns immediately. At the bound, {@link MALFORMED_RESPONSE_VERDICT} returns,
- *  still fail-closed to ESCALATE. Why: docs/forensics/risk-judge.md#realriskjudge. */
+ *  verdict returns immediately. At the bound, {@link MALFORMED_RESPONSE_VERDICT} returns;
+ *  the caller's unavailable-judge policy then decides whether to retain deterministic flow or
+ *  escalate. Why: docs/forensics/risk-judge.md#realriskjudge. */
 export function realRiskJudge(opts: {
   mount: Mount;
   cwd: string;
@@ -804,8 +823,8 @@ export function realRiskJudge(opts: {
         return {
           ...MALFORMED_RESPONSE_VERDICT,
           reasons: [
-            `judge output carried no parseable RISK_VERDICT after ${attempt} attempt(s) — failing ` +
-              "closed (never silent-proceed); this is a MALFORMED RESPONSE, not an adverse risk judgment",
+            `judge output carried no parseable RISK_VERDICT after ${attempt} attempt(s) — no LLM ` +
+              "risk decision was made; this is a MALFORMED RESPONSE, not an adverse risk judgment",
           ],
         };
       }
