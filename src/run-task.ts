@@ -10011,11 +10011,12 @@ export async function runFixRung(opts: {
     // review verdict derives, exactly like `noReviewYet`'s own reversion.
     currentMergeConflict = undefined;
 
-    // W1-T256: in body-coverage mode judge the CURRENT PR BODY — the artifact the
-    // worker was told to substantiate and the one the authoritative reviewCommand/
-    // post-review path judges — not the fix worker's chat text. Best-effort: an
-    // absent/throwing fetchPrBody falls back to the worker-text report (pre-W1-T256
-    // behavior). Every other mode is unchanged.
+    // W1-T3501: judge the CURRENT PR BODY — the artifact the authoritative
+    // reviewCommand/post-review path judges — not the fix worker's chat text. The
+    // worker transcript remains available to the prompt and diagnostics, including
+    // proof-discrimination's proposal parser below. Best-effort: an absent/throwing
+    // fetchPrBody falls back to the worker-text report and marks it as a substitute,
+    // so a transport failure cannot be certified as the PR's own claim.
     // W1-T186 round-2 note (the OBSERVED-not-inferred discipline applied to the gate
     // itself): a body-coverage fix worker that edits the PR body as its LAST action of
     // an exhausted strike (no strike budget left to re-verify) leaves the NEXT strike's
@@ -10026,36 +10027,27 @@ export async function runFixRung(opts: {
     // the reported reason still holds.
     let reviewReport = workerTranscript(fixResult);
     let reviewInputBody: string | undefined;
-    let reviewInputBodyFetchAttempted = false;
-    // W1-T1254: `reviewReport` above is the WORKER'S OWN NARRATIVE, and the body is fetched only
-    // in `body-coverage` below — so `reviewer-unmet`, `ci-log` and `merge-conflict` hand the
-    // reviewer prose that was never a claim about the changeset. `judgeReview` skips
-    // `bodyContradictsDiff` ONLY when it is told the report is a substitute, so leaving this
-    // unset made a worker fail its own PR on a claim the body never made (#2569, measured), and
-    // the author could not clear it: the verdict is write-once per head sha and the document
-    // being corrected was not the one being read. Defaulting TRUE covers the three
-    // never-fetch modes by the initialiser rather than a per-mode branch, and leaves a THROWING
-    // fetch correct for free. W1-T1100 (#2415) added this flag and guarded both consumers; none
-    // of its hunks reached this call site, whose `report:` line still blames to #762.
+    // W1-T1254/W1-T3501: the worker transcript starts as a substitute. Only a
+    // successful read of the live PR body clears the flag; a throwing or absent
+    // read must never let narrative text reach the changeset-claim detector as if
+    // the author wrote it.
     let reviewReportIsSubstitute = true;
-    // The DEFAULT cause matches the default flag: these three modes never ask for the body,
-    // so "never-fetched" is the truth and the mode name is the actionable half of it. Only
-    // the catch below may overwrite it, so a fetch failure can never be asserted by accident.
+    // The default cause identifies a worker transcript that has not yet been replaced by a
+    // successful body read. Only the catch below may overwrite it, so a fetch failure can never
+    // be asserted by accident.
     let reviewReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause = { kind: "never-fetched", fixMode };
-    if (fixMode === "body-coverage" || fixMode === "proof-discrimination") {
-      const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
-      try {
-        reviewInputBodyFetchAttempted = true;
-        reviewReport = await fetchBody(opts.prUrl);
-        reviewInputBody = reviewReport;
-        // Only HERE is `reviewReport` the real PR body. A throw leaves the assignment undone and
-        // the flag true, which is the honest reading: the catch below logs and falls through.
-        reviewReportIsSubstitute = false;
-      } catch (e) {
-        reviewReportSubstituteCause = { kind: "fetch-failed" };
-        deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
-      }
-      if (fixMode === "body-coverage") {
+    const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
+    try {
+      reviewReport = await fetchBody(opts.prUrl);
+      reviewInputBody = reviewReport;
+      // Only HERE is `reviewReport` the real PR body. A throw leaves the assignment undone and
+      // the flag true, which is the honest reading: the catch below logs and falls through.
+      reviewReportIsSubstitute = false;
+    } catch (e) {
+      reviewReportSubstituteCause = { kind: "fetch-failed" };
+      deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+    }
+    if (fixMode === "body-coverage") {
       // W1-T307: THE COMMIT THAT CHANGES THE DIFF OWNS THE CLAIM ABOUT THE DIFF. This strike
       // is exactly the shape that repairs coverage by ADDING a file (the #1202/W1-T301
       // fixture) — check whether the body just fetched now carries a stale file-count/
@@ -10107,7 +10099,6 @@ export async function runFixRung(opts: {
       } catch (e) {
         deps.log("fix.body_claim_update_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
-      }
     }
     // W1-T3434: THE PARENT-OWNED CAPPED-PROOF-AMENDMENT EFFECT. `evidence.proofDiscrimination`
     // (set only for THIS mode, above) is the exact structured stale-proof evidence the prompt just
@@ -10134,16 +10125,6 @@ export async function runFixRung(opts: {
         log: deps.log,
         getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
       });
-    }
-    // The other fix modes deliberately judge worker prose, but retry/backoff still belongs to
-    // material PR input. Fetch the body independently without changing the report the established
-    // reviewer path consumes. Failure leaves identity unset and therefore cannot spend the cap.
-    if (reviewInputBody === undefined && !reviewInputBodyFetchAttempted && deps.fetchPrBody !== undefined) {
-      try {
-        reviewInputBody = await deps.fetchPrBody(opts.prUrl);
-      } catch (e) {
-        deps.log("review.input_body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
-      }
     }
     // W1-T3557: RE-RESOLVE THE CONTRACT AT THE CURRENT PR HEAD, right before it is handed to the
     // reviewer — never earlier, so a strike's own push (just landed, just gone CI-green above)
@@ -13912,6 +13893,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       loadInjectableSkills(join(repoRoot, ".claude", "skills")),
       task.type,
       DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      task.files,
     );
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);

@@ -91,6 +91,7 @@ import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
+import { buildOperatorAgentRoutes } from "./operator-agent.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -3618,6 +3619,7 @@ function assembleServeRoutes(
     // (ledgerPanelAction, panel-actions.ts:134), which is identical across both PanelActionDeps
     // instances built above -- so this route reads no root at all and cannot be misrooted.
     buildDrainFeedbackRoute(fleetControlDeps),
+    ...buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath }),
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every

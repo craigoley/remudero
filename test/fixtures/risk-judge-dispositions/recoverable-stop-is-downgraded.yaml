@@ -1,0 +1,17 @@
+id: recoverable-stop-is-downgraded
+description: a recoverable finding cannot become a hard stop merely because the judge says stop
+finding:
+  gate: coverage
+  finding: coverage evidence is incomplete, but the next run can repair it
+  recoverability: recoverable
+  currentConsequence: STOP
+judge:
+  verdict: high
+  confidence: 0.88
+  reasons: ["the current evidence is incomplete"]
+  gateConsequence: STOP
+expected:
+  outcome: LAND+DEBT
+  judgmentSpawned: true
+  fallback: false
+  sideEffect: fileDebt

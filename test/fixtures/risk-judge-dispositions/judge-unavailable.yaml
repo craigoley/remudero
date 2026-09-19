@@ -1,0 +1,14 @@
+id: judge-unavailable
+description: a judging outage restores the gate's current behavior instead of inventing a new action
+finding:
+  gate: dependency-review
+  finding: the dependency review needs a judgment
+  recoverability: recoverable
+  currentConsequence: REPAIR
+judge:
+  unavailable: true
+expected:
+  outcome: REPAIR
+  judgmentSpawned: true
+  fallback: true
+  sideEffect: none

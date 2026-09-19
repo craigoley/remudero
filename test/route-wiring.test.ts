@@ -100,6 +100,18 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
       "test/escalation-answer-links.test.ts, and its exemption from the scope audit is reviewed in " +
       "test/route-scope-matrix.test.ts's SELF_AUTHENTICATED table.",
   ],
+  [
+    "POST /v1/operator-agent/proposals",
+    "ledger-only operator-agent history write; route behavior and read/write separation are covered in test/operator-agent.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/proposals/decision",
+    "ledger-only operator-agent decision write; route behavior and read/write separation are covered in test/operator-agent.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/proposals/outcome",
+    "ledger-only operator-agent outcome write; route behavior and read/write separation are covered in test/operator-agent.test.ts",
+  ],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
