@@ -294,6 +294,10 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
+  const previousCi = process.env.CI;
+  const previousGithubActions = process.env.GITHUB_ACTIONS;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
 
   try {
     let captured: DaemonDeps | undefined;
@@ -325,6 +329,10 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    if (previousCi === undefined) delete process.env.CI;
+    else process.env.CI = previousCi;
+    if (previousGithubActions === undefined) delete process.env.GITHUB_ACTIONS;
+    else process.env.GITHUB_ACTIONS = previousGithubActions;
     cleanupGit.cleanup();
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
