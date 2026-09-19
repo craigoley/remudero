@@ -1810,6 +1810,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
   },
   standaloneNpmScriptEntry("coverage-session-blanking.yml", "coverage-session-blanking", "coverage-session-blanking:check"),
   {
+    workflow: "pr-title-lint.yml",
+    job: "commitlint",
+    mirrored: false,
+    reason: "reads the live pull-request title through GitHub's event-bound gh token; the local pre-push gate has no PR event or title identity to substitute honestly",
+  },
+  {
     workflow: "dependency-review.yml",
     job: "dependency-review",
     mirrored: false,
