@@ -13,7 +13,7 @@ raw: "Dedicated-instance plan freshness gap: a daemon launched with --repo
   and preserves independent instance state and locks."
 attachments: []
 origin: cli
-status: accepted
+status: proposed
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/5494
 summary:

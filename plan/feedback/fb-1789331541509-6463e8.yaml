@@ -21,7 +21,7 @@ raw: "DRAFT IS AN OPERATOR HOLD, NOT A RETRYABLE AUTO-MERGE ERROR. Site daemon
   false."
 attachments: []
 origin: cli
-status: accepted
+status: proposed
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/5492
 summary:
