@@ -78,6 +78,12 @@ test("W1-T3807 criterion 4: live unavailable and stale states remain explicit wh
   assert.equal(unavailable.queue.trend.state, "not-collected");
   assert.equal(unavailable.provider.allowance.trend.state, "not-collected");
 
+  const unreadable = adaptLiveAnalyticsMetrics({
+    status: { generated_at: "2026-09-19T20:00:00.000Z", counts: {} },
+  });
+  assert.equal(unreadable.queue.pending.state, "unreadable");
+  assert.equal(unreadable.queue.pending.reason, "status snapshot has no queued count");
+
   const stale = adaptLiveAnalyticsMetrics({
     status: { counts: { queued: 4 } },
     provider: { state: "selected", freshness: "stale", observedAt: "2026-09-19T18:00:00.000Z" },
