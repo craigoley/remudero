@@ -63,7 +63,7 @@ function writeStubs(dir: string): void {
     "    shift",
     '    fmt=""',
     '    if [ "$1" = "--format" ]; then fmt="$2"; shift 2; fi',
-    '    if [ -z "$fmt" ]; then exit 0; fi', // container exists
+    '    if [ -z "$fmt" ]; then [ "${STUB_CONTAINER_EXISTS:-1}" = "1" ] && exit 0; exit 1; fi',
     '    case "$fmt" in',
     '      *Config.Image*) echo "test-registry/remudero:old"; exit 0 ;;',
     '      *Config.Env*) echo "GH_TOKEN=captured-token-value"; echo ""; exit 0 ;;',
@@ -264,6 +264,89 @@ test("W1-T2598: the hung-work age threshold (HUNG_WORKER_AGE_S) is not moved", (
     /HUNG_WORKER_AGE_S="\$\{RMD_RECYCLE_HUNG_AGE_S:-7200\}"/,
     "W1-T1046's hung-age default and override must be byte-identical to before this change",
   );
+});
+
+// ── W1-T3799: Bash 3.2 gives an empty array a nounset error even after `array=()` ───────────────
+
+test("W1-T3799: a container with an empty image environment reaches its bounded wait", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+  writeLock(state, "W1-T3799-image-env", "2020-01-01T00:00:00Z");
+
+  const run = runRecycle({ stateDir: state, extraEnv: { RMD_RECYCLE_WAIT_S: "1", RMD_RECYCLE_POLL_S: "1" } });
+  assert.notEqual(run.status, 0, "the existing bounded wait must still refuse a held lock");
+  assert.match(run.stderr, /still in flight after 1s/);
+  assert.doesNotMatch(run.stderr, /unbound variable/, "an empty image environment is valid input, not a shell abort");
+});
+
+test("W1-T3799: no-container recycle reaches its bounded wait", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+  writeLock(state, "W1-T3799-no-container", "2020-01-01T00:00:00Z");
+
+  const run = runRecycle({
+    stateDir: state,
+    extraEnv: {
+      STUB_CONTAINER_EXISTS: "0",
+      GH_TOKEN: "fixture-token",
+      RMD_RECYCLE_WAIT_S: "1",
+      RMD_RECYCLE_POLL_S: "1",
+    },
+  });
+  assert.notEqual(run.status, 0, "a held lock must reach the ordinary wait refusal");
+  assert.match(run.stderr, /still in flight after 1s/);
+  assert.doesNotMatch(run.stderr, /unbound variable/);
+});
+
+test("W1-T3799: no-container recycle retains the wait refusal evidence", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+  writeLock(state, "W1-T3799-no-container-evidence", "2020-01-01T00:00:00Z");
+
+  const run = runRecycle({
+    stateDir: state,
+    extraEnv: {
+      STUB_CONTAINER_EXISTS: "0",
+      GH_TOKEN: "fixture-token",
+      RMD_RECYCLE_WAIT_S: "1",
+      RMD_RECYCLE_POLL_S: "1",
+    },
+  });
+  assert.match(run.stderr, /WAIT_SECONDS=1 was sized against 115 implement\.done rows carrying worker_duration_ms/);
+  assert.match(run.stderr, /19\.3 min median \(1158s\)/);
+});
+
+test("W1-T3799: MUTANT: bare empty-array expansions are refused by the regression guard", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const safeExpansion = '"${IMAGE_ENV_LINES[@]-}"';
+  assert.ok(src.includes(safeExpansion), "the image-environment loop must use the nounset-safe expansion");
+  assert.equal(
+    (src.match(/"\$\{(?:CONTAINER_ENV_LINES|IMAGE_ENV_LINES)\[@\]-\}"/g) ?? []).length,
+    3,
+    "every line-array loop that may see zero values must use the nounset-safe form",
+  );
+  const mutant = src.replace(safeExpansion, '"${IMAGE_ENV_LINES[@]}"');
+  assert.doesNotMatch(mutant, /"\$\{IMAGE_ENV_LINES\[@\]-\}"/, "the mutant must remove the nounset-safe form");
+  assert.match(
+    src,
+    /for iline in "\$\{IMAGE_ENV_LINES\[@\]-\}"; do/,
+    "the live script must keep the Bash-3.2-safe image-environment iteration",
+  );
+
+  // GNU Bash 3.2 is the actual failing host. Newer Bash versions intentionally accept an empty
+  // array under nounset, so the source-shape assertion above is the portable CI protection.
+  const version = spawnSync("bash", ["--version"], { encoding: "utf8" }).stdout;
+  if (/version 3\.2\./.test(version)) {
+    const dir = mkdtempSync(join(tmpdir(), "recycle-wait-mutant-"));
+    const mutantPath = join(dir, "recycle-container.sh");
+    writeFileSync(mutantPath, mutant, { mode: 0o755 });
+    chmodSync(mutantPath, 0o755);
+    const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+    writeLock(state, "W1-T3799-mutant", "2020-01-01T00:00:00Z");
+    const run = runRecycle({
+      scriptPath: mutantPath,
+      stateDir: state,
+      extraEnv: { RMD_RECYCLE_WAIT_S: "1", RMD_RECYCLE_POLL_S: "1" },
+    });
+    assert.match(run.stderr, /IMAGE_ENV_LINES\[@\]: unbound variable/);
+  }
 });
 
 // ── ACCEPTANCE 7: THE FALSIFIER — restoring the 120 literal makes a healthy median-length run ────
