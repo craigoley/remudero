@@ -1,0 +1,56 @@
+- id: W1-T3781
+  title: "PR title edits do not re-run commitlint — the corrected title stays blocked until an unrelated push pays for a full CI cycle"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 24.00
+  origin: "operator-session#follow-up-automation-root-causes-2026-09-19"
+  plan_refs: ["W1-T351", "W1-T1033", "W1-T24"]
+  files:
+    - .github/workflows/pr-title-lint.yml
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at HEAD (2026-09-19): `.github/workflows/ci.yml:24-29` declares a bare
+    `pull_request:` trigger, whose default activity types exclude `edited`, while its
+    `commitlint` job at `.github/workflows/ci.yml:628-670` reads the live title with
+    `gh pr view`. W1-T351 fixed the stale event-payload read, but it cannot run when an
+    operator corrects only the title: no workflow run is created, so the required `commitlint`
+    context remains the old failure. The only observed recovery is an unrelated push, which
+    re-runs the full CI matrix for a title-only correction.
+
+    The falsifier is a real pull-request `edited` event after this task lands: if the existing
+    `ci.yml` creates a fresh `commitlint` check for that event without starting its expensive
+    jobs, this task is unnecessary. Its current trigger and the absence of an edited-event
+    `commitlint` workflow falsify that today.
+  design: |
+    Add a standalone `.github/workflows/pr-title-lint.yml` workflow triggered only by
+    `pull_request` activity types `opened`, `synchronize`, `reopened`, and `edited`, with one
+    job named exactly `commitlint`. Reuse the W1-T351 live `gh pr view --json title --jq .title`
+    read and its explicit empty-read diagnostic, so a title edit produces the same required
+    check context without widening `ci.yml`'s trigger and paying for its full matrix. Keep the
+    existing `ci.yml` trigger unchanged; its normal opened/synchronize/reopened run remains the
+    source of the expensive checks. Add a focused test that parses both workflow files, proves
+    `edited` is reachable only through the standalone title workflow, preserves the exact
+    `commitlint` job name, and exercises the live-title/empty-read distinction. Do not add a
+    second required context or change `ci-gate.yml`: its existing `commitlint` requirement should
+    observe the same job name from either workflow.
+  acceptance:
+    - claim: "a pull-request title edit registers a fresh commitlint check without widening ci.yml to rerun the expensive matrix"
+      proof: "unit test: W1-T3781"
+    - claim: "the edited-event commitlint job reads the current title live and keeps the empty-read diagnostic"
+      proof: "unit test: W1-T3781"
+  falsifier: |
+    Reject this task if a live `edited` pull-request event produces a new `commitlint` check from
+    `.github/workflows/ci.yml` itself while its other jobs do not run, or if a standalone workflow
+    would create a different check name that `ci-gate.yml` does not aggregate. The checked-in
+    trigger is currently bare and the required context is exactly `commitlint`, so both controls
+    must be explicit in the test before implementation.
+  note: |
+    This plan-only filing reserves W1-T3781 for the trigger/wiring implementation. It deliberately
+    omits both its own shard and the future test file from `files:`: the test is part of the build
+    PR, while this filing remains plan-only and lintable before that implementation exists.
