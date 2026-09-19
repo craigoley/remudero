@@ -10,7 +10,9 @@
   budget_usd: 20.00
   origin: operator-session#daemon-health-2026-09-19
   plan_refs: [W1-T3731, W1-T921, W1-T177]
-  files: [src/lib/sweep.ts]
+  files:
+    - src/lib/sweep.ts
+    - test/a-supersession-close-rechecks-the-winner.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -59,13 +61,13 @@
     do not delete branches or alter supersession verdict production in this PR.
   acceptance:
     - claim: "a supersession winner closed after the pass snapshot produces a named stand-down and never invokes the PR-close writer"
-      proof: "unit test: W1-T3784 criterion 1"
+      proof: "grep: sweep.supersession_close.stood_down in src/lib/sweep.ts"
     - claim: "a fresh positive read that the supersession winner remains open preserves the genuine-duplicate close"
-      proof: "unit test: W1-T3784 criterion 2"
+      proof: "grep: W1-T3784 winner remains open closes duplicate in test/a-supersession-close-rechecks-the-winner.test.ts"
     - claim: "an unreadable or malformed writer-side successor read fails closed rather than closing the older PR"
-      proof: "unit test: W1-T3784 criterion 3"
+      proof: "grep: W1-T3784 unreadable successor stands down in test/a-supersession-close-rechecks-the-winner.test.ts"
     - claim: "a non-supersession stale disposition retains its existing close path and makes no successor-state read"
-      proof: "unit test: W1-T3784 criterion 4"
+      proof: "grep: W1-T3784 non-supersession stale does not read winner in test/a-supersession-close-rechecks-the-winner.test.ts"
   falsifier: |
     Delete the writer-side successor-state check. Criterion 1 must then invoke
     the close writer for the production-shaped #6070/#6071 ordering; restoring
@@ -80,8 +82,7 @@
     ownership. The filed record is separate from W1-T3731 because that task's
     positive path-based disposition is correct at its own decision time.
 
-    `files:` deliberately names only the production seam. This filing is
-    plan-only and does not ship the new `test/a-supersession-close-rechecks-the-winner.test.ts`
-    suite whose literal titles the acceptance block names; declaring that absent
-    path makes `proof-unit-test-unresolvable` correctly refuse the filing. The
-    implementation PR must add that suite before it can claim these proofs.
+    The new regression suite is explicitly in `files:` so the implementation can
+    make its decision semantics executable without widening scope. This filing is
+    plan-only, so its future-discriminating proof strings are intentionally absent
+    until the implementation PR adds both the writer-side guard and that suite.
