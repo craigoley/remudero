@@ -1,0 +1,38 @@
+- id: W1-T3794
+  title: "WIRE THE OPERATOR SIGNAL ADAPTERS — compose proof, outcome, decision, and capacity evidence into console-v1 without inventing a healthy zero"
+  repo: remudero
+  depends_on: [W1-T3795, W1-T3796, W1-T3797]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  origin: human
+  plan_refs: ["W1-T425", "W1-T3762"]
+  files: [src/lib/analytics-route.ts, src/lib/operator-agent-proof.ts, test/analytics-route.test.ts, test/operator-agent-proof.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main 948173f3: run-task.ts:5902-5927 writes per-criterion `proof_exec`
+    values on `review.posted` rows, distinguishing executed_pass, executed_fail,
+    not_executable, and execution errors. The existing daemon also has separate measured producers
+    for verdict-class outcomes, panel decisions, and routing/dispatch telemetry, but the console
+    projection does not compose those signal families. W1-T3762 owns assignment-to-receipt
+    routing-v1 evidence; this task consumes that contract and adds the operator-agent projection
+    layer rather than changing routing policy.
+  design: |
+    Add a pure proof adapter and compose it with the three independent adapters from W1-T3795,
+    W1-T3796, and W1-T3797 in the versioned console-v1 response. Emit counts and rates only when
+    the denominator is named and meets each producer's conservative floor; carry unavailable,
+    mixed-scope, and unmeasurable populations as explicit reasons. Preserve the distinction between
+    executed proof failure, non-executable proof, a worker failure, a post-merge revert, an explicit
+    operator decision, and automatic routing/merge events. The projection must remain read-only and
+    must never turn an empty or unreadable corpus into a healthy zero.
+  acceptance:
+    - claim: "executed proof passes and failures are counted from review.posted proof_exec values with a named denominator"
+      proof: "grep: W1-T3794 criterion 1 in test/operator-agent-proof.test.ts"
+    - claim: "the four operator signal families are composed under one versioned console-v1 response without changing routing policy"
+      proof: "grep: W1-T3794 criterion 2 in test/analytics-route.test.ts"
+    - claim: "unavailable, unmeasurable, and below-floor sources remain explicit and never become healthy zeros"
+      proof: "grep: W1-T3794 criterion 3 in test/analytics-route.test.ts"
