@@ -1723,6 +1723,7 @@ import {
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
+import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -15293,6 +15294,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         log("worktree.remove", { on: "worker.abandoned" });
       } catch (e) {
         log("worktree.remove.error", { on: "worker.abandoned", error: String((e as Error)?.message ?? e) });
+      }
+      return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+    }
+    if (isCodexWorkerOutputLimitError(err)) {
+      log("verdict", {
+        verdict: "failed",
+        reason: err.message,
+        stage: "worker.output_bounded",
+        stream: err.stream,
+        limit_bytes: err.limitBytes,
+        observed_bytes: err.observedBytes,
+        cost_usd: costUsd,
+        ...terminalVerdictFields(null),
+      });
+      say(
+        `verdict: failed — ${err.message} (${err.stream}, limit ${err.limitBytes} bytes, ` +
+          `${err.observedBytes} observed)`,
+      );
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "worker.output_bounded" });
+      } catch (e) {
+        log("worktree.remove.error", { on: "worker.output_bounded", error: String((e as Error)?.message ?? e) });
       }
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }

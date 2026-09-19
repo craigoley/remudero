@@ -292,6 +292,30 @@ function abandoningSpawn(evidence: WorkerAbandonmentEvidence): { spawn: typeof s
   return { spawn, calls };
 }
 
+/** A real-shaped Codex containment error from the provider's bounded-output guard. The
+ * predicate under test validates every field, so this fixture intentionally constructs the
+ * public error shape rather than importing the adapter's private factory. */
+function codexOutputLimitError(overrides: Record<string, unknown> = {}): Error {
+  return Object.assign(new Error("Codex worker stdout output exceeded its 1048576-byte retention budget (1091550 bytes observed)"), {
+    name: "CodexWorkerOutputLimitError",
+    reasonClass: "bounded_output",
+    stream: "stdout",
+    limitBytes: 1_048_576,
+    observedBytes: 1_091_550,
+    ...overrides,
+  });
+}
+
+function boundedOutputSpawn(error: Error): { spawn: typeof spawnWorker; calls: SpawnWorkerArgs[] } {
+  const calls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    calls.push(args);
+    if (calls.length === 1) return reconResult();
+    throw error;
+  };
+  return { spawn, calls };
+}
+
 function buildFixtureRoot(): { root: string; planPath: string; config: Config } {
   const root = mkdtempSync(join(tmpdir(), "runtask-clockbound-root-"));
   const planPath = join(root, "tasks.yaml");
@@ -542,6 +566,83 @@ test("W1-T1045: a worktree that cannot be reclaimed is ledgered and the run stil
     // The positive control on the same corpus: the abandonment itself is still recorded, so the
     // failed reclaim is an extra row rather than a path that swallowed the whole branch.
     assert.ok(lines.some((l) => l.step === "verdict" && l.stage === "worker.abandoned"), "the abandonment verdict row still lands");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3502 criterion 1: validated Codex bounded output resolves to one failed terminal result with evidence", async () => {
+  const { root, planPath, config } = buildFixtureRoot();
+  try {
+    const { spawn } = boundedOutputSpawn(codexOutputLimitError());
+    const res = await runTask("TST-CLOCKBOUND", {
+      skipGitSync: true,
+      planPath,
+      config,
+      github: OFFLINE_GITHUB,
+      spawn,
+      containmentExec: clockBoundHoldingContainmentExec,
+      isolationExec: clockBoundCleanIsolationExec,
+    });
+
+    assert.equal(res.verdict, "failed", "a bounded provider stream is a terminal failed run, not a rejected daemon tick");
+    const ledger = readLedger(root);
+    const verdict = ledger.find((l) => l.step === "verdict" && l.stage === "worker.output_bounded");
+    assert.ok(verdict, "the bounded-output verdict is ledgered before cleanup");
+    assert.equal(verdict!.stream, "stdout");
+    assert.equal(verdict!.limit_bytes, 1_048_576);
+    assert.equal(verdict!.observed_bytes, 1_091_550);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3502 criterion 2: bounded output opens no PR or auto-merge and releases resources", async () => {
+  const { root, planPath, config } = buildFixtureRoot();
+  try {
+    const { spawn } = boundedOutputSpawn(codexOutputLimitError({ stream: "stderr", limitBytes: 262_144, observedBytes: 300_000 }));
+    const res = await runTask("TST-CLOCKBOUND", {
+      skipGitSync: true,
+      planPath,
+      config,
+      github: OFFLINE_GITHUB,
+      spawn,
+      containmentExec: clockBoundHoldingContainmentExec,
+      isolationExec: clockBoundCleanIsolationExec,
+    });
+
+    assert.equal(res.merged, false);
+    const ledger = readLedger(root);
+    assert.equal(ledger.some((l) => l.step === "pr.opened"), false, "a capped worker never opens a PR");
+    assert.equal(ledger.some((l) => l.step === "automerge.armed"), false, "a capped worker never arms auto-merge");
+    assert.ok(ledger.some((l) => l.step === "worktree.remove" && l.on === "worker.output_bounded"), "cleanup runs after the terminal verdict");
+    assert.equal(existsSync(join(root, "state", "inflight", "TST-CLOCKBOUND.lock")), false, "the run lock is released");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3502 criterion 3: a malformed bounded-output lookalike still follows the fatal rethrow path", async () => {
+  const { root, planPath, config } = buildFixtureRoot();
+  try {
+    const { spawn } = boundedOutputSpawn(codexOutputLimitError({ stream: "protocol" }));
+    await assert.rejects(
+      () =>
+        runTask("TST-CLOCKBOUND", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: OFFLINE_GITHUB,
+          spawn,
+          containmentExec: clockBoundHoldingContainmentExec,
+          isolationExec: clockBoundCleanIsolationExec,
+        }),
+      /Codex worker stdout output exceeded/,
+      "an invalid provider error must not be swallowed as a contained terminal failure",
+    );
+    const ledger = readLedger(root);
+    assert.ok(ledger.some((l) => l.step === "run.error"), "the generic fatal path remains observable");
+    assert.equal(ledger.some((l) => l.stage === "worker.output_bounded"), false, "malformed evidence never receives the bounded-output verdict");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
