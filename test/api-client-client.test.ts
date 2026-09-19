@@ -14,6 +14,7 @@ import {
 import { buildFeedbackInboxRoute, buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { buildPanelSkillsRoutes, type PanelSkillsDeps } from "../src/lib/panel-skills.js";
 import { buildPanelSkillRunRoutes, type PanelSkillRunDeps } from "../src/lib/panel-skill-run.js";
+import { buildRepoDashboardRoute } from "../src/lib/repo-dashboard-route.js";
 import { skillsDir } from "../src/lib/skill.js";
 import { setFeedbackStatus } from "../src/lib/feedback.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -525,4 +526,25 @@ test("createDaemonClient graph write methods: a read-only token gets a thrown 40
     await assert.rejects(() => client.submitFeedback("x"), /403/);
     await assert.rejects(() => client.decideProposal("fb-x", "accept"), /403/);
   });
+});
+
+test("createDaemonClient.listRepos(): GETs the read-scoped managed-repo portfolio through getJson", async () => {
+  const root = tmpRoot();
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["acme/alpha"] }));
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    routes: [buildRepoDashboardRoute({ root, now: () => Date.parse("2026-09-19T00:00:00.000Z") })],
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const client = createDaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: READ_TOKEN });
+    const result = await client.listRepos();
+    assert.equal(result.source, "managed-repos");
+    assert.equal(result.repos[0]?.id, "acme/alpha");
+    assert.equal(result.repos[0]?.health.status, "unknown");
+  } finally {
+    server.close();
+  }
 });

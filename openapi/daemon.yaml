@@ -204,6 +204,130 @@ components:
             W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp
             `recap` was computed as-of. Absent alongside `recap` for the same two reasons.
 
+    RepoDashboardHealth:
+      type: object
+      description: >
+        The health projection for one managed repository. The current daemon has no per-repo
+        health source, so every measurement is explicitly unknown rather than rendered as zero or
+        healthy.
+      required:
+        - status
+        - queuedtasks
+        - errorrate
+        - last_run
+        - alerts
+      properties:
+        status:
+          type: string
+          enum:
+            - unknown
+        queuedtasks:
+          type: [integer, "null"]
+        errorrate:
+          type: [number, "null"]
+        last_run:
+          type: [string, "null"]
+        alerts:
+          type: [array, "null"]
+          items:
+            type: string
+
+    RepoDashboardTelemetry:
+      type: object
+      description: Per-repository telemetry, unavailable until a durable per-repo aggregation source exists.
+      required:
+        - tokens7d
+        - modelsused
+        - cost_7d
+      properties:
+        tokens7d:
+          type: [number, "null"]
+        modelsused:
+          type: array
+          items:
+            type: string
+        cost_7d:
+          type: [number, "null"]
+
+    RepoDashboardSettings:
+      type: object
+      description: Per-repository settings, unavailable until durable settings persistence exists.
+      required:
+        - proofpolicy
+        - workerpoolsize
+        - alertthreshold
+      properties:
+        proofpolicy:
+          type: [string, "null"]
+        workerpoolsize:
+          type: [integer, "null"]
+        alertthreshold:
+          type: [number, "null"]
+
+    RepoDashboardEntry:
+      type: object
+      description: >
+        One repository from the validated `.remudero/managed-repos.json` set. Managed membership
+        is not evidence of OAuth connection, activation, health, telemetry, or settings.
+      required:
+        - id
+        - reponame
+        - repourl
+        - connected_at
+        - active
+        - managed
+        - source
+        - health
+        - telemetry
+        - settings
+      properties:
+        id:
+          type: string
+          description: Canonical `owner/repo` identity from the managed-repo set.
+        reponame:
+          type: string
+          description: Repository name from the canonical identity.
+        repourl:
+          type: string
+          description: Deterministic GitHub URL for the canonical identity; no GitHub read is implied.
+        connected_at:
+          type: [string, "null"]
+        active:
+          type: [boolean, "null"]
+        managed:
+          type: boolean
+        source:
+          type: string
+          enum:
+            - managed-repos
+        health:
+          $ref: "#/components/schemas/RepoDashboardHealth"
+        telemetry:
+          $ref: "#/components/schemas/RepoDashboardTelemetry"
+        settings:
+          $ref: "#/components/schemas/RepoDashboardSettings"
+
+    RepoDashboardResult:
+      type: object
+      description: >
+        GET /v1/repos's read-only managed-repo portfolio. An empty `repos` array is a measured
+        empty managed set; it is not an unavailable response.
+      required:
+        - generated_at
+        - source
+        - repos
+      properties:
+        generated_at:
+          type: string
+        source:
+          type: string
+          enum:
+            - managed-repos
+        repos:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoDashboardEntry"
+
     RecapEvent:
       type: object
       description: >
@@ -755,6 +879,30 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/repos:
+    get:
+      summary: The read-only managed-repo portfolio for the console dashboard.
+      description: >
+        Reads and validates `.remudero/managed-repos.json` (src/lib/managed-repos.ts). The
+        endpoint reports repository identity only; OAuth connection, activation, health,
+        telemetry, settings, logs, and test-run state remain explicitly unknown until they have
+        durable daemon sources.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The validated managed-repo portfolio, including an honest empty result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepoDashboardResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/status:
     get:
       summary: The current board snapshot -- one StatusProjection per plan task.

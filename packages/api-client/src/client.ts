@@ -56,6 +56,7 @@ export type ProposalDecisionResult = components["schemas"]["ProposalDecisionResu
 export type SkillEntry = components["schemas"]["SkillEntry"];
 export type SkillsListResult = components["schemas"]["SkillsListResult"];
 export type RunSkillResult = components["schemas"]["RunSkillResult"];
+export type RepoDashboardResult = components["schemas"]["RepoDashboardResult"];
 
 export interface DaemonClientOptions {
   /** The daemon's base URL, e.g. `https://<tailnet-host>`. No trailing slash required. */
@@ -69,6 +70,8 @@ export interface DaemonClientOptions {
 export interface DaemonClient {
   /** GET /v1/status — the current board snapshot. */
   getStatus(): Promise<StatusSnapshot>;
+  /** GET /v1/repos — the read-only managed-repo portfolio; unavailable measurements stay null. */
+  listRepos(): Promise<RepoDashboardResult>;
   /**
    * GET /v1/status/stream — subscribe to live `status` events (one per task whose derived
    * StatusProjection changed). Returns an unsubscribe function that aborts the underlying
@@ -242,6 +245,10 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
       const res = await fetchImpl(requestUrl(base, "/v1/status").toString(), { headers: authHeaders(opts.token) });
       if (!res.ok) throw new Error(`getStatus: daemon returned ${res.status}`);
       return (await res.json()) as StatusSnapshot;
+    },
+
+    listRepos() {
+      return getJson<RepoDashboardResult>("/v1/repos");
     },
 
     pauseFleet(reason) {
