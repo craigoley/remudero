@@ -9093,9 +9093,54 @@ export async function runSweep(
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               break;
             }
-            case "stale":
+            case "stale": {
+              // W1-T3784 — re-read only the supersession winner immediately before this destructive
+              // write; production wires the existing fresh GitHub reader.
+              const supersedingPrNumber =
+                pr.supersededBy != null && pr.supersessionVerdict?.status === "superseded"
+                  ? pr.supersededBy
+                  : undefined;
+              if (supersedingPrNumber !== undefined && deps.readLiveState) {
+                const winnerPr = {
+                  ...pr,
+                  prNumber: supersedingPrNumber,
+                  prUrl: pr.prUrl.replace(/\d+\/?$/, `${supersedingPrNumber}`),
+                } as OpenPrView;
+                let winnerState: LiveStateResult | undefined;
+                let winnerReadFailure: string | undefined;
+                try {
+                  winnerState = await deps.readLiveState(winnerPr);
+                } catch (error) {
+                  const reason = String((error as Error)?.message ?? error).slice(0, 160);
+                  winnerState = undefined;
+                  winnerReadFailure = reason;
+                }
+                const winnerIsOpen = winnerState?.ok === true && winnerState.state === "OPEN";
+                if (!winnerIsOpen) {
+                  acted = false;
+                  const winnerObservation = winnerState?.ok === true
+                    ? winnerState.state ?? "MALFORMED"
+                    : winnerReadFailure
+                      ? `UNREADABLE (${winnerReadFailure})`
+                      : "UNREADABLE";
+                  standDownReason =
+                    `supersession close stood down: successor #${supersedingPrNumber} is ${winnerObservation}`;
+                  if (!deps.dryRun) {
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: "sweep.supersession_close.stood_down",
+                      pr_number: pr.prNumber,
+                      superseding_pr_number: supersedingPrNumber,
+                      reason: standDownReason,
+                    });
+                  }
+                  break;
+                }
+              }
               await deps.close(pr, reason);
               break;
+            }
             case "refused-escalate":
               await deps.escalate(pr, reason, question!);
               break;
