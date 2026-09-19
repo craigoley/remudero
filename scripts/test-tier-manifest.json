@@ -575,6 +575,7 @@
     "test/daemon-disk-headroom.test.ts": 10076,
     "test/daemon-dispatch-reachability.test.ts": 1344,
     "test/daemon-draft-batch-is-capped.test.ts": 976,
+    "test/daemon-external-wait-freshness.test.ts": 0,
     "test/daemon-freshness-reachability.test.ts": 3374,
     "test/daemon-freshness-wiring.test.ts": 1260,
     "test/daemon-freshness.test.ts": 1384,
