@@ -260,6 +260,7 @@
   "src/lib/onboard/session.ts": 121,
   "src/lib/onboard/synthesize.ts": 144,
   "src/lib/open-prs-rest.ts": 460,
+  "src/lib/operator-agent-decisions.ts": 250,
   "src/lib/operator-agent.ts": 250,
   "src/lib/operator-merge-hold.ts": 14,
   "src/lib/operator-message.ts": 90,
