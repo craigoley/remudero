@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import {
   buildOperatorAgentRoutes,
+  readOperatorAgentHistory,
   type OperatorAgentProposal,
 } from "../src/lib/operator-agent.js";
 
@@ -39,8 +40,8 @@ function fixture(): { ledgerPath: string; proposal: OperatorAgentProposal } {
   };
 }
 
-async function withService<T>(ledgerPath: string, fn: (base: string) => Promise<T>): Promise<T> {
-  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildOperatorAgentRoutes({ ledgerPath }) });
+async function withService<T>(ledgerPath: string, fn: (base: string) => Promise<T>, now?: () => number): Promise<T> {
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildOperatorAgentRoutes({ ledgerPath, now }) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   try {
@@ -125,4 +126,98 @@ test("operator-agent decision refuses unknown and terminal proposals before writ
   });
   const lines = readFileSync(ledgerPath, "utf8").trim().split("\n");
   assert.equal(lines.length, 2);
+});
+
+test("operator-agent rejects malformed registration, decision, and outcome payloads before writing", async () => {
+  const { ledgerPath, proposal } = fixture();
+  await withService(ledgerPath, async (base) => {
+    const malformedRegistrations: unknown[] = [
+      null,
+      {},
+      { proposal: { ...proposal, category: "unknown" } },
+      { proposal: { ...proposal, status: "accepted" } },
+      { proposal: { ...proposal, createdAt: "not-a-date" } },
+      { proposal: { ...proposal, expiresAt: "not-a-date" } },
+      { proposal: { ...proposal, confidence: 2 } },
+      { proposal: { ...proposal, evidence: [null] } },
+      { proposal: { ...proposal, evidence: [{ ...proposal.evidence[0], freshness: "unknown" }] } },
+    ];
+    for (const body of malformedRegistrations) {
+      assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, body)).status, 400);
+    }
+
+    const malformedDecisions: unknown[] = [
+      null,
+      {},
+      { proposalId: "", decision: "accepted" },
+      { proposalId: proposal.proposalId, decision: "unknown" },
+      { proposalId: proposal.proposalId, decision: "accepted", note: "" },
+    ];
+    for (const body of malformedDecisions) {
+      assert.equal((await post(base, "/v1/operator-agent/proposals/decision", WRITE_TOKEN, body)).status, 400);
+    }
+
+    const malformedOutcomes: unknown[] = [
+      null,
+      {},
+      { proposalId: "", outcome: {} },
+      { proposalId: proposal.proposalId, outcome: {} },
+      { proposalId: proposal.proposalId, outcome: { summary: "done", observedAt: "not-a-date" } },
+      { proposalId: proposal.proposalId, outcome: { summary: "done", observedAt: proposal.createdAt, helped: "yes" } },
+      { proposalId: proposal.proposalId, outcome: { summary: "done", observedAt: proposal.createdAt, evidence: "not-an-array" } },
+      { proposalId: proposal.proposalId, outcome: { summary: "done", observedAt: proposal.createdAt, evidence: [""] } },
+    ];
+    for (const body of malformedOutcomes) {
+      assert.equal((await post(base, "/v1/operator-agent/proposals/outcome", WRITE_TOKEN, body)).status, 400);
+    }
+
+    assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, { proposal })).status, 201);
+    assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, {
+      proposal: { ...proposal, proposalText: "A different proposal with the same id." },
+    })).status, 409);
+  });
+  assert.equal(existsSync(ledgerPath), true);
+  assert.equal(readFileSync(ledgerPath, "utf8").trim().split("\n").length, 1);
+});
+
+test("operator-agent expires pending proposals, preserves rejected history, and ignores malformed ledger rows", async () => {
+  const { ledgerPath, proposal } = fixture();
+  const rejected = { ...proposal, proposalId: "operator-agent:repo:fix:rejected", expiresAt: undefined };
+  const now = () => Date.parse("2026-09-21T00:00:00.000Z");
+  await withService(ledgerPath, async (base) => {
+    assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, { proposal })).status, 201);
+    assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, { proposal: rejected })).status, 201);
+
+    const expired = (await (await get(base, READ_TOKEN)).json()) as { proposals: Array<{ proposalId: string; status: string }> };
+    assert.equal(expired.proposals.find((item) => item.proposalId === proposal.proposalId)?.status, "expired");
+
+    assert.equal((await post(base, "/v1/operator-agent/proposals/decision", WRITE_TOKEN, {
+      proposalId: proposal.proposalId,
+      decision: "accepted",
+    })).status, 409);
+    assert.equal((await post(base, "/v1/operator-agent/proposals/outcome", WRITE_TOKEN, {
+      proposalId: proposal.proposalId,
+      outcome: { summary: "too late", observedAt: "2026-09-21T00:00:00.000Z" },
+    })).status, 409);
+    assert.equal((await post(base, "/v1/operator-agent/proposals/outcome", WRITE_TOKEN, {
+      proposalId: "missing",
+      outcome: { summary: "not found", observedAt: "2026-09-21T00:00:00.000Z" },
+    })).status, 404);
+
+    assert.equal((await post(base, "/v1/operator-agent/proposals/decision", WRITE_TOKEN, {
+      proposalId: rejected.proposalId,
+      decision: "rejected",
+    })).status, 200);
+    assert.equal((await post(base, "/v1/operator-agent/proposals/outcome", WRITE_TOKEN, {
+      proposalId: rejected.proposalId,
+      outcome: { summary: "not applied", helped: false, observedAt: "2026-09-21T00:00:00.000Z", evidence: ["operator held"] },
+    })).status, 409);
+  }, now);
+
+  appendFileSync(ledgerPath, `${JSON.stringify({ step: "panel.operator_agent_decision", proposal_id: proposal.proposalId, decision: "unknown", at: proposal.createdAt })}\n`);
+  appendFileSync(ledgerPath, `${JSON.stringify({ step: "panel.operator_agent_decision", proposal_id: proposal.proposalId, decision: "accepted", at: "not-a-date" })}\n`);
+  appendFileSync(ledgerPath, `${JSON.stringify({ step: "panel.operator_agent_outcome", proposal_id: proposal.proposalId, outcome: { summary: "", observedAt: proposal.createdAt } })}\n`);
+  const history = readOperatorAgentHistory({ ledgerPath, now });
+  assert.equal(history.find((item) => item.proposalId === proposal.proposalId)?.status, "expired");
+  assert.equal(history.find((item) => item.proposalId === "operator-agent:repo:fix:rejected")?.status, "rejected");
 });
