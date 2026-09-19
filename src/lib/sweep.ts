@@ -5881,9 +5881,28 @@ export function decideSweepArm(
   // the run flow's classification is worktree-bound and this pass has no worktree, so the field
   // would be permanently unproducible.
   irreversible?: boolean,
+  /** W1-T3471: archive∪live evidence consulted only after the live-file miss. `complete:false`
+   *  means the archive corpus was unavailable or incomplete, so the historical fail-open remains. */
+  readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined,
 ): ArmDecision {
   const armId = pr.taskId ?? `PR-${pr.prNumber}`;
-  const facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha);
+  let facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha);
+  if (!facts && readLedgerUnion) {
+    try {
+      const union = readLedgerUnion();
+      if (union?.complete) {
+        facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha);
+        if (!facts) {
+          return {
+            arm: false,
+            reason: "complete ledger union shows no review.posted verdict for this task and head — refusing to arm",
+          };
+        }
+      }
+    } catch {
+      // An unreadable archive is not evidence of absence; retain the historical fail-open below.
+    }
+  }
   if (!facts) {
     return { arm: true, reason: "no ledgered verdict recoverable for this head — arming as before (no evidence to refuse on)" };
   }
@@ -6916,6 +6935,9 @@ export interface SweepDeps {
   runId: string;
   /** Ledger reader (dedup); defaults to readLedgerLines. Injectable for tests. */
   readLedger?: (path: string) => Array<Record<string, unknown>>;
+  /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
+   *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
+  readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
   /** Ledger appender; defaults to appendLedger. Injectable for tests. */
   appendLine?: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void;
   /** Injected clock for the stale window (default Date.now). */
@@ -7876,6 +7898,14 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
+  // W1-T3471: a live miss is not enough to call a verdict absent. Read the bounded archive∪live
+  // union only on that rare path; an unreadable or archive-free corpus stays incomplete so the
+  // historical fail-open remains intact.
+  const readArmLedgerUnion = deps.readLedgerUnion ?? (() => {
+    const union = resolveLedgerUnion(dirname(deps.ledgerPath), ".*", undefined, { step: "review.posted" });
+    if (union.archiveCount === 0 || !union.ok) return { complete: false, lines: [] };
+    return { complete: true, lines: parseLedger(union.matches.join("\n")) };
+  });
   const prior = priorActionsFromLedger(ledgerLines);
   // W1-T3202 — FULL-SWEEP CAPACITY IS DERIVED ONCE, BEFORE ANY REPAIR CAN SPAWN. Reviews reserve
   // only their live spawning width (plan filings are deterministic), and the same active-worker
@@ -8337,7 +8367,7 @@ export async function runSweep(
     // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
     // is wired, so any caller that omits it (every pre-existing fixture) keeps the old ladder.
     let planShardRepairDue = false;
-    if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines).arm) {
+    if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
       const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
@@ -8628,7 +8658,7 @@ export async function runSweep(
               // worthless while this independent path arms the same verdict seconds later. Stand
               // down instead — `acted:false` keeps this PR out of `prior.armed`, so the next pass
               // re-derives and arms the moment executed proof or a ledgered override lands.
-              const armDecision = decideSweepArm(pr, ledgerLines);
+              const armDecision = decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion);
               if (!armDecision.arm) {
                 acted = false;
                 standDownReason = armDecision.reason;
