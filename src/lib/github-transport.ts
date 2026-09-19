@@ -78,8 +78,14 @@ export function splitGhHeaderBlock(out: string): { headers: string; body: string
   return { headers: out.slice(0, sep.index), body: out.slice(sep.index + sep[0].length) };
 }
 
-export function ghOptionsWithDefaultTimeout<T extends object>(opts: T & { timeout?: number }): T & { timeout: number } {
-  return { ...opts, timeout: opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS };
+export function ghOptionsWithDefaultTimeout<T extends object>(
+  opts: T & { timeout?: number; maxBuffer?: number },
+): T & { timeout: number; maxBuffer: number } {
+  return {
+    ...opts,
+    maxBuffer: opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER,
+    timeout: opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS,
+  };
 }
 
 export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;

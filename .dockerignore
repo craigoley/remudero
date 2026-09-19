@@ -22,6 +22,8 @@ node_modules
 .env
 .env.*
 
+.remudero/daemon-instances.yaml
+
 # ── DELIBERATELY NOT EXCLUDED, BOTH VERIFIED FROM SOURCE BEFORE THIS FILE WAS WRITTEN ─────────
 #
 # `.git` — rmd needs its OWN git metadata at runtime, not just at build time. `resolveOwnerRepo`

@@ -1720,6 +1720,7 @@ import {
   type WorkerStreamObserver,
   WorkerAbandonedError,
 } from "./lib/worker.js";
+import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
@@ -15277,6 +15278,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       }
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
+    if (isCodexWorkerOutputLimitError(err)) {
+      log("verdict", {
+        verdict: "failed",
+        reason: err.message,
+        stage: "worker.bounded_output",
+        stream: err.stream,
+        limit_bytes: err.limitBytes,
+        observed_bytes: err.observedBytes,
+        cost_usd: costUsd,
+        ...terminalVerdictFields(null),
+      });
+      say(
+        `verdict: failed — Codex worker ${err.stream} output exceeded ${err.limitBytes} bytes ` +
+          `(${err.observedBytes} observed)`,
+      );
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "worker.bounded_output" });
+      } catch (e) {
+        log("worktree.remove.error", { on: "worker.bounded_output", error: String((e as Error)?.message ?? e) });
+      }
+      return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+    }
     log("run.error", { error: String((err as Error)?.message ?? err) });
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
@@ -26269,8 +26293,7 @@ export function reportDrainQuotaExhaustion(
 
 /**
  * W1-T206: shared dispatch-breaker gate for drainCommand/daemonCommand — ONE
- * {@link DispatchBreakerCache} per invocation (never rebuilt per tick/per task, so a
- * same-process rotation gets caught as it happens — see the cache's own doc), memoized
+ * {@link DispatchBreakerCache} per invocation (never rebuilt per tick/per task, so same-process rotation is caught as it happens — see the cache's own doc), memoized
  * per (taskId, this tick) since `nextRunnable` calls `isIndeterminate` then, only if that
  * was false, `isCircuitTripped` for the SAME task in the same pass; without the memo the
  * breaker's full ledger re-read would run twice per task per tick for no reason.
@@ -26299,6 +26322,19 @@ interface LifetimeReplayWindow {
   order: string[];
   next: number;
   seen: Set<string>;
+}
+
+export const MAX_LIFETIME_ARCHIVE_START_IDENTITIES = 4_096; // BACKSTOP: a capped identity set keeps the live-only decision.
+
+type LifetimeArchiveHistoryUnavailableReason =
+  | "archive_unreadable"
+  | "start_identity_missing"
+  | "start_identity_ceiling";
+
+function lifetimeStartIdentity(row: Record<string, unknown>): string | undefined {
+  return typeof row.task_id === "string" && typeof row.run_id === "string"
+    ? `${row.task_id}\u0000${row.run_id}`
+    : undefined;
 }
 
 function replayedLifetimeLedgerLine(
@@ -26407,24 +26443,41 @@ export async function auditedLifetimeTalliesFromArchives(
   ledgerPath: string = join(stateDir, LEDGER_FILENAME),
 ): Promise<{
   history: LifetimeHistory | undefined;
+  unavailableReason: LifetimeArchiveHistoryUnavailableReason | undefined;
   archiveCount: number;
   unread: readonly string[];
   records: number;
 }> {
   const tallies = new Map<string, LifetimeDispatchTally>();
   const recentByStep = new Map<string, LifetimeReplayWindow>();
+  const startIdentities = new Set<string>();
+  let startIdentityUnavailable: LifetimeArchiveHistoryUnavailableReason | undefined;
   const scan = await auditLedgerUnion(stateDir, {
     step: ["run.start", "daemon.spawn_infra_blocked"],
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     onRecord: (row, raw) => {
       const step = typeof row.step === "string" ? row.step : "";
-      if (!replayedLifetimeLedgerLine(recentByStep, step, raw)) {
-        recordLifetimeTally(tallies, row);
+      if (replayedLifetimeLedgerLine(recentByStep, step, raw)) return;
+      if (step === "run.start") {
+        const identity = lifetimeStartIdentity(row);
+        if (identity === undefined) {
+          startIdentityUnavailable ??= "start_identity_missing";
+          return;
+        }
+        if (startIdentities.has(identity)) return;
+        if (startIdentities.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
+          startIdentityUnavailable ??= "start_identity_ceiling";
+          return;
+        }
+        startIdentities.add(identity);
       }
+      recordLifetimeTally(tallies, row);
     },
   });
+  const unavailableReason = !scan.ok ? "archive_unreadable" : startIdentityUnavailable;
   return {
-    history: scan.ok ? lifetimeHistory(ledgerPath, tallies, recentByStep) : undefined,
+    history: unavailableReason === undefined ? lifetimeHistory(ledgerPath, tallies, recentByStep) : undefined,
+    unavailableReason,
     archiveCount: scan.archiveCount,
     unread: scan.unread,
     records: scan.records,
@@ -27256,6 +27309,7 @@ async function drainCommand(
     log("dispatch.lifetime_history_unavailable", {
       archive_count: archivedLifetime.archiveCount,
       unread_archives: archivedLifetime.unread,
+      reason: archivedLifetime.unavailableReason,
     });
   } else {
     log("dispatch.lifetime_history_loaded", {
@@ -28615,6 +28669,7 @@ export async function daemonCommand(
     log("dispatch.lifetime_history_unavailable", {
       archive_count: archivedLifetime.archiveCount,
       unread_archives: archivedLifetime.unread,
+      reason: archivedLifetime.unavailableReason,
     });
   } else {
     log("dispatch.lifetime_history_loaded", {
