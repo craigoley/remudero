@@ -185,6 +185,69 @@ export interface components {
       status: string;
       proposalPr: string | null;
     };
+    OperatorAgentEvidence: {
+      label: string;
+      value: string;
+      source: string;
+      observedAt: string;
+      freshness: "verified" | "stale" | "unavailable";
+    };
+    OperatorAgentProposal: {
+      proposalId: string;
+      repo: string;
+      proposalText: string;
+      confidence: number;
+      reasoning: string;
+      category: "optimize" | "fix" | "scale";
+      status: "pending" | "accepted" | "rejected" | "expired";
+      createdAt: string;
+      expiresAt?: string;
+      evidence: (OperatorAgentEvidence)[];
+    };
+    OperatorAgentHistory: {
+      proposalId: string;
+      repo: string;
+      proposalText: string;
+      confidence: number;
+      reasoning: string;
+      category: "optimize" | "fix" | "scale";
+      status: "pending" | "accepted" | "rejected" | "expired";
+      createdAt: string;
+      expiresAt?: string;
+      evidence: (OperatorAgentEvidence)[];
+      decisionHistory: ({
+        decision: "accepted" | "rejected" | "more-info";
+        at: string;
+        note?: string;
+      })[];
+      outcome?: {
+        summary: string;
+        helped?: boolean;
+        observedAt: string;
+        evidence?: (string)[];
+      };
+    };
+    OperatorAgentProposalList: {
+      proposals: (OperatorAgentHistory)[];
+      source: "ledger";
+    };
+    OperatorAgentProposalRegistration: {
+      proposal: OperatorAgentProposal;
+    };
+    OperatorAgentDecisionRequest: {
+      proposalId: string;
+      decision: "accepted" | "rejected" | "more-info";
+      note?: string;
+    };
+    OperatorAgentOutcomeRequest: {
+      proposalId: string;
+      outcome: {
+        summary: string;
+        helped?: boolean;
+        observedAt: string;
+        evidence?: (string)[];
+      };
+    };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
     SkillEntry: {
       /** The skill's identity -- its filename minus `.yaml`. */
@@ -341,6 +404,49 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/proposals": {
+    get: {
+      responses: {
+          "200": OperatorAgentProposalList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "201": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/proposals/decision": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/proposals/outcome": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
         };
     };
   };
