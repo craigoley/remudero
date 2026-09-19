@@ -1967,7 +1967,13 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (skipGitRepoCheck) shared.splice(2, 0, "--skip-git-repo-check");
   if (model) shared.push("--model", model);
   if (effort) shared.push("-c", `model_reasoning_effort=\"${effort}\"`);
-  if (args.resumeSessionId) return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
+  // `codex exec resume` accepts none of the fresh worker's workspace-write, cwd, or bounded-Git
+  // containment arguments. A resumed writer must therefore start fresh through the ordinary
+  // contained path below; the prompt already carries its predecessor's repair evidence. Read-only
+  // and disposable-review continuations retain the CLI resume form byte-for-byte.
+  if (args.resumeSessionId && (readOnly || disposableReview)) {
+    return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
+  }
   const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
   return [
     "exec",
