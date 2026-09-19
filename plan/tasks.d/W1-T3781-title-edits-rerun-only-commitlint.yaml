@@ -12,6 +12,7 @@
   plan_refs: ["W1-T351", "W1-T1033", "W1-T24"]
   files:
     - .github/workflows/pr-title-lint.yml
+    - src/lib/ci-parity.ts
   status: queued
   attempts: 0
   rationale: |
