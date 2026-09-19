@@ -1,0 +1,16 @@
+id: unparseable-consequence
+description: a verdict without a consequence does not silently land
+finding:
+  gate: scope
+  finding: declared scope and observed scope differ
+  recoverability: recoverable
+  currentConsequence: REPAIR
+judge:
+  verdict: low
+  confidence: 0.86
+  reasons: ["the judge did not choose a consequence"]
+expected:
+  outcome: REPAIR
+  judgmentSpawned: true
+  fallback: true
+  sideEffect: none

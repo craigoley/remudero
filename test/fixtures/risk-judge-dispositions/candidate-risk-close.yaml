@@ -1,0 +1,10 @@
+id: candidate-risk-close
+description: a low-risk, high-confidence judgment keeps ordinary work flowing
+kind: candidate-risk
+judge:
+  verdict: low
+  confidence: 0.91
+  reasons:
+    - change is narrow and reversible
+expected:
+  action: proceed

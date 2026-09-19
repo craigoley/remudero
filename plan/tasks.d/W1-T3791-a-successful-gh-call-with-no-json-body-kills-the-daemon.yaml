@@ -1,0 +1,87 @@
+- id: W1-T3791
+  title: "A SUCCESSFUL `gh` SPAWN WITH AN EMPTY OR MALFORMED JSON BODY BECOMES A BARE `SyntaxError` AND KILLS THE SCHEDULER — classify the transport boundary, defer the affected batch and preserve ordinary failures"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files:
+    - src/lib/github-transport.ts
+    - src/lib/daemon.ts
+    - test/gh-json-unreadable-dispatch.test.ts
+  origin: "recon#core-daemon-empty-json-fatal-2026-09-19"
+  plan_refs: ["W1-T2896", "W1-T3165"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE LIVE CORE DAEMON, 2026-09-19. After W1-T3722 had pushed
+    `run-W1-T3722-1789829384888` and opened #6096, the daemon summary was
+    `stopped: error — W1-T3722: Unexpected end of JSON input`. The entrypoint
+    then slept for its 120-second restart throttle and the scheduler was absent
+    during that interval. This was not a worker-model, capacity or CI failure:
+    the PR had already been created, and the same process had selected a worker.
+
+    THE LOW-LEVEL CAUSE IS REPRODUCED, NOT INFERRED. At origin/main
+    `128160d795a1fda6a9a82973c9fa2e4c3a5cecfe`,
+    `ghJsonAsync` in `src/lib/github-transport.ts` calls `JSON.parse(stdout)`
+    directly. Executing the real function in the deployed container with a
+    successful injected command result `{ stdout: "", stderr: "" }` produces
+    exactly `SyntaxError: Unexpected end of JSON input`.
+
+    THE FATAL ESCAPE IS ALSO OBSERVED IN SOURCE. `runDaemon` settles every
+    dispatch with `Promise.allSettled`; a rejected result is deferred only when
+    it is a recognised transient GitHub transport failure or a spawn-infra
+    error. Its `transientGhDispatchFailure` requires text that both names `gh`
+    and classifies as transient. A bare JSON `SyntaxError` has neither, so it
+    is stored as `fatalError` and the daemon returns the `error` summary.
+
+    The exact async call that received the empty body in the live W1-T3722 run
+    cannot be attributed from the existing summary because it records no stack
+    or transport operation. That uncertainty is a reason to add a narrow
+    typed boundary, not to treat every SyntaxError as GitHub transport. The
+    remedy applies only to parse failure of a successful `gh` JSON transport
+    call; file/config/worker JSON failures and genuine non-transient GitHub
+    failures must retain their current handling.
+  design: |
+    (i) `ghJsonAsync` turns only its own JSON-body parse failure into a named,
+    exported transport error. It carries a bounded safe operation label and
+    retains the original error as its cause. It must never log request headers,
+    tokens or an unbounded response body.
+
+    (ii) `transientGhDispatchFailure` recognises that one typed unreadable-body
+    error as a deferred GitHub transport outcome. The existing batch backoff and
+    `daemon.dispatch_transport_deferred` evidence remain the sole scheduler
+    response; no new retry loop, fabricated success or task-credit change is
+    introduced.
+
+    (iii) A non-transient `gh` refusal (for example HTTP 404) and an arbitrary
+    worker SyntaxError remain outside the new type and still take their existing
+    paths. This is a boundary fix, not a catch-all around worker failures.
+
+    (iv) The daemon's deferred outcome states that the body was unreadable,
+    rather than reporting only JavaScript's parser text, so a later recon can
+    name the failure class without needing an unavailable stack trace.
+  acceptance:
+    - claim: "an empty successful gh JSON response becomes a named transport error rather than a bare parser SyntaxError"
+      proof: "unit test: ghJsonAsync names a successful but unreadable JSON body"
+    - claim: "a batch rejected with that typed unreadable-response error is transport-deferred and does not return the daemon error summary"
+      proof: "unit test: runDaemon defers a typed unreadable gh response"
+    - claim: "a permanent gh 404 and an unrelated SyntaxError do not enter the unreadable-response defer path"
+      proof: "unit test: unreadable gh response deferral excludes 404 and arbitrary SyntaxError"
+    - claim: "the deferred ledger evidence names an unreadable gh response without including response contents or credentials"
+      proof: "unit test: unreadable gh response ledger evidence is bounded and secret-free"
+  falsifier: |
+    Delete the typed parse-error conversion while retaining the injected empty
+    successful command result: the first acceptance test must fail because the
+    observed bare SyntaxError returns. Delete the daemon's typed-error arm: the
+    batch test must return `error` again. If either test still passes, it has
+    not proved the safety boundary it claims.
+  note: |
+    The observed live incident is one core-daemon restart, not proof that every
+    `Unexpected end of JSON input` in the repository shares this cause. This
+    task deliberately narrows its scope to `ghJsonAsync`'s directly reproduced
+    parse boundary and its consumer in `runDaemon`.
+
+    reservation hand-off: unknown -> plan/gh-json-unreadable-dispatch-1789833477000

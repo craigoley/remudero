@@ -811,8 +811,26 @@ function nextCurated(
     }
     const openPrNumber = opts.isOpenPr?.(id);
     if (openPrNumber !== undefined) {
-      opts.onSkip?.(t, openPrNumber);
-      continue; // IN-FLIGHT — never a duplicate fresh build, same as the natural path.
+      // W1-T177: curated dispatch has the same fresh terminal-state confirmation as the natural
+      // selector. Without this, a cached OPEN PR could hold a curated task after it closed.
+      const liveState = opts.readLiveState?.(id, openPrNumber);
+      if (liveState !== undefined && liveState !== "OPEN") {
+        opts.onStoodDown?.(t, openPrNumber, liveState);
+        if (liveState === "MERGED" && opts.isLiveMergeCredited?.(id, openPrNumber)) {
+          opts.onStaleCreditExcluded?.(t, openPrNumber, liveState);
+          continue;
+        }
+      } else {
+        opts.onSkip?.(t, openPrNumber);
+        continue; // IN-FLIGHT (or unreadable) — never a duplicate fresh build.
+      }
+    }
+    // W1-T534: curated selection must also close the stale-absent window. A run branch can appear
+    // after the projection snapshot, so the branch backstop is not optional here.
+    if (opts.hasPushedRunBranch?.(id)) {
+      opts.onSkipRunBranch?.(t);
+      opts.onFiltered?.(t, "run-branch-already-pushed");
+      continue;
     }
     return t;
   }
@@ -922,14 +940,16 @@ export interface DrainDeps {
   /** W1-T1035: an OPTIONAL fresh re-check of whether a just-observed MERGED PR credits the task it
    *  was opened for — see {@link NextRunnableOpts.isLiveMergeCredited} for the discrimination. */
   isLiveMergeCredited?: (taskId: string, prNumber: number) => boolean;
-  /** W1-T916 — raw `git ls-remote --heads origin 'run-*'` output, read ONCE PER PASS and parsed by
-   *  {@link runBranchTaskIds} into the closure {@link NextRunnableOpts.hasPushedRunBranch} consumes.
-   *  INVARIANT: injected rather than executed here, because THIS MODULE IS PURE. TRAP: it is a
-   *  READER, not a predicate — a predicate would satisfy the type while making the per-candidate
-   *  call the design refuses. Optional. */
+  /** W1-T916/W1-T3722 — raw `git ls-remote --heads origin 'run-*'` output, read once for the
+   *  initial selection and refreshed after non-merged work, then parsed by {@link runBranchTaskIds}
+   *  into the closure {@link NextRunnableOpts.hasPushedRunBranch} consumes. INVARIANT: injected
+   *  rather than executed here, because THIS MODULE IS PURE. TRAP: it is a READER, not a predicate
+   *  — a predicate would satisfy the type while making the per-candidate call the design refuses.
+   *  Optional. */
   readPushedRunBranches?: () => string;
-  /** W1-T1207: raw `pulls?state=closed` rows for the same run-branch sweep above — ONE batched,
-   *  paginated read per pass, parsed by {@link closedUnmergedRunBranchTaskIds} into the set the
+  /** W1-T1207/W1-T3722: raw `pulls?state=closed` rows for the same run-branch sweep above — one
+   *  batched read for the initial selection and refreshed after non-merged work, parsed by
+   *  {@link closedUnmergedRunBranchTaskIds} into the set the
    *  caller subtracts from `readPushedRunBranches`' blocking set. INVARIANT: this FAILS TOWARD STILL
    *  BLOCKING, the opposite of `readPushedRunBranches`' own fail-open — a throw degrades to `""`, an
    *  empty exclusion set, so every pushed branch keeps blocking. A false block delays one task; a
@@ -1054,17 +1074,20 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     return s;
   };
 
-  // W1-T916 — ONE SWEEP PER PASS, NEVER ONE PER CANDIDATE. Resolved before the dispatch loop so
-  // every iteration tests set membership rather than making a round trip.
-  const pushedRunBranches = deps.readPushedRunBranches
-    ? runBranchTaskIds(deps.readPushedRunBranches())
-    : undefined;
-  // W1-T1207 — the same hoist, for the arm that stops a leftover branch blocking forever: ids whose
-  // pushed run branch's PR is CLOSED AND UNMERGED. Subtracted below, so an OPEN/DRAFT PR (or no PR)
-  // still blocks exactly as before.
-  const closedUnmergedRunBranches = deps.readClosedRunBranchPrs
-    ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
-    : undefined;
+  // W1-T916/W1-T3722 — read once for the initial selection, then refresh after a non-merged
+  // dispatch. A run can open its PR after this snapshot and before the next selection; retaining
+  // the old set across that boundary recreates the stale-absent duplicate-build window.
+  let pushedRunBranches: ReadonlySet<string> | undefined;
+  let closedUnmergedRunBranches: ReadonlySet<string> | undefined;
+  const refreshRunBranchState = (): void => {
+    pushedRunBranches = deps.readPushedRunBranches
+      ? runBranchTaskIds(deps.readPushedRunBranches())
+      : undefined;
+    closedUnmergedRunBranches = deps.readClosedRunBranchPrs
+      ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
+      : undefined;
+  };
+  refreshRunBranchState();
   while (attempted.length < max) {
     // FLEET CONTROL (W1-T11): checked FIRST every tick, so a hard STOP wins any race against PAUSE.
     // Neither check can interrupt a running task: `runOne` is awaited to completion before the loop
@@ -1151,6 +1174,8 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       );
     }
 
+    const currentPushedRunBranches = pushedRunBranches;
+    const currentClosedUnmergedRunBranches = closedUnmergedRunBranches;
     const skipOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
@@ -1165,13 +1190,15 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // W1-T2286: unused by this single-lane path, carried only so `NextRunnableOpts` is filled the
       // same way at both `skipOpts` sites. See `DrainDeps.observedByTask`.
       observedByTask: deps.observedByTask,
-      // W1-T916: `pushedRunBranches` is resolved ONCE above this loop, so this closure is a
-      // set-membership test and never a round trip. W1-T1207: `&& !closedUnmergedRunBranches?.has(id)`
-      // is the whole fix — a branch keeps blocking unless its PR is CLOSED AND UNMERGED. With no
-      // reader injected both are undefined and the predicate is byte-identical to before.
-      ...(pushedRunBranches
+      // W1-T916/W1-T3722: the current selection's branch state is already read above this loop
+      // (and refreshed after non-merged work), so this closure is a set-membership test and never
+      // a per-candidate round trip. W1-T1207: a branch keeps blocking unless its PR is CLOSED AND
+      // UNMERGED. With no reader injected both are undefined and the old behavior is unchanged.
+      ...(currentPushedRunBranches
         ? {
-            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id) && !closedUnmergedRunBranches?.has(id),
+            hasPushedRunBranch: (id: string) =>
+              currentPushedRunBranches.has(id) &&
+              (currentClosedUnmergedRunBranches === undefined || !currentClosedUnmergedRunBranches.has(id)),
             // RIDES THE EXISTING ROW (W1-T534): `dispatch.skipped` with its own reason, never a new
             // step. The task is not marked done and burns no strike — it is offered again once the
             // branch is gone, so this is a skip and never a terminal state.
@@ -1273,6 +1300,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       continued.push({ taskId: next.id, verdict: result.verdict, prUrl: result.prUrl });
       continuedIds.add(next.id);
       log("drain.continued", { task: next.id, verdict: result.verdict, pr_url: result.prUrl });
+      refreshRunBranchState();
       continue;
     }
     merged.push(next.id);
@@ -1358,17 +1386,20 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     return s;
   };
 
-  // W1-T916 — ONE SWEEP PER PASS, NEVER ONE PER CANDIDATE. Resolved before the dispatch loop so
-  // every iteration tests set membership rather than making a round trip.
-  const pushedRunBranches = deps.readPushedRunBranches
-    ? runBranchTaskIds(deps.readPushedRunBranches())
-    : undefined;
-  // W1-T1207 — the same hoist, for the arm that stops a leftover branch blocking forever: ids whose
-  // pushed run branch's PR is CLOSED AND UNMERGED. Subtracted below, so an OPEN/DRAFT PR (or no PR)
-  // still blocks exactly as before.
-  const closedUnmergedRunBranches = deps.readClosedRunBranchPrs
-    ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
-    : undefined;
+  // W1-T916/W1-T3722 — read once for the initial selection, then refresh after a non-merged
+  // dispatch. A run can open its PR after this snapshot and before the next selection; retaining
+  // the old set across that boundary recreates the stale-absent duplicate-build window.
+  let pushedRunBranches: ReadonlySet<string> | undefined;
+  let closedUnmergedRunBranches: ReadonlySet<string> | undefined;
+  const refreshRunBranchState = (): void => {
+    pushedRunBranches = deps.readPushedRunBranches
+      ? runBranchTaskIds(deps.readPushedRunBranches())
+      : undefined;
+    closedUnmergedRunBranches = deps.readClosedRunBranchPrs
+      ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
+      : undefined;
+  };
+  refreshRunBranchState();
   while (attempted.length < max) {
     const stopped = deps.checkStop?.();
     if (stopped) {
@@ -1459,6 +1490,8 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       );
     }
 
+    const currentPushedRunBranches = pushedRunBranches;
+    const currentClosedUnmergedRunBranches = closedUnmergedRunBranches;
     const skipOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
@@ -1473,13 +1506,15 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       // W1-T2286: the SAME map handed to `partitionByFileOverlap` below — see
       // `DrainDeps.observedByTask` for why the pack step and the real partition must not disagree.
       observedByTask: deps.observedByTask,
-      // W1-T916: `pushedRunBranches` is resolved ONCE above this loop, so this closure is a
-      // set-membership test and never a round trip. W1-T1207: `&& !closedUnmergedRunBranches?.has(id)`
-      // is the whole fix — a branch keeps blocking unless its PR is CLOSED AND UNMERGED. With no
-      // reader injected both are undefined and the predicate is byte-identical to before.
-      ...(pushedRunBranches
+      // W1-T916/W1-T3722: the current selection's branch state is already read above this loop
+      // (and refreshed after non-merged work), so this closure is a set-membership test and never
+      // a per-candidate round trip. W1-T1207: a branch keeps blocking unless its PR is CLOSED AND
+      // UNMERGED. With no reader injected both are undefined and the old behavior is unchanged.
+      ...(currentPushedRunBranches
         ? {
-            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id) && !closedUnmergedRunBranches?.has(id),
+            hasPushedRunBranch: (id: string) =>
+              currentPushedRunBranches.has(id) &&
+              (currentClosedUnmergedRunBranches === undefined || !currentClosedUnmergedRunBranches.has(id)),
             // RIDES THE EXISTING ROW (W1-T534): `dispatch.skipped` with its own reason, never a new
             // step. The task is not marked done and burns no strike — it is offered again once the
             // branch is gone, so this is a skip and never a terminal state.
@@ -1630,6 +1665,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         continued.push({ taskId: t.id, verdict: result.verdict, prUrl: result.prUrl });
         continuedIds.add(t.id);
         log("drain.continued", { task: t.id, verdict: result.verdict, pr_url: result.prUrl });
+        refreshRunBranchState();
         continue;
       }
       merged.push(t.id);
