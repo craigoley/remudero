@@ -119,6 +119,23 @@ test("W1-T3101: an optional when-paths selector narrows an approved skill to mat
   );
 });
 
+test("W1-T3101: when-paths uses anchored single-star, single-character, and literal-special matching", () => {
+  const loaded = loadInjectableSkills(skillTree([
+    { name: "literal-dot", front: "applies-to: implement\nwhen-paths: src/worker.ts", body: "literal" },
+    { name: "one-char", front: "applies-to: implement\nwhen-paths: test/?.ts", body: "one char" },
+    { name: "one-level", front: "applies-to: implement\nwhen-paths: src/*.ts", body: "one level" },
+  ]));
+  assert.deepEqual(
+    selectSkillsForTask(loaded, "implement", 10_000, ["src/worker.ts", "test/a.ts"]).map((skill) => skill.name),
+    ["literal-dot", "one-char", "one-level"],
+  );
+  assert.deepEqual(
+    selectSkillsForTask(loaded, "implement", 10_000, ["src/nested/worker.ts", "test/ab.ts"]).map((skill) => skill.name),
+    [],
+    "* and ? must not cross a slash or consume more than one character",
+  );
+});
+
 test("W1-T3101: malformed when-paths metadata fails closed and selection records path filtering", () => {
   const dir = skillTree([
     { name: "malformed", front: "applies-to: implement\nwhen-paths:", body: "must not inject" },
