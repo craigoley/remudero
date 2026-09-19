@@ -168,7 +168,7 @@ async function reviewArgsFrom(over: {
 
 // ── criterion 1 ───────────────────────────────────────────────────────────────────────────────
 
-test("criterion 1: reviewer-unmet fetches the live PR body and marks it as authoritative", async () => {
+test("W1-T3501 ci-log and reviewer-unmet re-reviews judge the current PR body", async () => {
   const body = "## Summary\n\nThis PR body is authoritative.\n";
   const got = await reviewArgsFrom({
     unmet: OTHER_UNMET,
@@ -179,7 +179,7 @@ test("criterion 1: reviewer-unmet fetches the live PR body and marks it as autho
   assert.equal(got.report, body, "the reviewer receives the current body, not worker prose");
 });
 
-test("criterion 1 (substitute fallback): worker prose produces no changeset contradiction when the body fetch fails", async () => {
+test("W1-T3501 body-fetch failure remains an explicit substitute", async () => {
   const got = await reviewArgsFrom({ unmet: OTHER_UNMET, narrative: NARRATIVE_WITH_SHORTHAND });
   const v = judgeReview([{ claim: "c", proof: "unit test: test/fix-rung-report-provenance.test.ts" }], {
     diff: PR_DIFF,
@@ -191,7 +191,7 @@ test("criterion 1 (substitute fallback): worker prose produces no changeset cont
 
 // ── criterion 2 ───────────────────────────────────────────────────────────────────────────────
 
-test("criterion 2: a successful body-coverage fetch marks the report NOT a substitute, so a real body is still scored exactly as it is today", async () => {
+test("W1-T3501 body-coverage keeps one current-body review input", async () => {
   const body = "## Summary\n\nThis PR touches src/run-task.ts and its test.\n";
   const got = await reviewArgsFrom({
     unmet: KEYWORD_UNMET,
