@@ -58,8 +58,8 @@ test("STRUCTURAL: daemonCommand's runOne closure threads target.owner into runTa
   const runOneBlock = body.slice(runOneIdx, body.indexOf("readUsage:", runOneIdx));
   assert.match(
     runOneBlock,
-    /runTask\(taskId,\s*\{[^}]*owner:\s*target\.owner/s,
-    "the runOne closure must pass owner: target.owner to runTask — without it the daemon's " +
+    /runTask(?:Fn)?\(taskId,\s*\{[^}]*owner:\s*target\.owner/s,
+    "the runOne closure must pass owner: target.owner to the injected runTask implementation — without it the daemon's " +
       "resolved (possibly foreign) owner never reaches the dispatched run",
   );
 });
