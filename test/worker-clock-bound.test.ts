@@ -292,6 +292,27 @@ function abandoningSpawn(evidence: WorkerAbandonmentEvidence): { spawn: typeof s
   return { spawn, calls };
 }
 
+function boundedOutputError(overrides: Record<string, unknown> = {}): Error {
+  return Object.assign(new Error("fixture: Codex stdout exceeded its retained output budget"), {
+    name: "CodexWorkerOutputLimitError",
+    reasonClass: "bounded_output",
+    stream: "stdout",
+    limitBytes: 1_048_576,
+    observedBytes: 1_048_791,
+    ...overrides,
+  });
+}
+
+function boundedOutputSpawn(error: Error): { spawn: typeof spawnWorker; calls: SpawnWorkerArgs[] } {
+  const calls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    calls.push(args);
+    if (calls.length === 1) return reconResult();
+    throw error;
+  };
+  return { spawn, calls };
+}
+
 function buildFixtureRoot(): { root: string; planPath: string; config: Config } {
   const root = mkdtempSync(join(tmpdir(), "runtask-clockbound-root-"));
   const planPath = join(root, "tasks.yaml");
@@ -427,6 +448,86 @@ test("W1-T1045: an abandoned run ends with a terminal verdict", async () => {
     assert.equal(res.verdict, "failed");
     assert.equal(res.taskId, "TST-CLOCKBOUND");
     assert.equal(typeof res.runId, "string");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3502 criterion 1: a validated bounded-output error becomes one terminal failed verdict", async () => {
+  const { root, planPath, config } = buildFixtureRoot();
+  try {
+    const { spawn } = boundedOutputSpawn(boundedOutputError());
+    const result = await runTask("TST-CLOCKBOUND", {
+      skipGitSync: true,
+      planPath,
+      config,
+      github: OFFLINE_GITHUB,
+      spawn,
+      containmentExec: clockBoundHoldingContainmentExec,
+      isolationExec: clockBoundCleanIsolationExec,
+    });
+
+    assert.equal(result.verdict, "failed");
+    const boundedVerdicts = readLedger(root).filter((line) => line.step === "verdict" && line.stage === "worker.bounded_output");
+    assert.equal(boundedVerdicts.length, 1, "the typed output failure settles exactly one named terminal verdict");
+    assert.deepEqual(
+      {
+        stream: boundedVerdicts[0]?.stream,
+        limitBytes: boundedVerdicts[0]?.limit_bytes,
+        observedBytes: boundedVerdicts[0]?.observed_bytes,
+      },
+      { stream: "stdout", limitBytes: 1_048_576, observedBytes: 1_048_791 },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3502 criterion 2: a bounded-output terminal result opens no PR, arms none, and releases the run", async () => {
+  const { root, planPath, config } = buildFixtureRoot();
+  try {
+    const { spawn } = boundedOutputSpawn(boundedOutputError());
+    const result = await runTask("TST-CLOCKBOUND", {
+      skipGitSync: true,
+      planPath,
+      config,
+      github: OFFLINE_GITHUB,
+      spawn,
+      containmentExec: clockBoundHoldingContainmentExec,
+      isolationExec: clockBoundCleanIsolationExec,
+    });
+
+    assert.equal(result.prUrl, undefined);
+    const ledger = readLedger(root);
+    assert.ok(!ledger.some((line) => line.step === "pr.opened"), "a failed worker never opens a PR");
+    assert.ok(!ledger.some((line) => line.step === "automerge.armed"), "a failed worker never arms auto-merge");
+    assert.ok(ledger.some((line) => line.step === "worktree.remove" && line.on === "worker.bounded_output"));
+    assert.ok(!existsSync(join(root, "state", "inflight", "TST-CLOCKBOUND.lock")), "the inflight lock is released");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3502 criterion 3: a malformed bounded-output lookalike still rejects", async () => {
+  const { root, planPath, config } = buildFixtureRoot();
+  try {
+    const { spawn } = boundedOutputSpawn(boundedOutputError({ stream: "unbounded" }));
+    await assert.rejects(
+      runTask("TST-CLOCKBOUND", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: OFFLINE_GITHUB,
+        spawn,
+        containmentExec: clockBoundHoldingContainmentExec,
+        isolationExec: clockBoundCleanIsolationExec,
+      }),
+      /fixture: Codex stdout exceeded/,
+    );
+
+    const ledger = readLedger(root);
+    assert.ok(!ledger.some((line) => line.step === "verdict" && line.stage === "worker.bounded_output"));
+    assert.ok(ledger.some((line) => line.step === "run.error"), "a novel error remains on the generic fatal path");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
