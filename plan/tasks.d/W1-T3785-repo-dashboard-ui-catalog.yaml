@@ -17,14 +17,20 @@
     - apps/dashboard/src/components/RepoCard.tsx
     - apps/dashboard/src/components/RepoDetail.tsx
     - apps/dashboard/src/__tests__/repo-dashboard.test.tsx
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
-    OBSERVED on current main at 6e238588a18afc4329441de00235b27c20e77daf: the React dashboard
+    OBSERVED at the filing base 6e238588a18afc4329441de00235b27c20e77daf: the React dashboard
     still seeds its repo store locally and labels every repo endpoint as a placeholder, while
     W1-T3783's implementation PR adds a typed daemon portfolio read. The UI therefore cannot show
     the managed-repo set from the server and its non-null local defaults would misrender missing
     connection/settings state as inactive or configured.
+
+    CURRENT HEAD CHECK: `apps/dashboard` is a retired, unreachable surface in this repository;
+    the live console is served elsewhere and the plan's retired-surface gate refuses dispatchable
+    tasks under that prefix. This record is therefore withdrawn until a task is filed against the
+    reachable console repository and contract.
 
     This task consumes W1-T3783 after it lands. It does not add OAuth, write settings, telemetry,
     logs, or dry-run behavior; it makes the existing list/card/detail surfaces honest and live for
@@ -56,4 +62,3 @@
   note: |
     This task is intentionally blocked behind W1-T3783's server/client contract. It must use a
     session branch shaped `run-W1-T3785-<epochMs>` and carry `Remudero-Task: W1-T3785` when built.
-
