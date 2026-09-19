@@ -1180,6 +1180,7 @@ import {
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
+  buildCommitTrailerIndex,
   classifyGhFailure,
   createDispatchBreakerCache,
   DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
@@ -28500,7 +28501,20 @@ export async function daemonCommand(
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
-  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log, snapshotCache: boardSnapshotFor(o, r) }));
+  // W1-T3779: the commit-trailer fallback must read the checkout that supplied this daemon's
+  // target plan. The module checkout is the engine repo and is foreign for every dedicated
+  // target, so letting buildBatchedGithub construct its default index there silently erases
+  // valid target-repo merge credit.
+  const targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo);
+  const targetCommitTrailerIndex = () =>
+    buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
+  const gatewayFor = (o: string, r: string) =>
+    buildBatchedGithub(o, r, {
+      log,
+      snapshotCache: boardSnapshotFor(o, r),
+      ...(o === target.owner && r === target.repo ? { commitTrailerIndex: targetCommitTrailerIndex } : {}),
+    });
+  const githubFactory = deps.githubFactory ?? gatewayFor;
 
   // W1-T2509 — ONE GATEWAY PER owner/repo FOR THE WHOLE DAEMON, handed to every dispatch lane.
   // STILL SEPARATE FROM `githubFactory` ABOVE, but no longer because the projection gateway is
@@ -28515,9 +28529,7 @@ export async function daemonCommand(
   // `buildBatchedGithub`'s own `ttlMs` (15 s default, far under `pollIntervalMs`), so a warm
   // gateway still refetches every poll — warming changes a fetch's SHAPE, never whether one
   // happens (`buildInboxDraftHook`'s doc makes the identical argument, with measurements).
-  const laneGithubFor = memoiseGatewayByRepo((o, r) =>
-    deps.githubFactory ? deps.githubFactory(o, r) : buildBatchedGithub(o, r, { log, snapshotCache: boardSnapshotFor(o, r) }),
-  );
+  const laneGithubFor = memoiseGatewayByRepo((o, r) => (deps.githubFactory ? deps.githubFactory(o, r) : gatewayFor(o, r)));
   // W1-T2513 — ONE COALESCER FOR THIS WHOLE DAEMON PROCESS (never per tick, never per lane),
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
