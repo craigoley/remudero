@@ -2,7 +2,7 @@
  * The read-only managed-repository portfolio surface for the console dashboard.
  *
  * This route deliberately reports only what the daemon can observe today: the validated
- * `.remudero/managed-repos.json` set. A repository being listed there is not proof that GitHub
+ * validated managed-repository manifest set. A repository being listed there is not proof that GitHub
  * OAuth completed, that a worker is active, or that health/telemetry/settings have a value. Those
  * fields stay explicit `null`/`unknown` until their durable sources and refresh semantics exist.
  */
@@ -82,7 +82,7 @@ function toDashboardEntry(owner: string, repo: string): RepoDashboardEntry {
 
 /** GET /v1/repos — the validated, read-only managed-repo portfolio. */
 export function buildRepoDashboardRoute(deps: {
-  /** Repository root containing `.remudero/managed-repos.json`. */
+  /** Repository root containing the managed-repository manifest. */
   root: string;
   /** Injectable clock for a stable generated_at in route tests. */
   now?: () => number;

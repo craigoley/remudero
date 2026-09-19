@@ -279,6 +279,11 @@
     "legacy": 0,
     "newDate": 0
   },
+  "src/lib/repo-dashboard-route.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 1
+  },
   "src/lib/report-commands.ts": {
     "dateNow": 3,
     "legacy": 0,
