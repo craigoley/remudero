@@ -11,6 +11,7 @@ import type { AttributionPolicy, ClassOutcome, UnmeasurableCause, UnmeasurableRo
 
 export const OPERATOR_AGENT_TASK_OUTCOME_SIGNAL = "task-outcomes" as const;
 
+/* c8 ignore next 8 -- exported type declarations have no runtime statements to execute */
 export type OperatorAgentTaskOutcomeStatus = "measured" | "not-collected";
 
 export type OperatorAgentTaskOutcomeUnavailableReason =
