@@ -14,7 +14,7 @@ import type { GitHub } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import type { DispatchClaimReserver } from "../src/lib/dispatch-claim.js";
-import { daemonCommand, runTask, waitForCiGreen, type PollDeps } from "../src/run-task.js";
+import { ciGateBlockReason, daemonCommand, runTask, waitForCiGreen, type PollDeps } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
@@ -55,6 +55,10 @@ test("W1-T3793: a stale daemon yields an external CI wait", async () => {
   assert.equal(outcome.sha, HEAD_SHA, "the handoff stays pinned to the already-read CI head");
   assert.equal(outcome.oldSha, OLD_SHA);
   assert.equal(outcome.newSha, NEW_SHA);
+  assert.equal(
+    ciGateBlockReason(outcome),
+    "daemon code became stale while CI was pending; yielded at the recorded external-wait boundary",
+  );
   assert.equal(freshnessCalls, 1, "the daemon-only callback is sampled once at the stable wait boundary");
   const awaiting = logs.findIndex((entry) => entry.step === "run.awaiting_external");
   const handoff = logs.findIndex((entry) => entry.step === "run.freshness_handoff");
