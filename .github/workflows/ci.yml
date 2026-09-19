@@ -23,6 +23,11 @@ name: CI
 
 on:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
   # W1-T1033: `ci` runs on main pushes; PR-only jobs below shell-skip or event-guard their work.
   # TRAP: `ci-gate.yml` must not gain this trigger; test/push-ci-on-main.test.ts pins why.
   push:
