@@ -22,6 +22,11 @@ node_modules
 .env
 .env.*
 
+# Live instance topology belongs to the host's operator overlay, never to the ACR build context.
+# Keep the public `.remudero/` runtime policy files available; exclude only this host-specific
+# registry so a checkout used for `az acr build` cannot transfer or bake its private targets.
+.remudero/daemon-instances.yaml
+
 # ── DELIBERATELY NOT EXCLUDED, BOTH VERIFIED FROM SOURCE BEFORE THIS FILE WAS WRITTEN ─────────
 #
 # `.git` — rmd needs its OWN git metadata at runtime, not just at build time. `resolveOwnerRepo`

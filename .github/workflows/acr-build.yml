@@ -34,10 +34,11 @@ name: Build image (ACR)
 #   already exists — the Azure CLI is not available to the session that wrote this file, so no
 #   read-only query was possible and neither could be confirmed.
 #
-# TRIGGER: either an explicit operator dispatch OR a main push that changes one of the two paths
-# production's image-drift detector proves is baked into the running image. Tens of mounted-source
-# merges a day still trigger nothing; the rare Dockerfile/entrypoint merge cannot silently wait for
-# a human to notice image drift. Manual dispatch remains the recovery/commissioning path.
+# TRIGGER: either an explicit operator dispatch OR a main push that changes one of the three paths
+# production's image-drift detector proves is baked into the running image or controls its build
+# context. Tens of mounted-source merges a day still trigger nothing; a Dockerfile, entrypoint, or
+# build-context change cannot silently wait for a human to notice image drift. Manual dispatch
+# remains the recovery/commissioning path.
 
 on:
   push:
@@ -45,6 +46,7 @@ on:
     paths:
       - deploy/Dockerfile
       - deploy/entrypoint.sh
+      - .dockerignore
   workflow_dispatch:
     inputs:
       registry:
