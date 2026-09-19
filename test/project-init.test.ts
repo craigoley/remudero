@@ -34,7 +34,7 @@ test("acceptance 1: buildProjectInit's branch-protection payload names exactly [
   assert.deepEqual(payload.branchProtection.required_status_checks.contexts, ["ci-gate", "remudero-review"]);
   assert.equal(payload.branchProtection.required_status_checks.strict, true);
   assert.equal(payload.branchProtection.enforce_admins, true);
-  assert.equal(payload.branchProtection.required_pull_request_reviews.required_approving_review_count, 1);
+  assert.equal(payload.branchProtection.required_pull_request_reviews, null);
   assert.equal(payload.branchProtection.restrictions, null);
 });
 
