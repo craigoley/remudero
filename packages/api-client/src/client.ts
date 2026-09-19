@@ -39,6 +39,7 @@
 // (src/lib/panel-skill-run.ts); its grill renders via the SAME `listFeedback`/`submitFeedback`
 // methods W3-T6 already added, never a second inline-render primitive.
 import type { components } from "./schema.js";
+import type { RepoDashboardResult } from "./client-types.js";
 
 export type StatusProjection = components["schemas"]["StatusProjection"];
 export type StatusSnapshot = components["schemas"]["StatusSnapshot"];
@@ -69,6 +70,8 @@ export interface DaemonClientOptions {
 export interface DaemonClient {
   /** GET /v1/status — the current board snapshot. */
   getStatus(): Promise<StatusSnapshot>;
+  /** GET /v1/repos — the read-only managed-repo portfolio; unavailable measurements stay null. */
+  listRepos(): Promise<RepoDashboardResult>;
   /**
    * GET /v1/status/stream — subscribe to live `status` events (one per task whose derived
    * StatusProjection changed). Returns an unsubscribe function that aborts the underlying
@@ -242,6 +245,10 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
       const res = await fetchImpl(requestUrl(base, "/v1/status").toString(), { headers: authHeaders(opts.token) });
       if (!res.ok) throw new Error(`getStatus: daemon returned ${res.status}`);
       return (await res.json()) as StatusSnapshot;
+    },
+
+    listRepos() {
+      return getJson<components["schemas"]["RepoDashboardResult"]>("/v1/repos");
     },
 
     pauseFleet(reason) {

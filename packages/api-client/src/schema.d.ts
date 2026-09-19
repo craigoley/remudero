@@ -42,6 +42,48 @@ export interface components {
       /** W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp `recap` was computed as-of. Absent alongside `recap` for the same two reasons. */
       sinceCheckpoint?: string;
     };
+    /** The health projection for one managed repository. The current daemon has no per-repo health source, so every measurement is explicitly unknown rather than rendered as zero or healthy. */
+    RepoDashboardHealth: {
+      status: "unknown";
+      queuedtasks: number | null;
+      errorrate: number | null;
+      last_run: string | null;
+      alerts: (string)[] | null;
+    };
+    /** Per-repository telemetry, unavailable until a durable per-repo aggregation source exists. */
+    RepoDashboardTelemetry: {
+      tokens7d: number | null;
+      modelsused: (string)[];
+      cost_7d: number | null;
+    };
+    /** Per-repository settings, unavailable until durable settings persistence exists. */
+    RepoDashboardSettings: {
+      proofpolicy: string | null;
+      workerpoolsize: number | null;
+      alertthreshold: number | null;
+    };
+    /** One repository from the validated `.remudero/managed-repos.json` set. Managed membership is not evidence of OAuth connection, activation, health, telemetry, or settings. */
+    RepoDashboardEntry: {
+      /** Canonical `owner/repo` identity from the managed-repo set. */
+      id: string;
+      /** Repository name from the canonical identity. */
+      reponame: string;
+      /** Deterministic GitHub URL for the canonical identity; no GitHub read is implied. */
+      repourl: string;
+      connected_at: string | null;
+      active: boolean | null;
+      managed: boolean;
+      source: "managed-repos";
+      health: RepoDashboardHealth;
+      telemetry: RepoDashboardTelemetry;
+      settings: RepoDashboardSettings;
+    };
+    /** GET /v1/repos's read-only managed-repo portfolio. An empty `repos` array is a measured empty managed set; it is not an unavailable response. */
+    RepoDashboardResult: {
+      generated_at: string;
+      source: "managed-repos";
+      repos: (RepoDashboardEntry)[];
+    };
     /** W1-T163 -- one "since you last checked" row (src/lib/recap.ts): a single ledger event after the caller's per-token marker. */
     RecapEvent: {
       kind: "merged" | "blocked" | "escalated" | "question_answered" | "retro";
@@ -290,6 +332,16 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/repos": {
+    get: {
+      responses: {
+          "200": RepoDashboardResult;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
   "/v1/status": {
     get: {
       responses: {
