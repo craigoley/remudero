@@ -159,28 +159,23 @@ export function adaptOperatorAgentCapacityRows(rows: readonly OperatorAgentCapac
       unavailableRows.push(unavailable(row, repo, missing));
       continue;
     }
-    if (
-      !repo ||
-      !validCapacity(configuredCapacity) ||
-      !validCount(admittedLanes) ||
-      !validCount(activeWorkers) ||
-      !validCount(queuedWork) ||
-      !validWindow(windowStart) ||
-      !validWindow(windowEnd)
-    ) {
-      continue;
-    }
-
+    const measuredRepo = repo as string;
+    const measuredConfiguredCapacity = configuredCapacity as number;
+    const measuredAdmittedLanes = admittedLanes as number;
+    const measuredActiveWorkers = activeWorkers as number;
+    const measuredQueuedWork = queuedWork as number;
+    const measuredWindowStart = windowStart as string;
+    const measuredWindowEnd = windowEnd as string;
     measurements.push({
-      repo,
-      configuredCapacity,
-      admittedLanes,
-      activeWorkers,
-      queuedWork,
-      utilizationRatio: activeWorkers / configuredCapacity,
-      windowStart,
-      windowEnd,
-      recommendation: recommendation(configuredCapacity, admittedLanes, activeWorkers, queuedWork),
+      repo: measuredRepo,
+      configuredCapacity: measuredConfiguredCapacity,
+      admittedLanes: measuredAdmittedLanes,
+      activeWorkers: measuredActiveWorkers,
+      queuedWork: measuredQueuedWork,
+      utilizationRatio: measuredActiveWorkers / measuredConfiguredCapacity,
+      windowStart: measuredWindowStart,
+      windowEnd: measuredWindowEnd,
+      recommendation: recommendation(measuredConfiguredCapacity, measuredAdmittedLanes, measuredActiveWorkers, measuredQueuedWork),
     });
   }
 
