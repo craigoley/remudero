@@ -34,6 +34,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
   DEPLOY_RESTART_RATE_CEILING_MS,
@@ -1250,7 +1251,7 @@ export function deployLedgerPath(stateRoot: string): string {
   if (!validRoot) {
     throw new Error(`cannot resolve deploy ledger — state root refused: ${String(stateRoot)}`);
   }
-  return join(stateRoot, "state", "ledger.ndjson");
+  return join(stateRoot, "state", LEDGER_FILENAME);
 }
 
 function parseDeployRestartPressureState(raw: string): DeployRestartPressureState {

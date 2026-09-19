@@ -596,7 +596,8 @@ test("realDeployDeps: git/pgrep/launchctl route through the injected exec with t
 
 test("realDeployDeps: waitBootHealth reads daemon.boot heartbeats after the kickstart instant", () => {
   withTemp((root) => {
-    const ledger = join(root, "ledger.ndjson");
+    const ledger = join(root, "state", "ledger.ndjson");
+    mkdirSync(join(root, "state"), { recursive: true });
     const since = Date.parse("2026-07-22T20:00:00.000Z");
     // one boot BEFORE the kickstart (ignored) + one AFTER (a clean single boot)
     writeFileSync(
