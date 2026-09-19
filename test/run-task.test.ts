@@ -59,8 +59,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   noPrVerdict,
   renderReconPrompt,
   softBudgetWarning,
-  workerErrorVerdict,
-  retroErrorLedgerFields,
+  workerErrorVerdict, retroErrorLedgerFields,
   type FixDeps,
   type FixEvidence,
   type PrHeadGateway,
@@ -138,23 +137,6 @@ import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 import { changedTaskIds } from "../src/lib/task-linter.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-
-test("W1-T3787 retro error carries output-limit evidence in test/run-task.test.ts", () => {
-  const error = Object.assign(new Error("Codex worker stdout output exceeded its 1048576-byte retention budget"), {
-    name: "CodexWorkerOutputLimitError" as const,
-    reasonClass: "bounded_output" as const,
-    stream: "stdout" as const,
-    limitBytes: 1_048_576,
-    observedBytes: 1_048_791,
-    eventBytesByKind: { "item.completed:agent_message": 42, other: 7 },
-    pendingLineBytes: 19,
-  });
-  const fields = retroErrorLedgerFields(error);
-  assert.deepEqual(fields?.event_bytes_by_kind, { "item.completed:agent_message": 42, other: 7 });
-  assert.equal(fields?.pending_line_bytes, 19);
-  assert.equal("raw_transcript" in (fields ?? {}), false, "the ledger carries bounded evidence, never transcript text");
-  assert.match(runTaskSrc, /log\("retro\.error", retroErrorLedgerFields\(e\)/);
-});
 
 /** An injected {@link PrHeadGateway} fixture — no `gh` exec, a fixed answer per PR url. */
 function fakeGateway(headRefName: string | undefined): PrHeadGateway {
@@ -8865,4 +8847,21 @@ test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung r
     !logged.some((l) => l.step === "ci.stalled"),
     "a target-green verdict must never route through the stall/timeout path either",
   );
+});
+
+test("W1-T3787 retro error carries output-limit evidence in test/run-task.test.ts", () => {
+  const error = Object.assign(new Error("Codex worker stdout output exceeded its 1048576-byte retention budget"), {
+    name: "CodexWorkerOutputLimitError" as const,
+    reasonClass: "bounded_output" as const,
+    stream: "stdout" as const,
+    limitBytes: 1_048_576,
+    observedBytes: 1_048_791,
+    eventBytesByKind: { "item.completed:agent_message": 42, other: 7 },
+    pendingLineBytes: 19,
+  });
+  const fields = retroErrorLedgerFields(error);
+  assert.deepEqual(fields?.event_bytes_by_kind, { "item.completed:agent_message": 42, other: 7 });
+  assert.equal(fields?.pending_line_bytes, 19);
+  assert.equal("raw_transcript" in (fields ?? {}), false, "the ledger carries bounded evidence, never transcript text");
+  assert.match(runTaskSrc, /log\("retro\.error", retroErrorLedgerFields\(e\)/);
 });
