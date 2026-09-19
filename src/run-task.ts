@@ -4780,12 +4780,6 @@ export interface PollDeps {
    * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
-  /**
-   * Daemon-only cooperative freshness boundary for the primary post-push CI wait. It is called
-   * once, immediately after `run.awaiting_external` has been recorded and before another poll.
-   * A stale reading returns the named handoff below; absent means every existing caller remains
-   * on its ordinary wait path. Manual, retro, plan, and fix callers never supply it.
-   */
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
 }
 
@@ -4960,15 +4954,10 @@ export type CiGateOutcome =
       checkCount?: number;
     }
   | {
-      /** A daemon-only cooperative return after it has recorded an external CI wait. */
       state: "freshness_handoff";
-      /** The PR head whose pending CI state reached the safe handoff boundary. */
       sha: string;
-      /** The daemon process booted at this material-but-stale source revision. */
       oldSha: string;
-      /** The material origin/main revision that the next daemon lifetime will load. */
       newSha: string;
-      /** Not CI evidence: this result deliberately yields before a terminal gate verdict. */
       checks?: never;
       checkCount?: never;
     };
@@ -5207,10 +5196,7 @@ async function waitForCiGreen(
     // is right to shed it. See `runIsAwaitingExternal`.
     if (i === 0) {
       log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
-      // W1-T3793: CI, rather than a live worker, now owns progress. The daemon may yield only
-      // AFTER the retained external-wait record exists and BEFORE a further poll could advance to
-      // review or repair. A caller that did not deliberately supply this daemon-only callback
-      // keeps the previous wait; degraded and dirty freshness cannot manufacture a handoff.
+      // W1-T3793: yield only after retaining the external-wait record.
       const freshness = deps.externalWaitFreshness?.();
       if (freshness) {
         log("run.freshness_handoff", {
@@ -12616,11 +12602,6 @@ async function runTask(
      *  `deps.probeExec` already uses, without touching `loadConfig()` (unavailable in CI) or
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
-    /**
-     * Daemon-only cooperative freshness read supplied at the already-ledgered external CI-wait
-     * boundary. Omitted by manual, retro, and plan callers; a live worker is never observed or
-     * interrupted through this option.
-     */
     externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
     /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
@@ -28414,11 +28395,6 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
-    /**
-     * Injectable single-task runner for daemon composition tests. The real command keeps the
-     * ordinary `runTask`; this seam lets a test invoke the daemon's actual `runOne` closure and
-     * inspect the options it forwards without provisioning a worker provider or GitHub write.
-     */
     runTask?: typeof runTask;
     /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
      * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
