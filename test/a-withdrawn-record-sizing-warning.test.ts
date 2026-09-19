@@ -34,7 +34,11 @@ test("the downgraded sizing violation names the retirement", () => {
   assert.match(violation.message, /retired \(withdrawn\)/);
 });
 
-test("a live record with the same span still blocks", () => {
+test("a withdrawn record is downgraded while a live record with the same span still blocks", () => {
+  const retired = sizingViolation(task());
+  assert.ok(retired);
+  assert.equal(retired.severity, "warn");
+
   const violation = sizingViolation(task({ retirement: undefined, status: "queued" }));
   assert.ok(violation);
   assert.equal(violation.severity, "block");
