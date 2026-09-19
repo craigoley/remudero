@@ -11,6 +11,7 @@ import {
   observeSkillSelection,
   renderSkillEffectivenessReport,
   SKILL_APPLIES_TO_RE,
+  SKILL_WHEN_PATHS_RE,
   loadInjectableSkills,
   renderSkillsPart,
   selectSkillsForTask,
@@ -68,6 +69,7 @@ test("W1-T3101: only a skill declaring applies-to is injectable — the generate
 
 test("W1-T3101: the applies-to matcher drives both arms", () => {
   assert.equal(SKILL_APPLIES_TO_RE.test("applies-to: implement, diagnose"), true);
+  assert.equal(SKILL_WHEN_PATHS_RE.test("when-paths: src/**, test/**"), true);
   assert.equal(SKILL_APPLIES_TO_RE.test("disable-model-invocation: true"), false);
   assert.equal(SKILL_APPLIES_TO_RE.test("name: tddr"), false);
 });
@@ -93,6 +95,47 @@ test("W1-T3101: a skill matching the task class is selected; one for another cla
   assert.deepEqual(selectSkillsForTask(skills, "implement", 10_000).map((s) => s.name), ["impl"]);
   assert.deepEqual(selectSkillsForTask(skills, "diagnose", 10_000).map((s) => s.name), ["diag"]);
   assert.deepEqual(selectSkillsForTask(skills, "review", 10_000), [], "an unmatched class selects nothing");
+});
+
+test("W1-T3101: an optional when-paths selector narrows an approved skill to matching task files", () => {
+  const dir = skillTree([
+    { name: "src-only", front: "applies-to: implement\nwhen-paths: src/**", body: "source procedure" },
+    { name: "repo-wide", front: "applies-to: implement", body: "general procedure" },
+  ]);
+  const loaded = loadInjectableSkills(dir);
+  assert.deepEqual(loaded.find((skill) => skill.name === "src-only")?.whenPaths, ["src/**"]);
+  assert.deepEqual(
+    selectSkillsForTask(loaded, "implement", 10_000, ["src/lib/worker.ts"]).map((skill) => skill.name),
+    ["repo-wide", "src-only"],
+  );
+  assert.deepEqual(
+    selectSkillsForTask(loaded, "implement", 10_000, ["test/worker.test.ts"]).map((skill) => skill.name),
+    ["repo-wide"],
+  );
+  assert.deepEqual(
+    selectSkillsForTask(loaded, "implement", 10_000).map((skill) => skill.name),
+    ["repo-wide"],
+    "a path-scoped skill must not become repo-wide when the task omits files",
+  );
+});
+
+test("W1-T3101: malformed when-paths metadata fails closed and selection records path filtering", () => {
+  const dir = skillTree([
+    { name: "malformed", front: "applies-to: implement\nwhen-paths:", body: "must not inject" },
+    { name: "src-only", front: "applies-to: implement\nwhen-paths: src/**", body: "source procedure" },
+  ]);
+  const loaded = loadInjectableSkills(dir);
+  assert.equal(loaded.some((skill) => skill.name === "malformed"), false);
+  const observed = observeSkillSelection(loaded, "implement", 10_000, ["test/worker.test.ts"]);
+  assert.deepEqual(observed.observation, {
+    task_type: "implement",
+    approved_eligible_names: [],
+    path_filtered_names: ["src-only"],
+    selected_names: [],
+    budget_omitted_names: [],
+    budget_chars: 10_000,
+    zero_selection: true,
+  });
 });
 
 test("W1-T3101: selection spends the EXISTING knowledge budget, and an over-budget skill is DROPPED not truncated", () => {
@@ -203,6 +246,7 @@ const skillSelectionRow = (runId: string, selected: boolean): Record<string, unk
   step: "skills.selection",
   task_type: "implement",
   approved_eligible_names: ["procedure"],
+  path_filtered_names: [],
   selected_names: selected ? ["procedure"] : [],
   budget_omitted_names: selected ? [] : ["procedure"],
   budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -247,6 +291,7 @@ test("W1-T3379 criterion 1: every observation carries the approved denominator, 
   assert.deepEqual(selected.observation, {
     task_type: "implement",
     approved_eligible_names: ["fits", "omitted"],
+    path_filtered_names: [],
     selected_names: ["fits"],
     budget_omitted_names: ["omitted"],
     budget_chars: 10,
@@ -256,6 +301,7 @@ test("W1-T3379 criterion 1: every observation carries the approved denominator, 
   assert.deepEqual(zero.observation, {
     task_type: "implement",
     approved_eligible_names: [],
+    path_filtered_names: [],
     selected_names: [],
     budget_omitted_names: [],
     budget_chars: 10,
@@ -524,6 +570,7 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated a
       run_id: selection.run_id,
       task_type: selection.task_type,
       approved_eligible_names: selection.approved_eligible_names,
+      path_filtered_names: selection.path_filtered_names,
       selected_names: selection.selected_names,
       budget_omitted_names: selection.budget_omitted_names,
       zero_selection: selection.zero_selection,
@@ -531,6 +578,7 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated a
       run_id: `T-SKILL-OBSERVATION-${fixedNow}`,
       task_type: "implement",
       approved_eligible_names: ["ci-state-forensics", "proof-preflight"],
+      path_filtered_names: [],
       selected_names: ["ci-state-forensics", "proof-preflight"],
       budget_omitted_names: [],
       zero_selection: false,

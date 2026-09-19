@@ -13912,6 +13912,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       loadInjectableSkills(join(repoRoot, ".claude", "skills")),
       task.type,
       DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      task.files,
     );
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);

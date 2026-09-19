@@ -363,12 +363,19 @@ export function stageSkillDraft(
  * is excluded without an allowlist naming it, and stays excluded when it grows.
  */
 export const SKILL_APPLIES_TO_RE = /^applies-to:\s*(.+)$/m;
+/** Optional repo-relative glob selectors. A declared selector is fail-closed when a task has no
+ *  declared files or none of its file globs match; an absent key remains repo-wide for backwards
+ *  compatibility. */
+export const SKILL_WHEN_PATHS_RE = /^when-paths:\s*(.*)$/m;
 
 /** One skill that has been APPROVED into `.claude/skills/` and opted in to prompt injection. */
 export interface InjectableSkill {
   name: string;
   /** Task classes this skill declares itself for, lower-cased. */
   appliesTo: string[];
+  /** Optional repo-relative task-file globs. Absent means every file scope; present means at least
+   *  one declared task file must match before the skill is eligible. */
+  whenPaths?: string[];
   /** The body below the frontmatter — what a worker actually reads. */
   body: string;
 }
@@ -378,6 +385,39 @@ export interface InjectableSkill {
 function splitFrontmatter(text: string): { front: string; body: string } {
   const m = /^---\n([\s\S]*?)\n---\n?/.exec(text);
   return m ? { front: m[1], body: text.slice(m[0].length) } : { front: "", body: text };
+}
+
+/** Compile one repo-relative path glob as an anchored matcher. This intentionally mirrors the
+ *  learnings selector's `*`, `?`, and `**` semantics so a task's declared `files:` vocabulary has
+ *  one meaning across both injection paths. */
+function skillPathGlobToRegExp(glob: string): RegExp {
+  const SPECIAL = ".+^${}()|[]\\";
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        out += ".*";
+        i++;
+      } else {
+        out += "[^/]*";
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (SPECIAL.includes(c)) {
+      out += `\\${c}`;
+    } else {
+      out += c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+function skillMatchesTaskFiles(skill: InjectableSkill, taskFiles: readonly string[] | undefined): boolean {
+  if (skill.whenPaths === undefined) return true;
+  if (skill.whenPaths.length === 0 || !taskFiles || taskFiles.length === 0) return false;
+  const matchers = skill.whenPaths.map(skillPathGlobToRegExp);
+  return taskFiles.some((taskFile) => matchers.some((matcher) => matcher.test(taskFile)));
 }
 
 /**
@@ -412,7 +452,12 @@ export function loadInjectableSkills(
     if (!m) continue; // no opt-in — the generated macro tree lands here and is excluded
     const appliesTo = m[1].split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0);
     if (appliesTo.length === 0) continue;
-    out.push({ name, appliesTo, body: body.trim() });
+    const whenPathsMatch = SKILL_WHEN_PATHS_RE.exec(front);
+    const whenPaths = whenPathsMatch
+      ? whenPathsMatch[1].split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+      : undefined;
+    if (whenPathsMatch && (!whenPaths || whenPaths.length === 0)) continue; // malformed selector: fail closed
+    out.push({ name, appliesTo, ...(whenPaths ? { whenPaths } : {}), body: body.trim() });
   }
   return out;
 }
@@ -431,8 +476,9 @@ export function selectSkillsForTask(
   skills: readonly InjectableSkill[],
   taskType: string,
   budgetChars: number,
+  taskFiles?: readonly string[],
 ): InjectableSkill[] {
-  return observeSkillSelection(skills, taskType, budgetChars).selected;
+  return observeSkillSelection(skills, taskType, budgetChars, taskFiles).selected;
 }
 
 /**
@@ -447,6 +493,7 @@ export function selectSkillsForTask(
 export interface SkillSelectionObservation extends Record<string, unknown> {
   task_type: string;
   approved_eligible_names: string[];
+  path_filtered_names: string[];
   selected_names: string[];
   budget_omitted_names: string[];
   budget_chars: number;
@@ -462,9 +509,12 @@ export function observeSkillSelection(
   skills: readonly InjectableSkill[],
   taskType: string,
   budgetChars: number,
+  taskFiles?: readonly string[],
 ): ObservedSkillSelection {
   const want = taskType.toLowerCase();
-  const eligible = skills.filter((s) => s.appliesTo.includes(want));
+  const taskTypeEligible = skills.filter((s) => s.appliesTo.includes(want));
+  const pathFiltered = taskTypeEligible.filter((s) => !skillMatchesTaskFiles(s, taskFiles));
+  const eligible = taskTypeEligible.filter((s) => !pathFiltered.includes(s));
   const selected: InjectableSkill[] = [];
   let spent = 0;
   for (const s of eligible) {
@@ -480,6 +530,7 @@ export function observeSkillSelection(
     observation: {
       task_type: taskType,
       approved_eligible_names: eligible.map((s) => s.name),
+      path_filtered_names: pathFiltered.map((s) => s.name),
       selected_names: selectedNames,
       budget_omitted_names: eligible.filter((s) => !selectedNameSet.has(s.name)).map((s) => s.name),
       budget_chars: budgetChars,
