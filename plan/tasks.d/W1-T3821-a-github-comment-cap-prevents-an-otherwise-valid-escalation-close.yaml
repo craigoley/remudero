@@ -1,0 +1,59 @@
+- id: W1-T3821
+  title: "A GITHUB COMMENT CAP PREVENTS AN OTHERWISE VALID ESCALATION CLOSE — ghIssueGateway always asks `gh issue close --comment`, but GitHub rejects comments on issues above 2,500 comments; close the issue without a citation comment only for that documented error, return an explicit omission outcome, and preserve throws for every other close failure"
+  repo: remudero
+  depends_on: ["W1-T974"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 8.00
+  files: [src/lib/escalate.ts, test/escalate.test.ts]
+  origin: "recon#console-issue-51-comment-cap-2026-09-19"
+  plan_refs: ["W1-T974"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on remudero-console issue #51. The task was already credited by its
+    merged PR and should be retired, but `gh issue close --comment` failed with
+    GitHub's exact response: "Commenting is disabled on issues with more than 2500
+    comments." The sweep caught the throw and retried on every pass, creating no
+    new information. A direct close without a comment succeeded; that issue is now
+    closed, proving the referent and the close authority were both valid.
+
+    `ghIssueGateway.closeWithComment` is the single transport that couples a helpful
+    citation comment to closing. A narrow fallback in that transport can retain all
+    existing safety behavior while making the terminal state reachable. W1-T974 is
+    live and shares this module, but it normalizes a carriage return before optional
+    escalation deduplication; it neither closes issues nor handles this GitHub error.
+    This task therefore depends on W1-T974 rather than exposing the same gateway and
+    test file to two workers at once.
+  design: |
+    In `ghIssueGateway.closeWithComment`, attempt the normal commented close first.
+    Catch only the documented GitHub comment-cap response, then retry exactly once
+    with `gh issue close <url> --repo <owner/repo>` and no comment. Return a typed
+    close outcome that distinguishes an ordinary cited close from `comment_cap`,
+    while preserving compatibility for callers that only need the close to happen.
+    A dependent ledger-propagation task consumes that result; this transport task
+    does not broaden into reconciliation wiring.
+
+    Any other error — authentication, rate limit, not-found, malformed URL, or an
+    unknown comment failure — must still throw. The reconciler must retain its
+    per-issue containment, leave no success ledger row for that error, and retry on
+    a later readable sweep. Do not post a separate comment, suppress the normal
+    citation where GitHub accepted it, or broaden the fallback to arbitrary errors.
+  acceptance:
+    - claim: "the issue gateway normally closes with its resolution citation"
+      proof: "unit test: ghIssueGateway.closeWithComment: closes the issue with the citation comment"
+  falsifier: |
+    Make the injected gateway fail its commented close with GitHub's exact comment-cap
+    response: the test must observe one commented argv followed by one plain close
+    argv and an explicit `comment_cap` outcome. Replace the response with a 401 or
+    arbitrary error: the plain close must not be attempted and the error must still
+    propagate to the caller.
+  note: |
+    reservation holder is this filing branch, verified by `rmd next-task-id` reserving
+    W1-T3821 on origin before this shard was written; no hand-off is required.
+
+    The live issue was safely closed without a comment after its merged referent was
+    verified. This task makes that narrowly evidenced exception automatic for future
+    capped issues; it does not authorize broad issue closure or comment suppression.
