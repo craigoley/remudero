@@ -210,18 +210,18 @@ capabilities:
     # So `balanced` leading with nano is not a preference, it is the only thing that can run; the
     # trailing gpt-oss there is unreachable for that lane and is kept only for a smaller caller.
     economy:
-      low:    [gpt-oss-120b, gpt-5-nano]
-      medium: [gpt-oss-120b, gpt-5-nano]
-      high:   [gpt-oss-120b, gpt-5-nano]
-    # this change LEAVES ECONOMY AND BALANCED ALONE, DELIBERATELY. Luna is cheaper than gpt-5-mini,
-    # but nano is cheaper than LUNA per token ($0.05/$0.40 vs $0.20/$1.20). W1-T3614 fixed these
-    # two leads from MEASURED PER-TASK cost on real lane shapes, not per-token price, and luna has
-    # no such measurement yet -- so reversing them here would trade a measured ordering for a
-    # cheaper-looking table. Luna enters only where it replaces gpt-5-mini outright: frontier.
+      low:    [gpt-oss-120b, gpt-5-nano, gpt-5.6-luna]
+      medium: [gpt-oss-120b, gpt-5-nano, gpt-5.6-luna]
+      high:   [gpt-oss-120b, gpt-5-nano, gpt-5.6-luna]
+    # NORMAL CASH ORDER STAYS MEASURED: economy/balanced continue to lead with the per-task winners
+    # from W1-T3614. Luna is nevertheless a real cash deployment, independently of subscription
+    # Codex. It trails both normal candidates so cheap routine work does not move lanes, and
+    # selectOpenWeightModel(..., { cashSqueezed: true }) promotes it only when the subscription
+    # auction has already blocked and this cash request is the squeeze fallback.
     balanced:
-      low:    [gpt-5-nano, gpt-oss-120b]
-      medium: [gpt-5-nano, gpt-oss-120b]
-      high:   [gpt-5-nano, gpt-oss-120b]
+      low:    [gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
+      medium: [gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
+      high:   [gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
     # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
     # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
     # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.

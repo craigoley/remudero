@@ -2079,6 +2079,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       args.model,
       args.effort,
       Buffer.byteLength(args.prompt ?? "", "utf8"),
+      { cashSqueezed: args.cashSqueezed === true },
     );
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "cash",

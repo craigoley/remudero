@@ -624,11 +624,10 @@ export function codexCandidatesForCapability(
  * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
  * gpt-5.6-luna now leads it (measured 2026-09-16), taking gpt-5-mini's place outright: cheaper on both axes
  * and 0 reasoning tokens where mini spent 64 of 76. gpt-5.6-terra TRAILS as the escalation, at 10x
- * luna, reached only when luna is unavailable. ECONOMY AND BALANCED ARE UNTOUCHED: nano is cheaper
- * than luna per token, and W1-T3614 fixed those leads from measured PER-TASK cost, which luna has
- * not yet been measured against. gpt-oss-120b TRAILS rather than being deleted,
- * the same demotion shape the `codex` table uses for a demoted model, so a deployment that stops
- * answering falls back instead of failing the lane.
+ * luna, reached only when luna is unavailable. ECONOMY AND BALANCED KEEP their measured
+ * per-task leads from W1-T3614, while Luna is retained as the explicit cash-squeeze candidate. The
+ * squeeze selector promotes it only after the subscription auction blocks; routine cash work keeps
+ * its measured OSS/nano order.
  */
 // W1-T3614: economy leads with gpt-oss-120b and balanced with gpt-5-nano, MIRRORING
 // .remudero/mounts.yaml exactly -- a checkout with no mounts table must not silently prefer a
@@ -637,8 +636,8 @@ export function codexCandidatesForCapability(
 // measured 2026-09-15, a 259,181-token inbox_draft favours nano 2.83x while a 446-token escalation
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-oss-120b", "gpt-5-nano"],
-  balanced: ["gpt-5-nano", "gpt-oss-120b"],
+  economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
   frontier: ["gpt-5.6-luna", "gpt-5.6-terra"],
 };
 
@@ -779,6 +778,11 @@ export interface OpenWeightModelSelection {
   estimatedTokens?: number;
 }
 
+export interface OpenWeightSelectionOptions {
+  /** Promote Luna only for the cash request reached after the subscription auction blocks. */
+  cashSqueezed?: boolean;
+}
+
 /**
  * Resolve and validate a deployment before it can enter an Azure URL.
  *
@@ -803,9 +807,16 @@ export function selectOpenWeightModel(
   requestedModel: string | undefined,
   requestedEffort: string | undefined,
   promptBytes?: number,
+  options: OpenWeightSelectionOptions = {},
 ): OpenWeightModelSelection {
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
-  const candidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
+  const configured = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
+  // Cash and subscription are separate billing lanes. A normal cash request keeps the measured
+  // OSS/nano order, but a cash request reached only after a blocked subscription auction may use
+  // Luna first. The context gate still wins: a squeeze never routes an oversized prompt to Luna.
+  const candidates = options.cashSqueezed && configured.includes("gpt-5.6-luna")
+    ? ["gpt-5.6-luna", ...configured.filter((candidate) => candidate !== "gpt-5.6-luna")]
+    : configured;
   const safe = candidates.filter((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
   if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
   if (promptBytes === undefined) {
