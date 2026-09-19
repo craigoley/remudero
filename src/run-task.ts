@@ -28786,21 +28786,19 @@ export async function daemonCommand(
   // boot-time param (below) and DaemonDeps.sweepFeedbackLanding (the per-poll half, at the deps
   // literal further down) — mirrors `sweepOrphans` immediately above in shape. `repoRoot` (not
   // `config.root`/`target.repo`'s drained checkout) is the SAME root `captureFeedback`'s CLI
-  // entry point already lands from (line ~16396): `plan/feedback/` is this harness's own inbox,
-  // present regardless of which target repo this daemon happens to be draining, so the rung is
-  // wired unconditionally rather than gated on `target.isSelf` (unlike the retro/auto-triage
-  // hooks below, which really do read/write THIS repo's own plan/state).
+  // entry point already lands from (line ~16396): `plan/feedback/` is this harness's own inbox.
+  // Only the self-target daemon owns that inbox. A non-self daemon must not push a branch from
+  // this checkout and ask GitHub to create its PR in the unrelated drained repository.
   // W1-T1000002: `ledgerLines` lets this rung's ONE arm-origin (`ensurePrOpen`, feedback-landing.ts)
   // honour a standing operator hold — the SAME `ledgerPath` this daemon boot already reads
   // everywhere else in this function, never a second path construction.
-  const sweepFeedbackLandingRung = () =>
-    sweepFeedbackLanding(repoRoot, {
-      log,
-      ledgerLines: () => readLedgerLines(ledgerPath),
-      ...(target.isSelf
-        ? {}
-        : { targetRepository: { owner: target.owner, repo: target.repo }, sourceRepository: self, landingOwner: config.root }),
-    });
+  const sweepFeedbackLandingRung = target.isSelf
+    ? () =>
+        sweepFeedbackLanding(repoRoot, {
+          log,
+          ledgerLines: () => readLedgerLines(ledgerPath),
+        })
+    : undefined;
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
