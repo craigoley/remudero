@@ -15142,6 +15142,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
       },
       log: (s, extra) => log(s, extra),
+    }, {
+      // Judge unavailability is recorded, while the deterministic gates remain authoritative.
+      judgeUnavailableAction: "proceed",
     });
     if (riskJudgeResult.action.kind === "escalate") {
       log("verdict", {
