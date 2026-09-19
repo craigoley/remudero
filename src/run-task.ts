@@ -12,7 +12,7 @@ import {
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -26365,10 +26365,22 @@ function lifetimeHistory(
   let identity: string | undefined;
   let offsetChars = 0;
   const refresh = () => {
-    if (!existsSync(ledgerPath)) return;
-    const stat = statSync(ledgerPath);
-    const nextIdentity = `${stat.dev}:${stat.ino}`;
-    const content = readFileSync(ledgerPath, "utf8");
+    let snapshot: { identity: string; content: string };
+    let fd: number | undefined;
+    try {
+      // Open once and read both metadata and bytes through the same descriptor. A path existence
+      // check followed by a path read gives the writer a replacement race between the two calls;
+      // the descriptor keeps the inode identity and content paired across ledger rotation.
+      fd = openSync(ledgerPath, "r");
+      const stat = fstatSync(fd);
+      snapshot = { identity: `${stat.dev}:${stat.ino}`, content: readFileSync(fd, "utf8") };
+    } catch {
+      return;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    const nextIdentity = snapshot.identity;
+    const content = snapshot.content;
     const sameFile = identity === nextIdentity && content.length >= offsetChars;
     const appended = sameFile ? content.slice(offsetChars) : content;
     // A concurrent append can expose an incomplete final line. Do not advance beyond it: once the
