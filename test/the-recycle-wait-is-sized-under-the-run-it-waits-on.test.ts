@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
@@ -118,12 +119,31 @@ function writeStubs(dir: string): void {
   // without this suite actually blocking for them.
   const sleepStub = ["#!/usr/bin/env bash", "exit 0", ""].join("\n");
 
+  // W1-T3813: force GNU parsing to refuse, then accept ONLY the fractional-free UTC timestamp
+  // BSD date requires. The fixture cannot accidentally pass if the script sends the original
+  // JavaScript ISO string to `date -j`.
+  const dateStub = [
+    "#!/usr/bin/env bash",
+    'if [ "${STUB_DATE_MODE:-}" = "bsd" ]; then',
+    '  if [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then printf "%s\\n" "${STUB_DATE_NOW_EPOCH:?}"; exit 0; fi',
+    '  if [ "$1" = "-u" ] && [ "$2" = "-d" ]; then exit 1; fi',
+    '  if [ "$1" = "-j" ] && [ "$2" = "-u" ] && [ "$3" = "-f" ] && [ "$4" = "%Y-%m-%dT%H:%M:%SZ" ] && [ "$5" = "${STUB_DATE_BSD_STARTED_AT:?}" ] && [ "$6" = "+%s" ]; then',
+    '    printf "%s\\n" "${STUB_DATE_BSD_STARTED_EPOCH:?}"; exit 0',
+    "  fi",
+    '  exec /bin/date "$@"',
+    "fi",
+    "exec /bin/date \"$@\"",
+    "",
+  ].join("\n");
+
   writeFileSync(join(dir, "docker"), docker, { mode: 0o755 });
   writeFileSync(join(dir, "az"), az, { mode: 0o755 });
   writeFileSync(join(dir, "sleep"), sleepStub, { mode: 0o755 });
+  writeFileSync(join(dir, "date"), dateStub, { mode: 0o755 });
   chmodSync(join(dir, "docker"), 0o755);
   chmodSync(join(dir, "az"), 0o755);
   chmodSync(join(dir, "sleep"), 0o755);
+  chmodSync(join(dir, "date"), 0o755);
 }
 
 interface RunOpts {
@@ -253,6 +273,76 @@ test("W1-T2598: a timeout refusal names the wait that would have covered the old
   const observedAge = Number(m![1]);
   assert.ok(observedAge >= 85 && observedAge <= 150, `expected an age near 90s, got ${observedAge}s`);
   assert.match(run.stderr, new RegExp(`RMD_RECYCLE_WAIT_S=${observedAge}\\) would have covered it`));
+});
+
+test("W1-T3813: BSD-date fallback preserves oldest-lock age evidence", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+  writeLock(state, "W1-T3813-bsd", "2024-01-01T00:00:00.841Z");
+
+  const run = runRecycle({
+    stateDir: state,
+    extraEnv: {
+      RMD_RECYCLE_WAIT_S: "1",
+      RMD_RECYCLE_POLL_S: "1",
+      STUB_DATE_MODE: "bsd",
+      STUB_DATE_NOW_EPOCH: "1704067291",
+      STUB_DATE_BSD_STARTED_AT: "2024-01-01T00:00:00Z",
+      STUB_DATE_BSD_STARTED_EPOCH: "1704067200",
+    },
+  });
+
+  assert.notEqual(run.status, 0, "the bounded wait still refuses while the lock remains");
+  assert.match(run.stderr, /oldest in-flight work this run observed was 91s old/);
+  assert.match(run.stderr, /RMD_RECYCLE_WAIT_S=91\) would have covered it/);
+});
+
+test("W1-T3813: malformed timestamp stays absent from age evidence", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+  writeLock(state, "W1-T3813-malformed", "not-a-lock-timestamp");
+
+  const run = runRecycle({
+    stateDir: state,
+    extraEnv: {
+      RMD_RECYCLE_WAIT_S: "1",
+      RMD_RECYCLE_POLL_S: "1",
+      STUB_DATE_MODE: "bsd",
+      STUB_DATE_NOW_EPOCH: "1704067291",
+      STUB_DATE_BSD_STARTED_AT: "2024-01-01T00:00:00Z",
+      STUB_DATE_BSD_STARTED_EPOCH: "1704067200",
+    },
+  });
+
+  assert.notEqual(run.status, 0, "the bounded wait still refuses while the malformed lock remains");
+  assert.doesNotMatch(run.stderr, /oldest in-flight work this run observed was/);
+  assert.doesNotMatch(run.stderr, /RMD_RECYCLE_WAIT_S=0\) would have covered it/);
+});
+
+test("W1-T3813: MUTANT: removing the BSD fallback drops the oldest-lock age evidence", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const anchor = `epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "\${bsd_started_at}" +%s 2>/dev/null || true)"`;
+  assert.equal(src.split(anchor).length - 1, 1, "the BSD fallback mutation target must stay unique");
+  const mutantDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-wait-bsd-mutant-`));
+  const mutant = join(mutantDir, "recycle-container.sh");
+  writeFileSync(mutant, src.replace(anchor, 'epoch=""'), { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+  writeLock(state, "W1-T3813-mutant", "2024-01-01T00:00:00.841Z");
+  const run = runRecycle({
+    scriptPath: mutant,
+    stateDir: state,
+    extraEnv: {
+      RMD_RECYCLE_WAIT_S: "1",
+      RMD_RECYCLE_POLL_S: "1",
+      STUB_DATE_MODE: "bsd",
+      STUB_DATE_NOW_EPOCH: "1704067291",
+      STUB_DATE_BSD_STARTED_AT: "2024-01-01T00:00:00Z",
+      STUB_DATE_BSD_STARTED_EPOCH: "1704067200",
+    },
+  });
+
+  assert.notEqual(run.status, 0);
+  assert.doesNotMatch(run.stderr, /oldest in-flight work this run observed was/);
 });
 
 // ── ACCEPTANCE 6: the hung-work age threshold is not moved ───────────────────────────────────────

@@ -1100,6 +1100,29 @@ reclaim_dead_inflight_locks() {
 # about THIS run rather than a property of the distribution above. Best-effort throughout: a lock
 # this shell cannot parse a `startedAt` out of, or a `date` that cannot parse it, is skipped rather
 # than aborting the refusal it feeds.
+#
+# W1-T3813: BSD date has no GNU `-d` parser. Locks are UTC ISO strings emitted by JavaScript's
+# `Date#toISOString`, so after GNU date declines, strip its three-digit fractional suffix and ask
+# BSD date to parse the same instant with an explicit UTC format. A malformed value remains empty;
+# it is evidence we cannot read, never a fabricated age of zero.
+lock_started_at_epoch_s() {
+  local started_at="$1" epoch bsd_started_at
+  epoch="$(date -u -d "${started_at}" +%s 2>/dev/null || true)"
+  if [ -n "${epoch}" ]; then
+    printf '%s' "${epoch}"
+    return 0
+  fi
+  case "${started_at}" in
+    ????-??-??T??:??:??.???Z)
+      bsd_started_at="${started_at%%.*}Z"
+      epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "${bsd_started_at}" +%s 2>/dev/null || true)"
+      ;;
+    *) return 0 ;;
+  esac
+  [ -n "${epoch}" ] || return 0
+  printf '%s' "${epoch}"
+}
+
 oldest_inflight_age_s() {
   local max=0 f started_at started_epoch age now_epoch wpid wage wargs
   now_epoch="$(date -u +%s 2>/dev/null || true)"
@@ -1109,7 +1132,7 @@ oldest_inflight_age_s() {
       [ -e "${f}" ] || continue
       started_at="$(lock_started_at_field "${f}")"
       [ -n "${started_at}" ] || continue
-      started_epoch="$(date -u -d "${started_at}" +%s 2>/dev/null || true)"
+      started_epoch="$(lock_started_at_epoch_s "${started_at}")"
       [ -n "${started_epoch}" ] || continue
       age=$((now_epoch - started_epoch))
       if [ "${age}" -gt "${max}" ] 2>/dev/null; then max="${age}"; fi
