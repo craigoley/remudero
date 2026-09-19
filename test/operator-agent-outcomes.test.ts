@@ -45,8 +45,7 @@ function measurableRows(count: number, lane = "review"): {
   return { rows, commits };
 }
 
-// W1-T3795 criterion 1 in test/operator-agent-outcomes.test.ts
-test("reports rates with the attribution policy and a named denominator", () => {
+test("W1-T3795 criterion 1 in test/operator-agent-outcomes.test.ts: reports rates with the attribution policy and a named denominator", () => {
   const { rows, commits } = measurableRows(MIN_POPULATION_FLOOR);
   commits.push({
     sha: SHA(100),
@@ -76,8 +75,7 @@ test("reports rates with the attribution policy and a named denominator", () => 
   assert.equal(fullPass.followupFixRate, 1 / MIN_POPULATION_FLOOR);
 });
 
-// W1-T3795 criterion 2 in test/operator-agent-outcomes.test.ts
-test("keeps below-floor, mixed-lane, and unmeasurable rows explicit", () => {
+test("W1-T3795 criterion 2 in test/operator-agent-outcomes.test.ts: keeps below-floor, mixed-lane, and unmeasurable rows explicit", () => {
   const belowFloor = measurableRows(1);
   belowFloor.rows[0].verdictClass = "keyword-floor";
   const mixed = measurableRows(MIN_POPULATION_FLOOR, "review");
@@ -121,8 +119,7 @@ test("keeps below-floor, mixed-lane, and unmeasurable rows explicit", () => {
   assert.equal(historyUnavailable.unmeasurableByCause["git-history-unavailable"], 1);
 });
 
-// W1-T3795 criterion 3 in test/operator-agent-outcomes.test.ts
-test("does not classify a failed worker result as a reverted task", () => {
+test("W1-T3795 criterion 3 in test/operator-agent-outcomes.test.ts: does not classify a failed worker result as a reverted task", () => {
   const report = verdictCalibrationReport(
     [
       {
