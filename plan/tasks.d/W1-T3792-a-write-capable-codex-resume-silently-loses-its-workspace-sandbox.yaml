@@ -71,7 +71,7 @@
     to pass. If a non-repository write-capable request starts instead of refusing, the third test
     must fail.
   note: |
-    reservation hand-off: unknown -> plan/codex-resume-write-capability-1789834820000
+    reservation hand-off: plan/gh-json-unreadable-dispatch-1789833477000 -> plan/codex-resume-write-capability-1789834820000
 
-    The id was reserved on origin with `rmd next-task-id`; the daemon-minted reservation reports
-    no branch, so this filing records the hand-off explicitly.
+    The origin reservation records the preceding plan branch as its holder. This filing is a
+    separate branch, so the exact recorded hand-off is required rather than inferred.
