@@ -12,7 +12,7 @@ import {
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -775,6 +775,7 @@ import {
   LEDGER_COST_TAG_INFRA,
   DECISION_RELEVANT_LEDGER_STEPS,
   markDaemonProcessActor,
+  MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, systemClock, type Clock } from "./lib/clock.js";
@@ -798,7 +799,7 @@ import {
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
-import { readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
@@ -1188,7 +1189,10 @@ import {
   ghGateway,
   ghRequiredStatusCheckContexts,
   isGhRateLimitError,
-  isLifetimeDispatchCapExceeded,
+  addLifetimeDispatchTallies,
+  effectiveLifetimeDispatches,
+  lifetimeDispatchTally,
+  type LifetimeDispatchTally,
   projectPlan,
   readLedgerLines,
   type DeriveDeps,
@@ -26309,6 +26313,142 @@ export function reportDrainQuotaExhaustion(
  * every task's verdict exactly as {@link evaluateDispatchBreaker} alone computed it — see that
  * function's doc for the fail-to-local-count contract.
  */
+interface LifetimeReplayWindow {
+  order: string[];
+  next: number;
+  seen: Set<string>;
+}
+
+function replayedLifetimeLedgerLine(
+  recentByStep: Map<string, LifetimeReplayWindow>,
+  step: string,
+  raw: string,
+): boolean {
+  const recent = recentByStep.get(step) ?? { order: [], next: 0, seen: new Set<string>() };
+  if (recent.seen.has(raw)) return true;
+  recent.seen.add(raw);
+  if (recent.order.length < MAX_RETAINED_LINES_PER_STEP) {
+    recent.order.push(raw);
+  } else {
+    const evicted = recent.order[recent.next];
+    if (evicted !== undefined) recent.seen.delete(evicted);
+    recent.order[recent.next] = raw;
+    recent.next = (recent.next + 1) % MAX_RETAINED_LINES_PER_STEP;
+  }
+  recentByStep.set(step, recent);
+  return false;
+}
+
+function recordLifetimeTally(
+  tallies: Map<string, LifetimeDispatchTally>,
+  row: Record<string, unknown>,
+): void {
+  const taskId = row.step === "run.start" ? row.task_id : row.task;
+  if (typeof taskId !== "string") return;
+  const tally = tallies.get(taskId) ?? { starts: 0, capacityBlocked: 0 };
+  if (row.step === "run.start" && row.task_id === taskId) tally.starts += 1;
+  if (row.step === "daemon.spawn_infra_blocked" && row.task === taskId) tally.capacityBlocked += 1;
+  tallies.set(taskId, tally);
+}
+
+/** The live overlay is incremental while a daemon is running. On a rotation its inode changes;
+ * replayed retained rows are skipped by the archive-seeded window and only genuinely new lines
+ * join the tally. This is what prevents the archive snapshot and the live retention core from
+ * double-charging the same dispatch. */
+export interface LifetimeHistory {
+  tallyFor: (taskId: string) => LifetimeDispatchTally;
+}
+
+function lifetimeHistory(
+  ledgerPath: string,
+  historic: ReadonlyMap<string, LifetimeDispatchTally>,
+  recentByStep: Map<string, LifetimeReplayWindow>,
+): LifetimeHistory {
+  const live = new Map<string, LifetimeDispatchTally>();
+  let identity: string | undefined;
+  let offsetChars = 0;
+  const refresh = () => {
+    let snapshot: { identity: string; content: string };
+    let fd: number | undefined;
+    try {
+      fd = openSync(ledgerPath, "r");
+      const stat = fstatSync(fd);
+      snapshot = { identity: `${stat.dev}:${stat.ino}`, content: readFileSync(fd, "utf8") };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : "live ledger unreadable",
+      };
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    const nextIdentity = snapshot.identity;
+    const content = snapshot.content;
+    const sameFile = identity === nextIdentity && content.length >= offsetChars;
+    const appended = sameFile ? content.slice(offsetChars) : content;
+    // A concurrent append can expose an incomplete final line. Do not advance beyond it: once the
+    // writer finishes, the next read parses the whole record rather than silently losing it.
+    const completedAt = appended.lastIndexOf("\n");
+    const complete = completedAt < 0 ? "" : appended.slice(0, completedAt);
+    for (const raw of complete.split("\n")) {
+      const line = raw.trim();
+      if (!line) continue;
+      let row: Record<string, unknown> | undefined;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) row = parsed as Record<string, unknown>;
+      } catch {
+        // Keep the live reader's existing torn-line behaviour: a malformed tail buys neither a
+        // capacity exemption nor a daemon failure; later complete rows remain observable.
+      }
+      if (row === undefined || (row.step !== "run.start" && row.step !== "daemon.spawn_infra_blocked")) continue;
+      if (replayedLifetimeLedgerLine(recentByStep, row.step, line)) continue;
+      recordLifetimeTally(live, row);
+    }
+    identity = nextIdentity;
+    offsetChars = sameFile ? offsetChars + completedAt + 1 : completedAt + 1;
+  };
+  return {
+    tallyFor(taskId) {
+      refresh();
+      return addLifetimeDispatchTallies(historic.get(taskId) ?? { starts: 0, capacityBlocked: 0 }, live.get(taskId) ?? { starts: 0, capacityBlocked: 0 });
+    },
+  };
+}
+
+/** The one archive-side projection W1-T3758 needs. It retains one two-integer tally per task
+ * plus the producer-bounded replay window, never raw corpus rows or a global `seen` set.
+ * `auditLedgerUnion` scans both rotation forms; if any archive is unreadable, this returns
+ * `undefined` and the caller deliberately keeps the old live-only lifetime decision. */
+export async function auditedLifetimeTalliesFromArchives(
+  stateDir: string,
+  ledgerPath: string = join(stateDir, LEDGER_FILENAME),
+): Promise<{
+  history: LifetimeHistory | undefined;
+  archiveCount: number;
+  unread: readonly string[];
+  records: number;
+}> {
+  const tallies = new Map<string, LifetimeDispatchTally>();
+  const recentByStep = new Map<string, LifetimeReplayWindow>();
+  const scan = await auditLedgerUnion(stateDir, {
+    step: ["run.start", "daemon.spawn_infra_blocked"],
+    dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
+    onRecord: (row, raw) => {
+      const step = typeof row.step === "string" ? row.step : "";
+      if (!replayedLifetimeLedgerLine(recentByStep, step, raw)) {
+        recordLifetimeTally(tallies, row);
+      }
+    },
+  });
+  return {
+    history: scan.ok ? lifetimeHistory(ledgerPath, tallies, recentByStep) : undefined,
+    archiveCount: scan.archiveCount,
+    unread: scan.unread,
+    records: scan.records,
+  };
+}
+
 export function breakerGateFor(
   ledgerPath: string,
   openHeadBranches:
@@ -26316,6 +26456,7 @@ export function breakerGateFor(
     | null
     | undefined
     | (() => ReadonlyArray<PrRef> | null | undefined),
+  auditedLifetimeHistory?: LifetimeHistory,
 ): {
   isIndeterminate: (taskId: string) => boolean;
   isTripped: (taskId: string) => boolean;
@@ -26372,7 +26513,13 @@ export function breakerGateFor(
   let lifetimeMemo: { taskId: string; exceeded: boolean } | undefined;
   const lifetimeCapExceededFor = (taskId: string) => {
     if (lifetimeMemo?.taskId !== taskId) {
-      lifetimeMemo = { taskId, exceeded: isLifetimeDispatchCapExceeded(readLedgerLines(ledgerPath), taskId) };
+      // ledger-read-intent: live — archive history is the audited boot projection above; its
+      // fresh incremental overlay accounts for later attempts without materialising the corpus.
+      const tally = auditedLifetimeHistory?.tallyFor(taskId) ?? lifetimeDispatchTally(readLedgerLines(ledgerPath), taskId);
+      lifetimeMemo = {
+        taskId,
+        exceeded: effectiveLifetimeDispatches(tally) >= DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
+      };
     }
     return lifetimeMemo.exceeded;
   };
@@ -27120,8 +27267,22 @@ async function drainCommand(
     }
     return openHeadBranchesMemo;
   };
+  // W1-T3758: one bounded archive scan before dispatch begins. The live ledger remains freshly
+  // overlaid inside breakerGateFor; a partial archive is named and deliberately changes nothing.
+  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath));
+  if (archivedLifetime.history === undefined) {
+    log("dispatch.lifetime_history_unavailable", {
+      archive_count: archivedLifetime.archiveCount,
+      unread_archives: archivedLifetime.unread,
+    });
+  } else {
+    log("dispatch.lifetime_history_loaded", {
+      archive_count: archivedLifetime.archiveCount,
+      records: archivedLifetime.records,
+    });
+  }
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
-  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
+  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, archivedLifetime.history);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
   // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
   // indeterminate when the ledger's dispatch-breaker read for this task cannot be
@@ -28458,8 +28619,22 @@ export async function daemonCommand(
     }
     return openHeadBranchesMemo;
   };
+  // W1-T3758: one bounded archive scan before the daemon starts dispatching. The live ledger is
+  // still read at each gate consultation; unread history retains the old live-only behaviour.
+  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath));
+  if (archivedLifetime.history === undefined) {
+    log("dispatch.lifetime_history_unavailable", {
+      archive_count: archivedLifetime.archiveCount,
+      unread_archives: archivedLifetime.unread,
+    });
+  } else {
+    log("dispatch.lifetime_history_loaded", {
+      archive_count: archivedLifetime.archiveCount,
+      records: archivedLifetime.records,
+    });
+  }
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
-  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
+  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, archivedLifetime.history);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
   // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
   // indeterminate when the ledger's dispatch-breaker read for this task cannot be
