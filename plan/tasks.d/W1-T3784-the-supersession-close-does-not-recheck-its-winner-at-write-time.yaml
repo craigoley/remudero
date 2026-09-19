@@ -61,7 +61,7 @@
     do not delete branches or alter supersession verdict production in this PR.
   acceptance:
     - claim: "a supersession winner closed after the pass snapshot produces a named stand-down and never invokes the PR-close writer"
-      proof: "grep: sweep.supersession_close.stood_down in src/lib/sweep.ts"
+      proof: "grep: sweep\\.supersession_close\\.stood_down in src/lib/sweep.ts"
     - claim: "a fresh positive read that the supersession winner remains open preserves the genuine-duplicate close"
       proof: "grep: W1-T3784 winner remains open closes duplicate in test/a-supersession-close-rechecks-the-winner.test.ts"
     - claim: "an unreadable or malformed writer-side successor read fails closed rather than closing the older PR"
