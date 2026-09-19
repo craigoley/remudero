@@ -307,6 +307,23 @@ function binariesProbeDelivered(): string {
   return run;
 }
 
+/** The bootstrap probe payload as Docker receives it, rather than a text-only approximation. */
+function bootstrapProbeDelivered(): string {
+  const run = runVerifier("good").argvs
+    .filter((a) => a[0] === "run")
+    .map((a) => a[a.indexOf("-c") + 1] ?? "")
+    .find((p) => p.includes("COLLIDE-"));
+  assert.ok(run, "the bootstrap probe must reach docker at all");
+  return run;
+}
+
+test("the bootstrap-currency fixture creates the executable CLI tree the entrypoint requires", () => {
+  const payload = bootstrapProbeDelivered();
+  assert.match(payload, /mkdir -p node_modules\/\.bin bin/, "the fixture must create both runtime directories");
+  assert.match(payload, /printf "#!\/bin\/sh\\nexit 0\\n" > bin\/rmd/, "the fixture must provide a harmless CLI stub");
+  assert.match(payload, /chmod \+x node_modules\/\.bin\/tsx bin\/rmd/, "both fixture executables must be runnable");
+});
+
 /**
  * The same probe read out of a script's TEXT.
  *
