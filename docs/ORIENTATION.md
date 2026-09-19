@@ -1,27 +1,40 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-17T05:14:06.227Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-19T15:52:12.222Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-24 run(s) since the last retro marker. Verdicts: {"incomplete":16,"merged":7,"no_pr":1}.
+40 run(s) since the last retro marker. Verdicts: {"blocked_budget":1,"incomplete":20,"merged":19}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/5829 (gate-side merge; run ended incomplete)
-- W1-T3683 → https://github.com/craigoley/remudero/pull/5836 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3684 → https://github.com/craigoley/remudero/pull/5840 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3686 → https://github.com/craigoley/remudero/pull/5841 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3687 → https://github.com/craigoley/remudero/pull/5844 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3699 → https://github.com/craigoley/remudero/pull/5854 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3701 → https://github.com/craigoley/remudero/pull/5856 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3704 → https://github.com/craigoley/remudero/pull/5831 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- RETRO → https://github.com/craigoley/remudero/pull/5862 (gate-side merge; run ended incomplete)
+- W1-T3241 → https://github.com/craigoley/remudero/pull/5866 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3243 → https://github.com/craigoley/remudero/pull/5867 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3645 → https://github.com/craigoley/remudero/pull/5865 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3646 → https://github.com/craigoley/remudero/pull/5870 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3647 → https://github.com/craigoley/remudero/pull/5873 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3648 → https://github.com/craigoley/remudero/pull/5871 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3651 → https://github.com/craigoley/remudero/pull/5874 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3652 → https://github.com/craigoley/remudero/pull/5876 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3653 → https://github.com/craigoley/remudero/pull/5877 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3654 → https://github.com/craigoley/remudero/pull/5879 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3655 → https://github.com/craigoley/remudero/pull/5880 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3657 → https://github.com/craigoley/remudero/pull/5887 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3658 → https://github.com/craigoley/remudero/pull/5885 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3659 → https://github.com/craigoley/remudero/pull/5895 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3666 → https://github.com/craigoley/remudero/pull/5898 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3667 → https://github.com/craigoley/remudero/pull/5913 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3668 → https://github.com/craigoley/remudero/pull/5915 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3674 → https://github.com/craigoley/remudero/pull/6005 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T3695 → https://github.com/craigoley/remudero/pull/5864 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3703 → https://github.com/craigoley/remudero/pull/5860 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
 
 ## Next runnable task
 
-**W1-T3241** — THE ONE ROW THAT WOULD HAVE SHOWN THE DAEMON'S CHECKOUT 34 COMMITS BEHIND READS `unknown` WHILE IT IS TRUE — `head vs origin/main` is gated on a LIVENESS SENSOR it does not need, and that sensor cannot answer on this host at all
+**W1-T3696** — THE IMPLEMENT LANE NEEDS GIT EFFECTS, NOT A SHELL — the harness already owns the branch and the push, so moving commit/push/PR off the worker makes implement provider-agnostic instead of granting a cheap model forge authority
 
 - risk: high · depends_on: (none)
 
