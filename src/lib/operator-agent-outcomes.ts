@@ -10,17 +10,11 @@
  * verdict was not recovered, but it cannot be evidence of a post-merge revert.
  */
 
-import type {
-  AttributionPolicy,
-  ClassOutcome,
-  UnmeasurableCause,
-  UnmeasurableRow,
-  VerdictCalibrationReport,
-  VerdictClass,
-} from "./verdict-calibration.js";
+import type { AttributionPolicy, ClassOutcome, UnmeasurableCause, UnmeasurableRow, VerdictCalibrationReport, VerdictClass } from "./verdict-calibration.js";
 
 export const OPERATOR_AGENT_OUTCOMES_VERSION = "operator-agent-outcomes-v1";
 
+/* c8 ignore next -- exported type declarations have no runtime statements to execute */
 export type OperatorAgentOutcomeStatus = "measured" | "not-collected";
 
 export interface OperatorAgentOutcomeClass {
