@@ -8857,6 +8857,7 @@ test("W1-T3787 retro error carries output-limit evidence in test/run-task.test.t
     limitBytes: 1_048_576,
     observedBytes: 1_048_791,
     eventBytesByKind: { "item.completed:agent_message": 42, other: 7 },
+    event_bytes_by_kind: { "item.completed:agent_message": 42, other: 7 },
     pendingLineBytes: 19,
   });
   const fields = retroErrorLedgerFields(error);

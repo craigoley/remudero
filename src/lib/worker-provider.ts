@@ -1543,6 +1543,8 @@ export interface CodexWorkerOutputLimitError extends Error {
   readonly observedBytes: number;
   /** Bounded byte totals for complete JSONL events retained before stdout hit its cap. */
   readonly eventBytesByKind: Readonly<Record<string, number>>;
+  /** Ledger-shaped alias kept on the error so the emitted retro field has a typed source. */
+  readonly event_bytes_by_kind: Readonly<Record<string, number>>;
   /** Bytes in the incomplete JSONL line held when the cap fired. */
   readonly pendingLineBytes: number;
 }
@@ -1560,7 +1562,9 @@ export function isCodexWorkerOutputLimitError(error: unknown): error is CodexWor
     typeof candidate.observedBytes === "number" &&
     (candidate.pendingLineBytes === undefined || typeof candidate.pendingLineBytes === "number") &&
     (candidate.eventBytesByKind === undefined ||
-      (candidate.eventBytesByKind !== null && typeof candidate.eventBytesByKind === "object"))
+      (candidate.eventBytesByKind !== null && typeof candidate.eventBytesByKind === "object")) &&
+    (candidate.event_bytes_by_kind === undefined ||
+      (candidate.event_bytes_by_kind !== null && typeof candidate.event_bytes_by_kind === "object"))
   );
 }
 
@@ -1582,6 +1586,7 @@ function codexWorkerOutputLimitError(
     limitBytes,
     observedBytes,
     eventBytesByKind,
+    event_bytes_by_kind: eventBytesByKind,
     pendingLineBytes,
   });
 }

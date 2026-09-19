@@ -1017,6 +1017,7 @@ test("W1-T3787 event bytes distinguish retained JSONL kinds in test/worker-provi
     await assert.rejects(resultPromise, (error: unknown) => {
       assert.ok(isCodexWorkerOutputLimitError(error));
       assert.ok(error.eventBytesByKind["thread.started"] > 0);
+      assert.deepEqual(error.event_bytes_by_kind, error.eventBytesByKind);
       assert.ok(error.eventBytesByKind["item.completed:agent_message"] > 0);
       assert.notEqual(error.eventBytesByKind["thread.started"], error.eventBytesByKind["item.completed:agent_message"]);
       assert.ok(error.pendingLineBytes > 0, "the unfinished line is reported separately from complete events");

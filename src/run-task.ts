@@ -1731,7 +1731,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
     stream: error.stream,
     limit_bytes: error.limitBytes,
     observed_bytes: error.observedBytes,
-    event_bytes_by_kind: error.eventBytesByKind ?? {},
+    event_bytes_by_kind: error.event_bytes_by_kind ?? error.eventBytesByKind ?? {},
     pending_line_bytes: error.pendingLineBytes ?? 0,
   };
 }
