@@ -1095,38 +1095,39 @@ YAML registry and select it by name; the installer refuses an unknown or malform
 writes a launcher or touches systemd:
 
 ```
-RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml deploy/install-host-units.sh --instance site
-RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml sudo -E deploy/install-host-units.sh --install --instance site
-RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml deploy/recycle-container.sh --instance site
+RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml deploy/install-host-units.sh --instance example
+RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml sudo -E deploy/install-host-units.sh --install --instance example
+RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml deploy/recycle-container.sh --instance example
 ```
 
-Each record is closed over the lifecycle values that must never drift between call sites:
+Each record is closed over the lifecycle values that must never drift between call sites. The values
+below are anonymized public examples; live instance records belong in the private operator overlay.
 
 ```
 instances:
-  site:
-    repo: remudero-site
-    state_dir: /mnt/rmd/remudero-site-state
-    container_name: remudero-site-daemon
-    service_user: craigoleyagent
-    image: synthwatcholey0620.azurecr.io/remudero:latest
+  example:
+    repo: example/remudero
+    state_dir: /var/lib/remudero/example-state
+    container_name: remudero-example-daemon
+    service_user: remudero
+    image: example.azurecr.io/remudero:latest
     max_old_space_mb: 4096
-    service_name: rmd-site-fleet.service
-    watchdog_service_name: rmd-site-fleet-watchdog.service
-    watchdog_timer_name: rmd-site-fleet-watchdog.timer
-    launcher_path: /home/craigoleyagent/rmd-site-relaunch.sh
-    revival_log: /home/craigoleyagent/rmd-site-revivals.log
-    gh_app_id: "4648213"
-    gh_app_installation_id: "155256285"
-    gh_app_private_key_path: /home/node/.claude/rmd-app.pem
-    claude_dir: /home/craigoleyagent/.claude
-    codex_dir: /home/craigoleyagent/.codex
-    container_config_dir: /home/craigoleyagent/.config/remudero-container
+    service_name: rmd-example-fleet.service
+    watchdog_service_name: rmd-example-fleet-watchdog.service
+    watchdog_timer_name: rmd-example-fleet-watchdog.timer
+    launcher_path: /usr/local/bin/remudero-example-relaunch.sh
+    revival_log: /var/log/remudero/example-revivals.log
+    gh_app_id: "EXAMPLE_APP_ID"
+    gh_app_installation_id: "EXAMPLE_INSTALLATION_ID"
+    gh_app_private_key_path: /var/lib/remudero/credentials/github-app.pem
+    claude_dir: /var/lib/remudero/credentials/claude
+    codex_dir: /var/lib/remudero/credentials/codex
+    container_config_dir: /etc/remudero/container-config
 ```
 
-`--instance site` renders only `rmd-site-fleet.*` and `rmd-site-relaunch.sh`; it does not check,
-install, relaunch, or recycle `remudero-daemon`. STOP/PAUSE markers remain under that instance's
-own `state_dir`, so a deliberate site stop blocks only the site revival path. The core daemon's
+`--instance example` renders only `rmd-example-fleet.*` and `remudero-example-relaunch.sh`; it does
+not check, install, relaunch, or recycle another instance. STOP/PAUSE markers remain under that instance's
+own `state_dir`, so a deliberate example stop blocks only the example revival path. The core daemon's
 legacy no-`--instance` invocation still uses the existing environment defaults.
 
 **`RMD_NODE_MAX_OLD_SPACE_MB` is required and has no default (W1-T2953).** It used to render 4096
@@ -1250,9 +1251,10 @@ host Codex home at `/home/node/.codex`; `deploy/host-update.sh --print-daemon-ru
 mounted Remudero config, authenticate that directory with a one-off interactive image invocation:
 
 ```sh
+IMAGE_REF="${RMD_IMAGE_REF:-example.azurecr.io/remudero:latest}"
 sudo install -d -m 700 -o 1000 -g 1000 "${RMD_CODEX_DIR:-$HOME/.codex}"
-docker run --rm -it --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.codex" --entrypoint codex synthwatcholey0620.azurecr.io/remudero:latest login --device-auth
-docker run --rm --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.codex" --entrypoint codex synthwatcholey0620.azurecr.io/remudero:latest login status
+docker run --rm -it --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.codex" --entrypoint codex "$IMAGE_REF" login --device-auth
+docker run --rm --user 1000:1000 -v "${RMD_CODEX_DIR:-$HOME/.codex}:/home/node/.codex" --entrypoint codex "$IMAGE_REF" login status
 ```
 
 The connector removes `OPENAI_API_KEY` from the Codex process environment, so this path uses the
@@ -1273,7 +1275,7 @@ Set `RMD_STATE_DIR` separately to the live state volume before using either laun
 commissioning does not infer or change it.
 
 ```sh
-IMAGE_REF="synthwatcholey0620.azurecr.io/remudero:latest"
+IMAGE_REF="${RMD_IMAGE_REF:-example.azurecr.io/remudero:latest}"
 RMD_CLAUDE_DIR="${RMD_CLAUDE_DIR:-${HOME}/.claude}"
 RMD_CODEX_DIR="${RMD_CODEX_DIR:-${HOME}/.codex}"
 RMD_CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME}/.config/remudero-container}"
