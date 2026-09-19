@@ -1,0 +1,18 @@
+id: unrecoverable-stop
+description: an unrecoverable recovery path remains a hard stop
+finding:
+  gate: credential-boundary
+  finding: a credential may have reached a persisted artifact and recovery is unavailable
+  evidence: ["secret scanner found an unredacted credential"]
+  recoverability: unrecoverable
+  currentConsequence: STOP
+judge:
+  verdict: high
+  confidence: 0.99
+  reasons: ["the recovery path is unavailable"]
+  gateConsequence: STOP
+expected:
+  outcome: STOP
+  judgmentSpawned: true
+  fallback: false
+  sideEffect: none
