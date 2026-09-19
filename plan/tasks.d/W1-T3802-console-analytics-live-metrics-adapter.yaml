@@ -1,0 +1,39 @@
+- id: W1-T3802
+  title: "THE ANALYTICS PROJECTION HAS NO LIVE-STATE ADAPTER — define honest queue.pending and provider.allowance.remaining readings without copying credentials or manufacturing zero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 45.00
+  origin: architect
+  plan_refs: ["W1-T3623", "W1-T2704"]
+  files: [src/lib/analytics-live-metrics.ts, test/analytics-live-metrics.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED on authenticated app.remudero.com on 2026-09-19: the private console receives the
+    five ledger-derived console-v1 scalar metrics, but queue.pending is null because its source is
+    the live /v1/status counter, and provider.allowance.remaining is absent because
+    CONSOLE_V1_METRIC_KEYS does not name it. The existing read-only sources already own both facts:
+    /v1/status owns counts.queued, while provider-routing-status projects bounded provider windows,
+    freshness, readability, and remaining headroom without exposing a credential.
+  design: |
+    Add a pure adapter for the two live metric readings. Queue depth is observed only from a
+    complete, current status snapshot. Provider allowance is derived from the bounded provider
+    routing status already written by the capacity probe, with its provider/window identity and
+    observation time. Preserve unavailable, unreadable, stale, not-probed, and not-collected as
+    distinct outcomes; an absent source never becomes zero. This task defines no HTTP wiring and
+    changes no routing or capacity policy. It must not accept or return tokens, keys, or raw provider
+    responses.
+  acceptance:
+    - claim: "a complete live status snapshot yields the observed queue.pending value, including a measured zero"
+      proof: "unit test: test/analytics-live-metrics.test.ts"
+    - claim: "provider allowance carries provider, window, remaining value, freshness, and observation time from the bounded routing snapshot"
+      proof: "unit test: test/analytics-live-metrics.test.ts"
+    - claim: "unavailable, stale, unreadable, not-probed, and not-collected sources remain distinct and never become zero"
+      proof: "unit test: test/analytics-live-metrics.test.ts"
+    - claim: "the adapter surface contains no credential or raw provider-response field"
+      proof: "unit test: test/analytics-live-metrics.test.ts"
+

@@ -1,0 +1,37 @@
+- id: W1-T3805
+  title: "EMPTY dimensions AND drilldowns HIDE THE TWO REQUESTED BREAKDOWNS — aggregate outcome and work category without treating unknown rows as successes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 55.00
+  origin: architect
+  plan_refs: ["W1-T477", "W1-T3795"]
+  files: [src/lib/analytics-breakdowns.ts, test/analytics-breakdowns.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED on authenticated app.remudero.com on 2026-09-19: dimensions and drilldowns are empty,
+    leaving both outcome and work-category breakdowns unavailable. Existing analytics evidence has
+    lane/task-type and terminal-result fields, but W1-T3795 correctly reserves post-merge revert and
+    follow-up-fix attribution for a separate measured adapter. A failed worker, failed proof, and
+    reverted task are not interchangeable outcomes.
+  design: |
+    Add a pure aggregate that emits the bounded dimension catalog and drilldown rows for the
+    evidence the analytics stream can actually classify. Keep terminal outcome, missing terminal
+    receipt, and work category separate; retain unknown/unclassified as named buckets with
+    denominators instead of dropping them. Do not claim post-merge success, revert, or follow-up-fix
+    unless W1-T3795's attributed producer is supplied. Empty, unreadable, unauthorized, and
+    not-collected corpora remain explicit states, never empty arrays that imply measured zero.
+  acceptance:
+    - claim: "outcome and work-category dimensions carry named denominators and bounded drilldown rows"
+      proof: "unit test: test/analytics-breakdowns.test.ts"
+    - claim: "missing terminal receipts and unknown work categories remain visible named buckets"
+      proof: "unit test: test/analytics-breakdowns.test.ts"
+    - claim: "worker or proof failure is never relabeled as post-merge revert or task outcome success"
+      proof: "unit test: test/analytics-breakdowns.test.ts"
+    - claim: "empty, unreadable, unauthorized, and not-collected inputs remain distinguishable"
+      proof: "unit test: test/analytics-breakdowns.test.ts"
+
