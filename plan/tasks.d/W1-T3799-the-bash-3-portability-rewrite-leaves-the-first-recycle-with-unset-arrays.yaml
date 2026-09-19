@@ -64,3 +64,7 @@
   note: |
     reservation holder is this filing branch, verified from `refs/rmd-id/W1-T3799` before the
     shard was written; no hand-off is required.
+
+    amendment #6140: the original no-container causal chain was falsified before implementation.
+    The repaired record names Bash 3.2's empty-array nounset behavior and its safe expansion
+    boundary; its acceptance claims remain unchanged.
