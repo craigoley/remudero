@@ -1,0 +1,25 @@
+id: fb-1789845640231-c117a2
+ts: 2026-09-19T19:20:40.231Z
+raw: "Correct the merged analytics plan from PR #6127 before dispatch. OBSERVED:
+  the deployed private console normalizes timeSeries, dimensions, and drilldowns
+  from top-level GET /v1/analytics fields; W1-T3806 instead nests them inside
+  consoleV1, which cannot affect the page. OBSERVED: W1-T3802, W1-T3804, and
+  W1-T3805 each add a pure module with no production call-site proof; their
+  current whole-file unit proofs are shared and can pass at the merge base.
+  Required repair: replace W1-T3802 through W1-T3806 with three sequential
+  tasks: (1) live metrics adapter plus one process-owned no-refresh route
+  composition; (2) five ledger-backed historical time series plus top-level
+  timeSeries composition; (3) outcome/work-category breakdowns plus top-level
+  dimensions and drilldowns composition. Keep queue and provider historical
+  trends explicitly uncollected until retained evidence exists. Every new module
+  needs a real src call-site proof and discriminating per-criterion test-title
+  proofs. Do not change routing policy or expose credentials."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
