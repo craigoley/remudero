@@ -68,6 +68,7 @@ test("W1-T2750: overlapping fresh and resumed Codex workers get distinct private
         cwd: process.cwd(),
         prompt: "exercise the private temp root",
         settingsFile: join(process.cwd(), "settings", "worker.json"),
+        tools: ["Read", "Grep", "Glob", "Bash"],
         resumeSessionId,
         env: suppliedEnv,
         containment: {
