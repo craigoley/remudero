@@ -15,12 +15,13 @@
  *
  * W1-T1100 (#2415) introduced `reportIsSubstitute` and guarded both consumers; NONE of its
  * `run-task.ts` hunks reached this call site, whose `report:` line still blames to #762
- * (2026-07-24). A second path it never covered, not a regression on the one it did.
+ * (2026-07-24). W1-T3501 closes that second path: every fix mode now reads the live PR body;
+ * only an unavailable body falls back to worker prose and keeps the substitute flag set.
  *
  * THE FIX IS THE FLAG, NOT THE DETECTOR. `bodyContradictsDiff` is untouched and narrative text is
- * not exempted from it — a narrative that IS the body must still be scored. The body fetch is NOT
- * widened to the other three modes either: that would spend a GraphQL call per strike on a bucket
- * this repo has already run to 0/5000 in a day, to fetch a document those modes do not need.
+ * not exempted from it — a narrative that IS the body must still be scored. The body fetch is
+ * intentionally widened to every mode because the authoritative reviewer judges the PR body, not
+ * the worker transcript. The fetch remains best-effort and a failure is explicit.
  *
  * WHY THE SECOND HALF OF THE LAST TEST MATTERS. "No contradiction is produced" passes trivially if
  * the check were disabled outright, so the same shorthand is also driven through `judgeReview` as a
@@ -154,7 +155,9 @@ async function reviewArgsFrom(over: {
       log: () => {},
       say: () => {},
       account: (r) => r,
-      ...(over.fetchPrBody ? { fetchPrBody: over.fetchPrBody } : {}),
+      fetchPrBody: over.fetchPrBody ?? (async () => {
+        throw new Error("gh unavailable");
+      }),
       ...(over.fetchPrDiffFiles ? { fetchPrDiffFiles: over.fetchPrDiffFiles } : {}),
       ...(over.updatePrBody ? { updatePrBody: over.updatePrBody } : {}),
     },
@@ -165,13 +168,18 @@ async function reviewArgsFrom(over: {
 
 // ── criterion 1 ───────────────────────────────────────────────────────────────────────────────
 
-test("criterion 1: a mode that never fetches the PR body marks its report a substitute, so the changeset check is skipped rather than scored against worker prose", async () => {
-  const got = await reviewArgsFrom({ unmet: OTHER_UNMET, narrative: NARRATIVE_WITH_SHORTHAND });
-  assert.equal(got.reportIsSubstitute, true, "reviewer-unmet never fetches a body — the report is the worker's narrative");
-  assert.match(got.report, /plan-only/, "and it really is the narrative, not a body: the shorthand is present in what was handed over");
+test("criterion 1: reviewer-unmet fetches the live PR body and marks it as authoritative", async () => {
+  const body = "## Summary\n\nThis PR body is authoritative.\n";
+  const got = await reviewArgsFrom({
+    unmet: OTHER_UNMET,
+    narrative: NARRATIVE_WITH_SHORTHAND,
+    fetchPrBody: async () => body,
+  });
+  assert.equal(got.reportIsSubstitute, false, "a successful body read is authoritative in every fix mode");
+  assert.equal(got.report, body, "the reviewer receives the current body, not worker prose");
 });
 
-test("criterion 1 (the flag is not merely present): the SAME narrative reaches judgeReview and produces no changeset contradiction", async () => {
+test("criterion 1 (substitute fallback): worker prose produces no changeset contradiction when the body fetch fails", async () => {
   const got = await reviewArgsFrom({ unmet: OTHER_UNMET, narrative: NARRATIVE_WITH_SHORTHAND });
   const v = judgeReview([{ claim: "c", proof: "unit test: test/fix-rung-report-provenance.test.ts" }], {
     diff: PR_DIFF,
