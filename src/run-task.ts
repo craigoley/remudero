@@ -26368,9 +26368,6 @@ function lifetimeHistory(
     let snapshot: { identity: string; content: string };
     let fd: number | undefined;
     try {
-      // Open once and read both metadata and bytes through the same descriptor. A path existence
-      // check followed by a path read gives the writer a replacement race between the two calls;
-      // the descriptor keeps the inode identity and content paired across ledger rotation.
       fd = openSync(ledgerPath, "r");
       const stat = fstatSync(fd);
       snapshot = { identity: `${stat.dev}:${stat.ino}`, content: readFileSync(fd, "utf8") };
