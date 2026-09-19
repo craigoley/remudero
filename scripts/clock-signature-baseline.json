@@ -234,6 +234,11 @@
     "legacy": 0,
     "newDate": 1
   },
+  "src/lib/operator-agent.ts": {
+    "dateNow": 2,
+    "legacy": 1,
+    "newDate": 6
+  },
   "src/lib/operator-sync.ts": {
     "dateNow": 1,
     "legacy": 1,
