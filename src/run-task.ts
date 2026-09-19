@@ -28501,10 +28501,6 @@ export async function daemonCommand(
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
-  // W1-T3779: the commit-trailer fallback must read the checkout that supplied this daemon's
-  // target plan. The module checkout is the engine repo and is foreign for every dedicated
-  // target, so letting buildBatchedGithub construct its default index there silently erases
-  // valid target-repo merge credit.
   const targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo);
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
