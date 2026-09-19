@@ -460,12 +460,15 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   // later edit that deletes the trailing entry fails here rather than silently killing the lane.
   assert.deepEqual(
     capabilities?.cash?.balanced.low,
-    ["gpt-5-nano", "gpt-oss-120b"],
-    "the declared openweight row, not fallback data, is the capability source",
+    ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
+    "the declared cash row, not fallback data, is the capability source",
   );
   assert.equal(selected.capability, "balanced");
   assert.equal(selected.model, "gpt-5-nano", "the ladder's LEADING candidate is what resolves");
   assert.equal(selected.effort, "low");
+
+  const squeezed = selectOpenWeightModel(capabilities, "sonnet", "low", 4_000, { cashSqueezed: true });
+  assert.equal(squeezed.model, "gpt-5.6-luna", "a cash squeeze promotes the independently available Luna deployment");
 
   const renamed = selectOpenWeightModel({
     ladder: { economy: 1, balanced: 2, frontier: 3 },
@@ -487,6 +490,53 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   const malformedModels = structuredClone(raw);
   (((malformedModels.capabilities as Record<string, unknown>).cash as Record<string, unknown>).economy as Record<string, unknown>).low = [];
   assert.throws(() => validateMounts(malformedModels), /capabilities\.cash\.economy\.low.*non-empty/);
+});
+
+test("the real cash mount passes the squeeze promotion without reading subscription capacity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-luna-squeeze-"));
+  try {
+    const settingsFile = join(root, "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    const selections: string[] = [];
+    const config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: { normal: 10, squeezed: 25 },
+      workerProviders: { enabled: ["cash"], cashEndpoint: "https://example.test/" },
+    } as Config;
+    const spawnOpenWeight = async (_args: unknown, _config: Config, selection: { model: string; effort: string }) => {
+      selections.push(selection.model);
+      return { ...openWeightResult(), model: selection.model, provider: "cash" as const };
+    };
+
+    await spawnWorker({
+      cwd: REPO_ROOT,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      prompt: "short cash work",
+      model: "sonnet",
+      effort: "low",
+      mountProvider: "cash",
+      cashSqueezed: true,
+      config,
+      providerRouting: { spawnOpenWeight },
+    } as never);
+    await spawnWorker({
+      cwd: REPO_ROOT,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      prompt: "short cash work",
+      model: "sonnet",
+      effort: "low",
+      mountProvider: "cash",
+      config,
+      providerRouting: { spawnOpenWeight },
+    } as never);
+
+    assert.deepEqual(selections, ["gpt-5.6-luna", "gpt-5-nano"], "only the squeeze cash spawn promotes Luna");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the openweight adapter prepends its output contract to every request and contains tools and bounds their conversation", async (t) => {
