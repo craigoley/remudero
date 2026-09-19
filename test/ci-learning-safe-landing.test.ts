@@ -46,7 +46,10 @@ function makeBareOrigin(): string {
 }
 
 function cloneRoot(bareOrigin: string): string {
-  return gitRepo({ cloneFrom: bareOrigin, kind: "ci-learning-landing-checkout" }).dir;
+  const checkout = gitRepo({ cloneFrom: bareOrigin, kind: "ci-learning-landing-checkout" });
+  checkout.git("config", "user.name", "remudero ci-learning fixture");
+  checkout.git("config", "user.email", "ci-learning-fixture@remudero.invalid");
+  return checkout.dir;
 }
 
 function stateRoot(): string {
