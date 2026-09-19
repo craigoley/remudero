@@ -363,11 +363,6 @@ export function stageSkillDraft(
  * is excluded without an allowlist naming it, and stays excluded when it grows.
  */
 export const SKILL_APPLIES_TO_RE = /^applies-to:\s*(.+)$/m;
-/** Optional repo-relative glob selectors. A declared selector is fail-closed when a task has no
- *  declared files or none of its file globs match; an absent key remains repo-wide for backwards
- *  compatibility. */
-export const SKILL_WHEN_PATHS_RE = /^when-paths:\s*(.*)$/m;
-
 /** One skill that has been APPROVED into `.claude/skills/` and opted in to prompt injection. */
 export interface InjectableSkill {
   name: string;
@@ -385,39 +380,6 @@ export interface InjectableSkill {
 function splitFrontmatter(text: string): { front: string; body: string } {
   const m = /^---\n([\s\S]*?)\n---\n?/.exec(text);
   return m ? { front: m[1], body: text.slice(m[0].length) } : { front: "", body: text };
-}
-
-/** Compile one repo-relative path glob as an anchored matcher. This intentionally mirrors the
- *  learnings selector's `*`, `?`, and `**` semantics so a task's declared `files:` vocabulary has
- *  one meaning across both injection paths. */
-function skillPathGlobToRegExp(glob: string): RegExp {
-  const SPECIAL = ".+^${}()|[]\\";
-  let out = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*") {
-      if (glob[i + 1] === "*") {
-        out += ".*";
-        i++;
-      } else {
-        out += "[^/]*";
-      }
-    } else if (c === "?") {
-      out += "[^/]";
-    } else if (SPECIAL.includes(c)) {
-      out += `\\${c}`;
-    } else {
-      out += c;
-    }
-  }
-  return new RegExp(`^${out}$`);
-}
-
-function skillMatchesTaskFiles(skill: InjectableSkill, taskFiles: readonly string[] | undefined): boolean {
-  if (skill.whenPaths === undefined) return true;
-  if (skill.whenPaths.length === 0 || !taskFiles || taskFiles.length === 0) return false;
-  const matchers = skill.whenPaths.map(skillPathGlobToRegExp);
-  return taskFiles.some((taskFile) => matchers.some((matcher) => matcher.test(taskFile)));
 }
 
 /**
@@ -460,6 +422,44 @@ export function loadInjectableSkills(
     out.push({ name, appliesTo, ...(whenPaths ? { whenPaths } : {}), body: body.trim() });
   }
   return out;
+}
+
+/** Optional repo-relative glob selectors. A declared selector is fail-closed when a task has no
+ *  declared files or none of its file globs match; an absent key remains repo-wide for backwards
+ *  compatibility. */
+export const SKILL_WHEN_PATHS_RE = /^when-paths:\s*(.*)$/m;
+
+/** Compile one repo-relative path glob as an anchored matcher. This intentionally mirrors the
+ *  learnings selector's `*`, `?`, and `**` semantics so a task's declared `files:` vocabulary has
+ *  one meaning across both injection paths. */
+function skillPathGlobToRegExp(glob: string): RegExp {
+  const SPECIAL = ".+^${}()|[]\\";
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        out += ".*";
+        i++;
+      } else {
+        out += "[^/]*";
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (SPECIAL.includes(c)) {
+      out += `\\${c}`;
+    } else {
+      out += c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+function skillMatchesTaskFiles(skill: InjectableSkill, taskFiles: readonly string[] | undefined): boolean {
+  if (skill.whenPaths === undefined) return true;
+  if (skill.whenPaths.length === 0 || !taskFiles || taskFiles.length === 0) return false;
+  const matchers = skill.whenPaths.map(skillPathGlobToRegExp);
+  return taskFiles.some((taskFile) => matchers.some((matcher) => matcher.test(taskFile)));
 }
 
 /**
