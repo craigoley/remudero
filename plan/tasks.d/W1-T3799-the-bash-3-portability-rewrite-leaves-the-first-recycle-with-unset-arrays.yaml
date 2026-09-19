@@ -1,0 +1,53 @@
+- id: W1-T3799
+  title: "THE BASH-3 PORTABILITY REWRITE LEAVES THE FIRST RECYCLE WITH UNSET ARRAYS — under set -u a no-container recycle aborts before its bounded safety wait"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [deploy/recycle-container.sh]
+  origin: "recon#core-preflight-recycle-first-run-2026-09-19"
+  plan_refs: ["W1-T2598", "W1-T3595"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON ORIGIN/MAIN, 2026-09-19. The real W1-T2598 recycle-wait fixture models the
+    first-cycle state in which no target container exists. Five of seven assertions fail before
+    their wait assertions run, with `IMAGE_ENV_LINES[@]: unbound variable`. The script has
+    `set -euo pipefail`; the unconditional drift loop later expands both `CONTAINER_ENV_LINES`
+    and `IMAGE_ENV_LINES`, but W1-T3595's Bash-3.2 conversion initializes both arrays only inside
+    `if docker inspect ...`. The no-container branch therefore leaves those names unset.
+
+    `W1-T2598` is already merged and its intended wait policy is not at fault. `W1-T3595` made
+    the script portable by replacing `readarray`, but moved the initialization boundary in the
+    process. The regression prevents the first recycle from reaching its normal credential,
+    bounded-wait, and refusal logic. It is not a host-caused suite red: the shipped script and its
+    real fixture reproduce it on the current checkout.
+  design: |
+    Initialize both line arrays before the container-existence branch, with the same empty-array
+    semantics the later loops require. Retain the container branch's population logic and every
+    existing credential, drift, pull, pause, and wait decision byte-for-byte. Add a focused
+    real-script regression that makes the no-container path reach its ordinary bounded-wait
+    refusal rather than aborting on an unbound array. The test must prove the original unbound
+    expansion fails when the initialization is removed.
+
+    Do not weaken `set -u`, suppress the drift check, change W1-T2598's 3000-second policy, or
+    alter the declared runtime environment list. Those change safety decisions rather than repair
+    the initialization boundary.
+
+    FILES NOTE (W1-T3730): the build adds its new test after this filing. It is omitted from
+    `files:` so this plan-only PR does not claim to resolve a future test filename.
+  acceptance:
+    - claim: "a recycle with no existing target container reaches the ordinary bounded-wait refusal instead of aborting on an unset runtime-environment array"
+      proof: "unit test: W1-T3799: no-container recycle reaches its bounded wait"
+    - claim: "the no-container fixture's refusal still reports the W1-T2598 wait evidence rather than bypassing the safety gate"
+      proof: "unit test: W1-T3799: no-container recycle retains the wait refusal evidence"
+  falsifier: |
+    Move either array initialization back inside the container-exists branch. The no-container
+    regression must fail with the shell's unbound-array error before it can report the bounded
+    wait; restoring the pre-branch initialization makes both assertions pass.
+  note: |
+    reservation holder is this filing branch, verified from `refs/rmd-id/W1-T3799` before the
+    shard was written; no hand-off is required.
