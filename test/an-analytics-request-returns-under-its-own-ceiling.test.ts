@@ -239,6 +239,7 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
           notCollectedReason: "queue depth is /v1/status's own live counter, not read by this projection",
         },
       ],
+      operatorAgent: cold.consoleV1.operatorAgent,
     },
     routingTelemetry: {
       version: "routing-v1",
