@@ -5219,8 +5219,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // `fetchSupersessionVerdict` returned `"indeterminate"` — "supports neither finding". This row
     // closed it anyway. Reopened by hand, and closed AGAIN sixteen minutes later.
     //
-    // SO THE TEST IS NOW THE POSITIVE ONE: `superseded` means every one of this PR's changed paths
-    // is also changed by the newer one. `indeterminate`, `unique`, `complementary` and NO VERDICT
+    // SO THE TEST IS NOW THE POSITIVE ONE: `superseded` means every one of this PR's patch hunks
+    // is contained by the newer one. `indeterminate`, `unique`, `complementary` and NO VERDICT
     // AT ALL (a hydration that threw) all leave the pull request open. A genuine duplicate still
     // closes, which is the case this row exists for and the one it keeps.
     //
@@ -5234,7 +5234,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr) =>
       `superseded-by #${pr.supersededBy}` +
       (pr.supersessionVerdict?.evidence
-        ? ` — every one of its ${pr.supersessionVerdict.evidence.diff.matchedHunks} changed path(s) is also changed there`
+        ? ` — every one of its ${pr.supersessionVerdict.evidence.diff.matchedHunks} patch hunk(s) is contained there`
         : ""),
   },
   {
