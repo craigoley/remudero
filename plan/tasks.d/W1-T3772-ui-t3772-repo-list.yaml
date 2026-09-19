@@ -1,0 +1,29 @@
+- id: W1-T3772
+  title: "UI-T3772 — Implement: repo list component"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: architect
+  plan_refs: ["§7", "§7A"]
+  files: [apps/dashboard/src/components/RepoList.tsx]
+  status: queued
+  attempts: 0
+  rationale: |
+    A multi-repo console needs one portfolio surface rather than one hard-coded daemon board. The
+    list owns search, health filtering, stable sorting, selection, and the empty/unknown states so
+    the operator can answer "which repo needs attention?" before opening a repo detail view.
+  design: |
+    Keep list state in the repo store and keep the component as a projection of that state. Search
+    matches both the display name and URL. Health sorting puts error and degraded repos first.
+    Empty and unknown are explicit; an empty list never means that a failed API read returned zero.
+  acceptance:
+    - claim: "repo state supports listing, filtering, selecting, and updating without mutating the prior state"
+      proof: "grep: useRepos in apps/dashboard/src/components/RepoList.tsx"
+    - claim: "the list renders a RepoCard for each matching repository"
+      proof: "grep: RepoCard in apps/dashboard/src/components/RepoList.tsx"
+  note: |
+    Brief-facing alias: UI-T3772. The repository's executable task namespace is W1-T3772.
