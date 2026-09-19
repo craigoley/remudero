@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { auditLedgerUnion } from "../src/lib/ledger-union.js";
 import { MAX_RETAINED_LINES_PER_STEP } from "../src/lib/ledger.js";
-import { auditedLifetimeTalliesFromArchives } from "../src/run-task.js";
+import { auditedLifetimeTalliesFromArchives, MAX_LIFETIME_ARCHIVE_START_IDENTITIES } from "../src/run-task.js";
 import {
   DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   effectiveLifetimeDispatches,
@@ -140,6 +140,78 @@ test("W1-T3758: the archive projection rolls its bounded replay window without l
       { starts: MAX_RETAINED_LINES_PER_STEP + 1, capacityBlocked: MAX_RETAINED_LINES_PER_STEP + 1 },
       "the bounded replay window must not drop distinct historical rows from the tally",
     );
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3780: replayed start identity survives the raw replay window", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-capacity-identity-replay-"));
+  const taskId = "W1-T3780-REPLAY";
+  try {
+    const first = [runStart(taskId, 0), capacityBlocked(taskId, 0)].map((row) => JSON.stringify(row)).join("\n") + "\n";
+    const noise = Array.from({ length: MAX_RETAINED_LINES_PER_STEP + 1 }, (_, n) => runStart(`W1-T3780-NOISE-${n}`, n))
+      .map((row) => JSON.stringify(row))
+      .join("\n") + "\n";
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-00-00-000Z.ndjson"), first);
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-01-00-000Z.ndjson"), noise);
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-02-00-000Z.ndjson"), `${JSON.stringify(runStart(taskId, 0))}\n`);
+
+    const result = await auditedLifetimeTalliesFromArchives(stateDir);
+    assert.deepEqual(result.history?.tallyFor(taskId), { starts: 1, capacityBlocked: 1 });
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3780: distinct starts and task-owned exits remain charged", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-capacity-identity-distinct-"));
+  const taskId = "W1-T3780-DISTINCT";
+  try {
+    const rows = [runStart(taskId, 0), capacityBlocked(taskId, 0), runStart(taskId, 1)];
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-00-00-000Z.ndjson"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+
+    const tally = (await auditedLifetimeTalliesFromArchives(stateDir)).history?.tallyFor(taskId);
+    assert.deepEqual(tally, { starts: 2, capacityBlocked: 1 });
+    assert.equal(effectiveLifetimeDispatches(tally!), 1, "the second, task-owned attempt remains charged");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3780: outage replay clears without mutating evidence", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-capacity-identity-outage-"));
+  const taskId = "W1-T3722";
+  try {
+    const attempts = Array.from({ length: DEFAULT_MAX_TASK_LIFETIME_DISPATCHES }, (_, n) => [runStart(taskId, n), capacityBlocked(taskId, n)]).flat();
+    const noise = Array.from({ length: MAX_RETAINED_LINES_PER_STEP + 1 }, (_, n) => runStart(`W1-T3780-NOISE-${n}`, n));
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-00-00-000Z.ndjson"), attempts.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-01-00-000Z.ndjson"), noise.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-02-00-000Z.ndjson"), attempts.filter((row) => row.step === "run.start").map((row) => JSON.stringify(row)).join("\n") + "\n");
+
+    const result = await auditedLifetimeTalliesFromArchives(stateDir);
+    const tally = result.history?.tallyFor(taskId);
+    assert.deepEqual(tally, { starts: 10, capacityBlocked: 10 });
+    assert.equal(effectiveLifetimeDispatches(tally!), 0, "the historical projection clears only duplicated capacity-outage attempts");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3780: unindexable archive history fails closed", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-capacity-identity-refusal-"));
+  try {
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-00-00-000Z.ndjson"), `${JSON.stringify({ step: "run.start", task_id: "W1-T3780-MISSING" })}\n`);
+    const missing = await auditedLifetimeTalliesFromArchives(stateDir);
+    assert.equal(missing.history, undefined);
+    assert.equal(missing.unavailableReason, "start_identity_missing");
+
+    rmSync(join(stateDir, "ledger.2026-09-17T00-00-00-000Z.ndjson"));
+    const rows = Array.from({ length: MAX_LIFETIME_ARCHIVE_START_IDENTITIES + 1 }, (_, n) => runStart("W1-T3780-CEILING", n));
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-01-00-000Z.ndjson"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const capped = await auditedLifetimeTalliesFromArchives(stateDir);
+    assert.equal(capped.history, undefined);
+    assert.equal(capped.unavailableReason, "start_identity_ceiling");
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
