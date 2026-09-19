@@ -16,10 +16,29 @@ raw: "Correct the merged analytics plan from PR #6127 before dispatch. OBSERVED:
   proofs. Do not change routing policy or expose credentials."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6135
+summary:
+  headline: Replace the merged analytics plan before dispatch
+  what_happened: The plan nests analytics fields where the deployed console cannot
+    read them, and several modules lack proof of real production use. Shared
+    whole-file tests can pass without proving the required behavior.
+  decision: "Reject PR #6127’s current plan and replace W1-T3802–W1-T3806 with the
+    three sequential tasks, preserving explicit non-collection of queue and
+    provider trends."
+  options:
+    - label: Approve the repaired plan
+      consequence: Dispatches live metrics, ledger-backed history, and
+        outcome/work-category breakdowns with real call-site and
+        criterion-specific proofs.
+    - label: Dispatch the current plan
+      consequence: Leaves analytics disconnected or incomplete and allows misleading
+        tests to pass.
+    - label: Defer dispatch
+      consequence: Avoids shipping the defect but delays analytics work until the
+        required repair is filed.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

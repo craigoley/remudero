@@ -1,0 +1,35 @@
+- id: W1-T3809
+  title: "COMPOSE OUTCOME AND WORK-CATEGORY BREAKDOWNS AT THE TOP LEVEL — preserve named unknowns and evidence boundaries"
+  repo: remudero
+  depends_on: [W1-T3808]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  origin: "feedback#fb-1789845640231-c117a2"
+  plan_refs: ["W1-T477", "W1-T3795"]
+  files: [src/lib/analytics-breakdowns.ts, src/lib/analytics-route.ts, test/console-analytics-breakdown-route.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Replaces W1-T3805 and the breakdown half of W1-T3806. Existing retained evidence can classify
+    terminal outcomes and work categories, but cannot claim post-merge reverts or follow-up fixes
+    without W1-T3795's attributed producer. The breakdown producer and its real top-level route
+    caller must be verified together.
+  design: |
+    Add bounded outcome and work-category aggregators, then compose dimensions and drilldowns as
+    top-level GET /v1/analytics fields. Keep missing terminal receipts and unknown categories as
+    named denominator-bearing buckets; never relabel worker/proof failure as success, revert, or
+    follow-up fix. Empty, unreadable, unauthorized, and not-collected states remain explicit and
+    do not become empty measured arrays. Do not change routing policy or expose credentials.
+  acceptance:
+    - claim: "the production analytics route calls the breakdown producer and emits top-level dimensions and drilldowns"
+      proof: "grep: buildAnalyticsBreakdowns( in src/lib/analytics-route.ts"
+    - claim: "outcome and work-category dimensions carry bounded named denominators and drilldown rows"
+      proof: "grep: W1-T3809 criterion 2 in test/console-analytics-breakdown-route.test.ts"
+    - claim: "missing receipts and unknown categories remain visible and failures are never relabeled as success or revert"
+      proof: "grep: W1-T3809 criterion 3 in test/console-analytics-breakdown-route.test.ts"
+    - claim: "empty, unreadable, unauthorized, and not-collected inputs remain explicit without credentials or raw rows"
+      proof: "grep: W1-T3809 criterion 4 in test/console-analytics-breakdown-route.test.ts"
