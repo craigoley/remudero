@@ -29,7 +29,7 @@
 
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { writeAtomic } from "./fs-race-safe.js";
 import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
@@ -1238,16 +1238,15 @@ export interface RealDeployOpts {
 /** Resolve the deploy supervisor's ledger from the state root it is operating on.
  *
  * The caller's legacy `ledgerPath` is deliberately not consulted here: a supervisor can be
- * launched from a checkout whose default config points at another instance's state. An absent,
- * relative, or non-directory root is a refusal, never permission to fall back to that default.
+ * launched from a checkout whose default config points at another instance's state. A relative
+ * or empty root is a refusal, never permission to fall back to that default; the state directory
+ * may be created later by the ledger writer.
  */
 export function deployLedgerPath(stateRoot: string): string {
   const validRoot =
     typeof stateRoot === "string" &&
     stateRoot.trim().length > 0 &&
-    isAbsolute(stateRoot) &&
-    existsSync(stateRoot) &&
-    statSync(stateRoot).isDirectory();
+    isAbsolute(stateRoot);
   if (!validRoot) {
     throw new Error(`cannot resolve deploy ledger — state root refused: ${String(stateRoot)}`);
   }
