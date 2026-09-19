@@ -984,6 +984,51 @@ test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained
   }
 });
 
+test("W1-T3787 event bytes distinguish retained JSONL kinds in test/worker-provider.test.ts", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+  const workerHome = mkdtempSync(join(tmpdir(), "rmd-codex-home-"));
+  let exited = false;
+  try {
+    const resultPromise = spawnCodexWorker(
+      {
+        workerHome,
+        cwd: process.cwd(),
+        prompt: "bounded event evidence",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
+        containment: {
+          spawn: () => ({ process: proc as never, pid: 34_903 }),
+          teardown: () => {
+            if (!exited) {
+              exited = true;
+              proc.emit("exit", null);
+            }
+          },
+        },
+      },
+      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    );
+    stdout.write('{"type":"thread.started","thread_id":"bounded"}\n');
+    stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"kept"}}\n');
+    stdout.write('{"type":"turn.started"');
+    stdout.write("x".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + 1));
+    await assert.rejects(resultPromise, (error: unknown) => {
+      assert.ok(isCodexWorkerOutputLimitError(error));
+      assert.ok(error.eventBytesByKind["thread.started"] > 0);
+      assert.deepEqual(error.event_bytes_by_kind, error.eventBytesByKind);
+      assert.ok(error.eventBytesByKind["item.completed:agent_message"] > 0);
+      assert.notEqual(error.eventBytesByKind["thread.started"], error.eventBytesByKind["item.completed:agent_message"]);
+      assert.ok(error.pendingLineBytes > 0, "the unfinished line is reported separately from complete events");
+      assert.ok(Object.keys(error.eventBytesByKind).length <= 12, "event keys stay on the fixed allowlist");
+      return true;
+    });
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+  }
+});
+
 test("Codex JSONL preserves turn failure as an error verdict", () => {
   const parsed = parseCodexJsonl([
     "not-json",

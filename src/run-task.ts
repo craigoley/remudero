@@ -1721,6 +1721,20 @@ import {
   WorkerAbandonedError,
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
+
+/** Convert a bounded Codex output failure into the structured fields retained by retro.error. */
+export function retroErrorLedgerFields(error: unknown): Record<string, unknown> | undefined {
+  if (!isCodexWorkerOutputLimitError(error)) return undefined;
+  return {
+    error: error.message,
+    reason_class: error.reasonClass,
+    stream: error.stream,
+    limit_bytes: error.limitBytes,
+    observed_bytes: error.observedBytes,
+    event_bytes_by_kind: error.event_bytes_by_kind ?? error.eventBytesByKind ?? {},
+    pending_line_bytes: error.pendingLineBytes ?? 0,
+  };
+}
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
@@ -25692,7 +25706,7 @@ async function retroCommand(
     say(`retro PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
-    log("retro.error", { error: String((e as Error)?.message ?? e) });
+    log("retro.error", retroErrorLedgerFields(e) ?? { error: String((e as Error)?.message ?? e) });
     try {
       worktreeRemove(repoDir, worktreePath);
     } catch {

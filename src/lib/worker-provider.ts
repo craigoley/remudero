@@ -1541,16 +1541,30 @@ export interface CodexWorkerOutputLimitError extends Error {
   readonly stream: "stdout" | "stderr";
   readonly limitBytes: number;
   readonly observedBytes: number;
+  /** Bounded byte totals for complete JSONL events retained before stdout hit its cap. */
+  readonly eventBytesByKind: Readonly<Record<string, number>>;
+  /** Ledger-shaped alias kept on the error so the emitted retro field has a typed source. */
+  readonly event_bytes_by_kind: Readonly<Record<string, number>>;
+  /** Bytes in the incomplete JSONL line held when the cap fired. */
+  readonly pendingLineBytes: number;
 }
 
 export function isCodexWorkerOutputLimitError(error: unknown): error is CodexWorkerOutputLimitError {
   if (!(error instanceof Error) || error.name !== "CodexWorkerOutputLimitError") return false;
   const candidate = error as Partial<CodexWorkerOutputLimitError>;
+  // Older callers and test fixtures construct this typed error before the bounded event
+  // evidence fields were added. Keep the established type guard compatible with those
+  // producers; real spawn failures always populate both fields below.
   return (
     candidate.reasonClass === "bounded_output" &&
     (candidate.stream === "stdout" || candidate.stream === "stderr") &&
     typeof candidate.limitBytes === "number" &&
-    typeof candidate.observedBytes === "number"
+    typeof candidate.observedBytes === "number" &&
+    (candidate.pendingLineBytes === undefined || typeof candidate.pendingLineBytes === "number") &&
+    (candidate.eventBytesByKind === undefined ||
+      (candidate.eventBytesByKind !== null && typeof candidate.eventBytesByKind === "object")) &&
+    (candidate.event_bytes_by_kind === undefined ||
+      (candidate.event_bytes_by_kind !== null && typeof candidate.event_bytes_by_kind === "object"))
   );
 }
 
@@ -1558,6 +1572,8 @@ function codexWorkerOutputLimitError(
   stream: "stdout" | "stderr",
   limitBytes: number,
   observedBytes: number,
+  eventBytesByKind: Readonly<Record<string, number>> = {},
+  pendingLineBytes = 0,
 ): CodexWorkerOutputLimitError {
   const error = new Error(
     `Codex worker ${stream} output exceeded its ${limitBytes}-byte retention budget ` +
@@ -1569,8 +1585,27 @@ function codexWorkerOutputLimitError(
     stream,
     limitBytes,
     observedBytes,
+    eventBytesByKind,
+    event_bytes_by_kind: eventBytesByKind,
+    pendingLineBytes,
   });
 }
+
+const CODEX_EVENT_BYTE_KIND_KEYS = [
+  "thread.started",
+  "turn.started",
+  "turn.completed",
+  "turn.failed",
+  "error",
+  "item.completed:agent_message",
+  "item.completed:command_execution",
+  "item.completed:file_change",
+  "item.completed:reasoning",
+  "item.completed:web_search",
+  "malformed",
+  "other",
+] as const;
+type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
 class CodexJsonlAccumulator {
@@ -1583,6 +1618,9 @@ class CodexJsonlAccumulator {
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
+  private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
+    CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
+  ) as Record<CodexEventByteKind, number>;
 
   constructor(private nowMs: number) {}
 
@@ -1613,16 +1651,32 @@ class CodexJsonlAccumulator {
     };
   }
 
+  eventBytesByKind(): Readonly<Record<string, number>> {
+    return { ...this.eventBytes };
+  }
+
+  pendingLineBytes(): number {
+    return Buffer.byteLength(this.pending, "utf8");
+  }
+
   private consumeLine(line: string): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
+      this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       return;
     }
+    const eventType = typeof event.type === "string" ? event.type : undefined;
+    const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
+    const combined = itemType && eventType ? `${eventType}:${itemType}` : eventType;
+    const kind: CodexEventByteKind = CODEX_EVENT_BYTE_KIND_KEYS.includes(combined as CodexEventByteKind)
+      ? (combined as CodexEventByteKind)
+      : "other";
+    this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
     if (event.type === "turn.started") this.numTurns += 1;
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
@@ -3449,7 +3503,13 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   const exceedOutputBudget = (stream: "stdout" | "stderr", limitBytes: number, observedBytes: number) => {
     if (outputLimit || timedOut) return;
-    outputLimit = codexWorkerOutputLimitError(stream, limitBytes, observedBytes);
+    outputLimit = codexWorkerOutputLimitError(
+      stream,
+      limitBytes,
+      observedBytes,
+      stream === "stdout" ? stdout.eventBytesByKind() : {},
+      stream === "stdout" ? stdout.pendingLineBytes() : 0,
+    );
     if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
   };
   const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
