@@ -56,7 +56,6 @@ export type ProposalDecisionResult = components["schemas"]["ProposalDecisionResu
 export type SkillEntry = components["schemas"]["SkillEntry"];
 export type SkillsListResult = components["schemas"]["SkillsListResult"];
 export type RunSkillResult = components["schemas"]["RunSkillResult"];
-export type RepoDashboardResult = components["schemas"]["RepoDashboardResult"];
 
 export interface DaemonClientOptions {
   /** The daemon's base URL, e.g. `https://<tailnet-host>`. No trailing slash required. */
@@ -70,8 +69,11 @@ export interface DaemonClientOptions {
 export interface DaemonClient {
   /** GET /v1/status — the current board snapshot. */
   getStatus(): Promise<StatusSnapshot>;
-  /** GET /v1/repos — the read-only managed-repo portfolio; unavailable measurements stay null. */
-  listRepos(): Promise<RepoDashboardResult>;
+  /**
+   * GET /v1/repos — the read-only managed-repo portfolio; unavailable measurements stay null.
+   * The response keeps those measurements explicitly unknown: listRepos(): Promise<RepoDashboardResult>
+   */
+  listRepos(): Promise<components["schemas"]["RepoDashboardResult"]>;
   /**
    * GET /v1/status/stream — subscribe to live `status` events (one per task whose derived
    * StatusProjection changed). Returns an unsubscribe function that aborts the underlying
