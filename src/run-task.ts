@@ -15097,11 +15097,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T1031: fetch the ACTUAL change view (bounded, REST-sourced — see `changeView`'s own
     // doc) and attach it to the input the real judge is given, right before it runs. A throw
     // from `changeView(prUrl)` here (an unparseable prUrl, a failed REST call) is deliberately
-    // left to PROPAGATE, never caught: `assessRisk`'s existing judge-unavailable catch already
-    // fails the whole judgment closed to ESCALATE (the cannot-observe→wait polarity, W1-T130,
-    // already applied to the judge itself), so no separate fail-closed branch is needed here —
-    // and catching it to fall back onto the declared `task.files` list alone would silently
-    // reproduce this task's own defect under the cover of "best effort".
+    // left to PROPAGATE, never caught: `assessRisk` marks the observation unavailable, and this
+    // caller's explicit policy retains the deterministic gates without inventing a risk decision
+    // or falling back onto the declared `task.files` list alone, which would reproduce this task's
+    // own defect under the cover of "best effort".
     // W1-T2383 (rank 1): ONE collector per judgment — `realRiskJudge` records each spawn into it
     // and `runRiskJudge` reads the total onto the `risk_judge.decision` row it already writes.
     // Declared HERE, at the single call site, so it cannot outlive one judgment.
@@ -15157,6 +15156,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
       },
       log: (s, extra) => log(s, extra),
+    }, {
+      // Judge unavailability is recorded, while the deterministic gates remain authoritative.
+      judgeUnavailableAction: "proceed",
     });
     if (riskJudgeResult.action.kind === "escalate") {
       log("verdict", {

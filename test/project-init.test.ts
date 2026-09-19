@@ -34,8 +34,13 @@ test("acceptance 1: buildProjectInit's branch-protection payload names exactly [
   assert.deepEqual(payload.branchProtection.required_status_checks.contexts, ["ci-gate", "remudero-review"]);
   assert.equal(payload.branchProtection.required_status_checks.strict, true);
   assert.equal(payload.branchProtection.enforce_admins, true);
-  assert.equal(payload.branchProtection.required_pull_request_reviews.required_approving_review_count, 1);
+  assert.equal(payload.branchProtection.required_pull_request_reviews, null);
   assert.equal(payload.branchProtection.restrictions, null);
+});
+
+test("generated branch protection omits independent pull-request approvals", () => {
+  const payload = buildProjectInit(fixtureInput());
+  assert.equal(payload.branchProtection.required_pull_request_reviews, null);
 });
 
 test("acceptance 1: buildProjectInit ships the full .github/workflows set — ci/ci-gate/scanners/depcruise, all non-empty", () => {
