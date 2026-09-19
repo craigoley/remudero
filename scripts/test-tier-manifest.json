@@ -1221,6 +1221,7 @@
     "test/risk-judge-disposition-goldens.test.ts": 0,
     "test/risk-judge-evidence-grammar.test.ts": 1003,
     "test/risk-judge-plan-only-amendment.test.ts": 1412,
+    "test/risk-judge-scrubbing.test.ts": 0,
     "test/risk-judge-wiring.test.ts": 326,
     "test/risk-judge.test.ts": 1010,
     "test/risk-override-reader-refusals.test.ts": 249,
