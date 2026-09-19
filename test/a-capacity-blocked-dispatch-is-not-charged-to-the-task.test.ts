@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { auditLedgerUnion } from "../src/lib/ledger-union.js";
+import { MAX_RETAINED_LINES_PER_STEP } from "../src/lib/ledger.js";
 import { auditedLifetimeTalliesFromArchives } from "../src/run-task.js";
 import {
   DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
@@ -116,6 +117,29 @@ test("W1-T3758: the archive tally streams both rotation forms and refuses an unr
     assert.equal(partial.unread.length, 1);
     const unavailable = await auditedLifetimeTalliesFromArchives(stateDir);
     assert.equal(unavailable.history, undefined, "the command layer keeps the pre-existing live-only cap when one archive is unreadable");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3758: the archive projection rolls its bounded replay window without losing rows", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-capacity-history-window-"));
+  const taskId = "W1-T3758-ARCHIVE-WINDOW";
+  try {
+    const rows = Array.from({ length: MAX_RETAINED_LINES_PER_STEP + 1 }, (_, n) => [
+      runStart(taskId, n),
+      capacityBlocked(taskId, n),
+    ]).flat();
+    const content = rows.map((row) => JSON.stringify(row)).join("\n") + "\n";
+    writeFileSync(join(stateDir, "ledger.2026-09-17T00-03-00-000Z.ndjson"), content);
+
+    const result = await auditedLifetimeTalliesFromArchives(stateDir);
+    assert.equal(result.records, rows.length, "the full archive remains visible after the ring advances");
+    assert.deepEqual(
+      result.history?.tallyFor(taskId),
+      { starts: MAX_RETAINED_LINES_PER_STEP + 1, capacityBlocked: MAX_RETAINED_LINES_PER_STEP + 1 },
+      "the bounded replay window must not drop distinct historical rows from the tally",
+    );
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

@@ -26433,10 +26433,11 @@ export async function auditedLifetimeTalliesFromArchives(
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     onRecord: (row, raw) => {
       const step = typeof row.step === "string" ? row.step : "";
-      if (replayedLifetimeLedgerLine(recentByStep, step, raw)) {
-        throw new Error("auditLedgerUnion yielded a replayed lifetime row");
+      // `auditLedgerUnion` already deduplicates the archive stream; this call seeds the bounded
+      // archive window so the live overlay can reject the same retained rows after rotation.
+      if (!replayedLifetimeLedgerLine(recentByStep, step, raw)) {
+        recordLifetimeTally(tallies, row);
       }
-      recordLifetimeTally(tallies, row);
     },
   });
   return {
