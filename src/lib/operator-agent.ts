@@ -10,7 +10,14 @@
 import { dirname } from "node:path";
 import type { Route } from "./service.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
+import {
+  appendPanelLedger,
+  bearerTokenId,
+  isRecord,
+  jsonAction,
+  sendJson,
+  type PanelActionDeps,
+} from "./panel-actions.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -64,10 +71,7 @@ export interface OperatorAgentHistory extends OperatorAgentProposal {
   decisionHistory: OperatorAgentDecisionEvent[];
 }
 
-export interface OperatorAgentRouteDeps {
-  ledgerPath: string;
-  now?: () => number;
-}
+type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { now?: () => number };
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
 type ProposalDecisionInput = { proposalId: string; decision: OperatorAgentDecision; note?: string };
@@ -209,7 +213,7 @@ function outcomeFromRow(row: Record<string, unknown>): { proposalId: string; out
   return "error" in parsed ? null : { proposalId: parsed.proposalId, outcome: parsed.outcome };
 }
 
-export function readOperatorAgentHistory(deps: OperatorAgentRouteDeps): OperatorAgentHistory[] {
+export function readOperatorAgentHistory(deps: OperatorAgentRouteDependencies): OperatorAgentHistory[] {
   const proposals = new Map<string, OperatorAgentProposal>();
   const decisions = new Map<string, OperatorAgentDecisionEvent[]>();
   const outcomes = new Map<string, OperatorAgentOutcome>();
@@ -241,12 +245,12 @@ export function readOperatorAgentHistory(deps: OperatorAgentRouteDeps): Operator
     .sort((left, right) => right.confidence - left.confidence || left.proposalId.localeCompare(right.proposalId));
 }
 
-function findProposal(deps: OperatorAgentRouteDeps, proposalId: string): OperatorAgentHistory | undefined {
+function findProposal(deps: OperatorAgentRouteDependencies, proposalId: string): OperatorAgentHistory | undefined {
   return readOperatorAgentHistory(deps).find((proposal) => proposal.proposalId === proposalId);
 }
 
 /** GET /v1/operator-agent/proposals — durable proposal and operator-decision history. */
-export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDeps): Route {
+export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "GET",
     path: "/v1/operator-agent/proposals",
@@ -256,7 +260,7 @@ export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDeps
 }
 
 /** POST /v1/operator-agent/proposals — register an evidence-backed proposal idempotently. */
-export function buildOperatorAgentProposalRegisterRoute(deps: OperatorAgentRouteDeps): Route {
+export function buildOperatorAgentProposalRegisterRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "POST",
     path: "/v1/operator-agent/proposals",
@@ -279,7 +283,7 @@ export function buildOperatorAgentProposalRegisterRoute(deps: OperatorAgentRoute
 }
 
 /** POST /v1/operator-agent/proposals/decision — record accept/reject/more-info in the ledger. */
-export function buildOperatorAgentDecisionRoute(deps: OperatorAgentRouteDeps): Route {
+export function buildOperatorAgentDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "POST",
     path: "/v1/operator-agent/proposals/decision",
@@ -308,7 +312,7 @@ export function buildOperatorAgentDecisionRoute(deps: OperatorAgentRouteDeps): R
 }
 
 /** POST /v1/operator-agent/proposals/outcome — attach a later observed outcome, never at accept time. */
-export function buildOperatorAgentOutcomeRoute(deps: OperatorAgentRouteDeps): Route {
+export function buildOperatorAgentOutcomeRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "POST",
     path: "/v1/operator-agent/proposals/outcome",
@@ -333,7 +337,7 @@ export function buildOperatorAgentOutcomeRoute(deps: OperatorAgentRouteDeps): Ro
   };
 }
 
-export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDeps): Route[] {
+export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
     buildOperatorAgentProposalReadRoute(deps),
     buildOperatorAgentProposalRegisterRoute(deps),
