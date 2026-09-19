@@ -9,6 +9,7 @@
     "test/a-blocked-task-must-name-its-disposition.test.ts": 3261,
     "test/a-blocked-task-with-no-disposition-is-reported.test.ts": 0,
     "test/a-body-repair-proof-safety-is-enforced-at-the-write-boundary.test.ts": 0,
+    "test/a-body-repair-re-evaluates-the-gate-that-read-it.test.ts": 0,
     "test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts": 1907,
     "test/a-broken-body-is-repairable-not-ambiguous.test.ts": 1676,
     "test/a-browser-boundary-has-no-directive.test.ts": 0,

@@ -51,7 +51,7 @@ concurrency:
 jobs:
   squash-trailer-gate:
     name: squash-trailer-gate
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.action != 'edited'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -69,7 +69,9 @@ jobs:
 
   ci:
     name: ci-shard (${{ matrix.shard }}/4)
-    # W1-T1033: no `if:` here — this matrix and its aggregator run on both triggers above.
+    # W1-T3332: body-only edits belong to the lightweight body gates; never start this matrix for
+    # an edited event. Pushes to main still run it, and normal PR events remain unchanged.
+    if: github.event_name != 'pull_request' || github.event.action != 'edited'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -368,7 +370,7 @@ jobs:
     name: flake-retry-aggregate
     runs-on: ubuntu-latest
     needs: [ci, test-slow]
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.action != 'edited') }}
     timeout-minutes: 10
     steps:
       # Checkout must precede artifact downloads: actions/checkout cleans the workspace, so the
@@ -433,7 +435,7 @@ jobs:
     name: ci
     runs-on: ubuntu-latest
     needs: [ci]
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.action != 'edited') }}
     timeout-minutes: 10
     steps:
       - name: Collapse all test shards into the stable required check
@@ -546,7 +548,7 @@ jobs:
     # event (W1-T1033), so the required context is never silently absent.
     name: test-slow
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 35
     # W1-T2904 HEAVY BAND. `test-slow` carries a `playwright install` step because 9 of the 106
     # files at or over the manifest's 5000ms threshold are the Playwright-driven serve.* suites,
@@ -640,7 +642,7 @@ jobs:
     # relocated, not dropped. FALSIFIER: test/commitlint-mode.test.ts, test/commitlint-config.test.ts.
     name: commitlint
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     permissions:
       contents: read
@@ -679,7 +681,7 @@ jobs:
     # the aggregator); its own job status is what "on every PR" is proven by.
     name: leak-grep
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -687,6 +689,8 @@ jobs:
         run: bash .github/scripts/leak-grep.sh
 
   coverage-ratchet:
+    # W1-T3332: body-only edits use acceptance-author-gate and ci-gate; do not start coverage.
+    if: github.event_name != 'pull_request' || github.event.action != 'edited'
     # §5 TIER 2, quality gate 1/4 (W1-T25) — coverage never goes down.
     # scripts/coverage-ratchet.mjs compares this run's lcov totals against the recorded floor in
     # scripts/coverage-baseline.json and exits non-zero on any coverage-lowering PR; that floor
@@ -911,7 +915,7 @@ jobs:
     name: coverage-ratchet
     runs-on: ubuntu-latest
     needs: [coverage-ratchet]
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.action != 'edited') }}
     timeout-minutes: 10
     steps:
       - name: Require every coverage shard to produce an artifact
@@ -1158,7 +1162,7 @@ jobs:
     # Why: the full latency measurements are in docs/forensics/ci-yml.md.
     name: mutation-ratchet
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     # W1-T1009: LIGHT band. This job installed Playwright until W1-T133 removed that step, so it
     # is not immune to the same stall class even though the measured hangs were elsewhere.
     timeout-minutes: 10
@@ -1249,7 +1253,7 @@ jobs:
     # an active-versus-superseded switch.
     name: learnings-budget-ratchet
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1297,7 +1301,7 @@ jobs:
     # fixture.
     name: jscpd-gate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1351,7 +1355,7 @@ jobs:
     # transpiles per-file through oxc), so a build-only job would go green on a type error.
     name: dashboard
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1381,7 +1385,7 @@ jobs:
     # PLAN_ONLY would retire the gate for exactly the diff shape most likely to touch it.
     name: claims
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1419,7 +1423,7 @@ jobs:
     # can move this check, so it is not source-only and must keep running in full.
     name: assertion-discrimination
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1447,7 +1451,7 @@ jobs:
     # src/lib/review.ts, so a proof that cannot execute never lands.
     name: lint-plan
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1471,7 +1475,7 @@ jobs:
     # violation to prove the rule is active, not merely declared.
     name: depcruise
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1552,7 +1556,7 @@ jobs:
     # adds nothing here.
     name: containment-probe
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1590,7 +1594,7 @@ jobs:
     # FALSIFIER: test/api-client-drift-check.test.ts.
     name: api-client-drift
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1642,7 +1646,7 @@ jobs:
     # FALSIFIER: test/no-hand-rolled-fetch-check.test.ts.
     name: no-hand-rolled-fetch
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1688,7 +1692,7 @@ jobs:
   prompt-surface-gate:
     name: prompt-surface-gate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1718,7 +1722,7 @@ jobs:
     # scripts/task-id-existence-baseline.json. FALSIFIER: test/task-id-existence-check.test.ts.
     name: task-id-existence
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1746,7 +1750,7 @@ jobs:
     # FALSIFIER: test/source-size-baseline-is-enforced.test.ts.
     name: source-size
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1800,7 +1804,7 @@ jobs:
     # FALSIFIER: test/comment-load-ratchet.test.ts.
     name: comment-load-ratchet
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1937,7 +1941,7 @@ jobs:
     # FALSIFIER: test/baseline-monotonic-against-origin-main.test.ts.
     name: baseline-monotonic
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited' # W1-T3332: body edits use the lightweight gates.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
