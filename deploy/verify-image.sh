@@ -590,9 +590,8 @@ fi
 # registry — everything happens on a throwaway path in a throwaway container, and it runs on every
 # verification rather than only when credentials are around.
 #
-# The scratch repo commits a dummy `node_modules/.bin/tsx` so the entrypoint takes its
-# "node_modules present" branch and skips the bootstrap install; this section is testing the
-# CHECKOUT resolution, and an npm run would only add a network dependency it does not need.
+# The scratch repo commits dummy `node_modules/.bin/tsx` and `bin/rmd` executables so the
+# entrypoint accepts the cloned checkout as a real CLI tree; this tests CHECKOUT resolution only.
 echo
 echo "verify-image: bootstrap currency (offline, against a throwaway origin — no token needed)"
 set +e
@@ -605,9 +604,10 @@ out="$(docker run --rm --entrypoint /bin/sh "${REF}" -c '
   mkdir -p "$origin" "$HOME"
   git init -q -b main "$origin"
   cd "$origin"
-  mkdir -p node_modules/.bin
+  mkdir -p node_modules/.bin bin
   printf "#!/bin/sh\n" > node_modules/.bin/tsx
-  chmod +x node_modules/.bin/tsx
+  printf "#!/bin/sh\nexit 0\n" > bin/rmd
+  chmod +x node_modules/.bin/tsx bin/rmd
   echo one > f.txt
   git add -A && git commit -qm c1
   # BOOT 1 — clones. Runs the real entrypoint, not a reimplementation of it.
