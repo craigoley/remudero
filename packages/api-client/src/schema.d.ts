@@ -309,6 +309,102 @@ export interface components {
       scope?: OperatorAgentSettingsScope;
       updatedAt?: string;
     };
+    OperatorAgentExperimentScope: {
+      repo: string;
+      taskType?: string;
+      lane?: string;
+      provider?: string;
+      modelPolicy?: string;
+      evidenceAnchors?: (string)[];
+    };
+    OperatorAgentExperimentBaseline: {
+      metricName: string;
+      value: number;
+      unit: string;
+      denominator: number;
+      comparisonPopulation: string;
+      windowStart: string;
+      windowEnd: string;
+      source: string;
+      freshness: "verified" | "stale" | "unavailable";
+    };
+    OperatorAgentExperimentIntervention: {
+      summary: string;
+      plan: string;
+      taskId?: string;
+      prUrl?: string;
+    };
+    OperatorAgentExperimentRollback: {
+      plan: string;
+      reason: string;
+      receipt?: string;
+    };
+    OperatorAgentExperiment: {
+      version: "experiment-v1";
+      experimentId: string;
+      proposalId?: string;
+      hypothesis: string;
+      intervention: OperatorAgentExperimentIntervention;
+      scope: OperatorAgentExperimentScope;
+      baseline: OperatorAgentExperimentBaseline;
+      rollback: OperatorAgentExperimentRollback;
+      createdAt: string;
+      state: "proposed";
+    };
+    OperatorAgentExperimentOutcome: {
+      state: "observing" | "succeeded" | "neutral" | "regressed" | "unmeasurable";
+      summary: string;
+      observedAt: string;
+      source?: string;
+      freshness?: "verified" | "stale" | "unavailable";
+      attribution?: "complete" | "missing" | "mixed";
+      denominator?: number;
+      comparisonPopulation?: string;
+      metricName?: string;
+      value?: number;
+      reason?: string;
+    };
+    OperatorAgentExperimentHistory: {
+      version: "experiment-v1";
+      experimentId: string;
+      proposalId?: string;
+      hypothesis: string;
+      intervention: OperatorAgentExperimentIntervention;
+      scope: OperatorAgentExperimentScope;
+      baseline: OperatorAgentExperimentBaseline;
+      rollback: OperatorAgentExperimentRollback;
+      createdAt: string;
+      state: "proposed" | "approved" | "observing" | "succeeded" | "neutral" | "regressed" | "rolled_back" | "expired" | "unmeasurable" | "rejected";
+      events: ({
+        kind: "decision" | "outcome" | "rollback";
+        at: string;
+        decision?: "approved" | "rejected";
+        outcome?: OperatorAgentExperimentOutcome;
+        rollback?: OperatorAgentExperimentRollback;
+        note?: string;
+      })[];
+      outcome?: OperatorAgentExperimentOutcome;
+    };
+    OperatorAgentExperimentList: {
+      experiments: (OperatorAgentExperimentHistory)[];
+      source: "ledger";
+    };
+    OperatorAgentExperimentRegistration: {
+      experiment: OperatorAgentExperiment;
+    };
+    OperatorAgentExperimentDecisionRequest: {
+      experimentId: string;
+      decision: "approved" | "rejected";
+      note?: string;
+    };
+    OperatorAgentExperimentOutcomeRequest: {
+      experimentId: string;
+      outcome: OperatorAgentExperimentOutcome;
+    };
+    OperatorAgentExperimentRollbackRequest: {
+      experimentId: string;
+      rollback: OperatorAgentExperimentRollback;
+    };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
     SkillEntry: {
       /** The skill's identity -- its filename minus `.yaml`. */
@@ -535,6 +631,61 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/experiments": {
+    get: {
+      responses: {
+          "200": OperatorAgentExperimentList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "201": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/experiments/decision": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/experiments/outcome": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/experiments/rollback": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
         };
     };
   };

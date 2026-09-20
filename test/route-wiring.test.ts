@@ -116,6 +116,22 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "POST /v1/operator-agent/settings",
     "ledger-only operator-agent settings write; route validation and durable read-back are covered in test/operator-agent.test.ts",
   ],
+  [
+    "POST /v1/operator-agent/experiments",
+    "ledger-only operator-agent experiment registration; route behavior and experiment-v1 validation are covered in test/operator-agent-experiments.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/experiments/decision",
+    "ledger-only operator-agent experiment decision; approval is separate from measured outcome and is covered in test/operator-agent-experiments.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/experiments/outcome",
+    "ledger-only operator-agent experiment outcome; attribution and denominator normalization are covered in test/operator-agent-experiments.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/experiments/rollback",
+    "ledger-only operator-agent experiment rollback; append-only rollback history is covered in test/operator-agent-experiments.test.ts",
+  ],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([

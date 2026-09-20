@@ -3625,6 +3625,9 @@ function assembleServeRoutes(
     // (ledgerPanelAction, panel-actions.ts:134), which is identical across both PanelActionDeps
     // instances built above -- so this route reads no root at all and cannot be misrooted.
     buildDrainFeedbackRoute(fleetControlDeps),
+    // Operator-agent proposals, settings, and experiment-v1 observations all share the daemon
+    // ledger. The experiment routes are mounted through this same production assembly so the
+    // console cannot approve a change without a durable baseline and rollback path.
     ...buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath }),
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,

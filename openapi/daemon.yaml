@@ -983,6 +983,239 @@ components:
           type: string
           format: date-time
 
+    OperatorAgentExperimentScope:
+      type: object
+      required: [repo]
+      properties:
+        repo:
+          type: string
+          minLength: 1
+        taskType:
+          type: string
+        lane:
+          type: string
+        provider:
+          type: string
+        modelPolicy:
+          type: string
+        evidenceAnchors:
+          type: array
+          maxItems: 12
+          items:
+            type: string
+
+    OperatorAgentExperimentBaseline:
+      type: object
+      required: [metricName, value, unit, denominator, comparisonPopulation, windowStart, windowEnd, source, freshness]
+      properties:
+        metricName:
+          type: string
+        value:
+          type: number
+        unit:
+          type: string
+        denominator:
+          type: integer
+          minimum: 1
+        comparisonPopulation:
+          type: string
+        windowStart:
+          type: string
+          format: date-time
+        windowEnd:
+          type: string
+          format: date-time
+        source:
+          type: string
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+
+    OperatorAgentExperimentIntervention:
+      type: object
+      required: [summary, plan]
+      properties:
+        summary:
+          type: string
+        plan:
+          type: string
+        taskId:
+          type: string
+        prUrl:
+          type: string
+          format: uri
+
+    OperatorAgentExperimentRollback:
+      type: object
+      required: [plan, reason]
+      properties:
+        plan:
+          type: string
+        reason:
+          type: string
+        receipt:
+          type: string
+
+    OperatorAgentExperiment:
+      type: object
+      required: [version, experimentId, hypothesis, intervention, scope, baseline, rollback, createdAt, state]
+      properties:
+        version:
+          type: string
+          enum: [experiment-v1]
+        experimentId:
+          type: string
+        proposalId:
+          type: string
+        hypothesis:
+          type: string
+        intervention:
+          $ref: "#/components/schemas/OperatorAgentExperimentIntervention"
+        scope:
+          $ref: "#/components/schemas/OperatorAgentExperimentScope"
+        baseline:
+          $ref: "#/components/schemas/OperatorAgentExperimentBaseline"
+        rollback:
+          $ref: "#/components/schemas/OperatorAgentExperimentRollback"
+        createdAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum: [proposed]
+
+    OperatorAgentExperimentOutcome:
+      type: object
+      required: [state, summary, observedAt]
+      properties:
+        state:
+          type: string
+          enum: [observing, succeeded, neutral, regressed, unmeasurable]
+        summary:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        source:
+          type: string
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+        attribution:
+          type: string
+          enum: [complete, missing, mixed]
+        denominator:
+          type: integer
+          minimum: 0
+        comparisonPopulation:
+          type: string
+        metricName:
+          type: string
+        value:
+          type: number
+        reason:
+          type: string
+
+    OperatorAgentExperimentHistory:
+      type: object
+      required: [version, experimentId, hypothesis, intervention, scope, baseline, rollback, createdAt, state, events]
+      properties:
+        version:
+          type: string
+          enum: [experiment-v1]
+        experimentId:
+          type: string
+        proposalId:
+          type: string
+        hypothesis:
+          type: string
+        intervention:
+          $ref: "#/components/schemas/OperatorAgentExperimentIntervention"
+        scope:
+          $ref: "#/components/schemas/OperatorAgentExperimentScope"
+        baseline:
+          $ref: "#/components/schemas/OperatorAgentExperimentBaseline"
+        rollback:
+          $ref: "#/components/schemas/OperatorAgentExperimentRollback"
+        createdAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum: [proposed, approved, observing, succeeded, neutral, regressed, rolled_back, expired, unmeasurable, rejected]
+        events:
+          type: array
+          items:
+            type: object
+            required: [kind, at]
+            properties:
+              kind:
+                type: string
+                enum: [decision, outcome, rollback]
+              at:
+                type: string
+                format: date-time
+              decision:
+                type: string
+                enum: [approved, rejected]
+              outcome:
+                $ref: "#/components/schemas/OperatorAgentExperimentOutcome"
+              rollback:
+                $ref: "#/components/schemas/OperatorAgentExperimentRollback"
+              note:
+                type: string
+        outcome:
+          $ref: "#/components/schemas/OperatorAgentExperimentOutcome"
+
+    OperatorAgentExperimentList:
+      type: object
+      required: [experiments, source]
+      properties:
+        experiments:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorAgentExperimentHistory"
+        source:
+          type: string
+          enum: [ledger]
+
+    OperatorAgentExperimentRegistration:
+      type: object
+      required: [experiment]
+      properties:
+        experiment:
+          $ref: "#/components/schemas/OperatorAgentExperiment"
+
+    OperatorAgentExperimentDecisionRequest:
+      type: object
+      required: [experimentId, decision]
+      properties:
+        experimentId:
+          type: string
+        decision:
+          type: string
+          enum: [approved, rejected]
+        note:
+          type: string
+
+    OperatorAgentExperimentOutcomeRequest:
+      type: object
+      required: [experimentId, outcome]
+      properties:
+        experimentId:
+          type: string
+        outcome:
+          $ref: "#/components/schemas/OperatorAgentExperimentOutcome"
+
+    OperatorAgentExperimentRollbackRequest:
+      type: object
+      required: [experimentId, rollback]
+      properties:
+        experimentId:
+          type: string
+        rollback:
+          $ref: "#/components/schemas/OperatorAgentExperimentRollback"
+
     # ── W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) -- the button set
     # src/lib/panel-skills.ts's ONE route returns, resolved from
     # `.remudero/skills/<name>.yaml` (lib/skill.ts's `Skill`, W1-T44) the SAME
@@ -1614,6 +1847,134 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/experiments:
+    get:
+      summary: Read durable self-improvement experiment-v1 history.
+      description: >
+        Returns the append-only experiment record, approval decision, measured outcome, and
+        rollback events across the live ledger and supported rotated ledger files. Approval is
+        never presented as measured success; weak attribution is returned as unmeasurable.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable experiment history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentExperimentList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Register a bounded, falsifiable self-improvement experiment.
+      description: >
+        Records the hypothesis, intervention, baseline, scope, observation window, and rollback
+        path before any operator decision. The durable version is experiment-v1 and excludes raw
+        credentials or unbounded model prose.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentExperimentRegistration"
+      responses:
+        "201":
+          description: Experiment registered.
+        "200":
+          description: Identical experiment already registered.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/experiments/decision:
+    post:
+      summary: Approve or reject a self-improvement experiment.
+      description: Approval records intent only; no outcome or success rate is created until a later observation.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentExperimentDecisionRequest"
+      responses:
+        "200":
+          description: Experiment decision recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/experiments/outcome:
+    post:
+      summary: Record a later self-improvement experiment observation.
+      description: >
+        A claimed success, neutral result, or regression is normalised to unmeasurable when its
+        denominator, attribution, comparison population, metric, or freshness is insufficient.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentExperimentOutcomeRequest"
+      responses:
+        "200":
+          description: Experiment observation recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/experiments/rollback:
+    post:
+      summary: Record a rollback for a regressed self-improvement experiment.
+      description: Rollback appends a linked event and leaves the proposal, approval, and regression history intact.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentExperimentRollbackRequest"
+      responses:
+        "200":
+          description: Rollback recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
   /v1/skills:
     get:
