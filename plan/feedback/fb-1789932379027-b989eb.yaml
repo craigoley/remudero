@@ -17,10 +17,30 @@ raw: "Observed live on 2026-09-20: core GET /v1/analytics reads
   timeouts."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6260
+summary:
+  headline: Analytics projectionVersion ignored; full snapshot returned instead of
+    bounded
+  what_happened: The /v1/analytics endpoint reads projectionVersion correctly but
+    always serializes the full multi-megabyte snapshot instead of the 128 KiB
+    console-v1 envelope, causing 8-10 second delays. Test W1-T3623 incorrectly
+    asserts this broken behavior as correct.
+  decision: Fix serialization to respect projectionVersion; rewrite W1-T3623 test;
+    add regression tests for matching/unversioned/unknown versions and
+    concurrent read efficiency.
+  options:
+    - label: Fix code + test + regressions
+      consequence: Restores correct behavior and performance; prevents regression;
+        fully validates projection handling
+    - label: Increase limits/timeouts instead
+      consequence: Masks root cause without fixing; violates design requirements;
+        creates future issues
+    - label: Defer pending redesign review
+      consequence: Blocks resolution; leaves users on degraded path; keeps incorrect
+        test as blocker
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
