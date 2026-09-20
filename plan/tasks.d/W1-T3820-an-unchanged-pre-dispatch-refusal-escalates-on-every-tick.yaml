@@ -42,7 +42,7 @@
     - claim: "an identical linter verdict produces at most one repair action and one operator escalation before it is held"
       proof: "unit test: ACCEPTANCE 3: an unchanged verdict is held after one escalation"
     - claim: "the run-task pre-dispatch refusal composition root records a held decision"
-      proof: "grep: dispatch\\.repair\\.held in src/run-task.ts"
+      proof: 'grep: dispatch.repair.held in src/run-task.ts'
   falsifier: |
     Feed the same verdict through the real repair entry point three times. Before the
     change it invokes the escalation callback twice and persists attempts 3. After
