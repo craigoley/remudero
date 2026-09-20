@@ -74,6 +74,38 @@ test("W1-T3595: the shipped recycle script contains no Bash-4-only collection pr
   );
 });
 
+test("W1-T3799: optional recycle mounts are appended only when present before docker run", () => {
+  assert.match(SCRIPT_SOURCE, /DOCKER_RUN_ARGS=\(/, "the run command must be assembled through a stable argv");
+  assert.match(
+    SCRIPT_SOURCE,
+    /if \[ "\$\{#CODEX_MOUNT_ARGS\[@\]\}" -gt 0 \]; then/,
+    "the optional Codex mount must be appended only when it exists",
+  );
+  assert.match(
+    SCRIPT_SOURCE,
+    /if \[ "\$\{#CONTAINER_CONFIG_MOUNT_ARGS\[@\]\}" -gt 0 \]; then/,
+    "the optional config mount must be appended only when it exists",
+  );
+  assert.match(SCRIPT_SOURCE, /docker run "\$\{DOCKER_RUN_ARGS\[@\]\}"/, "docker must receive the assembled argv");
+  assert.doesNotMatch(SCRIPT_SOURCE, /docker run[\s\S]{0,600}"\$\{CODEX_MOUNT_ARGS\[@\]\}"/);
+  assert.doesNotMatch(SCRIPT_SOURCE, /docker run[\s\S]{0,600}"\$\{CONTAINER_CONFIG_MOUNT_ARGS\[@\]\}"/);
+});
+
+test("W1-T3799: timeout age parsing tries GNU date and then BSD date", () => {
+  assert.match(SCRIPT_SOURCE, /epoch_of_started_at\(\)/, "timeout evidence needs one portable timestamp parser");
+  assert.match(SCRIPT_SOURCE, /date -u -d "\$\{iso\}" \+%s/, "Linux must retain the GNU date path");
+  assert.match(
+    SCRIPT_SOURCE,
+    /date -u -j -f "%Y-%m-%dT%H:%M:%S" "\$\{trimmed\}" \+%s/,
+    "macOS must have a BSD date path",
+  );
+  assert.match(
+    SCRIPT_SOURCE,
+    /started_epoch="\$\(epoch_of_started_at "\$\{started_at\}"\)"/,
+    "oldest-work evidence must use the portable parser",
+  );
+});
+
 // POSITIVE CONTROL for the census predicate itself — proves the regexes actually recognise the
 // six real shapes this file used to carry (four `readarray -t NAME < <(...)`, two `declare -A
 // NAME=()`), not merely that they find nothing in a script that has already been fixed.
