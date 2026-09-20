@@ -14,8 +14,9 @@ import { writeAtomic } from "./fs-race-safe.js";
  * THE SHAPE: on a refusal, dispatch ONE repair lane carrying the linter's own verdict text
  * VERBATIM (never a paraphrase or a generic prompt — the repair lane must repair the STATED
  * defect). A second refusal of the SAME task with the SAME verdict escalates to the operator
- * rather than dispatching a second repair lane. A task whose verdict CHANGES between refusals
- * is PROGRESS, not a repeat, and is treated exactly like a first-ever refusal.
+ * rather than dispatching a second repair lane. That escalation is terminal for the unchanged
+ * verdict: later reads are held rather than escalating again. A task whose verdict CHANGES
+ * between refusals is PROGRESS, not a repeat, and is treated exactly like a first-ever refusal.
  *
  * THIS MODULE IS DELIBERATELY PURE AT ITS CORE ({@link decideRepairDispatch}): no spawn, no
  * ledger write, no GitHub call. The one entry point real callers reach for
@@ -45,10 +46,13 @@ export function refusalVerdictText(violations: readonly RefusalViolation[]): str
 }
 
 /** The ONLY state threaded across dispatches of one task: the verdict text last recorded for
- *  it, and how many times that EXACT verdict has now been seen in a row. */
+ *  it, and how many times that EXACT verdict has now been seen in a row. `escalated` is optional
+ *  only for compatibility with records written before terminal escalation was persisted; every
+ *  new record writes it explicitly. */
 export interface PriorRefusal {
   verdict: string;
   attempts: number;
+  escalated?: boolean;
 }
 
 export type RepairDispatchAction =
@@ -61,17 +65,24 @@ export type RepairDispatchAction =
        *  lane, same as a genuinely first-ever refusal. */
       progress: boolean;
     }
-  | { kind: "escalate"; taskId: string; verdict: string; attempts: number };
+  | { kind: "escalate"; taskId: string; verdict: string; attempts: number }
+  | { kind: "held"; taskId: string; verdict: string; attempts: number };
 
 /**
  * THE PURE DECISION (rationale, W1-T3657 "THE SHAPE"). No prior refusal recorded for this task,
  * OR a prior refusal recorded with a DIFFERENT verdict, dispatches one repair lane. A prior
  * refusal recorded with the IDENTICAL verdict escalates instead of dispatching a second one —
- * "the second refusal of the same task with the same verdict" the rationale names.
+ * "the second refusal of the same task with the same verdict" the rationale names. Once that
+ * escalation is recorded, the same verdict is held with its original attempt count. Old records
+ * without `escalated` are deliberately treated as not-yet-terminal, so their next identical
+ * refusal still earns the one escalation.
  */
 export function decideRepairDispatch(taskId: string, verdict: string, prior: PriorRefusal | undefined): RepairDispatchAction {
   if (prior === undefined || prior.verdict !== verdict) {
     return { kind: "dispatch_repair", taskId, verdict, progress: prior !== undefined };
+  }
+  if (prior.escalated === true) {
+    return { kind: "held", taskId, verdict, attempts: prior.attempts };
   }
   return { kind: "escalate", taskId, verdict, attempts: prior.attempts + 1 };
 }
@@ -95,9 +106,15 @@ export function readPriorRefusal(stateRoot: string, taskId: string): PriorRefusa
       typeof raw === "object" &&
       raw !== null &&
       typeof (raw as { verdict?: unknown }).verdict === "string" &&
-      typeof (raw as { attempts?: unknown }).attempts === "number"
+      typeof (raw as { attempts?: unknown }).attempts === "number" &&
+      (typeof (raw as { escalated?: unknown }).escalated === "undefined" ||
+        typeof (raw as { escalated?: unknown }).escalated === "boolean")
     ) {
-      return { verdict: (raw as { verdict: string }).verdict, attempts: (raw as { attempts: number }).attempts };
+      return {
+        verdict: (raw as { verdict: string }).verdict,
+        attempts: (raw as { attempts: number }).attempts,
+        escalated: (raw as { escalated?: boolean }).escalated === true,
+      };
     }
     return undefined; // present but not this shape: read as "never refused before".
   } catch {
@@ -116,9 +133,9 @@ export function writePriorRefusal(stateRoot: string, taskId: string, prior: Prio
  * acceptance criterion 5). The run-task composition root supplies the four side effects; this
  * module owns only the refusal decision. That keeps the repair path on the existing runTask
  * boundary instead of adding a second `*Deps` seam solely for this feature. It reads this task's
- * prior refusal, drives exactly ONE of `dispatchRepairLane`/`escalate` — never both, never
- * neither — and persists the decision as the next prior record so the NEXT refusal is judged
- * against it.
+ * prior refusal, drives exactly ONE of `dispatchRepairLane`/`escalate` — or neither for a held
+ * decision — and persists the decision as the next prior record so the NEXT refusal is judged
+ * against it. A held decision does not rewrite the record or invoke either side effect.
  */
 export function repairRefusedTask(
   taskId: string,
@@ -133,10 +150,10 @@ export function repairRefusedTask(
   const action = decideRepairDispatch(taskId, verdict, prior);
   if (action.kind === "dispatch_repair") {
     dispatchRepairLane({ taskId, verdict, progress: action.progress });
-    writePrior(taskId, { verdict, attempts: 1 });
-  } else {
+    writePrior(taskId, { verdict, attempts: 1, escalated: false });
+  } else if (action.kind === "escalate") {
     escalate({ taskId, verdict, attempts: action.attempts });
-    writePrior(taskId, { verdict, attempts: action.attempts });
+    writePrior(taskId, { verdict, attempts: action.attempts, escalated: true });
   }
   return action;
 }

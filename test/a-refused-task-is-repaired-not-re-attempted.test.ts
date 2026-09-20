@@ -97,17 +97,31 @@ test("FALSIFIER of acceptance 2: a generic prompt instead of the verdict does no
 
 // ── ACCEPTANCE 3: an unchanged verdict escalates rather than re-reconning ─────────────────
 
-test("ACCEPTANCE 3: an unchanged verdict escalates rather than re-reconning", () => {
+test("ACCEPTANCE 3: an unchanged verdict is held after one escalation", () => {
   const verdict = refusalVerdictText(VIOLATIONS);
-  const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects({ verdict, attempts: 1 });
-  const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
+  let prior: PriorRefusal = { verdict, attempts: 1 };
+  const effects = fakeEffects(prior);
+  let writes = 0;
+  const readPrior = (_id: string) => prior;
+  const writePrior = (_id: string, record: PriorRefusal) => {
+    writes++;
+    prior = record;
+  };
+  const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, effects.dispatchRepairLane, effects.escalate);
 
   assert.equal(action.kind, "escalate", "the unchanged verdict escalates");
-  assert.equal(escalated.length, 1, "exactly one escalation is raised");
-  assert.equal(dispatched.length, 0, "no SECOND repair lane is dispatched for the same verdict — that would be re-reconning");
-  assert.equal(escalated[0]!.taskId, "W1-T9001");
-  assert.equal(escalated[0]!.verdict, verdict, "the escalation names the same verdict, unchanged");
-  assert.equal(escalated[0]!.attempts, 2, "the escalation counts this as the 2nd time this exact verdict was seen");
+  assert.equal(effects.escalated.length, 1, "exactly one escalation is raised");
+  assert.equal(effects.dispatched.length, 0, "no SECOND repair lane is dispatched for the same verdict — that would be re-reconning");
+  assert.equal(effects.escalated[0]!.taskId, "W1-T9001");
+  assert.equal(effects.escalated[0]!.verdict, verdict, "the escalation names the same verdict, unchanged");
+  assert.equal(effects.escalated[0]!.attempts, 2, "the escalation counts this as the 2nd time this exact verdict was seen");
+
+  const held = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, effects.dispatchRepairLane, effects.escalate);
+  assert.equal(held.kind, "held", "the terminal escalation holds a later identical refusal");
+  assert.equal(effects.escalated.length, 1, "a held refusal does not escalate again");
+  assert.equal(effects.dispatched.length, 0, "a held refusal does not dispatch a repair lane");
+  assert.equal(prior.attempts, 2, "a held refusal preserves the original escalation attempt");
+  assert.equal(writes, 1, "a held refusal does not rewrite the terminal state");
 });
 
 test("FALSIFIER of acceptance 3: an unchanged verdict that starts a second recon (dispatch) instead of escalating violates the shape", () => {
@@ -117,17 +131,25 @@ test("FALSIFIER of acceptance 3: an unchanged verdict that starts a second recon
   assert.notEqual(action.kind, "dispatch_repair", "an unchanged verdict must never decide to dispatch a second repair lane");
 });
 
+test("FALSIFIER of acceptance 3: a terminal escalation that fires again is not held", () => {
+  const verdict = refusalVerdictText(VIOLATIONS);
+  const action = decideRepairDispatch("W1-T9001", verdict, { verdict, attempts: 2, escalated: true });
+  assert.equal(action.kind, "held", "a terminally escalated verdict must be held, not escalated again");
+  assert.equal(action.attempts, 2, "the held action preserves the original escalation attempt");
+});
+
 // ── ACCEPTANCE 4: a changed verdict is PROGRESS, not a repeat ─────────────────────────────
 
 test("ACCEPTANCE 4: a changed verdict is progress, not a repeat", () => {
   const priorVerdict = refusalVerdictText(OTHER_VIOLATIONS);
-  const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects({ verdict: priorVerdict, attempts: 1 });
+  const { dispatched, escalated, written, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects({ verdict: priorVerdict, attempts: 2, escalated: true });
   const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
 
   assert.equal(action.kind, "dispatch_repair", "a changed verdict is progress, treated like a first-ever refusal");
   assert.ok(action.kind === "dispatch_repair" && action.progress, "the action is explicitly flagged as progress (not a first-ever refusal either)");
   assert.equal(dispatched.length, 1, "a changed verdict dispatches exactly one repair lane");
   assert.equal(escalated.length, 0, "a changed verdict never escalates");
+  assert.equal(written[0]!.escalated, false, "a changed verdict clears the terminal escalation state");
 });
 
 test("FALSIFIER of acceptance 4: treating a changed verdict as a repeat (escalating) violates the shape", () => {
@@ -219,6 +241,9 @@ test("BEHAVIORAL: the next real runTask reads that refusal and escalates without
   try {
     const repeated = await runTask("TST-REPAIR-BAD", { skipGitSync: true, planPath, config, github: OFFLINE_GITHUB, spawn });
     assert.equal(repeated.verdict, "blocked_illformed");
+
+    const held = await runTask("TST-REPAIR-BAD", { skipGitSync: true, planPath, config, github: OFFLINE_GITHUB, spawn });
+    assert.equal(held.verdict, "blocked_illformed");
   } finally {
     process.env.PATH = priorPath;
   }
@@ -227,4 +252,9 @@ test("BEHAVIORAL: the next real runTask reads that refusal and escalates without
     readFileSync(join(configRoot, "state", "dispatch-repair", "TST-REPAIR-BAD.json"), "utf8"),
   ) as PriorRefusal;
   assert.equal(record.attempts, 2, "the repeated real path reads the durable first refusal before escalating");
+  assert.equal(record.escalated, true, "the escalation is persisted as terminal");
+  const ledger = readFileSync(join(configRoot, "state", "ledger.ndjson"), "utf8");
+  assert.match(ledger, /"step":"dispatch\.repair\.held"/, "the held decision is ledgered by the run-task composition root");
+  assert.match(ledger, /"reason":"unchanged pre-dispatch verdict was already escalated"/, "the held ledger row names why the decision was held");
+  assert.match(ledger, /"escalation_attempts":2/, "the held ledger row preserves the original escalation attempt");
 });
