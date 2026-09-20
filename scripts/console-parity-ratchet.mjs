@@ -97,6 +97,9 @@ export const CLI_ONLY = {
       "next-task-id",
       "emissions",
       "receipt",
+      // W1-T3800: replays a privacy-safe offline corpus from the local filesystem;
+      // it is an operator calibration report, not a production console action.
+      "risk-judge-eval",
       "authority",
       "check-proof",
       "reap-branches",

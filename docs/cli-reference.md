@@ -28,6 +28,7 @@ usage:
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
   rmd replay <since> <until> [--task <id>] [--step <prefix>]   # Narrate a ledger window in plain text: what the fleet decided, in order.
+  rmd risk-judge-eval [--corpus <dir>]   # Replay risk-judge disposition fixtures offline and report calibration metrics.
   rmd authority [--json]   # Every external write the fleet may make without the operator, its gate, and its last firing.
   rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
@@ -237,6 +238,16 @@ rmd replay <since> <until> [--task <id>] [--step <prefix>]
 ```
 
 W1-T2296: a deterministic, plain-text narration of a LEDGER WINDOW — between two ISO-8601 instants, what did the fleet decide, in what order, and for what recorded reasons. Reuses buildReceipt's discipline (src/lib/ledger-replay.ts's buildReplay) over a WINDOW instead of a run: reads the archive∪live UNION (lib/ledger-grep.ts's resolveLedgerUnion, never the live ledger.ndjson alone), filters to [since, until] inclusive, orders by each row's own ts, and renders every row's own outcome/reason fields — a field the row does not carry prints `absent (no "<field>" field on this row)`, never a fabricated value. --task narrows to one task id; --step narrows to one step-name prefix (a family, e.g. `automerge.`). A partial ledger corpus (zero archives, or a rotation found and unreadable) is REFUSED, never narrated as a shorter story. READ-ONLY: writes no ledger line, no state file, posts nothing.
+
+### `rmd risk-judge-eval`
+
+Replay risk-judge disposition fixtures offline and report calibration metrics.
+
+```
+rmd risk-judge-eval [--corpus <dir>]
+```
+
+W1-T3800: read the privacy-safe disposition corpus, reuse the existing deterministic controller, and emit a machine-readable agreement/fallback/false-stop report. No LLM, network, ledger, repair, debt, or production routing; a missing corpus is a refusal, not a clean zero.
 
 ### `rmd authority`
 

@@ -1245,6 +1245,7 @@
     "test/risk-judge-change-view.test.ts": 1742,
     "test/risk-judge-description-is-the-defect.test.ts": 789,
     "test/risk-judge-disposition-goldens.test.ts": 0,
+    "test/risk-judge-eval.test.ts": 0,
     "test/risk-judge-evidence-grammar.test.ts": 1003,
     "test/risk-judge-plan-only-amendment.test.ts": 1412,
     "test/risk-judge-scrubbing.test.ts": 0,
