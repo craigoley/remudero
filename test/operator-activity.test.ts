@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,8 +7,10 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   OPERATOR_ACTIVITY_CONTRACT_VERSION,
   OPERATOR_ACTIVITY_MAX_ITEMS,
+  buildOperatorActivityRoute,
   buildOperatorActivityProjection,
   buildPanelReadRoutes,
+  type PanelGraphDeps,
   type OperatorActivityEnvelope,
 } from "../src/lib/panel-graph.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
@@ -145,4 +147,66 @@ test("unit test: operator activity is versioned bounded read-only and single-pas
   assert.ok(route);
   assert.equal(route?.method, "GET");
   assert.equal(route?.scope, "read");
+});
+
+function routeDeps(ledgerPath: string): PanelGraphDeps {
+  return {
+    root: "/tmp/repo",
+    planPath: "/tmp/repo/plan/tasks.yaml",
+    ledgerPath,
+    github: {} as never,
+    statusGithub: {} as never,
+    inboxRoot: "/tmp/state",
+    ratify: {} as never,
+  };
+}
+
+function responseCapture() {
+  let status = 0;
+  let body = "";
+  return {
+    response: {
+      writeHead(code: number) {
+        status = code;
+      },
+      end(value: string) {
+        body = value;
+      },
+    } as never,
+    status: () => status,
+    json: () => JSON.parse(body) as Record<string, unknown>,
+  };
+}
+
+test("unit test: operator activity route reports unavailable, serves a projection, and fails closed on projection errors", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-route-`));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(ledgerPath, JSON.stringify({ step: "run.start", task_id: "A", ts: "2026-09-20T10:00:00.000Z" }) + "\n");
+  const emptyPlan = () => ({ tasks: [], byId: new Map() }) as unknown as Plan;
+  try {
+    const missing = responseCapture();
+    buildOperatorActivityRoute(routeDeps(join(root, "missing.ndjson")), emptyPlan).handler(
+      {} as never,
+      missing.response,
+      { params: {} },
+    );
+    assert.equal(missing.status(), 200);
+    assert.equal(missing.json().state, "unavailable");
+
+    const served = responseCapture();
+    buildOperatorActivityRoute(routeDeps(ledgerPath), emptyPlan).handler({} as never, served.response, { params: {} });
+    assert.equal(served.status(), 200);
+    assert.equal(served.json().state, "verified");
+
+    const failed = responseCapture();
+    buildOperatorActivityRoute(routeDeps(ledgerPath), () => {
+      throw new Error("snapshot unavailable");
+    }).handler({} as never, failed.response, { params: {} });
+    assert.equal(failed.status(), 503);
+    assert.equal(failed.json().reason, "projection-unavailable");
+    assert.match(String(failed.json().detail), /snapshot unavailable/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
