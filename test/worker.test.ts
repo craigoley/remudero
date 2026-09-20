@@ -1336,6 +1336,48 @@ test("appendQuestion: appends one NDJSON line durably, creating plan/ on a fresh
   assert.ok(!("current_assumption" in second));
 });
 
+test("W1-T3845: a question write to the live store is refused under test", () => {
+  const result = appendQuestion(REPO_ROOT, {
+    ts: "2026-09-20T00:00:00.000Z",
+    task: "W1-T3845",
+    question: "Must not reach the live backlog",
+  });
+  assert.equal(result, false);
+});
+
+test("W1-T3845: a question with no pull request identity does not render", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "remudero-q-"));
+  const result = appendQuestion(repoRoot, {
+    ts: "2026-09-20T00:00:00.000Z",
+    task: "W1-T3845",
+    question: "Missing identity",
+    current_assumption: "PR is #undefined",
+  });
+  assert.equal(result, false);
+});
+
+test("W1-T3845: a temporary-root question write is unaffected", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "remudero-q-"));
+  const result = appendQuestion(repoRoot, {
+    ts: "2026-09-20T00:00:00.000Z",
+    task: "W1-T3845",
+    question: "Temporary root remains writable",
+  });
+  assert.equal(result, true);
+  assert.match(readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8"), /Temporary root remains writable/);
+});
+
+test("W1-T3845: a missing root fails open to the existing non-blocking writer", () => {
+  const parent = mkdtempSync(join(tmpdir(), "remudero-q-"));
+  const repoRoot = join(parent, "missing-root");
+  const result = appendQuestion(repoRoot, {
+    ts: "2026-09-20T00:00:00.000Z",
+    task: "W1-T3845",
+    question: "Realpath failure remains non-blocking",
+  });
+  assert.equal(result, true);
+});
+
 test("appendQuestion: NON-BLOCKING — an unwritable store returns false, never throws, so the loop keeps moving", () => {
   // repoRoot is a path UNDER an existing file, so mkdir(plan/) fails with ENOTDIR.
   const file = join(mkdtempSync(join(tmpdir(), "remudero-q-")), "not-a-dir");
