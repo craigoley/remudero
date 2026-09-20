@@ -1,0 +1,43 @@
+- id: W1-T3836
+  title: "GNU-only find metadata breaks agent-history reclaim on macOS — deploy/host-update.sh uses find -printf, so the newly merged W1-T3626 reclaim leaves old history in place and exits the dry-run path non-zero"
+  repo: remudero
+  depends_on: [W1-T3626]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files: [deploy/host-update.sh, test/agent-history-does-not-fill-the-root-disk.test.ts]
+  origin: "preflight#macos-find-printf-2026-09-20"
+  plan_refs: ["W1-T3626", "W1-T3612"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the macOS operator host with /usr/bin/find: the agent-history suite's four
+    metadata-dependent tests fail after W1-T3626 because its production section invokes GNU
+    find's -printf primary. macOS find rejects that primary before it emits any mtime, size or
+    path records. The failures are not harmless test noise: the reclaim reports zero removals,
+    the oldest-first trace is absent, the dry-run command exits 1, and the live-worker mutant
+    never reaches the reclaim body. Ubuntu CI has GNU find, so this portability gap is invisible
+    on the required runner while the operator's nightly macOS path is broken.
+  design: |
+    Keep W1-T3626's age threshold, oldest-first ordering, per-tree reporting, dry-run semantics,
+    live-container refusal and state-directory boundary unchanged. Replace only the GNU-specific
+    metadata enumeration with a platform-portable producer of the same mtime, byte-size and path
+    fields, or an equivalent platform-specific branch whose output is normalized before sorting.
+    Add or strengthen the existing real-script fixtures so the same acceptance names cover both
+    the normal reclaim and dry-run paths on the affected host. Do not widen the task into a new
+    retention policy or a different cleanup target.
+  acceptance:
+    - claim: "agent-history reclaim removes old files, keeps fresh files and credentials, and reports bytes per configured tree on macOS and Linux"
+      proof: "unit test: agent history does not fill the root disk"
+    - claim: "portable metadata enumeration preserves oldest-first removal order"
+      proof: "unit test: oldest first: files are removed in ascending mtime order, not filesystem order"
+    - claim: "dry-run reports the reclaim without deleting the old file and exits successfully"
+      proof: "unit test: --dry-run reports what would free without removing anything"
+  falsifier: |
+    On macOS, restore the current find -printf producer while leaving the tests and fixtures
+    unchanged; the three positive tests above must return to their present failures. On Linux,
+    run the same suite to prove the fix did not merely special-case the macOS output. If either
+    platform loses the live-container refusal or state-directory invariant, the task is not met.
