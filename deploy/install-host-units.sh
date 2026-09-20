@@ -463,7 +463,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
-    "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only || \\
+    "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."

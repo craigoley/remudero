@@ -389,6 +389,7 @@ import {
   inspectInstallRoot,
   provisionInstallRoot,
   resolveInstallRoot,
+  validateDeployStateRoot,
 } from "./lib/install-root.js";
 import { buildStatusBoard, deriveDispatchCadence, deriveQueueHead, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import {
@@ -29738,14 +29739,35 @@ async function deployCommand(rest: string[]): Promise<number> {
  * Provisioning the install root is exclusively `rmd install-checkout`'s job, not this one's.
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
-  const badArg = unknownArgError("deploy-run", rest, [], ["--dry-run", "--image-drift-only"]);
+  const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  const config = loadConfig();
-  const installRoot = resolveInstallRoot(config);
-  const assessment = assessInstallForDeploy(installRoot, { operatorRepoRoot: repoRoot, stateRoot: config.root });
+  const hasStateRootOverride = rest.includes("--state-root");
+  const stateRootOverride = hasStateRootOverride ? flagValue(rest, "--state-root") ?? "" : undefined;
+  if (stateRootOverride !== undefined) {
+    const validation = validateDeployStateRoot(stateRootOverride);
+    if (!validation.ok) {
+      console.log(`### rmd deploy-run — no-op: ${validation.reason}`);
+      return 0;
+    }
+  }
+  // An explicit root must never enter loadConfig's create branch. Existing config is retained for
+  // unrelated settings; an absent one gets only the fields this supervisor cycle reads.
+  const config =
+    stateRootOverride === undefined
+      ? loadConfig()
+      : existsSync(instanceConfigPath())
+        ? loadConfig()
+        : ({ claudeBin: "", root: stateRootOverride } as Config);
+  const effectiveConfig =
+    stateRootOverride === undefined ? config : { ...config, root: stateRootOverride, installRoot: undefined };
+  const installRoot = resolveInstallRoot(effectiveConfig);
+  const assessment = assessInstallForDeploy(installRoot, {
+    operatorRepoRoot: repoRoot,
+    stateRoot: effectiveConfig.root,
+  });
   if (!assessment.ok) {
     console.log(`### rmd deploy-run — no-op: ${assessment.reason}`);
     return 0;
@@ -29754,16 +29776,16 @@ async function deployRunCommand(rest: string[]): Promise<number> {
   const deps = {
     ...realDeps().deployFor({
       installPath: assessment.installRoot,
-      stateRoot: config.root,
+      stateRoot: effectiveConfig.root,
       daemonLabel: DAEMON_LABEL,
       // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
       // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
       // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
       // actually listens on.
       serveLabel: SERVE_LABEL,
-      servePort: resolveServePort([], config.serve?.port),
+      servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
-      ledgerPath: ledgerPathFor(config),
+      ledgerPath: ledgerPathFor(effectiveConfig),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
@@ -41929,8 +41951,11 @@ export function serviceFreshnessGate(
  * service-posture `emit` closure just above already keeps, never a reason a command that would
  * otherwise have worked now doesn't.
  */
-function logCliInvocation(cmd: string | undefined, argv: string[]): void {
+function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOverride?: string): void {
   try {
+    // Do not create either HOME config or an override's state/ directory before deploy-run validates
+    // the path. The supervisor's explicit-root path is intentionally not logged at this seam.
+    if (stateRootOverride !== undefined) return;
     appendLedger(ledgerPathFor(loadConfig()), {
       run_id: `CLI-${Date.now()}`,
       task_id: "CLI",
@@ -42378,7 +42403,8 @@ export async function main(
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
   // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
-  logCliInvocation(cmd, rest);
+  const invocationStateRoot = cmd === "deploy-run" && rest.includes("--state-root") ? flagValue(rest, "--state-root") ?? "" : undefined;
+  logCliInvocation(cmd, rest, invocationStateRoot);
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);
     process.exit(0);
