@@ -1,0 +1,45 @@
+- id: W1-T3884
+  title: "GET /v1/analytics RESOLVES console-v1 BUT SERIALIZES THE FULL SNAPSHOT ANYWAY — send the bounded consoleV1 envelope for a matching named version"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  files: [src/lib/analytics-route.ts, test/console-analytics-contract-gap.test.ts]
+  origin: "feedback#fb-1789932379027-b989eb"
+  plan_refs: ["W1-T3623"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Observed live 2026-09-20: buildAnalyticsRoute's GET /v1/analytics handler calls
+    resolveConsoleV1Projection(snapshot, requestedVersion) to validate ?projectionVersion, but
+    then unconditionally sendJson(res, 200, snapshot) with the FULL AnalyticsSnapshot regardless
+    of what resolution.ok resolved to. A request naming projectionVersion=console-v1 therefore
+    still receives the full multi-megabyte snapshot instead of the bounded consoleV1 envelope
+    the resolver already computed and discarded. Measured: 8.37 MB responses, concurrent
+    status/inbox/analytics reads taking 8-10s, while the hosted console enforces a 128 KiB bound
+    and renders typed unavailable rather than trust an oversized payload. W1-T3623 shipped the
+    resolver and the 409-on-unknown-version behavior but its route test never asserted the
+    matching-version case actually narrows the response body, so the gap merged invisibly.
+  design: |
+    When requestedVersion is provided and resolveConsoleV1Projection resolves it to the
+    consoleV1 projection, serve resolution.projection (the bounded envelope), not the full
+    snapshot. When requestedVersion is undefined (unversioned/legacy caller), continue serving
+    the full snapshot exactly as before -- this is the documented back-compat path, not a bug.
+    When requestedVersion names an unknown version, keep the existing 409 refusal. None of this
+    changes concurrency: the handler still reads only already-captured process-owned state and
+    must not start, join or await a scan for either branch. Preserve source/freshness and
+    not-collected fields already carried on the consoleV1 projection; do not solve the size
+    problem by raising the console's 128 KiB bound or any timeout.
+  acceptance:
+    - claim: "a request naming the matching projectionVersion (console-v1) receives only the bounded consoleV1 envelope, not the full AnalyticsSnapshot"
+      proof: "unit test: test/console-analytics-contract-gap.test.ts"
+    - claim: "an unversioned request retains the full snapshot for back-compat"
+      proof: "grep: dimensions: base.dimensions in src/lib/analytics-route.ts"
+    - claim: "an unknown named projectionVersion is still refused with 409, never answered with either payload shape"
+      proof: "grep: sendJson(res, 409, resolution) in src/lib/analytics-route.ts"
+    - claim: "the handler serves both branches from already process-owned state, never awaiting or starting a scan"
+      proof: "grep: currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics() in src/lib/analytics-route.ts"
