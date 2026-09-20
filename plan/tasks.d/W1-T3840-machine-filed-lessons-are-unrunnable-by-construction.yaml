@@ -1,0 +1,102 @@
+- id: W1-T3840
+  title: "THE FLEET FILES ITS OWN LESSONS INTO A QUEUE NOTHING CAN DRAIN — 33 ci-learning tasks citing 822 gate refusals across 211 PRs are all verify:human, assertRunnable refuses every one, releasedIds has never held a task id, and all 33 name a learnings file that has never existed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 25.00
+  files: [src/lib/plan.ts]
+  origin: "2026-09-20 census of plan/tasks.d during a five-PR unblocking session"
+  plan_refs: ["W1-T3206", "W1-T3748"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LOOP IS BUILT, IT HAS RUN, AND ITS LAST STEP HAS NEVER EXECUTED ONCE.
+
+    The ci-learning rung does the hard part correctly: it notices that one gate refused many PRs
+    for the same reason and files a task to carry that lesson into `learnings/`, where a DISPATCHED
+    worker would actually read it — CLAUDE.md is not loaded in that lane (`spawnWorker` passes
+    `settingSources: []`), so `learnings/` is the only channel that reaches it. Measured on
+    plan/tasks.d at 2026-09-20:
+
+      33 tasks with `origin: "ci-learning:..."`, filed 2026-09-15 through 2026-09-19
+      822 refusal citations across 211 DISTINCT pull requests
+      by gate: ci-gate 13, coverage-ratchet 9, coverage-shard 8, squash-trailer-gate 2,
+               comment-load-ratchet 1
+
+    THREE INDEPENDENT BREAKS, EACH SUFFICIENT ON ITS OWN:
+
+    (1) EVERY ONE IS `verify: human`. `assertRunnable` (src/lib/plan.ts) throws
+        "task <id> is verify:human — not auto-runnable by the proto-runner" unless the id is in
+        `releasedIds`. So the dispatcher refuses all 33 by construction, every pass, forever.
+
+    (2) NOTHING HAS EVER BEEN RELEASED. `releasedIds` comes from the ratification pipeline
+        (W1-T3206). plan/ratifications.yaml holds exactly ONE record, and it is a RUNG
+        ratification (`intakeCadence.codeqlQuality`, 2026-09-11), not a task-id release. The set
+        the guard consults has never contained a task id at all.
+
+    (3) ALL 33 TARGET A FILE THAT DOES NOT EXIST. Every one declares
+        `files: [learnings/ci-gate-lessons.yaml]`. `ls learnings/` returns architecture.yaml,
+        ci.yaml, failures.yaml, index.json, platform.yaml, testing.yaml. There is no
+        ci-gate-lessons.yaml and there never has been.
+
+    SO THE SYSTEM OBSERVES CORRECTLY, FILES CORRECTLY, AND THEN STOPS DEAD — and it has done
+    exactly that 33 times without anything anywhere reporting a problem. A queue that only grows
+    is indistinguishable, from the outside, from a queue that is being worked.
+
+    WHY THIS IS THE HIGHEST-LEVERAGE ITEM IN THE PLAN RIGHT NOW. Those 822 refusals are the
+    fleet's own measurement of what costs it the most time. The lessons are already written. The
+    only thing between them and the workers who keep re-learning them is a step nothing traverses.
+
+    WHAT MUST NOT HAPPEN: mass-flipping 33 records to `verify: auto` and calling it fixed. That
+    removes the human check W1-T3206 deliberately added and lands 33 unreviewed machine-authored
+    diffs. The filer must emit tasks that are runnable BY CONSTRUCTION, or the release path must
+    exist and be exercised — and whichever is chosen, something must REFUSE a recurrence.
+  design: |
+    (i) THE LOAD-BEARING ITEM IS A REFUSAL, NOT A CLEANUP. A machine-authored task that no
+        dispatcher can ever select is a filing bug, and nothing detects it. Add the check: a task
+        whose `author_class` is `machine` must be selectable by `runnableCandidates` under the
+        CURRENT `releasedIds`, or filing it fails. Draining today's 33 without this leaves the
+        filer free to refill the queue tomorrow.
+
+    (ii) A DECLARED `files:` PATH THAT EXISTS NOWHERE IS PART OF THE SAME BUG. 33 records naming
+         a file no commit has ever created should not have been fileable. Fold this into (i) as a
+         second condition rather than a separate gate.
+
+    (iii) THEN, AND ONLY THEN, DECIDE THE 33. Once a recurrence is refused, the existing records
+          are a one-time disposition, not an emergency: either release them through the W1-T3206
+          pipeline in reviewed batches, or re-file them as `verify: auto` with `files:` narrowed
+          to the single learnings data file. That is an operator decision and this task must not
+          pre-empt it.
+
+    NOT IN SCOPE: changing what `verify: human` means, the ratification pipeline's own design,
+    and the content of any individual lesson. This task must not be able to pass by deleting the
+    33 records.
+  acceptance:
+    - claim: "filing a machine-authored task that no dispatcher can select under the current releasedIds is refused"
+      proof: "unit test: W1-T3840: an unselectable machine-filed task is refused at filing"
+    - claim: "a machine-authored task declaring a files: path that exists in no commit is refused by the same check"
+      proof: "unit test: W1-T3840: a machine-filed task naming a nonexistent file is refused"
+    - claim: "a human-authored verify:human task is unaffected, so the W1-T3206 review path still works"
+      proof: "unit test: W1-T3840: a human-authored verify:human task still files"
+  falsifier: |
+    Re-file any of the 33 existing ci-learning records as they stand: the new check must refuse
+    it, naming both that no dispatcher can select it and that learnings/ci-gate-lessons.yaml does
+    not exist. Delete the check and the same record files silently — which is the defect,
+    reproduced. File an ordinary human-authored `verify: human` task and it must still pass, or
+    the fix has broken the review path it is meant to protect.
+  note: |
+    RESERVATION: could not be claimed. `rmd next-task-id --reserve` pushes `refs/rmd-id/<id>`, and
+    this environment's egress proxy refuses every `git-receive-pack` update outside `refs/heads/*`
+    with a local HTTP 403 — proven by control: a successful refs/heads push's POST carries
+    `X-Github-Request-Id` and GitHub cache headers, the refused one carries none and
+    returns in 29ms. Not GitHub, not a ruleset (repos/.../rulesets is empty), not this repo.
+    `rmd next-task-id --no-reserve` named W1-T3840 as next. Both scope-time checks read clear at
+    filing time. AN OPERATOR MUST CONFIRM THE CLAIM before a build starts; the loser renumbers.
+
+    FILES NOTE (W1-T3730): `files:` deliberately omits the test file the build will add — a
+    `test/` path here reads to `lint-plan`'s `proof-unit-test-unresolvable` check as "this diff
+    ships the suite" and refuses every forward-referencing proof above. The build adds it and
+    lists it then.
