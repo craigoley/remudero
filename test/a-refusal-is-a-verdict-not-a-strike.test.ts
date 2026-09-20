@@ -19,7 +19,30 @@ import {
   type SweepDeps,
 } from "../src/lib/sweep.js";
 
-const NOW = Date.parse("2026-09-11T12:00:00.000Z");
+/** W1-T3837 — DERIVED FROM THE CLOCK, NEVER A CONSTANT, because one caller in this file does not
+ *  take an injected one. `deriveDisposition` is handed `NOW` explicitly at every call site below,
+ *  but `routeFix` ("rmd fix routes a refusal to escalation too") takes no clock and ages the
+ *  fixture against the REAL one. With a fixed pair this suite was a time bomb of exactly the shape
+ *  W1-T3270 documents on test/stale-ci-gate-wiring.test.ts: on 2026-09-25 the 09-11 stamp turns
+ *  `policy.staleDays` (14) old, `routeFix` disposes the PR `stale` BEFORE reaching the refusal
+ *  branch this test exists to exercise, and the case fails with no diff involved.
+ *
+ *  MEASURED before the fix, by shifting every date literal in this file back one year — which is
+ *  what the wall clock does to it by simply advancing:
+ *    Expected values to be strictly equal:  actual 'refused' - expected 'escalated'
+ *  Holding the pair on the clock keeps the one-hour offset every injected-NOW case relies on AND
+ *  keeps the fixture fresh for the caller that has no injection.
+ *
+ *  EVERY stamp in this file is derived from it, not just the one the census flagged. The cold-sweep
+ *  case reconstructs from a ledger row, a PR payload and a commit status, and those three carried
+ *  the same fixed 09-11 instant. Deriving only the flagged one would have DISPLACED this bomb
+ *  rather than removed it: with NOW on the wall clock, fixed siblings rot against it just the same,
+ *  only later and in a case the census had not yet reached. Measured by aging the three 60 days,
+ *  which is what time does to them on its own:
+ *    not ok - the cold sweep reconstructs a refusal only from the structured review verdict
+ *  A date literal anywhere in this file is now a defect; there is no correct fixed one left. */
+const NOW = Date.now();
+const RECENT_ACTIVITY_ISO = new Date(NOW - 60 * 60 * 1000).toISOString();
 
 function refusalReport(): string {
   return [
@@ -52,7 +75,7 @@ function refusalPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [refusalCriterion()],
     priorStrikes: 1,
-    lastActivityAt: "2026-09-11T11:00:00.000Z",
+    lastActivityAt: RECENT_ACTIVITY_ISO,
     headSha: "refusal-head",
     autoMergeArmed: false,
     ...over,
@@ -159,7 +182,7 @@ test("the cold sweep reconstructs a refusal only from the structured review verd
   writeFileSync(
     ledgerPath,
     `${JSON.stringify({
-      ts: "2026-09-11T11:00:00.000Z",
+      ts: RECENT_ACTIVITY_ISO,
       step: "review.posted",
       task_id: "W1-T3078",
       pr_url: "https://github.com/o/r/pull/77",
@@ -185,7 +208,7 @@ test("the cold sweep reconstructs a refusal only from the structured review verd
         number: 77,
         html_url: "https://github.com/o/r/pull/77",
         head: { ref: "run-W1-T3078-1", sha: "refusal-head" },
-        updated_at: "2026-09-11T11:00:00.000Z",
+        updated_at: RECENT_ACTIVITY_ISO,
         body,
         auto_merge: null,
         state: "open",
@@ -195,7 +218,7 @@ test("the cold sweep reconstructs a refusal only from the structured review verd
       return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] };
     }
     if (/commits\/.+\/status/.test(path)) {
-      return { statuses: [{ context: "remudero-review", state: "failure", created_at: "2026-09-11T11:00:00.000Z" }] };
+      return { statuses: [{ context: "remudero-review", state: "failure", created_at: RECENT_ACTIVITY_ISO }] };
     }
     if (/\/pulls\/77$/.test(path)) return { mergeable: true, mergeable_state: "clean" };
     return [];

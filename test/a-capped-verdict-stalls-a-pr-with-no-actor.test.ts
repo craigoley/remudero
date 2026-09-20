@@ -77,7 +77,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-10T11:00:00.000Z",
+    lastActivityAt: "2026-09-10T11:00:00.000Z", // expiring-fixture: exempt -- compared only against this suite's INJECTED now (NOW), never the wall clock
     headSha: HEAD,
     autoMergeArmed: false,
     ...over,
@@ -378,7 +378,7 @@ function pr5683(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-16T10:00:00.000Z",
+    lastActivityAt: "2026-09-16T10:00:00.000Z", // expiring-fixture: exempt -- compared only against this suite's INJECTED now (NOW), never the wall clock
     headSha: HEAD_5683,
     autoMergeArmed: false,
     ...over,

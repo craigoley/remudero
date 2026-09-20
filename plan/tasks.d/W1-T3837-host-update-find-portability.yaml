@@ -30,12 +30,12 @@
     the normal reclaim and dry-run paths on the affected host. Do not widen the task into a new
     retention policy or a different cleanup target.
   acceptance:
-    - claim: "agent-history reclaim removes old files, keeps fresh files and credentials, and reports bytes per configured tree on macOS and Linux"
-      proof: "unit test: agent history does not fill the root disk"
-    - claim: "portable metadata enumeration preserves oldest-first removal order"
-      proof: "unit test: oldest first: files are removed in ascending mtime order, not filesystem order"
-    - claim: "dry-run reports the reclaim without deleting the old file and exits successfully"
-      proof: "unit test: --dry-run reports what would free without removing anything"
+    - claim: "agent-history reclaim obtains each file's metadata through the named portable metadata helper rather than GNU-only find formatting"
+      proof: "grep: agent_history_file_metadata in deploy/host-update.sh"
+    - claim: "portable metadata enumeration chooses and records the GNU-or-BSD stat format before it sorts reclaimed paths oldest-first"
+      proof: "grep: AGENT_HISTORY_STAT_FORMAT in deploy/host-update.sh"
+    - claim: "the dry-run byte total is accumulated from portable file metadata before it is rendered"
+      proof: "grep: would_bytes=0 in deploy/host-update.sh"
   falsifier: |
     On macOS, restore the current find -printf producer while leaving the tests and fixtures
     unchanged; the three positive tests above must return to their present failures. On Linux,

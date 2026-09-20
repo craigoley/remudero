@@ -81,7 +81,11 @@ export const RECORDED_POPULATION_BY_FILE = Object.freeze({
   "test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts": 1,
   "test/a-permanent-diff-refusal-is-not-retried-forever.test.ts": 0,
   "test/a-push-does-not-re-ask-a-head-independent-question.test.ts": 0,
-  "test/a-refusal-is-a-verdict-not-a-strike.test.ts": 1,
+  // W1-T3837: 0, not 1 — its one stamp is now DERIVED from the clock (RECENT_ACTIVITY_ISO),
+  // because `routeFix` ages that fixture against the REAL clock and a fixed date made the
+  // suite fail on 2026-09-25 with no diff involved. The literal is gone on purpose, so the
+  // population it was counted in drops with it.
+  "test/a-refusal-is-a-verdict-not-a-strike.test.ts": 0,
   "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 1,
   "test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts": 0,
   "test/an-open-pr-does-not-rot-while-it-waits.test.ts": 2,

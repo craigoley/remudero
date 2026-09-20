@@ -14,8 +14,26 @@ import {
 const READ_TOKEN = "operator-agent-read-token";
 const WRITE_TOKEN = "operator-agent-write-token";
 
+/** W1-T3270's rule, applied here: anything the SERVICE ages against the wall clock has to be
+ *  stamped from the wall clock. `expiresAt` was the fixed literal "2026-09-20T10:00:00.000Z", and
+ *  `buildOperatorAgentHistory` marks a proposal `expired` on `Date.parse(expiresAt) <= now` with
+ *  `now` defaulting to the REAL clock. The two cases below that do not inject a clock therefore
+ *  went red the moment that instant passed — 10:00Z on 2026-09-20, with no diff involved — because
+ *  a proposal they need LIVE started reading `expired` and the decision route answered 409 instead
+ *  of 200. The census cannot catch this one: it scans `lastActivityAt` stamps, and this is an
+ *  `expiresAt`.
+ *
+ *  The offsets are what the cases actually depend on, so they are what is preserved: created a day
+ *  behind, expiring a day ahead. The expiry case derives its injected clock from `expiresAt`
+ *  instead of naming an instant, so "after expiry" stays true by construction rather than by
+ *  coincidence of the calendar. */
+const FIXTURE_DAY_MS = 24 * 60 * 60 * 1000;
+
 function fixture(): { ledgerPath: string; proposal: OperatorAgentProposal } {
   const root = mkdtempSync(join(tmpdir(), "rmd-operator-agent-"));
+  const nowMs = Date.now();
+  const createdAt = new Date(nowMs - FIXTURE_DAY_MS).toISOString();
+  const expiresAt = new Date(nowMs + FIXTURE_DAY_MS).toISOString();
   mkdirSync(join(root, "state"), { recursive: true });
   return {
     ledgerPath: join(root, "state", "ledger.ndjson"),
@@ -27,13 +45,13 @@ function fixture(): { ledgerPath: string; proposal: OperatorAgentProposal } {
       reasoning: "The queue and p50 latency crossed the conservative threshold together.",
       category: "scale",
       status: "pending",
-      createdAt: "2026-09-19T10:00:00.000Z",
-      expiresAt: "2026-09-20T10:00:00.000Z",
+      createdAt,
+      expiresAt,
       evidence: [{
         label: "Queued tasks",
         value: "8",
         source: "run-ledger",
-        observedAt: "2026-09-19T10:00:00.000Z",
+        observedAt: createdAt,
         freshness: "verified",
       }],
     },
@@ -219,7 +237,11 @@ test("operator-agent rejects malformed registration, decision, and outcome paylo
 test("operator-agent expires pending proposals, preserves rejected history, and ignores malformed ledger rows", async () => {
   const { ledgerPath, proposal } = fixture();
   const rejected = { ...proposal, proposalId: "operator-agent:repo:fix:rejected", expiresAt: undefined };
-  const now = () => Date.parse("2026-09-21T00:00:00.000Z");
+  // DERIVED FROM THE FIXTURE, not an instant: this case needs a clock strictly AFTER `expiresAt`,
+  // and saying so in terms of `expiresAt` keeps that true however the fixture is stamped.
+  const expiresAtMs = Date.parse(proposal.expiresAt ?? "");
+  assert.ok(Number.isFinite(expiresAtMs), "the fixture must carry a parseable expiresAt for this case to age past it");
+  const now = () => expiresAtMs + 14 * 60 * 60 * 1000;
   await withService(ledgerPath, async (base) => {
     assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, { proposal })).status, 201);
     assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, { proposal: rejected })).status, 201);

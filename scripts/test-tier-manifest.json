@@ -1509,6 +1509,7 @@
     "test/the-quotation-guard-covers-one-arm-of-four.test.ts": 1179,
     "test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts": 0,
     "test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts": 972,
+    "test/the-reclaim-survives-a-find-without-printf.test.ts": 0,
     "test/the-recovery-path-merges-into-a-shared-checkout.test.ts": 2598,
     "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": 692,
     "test/the-restart-seam-adapts-to-its-host.test.ts": 0,

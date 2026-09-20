@@ -88,7 +88,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
-    lastActivityAt: "2026-09-13T11:00:00.000Z",
+    lastActivityAt: "2026-09-13T11:00:00.000Z", // expiring-fixture: exempt -- compared only against this suite's INJECTED now (NOW), never the wall clock
     headSha: HEAD,
     autoMergeArmed: false,
     ...over,
