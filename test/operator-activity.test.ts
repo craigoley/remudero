@@ -122,6 +122,29 @@ test("unit test: operator artifacts expose bounded evidence links without raw co
   }
 });
 
+test("unit test: operator artifacts expose a GitHub receipt when the projection has PR evidence", () => {
+  const projected = projection(["A", "B", "D"]);
+  const task = projected.get("A");
+  if (!task) throw new Error("expected task A projection");
+  task.prNumber = 6267;
+  task.prUrl = "https://github.com/craigoley/remudero/pull/6267";
+
+  const result = buildOperatorActivityProjection({ ...verifiedInput(), projection: projected });
+  const receipt = itemsOf(result).find((item) => item.id === "artifact:receipt:A");
+
+  assert.deepEqual(receipt, {
+    id: "artifact:receipt:A",
+    kind: "artifact",
+    summary: "Authoritative change receipt for A",
+    source: "github:pull-request",
+    observedAt: "2026-09-20T10:01:00.000Z",
+    freshness: "verified",
+    taskId: "A",
+    repository: "remudero",
+    href: "https://github.com/craigoley/remudero/pull/6267",
+  });
+});
+
 test("unit test: operator activity is versioned bounded read-only and single-pass", () => {
   const rows = Array.from({ length: OPERATOR_ACTIVITY_MAX_ITEMS + 25 }, (_, index) => ({
     step: "worker.state",
