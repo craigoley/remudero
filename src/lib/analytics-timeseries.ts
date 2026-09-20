@@ -57,5 +57,7 @@ export function fiveLedgerBackedHistoricalSeries(): LedgerTimeSeries[] {
   });
 }
 
-// Named export to ease imports from analytics-route
-export { fiveLedgerBackedHistoricalSeries as generateFiveLedgerBackedHistoricalSeries };
+// Named wrapper to ease imports from analytics-route while keeping the public alias executable.
+export function generateFiveLedgerBackedHistoricalSeries(): LedgerTimeSeries[] {
+  return fiveLedgerBackedHistoricalSeries();
+}
