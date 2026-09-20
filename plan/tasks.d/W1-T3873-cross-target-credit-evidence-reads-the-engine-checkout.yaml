@@ -1,0 +1,152 @@
+- id: W1-T3873
+  title: "CROSS-TARGET MERGE CREDIT IS DERIVED FROM THE ENGINE CHECKOUT'S GIT HISTORY — `buildCreditCandidates(owner, repo, …)` calls `readMergedPathsByPr(repoRoot)` and `readMergeSubjectsByPr(repoRoot)` whatever owner/repo it was handed, and both maps are keyed by a BARE pull request number, so a target repository's PR is answered by the core repository's PR of the same number or by nothing at all; a remudero-site plan-only filing therefore kept its merge credit and the backfill wrote verdict.merged for a task with no run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 36.00
+  origin: architect
+  plan_refs: ["W1-T3067", "W1-T3063", "W1-T2970", "W1-T3779", "W1-T1062"]
+  files:
+    - src/run-task.ts
+    - plan/credit-overrides.yaml
+    - test/cross-target-credit-evidence.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, 2026-09-20. remudero-site PR 107 was a PLAN-ONLY filing: its whole diff introduced the
+    shard for PORTAL-T19. It merged, the credit-backfill rung wrote `verdict.merged` for PORTAL-T19,
+    and NO `run.start` for PORTAL-T19 exists anywhere — nothing was ever built. PORTAL-T12's merged
+    credit in the same plan is genuine and must stay, so this is not "the site plan is wrong"; it is
+    one pairing credited on evidence read out of the wrong repository.
+
+    THE SOURCE SAYS WHY, IN THREE LINES. `buildCreditCandidates(owner, repo, plan, ledgerPath, log,
+    github)` (src/run-task.ts) builds its evidence with:
+
+        mergedPathsByPr: readMergedPathsByPr(repoRoot)      // :32702
+        const mergeSubjects = readMergeSubjectsByPr(repoRoot) // :32707
+
+    and `buildEscalationReconcileCandidates` repeats the first at :32800. `repoRoot` is
+    `src/lib/repo-location.ts`'s module constant — the ENGINE checkout this process runs from,
+    resolved from argv/cwd. NEITHER `owner` NOR `repo` reaches either reader. When the owner/repo
+    pair names remudero-site, both `git log origin/main` reads still walk the Remudero engine
+    repository.
+
+    AND THE KEY IS A BARE NUMBER, WHICH MAKES IT WORSE THAN A MISS. Both readers key on the squash
+    subject's `(#N)` and store `Number(N)` with nothing recording WHICH repository minted it. So a
+    target PR number resolves one of two ways, and both are wrong:
+      (a) THE SAME NUMBER EXISTS IN THE ENGINE REPO and is inside the scan window
+          (MERGED_PATHS_SCAN_LIMIT 4000 / MERGE_SUBJECT_SCAN_LIMIT 5000) — the target PR is then
+          answered by an unrelated core merge's changed paths and subject. A core PR that touched
+          `src/` reads NOT plan-only, so W1-T3067's diff refusal is handed evidence that positively
+          asserts an implementation that does not exist, and W1-T3063's
+          `creditSubjectIsImplementation` grades a foreign subject.
+      (b) THE NUMBER IS ABSENT from the window — every target PR then has no entry, the path arm
+          abstains for the whole target plan, and credit falls back to the ledger arm alone, which
+          `W1-T3067`'s own shard records as failing open for rows with no `plan_only` key.
+    Either way the one refusal built to stop a filing earning a merge credit cannot fire for a
+    non-self target, which is exactly the population that produced PORTAL-T19.
+
+    THE FLEET ALREADY KNOWS HOW TO ROOT EVIDENCE IN A TARGET. `daemonCommand` computes
+    `targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo)` and
+    hands `buildCommitTrailerIndex({ slug, cwd: targetCheckoutRoot })` to the target gateway. The
+    checkout is already present and already synced to `origin/main` before the plan is read. Only
+    the two git-evidence readers were left pointed at the engine.
+
+    WHY THE MERGED NEIGHBOURS DO NOT COVER THIS. W1-T1004 stops a filing PR crediting its OWN task
+    at filing time. W1-T2864 is the fast lane for agent-opened plan PRs. W1-T3505 fixes open-PR task
+    ATTRIBUTION for a GitHub-classified plan filing. W1-T2970 built the override RECORD and states
+    it is empty by design. W1-T3779 moves COMMIT-TRAILER credit to the target checkout and touches
+    neither `readMergedPathsByPr` nor `readMergeSubjectsByPr`. None of the five changes which
+    repository the merged-path / merge-subject evidence is read from.
+  design: |
+    (i) ONE TARGET-ROOTED EVIDENCE ROOT, RESOLVED WHERE owner/repo IS ALREADY KNOWN. Add a named
+    helper `creditEvidenceRootFor(` that returns the engine `repoRoot` for a self target and the
+    already-synced target checkout (`join(config.root, "repos", <repo>)`, the SAME expression
+    daemonCommand uses today) otherwise, and resolve both `readMergedPathsByPr` and
+    `readMergeSubjectsByPr` through it in `buildCreditCandidates` and in
+    `buildEscalationReconcileCandidates`. Thread it as a LAST, OPTIONAL parameter so no positional
+    call site shifts — the convention those two builders already follow for `github`/`injected`.
+
+    (ii) PROVE THE CHECKOUT BELONGS TO THE TARGET BEFORE READING IT. Compare the checkout's origin
+    remote with the owner/repo the credit pass is for, the way `buildCommitTrailerIndex` already
+    proves a foreign checkout. A missing, foreign or unreadable checkout yields EMPTY maps and never
+    borrows the engine repository's history. Credit evidence may never be answered by a repository
+    that did not mint the pull request number.
+
+    (iii) EMPTY IS THE STATUS QUO AND THE POLARITY DOES NOT MOVE. No entry in `mergedPathsByPr`
+    means the diff arm abstains and the ledger arm decides alone; an unknown merge subject means
+    `creditIsImplementation` stays undefined and every destructive consumer declines. That is
+    today's fail-closed behaviour, and a transient git failure must never uncredit a plan or close
+    an escalation. This change is SUBTRACT-ONLY in effect: it can stop a credit being granted on
+    foreign evidence, and there is no arrangement of its inputs that grants one.
+
+    (iv) NO NEW GITHUB READ, AND NO PER-TASK READ. Both readers stay ONE local `git log` per kind
+    per credit pass, built before the per-task loop — `deriveStatus` runs once per plan task, so a
+    per-task read would be thousands of subprocesses a sweep. GitHub call count for a credit pass
+    must be identical before and after.
+
+    (v) THE ONE OPERATOR RULING, PRECISE AND REVIEWABLE. Add exactly ONE row to
+    plan/credit-overrides.yaml: `task: PORTAL-T19`, `pr: 107`, `action: remove-credit`,
+    `author_class: operator`, and a `reason:` naming remudero-site PR 107, its plan-only diff, and
+    the absent PORTAL-T19 `run.start`. The pairing is the key (`creditOverrideFor` matches task AND
+    pr), so PORTAL-T12 and every other credited pairing is untouched. The ruling must REACH the
+    projection that evaluates the site plan — a row that parses but never reaches the reader that
+    credits PORTAL-T19 is decorative, so use the existing `creditOverridePath` /
+    `readCreditOverrideFile` seams rather than widening override semantics, and do not add any
+    grant direction: `loadCreditOverrides` refuses anything but `remove-credit` and that stays.
+
+    (vi) EXPLICITLY NOT IN SCOPE. No merged PR-body edit, no bulk or heuristic uncredit, no second
+    override row, no `status:` field mutation in any shard, no change to the subject-based
+    classification policy itself, and no change to review routing, provider capacity, deployment or
+    dispatch ordering. Self-target credit evaluation must be behaviourally identical.
+  acceptance:
+    - claim: "a target-repo plan-only filing pull request does not credit a task with no run, while a target-repo source implementation in the same pass still credits"
+      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+    - claim: "merged-path and merge-subject evidence for a non-self target is read from that target's checkout, so an engine-repository pull request carrying the same number cannot answer for a target pull request"
+      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+    - claim: "a missing, foreign or unreadable target checkout yields empty evidence and leaves the existing fail-closed outcome and every self-target result unchanged"
+      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+    - claim: "the credit pass performs no additional GitHub read and builds each evidence map once per pass, never once per task"
+      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+    - claim: "both credit builders resolve their git-evidence root through the named target helper instead of the engine module constant"
+      proof: "grep: creditEvidenceRootFor( in src/run-task.ts"
+    - claim: "the committed subtract-only operator ruling names the PORTAL-T19 and pull request 107 pairing with a reason and an operator author"
+      proof: "grep: PORTAL-T19 in plan/credit-overrides.yaml"
+  falsifier: |
+    REJECT THIS TASK if the credit builders already root their git evidence in the target checkout.
+    The measured source instead passes the module constant `repoRoot` at src/run-task.ts:32702,
+    :32707 and :32800, and neither `owner` nor `repo` reaches either reader.
+
+    THE FIXTURE IS TWO CHECKOUTS AND ONE NUMBER. Seed an engine-shaped repository whose merge of
+    `(#107)` touches `src/`, and a target-shaped repository whose merge of `(#107)` touches only
+    `plan/`. Before the change the target task reads CREDITED, because the engine merge answers for
+    it; after, it reads UNCREDITED. A target implementation merge touching `src/` in the same pass
+    must stay CREDITED — a change that refuses both is the wrong discriminator in a new place and is
+    worse than the defect.
+
+    PROVE IT LOAD-BEARING, NOT MERELY PRESENT. Revert only the evidence-root resolution and require
+    exactly the plan-only-target row to redden while the self-target rows, the target-implementation
+    row and the unreadable-checkout rows stay green. A test that reddens everywhere pins the seam's
+    existence rather than what it decides.
+
+    PROVE THE DIRECTION. For an UNCREDITED projection, every arrangement of target evidence —
+    present, empty, foreign-origin, unreadable — must leave it uncredited. If any arrangement
+    manufactures credit, the subtract-only property is false and the change must not ship.
+
+    PROVE THE RULING IS NOT DECORATIVE, AND IS NARROW. With the row absent, a PORTAL-T19-shaped
+    pairing reads credited; with the row present, it reads uncredited, and a PORTAL-T12-shaped
+    pairing reads credited in BOTH readings. A ruling that also moves the second pairing is a broad
+    uncredit and must not ship.
+  note: |
+    risk:high is BLAST RADIUS, not span. The credit projection is read by the board, the backfill
+    writer, `lint-plan`'s open-task split, the supersession closer and the escalation retirer; the
+    mitigations are that the change only ever withholds a credit granted on foreign evidence, that
+    unreadable evidence keeps today's behaviour byte-for-byte, and that the one operator ruling is a
+    single reviewable pairing.
+
+    This shard deliberately omits itself from `files:`. It is filed in a plan-only pull request;
+    declaring that record beside the source/test/override scope would trip rule15-filing.
