@@ -1,4 +1,4 @@
-- id: W1-T3892
+- id: W1-T3898
   title: "TURN A CONVERSATION INTO A BOUNDED PLAN — goal extraction, clarification, preview, confirmation, and undo"
   repo: remudero
   depends_on: [W1-T2499, W1-T3855, W1-T3878]

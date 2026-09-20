@@ -1,7 +1,7 @@
 - id: W1-T3896
   title: "PUBLISH ONE CROSS-REPOSITORY CONTRACT MANIFEST — versioned states, fixtures, provenance, and compatibility policy"
   repo: remudero
-  depends_on: [W1-T3855, W1-T3892, W1-T3885]
+  depends_on: [W1-T3855, W1-T3898, W1-T3899]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,7 +9,7 @@
   risk: high
   band_meaning: blast-radius
   origin: "research:instinct-automation-2026-09-20"
-  plan_refs: ["§Cross-repository ownership", "W1-T3855", "W1-T3892", "W1-T3885"]
+  plan_refs: ["§Cross-repository ownership", "W1-T3855", "W1-T3898", "W1-T3899"]
   files:
     - contracts/automation-flow-v1.json
     - contracts/automation-flow-v1-fixtures.json

@@ -1,4 +1,4 @@
-- id: W1-T3885
+- id: W1-T3899
   title: "VERIFY EXTERNAL EFFECTS — postconditions, reconciliation, partial success, and connector truth"
   repo: remudero
   depends_on: [W1-T3855, W1-T3880]
@@ -58,4 +58,3 @@
     original grant, repeat a non-idempotent operation, or store raw provider output. The corresponding
     proof must fail.
   note: "W1-T3855 owns action admission and receipts; this task owns the postcondition and external-state readback."
-
