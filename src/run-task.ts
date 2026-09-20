@@ -17,6 +17,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+const GIT_UNTRACKED_FILES_ALL = "--untracked-files=all";
 import {
   architectModel,
   configPath as instanceConfigPath,
@@ -5356,7 +5357,7 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", "--untracked-files=all"], {
+    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -21869,17 +21870,25 @@ function defaultCreditedMergedIds(): Set<string> {
   );
 }
 
+/** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
+ * must direct larger status repairs into multiple reviewable plan-only PRs. */
+export const PLAN_RECONCILE_REVIEW_FILE_CEILING = 300;
+
 /** The operator-facing summary. Names the mode FIRST, so a dry run can never be misread as applied. */
 export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): string {
   const skipped = Object.entries(summary.skipped)
     .filter(([, n]) => n > 0)
     .map(([k, n]) => `${k}=${n}`)
     .join(" · ");
+  const reviewHint =
+    summary.rewritten.length > PLAN_RECONCILE_REVIEW_FILE_CEILING
+      ? `\nreview ceiling: ${summary.rewritten.length} changed shards exceed GitHub's ${PLAN_RECONCILE_REVIEW_FILE_CEILING}-file diff limit; split the changes across multiple plan-only PRs before landing`
+      : "\nre-run with --write to apply, then land the diff as one plan-only PR";
   return (
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
-    (summary.rewritten.length > 0 && !write ? "\nre-run with --write to apply, then land the diff as one plan-only PR" : "")
+    (summary.rewritten.length > 0 && !write ? reviewHint : "")
   );
 }
 
@@ -33421,7 +33430,7 @@ export function captureRegisteredFixOwnerSnapshot(
   if (snapshot.attachmentState !== "exact") return snapshot;
 
   try {
-    const status = execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1", "--untracked-files=all"], {
+    const status = execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -33711,7 +33720,7 @@ export function commitWorkerEdits(
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
-  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z"]));
+  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
   if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
 
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths));

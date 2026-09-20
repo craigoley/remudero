@@ -1,0 +1,29 @@
+id: fb-1789927053247-879a03
+ts: 2026-09-20T17:57:33.247Z
+raw: "Repair the hosted console analytics projection contract. OBSERVED against
+  deployed core and current main: the console requests GET
+  /v1/analytics?projection=console-v1&limit=100 and rejects bodies over its
+  deliberate 128 KiB safety ceiling; the daemon returns 8,356,756 bytes. In
+  current src/lib/analytics-route.ts, buildAnalyticsRoute parses only
+  projectionVersion, resolveConsoleV1Projection validates console-v1, then
+  unconditionally sendJson(res, 200, snapshot), so consoleV1 is embedded in the
+  full raw snapshot rather than negotiated as a bounded response. This makes the
+  Analytics tab unavailable although telemetry exists. Implement a versioned,
+  explicitly requested bounded console-only envelope that carries only the
+  allowlisted metrics/routing/operator fields the private console needs, honors
+  an agreed request spelling or backward-compatible alias, returns no raw task
+  rows/transcripts/credentials, and stays below the console gateway bound under
+  an intentionally huge snapshot. Keep the legacy full response for clients that
+  do not request the projection. Add real route tests that prove response
+  selection and byte bound, plus a console contract test that the accepted
+  bounded projection renders. Do not solve it by raising the console byte
+  ceiling."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

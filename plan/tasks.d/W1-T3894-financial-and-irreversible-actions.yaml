@@ -1,0 +1,58 @@
+- id: W1-T3894
+  title: "MAKE IRREVERSIBLE ACTIONS EXPLICIT — financial limits, target confirmation, cooling-off, and human approval"
+  repo: remudero
+  depends_on: [W1-T3855, W1-T3878, W1-T3880]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Credential boundary", "§Self-improvement", "W1-T3855", "W1-T3878", "W1-T3880"]
+  files:
+    - src/lib/consequence-policy.ts
+    - src/lib/automation-action.ts
+    - src/lib/operator-agent.ts
+    - openapi/daemon.yaml
+    - test/consequence-policy-classification.test.ts
+    - test/consequence-policy-financial.test.ts
+    - test/consequence-policy-confirmation.test.ts
+    - test/consequence-policy-approval.test.ts
+    - test/consequence-policy-receipts.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3878 and W1-T3883 correctly keep financial and destructive actions human-gated, while
+    W1-T3855 supplies generic approval and rollback fields. The missing product contract is how an
+    operator can understand and approve a consequential action without treating a generic risk label as
+    sufficient: target, amount, currency, irreversible effect, and the exact recovery limit must be
+    visible and bounded.
+  design: |
+    Add `consequence-policy-v1` with classes `reversible`, `disruptive`, `irreversible`, and `financial`.
+    Financial actions carry target identity, amount, currency, aggregate and per-action ceilings, expiry,
+    cooling-off period, required approver count, and a durable receipt requirement. Irreversible actions
+    carry the exact affected resource, recovery statement, confirmation nonce, and rollback-unavailable
+    reason. A capability grant cannot widen these rules, and text from an external source cannot supply
+    a target or approval.
+
+    Preflight must refuse ambiguous targets, exceeded limits, stale quotes or evidence, expired
+    confirmations, and missing approvers. Success is never shown before the action and external-effect
+    receipts exist.
+  acceptance:
+    - claim: "actions classify consequence and preserve the exact target, scope, and recovery boundary"
+      proof: "unit test: test/consequence-policy-classification.test.ts"
+    - claim: "financial actions enforce target, amount, currency, aggregate ceiling, expiry, and cooling-off policy"
+      proof: "unit test: test/consequence-policy-financial.test.ts"
+    - claim: "ambiguous targets, stale evidence, expired confirmations, and exceeded limits refuse before execution"
+      proof: "unit test: test/consequence-policy-confirmation.test.ts"
+    - claim: "irreversible and financial actions require the configured human approval level across handoffs"
+      proof: "unit test: test/consequence-policy-approval.test.ts"
+    - claim: "approval, execution, refusal, and recovery limits produce linked bounded receipts"
+      proof: "unit test: test/consequence-policy-receipts.test.ts"
+    - claim: "the operator-agent action path evaluates consequence policy before a capability can be used"
+      proof: "grep: evaluateConsequencePolicy( in src/lib/operator-agent.ts"
+  falsifier: |
+    Approve an ambiguous target, spend beyond a ceiling, accept stale evidence, let a grant bypass a
+    human gate, or claim recovery where none exists. The corresponding proof must fail.
+  note: "This specializes generic action safety for irreversible and financial consequences; it does not provision payment credentials."
