@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
+import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,11 +9,15 @@ import {
   OPERATOR_ACTIVITY_CONTRACT_VERSION,
   OPERATOR_ACTIVITY_MAX_ITEMS,
   buildOperatorActivityProjection,
+  buildOperatorActivityRoute,
   buildPanelReadRoutes,
   type OperatorActivityEnvelope,
+  type PanelGraphDeps,
+  type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
+import type { GitHub, StatusProjection } from "../src/lib/status.js";
+import type { TraceGithub } from "../src/lib/trace.js";
 
 const PLAN_YAML = `
 - id: A
@@ -65,6 +70,55 @@ function verifiedInput(rows: Array<Record<string, unknown>> = [{ step: "run.star
 function itemsOf(result: OperatorActivityEnvelope) {
   if (!("items" in result)) throw new Error("expected an item-bearing activity projection");
   return result.items;
+}
+
+// ── route-level wiring fixtures — the handler itself (readLedgerUnionBounded, loadPlan,
+// projectPlan, the try/catch) is a separate concern from buildOperatorActivityProjection's pure
+// derivation above, and none of it runs unless something calls the built Route's own handler.
+
+function responseCapture(): { res: ServerResponse; read: () => { status: number; body: unknown } } {
+  let status = 0;
+  let body = "";
+  const res = {
+    writeHead(code: number) {
+      status = code;
+    },
+    end(chunk: string) {
+      body = chunk;
+    },
+  } as unknown as ServerResponse;
+  return { res, read: () => ({ status, body: JSON.parse(body) as unknown }) };
+}
+
+function fakeStatusGithub(): GitHub {
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+}
+
+function fakeRatify(): RatifyCliGateway {
+  return { approve: () => {}, reframe: () => {} };
+}
+
+/** A real-on-disk plan/ledger pair for the route handler, which reads both off the filesystem
+ *  directly (never an injected fixture) — distinct from {@link plan}'s in-memory `Plan`. */
+function routeDeps(overrides: Partial<PanelGraphDeps> = {}): PanelGraphDeps {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-route-`));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, PLAN_YAML);
+  return {
+    root,
+    inboxRoot: root,
+    planPath,
+    ledgerPath: join(root, "ledger.ndjson"),
+    github: { prView: () => null } as TraceGithub,
+    statusGithub: fakeStatusGithub(),
+    ratify: fakeRatify(),
+    ...overrides,
+  };
 }
 
 test("unit test: operator activity rows preserve source observed time and freshness", () => {
@@ -145,4 +199,75 @@ test("unit test: operator activity is versioned bounded read-only and single-pas
   assert.ok(route);
   assert.equal(route?.method, "GET");
   assert.equal(route?.scope, "read");
+});
+
+test("unit test: operator workstreams render a completed placeholder when the frontier has no rows", () => {
+  const result = buildOperatorActivityProjection({
+    ...verifiedInput(),
+    projection: new Map<string, StatusProjection>([
+      ["A", { taskId: "A", status: "queued", merged: true, source: "none" }],
+      ["B", { taskId: "B", status: "queued", merged: true, source: "none" }],
+      ["D", { taskId: "D", status: "queued", merged: true, source: "none" }],
+    ]),
+  });
+  const workstream = itemsOf(result).find((item) => item.kind === "workstream");
+  assert.equal(workstream?.state, "completed");
+  assert.match(workstream?.summary ?? "", /no unfinished runnable or held frontier rows/);
+});
+
+test("unit test: operator artifacts add a change-receipt link when the frontier task carries a merged PR url", () => {
+  const result = buildOperatorActivityProjection({
+    ...verifiedInput(),
+    projection: new Map<string, StatusProjection>([
+      ["A", { taskId: "A", status: "queued", merged: false, source: "none", prUrl: "https://github.com/example/repo/pull/1" }],
+      ["B", { taskId: "B", status: "queued", merged: false, source: "none" }],
+      ["D", { taskId: "D", status: "queued", merged: false, source: "none" }],
+    ]),
+  });
+  const receipt = itemsOf(result).find((item) => item.id === "artifact:receipt:A");
+  assert.ok(receipt);
+  assert.equal(receipt?.href, "https://github.com/example/repo/pull/1");
+  assert.equal(receipt?.source, "github:pull-request");
+});
+
+test("wiring test: GET /v1/operator-activity route handler serves the projection over real plan and ledger files", async () => {
+  const deps = routeDeps();
+  writeFileSync(
+    deps.ledgerPath,
+    `${JSON.stringify({ step: "run.start", task_id: "A", ts: "2026-09-20T10:00:00.000Z", run_id: "run-a" })}\n`,
+  );
+  const captured = responseCapture();
+  await buildOperatorActivityRoute(deps).handler({} as never, captured.res, { params: {} });
+  const { status, body } = captured.read();
+  assert.equal(status, 200);
+  const envelope = body as OperatorActivityEnvelope;
+  assert.equal(envelope.version, OPERATOR_ACTIVITY_CONTRACT_VERSION);
+  assert.equal(envelope.state, "verified");
+  assert.ok(itemsOf(envelope).length > 0);
+});
+
+test("wiring test: GET /v1/operator-activity route handler reports ledger-unavailable when no ledger file exists on disk", async () => {
+  const deps = routeDeps();
+  const captured = responseCapture();
+  await buildOperatorActivityRoute(deps).handler({} as never, captured.res, { params: {} });
+  const { status, body } = captured.read();
+  assert.equal(status, 200);
+  const envelope = body as OperatorActivityEnvelope;
+  assert.equal(envelope.state, "unavailable");
+  if (envelope.state !== "unavailable") throw new Error("expected unavailable activity");
+  assert.equal(envelope.reason, "ledger-unavailable");
+});
+
+test("wiring test: GET /v1/operator-activity route handler resolves 503 projection-unavailable when the plan cannot be read", async () => {
+  const missingPlanRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-missing-`));
+  const deps = routeDeps({ planPath: join(missingPlanRoot, "no-such-tasks.yaml") });
+  writeFileSync(deps.ledgerPath, `${JSON.stringify({ step: "run.start", task_id: "A", ts: "2026-09-20T10:00:00.000Z" })}\n`);
+  const captured = responseCapture();
+  await buildOperatorActivityRoute(deps).handler({} as never, captured.res, { params: {} });
+  const { status, body } = captured.read();
+  assert.equal(status, 503);
+  const envelope = body as OperatorActivityEnvelope;
+  assert.equal(envelope.state, "unavailable");
+  if (envelope.state !== "unavailable") throw new Error("expected unavailable activity");
+  assert.equal(envelope.reason, "projection-unavailable");
 });
