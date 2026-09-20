@@ -9,6 +9,7 @@
 
 import { dirname } from "node:path";
 import type { Route } from "./service.js";
+import { clockFromMillisFn } from "./clock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
   appendPanelLedger,
@@ -22,6 +23,8 @@ import {
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
 export const OPERATOR_AGENT_OUTCOME_STEP = "panel.operator_agent_outcome";
+export const OPERATOR_AGENT_SETTINGS_STEP = "panel.operator_agent_settings";
+export const OPERATOR_AGENT_DEFAULT_SETTINGS = { enabled: true, confidenceThreshold: 0.9 } as const;
 
 export const OPERATOR_AGENT_CATEGORIES = ["optimize", "fix", "scale"] as const;
 export type OperatorAgentCategory = (typeof OPERATOR_AGENT_CATEGORIES)[number];
@@ -71,11 +74,22 @@ export interface OperatorAgentHistory extends OperatorAgentProposal {
   decisionHistory: OperatorAgentDecisionEvent[];
 }
 
+export interface OperatorAgentSettings {
+  enabled: boolean;
+  confidenceThreshold: number;
+}
+
+export type OperatorAgentSettingsRead = {
+  settings: OperatorAgentSettings;
+  source: "ledger" | "default";
+};
+
 type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { now?: () => number };
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
 type ProposalDecisionInput = { proposalId: string; decision: OperatorAgentDecision; note?: string };
 type ProposalOutcomeInput = { proposalId: string; outcome: OperatorAgentOutcome };
+type OperatorAgentSettingsInput = { settings: OperatorAgentSettings };
 
 const MAX_ID = 160;
 const MAX_REPO = 200;
@@ -84,6 +98,8 @@ const MAX_REASONING = 4_000;
 const MAX_NOTE = 1_000;
 const MAX_EVIDENCE = 20;
 const MAX_EVIDENCE_VALUE = 600;
+const MIN_CONFIDENCE_THRESHOLD = 0.9;
+const MAX_CONFIDENCE_THRESHOLD = 0.99;
 
 function boundedString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= max;
@@ -103,6 +119,12 @@ function isCategory(value: unknown): value is OperatorAgentCategory {
 
 function isDecision(value: unknown): value is OperatorAgentDecision {
   return OPERATOR_AGENT_DECISIONS.includes(value as OperatorAgentDecision);
+}
+
+function validateSettings(value: unknown): OperatorAgentSettings | null {
+  if (!isRecord(value) || typeof value.enabled !== "boolean") return null;
+  if (typeof value.confidenceThreshold !== "number" || !Number.isFinite(value.confidenceThreshold) || value.confidenceThreshold < MIN_CONFIDENCE_THRESHOLD || value.confidenceThreshold > MAX_CONFIDENCE_THRESHOLD) return null;
+  return { enabled: value.enabled, confidenceThreshold: Number(value.confidenceThreshold.toFixed(3)) };
 }
 
 function validateEvidence(value: unknown): OperatorAgentEvidence[] | null {
@@ -187,6 +209,13 @@ function validateOutcome(body: unknown): { error: string } | ProposalOutcomeInpu
   };
 }
 
+function validateSettingsInput(body: unknown): { error: string } | OperatorAgentSettingsInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const settings = validateSettings(body.settings);
+  if (!settings) return { error: "settings.enabled and settings.confidenceThreshold must be valid" };
+  return { settings };
+}
+
 function readRows(ledgerPath: string): Array<Record<string, unknown>> {
   // The agent's history is a durable read, so it must include the live ledger and both supported
   // rotation forms. The live reader is intentionally not substituted here: a compacted decision
@@ -194,6 +223,24 @@ function readRows(ledgerPath: string): Array<Record<string, unknown>> {
   return readLedgerUnionRecordsSync(dirname(ledgerPath), {
     step: [OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_OUTCOME_STEP],
   }).rows;
+}
+
+function readSettingsRows(ledgerPath: string): Array<Record<string, unknown>> {
+  return readLedgerUnionRecordsSync(dirname(ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP }).rows;
+}
+
+function settingsFromRow(row: Record<string, unknown>): OperatorAgentSettings | null {
+  if (row.step !== OPERATOR_AGENT_SETTINGS_STEP) return null;
+  return validateSettings(row.settings);
+}
+
+export function readOperatorAgentSettings(deps: OperatorAgentRouteDependencies): OperatorAgentSettingsRead {
+  let settings: OperatorAgentSettings | undefined;
+  for (const row of readSettingsRows(deps.ledgerPath)) {
+    const candidate = settingsFromRow(row);
+    if (candidate) settings = candidate;
+  }
+  return settings ? { settings, source: "ledger" } : { settings: { ...OPERATOR_AGENT_DEFAULT_SETTINGS }, source: "default" };
 }
 
 function proposalFromRow(row: Record<string, unknown>): OperatorAgentProposal | null {
@@ -337,11 +384,41 @@ export function buildOperatorAgentOutcomeRoute(deps: OperatorAgentRouteDependenc
   };
 }
 
+/** GET /v1/operator-agent/settings — durable settings or explicit conservative defaults. */
+export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/settings",
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, readOperatorAgentSettings(deps)),
+  };
+}
+
+/** POST /v1/operator-agent/settings — persist bounded operator-agent settings. */
+export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/settings",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateSettingsInput, (input, req, res) => {
+      const updatedAt = clockFromMillisFn(deps.now).iso();
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_SETTINGS_STEP, "operator-agent-settings", bearerTokenId(req), {
+        settings: input.settings,
+        updatedAt,
+      });
+      sendJson(res, 200, { settings: input.settings, source: "ledger", updatedAt });
+    }),
+  };
+}
+
 export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
     buildOperatorAgentProposalReadRoute(deps),
     buildOperatorAgentProposalRegisterRoute(deps),
     buildOperatorAgentDecisionRoute(deps),
     buildOperatorAgentOutcomeRoute(deps),
+    buildOperatorAgentSettingsReadRoute(deps),
+    buildOperatorAgentSettingsWriteRoute(deps),
   ];
 }

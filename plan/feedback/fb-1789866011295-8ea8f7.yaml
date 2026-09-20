@@ -1,0 +1,26 @@
+id: fb-1789866011295-8ea8f7
+ts: 2026-09-20T01:00:11.295Z
+raw: "OBSERVED 2026-09-20, remudero-console PR #1364: a conflict-repair worker
+  disappeared after an old fix.dispatch and left a dirty managed worktree. The
+  remote PR later had a newer conflict head, but src/lib/sweep.ts
+  priorActionsFromLedger plus fixRungStalledWithoutNewHead (around 7222 and
+  7377) kept sweep deduped as awaiting the old dispatch because it had no
+  terminal fix.ci_not_green or fix.review row. src/run-task.ts
+  decideRegisteredFixOwnerRecovery around 32620 also correctly preserves dirty
+  worktrees but offers no durable, actionable recovery path for a vanished
+  owner. Build a bounded recovery that proves no process or branch owner,
+  preserves dirty tracked work to a recovery ref or stash with provenance,
+  reclaims only after that proof, and re-arms exactly one fix when the current
+  PR head differs or the prior worker has exceeded policy. Test the
+  old-dispatch/new-head/absent-owner/dirty-worktree sequence: next sweep must
+  dispatch one recovery or record an actionable escalation, never stand down
+  indefinitely. Preserve no-loss and single-strike guarantees."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

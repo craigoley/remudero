@@ -290,6 +290,18 @@ export interface components {
         evidence?: (string)[];
       };
     };
+    OperatorAgentSettings: {
+      enabled: boolean;
+      confidenceThreshold: number;
+    };
+    OperatorAgentSettingsRequest: {
+      settings: OperatorAgentSettings;
+    };
+    OperatorAgentSettingsResult: {
+      settings: OperatorAgentSettings;
+      source: "ledger" | "default";
+      updatedAt?: string;
+    };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
     SkillEntry: {
       /** The skill's identity -- its filename minus `.yaml`. */
@@ -499,6 +511,23 @@ export interface paths {
           "403": Error;
           "404": Error;
           "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/settings": {
+    get: {
+      responses: {
+          "200": OperatorAgentSettingsResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
         };
     };
   };

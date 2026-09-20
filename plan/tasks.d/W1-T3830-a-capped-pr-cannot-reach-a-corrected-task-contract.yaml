@@ -1,0 +1,69 @@
+- id: W1-T3830
+  title: "A CAPPED PR CANNOT REACH A CORRECTED TASK CONTRACT — a plan-only acceptance or scope amendment on main remains outside the PR head, so the reviewer correctly reuses the old contract while the capped disposition only escalates instead of advancing the branch that would make the repair reviewable"
+  repo: remudero
+  depends_on: ["W1-T3579"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-capped-pr-advances-to-a-corrected-task-contract.test.ts]
+  origin: "recon#pr-6153-capped-contract-amendment-2026-09-20"
+  plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T3579", "W1-T3306", "W1-T3817"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #6153. Its current head 59885503 was reviewed at 2026-09-19T23:14:57Z
+    against W1-T3817's then-current proof, `unit test: only synthesis.inbox_draft declares
+    provider openweight`. The proof already matched the merge base, so the reviewer recorded
+    `executed_stale`, zero executed proofs, and a CAPPED failure. The plan-only correction #6169
+    merged at 2026-09-20T00:59:47Z and replaced that proof with the discriminating
+    `grep: cwd: join(root, "worktree"), ...` contract. The PR head still contains the old task
+    record, while origin/main contains the corrected one.
+
+    The current reviewer behavior is correct: `resolvePlanCriteriaAtHead` reads the task record
+    committed at the PR head, so it must not judge a branch against an acceptance contract that
+    branch has not incorporated. But the capped disposition has no task-contract advance path.
+    It escalates the unchanged head, and the generic branch refresher only samples ordinary PRs
+    above its distance threshold. This leaves a correct plan amendment unable to repair a
+    reviewable PR promptly, even though GitHub's standard update-branch operation would create
+    the new head that ordinary CI and review already know how to handle.
+
+    W1-T77, W1-T78, W1-T100, W1-T150, and W1-T168 are historical broad users of the same
+    run-task/sweep surface. They do not own task-contract comparison or update-branch admission;
+    this task adds only that missing candidate and retains the existing shared one-per-pass writer.
+  design: |
+    Add one bounded task-contract-advance candidate to the existing one-per-full-sweep
+    update-branch selection. Consider only a non-draft, updateable PR whose exact-head verdict
+    is terminal-capped and whose resolved current main task execution contract differs from the
+    task contract at that PR head. The compared contract is the existing task identity plus its
+    declared files and acceptance claim/proof pairs; unrelated plan filings and decorative task
+    prose must not qualify. Read the PR-head contract only for this already-capped population.
+    An unreadable head contract is explicit and never treated as a difference.
+
+    A qualifying candidate joins the existing update-branch arbiter, which still chooses at most
+    one oldest eligible PR per full pass and still excludes drafts and in-flight task branches.
+    Ledger a distinct `task-contract` update reason. Request GitHub update-branch; do not
+    re-review the old head, synthesize a success status, change the generic distance threshold,
+    or bypass merge checks. The update creates a new head containing the corrected contract;
+    existing CI, exact-input review, and auto-merge rules then decide it normally.
+  acceptance:
+    - claim: "a capped PR whose current main task contract differs from its PR-head contract is selected once for branch advance before another review is attempted"
+      proof: "grep: updateReason: \"task-contract\" in src/lib/sweep.ts"
+    - claim: "an unchanged contract, an unrelated plan amendment, an unreadable head contract, and a draft or in-flight PR cannot trigger the task-contract branch advance"
+      proof: "grep: taskContractAdvance in src/run-task.ts"
+  falsifier: |
+    If the full-sweep selector already compares a capped PR's current task identity, files, and
+    acceptance pairs with the contract committed at its head, selects that PR for update-branch,
+    and records a distinct task-contract reason before the generic distance threshold, close this
+    task without implementation. At filing, the selector's union contains only armed-stalled,
+    stale-gate, and generic-distance candidates. Delete the new task-contract candidate and the
+    first acceptance proof must fail; then restore it and the proof must pass. A mutation that
+    treats an unreadable head contract as changed must fail the implementation suite's negative case.
+  note: |
+    Reservation holder: chore/file-review-contract-advance-1789866911000. `rmd next-task-id`
+    reserved W1-T3830 on origin before this shard was written.
+
+    This is a queue-recovery mechanism, not permission to judge mainline criteria against an old
+    branch. The only write remains GitHub's ordinary update-branch request; a new head re-earns
+    all existing gates and review.

@@ -304,28 +304,28 @@ test("only synthesis.inbox_draft declares provider openweight, after its Read/Gr
     }
   }
 
-  const config: Config = {
-    claudeBin: "/unused/claude",
-    root: "/tmp/rmd-mount-affinity-inbox-real",
-    dailyCapUsd: 1,
-    workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
-  };
-  const args = buildInboxDraftSpawnArgs({
-    cwd: "/tmp/rmd-mount-affinity-inbox-real/worktree",
-    settingsFile: SETTINGS_FILE,
-    prompt: "draft this task",
-    mount: inboxDraftMount,
-    config,
-    disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-  });
-  assert.equal(args.mountProvider, "cash");
-  assert.deepEqual(args.tools, ["Read", "Grep", "Glob"], "the exact declared surface this row is eligible on");
-
-  // Re-prove the surface against the REAL adapter (not just the mount table): declaring
-  // Read/Grep/Glob must not throw the "does not implement declared tool(s)" refusal the adapter
-  // raises for triage's WebSearch (see the "undeclared tool" test above).
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-inbox-surface-"));
   try {
+    const config: Config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 1,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    };
+    const args = buildInboxDraftSpawnArgs({
+      cwd: join(root, "worktree"),
+      settingsFile: SETTINGS_FILE,
+      prompt: "draft this task",
+      mount: inboxDraftMount,
+      config,
+      disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+    });
+    assert.equal(args.mountProvider, "cash");
+    assert.deepEqual(args.tools, ["Read", "Grep", "Glob"], "the exact declared surface this row is eligible on");
+
+    // Re-prove the surface against the REAL adapter (not just the mount table): declaring
+    // Read/Grep/Glob must not throw the "does not implement declared tool(s)" refusal the adapter
+    // raises for triage's WebSearch (see the "undeclared tool" test above).
     const result = await spawnOpenWeightWorker(
       {
         cwd: root,
