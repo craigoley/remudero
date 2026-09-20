@@ -77,3 +77,18 @@ test("W1-T3849: an unrelated new file in the SAME new directory stays uncommitte
     rmSync(repoDir, { recursive: true, force: true });
   }
 });
+
+test("W1-T3849: status enumerates all untracked files individually before classification", () => {
+  const calls: string[][] = [];
+  const runGit = (args: string[]): string => {
+    calls.push(args);
+    if (args[0] === "status") return "?? a/one.ts\0";
+    if (args[0] === "rev-parse") return "abc123\n";
+    return "";
+  };
+
+  const result = commitWorkerEdits("/unused", ["a/one.ts"], "feat: add a/one.ts", { runGit });
+
+  assert.equal(result.committed, true);
+  assert.deepEqual(calls[0], ["status", "--porcelain", "-z", "--untracked-files=all"]);
+});
