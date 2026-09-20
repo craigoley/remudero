@@ -135,20 +135,42 @@ export interface ParityRow {
   readonly reason?: string;
 }
 
+// ── W1-T3743: THE MATRIX SUFFIX IS A SPELLING, NOT A DIFFERENT JOB ───────────────────────────
+//
+// GitHub reports a sharded matrix job as `ci-shard (1/4)`; the registry and the default tier both
+// name it `ci-shard`. The strip is EXACT and NARROW — a trailing ` (<n>/<m>)`, nothing else — so
+// `coverage-shard` never resolves toward `coverage-ratchet` merely for sharing a prefix. See the
+// task rationale (W1-T3743) for why a looser strip re-opens the falsifier W1-T3740 already caught.
+const MATRIX_SUFFIX_RE = / \(\d+\/\d+\)$/;
+
+/**
+ * Strip a trailing GitHub matrix suffix, e.g. `"ci-shard (1/4)"` -> `"ci-shard"`. A name with no
+ * such suffix — including one that merely LOOKS unregistered — passes through unchanged, so a
+ * name that normalises to nothing registered still falls through to `unknown-job` below.
+ */
+export function stripMatrixSuffix(job: string): string {
+  return job.replace(MATRIX_SUFFIX_RE, "");
+}
+
 /**
  * W1-T3740 — classify ONE refusal by REGISTRY LOOKUP, never by a heuristic on the job name.
  *
  * `in-default-tier` and `mirrored-not-default` are indistinguishable from a name, and the whole
  * value of the join is that the registry has already made every one of these calls. A heuristic
  * here would be a second, quieter opinion about what the local mirror covers.
+ *
+ * NORMALISED AT THE LOOKUP, NOT IN THE REGISTRY (W1-T3743): the registry's unsharded keys are
+ * correct for every other reader, so the suffix is stripped here, once, before either table is
+ * consulted — never by rewriting the tables themselves.
  */
 export function classifyRefusalLocality(
   job: string,
   registry: readonly ParityRow[],
   defaultTierJobs: ReadonlySet<string>,
 ): RefusalLocality {
-  if (defaultTierJobs.has(job)) return "in-default-tier";
-  const row = registry.find((r) => r.job === job);
+  const normalised = stripMatrixSuffix(job);
+  if (defaultTierJobs.has(normalised)) return "in-default-tier";
+  const row = registry.find((r) => r.job === normalised);
   if (row === undefined) return "unknown-job";
   if (row.mirrored === true) return "mirrored-not-default";
   // `mirrored: false` WITHOUT a reason is what ci-parity:drift refuses — an exclusion nobody
