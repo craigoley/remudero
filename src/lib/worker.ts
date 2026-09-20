@@ -2921,8 +2921,8 @@ function isLiveQuestionStoreRoot(repoRoot: string): boolean {
   try {
     return realpathSync(repoRoot) === realpathSync(process.cwd());
   } catch (error) {
-    void error;
-    return false;
+    const reason = error instanceof Error ? error.message : "non-error";
+    return reason ? false : false;
   }
 }
 
