@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   gitRemoteRefReserver,
   parseReservationHolderLine,
+  reservationHandoffNoteLine,
   taskIdReservationRef,
   type RemoteRefReserver,
 } from "../src/lib/task-id-reservation.js";
@@ -159,6 +160,64 @@ test("unit test: a reservation naming its filer needs no hand-off note", () => {
   const reservation = { reachable: true, ids: new Set(["W1-T9402"]), holders: new Map([["W1-T9402", gateHolder]]) };
   const conflicts = gate.evaluateReservationHolderConflicts(["W1-T9402"], occurrencesFor("W1-T9402", shard), reservation, filerBranch, root);
   assert.deepEqual(conflicts, [], "the holder check passes with NO note at all — this is the ceremony the task removes");
+});
+
+function reclaimRun(holderMessage: string, holderBranchPresent: "absent" | "present" | "unreadable", outputs: string[]) {
+  let commits = 0;
+  return (args: string[]): { status: number; stdout: string; stderr: string } => {
+    if (args[0] === "fetch") return { status: 0, stdout: "", stderr: "" };
+    if (args[0] === "log") return { status: 0, stdout: holderMessage, stderr: "" };
+    if (args[0] === "ls-remote") {
+      if (holderBranchPresent === "absent") return { status: 2, stdout: "", stderr: "" };
+      if (holderBranchPresent === "unreadable") return { status: 1, stdout: "", stderr: "permission denied" };
+      return { status: 0, stdout: "holder-sha\trefs/heads/holder\n", stderr: "" };
+    }
+    if (args[0] === "hash-object") return { status: 0, stdout: "TREE\n", stderr: "" };
+    if (args[0] === "commit-tree") return { status: 0, stdout: `RECLAIMED${++commits}\n`, stderr: "" };
+    if (args[0] === "push") return { status: 0, stdout: "", stderr: "" };
+    if (args[0] === "symbolic-ref") return { status: 0, stdout: "run-filer\n", stderr: "" };
+    if (args[0] === "rev-parse") return { status: 0, stdout: "run-filer\n", stderr: "" };
+    throw new Error(`unexpected git command: ${args.join(" ")}`);
+  };
+}
+
+test("unit test: the mint prints the generated hand-off line", () => {
+  const output: string[] = [];
+  const holder = "rmd-id holder branch=holder";
+  const reserver = gitRemoteRefReserver({
+    filingBranch: "filer",
+    say: (line) => output.push(line),
+    run: reclaimRun(holder, "absent", output),
+  });
+
+  assert.equal(reserver.reclaim("W1-T3742"), "created");
+  assert.deepEqual(output, [reservationHandoffNoteLine("holder", "filer")]);
+});
+
+test("unit test: the mint's line is the producer's output", () => {
+  const output: string[] = [];
+  const reserver = gitRemoteRefReserver({
+    filingBranch: "filer",
+    say: (line) => output.push(line),
+    run: reclaimRun("rmd-id holder branch=holder", "absent", output),
+  });
+
+  assert.equal(reserver.reclaim("W1-T3742"), "created");
+  assert.equal(output[0], reservationHandoffNoteLine("holder", "filer"));
+});
+
+test("unit test: an unreadable reservation prints no hand-off line", () => {
+  const output: string[] = [];
+  const reserver = gitRemoteRefReserver({
+    filingBranch: "filer",
+    say: (line) => output.push(line),
+    run: (args) => args[0] === "fetch"
+      ? { status: 0, stdout: "", stderr: "" }
+      : { status: 1, stdout: "", stderr: "reservation unreadable" },
+  });
+
+  assert.equal(reserver.reclaim("W1-T3742"), "unknown");
+  assert.deepEqual(output, []);
 });
 
 test("unit test: an unattributable holder still accepts a recorded hand-off", () => {
