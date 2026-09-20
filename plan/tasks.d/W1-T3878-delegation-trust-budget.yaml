@@ -1,0 +1,56 @@
+- id: W1-T3878
+  title: "GIVE EVERY DELEGATION A TRUST BUDGET — versioned scope, autonomy, approval, expiry, and human handoff profile"
+  repo: remudero
+  depends_on: ["W1-T3855", "W1-T3856"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Self-improvement", "§Cross-repository ownership", "W1-T3855", "W1-T3856"]
+  files:
+    - src/lib/delegation-profile.ts
+    - src/lib/automation-action.ts
+    - src/lib/operator-agent.ts
+    - openapi/daemon.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    Instinct makes delegation feel natural by accepting an outcome in an existing conversation and
+    continuing the work in the background. That convenience is only trustworthy when the system can
+    say exactly what the delegation may read, change, spend, communicate, and for how long. RMD has
+    the action and promotion contracts, but not yet one reusable autonomy budget that every flow must
+    carry across proposal, execution, follow-up, and rollback.
+
+    This task turns the human boundary into a durable contract rather than a screen-specific rule.
+    It keeps the public core authoritative while allowing the console and future channels to offer a
+    calm, low-friction delegation experience without granting implicit production power.
+  design: |
+    Add a bounded `delegation-profile-v1` envelope linked to an action or flow. It names the
+    principal, purpose, repository or instance scope, readable data classes, allowed capabilities,
+    risk tier, cost and duration budgets, notification policy, required approval level, expiry,
+    revocation reference, fallback owner, and the human decision still required. Derive action
+    eligibility from this profile and the authoritative preflight; never infer authority from a
+    prompt, model confidence, UI state, or a remembered prior approval.
+
+    Profiles are immutable after issuance; changes create a linked replacement and receipt. A missing,
+    stale, expired, revoked, or over-budget profile produces a named refusal. High-risk or
+    irreversible actions remain human-gated even when a profile exists.
+  acceptance:
+    - claim: "every executable delegation carries a bounded scope, capability set, risk tier, budget, approval policy, expiry, and revocation reference"
+      proof: "unit test: delegation profile refuses incomplete or unbounded autonomy metadata"
+    - claim: "profile changes create linked replacements and never mutate the original authorization history"
+      proof: "unit test: delegation profile versions authorization changes with linked receipts"
+    - claim: "missing, stale, expired, revoked, and over-budget profiles produce distinct refusals"
+      proof: "unit test: delegation profile preserves explicit refusal reasons"
+    - claim: "a prior approval or model confidence cannot authorize a higher-risk action than the profile permits"
+      proof: "unit test: delegation profile cannot escalate capability from approval or confidence"
+    - claim: "the profile contract contains no raw prompt, credential, transcript, or browser-owned measurement"
+      proof: "unit test: delegation profile redacts prompts credentials transcripts and client measurements"
+  falsifier: |
+    Permit an unscoped action, reuse an expired or revoked profile, mutate an authorization in place,
+    infer permission from a prior approval, or let a low-risk profile execute a higher-risk action.
+    Each corresponding proof must fail.
+  note: "This is the shared trust envelope for future channels and surfaces; it does not itself grant production mutation or bypass the reviewed PR boundary. reservation hand-off: unknown -> run-W1-T3878-1789934131000"

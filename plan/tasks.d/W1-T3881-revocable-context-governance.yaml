@@ -1,0 +1,55 @@
+- id: W1-T3881
+  title: "MAKE PERSONAL CONTEXT REVOCABLE — provenance, purpose, retention, sensitivity, and deletion for assistant memory"
+  repo: remudero
+  depends_on: ["W1-T3852", "W1-T3878"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Learning provenance", "§Credential boundary", "W1-T3852", "W1-T3853", "W1-T3878"]
+  files:
+    - src/lib/operator-agent.ts
+    - src/lib/ledger.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    A persistent assistant becomes more useful as it remembers preferences, prior decisions, and
+    unfinished threads. It also becomes more dangerous if remembered context has no provenance,
+    purpose, sensitivity, retention, or revocation semantics. Disconnecting a source must not leave
+    operators guessing what derived context still influences future actions.
+
+    RMD's learning-origin work protects public learning provenance, and W1-T3853 owns the
+    hypothesis/intervention/baseline experiment record. W1-T3853 does not own context retention,
+    consent, deletion, or revocation; this task owns assistant context governance. It must keep
+    operational memory useful while making the boundary inspectable and deletion or revocation
+    honest.
+  design: |
+    Define a bounded `context-item-v1` envelope with source, principal, purpose, sensitivity class,
+    consent or authority reference, observed time, freshness, retention or expiry, visibility scope,
+    derivation links, revocation state, and deletion receipt. Context readers must filter by current
+    authority and purpose, distinguish absent from stale, and refuse to use revoked or expired items.
+    Derived summaries retain links to their inputs and become unavailable when required inputs are
+    deleted or revoked; the system must not silently recreate them from an undeclared cache.
+
+    Provide an operator-readable inventory and bounded delete/revoke events without exposing raw
+    private content in the browser or public site.
+  acceptance:
+    - claim: "every retained context item names provenance, purpose, sensitivity, authority, freshness, retention, and visibility"
+      proof: "unit test: context governance refuses incomplete provenance purpose or retention"
+    - claim: "revoked, expired, or purpose-mismatched context is excluded from planning and action preflight"
+      proof: "unit test: context governance filters revoked expired and out-of-purpose items"
+    - claim: "derived context links to its inputs and becomes unavailable when required inputs are deleted"
+      proof: "unit test: context governance invalidates derived items after source deletion"
+    - claim: "delete and revoke operations produce bounded receipts without returning raw private content"
+      proof: "unit test: context governance records redacted deletion and revocation receipts"
+    - claim: "restart and reindex do not silently restore revoked context"
+      proof: "unit test: context governance preserves revocation across restart and reindex"
+  falsifier: |
+    Use context after revocation, recreate deleted context from an undeclared cache, merge purposes
+    without authority, or report deletion without a durable receipt. The corresponding proof must fail.
+  note: "This task complements learning-origin provenance and does not expose personal context through the public marketing site. reservation hand-off: unknown -> run-W1-T3878-1789934131000"

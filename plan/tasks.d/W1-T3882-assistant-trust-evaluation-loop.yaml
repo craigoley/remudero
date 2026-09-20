@@ -1,0 +1,54 @@
+- id: W1-T3882
+  title: "MEASURE TRUST, NOT JUST COMPLETION — longitudinal assistant evaluations for proactivity, restraint, evidence, and recovery"
+  repo: remudero
+  depends_on: ["W1-T3856", "W1-T3879", "W1-T3881"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Self-improvement", "W1-T3856", "W1-T3879", "W1-T3881"]
+  files:
+    - src/lib/experiment-promotion.ts
+    - src/lib/measurement-cadence.ts
+    - src/lib/operator-agent.ts
+    - openapi/daemon.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    Completion rate alone rewards an assistant for acting too aggressively. A trustworthy RMD flow
+    must also measure whether it asked at the right time, respected scope, preserved evidence,
+    avoided duplicate side effects, recovered dropped work, and stopped when the source was stale.
+    Those measures turn user feedback and operational failures into a falsifiable improvement loop.
+
+    This is the evaluation layer above W1-T3856. It must use replayable, bounded corpora and clear
+    denominators; a model's confidence or a single happy-path demonstration is not a promotion
+    signal.
+  design: |
+    Add an assistant-evaluation envelope and deterministic corpus runner for proactivity precision,
+    dropped-thread recovery, clarification burden, intervention rate, unauthorized-side-effect rate,
+    stale-context use, receipt completeness, rollback success, and time-to-human-attention. Each
+    metric names its population, denominator, observation window, minimum sample floor, source,
+    freshness, and unmeasurable condition.
+
+    Evaluations run in replay or shadow mode before canary exposure. Candidate changes must preserve
+    a baseline, include positive and negative controls, and produce a promotion or refusal receipt.
+    Never train on raw prompts, private context, credentials, or transcripts by default; store only
+    bounded redacted evidence needed to reproduce the decision.
+  acceptance:
+    - claim: "each trust metric names its population, denominator, window, sample floor, source, freshness, and unmeasurable state"
+      proof: "unit test: assistant evaluation refuses metrics without denominator window or freshness"
+    - claim: "replay and shadow evaluation are deterministic and side-effect-free"
+      proof: "unit test: assistant evaluation replays with no external action"
+    - claim: "positive controls prove the corpus is visible and negative controls prove restraint failures are detectable"
+      proof: "unit test: assistant evaluation requires positive and negative controls"
+    - claim: "unauthorized side effects, stale context use, incomplete receipts, and failed rollback block promotion"
+      proof: "unit test: assistant evaluation blocks promotion on trust regressions"
+    - claim: "evaluation records contain bounded redacted evidence rather than raw prompts, credentials, or transcripts"
+      proof: "unit test: assistant evaluation redacts private and unbounded evidence"
+  falsifier: |
+    Promote from completion rate alone, compare mixed populations, accept a zero without a positive
+    control, ignore unauthorized side effects, or persist raw private inputs. The affected proof must fail.
+  note: "This task makes the self-improvement loop measure restraint and trust, not merely throughput. reservation hand-off: unknown -> run-W1-T3878-1789934131000"
