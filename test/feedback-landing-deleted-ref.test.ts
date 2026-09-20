@@ -100,7 +100,7 @@ function deleteRemoteBranch(bareOrigin: string, branch: string, expectedSha: str
 
 // ── acceptance 1: a deleted ref lands fresh under the empty-expected-value lease ────────────
 
-test("a deleted landing ref creates a fresh branch with an empty expected lease — no other ref, worktree or source file is touched", () => {
+test("unit test: a deleted landing ref creates a fresh branch with an empty expected lease — no other ref, worktree or source file is touched", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   writeFeedbackEntry(root, "fb-first", "first record — lands, then GitHub deletes the branch on merge");
@@ -158,7 +158,7 @@ test("a deleted landing ref creates a fresh branch with an empty expected lease 
 
 // ── acceptance 4: identical content after deletion must not fool the already-landed short-circuit
 
-test("identical content re-submitted after a deletion still recreates the branch — the tree-compare short-circuit is not fooled by the stale local ref", () => {
+test("unit test: an absent landing ref reports absence not a concurrent move — identical content still recreates the branch", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   writeFeedbackEntry(root, "fb-echo", "unchanged record — its bytes never move");
@@ -197,7 +197,7 @@ test("identical content re-submitted after a deletion still recreates the branch
 
 // ── acceptance 2: a branch that still exists and moved once is unchanged from today ────────
 
-test("a landing branch that still exists and genuinely moved once re-derives the union exactly once, and the retry lands — unchanged by the deleted-ref fix", () => {
+test("unit test: one live landing move rederives exactly once — the retry lands unchanged by the deleted-ref fix", () => {
   const bareOrigin = makeBareOrigin();
   const rootA = cloneRoot(bareOrigin);
   const rootB = cloneRoot(bareOrigin);
@@ -238,7 +238,7 @@ test("a landing branch that still exists and genuinely moved once re-derives the
 
 // ── acceptance 3: a branch that moves twice under contention is still refused ───────────────
 
-test("a landing branch that moves twice under contention is still REFUSED, and the branch's actual content is left untouched", () => {
+test("unit test: two live landing moves refuse without force replacement — the branch's actual content is left untouched", () => {
   const bareOrigin = makeBareOrigin();
   const rootA = cloneRoot(bareOrigin);
   const rootB = cloneRoot(bareOrigin);
@@ -280,7 +280,7 @@ test("a landing branch that moves twice under contention is still REFUSED, and t
 
 // ── acceptance 5: unreadable pending content still refuses, never a fresh empty create ──────
 
-test("unreadable landing content refuses without collapsing to a fresh empty-branch create", () => {
+test("unit test: unreadable landing content refuses without fresh create — content cannot be collapsed", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   writeFeedbackEntry(root, "fb-unreadable", "a record that lands once, then its content becomes unreadable");
