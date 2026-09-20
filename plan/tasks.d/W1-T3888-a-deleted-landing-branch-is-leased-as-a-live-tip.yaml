@@ -1,0 +1,144 @@
+- id: W1-T3888
+  title: "A MERGED-AND-DELETED LANDING BRANCH IS LEASED AS A LIVE TIP — `readBranchPending` derives `branchTipSha` from the LOCAL `origin/<branch>` tracking ref, and neither `landPending`'s nor `landContent`'s `git fetch origin --quiet` prunes it, so after GitHub deletes the ephemeral landing branch on merge the compare-and-swap expects a sha the remote no longer has, both the first push and the ONE rebuild retry are rejected as stale, and the refusal misreports a deleted ref as a third writer's concurrent tip move"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 75.00
+  files:
+    - src/lib/feedback-landing.ts
+    - test/feedback-landing-deleted-ref.test.ts
+  origin: architect
+  plan_refs: ["W1-T3560", "W1-T3559", "W1-T3561", "W1-T530", "W1-T191", "§7B"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE INCIDENT, THEN THE SOURCE READ. Operator feedback fb-1789923809449-f80f3c (2026-09-20
+    17:03:29Z) reports the landing bridge failing in a loop through 16:58Z; the observation this
+    task is filed from adds the second occurrence: remote `refs/heads/feedback-landing` was ABSENT
+    while the local `refs/remotes/origin/feedback-landing` still held e592d965. `rmd
+    feedback-reconcile --apply` built a `--force-with-lease` expecting e592d965, was refused TWICE,
+    and could not land SIX donor feedback records. Deleting only that one stale local tracking ref
+    — SHA-guarded, nothing else touched — let the UNCHANGED ordinary bridge land all six on PR 6259
+    on the very next run. The repair therefore identifies the defect exactly: the code is correct
+    except that it reads a ref which no longer describes the remote.
+
+    THE MECHANISM IS FOUR FACTS READ IN `src/lib/feedback-landing.ts` AT THIS COMMIT.
+
+    (1) THE TIP IS READ FROM A LOCAL TRACKING REF. `readBranchPending` does `git rev-parse
+    origin/<kind.branch>` and returns that as `tipSha`; a throw there (and ONLY a throw there) is
+    what maps to `tipSha: undefined`, i.e. "the branch has genuinely never been pushed". A stale
+    tracking ref never throws, so a DELETED remote branch is indistinguishable from a live one.
+
+    (2) NOTHING PRUNES IT. Both refresh sites are `git fetch origin --quiet` — `landPending`'s
+    `rebuild` (feedback-landing.ts:894) and `landContent`'s (feedback-landing.ts:1071), plus the
+    pre-scan fetches at :824, :1062 and :1273. Per git-fetch's PRUNING section a fetch without
+    `--prune` NEVER removes a remote-tracking ref whose remote counterpart is gone. So the rebuild
+    is a no-op for exactly this failure: it re-reads the SAME stale sha and computes the SAME dead
+    lease.
+
+    (3) THE LEASE THEN ASSERTS A SHA THE REMOTE DOES NOT HAVE. `finishLanding` builds
+    `--force-with-lease=refs/heads/<branch>:<b.branchTipSha>` (feedback-landing.ts:752-755). The
+    correct expected value for an absent ref is the EMPTY one — the branch of that same ternary
+    that already exists and already works for a first-ever push. The remote rejects the non-empty
+    form as stale, correctly.
+
+    (4) SO THE LOOP IS CLOSED AND SELF-PERPETUATING, AND ITS ERROR TEXT IS WRONG. `pushOnce` fails,
+    `rebuild()` returns an identical build, `pushOnce` fails identically, and the refusal reads
+    "refused to force-replace <branch>: its tip moved again after re-deriving the union once" —
+    which names a third-writer race that did not happen and sends a reader looking for a
+    concurrent owner instead of a deleted ref. Every subsequent sweep repeats this forever: the
+    records are durable on disk, so nothing is lost, but NOTHING LANDS until a human intervenes.
+    `remoteBranchTree` (feedback-landing.ts:500-506) reads the same stale ref, so the no-op
+    short-circuit can also compare this call's tree against a branch that no longer exists.
+  design: |
+    (i) MAKE THE DELETION OBSERVABLE BEFORE THE LEASE IS DECIDED. The landing reader must establish
+    the remote's ACTUAL state of `refs/heads/<kind.branch>` before `branchTipSha` is fixed, by
+    exactly one of two targeted shapes — pick one, state which, and say why in the PR body:
+      (a) TARGETED REFRESH: fetch the one landing refspec with pruning confined to it
+          (`+refs/heads/<branch>:refs/remotes/origin/<branch>` under `--prune`), so only that ONE
+          tracking ref can be reconciled; or
+      (b) ABSENCE VALIDATION: an authoritative remote read of that one ref (`ls-remote --heads
+          origin <branch>`) whose "absent" answer makes the reader report `tipSha: undefined`
+          without deleting anything at all.
+    WHICHEVER SHAPE IS CHOSEN IT IS A NAMED HELPER IN THIS MODULE, `refreshLandingRef`, called
+    before `branchTipSha` is fixed — one greppable seam, not an inline command buried in two
+    build closures, because `landPending` and `landContent` must both go through it.
+    Either way an absent remote branch MUST produce the empty-expected-value lease — the path that
+    already exists for a never-pushed branch — so the union rebuilds from `origin/main` and the
+    branch is created fresh.
+    THE ONE THING FORBIDDEN IS A BROAD SWEEP. No `git fetch --prune origin` over all refspecs, no
+    `remote prune`, no deletion of a REMOTE branch, a source file, a worktree, or ANY tracking ref
+    other than the landing ref this call is about. The live repair worked precisely because it was
+    one SHA-guarded ref; a broad prune in a checkout that many lanes share is a different and much
+    worse blast radius.
+
+    (ii) COMPARE-AND-SWAP IS PRESERVED EXACTLY, AND THIS IS THE HARD CONSTRAINT. Absence is NOT a
+    licence to force. A branch that still EXISTS and has MOVED must keep W1-T3560's behavior
+    unchanged: re-derive the union ONCE against the new tip, retry, and on a SECOND live move
+    REFUSE rather than force-replacing a tip this call never read. An implementation that answers
+    "absent" by falling back to an unconditional `--force`, or that converts a live-tip refusal
+    into an overwrite, has reopened the exact hole W1-T3560 closed and must fail review.
+
+    (iii) A READ FAILURE IS STILL A REFUSAL, NOT AN "ASSUME EMPTY". `readBranchPending`'s `ok:
+    false` contract — the branch EXISTS but its content could not be read — stands untouched.
+    Only a POSITIVELY OBSERVED absence may collapse to `tipSha: undefined`; a network error, an
+    auth failure or an unparseable answer must surface, never silently become a fresh-branch
+    create that discards content nobody managed to read.
+
+    (iv) THE SURFACED ERROR MUST NAME THE RIGHT CAUSE. A refusal or a recovery caused by the
+    landing ref being ABSENT on the remote must say so in words that cannot be confused with a
+    concurrent tip move, and the existing second-move refusal must keep saying what it says today.
+    This is half the value of the task: the loop above cost two incidents largely because its text
+    pointed at a race.
+
+    (v) SCOPE. `finishLanding`, `readBranchPending` and `remoteBranchTree` are shared by the
+    `feedback`, `decisions` and `ci-learning` landing kinds; the work must state explicitly whether
+    the refresh applies to all kinds or only the feedback kind — silence there is a half-applied
+    fix, and all three branches are ephemeral for the same reason. EXPLICITLY OUT OF SCOPE: §7B
+    feedback lifecycle ordering and record monotonicity (W1-T3561), the union writer's carry-forward
+    semantics (W1-T3560), PR automation and auto-merge arming, provider routing, deployment, and
+    `src/lib/feedback-reconcile.ts` — reconcile re-lands through `landFeedbackStatusContent` and is
+    therefore FIXED BY THIS CHANGE WITHOUT BEING EDITED, which is the point of fixing it here.
+  acceptance:
+    - claim: "a landing whose local tracking ref still holds a sha while the remote branch is absent lands its records by creating the branch fresh under the empty-expected-value lease, and no remote branch, worktree, source file or unrelated tracking ref is touched"
+      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+    - claim: "a landing branch that still exists and genuinely moved once re-derives the union exactly once and then lands, unchanged from today"
+      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+    - claim: "a landing branch that genuinely moves twice is still refused, and the tip it never read is not force-replaced"
+      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+    - claim: "an absent remote landing ref is surfaced as an absent ref and never reported as a concurrent tip move"
+      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+    - claim: "a branch that exists but whose pending content cannot be read is still refused rather than collapsing to an empty fresh-branch create"
+      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+    - claim: "the landing reader consults a named targeted landing-ref refresh before the lease is derived"
+      proof: "grep: refreshLandingRef( in src/lib/feedback-landing.ts"
+  falsifier: |
+    CLOSE IF the landing reader already observes a deleted landing branch before deriving its
+    lease. As of this filing `readBranchPending` maps ONLY a `rev-parse origin/<branch>` throw to
+    `tipSha: undefined`, and every refresh in the module is a bare `git fetch origin --quiet` with
+    no prune and no per-ref refspec — so a deleted branch cannot be observed by construction.
+    DO NOT satisfy this with a repo-wide `git fetch --prune` or `git remote prune origin`: the
+    landing checkout is shared, and pruning every tracking ref to fix one is a blast radius this
+    task explicitly refuses.
+    DO NOT satisfy this by dropping the lease, by widening it to a bare `--force`, or by retrying
+    more than the ONE re-derivation W1-T3560 allows — a second LIVE move must still refuse.
+    DO NOT satisfy it by deleting the remote branch, a worktree, a source file, or any tracking ref
+    other than the landing ref under repair.
+  note: |
+    risk:high — `band_meaning: blast-radius`, not span. The declared work is ONE concern
+    (`src/lib/feedback-landing.ts` plus its own suite), but it changes how a compare-and-swap on a
+    live bot-owned ref decides its expected value, and a wrong answer there force-replaces another
+    owner's merged-bound tree. The counter-weight is that the failure it fixes is live, repeating,
+    and blocked six operator feedback records until a hand repair.
+    budget_usd 75 — the cost is the fixture, not the logic: a real bare origin whose landing branch
+    is fetched, then deleted remotely, plus a two-writer moving-tip fixture to prove the
+    compare-and-swap is untouched. The existing `test/feedback-landing.test.ts` and
+    `test/feedback-landing-union-writer.test.ts` idioms are the model.
+    verify:auto — every claim is assertable against a seeded bare origin; no human judgement.
+    NO depends_on: W1-T3560 (the lease), W1-T3559 (landing identity) and W1-T3561 (monotonicity)
+    are all merged, and this task changes only how the expected value is derived.
