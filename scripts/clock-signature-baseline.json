@@ -255,9 +255,9 @@
     "newDate": 1
   },
   "src/lib/panel-graph.ts": {
-    "dateNow": 2,
-    "legacy": 1,
-    "newDate": 1
+    "dateNow": 3,
+    "legacy": 2,
+    "newDate": 5
   },
   "src/lib/policy.ts": {
     "dateNow": 0,
