@@ -62,4 +62,4 @@
     Treat a natural-language request as authority, ask the same question twice, ask indefinitely, execute
     from a preview, report success before a receipt, or rewrite history during undo. The corresponding
     proof must fail.
-  note: "This is the missing conversation-to-plan seam; W1-T3855 remains authoritative for execution and receipts."
+  note: "This is the missing conversation-to-plan seam; W1-T3855 remains authoritative for execution and receipts. Filing only: implementation is not claimed here."
