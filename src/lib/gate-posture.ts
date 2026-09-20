@@ -484,6 +484,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "script:scripts/contract-coverage-ratchet.mjs": repair(true, "contract coverage drift is repaired with a test or baseline decrease"),
   "script:scripts/coverage-merge-ratchet.mjs": repair(true, "coverage merge failures name missing shard artifacts or bad inputs"),
   "script:scripts/coverage-ratchet.mjs": repair(true, "coverage failures are repaired by tests or measured baseline movement"),
+  "script:scripts/clock-signature-ratchet.mjs": repair(true, "clock-signature drift is repaired by measured baseline movement"),
   "script:scripts/cycle-ratchet.mjs": repair(true, "dependency cycles are removed or explicitly budgeted"),
   "script:scripts/learnings-budget-ratchet.mjs": repair(true, "learning-budget failures name the record to compress or split"),
   "script:scripts/mutation-ratchet.mjs": repair(true, "mutation regressions are repaired by behavior tests or reviewed baseline movement"),
