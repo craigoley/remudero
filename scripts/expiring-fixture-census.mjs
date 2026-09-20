@@ -141,6 +141,146 @@ export function assertFieldsStillAged(readFile = (p) => readFileSync(p, "utf8"))
   }
 }
 
+// ── W1-T3838: THE INVERSE DIRECTION — REAL => LISTED ────────────────────────────────────────────
+//
+// `assertFieldsStillAged` above proves LISTED => STILL REAL: pin a row against its own source and
+// the census fails rather than quietly covering nothing. That guard runs in exactly one direction.
+// Nothing proved REAL => LISTED, and incompleteness -- not staleness -- is what actually took `main`
+// and three PRs down on 2026-09-20: `expiresAt` aged a proposal against `Date.now()` in
+// src/lib/operator-agent.ts the whole time, AGED_FIELDS never named it, and the census measured 95
+// fixture stamps that morning and reported none crossing -- true of the one field it read, useless
+// about the one that fired.
+//
+// DISCOVER, DO NOT HAND-LIST (design (i)). `discoverClockAgedFields` scans source text for the two
+// shapes a live threshold actually takes: `Date.parse(x.field) <op> now` on one line (the shape that
+// detonated), and `const v = Date.parse(x.field)` followed, within a short window, by `v` and `now`
+// (or `Date.now()`) meeting in the same expression -- the shape {@link deriveDisposition} and
+// {@link absentAgeMinutes} already use for `lastActivityAt`. A bare variable (`Date.parse(raw)`, no
+// property access) is not a FIELD and is not reported; a census that named every local would be the
+// noise CLAUDE.md already warns a gate gets reverted over.
+
+const CLOCK_TOKEN = /(?:\bnow\b|Date\.now\(\))/.source;
+const CLOCK_WORD_RE = new RegExp(CLOCK_TOKEN);
+const DIRECT_COMPARE_RE = new RegExp(
+  `Date\\.parse\\(([\\w.?]+)\\)\\s*(?:<=|>=|<|>|===|!==)\\s*${CLOCK_TOKEN}` +
+    `|${CLOCK_TOKEN}\\s*(?:<=|>=|<|>|===|!==)\\s*Date\\.parse\\(([\\w.?]+)\\)`,
+);
+const ASSIGN_RE = /(?:const|let)\s+(\w+)\s*=\s*Date\.parse\(([\w.?]+)\)/;
+/** How many lines after an assignment to search for it meeting `now` -- wide enough to cover
+ *  {@link deriveDisposition}'s `const parsed = Date.parse(pr.lastActivityAt);` two lines above its
+ *  own use, narrow enough that an unrelated `now` later in a long function is not falsely joined. */
+const CLOCK_WINDOW_LINES = 6;
+
+/** A property access only, e.g. `pr.lastActivityAt` or `proposal?.expiresAt` -- never a bare local. */
+function propertyField(expr) {
+  if (!/^[\w$]+(?:\?\.|\.)[\w$]+(?:(?:\?\.|\.)[\w$]+)*$/.test(expr)) return undefined;
+  return expr.split(/\?\.|\./).filter(Boolean).pop();
+}
+
+/**
+ * Every `Date.parse(x.field)` in `files` that a nearby comparison ages against the clock, found
+ * instead of hand-listed. PURE: files and reader are parameters, exactly like
+ * {@link censusExpiringFixtures}. Each record also carries whether ITS OWN line (or the one above
+ * it) waives the finding with {@link EXEMPT_MARKER} -- the identical convention a fixture's own
+ * exemption already uses (design (iii): one convention covers both).
+ */
+export function discoverClockAgedFields({ files, readFile }) {
+  const discovered = [];
+  for (const file of files) {
+    const lines = readFile(file).split("\n");
+    for (const [index, line] of lines.entries()) {
+      let expr;
+      let clockLine = index;
+      const direct = DIRECT_COMPARE_RE.exec(line);
+      if (direct) {
+        expr = direct[1] ?? direct[2];
+      } else {
+        const assigned = ASSIGN_RE.exec(line);
+        if (assigned) {
+          const [, varName, varExpr] = assigned;
+          const windowEnd = Math.min(lines.length, index + 1 + CLOCK_WINDOW_LINES);
+          for (let j = index + 1; j < windowEnd; j++) {
+            if (CLOCK_WORD_RE.test(lines[j]) && new RegExp(`\\b${varName}\\b`).test(lines[j])) {
+              expr = varExpr;
+              clockLine = j;
+              break;
+            }
+          }
+        }
+      }
+      if (!expr) continue;
+      const field = propertyField(expr);
+      if (!field) continue; // a bare local, not a field -- see the header note above
+
+      const above = (i) => (i > 0 ? lines[i - 1] : "");
+      const waived =
+        `${line}\n${above(index)}`.includes(EXEMPT_MARKER) ||
+        `${lines[clockLine]}\n${above(clockLine)}`.includes(EXEMPT_MARKER);
+      discovered.push({ field, source: file, line: index + 1, expr, waived });
+    }
+  }
+  return discovered;
+}
+
+/**
+ * THE INVERSE OF {@link assertFieldsStillAged}: that one proves LISTED => STILL REAL; this proves
+ * REAL => LISTED. A field `src` ages against the clock that is neither a row in `agedFields` nor
+ * waived on its own line is a census failure naming the field AND the source that ages it, so the
+ * gate fails closed on an unknown field (design (ii)) instead of answering a confident, useless "OK".
+ */
+export function assertFieldListComplete({ files, readFile, agedFields = AGED_FIELDS }) {
+  const discovered = discoverClockAgedFields({ files, readFile });
+  const known = new Set(agedFields.map((row) => row.field));
+  const missing = new Map();
+  for (const d of discovered) {
+    if (d.waived || known.has(d.field) || missing.has(d.field)) continue;
+    missing.set(d.field, d);
+  }
+  if (missing.size > 0) {
+    const lines = [...missing.values()].map(
+      (m) => `  - "${m.field}" ages against the clock at ${m.source}:${m.line}, not in AGED_FIELDS and not waived`,
+    );
+    throw new Error(
+      `expiring-fixture-census: INCOMPLETE TABLE — ${missing.size} clock-aged field(s) are not in AGED_FIELDS:\n` +
+        `${lines.join("\n")}\n` +
+        `  TO FIX: add a row to AGED_FIELDS in scripts/expiring-fixture-census.mjs, or, if the field genuinely\n` +
+        `  needs no census row, waive it with a reason on the line: ${EXEMPT_MARKER} -- <why>.`,
+    );
+  }
+  return discovered;
+}
+
+/**
+ * MEASURED 2026-09-20 (W1-T3838), by running {@link discoverClockAgedFields} over every tracked
+ * `src/**\/*.ts` file: 14 (field, source) findings -- 11 distinct field names, with `ts`,
+ * `expires_at`, and `lastActivityAt` each discovered at two sources -- exist beyond
+ * `lastActivityAt`, none of them written as a hardcoded ISO fixture literal this census's own
+ * population ever measured (the sizing note this task shipped with: run the discovery, read what
+ * it finds, and let that decide whether it lands refusing or advisory). Refusing on all fourteen
+ * in the same change that adds the discovery would touch eleven different files, only one of them this incident's own
+ * (src/lib/operator-agent.ts), with no bearing on this task's one declared concern --
+ * scripts/expiring-fixture-census.mjs's AGED_FIELDS completeness, not a src-wide audit of every
+ * clock comparison. So {@link main} treats
+ * this ledger as ALREADY KNOWN,
+ * the identical ratchet shape {@link RECORDED_POPULATION_BY_FILE} already uses: a field discovered
+ * OUTSIDE this ledger is unreviewed and blocks; one recorded here is a known, accepted gap that stays
+ * visible in the report without failing the build. Removing a row here re-arms that field as blocking
+ * on the next scan unless it is also added to AGED_FIELDS or waived with {@link EXEMPT_MARKER}.
+ */
+export const KNOWN_UNCOVERED_CLOCK_FIELDS = Object.freeze([
+  { field: "ts", source: "src/lib/console-shell-client.ts" },
+  { field: "ts", source: "src/run-task.ts" },
+  { field: "lastPollIso", source: "src/lib/daemon.ts" },
+  { field: "lastFireIso", source: "src/lib/feedback-docket.ts" },
+  { field: "expires_at", source: "src/lib/github-app.ts" },
+  { field: "receivedAtIso", source: "src/lib/github-event-wake.ts" },
+  { field: "lastCheckedIso", source: "src/lib/github-posture.ts" },
+  { field: "expiresAt", source: "src/lib/operator-agent.ts" },
+  { field: "createdAt", source: "src/lib/ops.ts" },
+  { field: "postedAt", source: "src/lib/review.ts" },
+  { field: "reviewInputLastAttemptAt", source: "src/lib/sweep.ts" },
+]);
+
 /**
  * Every fixture stamp in `files` that a threshold will age past, within `marginDays` of `now`.
  *
@@ -336,11 +476,22 @@ export function main({
   now = () => Date.now(),
   log = (message) => console.log(message),
   assertAged = assertFieldsStillAged,
+  // W1-T3838 — THE INVERSE DIRECTION, wired the same way `assertAged` is: a real closure by
+  // default, fully overridable so a test that is not exercising completeness never has to mock a
+  // fourth `git` seam. Ratcheted against `KNOWN_UNCOVERED_CLOCK_FIELDS` (see its own comment) so
+  // this call refuses on a NEW clock-aged field, not on the tail already measured and accepted.
+  assertComplete = () => {
+    const srcFiles = [
+      ...new Set(execFile("git", ["ls-files", "src/*.ts", "src/**/*.ts"], { encoding: "utf8" }).split("\n").filter(Boolean)),
+    ];
+    assertFieldListComplete({ files: srcFiles, readFile, agedFields: [...AGED_FIELDS, ...KNOWN_UNCOVERED_CLOCK_FIELDS] });
+  },
   recordedPopulationByFile = RECORDED_POPULATION_BY_FILE,
   baseRefOverride,
   env = process.env,
 } = {}) {
   assertAged();
+  assertComplete();
   const files = execFile("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
   // The threshold comes from the policy the sweep actually loads, never a copy of the number here.
   const policy = JSON.parse(execFile("node", ["--import", "tsx", "-e", "import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));"], { encoding: "utf8" }));
