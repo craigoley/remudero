@@ -59,7 +59,7 @@
     - claim: "the retro lane offers a cash divert surface at its dispatch sites, so a blocked auction can divert it"
       proof: "grep: cashDivertSpawnFields(\"retro\") in src/run-task.ts"
     - claim: "the harness performs retro's commit when it runs on a shell-less surface"
-      proof: "grep: harnessCommitForShellLessWorker in src/run-task.ts"
+      proof: 'grep: harnessOwnsGit: worker\.provider === "cash" || worker\.provider === "openweight" in src/run-task.ts'
     - claim: "a retro spawn told the harness owns git is coherent with the surface it is offered"
       proof: "unit test: W1-T3746"
   note: |
