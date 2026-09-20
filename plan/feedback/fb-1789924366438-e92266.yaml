@@ -1,0 +1,27 @@
+id: fb-1789924366438-e92266
+ts: 2026-09-20T17:12:46.439Z
+raw: "Observed live across the three daemon instances: a non-self sweep calls
+  landFeedback from the controller checkout, so finishLanding always pushes the
+  derived feedback branch to that controller git origin (craigoley/remudero).
+  But the same call passes targetRepository=the drained target (remudero-console
+  or remudero-site), so ensurePrOpen invokes gh pr create --repo target --head
+  bare-derived-branch. The ref does not exist in either target repo. Verified
+  2026-09-20: refs
+  feedback-landing-craigoley-remudero-console-home-node-remudero-145a156f8b24
+  and feedback-landing-craigoley-remudero-site-home-node-remudero-9d5ce343d7ca
+  exist in craigoley/remudero, while matching PR queries return zero in core,
+  console, and site; console/site state roots retain their feedback buffers.
+  Preserve per-owner scoped identities, but make the Git push target, branch
+  lookup, and PR target one coherent controller-owned repository for records
+  captured in the controller-owned plan/feedback inbox. Do not solve it by
+  direct pushing to target main, changing record routing without a decision, or
+  dropping the CAS/PR gates."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
