@@ -1049,6 +1049,7 @@
     "test/plan-index.test.ts": 701,
     "test/plan-lane-mint.test.ts": 5337,
     "test/plan-only-carve-out-reachable.test.ts": 1039,
+    "test/plan-only-new-task-diagnostics.test.ts": 7865,
     "test/plan-only-floor-reads-the-body.test.ts": 1106,
     "test/plan-pr-emitter.test.ts": 5312,
     "test/plan-prompt-placement.test.ts": 825,

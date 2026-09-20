@@ -915,6 +915,7 @@ import {
   formatReadIdentity,
   isPathOutsideRoot,
   lintTask,
+  promoteIntroducedPlanOnlyDiagnostics,
   planShardSlugCorpus,
   proofGrepUnmatchableViolations,
   proofGrepSelfCertifyingViolations,
@@ -924,6 +925,7 @@ import {
   // scopeGuardOutOfScopeFiles into lib/prompt-render.ts.
   type AddedExport,
   type LintOpts,
+  type LintViolation,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
 import {
@@ -22368,7 +22370,23 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         opts.pathExistsAtBase = pathExistsAtBase;
       }
     }
-    const { violations: lintViolations } = lintTask(task, opts);
+    let { violations: lintViolations } = lintTask(task, opts);
+    // W1-T3814: a plan-only filing is allowed to carry inherited diagnostics, but a newly added
+    // or newly warned shard must not auto-merge with shared-proof, call-site, or proof-scope
+    // findings. Compare the same task at the base ref; an absent base record fails closed rather
+    // than treating a missing fact as inherited. Mixed/source diffs never set planOnlyFilingDiff
+    // and therefore retain the existing warning-only defaults.
+    if (scope && planOnlyFilingDiff === true) {
+      const baseTask = oldById?.get(task.id);
+      const baseViolations: LintViolation[] | undefined = baseTask
+        ? lintTask(baseTask, { moduleExists: opts.moduleExists }).violations
+        : undefined;
+      lintViolations = promoteIntroducedPlanOnlyDiagnostics(
+        lintViolations,
+        baseViolations,
+        baseTask === undefined,
+      );
+    }
     // W1-T1225: proofGrepUnmatchableViolations( is called HERE, directly, rather than folded into
     // `lintTask`'s own aggregate (see that check's module comment in task-linter.ts for why) — the
     // call site IS the deliverable (rationale point 5): a check that merges without a caller ships
