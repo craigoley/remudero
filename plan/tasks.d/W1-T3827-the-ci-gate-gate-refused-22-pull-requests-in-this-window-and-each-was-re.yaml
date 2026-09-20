@@ -1,0 +1,19 @@
+- id: W1-T3827
+  title: "THE ci-gate GATE REFUSED 22 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:6058:ci-gate"
+  ci_learning_prs: [6058, 6062, 6077, 6077, 6078, 6088, 6092, 6093, 6096, 6098, 6099, 6105, 6107, 6113, 6135, 6138, 6140, 6148, 6154, 6156, 6171, 6172]
+  files:
+    - learnings/ci-gate-lessons.yaml
+  acceptance:
+    - claim: "the lane that trips the ci-gate gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:6058:ci-gate in learnings/ci-gate-lessons.yaml"
+  note: |
+    Filed by the ci-learning rung from ci-learning:6058:ci-gate; machine-authored and parked for human verification.
