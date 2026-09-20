@@ -38,8 +38,8 @@
     fake transport with the allowance write's EACCES on this host. The test must not depend on
     the presence, ownership, or contents of the former shared directory.
   acceptance:
-    - claim: "only synthesis.inbox_draft declares provider openweight, after its Read/Grep/Glob surface is re-proven to be adapter-supported"
-      proof: "unit test: only synthesis.inbox_draft declares provider openweight"
+    - claim: "the real inbox-draft adapter test derives both config state and spawn cwd from its own temporary root rather than a cross-account /tmp directory"
+      proof: "grep: cwd: join(root, \"worktree\"), in test/an-open-weight-provider-rides-the-capability-ladder.test.ts"
   falsifier: |
     Restore the fixed `/tmp/rmd-mount-affinity-inbox-real` Config root and cwd while retaining
     the private worker root. The real adapter must again fail its atomic allowance-file write
