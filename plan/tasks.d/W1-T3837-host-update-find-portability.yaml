@@ -41,3 +41,5 @@
     unchanged; the three positive tests above must return to their present failures. On Linux,
     run the same suite to prove the fix did not merely special-case the macOS output. If either
     platform loses the live-container refusal or state-directory invariant, the task is not met.
+  note: |
+    reservation hand-off: plan/W1-T3837-host-update-find-portability -> plan/W1-T3836-host-update-find-portability
