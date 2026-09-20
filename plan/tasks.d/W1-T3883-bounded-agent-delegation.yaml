@@ -47,6 +47,8 @@
       proof: "unit test: agent delegation preserves human gates for high-risk actions"
     - claim: "parent and child receipts are linked and bounded without raw prompts, secrets, or transcripts"
       proof: "unit test: agent delegation records linked redacted receipts"
+    - claim: "the operator-agent handoff path calls the bounded automation action module"
+      proof: "grep: executeBoundedDelegation( in src/lib/operator-agent.ts"
   falsifier: |
     Let a recipient act before acceptance, widen a grant, forward authority transitively, replay a
     nonce, act after parent revocation, or hide the identity chain. The corresponding proof must fail.

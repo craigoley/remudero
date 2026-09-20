@@ -48,6 +48,8 @@
       proof: "unit test: assistant evaluation blocks promotion on trust regressions"
     - claim: "evaluation records contain bounded redacted evidence rather than raw prompts, credentials, or transcripts"
       proof: "unit test: assistant evaluation redacts private and unbounded evidence"
+    - claim: "the operator-agent promotion path calls the experiment evaluation module"
+      proof: "grep: evaluateAssistantTrust( in src/lib/operator-agent.ts"
   falsifier: |
     Promote from completion rate alone, compare mixed populations, accept a zero without a positive
     control, ignore unauthorized side effects, or persist raw private inputs. The affected proof must fail.
