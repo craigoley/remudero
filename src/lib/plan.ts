@@ -225,6 +225,14 @@ export interface Plan {
   byId: Map<string, Task>;
 }
 
+export interface MachineFilingAdmissionContext {
+  plan: Plan;
+  releasedIds: ReadonlySet<string>;
+  isMerged?: MergedResolver;
+  pathExists?: (repoRelPath: string) => boolean;
+  pathExistsAtBase?: (repoRelPath: string) => boolean;
+}
+
 function req<T>(v: T | undefined, field: string, id: string): T {
   if (v === undefined || v === null) throw new PlanError(`task ${id}: missing required field '${field}'`);
   return v;
@@ -806,4 +814,43 @@ export function assertRunnable(
   if (unmet.length > 0) {
     throw new TaskAdmissionError(`task ${task.id} has unmerged dependencies: ${unmet.join(", ")}`);
   }
+}
+
+export function machineFilingAdmissionViolations(
+  task: Task,
+  context: MachineFilingAdmissionContext,
+): string[] {
+  if (task.author_class !== "machine") return [];
+
+  const reasons: string[] = [];
+  if (task.status === "blocked") {
+    reasons.push(
+      `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
+        `task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`,
+    );
+  } else if (task.verify === "human" && !context.releasedIds.has(task.id)) {
+    reasons.push(
+      `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
+        `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,
+    );
+  } else {
+    const unmet = unmetDependencies(context.plan, task, context.isMerged ?? yamlStatusMerged);
+    if (unmet.length > 0) {
+      reasons.push(
+        `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
+          `task ${task.id} has unmerged dependencies: ${unmet.join(", ")}`,
+      );
+    }
+  }
+
+  const exists = context.pathExists ?? (() => false);
+  const existsAtBase = context.pathExistsAtBase ?? (() => false);
+  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path));
+  if (missing.length > 0) {
+    reasons.push(
+      `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +
+        missing.join(", "),
+    );
+  }
+  return reasons;
 }

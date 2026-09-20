@@ -22251,6 +22251,17 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
+  let releasedIdsForAdmission = new Set<string>();
+  if (scope && !offline) {
+    try {
+      const config = (deps.loadConfig ?? loadConfig)();
+      releasedIdsForAdmission = releasedTaskIds(readLedgerRawLines(ledgerPathFor(config)));
+    } catch {
+      // An unreadable ledger releases nothing. That is the safe direction for a machine filing:
+      // it must not become dispatchable by guessing that an operator approved it.
+      releasedIdsForAdmission = new Set<string>();
+    }
+  }
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -22370,6 +22381,17 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // the `--base` pass — for the same reason `blockedDisposition` and `newMonolithIds` are.
         opts.pathExistsAtBase = pathExistsAtBase;
       }
+      // W1-T3843: a machine-authored task is admitted only when the same changed-task filing pass
+      // can show both selector eligibility under the current release ledger and a real declared
+      // file in head or base. This stays scoped: the whole-plan pass must not retroactively refuse
+      // the standing population of older machine-authored records.
+      opts.machineFilingAdmission = {
+        plan,
+        releasedIds: releasedIdsForAdmission,
+        isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
+        pathExists: opts.moduleExists,
+        pathExistsAtBase,
+      };
     }
     let { violations: lintViolations } = lintTask(task, opts);
     // W1-T3814: a plan-only filing is allowed to carry inherited diagnostics, but a newly added

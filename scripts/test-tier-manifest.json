@@ -117,6 +117,7 @@
     "test/a-local-gate-run-has-no-bound-of-its-own.test.ts": 0,
     "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts": 5609,
     "test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts": 2282,
+    "test/machine-filed-task-admission.test.ts": 0,
     "test/a-main-health-escalation-names-the-defect.test.ts": 0,
     "test/a-mandatory-registration-is-not-entanglement.test.ts": 0,
     "test/a-mention-is-not-a-caller.test.ts": 0,
