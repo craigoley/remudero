@@ -1,0 +1,67 @@
+- id: W1-T3822
+  title: "A DIRTY ABANDONED FIX WORKTREE BLOCKS ITS PR'S ONLY REPAIR — the registered-owner recovery correctly refuses a dirty tree, but after it has proved no worker or branch claim remains it records the same decline forever; preserve tracked changes in a recovery ref before resetting and reclaiming that managed owner, then dispatch the ordinary bounded repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/fix-branch-checkout-serialization.test.ts]
+  origin: "fleet-incident#pr-6154-dirty-abandoned-fix-owner-2026-09-19"
+  plan_refs: ["W1-T2952", "W1-T3170"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the core Azure daemon on 2026-09-20. PR #6154 is red and its
+    auto-merge is already armed, so the sweep admits a coverage-ratchet repair on
+    every pass. The registered owner
+    `/home/node/Remudero/worktrees/sweep-W1-T3807-1789857169906` is on the exact
+    run branch and contains four tracked modifications, but no process has that
+    worktree as its cwd. `decideRegisteredFixOwnerRecovery` returns
+    `keep/dirty_worktree` before the ordinary recovery can remove it, so the
+    daemon logs `sweep.fix.checkout_claim_declined` and cannot launch the repair.
+
+    W1-T2952 deliberately made dirty trees non-reclaimable to avoid data loss;
+    that rule remains correct. W1-T3170 later proved how to preserve committed
+    divergence before a normal remove. Neither captures uncommitted, tracked
+    changes. The observed residue is exactly that remaining state: a dead worker's
+    useful but uncommitted repair, permanently blocking the PR that needs another
+    repair worker.
+  design: |
+    Add one strictly narrower recovery arm for a managed, exact-branch owner whose
+    remote head is exact, branch claim and process-cwd census are clear, and whose
+    dirty state contains tracked changes only. Before changing that owner, capture
+    its complete `HEAD`-relative binary diff into an immutable, collision-refusing
+    `refs/rmd-recovery/` commit rooted at the exact local HEAD. Verify that applying
+    the captured change produces the same tree as the owner. Ledger the bounded
+    recovery ref and SHA evidence.
+
+    Only after that verification succeeds, reset the owner to its recorded HEAD,
+    remove it through the existing normal Git worktree removal path, re-read the
+    registration, and let the same level-triggered poll take the existing exclusive
+    claim and dispatch one ordinary repair worker. If a recovery ref cannot be
+    created, any probe is unreadable, the owner has an untracked path, the branch
+    moved, or any process/claim is live, keep the owner exactly as W1-T2952 does:
+    no reset, removal, checkout, or spawn. Do not add a timer, delete a recovery
+    ref, overwrite a ref, force-remove a worktree, or weaken the clean-owner path.
+  acceptance:
+    - claim: "an abandoned managed owner with tracked-only dirty work is preserved in a recovery ref before its PR's fix worktree is reclaimed"
+      proof: "grep: refs/rmd-recovery/ in src/run-task.ts"
+    - claim: "an untracked file, unreadable probe, live claim, or process cwd leaves the dirty owner untouched and dispatches no repair worker"
+      proof: "grep: dirty_recovery_untracked_refused in src/lib/sweep.ts"
+  falsifier: |
+    Reproduce a real managed fix worktree with the live PR head, four tracked edits,
+    no active claim, and no process cwd. Delete the capture-and-verify arm: the
+    focused fixture must return `dirty_worktree` and no repair dispatch occurs.
+    Restore it: the recovery ref must reproduce the dirty tree exactly before the
+    owner is reset and removed, and exactly one repair dispatch follows. Add one
+    untracked file or make the cwd census unreadable: any recovery ref, reset,
+    removal, or worker spawn is a failure.
+  note: |
+    reservation holder is this filing branch, verified by `rmd next-task-id`
+    reserving W1-T3822 on origin before this shard was written; no hand-off is required.
+
+    This targets the managed dirty owner on core PR #6154. The console's
+    `foreign_worktree_path` owner is a separate identity-classification concern;
+    combining it here would weaken the evidence needed before mutating either tree.

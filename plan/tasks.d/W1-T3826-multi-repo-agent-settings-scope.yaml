@@ -1,0 +1,29 @@
+- id: W1-T3826
+  title: "Define durable operator-agent settings scope across multi-repository consoles"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "The daemon settings contract is ledger-local while the console can aggregate multiple repositories. The first console integration correctly refuses to select an arbitrary daemon, but multi-repository operators still need an explicit durable settings scope."
+  design: "Choose and implement an explicit global or per-repository settings scope across the daemon and console, preserve conservative defaults when scope is absent, and expose the selected scope in reads, writes, history, and UI. Never silently persist a global preference to the first configured repository."
+  acceptance:
+    - claim: "multi-repository settings reads preserve scope and do not select an arbitrary daemon"
+      proof: "unit test: keeps multi-repository operator-agent settings scope explicit"
+    - claim: "settings writes target the operator-selected durable scope"
+      proof: "unit test: persists operator-agent settings to the selected repository scope"
+    - claim: "the console labels the durable scope and honest fallback state"
+      proof: "unit test: renders the selected operator-agent settings scope and fallback"
+  risk: high
+  band_meaning: blast-radius
+  origin: human
+  note: |
+    reservation hand-off: run-W1-T3818-1789861944 -> run-PLAN-W1-T3818-1789861944
+    Implement only after W1-T3824 is merged; the dependency is omitted until that task exists on main.
+  files:
+    - src/lib/operator-agent.ts
+    - openapi/daemon.yaml
+    - test/operator-agent.test.ts
+  status: queued
+  attempts: 0

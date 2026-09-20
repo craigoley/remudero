@@ -58,6 +58,7 @@ import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow, type Operato
 import { adaptOperatorAgentProofRows, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal } from "./operator-agent-proof.js";
 import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "./operator-agent-outcomes.js";
 import { verdictCalibrationReport } from "./verdict-calibration.js";
+import { adaptLiveAnalyticsMetrics, emptyLiveAnalyticsMetrics, type LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -159,6 +160,9 @@ export interface AnalyticsSnapshot {
   consoleV1: ConsoleV1Projection;
   /** Bounded routing policy/receipt attribution for the operator console. */
   routingTelemetry: RoutingTelemetrySnapshot;
+  /** Current process-owned queue/provider signals; historical trends remain explicitly uncollected. */
+  queue: LiveAnalyticsMetrics["queue"];
+  provider: LiveAnalyticsMetrics["provider"];
 }
 
 /** A console-v1 metric's provenance, carried explicitly because the console renders it and
@@ -826,6 +830,7 @@ function snapshotFromAccumulator(
       }),
     }),
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
+    ...emptyLiveAnalyticsMetrics(),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -958,6 +963,13 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   Object.freeze(value.consoleV1.operatorAgent.capacity);
   Object.freeze(value.consoleV1.operatorAgent);
   Object.freeze(value.consoleV1);
+  Object.freeze(value.queue.pending);
+  Object.freeze(value.queue.trend);
+  Object.freeze(value.queue);
+  Object.freeze(value.provider.allowance.remaining);
+  Object.freeze(value.provider.allowance.trend);
+  Object.freeze(value.provider.allowance);
+  Object.freeze(value.provider);
   for (const bucket of value.routingTelemetry.buckets) {
     for (const reason of bucket.fallbackReasons) Object.freeze(reason);
     Object.freeze(bucket.fallbackReasons);
@@ -1000,6 +1012,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
       buckets: [],
       daily: [],
     },
+    ...emptyLiveAnalyticsMetrics(),
   });
 }
 
@@ -1134,7 +1147,10 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
  * `GET /v1/analytics` — read-scoped and synchronously served from process-owned state. It cannot
  * start, join or await a union scan because its inline input exposes only the current value.
  */
-export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnapshot }): Route {
+export function buildAnalyticsRoute(deps: {
+  currentSnapshot: () => AnalyticsSnapshot;
+  currentLiveMetrics?: () => LiveAnalyticsMetrics;
+}): Route {
   return {
     method: "GET",
     path: "/v1/analytics",
@@ -1145,7 +1161,11 @@ export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnap
       // before. Named and unrecognised, the request is REFUSED (409) rather than answered with
       // today's shape under a version string the caller never asked for.
       const requestedVersion = new URL(req.url ?? "/", "http://local").searchParams.get("projectionVersion") ?? undefined;
-      const snapshot = deps.currentSnapshot();
+      const base = deps.currentSnapshot();
+      // The analytics cache owns historical refreshes. Live metrics are a separate, already
+      // captured process-owned value, so this handler never starts a refresh or provider read.
+      const live = deps.currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics();
+      const snapshot = { ...base, ...live } as AnalyticsSnapshot;
       const resolution = resolveConsoleV1Projection(snapshot, requestedVersion);
       if (!resolution.ok) {
         sendJson(res, 409, resolution);

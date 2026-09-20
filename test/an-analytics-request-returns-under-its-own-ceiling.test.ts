@@ -251,6 +251,28 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
       buckets: [],
       daily: [],
     },
+    queue: {
+      pending: {
+        state: "not-collected",
+        reason: "no process-owned status snapshot is available",
+      },
+      trend: {
+        state: "not-collected",
+        reason: "live-only signal; historical queue and provider trends are not collected",
+      },
+    },
+    provider: {
+      allowance: {
+        remaining: {
+          state: "not-probed",
+          reason: "no process-owned provider snapshot is available",
+        },
+        trend: {
+          state: "not-collected",
+          reason: "live-only signal; historical queue and provider trends are not collected",
+        },
+      },
+    },
   });
   assert.ok(Object.isFrozen(cold), "the process-owned value is immutable");
   await cache.refresh();
