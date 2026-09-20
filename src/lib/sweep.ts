@@ -5039,6 +5039,40 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
   return activityAt > verdictAt;
 }
 
+export function reviewStatusSupersedesLedgerAttempt(
+  pr: Pick<
+    OpenPrView,
+    | "checksState"
+    | "requiredContextsUnreadable"
+    | "reviewState"
+    | "reviewInputDigest"
+    | "priorReviewAttemptsForInput"
+    | "reviewInputLastAttemptAt"
+    | "reviewVerdictPostedAt"
+    | "reviewPostRefused"
+  >,
+): boolean {
+  const attempts = pr.priorReviewAttemptsForInput;
+  if (
+    pr.checksState !== "green" ||
+    pr.requiredContextsUnreadable === true ||
+    pr.reviewState !== "success" ||
+    pr.reviewInputDigest === undefined ||
+    typeof attempts !== "number" ||
+    !Number.isSafeInteger(attempts) ||
+    attempts < 1 ||
+    pr.reviewPostRefused === true ||
+    pr.reviewVerdictPostedAt === undefined ||
+    pr.reviewInputLastAttemptAt === undefined
+  ) {
+    return false;
+  }
+  const statusAt = Date.parse(pr.reviewVerdictPostedAt);
+  const ledgerAt = Date.parse(pr.reviewInputLastAttemptAt);
+  if (Number.isNaN(statusAt) || Number.isNaN(ledgerAt)) return false;
+  return statusAt > ledgerAt;
+}
+
 /** W1-T3704 — THE REUSE DECISION (design ii-v). A verdict RECORDS what it judged (review.ts); this
  *  decides what a LATER push, orphaning that verdict, is actually owed. Deliberately placed here
  *  and not in review.ts: "the recorded verdict lives with the reviewer and the reuse decision lives
@@ -5532,6 +5566,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
       );
     },
+  },
+  {
+    disposition: "post-review",
+    when: (pr) => reviewStatusSupersedesLedgerAttempt(pr),
+    reason: () =>
+      "review_status_supersedes_ledger_attempt — GitHub reports a dated success strictly later than " +
+      "the latest completed exact-input ledger attempt; re-running the authoritative reviewer before " +
+      "auto-merge",
   },
   {
     // W1-T2860 — GitHub can carry an exact-head remudero-review SUCCESS without the completed
