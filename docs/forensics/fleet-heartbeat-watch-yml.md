@@ -124,10 +124,15 @@ the four scheduled instruments never contend for the same runner window.
 
 ### Base lines 101-123 — ONE ENTRY PER HOST, space-separated…
 
-ONE ENTRY PER HOST, space-separated. `heartbeat-mini` is the mini's and `heartbeat-azure` is
-Azure's. Adding a host is one word here plus `RMD_HEARTBEAT_BRANCH=<that word>` in its cron
-line — and an entry whose branch does not exist yet costs nothing, because absence is silent
-per branch.
+ONE ACTIVE ENTRY PER FLEET HOST, space-separated. `heartbeat-azure` is the only active entry;
+the Mac-mini's `heartbeat-mini` transport is retired and is no longer watched. Adding a host is
+one word here plus `RMD_HEARTBEAT_BRANCH=<that word>` in its cron line — and an entry whose
+branch does not exist yet costs nothing, because absence is silent per branch.
+
+The Mac-mini heartbeat is retired rather than disabled by deleting its remote branch. Its stale
+delivery record is no longer an active finding, and the ref remains inert so the branch reaper
+cannot mistake an operator retirement for disposable state. Re-enable it only by explicitly
+adding `heartbeat-mini` back to this active list and restoring a beat publisher.
 
 THE BARE `heartbeat` NAME IS DELIBERATELY GONE FROM THIS LIST, AND NOTHING WRITES IT ANY MORE.
 It was the mini's until its cron moved to `RMD_HEARTBEAT_BRANCH=heartbeat-mini`; its last beat
@@ -154,10 +159,8 @@ same alarm; its own doc calls that "the alarm working as intended".
 
 W1-T2876: THE BRANCHES THAT MUST HAVE A POLLING DAEMON. The beat already carries
 `daemon_verdict`; the judging step below now escalates on it, but ONLY for a branch named here.
-`heartbeat-mini` reports `daemon_verdict=STALE` correctly and permanently -- the mini is not the
-fleet host and runs no daemon -- so an unconditional arm would fail this job forever on a TRUE
-reading, which is exactly what trains an operator to ignore an alarm. A branch not listed stays
-silent on this arm, the same way a never-installed beat already does.
+`heartbeat-azure` is the only active branch expected to run a daemon. A retired or otherwise
+unlisted branch stays silent on this arm, the same way a never-installed beat already does.
 
 This escalation exists because of a real miss: the judging loop (the `## Read every host beat
 branch and judge each age` step's `run:` body, unchanged by this compaction — see its own inline
