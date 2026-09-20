@@ -190,7 +190,7 @@ test("unit test: the mint prints the generated hand-off line", () => {
     run: reclaimRun(holder, "absent", output),
   });
 
-  assert.equal(reserver.reclaim("W1-T3742"), "created");
+  assert.equal(reserver.reclaim!("W1-T3742"), "created");
   assert.deepEqual(output, [reservationHandoffNoteLine("holder", "filer")]);
 });
 
@@ -202,7 +202,7 @@ test("unit test: the mint's line is the producer's output", () => {
     run: reclaimRun("rmd-id holder branch=holder", "absent", output),
   });
 
-  assert.equal(reserver.reclaim("W1-T3742"), "created");
+  assert.equal(reserver.reclaim!("W1-T3742"), "created");
   assert.equal(output[0], reservationHandoffNoteLine("holder", "filer"));
 });
 
@@ -216,7 +216,7 @@ test("unit test: an unreadable reservation prints no hand-off line", () => {
       : { status: 1, stdout: "", stderr: "reservation unreadable" },
   });
 
-  assert.equal(reserver.reclaim("W1-T3742"), "unknown");
+  assert.equal(reserver.reclaim!("W1-T3742"), "unknown");
   assert.deepEqual(output, []);
 });
 
