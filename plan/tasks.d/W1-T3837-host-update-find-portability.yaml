@@ -8,7 +8,8 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 8.00
-  files: [deploy/host-update.sh, test/agent-history-does-not-fill-the-root-disk.test.ts]
+  files: [deploy/host-update.sh, test/agent-history-does-not-fill-the-root-disk.test.ts,
+          test/the-reclaim-survives-a-find-without-printf.test.ts]
   origin: "preflight#macos-find-printf-2026-09-20"
   plan_refs: ["W1-T3626", "W1-T3612"]
   status: queued
@@ -30,12 +31,17 @@
     the normal reclaim and dry-run paths on the affected host. Do not widen the task into a new
     retention policy or a different cleanup target.
   acceptance:
-    - claim: "agent-history reclaim removes old files, keeps fresh files and credentials, and reports bytes per configured tree on macOS and Linux"
-      proof: "unit test: agent history does not fill the root disk"
-    - claim: "portable metadata enumeration preserves oldest-first removal order"
-      proof: "unit test: oldest first: files are removed in ascending mtime order, not filesystem order"
-    - claim: "dry-run reports the reclaim without deleting the old file and exits successfully"
-      proof: "unit test: --dry-run reports what would free without removing anything"
+    # EACH PROOF NAMES THE NEW FILE, NOT THE SIBLING SUITE. `buildBaseProofDir` copies only the
+    # test/** paths a diff ADDS into the merge-base worktree (addedTestFiles, W1-T3190), so a proof
+    # naming the MODIFIED sibling is re-run at base against the base's own copy of it -- which has
+    # no BSD-find stub -- and passes there on GNU-find CI. proof-discrimination graded exactly that
+    # executed_stale on 61a076b6. Measured on both sides: 3 pass at head, 3 fail at base.
+    - claim: "agent-history reclaim removes old files, keeps fresh files, and reports bytes per tree where find rejects GNU's -printf"
+      proof: "unit test: a find without -printf still reclaims old agent history and reports the bytes freed"
+    - claim: "portable metadata enumeration preserves oldest-first removal order where find rejects -printf"
+      proof: "unit test: a find without -printf still removes oldest first"
+    - claim: "dry-run reports the reclaim without deleting the old file and exits successfully where find rejects -printf"
+      proof: "unit test: a find without -printf still reports a dry run without removing anything"
   falsifier: |
     On macOS, restore the current find -printf producer while leaving the tests and fixtures
     unchanged; the three positive tests above must return to their present failures. On Linux,
