@@ -1,0 +1,21 @@
+id: fb-1789922608262-d7142f
+ts: 2026-09-20T16:43:28.262Z
+raw: "Observed live: a shell-less worker created two task-declared new files
+  beneath directories. The harness reads git status --porcelain -z with Git
+  default untracked mode, receives the directories rather than individual files,
+  classifies those directory entries outside exact file declarations, commits
+  only tracked edits, and strands the task PR red. Preserve the explicit
+  declared-path security boundary while make the status reader enumerate
+  untracked files; prove a declared nested new file is committed and an
+  unrelated nested new file remains uncommitted. The live console T8 run
+  reproduced this and required recovery commit 5322580 after PR 1447 failed
+  typecheck on its omitted route."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
