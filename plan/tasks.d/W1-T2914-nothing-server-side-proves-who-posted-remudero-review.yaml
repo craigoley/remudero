@@ -10,7 +10,9 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§8", "§4A", "§12", "W1-T990", "W1-T2262", "W1-T1040"]
   files: [deploy/github-ruleset-main.json, docs/review-gate.md, docs/operator-guide.md]
-  status: queued
+  status: blocked
+  retirement: retired
+  # RETIRED 2026-09-20 by operator authorization: shared App identity is deliberate; residual exposure is accepted, not fixed.
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-19 (OBSERVED; PARTIAL against W1-T990 — fleet authorship as an

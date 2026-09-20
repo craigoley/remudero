@@ -109,7 +109,9 @@
   origin: "oper#audit-filings-2026-08-04 (audit §1d; second half of the warn-first pair)"
   plan_refs: ["W1-T322", "W1-T277"]
   files: [src/lib/review.ts, test/ships-unwired-floor.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: the current ruling is do-not-flip-yet; re-filing owns any later flip.
   attempts: 0
   note: "verify:human is the load-bearing choice: it is what makes 'the second task has a
     criterion rather than a judgement call' TRUE in practice — the criterion is mechanical, but

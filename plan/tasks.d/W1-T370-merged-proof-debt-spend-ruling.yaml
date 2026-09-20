@@ -100,7 +100,9 @@
   origin: oper#proof-debt-arc-2026-08-05
   plan_refs: ["W1-T369", "W1-T367", "W1-T229"]
   files: [plan/tasks.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: attrition was selected; no bulk proof rewrite is authorized.
   attempts: 0
   note: "verify:human is the load-bearing choice, not a formality. The question is whether to SPEND an
     implementer on 391 rewrites for shipped work, and this repo's standing rule (fb-1785882211812-bafd8f)

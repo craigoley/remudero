@@ -20,7 +20,9 @@
     - docs/README.md
     - docs/docs-index.json
     - plan/tasks.d/W1-T3762-smart-router-luna-routing-telemetry.yaml
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: Luna-first routing and assignment telemetry shipped in #5999.
   attempts: 0
   rationale: |
     OBSERVED in the read-only, rotation-safe production-ledger census (2026-09-18): 326 retained

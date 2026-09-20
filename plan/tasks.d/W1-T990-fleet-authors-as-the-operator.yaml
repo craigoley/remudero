@@ -180,7 +180,9 @@
   origin: "oper#fleet-authors-as-the-operator-2026-08-18"
   plan_refs: ["W1-T204", "W1-T203", "W1-T471"]
   files: [docs/fleet-authoring-identity.md]
-  status: queued
+  status: blocked
+  retirement: retired
+  # RETIRED 2026-09-20 by operator authorization: the fleet already authors as remudero-fleet[bot]; the original premise is false.
   attempts: 0
   note: |
     W1-T204 IS THE CONSUMER, W1-T203 IS THE SIBLING THAT SOLVED THE OTHER HALF. W1-T204 asks for

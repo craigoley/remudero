@@ -12,7 +12,9 @@
     - src/lib/retro.ts
   origin: "operator-session#is-the-shift-left-loop-effective-2026-09-16"
   plan_refs: ["W1-T2288", "W1-T33", "W1-T3709"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: session lessons land at discovery; no session harvester is wanted.
   attempts: 0
   note: |
     MEASURED 2026-09-16. The loop is HEALTHY on every axis except its input:

@@ -184,7 +184,9 @@
   origin: "feedback#fb-1785896975009-9f6c88"
   plan_refs: ["W1-T323", "W1-T322", "W1-T1017", "W1-T1118", "W1-T1014", "W1-T401"]
   files: [plan/tasks.d/W1-T1120-flip-threshold-unmeetable-at-small-n.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: the denominator and test-only-export ruling are recorded.
   attempts: 0
   note: |
     THIS TASK IS SATISFIED BY ITS OWN TEXT ON MERGE, AND THAT IS DELIBERATE RATHER THAN A DODGE —

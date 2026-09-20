@@ -12,7 +12,9 @@
     - docs/recon/openweight-bash-capability-decision.md
   origin: "operator-session#open-weight-resequence-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3569", "W1-T3570"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: the check-runner-not-Bash decision is recorded and implemented.
   attempts: 0
   note: |
     reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-bash-decision-1789389121907

@@ -123,8 +123,12 @@
   risk: high
   origin: "oper#byo-subscription-ruling-2026-08-18"
   plan_refs: ["W1-T431", "W1-T439", "W12-T1"]
-  files: [DECISIONS.md, MASTER-PLAN.md, test/licence-boundary.test.ts]
-  status: queued
+  # RETIREMENT RECORD: the original implementation surface is preserved verbatim in note: below;
+  # this closed record no longer declares files a worker could write.
+  files: [plan/tasks.d/W1-T992-byo-subscription-ruling.yaml]
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: the BYO-subscription ruling is recorded in DECISIONS.md.
   attempts: 0
   note: |
     THIS TASK PARKS, DELIBERATELY, AND THE GATE IS NAMED. `DECISIONS_LOG_PATH` is "DECISIONS.md" in
