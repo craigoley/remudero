@@ -1098,8 +1098,26 @@ reclaim_dead_inflight_locks() {
 # already read by worker_lines above) and returns the single oldest age observed, in seconds — the
 # wait that would have been JUST enough to cover the oldest thing this run actually saw, a fact
 # about THIS run rather than a property of the distribution above. Best-effort throughout: a lock
-# this shell cannot parse a `startedAt` out of, or a `date` that cannot parse it, is skipped rather
-# than aborting the refusal it feeds.
+# this shell cannot parse a `startedAt` out of, or a date implementation that cannot parse it, is
+# skipped rather than aborting the refusal it feeds. The fleet's Mac host has BSD date while the
+# Linux container host has GNU date, so try both dialects and never turn an unparseable timestamp
+# into a healthy-looking zero.
+epoch_of_started_at() {
+  local iso="$1" out trimmed
+  [ -n "${iso}" ] || return 0
+  if out="$(date -u -d "${iso}" +%s 2>/dev/null)"; then
+    printf '%s' "${out}"
+    return 0
+  fi
+  trimmed="${iso%Z}"
+  trimmed="${trimmed%.*}"
+  if out="$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "${trimmed}" +%s 2>/dev/null)"; then
+    printf '%s' "${out}"
+    return 0
+  fi
+  return 0
+}
+
 oldest_inflight_age_s() {
   local max=0 f started_at started_epoch age now_epoch wpid wage wargs
   now_epoch="$(date -u +%s 2>/dev/null || true)"
@@ -1109,7 +1127,7 @@ oldest_inflight_age_s() {
       [ -e "${f}" ] || continue
       started_at="$(lock_started_at_field "${f}")"
       [ -n "${started_at}" ] || continue
-      started_epoch="$(date -u -d "${started_at}" +%s 2>/dev/null || true)"
+      started_epoch="$(epoch_of_started_at "${started_at}")"
       [ -n "${started_epoch}" ] || continue
       age=$((now_epoch - started_epoch))
       if [ "${age}" -gt "${max}" ] 2>/dev/null; then max="${age}"; fi
@@ -1232,20 +1250,29 @@ rm -f "${PAUSE_FILE}"
 echo "recycle-container: pause cleared — the new container must not come up paused"
 
 echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
-docker run -d --name "${CONTAINER_NAME}" \
-  --restart=on-failure:5 \
-  --cap-drop ALL \
-  --security-opt seccomp=unconfined \
-  --security-opt apparmor=unconfined \
-  --security-opt systempaths=unconfined \
-  --user 1000:1000 \
-  "${RUN_ENV_ARGS[@]}" \
-  -v "${STATE_DIR}:${STATE_MOUNT_DEST}" \
-  -v "${CRED_DIR}:${CRED_MOUNT_DEST}" \
-  "${CODEX_MOUNT_ARGS[@]}" \
-  "${CONTAINER_CONFIG_MOUNT_ARGS[@]}" \
-  "${REF}" \
-  ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target >/dev/null
+# Bash 3.2 treats an empty array as unset under `set -u`, even when it was initialized with `=()`.
+# Build one non-empty argv instead: the mandatory daemon/runtime arguments keep its expansion safe,
+# while optional mounts are appended only when their host directories actually exist.
+DOCKER_RUN_ARGS=(
+  -d --name "${CONTAINER_NAME}"
+  --restart=on-failure:5
+  --cap-drop ALL
+  --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined
+  --security-opt systempaths=unconfined
+  --user 1000:1000
+  "${RUN_ENV_ARGS[@]}"
+  -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
+  -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
+)
+if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
+fi
+if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${CONTAINER_CONFIG_MOUNT_ARGS[@]}")
+fi
+DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
+docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────
 # `docker inspect --format '{{.Image}}'` against the id captured in section 4 is the only proof this
