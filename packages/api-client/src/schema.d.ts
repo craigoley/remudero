@@ -294,12 +294,19 @@ export interface components {
       enabled: boolean;
       confidenceThreshold: number;
     };
+    /** Settings are durable per repository; the console must select the repository explicitly. */
+    OperatorAgentSettingsScope: {
+      kind: "repository";
+      repository: string;
+    };
     OperatorAgentSettingsRequest: {
       settings: OperatorAgentSettings;
+      scope?: OperatorAgentSettingsScope;
     };
     OperatorAgentSettingsResult: {
       settings: OperatorAgentSettings;
       source: "ledger" | "default";
+      scope?: OperatorAgentSettingsScope;
       updatedAt?: string;
     };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */

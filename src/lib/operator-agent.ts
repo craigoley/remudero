@@ -79,9 +79,15 @@ export interface OperatorAgentSettings {
   confidenceThreshold: number;
 }
 
+export interface OperatorAgentSettingsScope {
+  kind: "repository";
+  repository: string;
+}
+
 export type OperatorAgentSettingsRead = {
   settings: OperatorAgentSettings;
   source: "ledger" | "default";
+  scope?: OperatorAgentSettingsScope;
 };
 
 type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { now?: () => number };
@@ -89,7 +95,7 @@ type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { no
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
 type ProposalDecisionInput = { proposalId: string; decision: OperatorAgentDecision; note?: string };
 type ProposalOutcomeInput = { proposalId: string; outcome: OperatorAgentOutcome };
-type OperatorAgentSettingsInput = { settings: OperatorAgentSettings };
+type OperatorAgentSettingsInput = { settings: OperatorAgentSettings; scope?: OperatorAgentSettingsScope };
 
 const MAX_ID = 160;
 const MAX_REPO = 200;
@@ -125,6 +131,11 @@ function validateSettings(value: unknown): OperatorAgentSettings | null {
   if (!isRecord(value) || typeof value.enabled !== "boolean") return null;
   if (typeof value.confidenceThreshold !== "number" || !Number.isFinite(value.confidenceThreshold) || value.confidenceThreshold < MIN_CONFIDENCE_THRESHOLD || value.confidenceThreshold > MAX_CONFIDENCE_THRESHOLD) return null;
   return { enabled: value.enabled, confidenceThreshold: Number(value.confidenceThreshold.toFixed(3)) };
+}
+
+function validateSettingsScope(value: unknown): OperatorAgentSettingsScope | null {
+  if (!isRecord(value) || value.kind !== "repository" || !boundedString(value.repository, MAX_REPO)) return null;
+  return { kind: "repository", repository: value.repository.trim() };
 }
 
 function validateEvidence(value: unknown): OperatorAgentEvidence[] | null {
@@ -213,6 +224,11 @@ function validateSettingsInput(body: unknown): { error: string } | OperatorAgent
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   const settings = validateSettings(body.settings);
   if (!settings) return { error: "settings.enabled and settings.confidenceThreshold must be valid" };
+  if (body.scope !== undefined) {
+    const scope = validateSettingsScope(body.scope);
+    if (!scope) return { error: "scope must identify a repository" };
+    return { settings, scope };
+  }
   return { settings };
 }
 
@@ -229,18 +245,34 @@ function readSettingsRows(ledgerPath: string): Array<Record<string, unknown>> {
   return readLedgerUnionRecordsSync(dirname(ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP }).rows;
 }
 
-function settingsFromRow(row: Record<string, unknown>): OperatorAgentSettings | null {
+function settingsFromRow(row: Record<string, unknown>, requestedScope?: OperatorAgentSettingsScope): { settings: OperatorAgentSettings; scope?: OperatorAgentSettingsScope } | null {
   if (row.step !== OPERATOR_AGENT_SETTINGS_STEP) return null;
-  return validateSettings(row.settings);
+  const settings = validateSettings(row.settings);
+  if (!settings) return null;
+  const scope = row.scope === undefined ? undefined : validateSettingsScope(row.scope);
+  if (scope === null) return null;
+  if (requestedScope && (scope === undefined || scope.repository !== requestedScope.repository || scope.kind !== requestedScope.kind)) return null;
+  if (requestedScope) return { settings, scope: requestedScope };
+  return { settings, ...(scope ? { scope } : {}) };
 }
 
-export function readOperatorAgentSettings(deps: OperatorAgentRouteDependencies): OperatorAgentSettingsRead {
-  let settings: OperatorAgentSettings | undefined;
+export function readOperatorAgentSettings(deps: OperatorAgentRouteDependencies, requestedScope?: OperatorAgentSettingsScope): OperatorAgentSettingsRead {
+  let result: { settings: OperatorAgentSettings; scope?: OperatorAgentSettingsScope } | undefined;
   for (const row of readSettingsRows(deps.ledgerPath)) {
-    const candidate = settingsFromRow(row);
-    if (candidate) settings = candidate;
+    const candidate = settingsFromRow(row, requestedScope);
+    if (candidate) result = candidate;
   }
-  return settings ? { settings, source: "ledger" } : { settings: { ...OPERATOR_AGENT_DEFAULT_SETTINGS }, source: "default" };
+  return result
+    ? { settings: result.settings, source: "ledger", ...(result.scope ? { scope: result.scope } : {}) }
+    : { settings: { ...OPERATOR_AGENT_DEFAULT_SETTINGS }, source: "default", ...(requestedScope ? { scope: requestedScope } : {}) };
+}
+
+function requestedSettingsScope(req: { url?: string }): { scope?: OperatorAgentSettingsScope; error?: string } {
+  const url = new URL(req.url ?? "/", "http://rmd.local");
+  const repository = url.searchParams.get("repository");
+  if (repository === null) return {};
+  const scope = validateSettingsScope({ kind: "repository", repository });
+  return scope ? { scope } : { error: "repository must identify a repository" };
 }
 
 function proposalFromRow(row: Record<string, unknown>): OperatorAgentProposal | null {
@@ -390,7 +422,14 @@ export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDepe
     method: "GET",
     path: "/v1/operator-agent/settings",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, readOperatorAgentSettings(deps)),
+    handler: (req, res) => {
+      const requested = requestedSettingsScope(req);
+      if (requested.error) {
+        sendJson(res, 400, { error: "invalid_request", detail: requested.error });
+        return;
+      }
+      sendJson(res, 200, readOperatorAgentSettings(deps, requested.scope));
+    },
   };
 }
 
@@ -405,9 +444,10 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
       const updatedAt = clockFromMillisFn(deps.now).iso();
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_SETTINGS_STEP, "operator-agent-settings", bearerTokenId(req), {
         settings: input.settings,
+        ...(input.scope ? { scope: input.scope } : {}),
         updatedAt,
       });
-      sendJson(res, 200, { settings: input.settings, source: "ledger", updatedAt });
+      sendJson(res, 200, { settings: input.settings, source: "ledger", ...(input.scope ? { scope: input.scope } : {}), updatedAt });
     }),
   };
 }

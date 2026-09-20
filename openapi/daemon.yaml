@@ -947,12 +947,26 @@ components:
           minimum: 0.9
           maximum: 0.99
 
+    OperatorAgentSettingsScope:
+      type: object
+      description: Settings are durable per repository; the console must select the repository explicitly.
+      required: [kind, repository]
+      properties:
+        kind:
+          type: string
+          enum: [repository]
+        repository:
+          type: string
+          minLength: 1
+
     OperatorAgentSettingsRequest:
       type: object
       required: [settings]
       properties:
         settings:
           $ref: "#/components/schemas/OperatorAgentSettings"
+        scope:
+          $ref: "#/components/schemas/OperatorAgentSettingsScope"
 
     OperatorAgentSettingsResult:
       type: object
@@ -963,6 +977,8 @@ components:
         source:
           type: string
           enum: [ledger, default]
+        scope:
+          $ref: "#/components/schemas/OperatorAgentSettingsScope"
         updatedAt:
           type: string
           format: date-time
@@ -1560,6 +1576,14 @@ paths:
       description: Returns the last valid ledger settings row, or explicit conservative defaults when none exists.
       security:
         - bearerRead: []
+      parameters:
+        - name: repository
+          in: query
+          required: false
+          description: Explicit repository scope. When present, only rows for this repository are read.
+          schema:
+            type: string
+            minLength: 1
       responses:
         "200":
           description: Operator-agent settings.
