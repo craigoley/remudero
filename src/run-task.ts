@@ -1005,6 +1005,7 @@ import {
   type RiskJudgeInput,
   type RiskJudgeVerdict,
 } from "./lib/risk-judge.js";
+import { evaluateRiskJudgeDisposition } from "./lib/risk-judge-eval.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import {
   buildSkillEffectivenessReport,
@@ -18061,6 +18062,25 @@ export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDe
   const rate = replayPassRate(results);
   log(`replay-goldens: ${rate.passed}/${rate.total} golden(s) passed; ${results.length} line(s) recorded to ${ledgerPath} (run ${runId}).`);
   return results.every((r) => r.passed) ? 0 : 1;
+}
+
+/** Offline, side-effect-free risk-judge disposition replay. It never uses the production routing
+ * path; the fixture corpus and the controller's own pure seams are the only inputs. */
+export async function evaluateRiskJudgeDispositionCommand(rest: string[]): Promise<number> {
+  const corpusFlag = rest.indexOf("--corpus");
+  if (corpusFlag >= 0 && !rest[corpusFlag + 1]) {
+    console.error("risk-judge-eval: --corpus needs a directory");
+    return 2;
+  }
+  const corpus = corpusFlag >= 0 ? rest[corpusFlag + 1]! : join(repoRoot, "test", "fixtures", "risk-judge-dispositions");
+  try {
+    const report = await evaluateRiskJudgeDisposition(corpus);
+    console.log(JSON.stringify(report, null, 2));
+    return report.metrics.agreement === report.metrics.accepted ? 0 : 1;
+  } catch (error) {
+    console.error(`risk-judge-eval: ${String((error as Error)?.message ?? error)}`);
+    return 2;
+  }
 }
 
 export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
@@ -41353,6 +41373,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2296: a deterministic, plain-text narration of a LEDGER WINDOW — between two ISO-8601 instants, what did the fleet decide, in what order, and for what recorded reasons. Reuses buildReceipt's discipline (src/lib/ledger-replay.ts's buildReplay) over a WINDOW instead of a run: reads the archive∪live UNION (lib/ledger-grep.ts's resolveLedgerUnion, never the live ledger.ndjson alone), filters to [since, until] inclusive, orders by each row's own ts, and renders every row's own outcome/reason fields — a field the row does not carry prints `absent (no \"<field>\" field on this row)`, never a fabricated value. --task narrows to one task id; --step narrows to one step-name prefix (a family, e.g. `automerge.`). A partial ledger corpus (zero archives, or a rotation found and unreadable) is REFUSED, never narrated as a shorter story. READ-ONLY: writes no ledger line, no state file, posts nothing.",
   },
   {
+    name: "risk-judge-eval",
+    syntax: "rmd risk-judge-eval [--corpus <dir>]",
+    summary: "Replay risk-judge disposition fixtures offline and report calibration metrics.",
+    detail: "W1-T3800: read the privacy-safe disposition corpus, reuse the existing deterministic controller, and emit a machine-readable agreement/fallback/false-stop report. No LLM, network, ledger, repair, debt, or production routing; a missing corpus is a refusal, not a clean zero.",
+  },
+  {
     name: "authority",
     syntax: "rmd authority [--json]",
     summary: "Every external write the fleet may make without the operator, its gate, and its last firing.",
@@ -42283,6 +42309,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return replayCommand(arg, rest[1], rest.slice(2), { usage: USAGE, commandSyntax: commandSyntax("replay") });
     },
   ],
+  ["risk-judge-eval", async (rest) => await evaluateRiskJudgeDispositionCommand(rest)],
   ["authority", (rest) => authorityCommand(rest)],
   ["lint-plan", async (rest) => await lintPlanCommand(rest)],
   ["plan-reconcile", async (rest) => await planReconcileCommand(rest)],
