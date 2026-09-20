@@ -647,6 +647,78 @@ test("W1-T3170 an owner already contained by the remote is a salvage no-op, not 
   }
 });
 
+test("W1-T3825: a clean exact run worktree reaches the existing registered-owner recovery", () => {
+  const root = tmp("rmd-fbcs-run-owner-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const taskId = "W1-T3825";
+    const branch = `run-${taskId}-1789874500000`;
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const remoteSha = sha(repoDir, branch);
+    const worktreesRoot = join(root, "worktrees");
+    const ownerPath = join(worktreesRoot, branch);
+    mkdirSync(worktreesRoot, { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+
+    const snapshot = captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot,
+      ownerPath,
+      taskId,
+      branch,
+      expectedRemoteSha: remoteSha,
+      observedRemoteSha: remoteSha,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    }, {
+      readClaim: () => "clear",
+      processCensus: () => ({ state: "clear", scanned: 1 }),
+    });
+
+    assert.equal(snapshot.pathState, "managed", "a daemon-created run worktree must reach the existing safety checks");
+    assert.equal(snapshot.attachmentState, "exact");
+    assert.equal(snapshot.treeState, "clean");
+    assert.deepEqual(decideRegisteredFixOwnerRecovery(snapshot), { kind: "reclaim-contained" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3825: only an exact numeric run or sweep name is eligible under the configured worktrees root", () => {
+  const root = tmp("rmd-fbcs-run-owner-name-");
+  try {
+    const worktreesRoot = join(root, "worktrees");
+    mkdirSync(worktreesRoot, { recursive: true });
+    const taskId = "W1-T3825";
+    const candidates = [
+      `run-${taskId}-not-an-epoch`,
+      `run-W1-T3826-1789874500000`,
+      `run-${taskId}-1789874500000-child`,
+      `manual-${taskId}-1789874500000`,
+    ];
+    for (const name of candidates) {
+      const ownerPath = join(worktreesRoot, name);
+      mkdirSync(ownerPath);
+      const snapshot = captureRegisteredFixOwnerSnapshot({
+        repoDir: root,
+        worktreesRoot,
+        ownerPath,
+        taskId,
+        branch: `run-${taskId}-1789874500000`,
+        expectedRemoteSha: "a".repeat(40),
+        inflightDir: join(root, "inflight"),
+        claimKey: "fixture",
+      });
+      assert.equal(snapshot.pathState, "foreign", `${name} must not enter recovery`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T3170 a remote SHA git cannot resolve reads unknown and stands the salvage down", () => {
   const root = tmp("rmd-fbcs-owner-unreadable-");
   try {
