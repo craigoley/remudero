@@ -12,7 +12,7 @@ raw: "Observed live: a shell-less worker created two task-declared new files
   typecheck on its omitted route."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/6231
 summary:
