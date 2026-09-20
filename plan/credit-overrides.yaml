@@ -25,8 +25,20 @@
 #     reason: "..."            why — required; an unreasoned ruling is the shape this replaces
 #     author_class: operator   required; un-crediting is a person's ruling, never a machine's
 #
-# EMPTY BY DESIGN. W1-T2970 builds the place to record a ruling; deciding WHICH tasks to un-credit
-# is the operator's, one row at a time. The measurement that motivated this — up to 23 tasks
-# credited by a pull request on their own run branch — is an upper bound, not a verdict on any of
-# them.
-[]
+# EMPTY BY DEFAULT, NOT EMPTY FOREVER. W1-T2970 built the place to record a ruling; deciding WHICH
+# tasks to un-credit is the operator's, one row at a time. The measurement that motivated the empty
+# file at filing — up to 23 tasks credited by a pull request on their own run branch — was an upper
+# bound, not a verdict on any of them; the one row below is the first that has since been ruled on.
+- task: PORTAL-T19
+  pr: 107
+  action: remove-credit
+  reason: >
+    W1-T3873, OBSERVED 2026-09-20. remudero-site PR 107's whole diff introduced the plan shard for
+    PORTAL-T19 — a plan-only filing, never an implementation. It merged, the credit-backfill rung
+    read `verdict.merged` for PORTAL-T19 off that merge, and no `run.start` for PORTAL-T19 exists
+    anywhere: nothing was ever built. The credit was read out of the wrong repository's history in
+    the first place (both git-evidence readers were rooted in the engine checkout regardless of
+    which target the pass was for, so a bare PR number could answer for any repo's history); this
+    row corrects the one pairing it produced. PORTAL-T12's own merged credit is genuine and is a
+    different pairing, so it is untouched by this row.
+  author_class: operator
