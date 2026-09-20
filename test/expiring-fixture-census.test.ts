@@ -16,8 +16,10 @@ const {
   AGED_FIELDS,
   EXEMPT_MARKER,
   MARGIN_DAYS,
+  assertFieldListComplete,
   assertFieldsStillAged,
   censusExpiringFixtures,
+  discoverClockAgedFields,
   emitCiReport,
   encodeAnnotation,
   formatReport,
@@ -27,7 +29,9 @@ const {
     AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
     EXEMPT_MARKER: string;
     MARGIN_DAYS: number;
+    assertFieldListComplete: (o: { files: string[]; readFile: (p: string) => string; agedFields?: ReadonlyArray<{ field: string }> }) => unknown;
     assertFieldsStillAged: (readFile?: (p: string) => string) => void;
+    discoverClockAgedFields: (o: { files: string[]; readFile: (p: string) => string }) => Array<{ field: string; source: string; line: number; waived: boolean }>;
     censusExpiringFixtures: (o: {
       files: string[];
       readFile: (p: string) => string;
@@ -64,6 +68,7 @@ const {
       now?: () => number;
       log?: (message: string) => void;
       assertAged?: () => void;
+      assertComplete?: () => void;
       recordedPopulationByFile?: Record<string, number>;
     }) => number;
   };
@@ -91,6 +96,40 @@ function tree(files: Record<string, string>) {
 }
 
 const at = (msFromNow: number) => new Date(NOW + msFromNow).toISOString();
+
+test("W1-T3838: an unlisted clock-aged field fails the census", () => {
+  const source = `const expiresAt = Date.parse(proposal.expiresAt);\nif (expiresAt <= now) return;`;
+
+  assert.throws(
+    () => assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => source, agedFields: [] }),
+    /INCOMPLETE TABLE.*expiresAt/s,
+  );
+});
+
+test("W1-T3838: the completeness failure names the field and its source", () => {
+  const source = `const expiresAt = Date.parse(proposal.expiresAt);\nif (expiresAt <= now) return;`;
+
+  assert.throws(
+    () => assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => source, agedFields: [] }),
+    /"expiresAt" ages against the clock at src\/lib\/operator-agent\.ts:1/,
+  );
+});
+
+test("W1-T3838: a waived field passes and an unwaived one still fails", () => {
+  const waived = `// ${EXEMPT_MARKER} -- display timestamp, not a disposition input\nconst expiresAt = Date.parse(proposal.expiresAt);\nif (expiresAt <= now) return;`;
+  const unwaived = `const dueAt = Date.parse(task.dueAt);\nif (dueAt <= now) return;`;
+
+  assert.doesNotThrow(() =>
+    assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => waived, agedFields: [] }),
+  );
+  assert.throws(
+    () => assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => unwaived, agedFields: [] }),
+    /"dueAt"/,
+  );
+  assert.deepEqual(discoverClockAgedFields({ files: ["src/lib/operator-agent.ts"], readFile: () => waived }), [
+    { field: "expiresAt", source: "src/lib/operator-agent.ts", line: 2, expr: "proposal.expiresAt", waived: true },
+  ]);
+});
 
 test("W1-T3272: a fixture about to cross its threshold is reported, and the report names the date it goes red", () => {
   // 13 days old against a 14-day rung: still fresh today, red tomorrow. This is the shape that took
@@ -180,6 +219,7 @@ test("W1-T3272: main reads the real test-file population and sweep staleDays pol
     now: () => NOW,
     log: (message) => output.push(message),
     assertAged: () => undefined,
+    assertComplete: () => undefined,
     recordedPopulationByFile: { "test/a.test.ts": 1 },
   });
 
