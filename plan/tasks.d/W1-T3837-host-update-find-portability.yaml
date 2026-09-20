@@ -1,4 +1,4 @@
-- id: W1-T3836
+- id: W1-T3837
   title: "GNU-only find metadata breaks agent-history reclaim on macOS — deploy/host-update.sh uses find -printf, so the newly merged W1-T3626 reclaim leaves old history in place and exits the dry-run path non-zero"
   repo: remudero
   depends_on: [W1-T3626]
