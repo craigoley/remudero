@@ -48,7 +48,12 @@
  */
 
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
-import { fiveLedgerBackedHistoricalSeries, type LedgerTimeSeries } from "./analytics-timeseries.js";
+import {
+  buildAnalyticsTimeSeries,
+  createHistoricalSeriesAccumulator,
+  type HistoricalSeriesAccumulator,
+  type LedgerTimeSeries,
+} from "./analytics-timeseries.js";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { openLedgerUnion } from "./ledger-union.js";
@@ -164,6 +169,8 @@ export interface AnalyticsSnapshot {
   /** Current process-owned queue/provider signals; historical trends remain explicitly uncollected. */
   queue: LiveAnalyticsMetrics["queue"];
   provider: LiveAnalyticsMetrics["provider"];
+  /** Five bounded ledger-backed series; queue and provider trends remain live-only. */
+  timeSeries: LedgerTimeSeries[];
 }
 
 /** A console-v1 metric's provenance, carried explicitly because the console renders it and
@@ -402,6 +409,7 @@ interface AnalyticsAccumulator {
     decisions: OperatorDecisionLedgerRow[];
     capacity: OperatorAgentCapacityLedgerRow[];
   };
+  historicalSeries: HistoricalSeriesAccumulator;
 }
 
 type RoutingAssignment = {
@@ -461,6 +469,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     routingTelemetry: routingTelemetryAccumulator(),
     operatorAgentRows: { proof: [], decisions: [], capacity: [] },
+    historicalSeries: createHistoricalSeriesAccumulator(),
   };
 }
 
@@ -715,6 +724,7 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
 
 /** Fold one logical ledger event into all four analytics questions in one pass. */
 function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
+  acc.historicalSeries.add(line);
   const selectedOperatorAgentRow = operatorAgentRow(line);
   if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
   else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
@@ -832,6 +842,7 @@ function snapshotFromAccumulator(
     }),
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
     ...emptyLiveAnalyticsMetrics(),
+    timeSeries: buildAnalyticsTimeSeries(acc.historicalSeries, nowIso),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -928,6 +939,12 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   Object.freeze(value.workersByLaneModel);
   for (const entry of value.taskDurationsMs) Object.freeze(entry);
   Object.freeze(value.taskDurationsMs);
+  for (const series of value.timeSeries) {
+    for (const point of series.points) Object.freeze(point);
+    Object.freeze(series.points);
+    Object.freeze(series);
+  }
+  Object.freeze(value.timeSeries);
   for (const bucket of value.workerDurationsByLane) Object.freeze(bucket);
   Object.freeze(value.workerDurationsByLane);
   for (const metric of value.consoleV1.metrics) Object.freeze(metric);
@@ -1014,6 +1031,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
       daily: [],
     },
     ...emptyLiveAnalyticsMetrics(),
+    timeSeries: buildAnalyticsTimeSeries([], null),
   });
 }
 
