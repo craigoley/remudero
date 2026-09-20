@@ -405,6 +405,135 @@ export interface components {
       experimentId: string;
       rollback: OperatorAgentExperimentRollback;
     };
+    PromotionScope: {
+      repo: string;
+      /** The unit canary exposure is serialized against; at most one active promotion may hold a given (repo, policyScope) pair. */
+      policyScope: string;
+      taskType?: string;
+      lane?: string;
+    };
+    PromotionGuardMetric: {
+      metricName: string;
+      unit: string;
+      direction: "max" | "min";
+      abortThreshold: number;
+    };
+    PromotionRollback: {
+      plan: string;
+      reason: string;
+      receipt?: string;
+    };
+    PromotionRecord: {
+      version: "experiment-promotion-v1";
+      promotionId: string;
+      /** Links to the experiment-v1 record (W1-T3853) this promotion progresses. */
+      experimentId?: string;
+      candidate: string;
+      baseline: string;
+      scope: PromotionScope;
+      comparisonPopulation: string;
+      denominatorFloor: number;
+      observationWindow: {
+        start: string;
+        end: string;
+      };
+      guardMetrics: (PromotionGuardMetric)[];
+      /** The bounded maximum fraction of traffic the canary may take. */
+      maxExposure: number;
+      owner: string;
+      expiresAt: string;
+      rollback: PromotionRollback;
+      createdAt: string;
+      state: "proposed";
+    };
+    /** The bounded per-case receipt submitted and persisted: whether the candidate and baseline agreed. The raw candidate/baseline outputs replayPromotion() computes are not part of the durable wire contract -- they may be arbitrarily large or unbounded -- so only the comparison result is recorded. */
+    PromotionReplayResult: {
+      caseId: string;
+      matched: boolean;
+    };
+    PromotionReplaySummary: {
+      version: "experiment-promotion-v1";
+      corpusSize: number;
+      matched: number;
+      mismatched: number;
+      deterministic: boolean;
+      sideEffectFree: true;
+      results: (PromotionReplayResult)[];
+    };
+    PromotionGuardObservation: {
+      metricName: string;
+      value: number;
+      denominator: number;
+      freshness: "verified" | "stale" | "unavailable";
+      comparisonPopulation: string;
+      observedAt: string;
+    };
+    PromotionGuardEvaluation: {
+      state: "ready" | "unmeasurable" | "regressed";
+      reasons: (string)[];
+      breachedMetrics: (string)[];
+    };
+    OperatorAgentPromotionHistory: {
+      version: "experiment-promotion-v1";
+      promotionId: string;
+      experimentId?: string;
+      candidate: string;
+      baseline: string;
+      scope: PromotionScope;
+      comparisonPopulation: string;
+      denominatorFloor: number;
+      observationWindow: {
+        start: string;
+        end: string;
+      };
+      guardMetrics: (PromotionGuardMetric)[];
+      maxExposure: number;
+      owner: string;
+      expiresAt: string;
+      rollback: PromotionRollback;
+      createdAt: string;
+      state: "proposed" | "replayed" | "approved" | "shadow" | "canary" | "observing" | "promoted" | "neutral" | "regressed" | "rolled_back" | "expired" | "unmeasurable";
+      events: ({
+        kind: "replay" | "decision" | "advance" | "rollback";
+        at: string;
+        state: string;
+        replay?: PromotionReplaySummary;
+        decision?: "approved";
+        advance?: {
+          target: "shadow" | "canary" | "observing" | "promoted";
+          guard: PromotionGuardEvaluation;
+          exposure?: number;
+        };
+        rollback?: PromotionRollback;
+        note?: string;
+      })[];
+    };
+    OperatorAgentPromotionList: {
+      promotions: (OperatorAgentPromotionHistory)[];
+      source: "ledger";
+    };
+    OperatorAgentPromotionRegistration: {
+      promotion: PromotionRecord;
+    };
+    OperatorAgentPromotionReplayRequest: {
+      promotionId: string;
+      replay: PromotionReplaySummary;
+    };
+    OperatorAgentPromotionDecisionRequest: {
+      promotionId: string;
+      decision: "approved";
+      note?: string;
+    };
+    OperatorAgentPromotionAdvanceRequest: {
+      promotionId: string;
+      target: "shadow" | "canary" | "observing" | "promoted";
+      observations?: (PromotionGuardObservation)[];
+      exposure?: number;
+    };
+    OperatorAgentPromotionRollbackRequest: {
+      promotionId: string;
+      rollback: PromotionRollback;
+    };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
     SkillEntry: {
       /** The skill's identity -- its filename minus `.yaml`. */
@@ -678,6 +807,73 @@ export interface paths {
     };
   };
   "/v1/operator-agent/experiments/rollback": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/promotions": {
+    get: {
+      responses: {
+          "200": OperatorAgentPromotionList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "201": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/promotions/replay": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/promotions/decision": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/promotions/advance": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/promotions/rollback": {
     post: {
       responses: {
           "200": undefined;
