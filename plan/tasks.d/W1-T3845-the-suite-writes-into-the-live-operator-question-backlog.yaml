@@ -1,4 +1,4 @@
-- id: W1-T3842
+- id: W1-T3845
   title: "THE SUITE WRITES INTO THE LIVE OPERATOR QUESTION BACKLOG — appendQuestion resolves plan/questions.ndjson from a caller-supplied root, 92 test files drive it with the acme/remudero fixture host, and on any host that runs both the tests and the daemon the operator's real §2 backlog fills with questions about pull requests that do not exist"
   repo: remudero
   depends_on: []
@@ -67,21 +67,33 @@
     NOT IN SCOPE: the §2 backlog's semantics, the sweep's reading of it, and the answer path.
   acceptance:
     - claim: "a question write that would land in the repository's real plan/questions.ndjson is refused under test"
-      proof: "unit test: W1-T3842: a question write to the live store is refused under test"
+      proof: "unit test: W1-T3845: a question write to the live store is refused under test"
     - claim: "a question whose pull request identity is missing is refused instead of rendering PR #undefined"
-      proof: "unit test: W1-T3842: a question with no pull request identity does not render"
+      proof: "unit test: W1-T3845: a question with no pull request identity does not render"
     - claim: "a question written to a temporary root still succeeds exactly as before"
-      proof: "unit test: W1-T3842: a temporary-root question write is unaffected"
+      proof: "unit test: W1-T3845: a temporary-root question write is unaffected"
   falsifier: |
     Drive `appendQuestion` with the repository root under test: it must refuse. Remove the guard
     and the line lands in the live file — the defect, reproduced. Construct a question with no PR
     identity: it must refuse rather than emit `#undefined`. Write to a tmpdir root and the
     existing behaviour must be byte-identical, or the guard has caught the wrong population.
   note: |
-    RESERVATION: could not be claimed — see W1-T3841, which is that defect. `rmd next-task-id
-    --no-reserve` named W1-T3840 as next; this is the third of three filed together. Both
-    scope-time checks read clear at filing time. AN OPERATOR MUST CONFIRM THE CLAIM before a
-    build starts.
+    RESERVATION: could not be claimed, and a race was then LOST because of it. `rmd next-task-id
+    --reserve` pushes `refs/rmd-id/<id>`, and this environment's egress proxy refuses every
+    `git-receive-pack` update outside `refs/heads/*` with a local HTTP 403 -- proven by control: a
+    successful refs/heads push's POST carries `X-Github-Request-Id` and GitHub cache headers, the
+    refused one carries none and returns in 29ms; `repos/.../rulesets` is empty, so this is not
+    GitHub and not this repo. With no claim possible, these were filed on ids that
+    `rmd next-task-id --no-reserve` reported free and that both scope-time checks read clear.
+    While the shards were being written, PR #6227 claimed the first two of them, and
+    `task-id-existence` caught the duplicate on #6228's first CI run. Per the loser-renumbers
+    rule, the two contested shards were renumbered upward, the third being uncontested. (The
+    superseded numbers are named in that CI log, not here: a prose id literal is itself read by
+    the open-PR scan, so repeating one would re-assert a claim this shard has just given up --
+    which is why the help tells authors to write the placeholder form W1-T<n> in prose.) That is
+    exactly the collision W1-T3091 made reserving the default to prevent, and it happened here
+    only because the claim could not be made.
+    AN OPERATOR MUST CONFIRM THIS ID before a build starts; nothing holds it.
 
     FILES NOTE (W1-T3730): `files:` omits the test file the build will add, for the same
     `proof-unit-test-unresolvable` reason recorded on W1-T3838.

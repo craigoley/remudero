@@ -1,4 +1,4 @@
-- id: W1-T3840
+- id: W1-T3843
   title: "THE FLEET FILES ITS OWN LESSONS INTO A QUEUE NOTHING CAN DRAIN — 33 ci-learning tasks citing 822 gate refusals across 211 PRs are all verify:human, assertRunnable refuses every one, releasedIds has never held a task id, and all 33 name a learnings file that has never existed"
   repo: remudero
   depends_on: []
@@ -76,11 +76,11 @@
     33 records.
   acceptance:
     - claim: "filing a machine-authored task that no dispatcher can select under the current releasedIds is refused"
-      proof: "unit test: W1-T3840: an unselectable machine-filed task is refused at filing"
+      proof: "unit test: W1-T3843: an unselectable machine-filed task is refused at filing"
     - claim: "a machine-authored task declaring a files: path that exists in no commit is refused by the same check"
-      proof: "unit test: W1-T3840: a machine-filed task naming a nonexistent file is refused"
+      proof: "unit test: W1-T3843: a machine-filed task naming a nonexistent file is refused"
     - claim: "a human-authored verify:human task is unaffected, so the W1-T3206 review path still works"
-      proof: "unit test: W1-T3840: a human-authored verify:human task still files"
+      proof: "unit test: W1-T3843: a human-authored verify:human task still files"
   falsifier: |
     Re-file any of the 33 existing ci-learning records as they stand: the new check must refuse
     it, naming both that no dispatcher can select it and that learnings/ci-gate-lessons.yaml does
@@ -88,13 +88,22 @@
     reproduced. File an ordinary human-authored `verify: human` task and it must still pass, or
     the fix has broken the review path it is meant to protect.
   note: |
-    RESERVATION: could not be claimed. `rmd next-task-id --reserve` pushes `refs/rmd-id/<id>`, and
-    this environment's egress proxy refuses every `git-receive-pack` update outside `refs/heads/*`
-    with a local HTTP 403 — proven by control: a successful refs/heads push's POST carries
-    `X-Github-Request-Id` and GitHub cache headers, the refused one carries none and
-    returns in 29ms. Not GitHub, not a ruleset (repos/.../rulesets is empty), not this repo.
-    `rmd next-task-id --no-reserve` named W1-T3840 as next. Both scope-time checks read clear at
-    filing time. AN OPERATOR MUST CONFIRM THE CLAIM before a build starts; the loser renumbers.
+    RESERVATION: could not be claimed, and a race was then LOST because of it. `rmd next-task-id
+    --reserve` pushes `refs/rmd-id/<id>`, and this environment's egress proxy refuses every
+    `git-receive-pack` update outside `refs/heads/*` with a local HTTP 403 -- proven by control: a
+    successful refs/heads push's POST carries `X-Github-Request-Id` and GitHub cache headers, the
+    refused one carries none and returns in 29ms; `repos/.../rulesets` is empty, so this is not
+    GitHub and not this repo. With no claim possible, these were filed on ids that
+    `rmd next-task-id --no-reserve` reported free and that both scope-time checks read clear.
+    While the shards were being written, PR #6227 claimed the first two of them, and
+    `task-id-existence` caught the duplicate on #6228's first CI run. Per the loser-renumbers
+    rule, the two contested shards were renumbered upward, the third being uncontested. (The
+    superseded numbers are named in that CI log, not here: a prose id literal is itself read by
+    the open-PR scan, so repeating one would re-assert a claim this shard has just given up --
+    which is why the help tells authors to write the placeholder form W1-T<n> in prose.) That is
+    exactly the collision W1-T3091 made reserving the default to prevent, and it happened here
+    only because the claim could not be made.
+    AN OPERATOR MUST CONFIRM THIS ID before a build starts; nothing holds it.
 
     FILES NOTE (W1-T3730): `files:` deliberately omits the test file the build will add — a
     `test/` path here reads to `lint-plan`'s `proof-unit-test-unresolvable` check as "this diff

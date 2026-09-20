@@ -1,4 +1,4 @@
-- id: W1-T3841
+- id: W1-T3844
   title: "A POLICY-REFUSED RESERVATION READS AS `UNKNOWN push failure` AND OFFERS NO WAY FORWARD — classifyReservationPushFailure has no case for an HTTP 403 at receive-pack, so a reachable origin that simply will not accept the ref namespace is reported as an unclassified git error and the caller is never told --no-reserve exists"
   repo: remudero
   depends_on: []
@@ -37,7 +37,7 @@
         The degraded-open-PR-surface refusal already tells the caller: "Printing (without
         --reserve) still works — only the ATOMIC claim refuses." That sentence is exactly what a
         caller needs here too, and `--no-reserve` genuinely does work in this situation — measured
-        the same session, `rmd next-task-id --no-reserve` printed W1-T3840 and exited 0 while every
+        the same session, `rmd next-task-id --no-reserve` printed W1-T3843 and exited 0 while every
         reserving call was still failing. The push-failure path says none of it. So a caller who
         hits (1) concludes the reserver is unusable and either stops or invents an id by hand. In
         the observed session the operator filed two shards with UNCLAIMED ids and a hand-written
@@ -67,11 +67,11 @@
     policy itself, which is environment configuration and not this repo's to change.
   acceptance:
     - claim: "an HTTP 403 at receive-pack with a reachable origin classifies as refused, not unknown and not unreachable"
-      proof: "unit test: W1-T3841: a 403 at receive-pack classifies as refused"
+      proof: "unit test: W1-T3844: a 403 at receive-pack classifies as refused"
     - claim: "the refusal message names --no-reserve as the path that still yields an id"
       proof: "grep: --no-reserve still yields an id in src/lib/task-id-reservation.ts"
     - claim: "contention, local pre-push refusal and genuine unreachability keep their existing classifications"
-      proof: "unit test: W1-T3841: the other push-failure arms are unchanged"
+      proof: "unit test: W1-T3844: the other push-failure arms are unchanged"
   falsifier: |
     Feed `classifyReservationPushFailure` the exact stderr above: it must return `refused`. Delete
     the new arm and it returns `unknown` again — the defect, reproduced. Feed it
@@ -79,9 +79,22 @@
     must still return `unreachable`. Assert the refusal still exits non-zero: turning this into a
     soft warning would mint optimistically, which W1-T1055 exists to prevent.
   note: |
-    RESERVATION: could not be claimed, for the reason this very task describes. `rmd next-task-id
-    --no-reserve` named W1-T3840 as next; this is the id after. Both scope-time checks read clear
-    at filing time. AN OPERATOR MUST CONFIRM THE CLAIM before a build starts.
+    RESERVATION: could not be claimed, and a race was then LOST because of it. `rmd next-task-id
+    --reserve` pushes `refs/rmd-id/<id>`, and this environment's egress proxy refuses every
+    `git-receive-pack` update outside `refs/heads/*` with a local HTTP 403 -- proven by control: a
+    successful refs/heads push's POST carries `X-Github-Request-Id` and GitHub cache headers, the
+    refused one carries none and returns in 29ms; `repos/.../rulesets` is empty, so this is not
+    GitHub and not this repo. With no claim possible, these were filed on ids that
+    `rmd next-task-id --no-reserve` reported free and that both scope-time checks read clear.
+    While the shards were being written, PR #6227 claimed the first two of them, and
+    `task-id-existence` caught the duplicate on #6228's first CI run. Per the loser-renumbers
+    rule, the two contested shards were renumbered upward, the third being uncontested. (The
+    superseded numbers are named in that CI log, not here: a prose id literal is itself read by
+    the open-PR scan, so repeating one would re-assert a claim this shard has just given up --
+    which is why the help tells authors to write the placeholder form W1-T<n> in prose.) That is
+    exactly the collision W1-T3091 made reserving the default to prevent, and it happened here
+    only because the claim could not be made.
+    AN OPERATOR MUST CONFIRM THIS ID before a build starts; nothing holds it.
 
     FILES NOTE (W1-T3730): the build EXTENDS an existing suite --
     test/a-refused-push-is-not-an-unreachable-origin.test.ts, which already covers the local,
