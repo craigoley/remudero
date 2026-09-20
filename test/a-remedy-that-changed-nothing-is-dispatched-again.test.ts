@@ -195,7 +195,7 @@ test("an ordinary fix.dispatch records its claim set, and its first exact recurr
     unmetCriteria: [criterion()],
     priorStrikes: 1,
     strikeHistory: history,
-    lastActivityAt: "2026-09-10T11:59:00.000Z",
+    lastActivityAt: "2026-09-10T11:59:00.000Z", // expiring-fixture: exempt -- compared only against this suite's INJECTED now (NOW), never the wall clock
     headSha: CURRENT_HEAD,
     autoMergeArmed: false,
   };

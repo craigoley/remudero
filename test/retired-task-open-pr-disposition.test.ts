@@ -94,7 +94,7 @@ function conflictDisposition(over: Partial<OpenPrView> = {}) {
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 0,
-      lastActivityAt: "2026-09-12T16:59:00.000Z",
+      lastActivityAt: "2026-09-12T16:59:00.000Z", // expiring-fixture: exempt -- compared only against this suite's INJECTED now (NOW), never the wall clock
       headSha: "a".repeat(40),
       autoMergeArmed: false,
       mergeState: "dirty",
