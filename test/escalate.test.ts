@@ -1233,10 +1233,49 @@ test("ghIssueGateway.closeWithComment: closes the issue with the citation commen
       return "";
     },
   });
-  gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574");
+  assert.equal(
+    gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574"),
+    "commented",
+  );
   assert.deepEqual(calls, [
     ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero", "--comment", "resolved by #574"],
   ]);
+});
+
+test("ghIssueGateway.closeWithComment: retries without a comment at GitHub's comment cap", () => {
+  const calls: string[][] = [];
+  let attempts = 0;
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      attempts += 1;
+      if (attempts === 1) throw new Error("Commenting is disabled on issues with more than 2500 comments.");
+      return "";
+    },
+  });
+  assert.equal(
+    gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574"),
+    "comment_cap",
+  );
+  assert.deepEqual(calls, [
+    ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero", "--comment", "resolved by #574"],
+    ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero"],
+  ]);
+});
+
+test("ghIssueGateway.closeWithComment: preserves non-cap failures and never retries them", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      throw new Error("gh: HTTP 401 Bad credentials");
+    },
+  });
+  assert.throws(
+    () => gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574"),
+    /401 Bad credentials/,
+  );
+  assert.equal(calls.length, 1);
 });
 
 // ── escalateWithSummary (W1-T348: the choke point a wired producer calls) ───────────────────
