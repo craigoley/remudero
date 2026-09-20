@@ -16,7 +16,7 @@ import {
   deriveAnalyticsSnapshotFromStream,
   type AnalyticsSnapshot,
 } from "../src/lib/analytics-route.js";
-import { fiveLedgerBackedHistoricalSeries } from "../src/lib/analytics-timeseries.js";
+import { fiveLedgerBackedHistoricalSeries, generateFiveLedgerBackedHistoricalSeries } from "../src/lib/analytics-timeseries.js";
 import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
 import { clockFromIsoFn, fixedClock } from "../src/lib/clock.js";
 import { terminalVerdictFields } from "../src/run-task.js";
@@ -40,6 +40,7 @@ function writeLive(stateDir: string, lines: string[]): void {
 
 test("historical analytics: five ledger-backed top-level series preserve explicit gap points", () => {
   const series = fiveLedgerBackedHistoricalSeries();
+  assert.deepEqual(generateFiveLedgerBackedHistoricalSeries(), series);
   assert.equal(series.length, 5);
   assert.deepEqual(series.map((entry) => entry.id), ["ledger-1", "ledger-2", "ledger-3", "ledger-4", "ledger-5"]);
   assert.ok(series.every((entry) => entry.points.length === 5));
