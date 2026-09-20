@@ -153,7 +153,7 @@ running, what is next, what is waiting on me, and which evidence supports this c
 `Needs me`, `Plan`, `Activity`, and `Evidence` are projections of the same source-labeled data,
 not separate truths. Every projection preserves verified/stale/unavailable/unknown/not-collected,
 and every mutation names scope and consequence, revalidates at click time, and ends in a durable
-receipt. See W1-T3840 for the bounded public contract that lets a private console compose these
+receipt. See W1-T3846 for the bounded public contract that lets a private console compose these
 surfaces without copying raw prompts, transcripts, credentials, or account identifiers.
 
 Borrow the trust affordances — explicit permissions, inspectable activity, meaningful-change
@@ -173,7 +173,7 @@ stale, mixed, or below-floor evidence is `unmeasurable`, never a favorable zero.
 The operator also needs one conservative incident identity across activity, inbox, evidence, and
 regression views. Grouping reduces duplicate cards but never deletes ledger evidence. Resolution is
 tied to a shipped artifact, regression requires newer evidence, and snooze ends on a named
-condition or new activity. W1-T3841 and W1-T3842 make these rules durable and source-labeled.
+condition or new activity. W1-T3847 and W1-T3848 make these rules durable and source-labeled.
 
 ## NET STATE
 
