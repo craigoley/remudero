@@ -1,0 +1,23 @@
+id: fb-1789929986943-7c7dba
+ts: 2026-09-20T18:46:26.943Z
+raw: "Observed live on core: both W1-T3746/#6239 and W1-T3814/#6238 emitted
+  implement.harness_commit_refused reason=no anchored COMMIT_MESSAGE line, then
+  the same sweep recorded fix.done subtype=success and pr.head_provider
+  availability=unavailable. The PR heads did not advance, but later sweeps say
+  fix already dispatched and withhold another repair. Make the harness-to-sweep
+  outcome truthful and recoverable: validate the terminal report contract before
+  classifying a fix as done; a refused commit must be a distinct non-success
+  outcome that releases or safely reclaims the per-head claim, preserves the
+  worker transcript, and lets the bounded repair policy re-dispatch or escalate.
+  Prove a malformed or unanchored commit line never yields fix.done/claim-held,
+  while a valid anchored line still commits once and duplicate runs cannot spend
+  extra strikes."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
