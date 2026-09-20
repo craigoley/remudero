@@ -15898,6 +15898,35 @@ export function bodyCarriesGenericAcceptanceFallback(body: string): boolean {
   return criteria[0].proof?.trim() === PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof;
 }
 
+function escapeRetroGrepPattern(line: string): string {
+  let escaped = "";
+  for (const ch of line) {
+    if (ch === "\\") escaped += "\\\\";
+    else if (ch === "?") escaped += "[?]";
+    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
+    else escaped += ch;
+  }
+  return escaped;
+}
+
+function retroAcceptanceProofFromDiff(diff: string): string | undefined {
+  let file: string | undefined;
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("+++ ")) {
+      const path = raw.slice(4).replace(/^b\//, "").replace(/\r$/, "").trim();
+      file = path === "/dev/null" ? undefined : path;
+      continue;
+    }
+    if (!file || !raw.startsWith("+") || raw.startsWith("+++ ")) continue;
+    const line = raw.slice(1).replace(/\r$/, "").trim();
+    if (!line || !/\.[^/]+$/.test(file)) continue;
+    const pattern = escapeRetroGrepPattern(line);
+    const proof = `grep: ${pattern} in ${file}`;
+    if (parseWhitelistedProof(proof) !== null && breMetacharsIn(pattern).blocking.length === 0) return proof;
+  }
+  return undefined;
+}
+
 /**
  * THE RETRO'S ACCEPTANCE-BLOCK REPAIR RUNG, extracted so the DECISION is reachable by a test.
  *
@@ -15918,8 +15947,9 @@ export function repairRetroAcceptanceBlock(
   deps: {
     fetchBody?: (url: string) => string;
     editBody?: (url: string, body: string) => void;
+    diff?: string;
   } = {},
-): "repaired" | "healthy" | "error" {
+): "repaired" | "healthy" | "unrepresentable" | "error" {
   const { fetchBody, editBody } = {
     fetchBody: defaultRetroFetchBody,
     editBody: defaultRetroEditBody,
@@ -15935,12 +15965,15 @@ export function repairRetroAcceptanceBlock(
     // (see bodyCarriesGenericAcceptanceFallback), so `proof-discrimination` REFUSES the retro
     // otherwise, even though `bodyNeedsAcceptanceRepair` alone calls it healthy.
     if (!bodyNeedsAcceptanceRepair(body) && !bodyCarriesGenericAcceptanceFallback(body)) return "healthy";
+    const proof = Object.hasOwn(deps, "diff") ? retroAcceptanceProofFromDiff(deps.diff ?? "") : undefined;
+    if (Object.hasOwn(deps, "diff") && proof === undefined) {
+      log("acceptance.repair.unrepresentable", { pr_url: prUrl, reason: "no safe added diff line" });
+      return "unrepresentable";
+    }
     const fallback: AcceptanceCriterion[] = [
       {
         claim: "the retro's plan-only sync PR is gate-compliant",
-        proof:
-          "SHIPPED-log/NET-STATE/calibration-table updates and the COMPRESSION deletion are in this diff; " +
-          "docs/ORIENTATION.md and plan/plan-index.json are harness-regenerated separately in this same PR",
+        proof: proof ?? PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof,
       },
     ];
     // `ensureJudgeableBody` re-checks `bodyNeedsAcceptanceRepair` internally and no-ops when it reads
@@ -25679,13 +25712,13 @@ async function retroCommand(
     // parseAcceptanceBlock never recognizes) — this harness-side pass is the
     // deterministic backstop so a worker's shape mistake doesn't fail the whole retro
     // CLOSED at remudero-review. Best-effort: never lets this crash an otherwise-fine retro.
-    repairRetroAcceptanceBlock(prUrl, log);
+    const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    repairRetroAcceptanceBlock(prUrl, log, { diff });
     // W1-T908: and the CHANGESET sentence, for the same reason and at the same point. Both
     // companions above are committed and pushed by now, so this is the first moment in the run
     // where the PR's real file set can be read at all.
     repairRetroChangesetClaim(prUrl, log);
 
-    const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).
     const codeFiles = codeFilesInDiff(diff);

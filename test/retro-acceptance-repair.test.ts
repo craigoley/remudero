@@ -22,12 +22,13 @@
  * intermittently crashes at FILE level under --experimental-test-coverage.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { repairRetroAcceptanceBlock, repairRetroChangesetClaim } from "../src/run-task.js";
-import { bodyContradictsDiff, changesetClaimsDisagreeing, parseAcceptanceBlock } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, parseAcceptanceBlock, parseWhitelistedProof } from "../src/lib/review.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/999";
 
@@ -54,6 +55,16 @@ const WRAPPED_BODY = [
 ].join("\n");
 
 const HEALTHY_BODY = ["Acceptance:", "- a claim | grep: needle in src/x.ts", ""].join("\n");
+const ADDED_LINE = "retro proof [marker]. $value * ^end? \\slash";
+const ADDED_DIFF = [
+  "diff --git a/retro.md b/retro.md",
+  "--- a/retro.md",
+  "+++ b/retro.md",
+  "@@ -1 +1,2 @@",
+  " existing",
+  `+${ADDED_LINE}`,
+  "",
+].join("\n");
 
 test("the rung REPAIRS a body that parses to one criterion with an empty proof — the case the old trigger walked past", () => {
   const r = recorder();
@@ -62,7 +73,7 @@ test("the rung REPAIRS a body that parses to one criterion with an empty proof �
   assert.equal(before.length, 1);
   assert.equal(before[0].proof, "");
 
-  const outcome = repairRetroAcceptanceBlock(PR, r.log, { fetchBody: () => WRAPPED_BODY, editBody: r.editBody });
+  const outcome = repairRetroAcceptanceBlock(PR, r.log, { fetchBody: () => WRAPPED_BODY, editBody: r.editBody, diff: ADDED_DIFF });
 
   assert.equal(outcome, "repaired");
   assert.equal(r.edits.length, 1, "the PR body was actually edited");
@@ -70,7 +81,59 @@ test("the rung REPAIRS a body that parses to one criterion with an empty proof �
   const after = parseAcceptanceBlock(r.edits[0].body);
   assert.ok(after.length > 0, "and the body it wrote PARSES");
   assert.equal(after.every((c) => c.proof.trim().length > 0), true, "with no empty proofs left");
+  assert.match(after[0].proof, /^grep: /, "and the replacement is an executable grep proof");
   assert.ok(r.logged.some((l) => l.step === "acceptance.repaired"), "and the repair is ledgered");
+});
+
+test("the repaired grep proof comes from one added physical line and is absent from the base", () => {
+  const r = recorder();
+  const outcome = repairRetroAcceptanceBlock(PR, r.log, {
+    fetchBody: () => "just prose",
+    editBody: r.editBody,
+    diff: ADDED_DIFF,
+  });
+  assert.equal(outcome, "repaired");
+  const proof = parseAcceptanceBlock(r.edits[0].body)[0].proof;
+  const parsed = parseWhitelistedProof(proof);
+  assert.ok(parsed && parsed.kind === "grep", "the derived proof parses through the real whitelist");
+
+  const root = mkdtempSync(join(tmpdir(), "rmd-retro-proof-"));
+  const head = join(root, "head");
+  const base = join(root, "base");
+  try {
+    mkdirSync(head);
+    mkdirSync(base);
+    for (const dir of [head, base]) writeFileSync(join(dir, "retro.md"), "existing\n");
+    writeFileSync(join(head, "retro.md"), `existing\n${ADDED_LINE}\n`);
+    execFileSync(parsed!.command, parsed!.args, { cwd: head, encoding: "utf8" });
+    assert.throws(
+      () => execFileSync(parsed!.command, parsed!.args, { cwd: base, encoding: "utf8" }),
+      (error) => (error as { status?: number }).status === 1,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a deletion-only diff leaves the defective body untouched and records no safe proof", () => {
+  const r = recorder();
+  const deletion = [
+    "diff --git a/retro.md b/retro.md",
+    "--- a/retro.md",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    `-${ADDED_LINE}`,
+    "",
+  ].join("\n");
+  const outcome = repairRetroAcceptanceBlock(PR, r.log, {
+    fetchBody: () => WRAPPED_BODY,
+    editBody: r.editBody,
+    diff: deletion,
+  });
+  assert.equal(outcome, "unrepresentable");
+  assert.equal(r.edits.length, 0);
+  assert.equal(r.logged.some((l) => l.step === "acceptance.repaired"), false);
+  assert.ok(r.logged.some((l) => l.step === "acceptance.repair.unrepresentable"));
 });
 
 test("REGRESSION LOCK: the rung leaves a HEALTHY body alone — no edit, no ledger line", () => {
@@ -107,6 +170,7 @@ test("a failed EDIT is also contained — the read succeeded, the write did not"
     editBody: () => {
       throw new Error("edit refused");
     },
+    diff: ADDED_DIFF,
   });
   assert.equal(outcome, "error");
   assert.ok(
@@ -118,7 +182,7 @@ test("a failed EDIT is also contained — the read succeeded, the write did not"
 
 test("a body with NO block at all still repairs — the original trigger's case is not regressed", () => {
   const r = recorder();
-  const outcome = repairRetroAcceptanceBlock(PR, r.log, { fetchBody: () => "just prose", editBody: r.editBody });
+  const outcome = repairRetroAcceptanceBlock(PR, r.log, { fetchBody: () => "just prose", editBody: r.editBody, diff: ADDED_DIFF });
   assert.equal(outcome, "repaired");
   assert.ok(parseAcceptanceBlock(r.edits[0].body).length > 0);
 });
@@ -147,7 +211,7 @@ test("the DEFAULT leaves really shell out to gh — argv, JSON parse and the edi
   try {
     const logged: string[] = [];
     // NO deps object at all — the spread defaults are what run.
-    const outcome = repairRetroAcceptanceBlock(PR, (s) => logged.push(s));
+    const outcome = repairRetroAcceptanceBlock(PR, (s) => logged.push(s), { diff: ADDED_DIFF });
     assert.equal(outcome, "repaired", "the real default read + trigger + real default edit all ran");
     const argv = readFileSync(argvLog, "utf8");
     assert.match(argv, /pr view .*--json body/, "defaultRetroFetchBody issued the real view argv");

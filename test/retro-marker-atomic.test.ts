@@ -1266,7 +1266,18 @@ test("retroCommand: a transient `gh pr edit` failure during the acceptance-repai
   // No Acceptance block (forces the repair attempt) AND the repair's own `gh pr edit`
   // fails -- distinct from `diffFails` (which fails a DIFFERENT gh call, caught by the
   // outer catch and rethrown instead).
-  const fx = setupFakeRetroFixture(t, { body: "Remudero-Task: RETRO\n", repairEditFails: true });
+  const fx = setupFakeRetroFixture(t, {
+    body: "Remudero-Task: RETRO\n",
+    repairEditFails: true,
+    diff: [
+      "diff --git a/plan/retro-proof.txt b/plan/retro-proof.txt",
+      "--- /dev/null",
+      "+++ b/plan/retro-proof.txt",
+      "@@ -0,0 +1 @@",
+      "+fixture repair edit failure",
+      "",
+    ].join("\n"),
+  });
   await fx.run(async () => {
     const exitCode = await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
     assert.equal(exitCode, 1, "the repair failure is best-effort -- it must NOT propagate as an uncaught rejection");
