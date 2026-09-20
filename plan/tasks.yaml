@@ -5946,7 +5946,7 @@
   risk: high
   origin: architect
   status: blocked
-  retirement: retired
+  retirement: retired # operator-ratified W1-T1B evidence reviewed
   pr: 3                     # merged PR #3 -> deriveStatus resolves this task as merged
   attempts: 0
   note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
@@ -7985,7 +7985,7 @@
   risk: medium
   origin: architect
   status: blocked
-  retirement: retired
+  retirement: retired # operator-ratified W1-T37 evidence reviewed
   attempts: 0
   note: "Architect (rule-20 sweep): the grep-and-retrieve transcript proof may be satisfied by ANY real
     drained run whose worker greps a §-heading from the injected index — not a purpose-built run.
