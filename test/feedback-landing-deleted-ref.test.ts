@@ -327,3 +327,44 @@ test("unit test: unreadable landing content refuses without fresh create — con
   const tree = landingTree(bareOrigin);
   assert.match(tree, /fb-unreadable\.yaml/, "the branch's real, already-landed content is untouched by the refusal");
 });
+
+test("refreshing the landing ref refuses when the authoritative remote read fails", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  writeFeedbackEntry(root, "fb-refresh-error", "the remote read itself is unavailable");
+  const { gh } = fakeGh("https://github.com/o/r/pull/411");
+  const failingGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "ls-remote") throw new Error("simulated: remote ref read unavailable");
+    return execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: opts?.env ?? process.env,
+    });
+  };
+  const result = withLiveWritesAllowed(() => landFeedback(root, { git: failingGit, gh }));
+  assert.equal(result.landed, false);
+  assert.match(result.error ?? "", /cannot refresh .*remote ref/i);
+});
+
+test("a confirmed remote landing ref that cannot be read refuses instead of assuming empty", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  writeFeedbackEntry(root, "fb-tip-error", "lands once before the tip read fails");
+  const first = withLiveWritesAllowed(() => landFeedback(root, { gh: fakeGh("https://github.com/o/r/pull/412").gh }));
+  assert.equal(first.landed, true);
+  writeFeedbackEntry(root, "fb-tip-error-2", "must not be dropped on a tip read failure");
+  const { gh } = fakeGh("https://github.com/o/r/pull/413");
+  const failingGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "rev-parse" && args[1] === `origin/${LANDING_BRANCH}`) {
+      throw new Error("simulated: confirmed landing tip unreadable");
+    }
+    return execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: opts?.env ?? process.env,
+    });
+  };
+  const result = withLiveWritesAllowed(() => landFeedback(root, { git: failingGit, gh }));
+  assert.equal(result.landed, false);
+  assert.match(result.error ?? "", /cannot read .*tip after confirming it exists/i);
+});
