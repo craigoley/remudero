@@ -46,6 +46,10 @@ test("the no-record mode leaves the clock-signature baseline byte-identical", ()
     const before = readFileSync(baseline, "utf8");
     const result = run(root, baseline, "--no-record");
     assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /clock-signature-ratchet: CHECK FAILED -- 1 growth\/new row change\(s\) require recording/,
+    );
     assert.equal(readFileSync(baseline, "utf8"), before);
   } finally {
     rmSync(root, { recursive: true, force: true });
