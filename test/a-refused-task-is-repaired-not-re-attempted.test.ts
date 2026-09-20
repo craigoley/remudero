@@ -97,7 +97,7 @@ test("FALSIFIER of acceptance 2: a generic prompt instead of the verdict does no
 
 // ── ACCEPTANCE 3: an unchanged verdict escalates rather than re-reconning ─────────────────
 
-test("ACCEPTANCE 3: an unchanged verdict escalates rather than re-reconning", () => {
+test("ACCEPTANCE 3: an unchanged verdict is held after one escalation", () => {
   const verdict = refusalVerdictText(VIOLATIONS);
   let prior: PriorRefusal = { verdict, attempts: 1 };
   const effects = fakeEffects(prior);
