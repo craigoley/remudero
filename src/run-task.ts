@@ -12960,8 +12960,9 @@ async function runTask(
       // refusals of one already-shipped task in 10.4h) — no strike spent, no escalation, nothing
       // touched. `repairRefusedTask` (src/lib/dispatch-repair.ts) spends the decision instead:
       // dispatch ONE repair lane carrying `e.violations` VERBATIM, or, on a SECOND refusal
-      // carrying the SAME verdict, escalate to the operator rather than re-reconning. NEVER
-      // spawns (`dispatchRepairLaneDefault` below only logs+says) — the "no spawn on a
+      // carrying the SAME verdict, escalate to the operator rather than re-reconning. A later
+      // identical refusal is held after that terminal escalation, with no second GitHub write.
+      // NEVER spawns (`dispatchRepairLaneDefault` below only logs+says) — the "no spawn on a
       // linter-failing task" invariant (W1-T20c criterion 5, test/task-linter-wiring.test.ts)
       // holds exactly as it did before this task.
       const dispatchRepairLaneDefault = (input: { taskId: string; verdict: string; progress: boolean }) => {
@@ -12993,7 +12994,7 @@ async function runTask(
       };
       const violations: RefusalViolation[] = e.violations.map((v) => ({ check: v.check, message: v.message }));
       const refusalStateRoot = join(config.root, "state");
-      repairRefusedTask(
+      const repairAction = repairRefusedTask(
         taskId,
         violations,
         (id) => readPriorRefusal(refusalStateRoot, id),
@@ -13001,6 +13002,13 @@ async function runTask(
         dispatchRepairLaneDefault,
         escalateDefault,
       );
+      if (repairAction.kind === "held") {
+        log("dispatch.repair.held", {
+          reason: "unchanged pre-dispatch verdict was already escalated",
+          verdict: repairAction.verdict,
+          escalation_attempts: repairAction.attempts,
+        });
+      }
       return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_illformed" };
     }
     throw e;
