@@ -53,6 +53,12 @@ import { sendJson } from "./panel-actions.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
+import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal } from "./operator-agent-capacity.js";
+import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow, type OperatorAgentDecisionSignal } from "./operator-agent-decisions.js";
+import { adaptOperatorAgentProofRows, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal } from "./operator-agent-proof.js";
+import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "./operator-agent-outcomes.js";
+import { verdictCalibrationReport } from "./verdict-calibration.js";
+import { adaptLiveAnalyticsMetrics, emptyLiveAnalyticsMetrics, type LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -154,6 +160,9 @@ export interface AnalyticsSnapshot {
   consoleV1: ConsoleV1Projection;
   /** Bounded routing policy/receipt attribution for the operator console. */
   routingTelemetry: RoutingTelemetrySnapshot;
+  /** Current process-owned queue/provider signals; historical trends remain explicitly uncollected. */
+  queue: LiveAnalyticsMetrics["queue"];
+  provider: LiveAnalyticsMetrics["provider"];
 }
 
 /** A console-v1 metric's provenance, carried explicitly because the console renders it and
@@ -194,6 +203,15 @@ export interface ConsoleV1Metric {
   notCollectedReason?: string;
 }
 
+/** The operator-agent evidence families carried beside the existing console-v1 metric catalog. */
+export interface OperatorAgentProjection {
+  version: "operator-agent-v1";
+  proof: OperatorAgentProofSignal;
+  outcomes: OperatorAgentTaskOutcomeSignal;
+  decisions: OperatorAgentDecisionSignal;
+  capacity: OperatorAgentCapacitySignal;
+}
+
 /** `GET /v1/analytics`'s console-v1 projection — the catalog the console's own analytics page
  *  reads. `version` travels WITH the payload (design note, W1-T3623 acceptance iv) so a caller
  *  naming a version this instance does not emit can be REFUSED by {@link
@@ -204,6 +222,35 @@ export interface ConsoleV1Projection {
   version: string;
   asOf: string | null;
   metrics: ConsoleV1Metric[];
+  operatorAgent: OperatorAgentProjection;
+}
+
+export interface OperatorAgentProjectionInputs {
+  proofRows?: readonly OperatorAgentProofLedgerRow[];
+  decisionRows?: readonly OperatorDecisionLedgerRow[];
+  capacityRows?: readonly OperatorAgentCapacityLedgerRow[];
+  outcomes?: OperatorAgentTaskOutcomeSignal;
+}
+
+function emptyOperatorAgentProjection(): OperatorAgentProjection {
+  return {
+    version: "operator-agent-v1",
+    proof: adaptOperatorAgentProofRows([]),
+    outcomes: adaptVerdictCalibrationReport(verdictCalibrationReport([], "")),
+    decisions: adaptOperatorDecisionRows([]),
+    capacity: adaptOperatorAgentCapacityRows([]),
+  };
+}
+
+/** Compose independently measured signals without allowing a missing producer to become zero. */
+export function buildOperatorAgentProjection(inputs: OperatorAgentProjectionInputs = {}): OperatorAgentProjection {
+  return {
+    version: "operator-agent-v1",
+    proof: adaptOperatorAgentProofRows(inputs.proofRows ?? []),
+    outcomes: inputs.outcomes ?? adaptVerdictCalibrationReport(verdictCalibrationReport([], "")),
+    decisions: adaptOperatorDecisionRows(inputs.decisionRows ?? []),
+    capacity: adaptOperatorAgentCapacityRows(inputs.capacityRows ?? []),
+  };
 }
 
 /** Carried in the payload rather than hardcoded client-side — mirrors account-usage.ts's
@@ -243,6 +290,7 @@ export interface ConsoleV1ProjectionInputs {
   costModeledUsd: number;
   taskDurationsMs: readonly number[];
   queuePending?: number;
+  operatorAgent?: OperatorAgentProjection;
 }
 
 /** Nearest-rank p50 (`sorted[floor((n-1)/2)]`) — `undefined`, never `0`, on an empty sample: a
@@ -298,7 +346,12 @@ export function buildConsoleV1Metrics(inputs: ConsoleV1ProjectionInputs): Consol
 /** Wraps {@link buildConsoleV1Metrics} with the version/asOf envelope the console's catalog
  *  expects on the wire. */
 export function buildConsoleV1Projection(asOf: string | null, inputs: ConsoleV1ProjectionInputs): ConsoleV1Projection {
-  return { version: CONSOLE_V1_PROJECTION_VERSION, asOf, metrics: buildConsoleV1Metrics(inputs) };
+  return {
+    version: CONSOLE_V1_PROJECTION_VERSION,
+    asOf,
+    metrics: buildConsoleV1Metrics(inputs),
+    operatorAgent: inputs.operatorAgent ?? emptyOperatorAgentProjection(),
+  };
 }
 
 export type ConsoleV1ProjectionResolution =
@@ -342,6 +395,12 @@ interface AnalyticsAccumulator {
    *  undefined` above, so this adds no new pass over the corpus. */
   tokensTotal: CacheHitTokens & { output: number };
   routingTelemetry: RoutingTelemetryAccumulator;
+  /** Sanitized rows retained only for the four operator-agent evidence adapters. */
+  operatorAgentRows: {
+    proof: OperatorAgentProofLedgerRow[];
+    decisions: OperatorDecisionLedgerRow[];
+    capacity: OperatorAgentCapacityLedgerRow[];
+  };
 }
 
 type RoutingAssignment = {
@@ -400,7 +459,86 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     workerDurationsMeasured: false,
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     routingTelemetry: routingTelemetryAccumulator(),
+    operatorAgentRows: { proof: [], decisions: [], capacity: [] },
   };
+}
+
+const OPERATOR_AGENT_DECISION_STEPS = new Set([
+  "panel.manual_approved",
+  "panel.proposal_accepted",
+  "panel.proposal_rejected",
+  "panel.proposal_declined",
+  "automerge.hold_engaged",
+  "automerge.hold_released",
+  "automerge.armed",
+  "automerge.clean_status_direct_merge",
+  "automerge.direct_merge_failed",
+  "automerge.direct_merge_preflight_head_unavailable",
+  "automerge.direct_merge_preflight_refused",
+  "automerge.direct_merge_update_failed",
+  "automerge.direct_merge_updated",
+  "automerge.rate_limited_rest_merge",
+  "automerge.rate_limited_rest_merge_conflict",
+  "automerge.rate_limited_rest_merge_refused",
+  "automerge.rate_limited_rest_merge_retry",
+]);
+
+const OPERATOR_AGENT_CAPACITY_FIELDS = [
+  "repo",
+  "repository",
+  "configured_capacity",
+  "configured_pool_size",
+  "worker_pool_size",
+  "wip_limit",
+  "admitted_lanes",
+  "lane_budget",
+  "active_workers",
+  "queued_work",
+  "queue_pending",
+  "window_start",
+  "measurement_start",
+  "window_end",
+  "measurement_end",
+] as const;
+
+const OPERATOR_AGENT_CAPACITY_OBSERVATION_FIELDS = OPERATOR_AGENT_CAPACITY_FIELDS.filter(
+  (field) => field !== "repo" && field !== "repository",
+);
+
+/** Retain only the bounded fields the operator-agent adapters need; prompts and ledger excerpts
+ * never enter the analytics snapshot's response path. */
+type SelectedOperatorAgentRow =
+  | { family: "proof"; row: OperatorAgentProofLedgerRow }
+  | { family: "decisions"; row: OperatorDecisionLedgerRow }
+  | { family: "capacity"; row: OperatorAgentCapacityLedgerRow };
+
+function operatorAgentRow(line: Record<string, unknown>): SelectedOperatorAgentRow | undefined {
+  const step = str(line.step);
+  if (step === "review.posted") {
+    return { family: "proof", row: { step, task_id: line.task_id, proof_exec: line.proof_exec } };
+  }
+  if (step && OPERATOR_AGENT_DECISION_STEPS.has(step)) {
+    return {
+      family: "decisions",
+      row: {
+        step,
+        task_id: line.task_id,
+        task_class: line.task_class,
+        task_type: line.task_type,
+        class: line.class,
+        origin: line.origin,
+        actor: line.actor,
+        by: line.by,
+      },
+    };
+  }
+  if (OPERATOR_AGENT_CAPACITY_OBSERVATION_FIELDS.some((field) => field in line)) {
+    return {
+      family: "capacity",
+      row: Object.fromEntries(OPERATOR_AGENT_CAPACITY_FIELDS.map((field) => [field, line[field]])),
+    };
+  }
+  return undefined;
 }
 
 function routingBucketFor(
@@ -576,6 +714,11 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
 
 /** Fold one logical ledger event into all four analytics questions in one pass. */
 function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
+  const selectedOperatorAgentRow = operatorAgentRow(line);
+  if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "capacity") acc.operatorAgentRows.capacity.push(selectedOperatorAgentRow.row);
+
   // Assignment/terminal attribution is folded from this SAME union pass. It has its
   // own bounded, join-aware accumulator because an assignment is a policy fact and a terminal
   // row is an outcome fact; neither may be inferred from the other.
@@ -634,7 +777,16 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   }
 }
 
-function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): AnalyticsSnapshot {
+export interface AnalyticsDeriveOptions {
+  /** Optional host-side git calibration; the ledger reader cannot infer post-merge outcomes. */
+  operatorAgentOutcomes?: OperatorAgentTaskOutcomeSignal;
+}
+
+function snapshotFromAccumulator(
+  acc: AnalyticsAccumulator,
+  nowIso: string,
+  options: AnalyticsDeriveOptions = {},
+): AnalyticsSnapshot {
   const taskDurationsMs: TaskDurationEntry[] = [];
   let noTerminalTaskCount = 0;
   for (const [runId, start] of acc.startsByRun) {
@@ -670,8 +822,15 @@ function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): Ana
       cacheReuseTokens: acc.tokensTotal,
       costModeledUsd,
       taskDurationsMs: taskDurationsMs.map((entry) => entry.durationMs),
+      operatorAgent: buildOperatorAgentProjection({
+        proofRows: acc.operatorAgentRows.proof,
+        decisionRows: acc.operatorAgentRows.decisions,
+        capacityRows: acc.operatorAgentRows.capacity,
+        outcomes: options.operatorAgentOutcomes,
+      }),
     }),
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
+    ...emptyLiveAnalyticsMetrics(),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -686,10 +845,11 @@ function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): Ana
 export function deriveAnalyticsSnapshot(
   lines: ReadonlyArray<Record<string, unknown>>,
   nowIso: string,
+  options: AnalyticsDeriveOptions = {},
 ): AnalyticsSnapshot {
   const accumulator = analyticsAccumulator();
   for (const line of lines) accumulateAnalyticsLine(accumulator, line);
-  return snapshotFromAccumulator(accumulator, nowIso);
+  return snapshotFromAccumulator(accumulator, nowIso, options);
 }
 
 /** Fold an already-deduplicated stream without materialising its input. */
@@ -697,6 +857,7 @@ export async function deriveAnalyticsSnapshotFromStream(
   lines: AsyncIterable<Record<string, unknown>>,
   clock: Clock,
   signal?: AbortSignal,
+  options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshot> {
   const accumulator = analyticsAccumulator();
   for await (const line of lines) {
@@ -704,7 +865,7 @@ export async function deriveAnalyticsSnapshotFromStream(
     accumulateAnalyticsLine(accumulator, line);
   }
   signal?.throwIfAborted();
-  return snapshotFromAccumulator(accumulator, clock.iso());
+  return snapshotFromAccumulator(accumulator, clock.iso(), options);
 }
 
 /**
@@ -717,11 +878,13 @@ export async function deriveAnalyticsSnapshotFromLedger(
   stateDir: string,
   clock: Clock,
   signal?: AbortSignal,
+  options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshot> {
   return deriveAnalyticsSnapshotFromStream(
     openLedgerUnion(stateDir, { dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP, signal }),
     clock,
     signal,
+    options,
   );
 }
 
@@ -768,7 +931,45 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   Object.freeze(value.workerDurationsByLane);
   for (const metric of value.consoleV1.metrics) Object.freeze(metric);
   Object.freeze(value.consoleV1.metrics);
+  Object.freeze(value.consoleV1.operatorAgent.proof.unmeasurable);
+  Object.freeze(value.consoleV1.operatorAgent.proof);
+  for (const item of value.consoleV1.operatorAgent.outcomes.classes) {
+    Object.freeze(item.taskIds);
+    Object.freeze(item);
+  }
+  for (const item of value.consoleV1.operatorAgent.outcomes.unmeasurable) Object.freeze(item);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.classes);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.unmeasurable);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.unmeasurableByCause);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.policy);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes);
+  for (const item of value.consoleV1.operatorAgent.decisions.explicitDecisions) Object.freeze(item);
+  for (const item of value.consoleV1.operatorAgent.decisions.automaticMergeEvents) Object.freeze(item);
+  for (const item of value.consoleV1.operatorAgent.decisions.classes) {
+    Object.freeze(item.taskIds);
+    Object.freeze(item.actorIds);
+    Object.freeze(item);
+  }
+  for (const item of value.consoleV1.operatorAgent.decisions.unmeasurable) Object.freeze(item);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.explicitDecisions);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.automaticMergeEvents);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.classes);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.unmeasurable);
+  for (const item of value.consoleV1.operatorAgent.capacity.measurements) Object.freeze(item);
+  for (const item of value.consoleV1.operatorAgent.capacity.unavailable) Object.freeze(item.missing);
+  for (const item of value.consoleV1.operatorAgent.capacity.unavailable) Object.freeze(item);
+  Object.freeze(value.consoleV1.operatorAgent.capacity.measurements);
+  Object.freeze(value.consoleV1.operatorAgent.capacity.unavailable);
+  Object.freeze(value.consoleV1.operatorAgent.capacity);
+  Object.freeze(value.consoleV1.operatorAgent);
   Object.freeze(value.consoleV1);
+  Object.freeze(value.queue.pending);
+  Object.freeze(value.queue.trend);
+  Object.freeze(value.queue);
+  Object.freeze(value.provider.allowance.remaining);
+  Object.freeze(value.provider.allowance.trend);
+  Object.freeze(value.provider.allowance);
+  Object.freeze(value.provider);
   for (const bucket of value.routingTelemetry.buckets) {
     for (const reason of bucket.fallbackReasons) Object.freeze(reason);
     Object.freeze(bucket.fallbackReasons);
@@ -811,6 +1012,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
       buckets: [],
       daily: [],
     },
+    ...emptyLiveAnalyticsMetrics(),
   });
 }
 
@@ -945,7 +1147,10 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
  * `GET /v1/analytics` — read-scoped and synchronously served from process-owned state. It cannot
  * start, join or await a union scan because its inline input exposes only the current value.
  */
-export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnapshot }): Route {
+export function buildAnalyticsRoute(deps: {
+  currentSnapshot: () => AnalyticsSnapshot;
+  currentLiveMetrics?: () => LiveAnalyticsMetrics;
+}): Route {
   return {
     method: "GET",
     path: "/v1/analytics",
@@ -956,7 +1161,11 @@ export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnap
       // before. Named and unrecognised, the request is REFUSED (409) rather than answered with
       // today's shape under a version string the caller never asked for.
       const requestedVersion = new URL(req.url ?? "/", "http://local").searchParams.get("projectionVersion") ?? undefined;
-      const snapshot = deps.currentSnapshot();
+      const base = deps.currentSnapshot();
+      // The analytics cache owns historical refreshes. Live metrics are a separate, already
+      // captured process-owned value, so this handler never starts a refresh or provider read.
+      const live = deps.currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics();
+      const snapshot = { ...base, ...live } as AnalyticsSnapshot;
       const resolution = resolveConsoleV1Projection(snapshot, requestedVersion);
       if (!resolution.ok) {
         sendJson(res, 409, resolution);
