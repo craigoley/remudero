@@ -1,4 +1,4 @@
-- id: W1-T3846
+- id: W1-T3852
   title: "Give the operator one bounded story of long-running work: a source-labeled activity, workstream, and artifact projection without creating a second plan or memory store"
   repo: remudero
   depends_on: []
@@ -9,7 +9,7 @@
   risk: high
   band_meaning: span
   origin: "research:muse-ux-2026-09-20"
-  plan_refs: ["§7", "§7B", "W1-T315", "W1-T3848"]
+  plan_refs: ["§7", "§7B", "W1-T315", "W1-T3854"]
   files:
     - src/lib/panel-graph.ts
     - src/lib/serve.ts
@@ -73,4 +73,4 @@
     selector with a local title/id sort and the third must fail. Add a raw transcript or credential
     field to an artifact and the fourth must fail. Remove the schema version, exceed the declared
     limit, or issue one upstream request per row and the fifth must fail.
-  note: "This is the public contract seam for a private console. It does not add browser UI, consumer-style memory, a new goal store, credentials, or a host action. W1-T3848 is an explicit follow-up: it consumes this projection to add incident identity/regression semantics; it does not replace or duplicate the activity envelope."
+  note: "This is the public contract seam for a private console. It does not add browser UI, consumer-style memory, a new goal store, credentials, or a host action. W1-T3854 is an explicit follow-up: it consumes this projection to add incident identity/regression semantics; it does not replace or duplicate the activity envelope."

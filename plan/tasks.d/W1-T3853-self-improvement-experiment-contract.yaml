@@ -1,4 +1,4 @@
-- id: W1-T3847
+- id: W1-T3853
   title: "SELF-IMPROVEMENT NEEDS A FALSIFIABLE EXPERIMENT RECORD — tie each proposed change to a hypothesis, baseline, observation window, measured outcome, and rollback path instead of calling acceptance success"
   repo: remudero
   depends_on: []
@@ -9,7 +9,7 @@
   risk: high
   band_meaning: blast-radius
   origin: "research:self-improving-systems-2026-09-20"
-  plan_refs: ["§Self-improvement", "W1-T3795", "W1-T3800", "W1-T3846"]
+  plan_refs: ["§Self-improvement", "W1-T3795", "W1-T3800", "W1-T3852"]
   files: [src/lib/operator-agent.ts, src/lib/serve.ts, openapi/daemon.yaml]
   status: queued
   attempts: 0
