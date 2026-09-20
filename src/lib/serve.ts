@@ -112,7 +112,7 @@ import {
   type AnalyticsSnapshotCacheDeps,
 } from "./analytics-route.js";
 import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
-import { createLiveAnalyticsSnapshotCache, type LiveAnalyticsSnapshotCacheDeps } from "./live-analytics-snapshot-cache.js";
+import { createLiveAnalyticsSnapshotCache, type LiveAnalyticsSnapshotCacheOptions } from "./live-analytics-snapshot-cache.js";
 import { escapeHtml, renderConsoleShellScript } from "./console-shell-script.js";
 import { consoleShellClientSource } from "./console-shell-client.js";
 import { inboxDigestsPath } from "./digest.js";
@@ -306,7 +306,7 @@ export interface ServeDeps {
    */
   analytics?: Omit<AnalyticsSnapshotCacheDeps, "stateDir" | "log">;
   /** Process-owned filesystem snapshots for the live analytics fields; never request-time readers. */
-  liveAnalytics?: Omit<LiveAnalyticsSnapshotCacheDeps, "root">;
+  liveAnalytics?: Omit<LiveAnalyticsSnapshotCacheOptions, "root">;
   /** Already-captured process-owned live signals for `/v1/analytics`; never a request-time reader. */
   liveMetrics?: () => LiveAnalyticsMetrics;
   /**
