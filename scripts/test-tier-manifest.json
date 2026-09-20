@@ -1543,6 +1543,7 @@
     "test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts": 455,
     "test/the-supervisor-names-the-daemon-it-is-restarting.test.ts": 0,
     "test/the-supervisor-reads-its-own-daemons-image.test.ts": 0,
+    "test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts": 0,
     "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 1247,
     "test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts": 328,
     "test/the-top-of-tick-freshness-exit-precedes-every-dispatch.test.ts": 771,
