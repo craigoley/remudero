@@ -3157,10 +3157,8 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
  * W1-T3814 — plan-only filings may not introduce substantive authoring diagnostics and still
  * auto-merge. These three checks are intentionally WARN in the whole-plan and implementation
  * paths: existing backlog carries measured findings, and a global severity flip would strand it.
- * The plan-only caller supplies the base task's diagnostics so this pure adapter can promote only
- * a finding that is NEW on a changed shard (or any finding on a newly added shard). Inherited
- * findings stay visible as warnings; an absent base is not treated as inherited and therefore
- * fails closed for a changed shard.
+ * The caller supplies base diagnostics so this pure adapter promotes only NEW findings (or any
+ * finding on a newly added shard). Inherited findings stay visible; an absent base fails closed.
  */
 export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new Set([
   "shared-proof",
