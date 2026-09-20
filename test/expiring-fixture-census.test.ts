@@ -99,9 +99,14 @@ const at = (msFromNow: number) => new Date(NOW + msFromNow).toISOString();
 
 test("W1-T3838: an unlisted clock-aged field fails the census", () => {
   const source = `const expiresAt = Date.parse(proposal.expiresAt);\nif (expiresAt <= now) return;`;
+  const reverseComparison = `if (now >= Date.parse(proposal.expiresAt)) return;`;
 
   assert.throws(
     () => assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => source, agedFields: [] }),
+    /INCOMPLETE TABLE.*expiresAt/s,
+  );
+  assert.throws(
+    () => assertFieldListComplete({ files: ["src/lib/operator-agent.ts"], readFile: () => reverseComparison, agedFields: [] }),
     /INCOMPLETE TABLE.*expiresAt/s,
   );
 });
