@@ -33655,7 +33655,7 @@ export function commitWorkerEdits(
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
-  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z"]));
+  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z", "--untracked-files=all"]));
   if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
 
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths));
