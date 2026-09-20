@@ -60,7 +60,7 @@ import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
-import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // W1-T2777: same primitive `ensureInstallFresh` (run-task.ts) uses, shared via the extracted `install-hash` module so both
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
@@ -2916,6 +2916,19 @@ export interface QuestionEntry {
   impact_if_wrong?: string;
 }
 
+function isLiveQuestionStoreRoot(repoRoot: string): boolean {
+  if (!isTestRunner()) return false;
+  try {
+    return realpathSync(repoRoot) === realpathSync(process.cwd());
+  } catch {
+    return false;
+  }
+}
+
+function hasMissingPullRequestIdentity(entry: QuestionEntry): boolean {
+  return /#undefined\b|\(undefined\)/i.test(entry.current_assumption ?? "");
+}
+
 /** Extract a labelled section (`HEADER:` … until the next known header). */
 function section(text: string, header: string, stops: string[]): string {
   const re = new RegExp(
@@ -3102,6 +3115,7 @@ export function parseFollowups(text: string): FollowupEntry[] | null {
  * durably on its first question (MASTER-PLAN 2). */
 export function appendQuestion(repoRoot: string, entry: QuestionEntry): boolean {
   try {
+    if (isLiveQuestionStoreRoot(repoRoot) || hasMissingPullRequestIdentity(entry)) return false;
     const dir = join(repoRoot, "plan");
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, "questions.ndjson"), JSON.stringify(entry) + "\n");
