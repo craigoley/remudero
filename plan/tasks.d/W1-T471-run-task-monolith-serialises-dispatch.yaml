@@ -78,7 +78,9 @@
   origin: recon#run-task-serialises-dispatch-2026-08-13
   plan_refs: ["W1-T344", "W1-T325"]
   files: [src/run-task.ts, src/lib/dispatch-overlap.ts, test/dispatch-overlap.test.ts, test/parallel-dispatch.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: one effective lane and the monolith are accepted by ruling.
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/run-task.ts` and
     `src/lib/dispatch-overlap.ts` plus their suites; `sizingViolation` (`src/lib/task-linter.ts`)

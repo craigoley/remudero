@@ -87,7 +87,9 @@
     - claim: "The shard leaves severity and remediation to the operator and records why a review-side fix would not block the shipping PR"
       proof: "grep: WHY IT HAS TO BE A FILING-TIME CHECK in plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml"
   files: [plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: W1-T3208/#4737 shipped the task-shard self-line fix.
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
   plan_refs: ["W1-T1120", "W1-T2817", "W1-T2818", "W1-T2737", "W1-T2909", "W1-T1014"]

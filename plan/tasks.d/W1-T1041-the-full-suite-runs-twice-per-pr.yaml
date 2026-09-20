@@ -360,7 +360,9 @@
   origin: "oper#full-suite-runs-twice-2026-08-19"
   plan_refs: ["W1-T1009", "W1-T1014", "W1-T1027", "W1-T1034", "W1-T255", "W1-T131", "W1-T133", "W1-T212"]
   files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/workflow-job-timeouts.test.ts, test/workflow-playwright-install.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: W1-T3207/#4733 owns the surviving harness policy.
   attempts: 0
   note: |
     RISK IS `high` UP FRONT, AND THE BAND IS RULE 19's SPAN RATHER THAN BLAST RADIUS. `files:`

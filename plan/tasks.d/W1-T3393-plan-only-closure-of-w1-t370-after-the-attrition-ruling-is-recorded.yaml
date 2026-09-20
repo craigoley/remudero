@@ -28,7 +28,9 @@
   origin: architect
   plan_refs: ["W1-T370", "W1-T3212", "W1-T369", "W1-T1260"]
   files: [plan/tasks.d/W1-T370-merged-proof-debt-spend-ruling.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: W1-T370's attrition ruling is now recorded.
   attempts: 0
   note: |
     verify:human is deliberate because this task is conditional on the live judge arm from W1-T3392.

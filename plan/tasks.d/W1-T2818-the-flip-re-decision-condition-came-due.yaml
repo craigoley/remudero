@@ -117,7 +117,9 @@
     - claim: "the shard changes nothing about whether the advisory blocks"
       proof: "grep: THE ADVISORY STAYS ADVISORY UNTIL THE OPERATOR SAYS OTHERWISE in plan/tasks.d/W1-T2818-the-flip-re-decision-condition-came-due.yaml"
   files: [plan/tasks.d/W1-T2818-the-flip-re-decision-condition-came-due.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: the flip remains declined and the condition is re-armed.
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
   plan_refs: ["W1-T323", "W1-T322", "W1-T1120", "W1-T1017"]

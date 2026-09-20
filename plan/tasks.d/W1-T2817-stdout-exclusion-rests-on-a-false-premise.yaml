@@ -113,7 +113,9 @@
     - claim: "the shard settles nothing itself and parks the scope ruling for the operator"
       proof: "grep: THIS SHARD DOES NOT DECIDE THE SCOPE QUESTION in plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml"
   files: [plan/tasks.d/W1-T2817-stdout-exclusion-rests-on-a-false-premise.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: the exclusion remains and its reason is corrected.
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
   plan_refs: ["W1-T2279", "W1-T2806", "W1-T2807"]

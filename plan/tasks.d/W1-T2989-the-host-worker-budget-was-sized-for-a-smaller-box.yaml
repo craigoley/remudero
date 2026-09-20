@@ -10,7 +10,9 @@
   origin: architect
   plan_refs: ["W1-T2853", "W1-T2985", "W1-T1049", "W1-T312"]
   files: [plan/policy.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: W1-T3209/#4731 shipped the measured host budget.
   attempts: 0
   rationale: |
     `sweep.reviewCapacity.hostWorkerBudget` is 4. The shed fires when
