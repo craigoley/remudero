@@ -26,6 +26,12 @@ const HISTORICAL_SERIES = [
 
 const HISTORICAL_BUCKETS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const utcDayFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
 
 type HistoricalBucket = {
   observed: boolean;
@@ -59,11 +65,18 @@ function number(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function utcDayFromMs(parsed: number): string | undefined {
+  if (!Number.isFinite(parsed)) return undefined;
+  const parts = Object.fromEntries(utcDayFormatter.formatToParts(parsed).map(({ type, value }) => [type, value]));
+  const year = parts.year;
+  const month = parts.month;
+  const day = parts.day;
+  return year && month && day ? `${year}-${month}-${day}` : undefined;
+}
+
 function timestampDay(value: unknown): string | undefined {
   const raw = text(value);
-  if (!raw) return undefined;
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : undefined;
+  return raw ? utcDayFromMs(Date.parse(raw)) : undefined;
 }
 
 function tokenCounts(line: Record<string, unknown>): { total: number; input: number; cacheRead: number; cacheCreation: number } {
@@ -89,13 +102,12 @@ export interface HistoricalSeriesAccumulator {
 }
 
 function dayRange(nowIso: string): string[] {
-  const parsed = Date.parse(nowIso);
-  if (!Number.isFinite(parsed)) return [];
-  const end = new Date(parsed);
-  end.setUTCHours(0, 0, 0, 0);
+  const endDay = timestampDay(nowIso);
+  if (!endDay) return [];
+  const end = Date.parse(`${endDay}T00:00:00.000Z`);
+  if (!Number.isFinite(end)) return [];
   return Array.from({ length: HISTORICAL_BUCKETS }, (_, index) => {
-    const day = new Date(end.getTime() - (HISTORICAL_BUCKETS - index - 1) * DAY_MS);
-    return day.toISOString().slice(0, 10);
+    return utcDayFromMs(end - (HISTORICAL_BUCKETS - index - 1) * DAY_MS)!;
   });
 }
 
