@@ -33196,6 +33196,16 @@ export interface CaptureRegisteredFixOwnerDeps {
   processCensus?: (ownerPath: string) => ProcessCwdCensus;
   readClaim?: (inflightDir: string, claimKey: string) => "clear" | "occupied" | "unknown";
   now?: () => number;
+  /**
+   * W1-T3822's capture-verification seams live here rather than in a shape of their own.
+   * `captureRegisteredFixOwnerSnapshot` and `preserveTrackedDirtyFixOwner` are siblings under the
+   * single `registeredOwnerRecovery` composition root, and both of these seams verify a capture:
+   * that the reconstructed patch tree equals the owner's, and that the written recovery ref
+   * reproduces it. W1-T2894's ceiling only falls when siblings reuse a seam instead of each
+   * minting one, so these are members here instead of a second *Deps interface.
+   */
+  treesMatch?: (patchTree: string, ownerTree: string) => boolean;
+  matchesDirtyRecovery?: (repoDir: string, recoveryRef: string, localSha: string, tree: string) => boolean;
 }
 
 export function readRegisteredFixOwnerClaim(
@@ -33395,17 +33405,12 @@ function refCommitMatchesDirtyRecovery(repoDir: string, recoveryRef: string, loc
   }
 }
 
-export interface PreserveTrackedDirtyFixOwnerDeps {
-  treesMatch?: (patchTree: string, ownerTree: string) => boolean;
-  matchesDirtyRecovery?: (repoDir: string, recoveryRef: string, localSha: string, tree: string) => boolean;
-}
-
 export function preserveTrackedDirtyFixOwner(
   repoDir: string,
   ownerPath: string,
   branch: string,
   localSha: string,
-  deps: PreserveTrackedDirtyFixOwnerDeps = {},
+  deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
