@@ -8431,10 +8431,10 @@
   risk: medium
   origin: feedback#docs
   plan_refs: ["§12A", "§Cross-repository ownership"]
-  files: [plan/tasks.yaml]
+  files: [plan/tasks.yaml, plan/tasks.d/W1-T3887-core-site-cli-reference-contract.yaml]
   acceptance:
     - claim: "the former W1-T49 record is withdrawn and its site implementation is owned by PORTAL-T19"
-      proof: "grep: retirement: withdrawn # PORTAL-T19 in plan/tasks.yaml"
+      proof: "grep: PORTAL-T19 in plan/tasks.d/W1-T3887-core-site-cli-reference-contract.yaml"
   status: blocked
   retirement: withdrawn # PORTAL-T19 owns the site implementation
   attempts: 0
