@@ -88,9 +88,19 @@
   # below into proof-unit-test-unresolvable in a tree that by rule cannot carry one. It is
   # test/expiring-fixture-census.test.ts, and it lands with the implementation.
   files: [scripts/expiring-fixture-census.mjs, .github/workflows/ci.yml]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
+    RETIRED 2026-09-20: the complete implementation is already on current main in commit
+    80c2829e839dc11a82520693f213c7b04e47fe04, merged by PR #5880 with Remudero-Task: W1-T3655.
+    `.github/workflows/ci.yml:270-285` runs the census on push-to-main with
+    `CENSUS_MAIN_BRANCH_RUN=1`, and `scripts/expiring-fixture-census.mjs:354-365` charges only
+    diff-introduced crossings or population drops while retaining the inherited report. The
+    current tests cover inherited non-blocking, introduced blocking, main-branch blocking,
+    visibility, and population-drop refusal. This task is retired as a stale duplicate of the
+    shipped W1-T3655 implementation; do not dispatch it or credit its issue to a future PR.
+
     reservation hand-off: unknown -> throughput
 
     Minted by `rmd next-task-id` from a DETACHED HEAD, so the reservation recorded no readable
