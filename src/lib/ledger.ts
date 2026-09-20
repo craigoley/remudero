@@ -422,6 +422,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // wait; losing it reads a WAITING run as WORKING and freezes the fix rung for that run.
   "run.awaiting_external",
   "fix.ci_not_green",
+  // W1-T3868: sweep.ts reads this fix-lane refusal to release the unchanged-head claim after the
+  // harness declined to create a commit; rotating it away would strand that head again.
+  "fix.commit_refused",
   "fix.resolved",
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
