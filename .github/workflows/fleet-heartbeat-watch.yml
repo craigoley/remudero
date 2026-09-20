@@ -38,19 +38,20 @@ permissions:
   contents: read
 
 env:
-  # One entry per host, space-separated: heartbeat-mini, heartbeat-azure. Adding a host costs one
+  # One active entry per fleet host, space-separated: heartbeat-azure. Adding a host costs one
   # word here plus `RMD_HEARTBEAT_BRANCH=<word>` in its cron line; an entry with no beat yet costs
-  # nothing, because absence is silent per branch (see the file header).
+  # nothing, because absence is silent per branch (see the file header). The Mac-mini's
+  # heartbeat-mini transport is retired and intentionally no longer watched.
   #
   # A branch named here is also guarded from the branch reaper (reapBranchesCommand,
   # src/run-task.ts); a name missing from that gate's own DECLARED_BRANCH_GUARDS is reported as
   # drift.
-  # Why: the retired `heartbeat` entry stays here, inert, rather than being deleted — see
+  # Why: retired refs stay out of this active list and inert, rather than being deleted — see
   # docs/forensics/fleet-heartbeat-watch-yml.md#heartbeat_branches.
-  HEARTBEAT_BRANCHES: "heartbeat-mini heartbeat-azure"
+  HEARTBEAT_BRANCHES: "heartbeat-azure"
   STALE_AFTER_MINUTES: "30"
   # W1-T2876: only a branch listed here is expected to run a polling daemon, so only it is
-  # escalated on daemon_verdict — heartbeat-mini runs no daemon and would otherwise fail this job
+  # escalated on daemon_verdict — a branch that runs no daemon would otherwise fail this job
   # forever on a true STALE reading. A branch not listed stays silent on this arm.
   # Why: PRs #4095 and #4068 fixed a run that printed "daemon STALE" and reported 0 stale — see
   # docs/forensics/fleet-heartbeat-watch-yml.md#daemon_expected_branches.
