@@ -14,6 +14,11 @@
     - src/lib/automation-action.ts
     - src/lib/serve.ts
     - src/lib/operator-agent.ts
+    - test/agent-delegation-envelope.test.ts
+    - test/agent-delegation-acceptance.test.ts
+    - test/agent-delegation-replay.test.ts
+    - test/agent-delegation-human-gates.test.ts
+    - test/agent-delegation-receipts.test.ts
     - openapi/daemon.yaml
   status: queued
   attempts: 0
@@ -39,15 +44,15 @@
     reconstruct who authorized which side effect without storing raw prompts or secrets.
   acceptance:
     - claim: "a delegation envelope binds sender, recipient, principal, purpose, capability, scope, audience, expiry, nonce, and parent receipt"
-      proof: "unit test: agent delegation refuses incomplete identity scope or parent receipt"
+      proof: "unit test: test/agent-delegation-envelope.test.ts"
     - claim: "the recipient must explicitly accept before acting and may only narrow the granted capability"
-      proof: "unit test: agent delegation requires acceptance and forbids capability widening"
+      proof: "unit test: test/agent-delegation-acceptance.test.ts"
     - claim: "forwarding, replay, expiry, revocation, identity mismatch, and unavailable audit sources refuse safely"
-      proof: "unit test: agent delegation refuses replay expiry revocation identity mismatch and audit absence"
+      proof: "unit test: test/agent-delegation-replay.test.ts"
     - claim: "high-risk, destructive, financial, and credential actions remain human-gated across handoffs"
-      proof: "unit test: agent delegation preserves human gates for high-risk actions"
+      proof: "unit test: test/agent-delegation-human-gates.test.ts"
     - claim: "parent and child receipts are linked and bounded without raw prompts, secrets, or transcripts"
-      proof: "unit test: agent delegation records linked redacted receipts"
+      proof: "unit test: test/agent-delegation-receipts.test.ts"
     - claim: "the operator-agent handoff path calls the bounded automation action module"
       proof: "grep: executeBoundedDelegation( in src/lib/operator-agent.ts"
   falsifier: |

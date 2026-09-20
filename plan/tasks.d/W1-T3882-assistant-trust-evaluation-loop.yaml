@@ -14,6 +14,11 @@
     - src/lib/experiment-promotion.ts
     - src/lib/measurement-cadence.ts
     - src/lib/operator-agent.ts
+    - test/assistant-evaluation-metrics.test.ts
+    - test/assistant-evaluation-replay.test.ts
+    - test/assistant-evaluation-controls.test.ts
+    - test/assistant-evaluation-promotion.test.ts
+    - test/assistant-evaluation-redaction.test.ts
     - openapi/daemon.yaml
   status: queued
   attempts: 0
@@ -39,15 +44,15 @@
     bounded redacted evidence needed to reproduce the decision.
   acceptance:
     - claim: "each trust metric names its population, denominator, window, sample floor, source, freshness, and unmeasurable state"
-      proof: "unit test: assistant evaluation refuses metrics without denominator window or freshness"
+      proof: "unit test: test/assistant-evaluation-metrics.test.ts"
     - claim: "replay and shadow evaluation are deterministic and side-effect-free"
-      proof: "unit test: assistant evaluation replays with no external action"
+      proof: "unit test: test/assistant-evaluation-replay.test.ts"
     - claim: "positive controls prove the corpus is visible and negative controls prove restraint failures are detectable"
-      proof: "unit test: assistant evaluation requires positive and negative controls"
+      proof: "unit test: test/assistant-evaluation-controls.test.ts"
     - claim: "unauthorized side effects, stale context use, incomplete receipts, and failed rollback block promotion"
-      proof: "unit test: assistant evaluation blocks promotion on trust regressions"
+      proof: "unit test: test/assistant-evaluation-promotion.test.ts"
     - claim: "evaluation records contain bounded redacted evidence rather than raw prompts, credentials, or transcripts"
-      proof: "unit test: assistant evaluation redacts private and unbounded evidence"
+      proof: "unit test: test/assistant-evaluation-redaction.test.ts"
     - claim: "the operator-agent promotion path calls the experiment evaluation module"
       proof: "grep: evaluateAssistantTrust( in src/lib/operator-agent.ts"
   falsifier: |

@@ -15,6 +15,11 @@
     - src/lib/automation-action.ts
     - src/lib/operator-agent.ts
     - openapi/daemon.yaml
+    - test/delegation-profile-scope.test.ts
+    - test/delegation-profile-versioning.test.ts
+    - test/delegation-profile-refusals.test.ts
+    - test/delegation-profile-escalation.test.ts
+    - test/delegation-profile-redaction.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -40,15 +45,15 @@
     irreversible actions remain human-gated even when a profile exists.
   acceptance:
     - claim: "every executable delegation carries a bounded scope, capability set, risk tier, budget, approval policy, expiry, and revocation reference"
-      proof: "unit test: delegation profile refuses incomplete or unbounded autonomy metadata"
+      proof: "unit test: test/delegation-profile-scope.test.ts"
     - claim: "profile changes create linked replacements and never mutate the original authorization history"
-      proof: "unit test: delegation profile versions authorization changes with linked receipts"
+      proof: "unit test: test/delegation-profile-versioning.test.ts"
     - claim: "missing, stale, expired, revoked, and over-budget profiles produce distinct refusals"
-      proof: "unit test: delegation profile preserves explicit refusal reasons"
+      proof: "unit test: test/delegation-profile-refusals.test.ts"
     - claim: "a prior approval or model confidence cannot authorize a higher-risk action than the profile permits"
-      proof: "unit test: delegation profile cannot escalate capability from approval or confidence"
+      proof: "unit test: test/delegation-profile-escalation.test.ts"
     - claim: "the profile contract contains no raw prompt, credential, transcript, or browser-owned measurement"
-      proof: "unit test: delegation profile redacts prompts credentials transcripts and client measurements"
+      proof: "unit test: test/delegation-profile-redaction.test.ts"
     - claim: "the operator-agent execution path calls the delegation profile module"
       proof: "grep: buildDelegationProfile( in src/lib/operator-agent.ts"
     - claim: "the operator-agent execution path evaluates the bounded automation action module"

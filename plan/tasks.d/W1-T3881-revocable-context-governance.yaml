@@ -14,6 +14,11 @@
     - src/lib/operator-agent.ts
     - src/lib/ledger.ts
     - src/lib/serve.ts
+    - test/context-governance-shape.test.ts
+    - test/context-governance-filtering.test.ts
+    - test/context-governance-derivation.test.ts
+    - test/context-governance-receipts.test.ts
+    - test/context-governance-restart.test.ts
     - openapi/daemon.yaml
   status: queued
   attempts: 0
@@ -40,15 +45,15 @@
     private content in the browser or public site.
   acceptance:
     - claim: "every retained context item names provenance, purpose, sensitivity, authority, freshness, retention, and visibility"
-      proof: "unit test: context governance refuses incomplete provenance purpose or retention"
+      proof: "unit test: test/context-governance-shape.test.ts"
     - claim: "revoked, expired, or purpose-mismatched context is excluded from planning and action preflight"
-      proof: "unit test: context governance filters revoked expired and out-of-purpose items"
+      proof: "unit test: test/context-governance-filtering.test.ts"
     - claim: "derived context links to its inputs and becomes unavailable when required inputs are deleted"
-      proof: "unit test: context governance invalidates derived items after source deletion"
+      proof: "unit test: test/context-governance-derivation.test.ts"
     - claim: "delete and revoke operations produce bounded receipts without returning raw private content"
-      proof: "unit test: context governance records redacted deletion and revocation receipts"
+      proof: "unit test: test/context-governance-receipts.test.ts"
     - claim: "restart and reindex do not silently restore revoked context"
-      proof: "unit test: context governance preserves revocation across restart and reindex"
+      proof: "unit test: test/context-governance-restart.test.ts"
   falsifier: |
     Use context after revocation, recreate deleted context from an undeclared cache, merge purposes
     without authority, or report deletion without a durable receipt. The corresponding proof must fail.

@@ -14,6 +14,11 @@
     - src/lib/follow-up-policy.ts
     - src/lib/operator-agent.ts
     - src/lib/ledger.ts
+    - test/follow-up-policy-source.test.ts
+    - test/follow-up-policy-stale.test.ts
+    - test/follow-up-policy-deduplication.test.ts
+    - test/follow-up-policy-stops.test.ts
+    - test/follow-up-policy-delivery.test.ts
     - openapi/daemon.yaml
   status: queued
   attempts: 0
@@ -39,15 +44,15 @@
     they never imply completion merely because a message was delivered.
   acceptance:
     - claim: "a follow-up names its source event, reason, freshness, deadline or dependency, deduplication key, and next decision"
-      proof: "unit test: follow-up policy requires source reason freshness and next decision"
+      proof: "unit test: test/follow-up-policy-source.test.ts"
     - claim: "stale, unavailable, expired, and terminal sources suppress follow-up instead of generating a healthy reminder"
-      proof: "unit test: follow-up policy refuses stale unavailable expired and terminal sources"
+      proof: "unit test: test/follow-up-policy-stale.test.ts"
     - claim: "duplicate candidates coalesce by a durable key and never repeat a terminal side effect"
-      proof: "unit test: follow-up policy deduplicates terminal and in-flight candidates"
+      proof: "unit test: test/follow-up-policy-deduplication.test.ts"
     - claim: "snooze, reject, revoke, quiet hours, and maximum-attempt controls survive restart from ledgered state"
-      proof: "unit test: follow-up policy restores human stop controls from receipts"
+      proof: "unit test: test/follow-up-policy-stops.test.ts"
     - claim: "a delivered reminder is not rendered as completed work or permission to act"
-      proof: "unit test: follow-up policy separates notification delivery from action completion"
+      proof: "unit test: test/follow-up-policy-delivery.test.ts"
     - claim: "the operator-agent execution path calls the durable follow-up policy module"
       proof: "grep: evaluateFollowUpPolicy( in src/lib/operator-agent.ts"
   falsifier: |
