@@ -48,6 +48,8 @@
       proof: "unit test: follow-up policy restores human stop controls from receipts"
     - claim: "a delivered reminder is not rendered as completed work or permission to act"
       proof: "unit test: follow-up policy separates notification delivery from action completion"
+    - claim: "the operator-agent execution path calls the durable follow-up policy module"
+      proof: "grep: evaluateFollowUpPolicy( in src/lib/operator-agent.ts"
   falsifier: |
     Send a reminder from stale evidence, re-arm a terminal candidate, ignore quiet hours or revoke,
     duplicate an in-flight candidate, or treat delivery as completion. The affected proof must fail.

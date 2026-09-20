@@ -49,6 +49,10 @@
       proof: "unit test: delegation profile cannot escalate capability from approval or confidence"
     - claim: "the profile contract contains no raw prompt, credential, transcript, or browser-owned measurement"
       proof: "unit test: delegation profile redacts prompts credentials transcripts and client measurements"
+    - claim: "the operator-agent execution path calls the delegation profile module"
+      proof: "grep: buildDelegationProfile( in src/lib/operator-agent.ts"
+    - claim: "the operator-agent execution path evaluates the bounded automation action module"
+      proof: "grep: evaluateAutomationAction( in src/lib/operator-agent.ts"
   falsifier: |
     Permit an unscoped action, reuse an expired or revoked profile, mutate an authorization in place,
     infer permission from a prior approval, or let a low-risk profile execute a higher-risk action.
