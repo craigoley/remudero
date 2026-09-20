@@ -47,7 +47,7 @@
     ref, overwrite a ref, force-remove a worktree, or weaken the clean-owner path.
   acceptance:
     - claim: "an abandoned managed owner with tracked-only dirty work is preserved in a recovery ref before its PR's fix worktree is reclaimed"
-      proof: "grep: refs/rmd-recovery/ in src/run-task.ts"
+      proof: "grep: refs/rmd-recovery/fix-dirty in src/run-task.ts"
     - claim: "an untracked file, unreadable probe, live claim, or process cwd leaves the dirty owner untouched and dispatches no repair worker"
       proof: "grep: dirty_recovery_untracked_refused in src/lib/sweep.ts"
   falsifier: |
