@@ -113,6 +113,46 @@ function minimalDeps(): SweepDeps & { armed: OpenPrView[]; closed: OpenPrView[];
   };
 }
 
+function modeDeps(): SweepDeps & { modes: string[] } {
+  const base = minimalDeps();
+  const modes: string[] = [];
+  return {
+    ...base,
+    modes,
+    postReview: async (_pr, mode) => {
+      modes.push(mode?.kind ?? "full-review");
+    },
+  };
+}
+
+test("W1-T3798 reuse-posts-current-head-verdict", async () => {
+  const deps = modeDeps();
+  const summary = await runSweep([orphanedPr(unchangedInputs())], deps);
+  assert.equal(summary.byDisposition["review-reused"], 1);
+  assert.deepEqual(deps.modes, ["reuse"]);
+  const disposed = readLedgerLines(deps.ledgerPath).find((line) => line.step === "sweep.disposed");
+  assert.equal(disposed?.acted, true);
+});
+
+test("W1-T3798 base-only-runs-discrimination", async () => {
+  const deps = modeDeps();
+  const summary = await runSweep([orphanedPr({ ...unchangedInputs(), currentMergeBaseSha: NEW_MERGE_BASE })], deps);
+  assert.equal(summary.byDisposition["discriminate-only"], 1);
+  assert.deepEqual(deps.modes, ["discriminate-only"]);
+});
+
+test("W1-T3798 changed-contract-forces-full-review", async () => {
+  const deps = modeDeps();
+  await runSweep([orphanedPr({ ...unchangedInputs(), currentOwnDiffDigest: "sha256:changed" })], deps);
+  assert.deepEqual(deps.modes, ["full-review"]);
+});
+
+test("W1-T3798 unreadable-evidence-falls-back", async () => {
+  const deps = modeDeps();
+  await runSweep([orphanedPr({ ...unchangedInputs(), currentMergeBaseSha: undefined })], deps);
+  assert.deepEqual(deps.modes, ["full-review"]);
+});
+
 // ── acceptance 1: own diff same, merge base same → reuse the verdict ──────────────────────────
 
 test("W1-T3704 (1): a push whose own diff and merge base are both unchanged reuses the verdict instead of discarding it", () => {

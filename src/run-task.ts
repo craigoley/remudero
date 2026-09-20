@@ -1279,6 +1279,7 @@ import {
   type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type ReviewDispatchMode,
   type RollupCheckEntry,
   type PostFixReverificationSummary,
   type ProofDiscriminationEvidence,
@@ -1606,6 +1607,58 @@ export function buildSweepEffects(
       spawnReview: spawnRmdReviewForFreshTree,
     }),
   );
+  const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
+    // A base move still needs fresh proof discrimination; the existing deterministic review path
+    // is the safe fallback until a proof-only runner can be exposed without duplicating review.ts.
+    if (mode.kind !== "reuse") {
+      deps.log("sweep.review_reuse_discrimination_fallback", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        ...(mode.kind === "discriminate-only" ? { judged_head_sha: mode.judgedHeadSha } : {}),
+      });
+      return reviewCommand(String(pr.prNumber), ["--repo", deps.repo]);
+    }
+    const prior = readLedgerLines(deps.ledgerPath)
+      .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
+      .at(-1);
+    const verdict = prior?.decision_verdict as ReviewVerdict | undefined;
+    if (!pr.taskId || !verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
+      deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
+      return reviewCommand(String(pr.prNumber), ["--repo", deps.repo]);
+    }
+    const posted = await postReviewStatusGuarded({
+      owner: deps.owner,
+      repo: deps.repo,
+      sha: pr.headSha,
+      state: verdict.state,
+      description: reviewPostedDescription(verdict),
+      taskId: pr.taskId,
+      evidence: reviewEvidenceStrength(verdict.criteria ?? []),
+      ledgerPath: deps.ledgerPath,
+      runId: deps.runId,
+      prUrl: pr.prUrl,
+      reviewInputDigest: pr.reviewInputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
+    });
+    if (!posted.posted && !posted.replayed) return 1;
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: pr.taskId,
+      step: "review.posted",
+      context: REVIEW_CONTEXT,
+      state: verdict.state,
+      head_sha: pr.headSha,
+      pr_url: pr.prUrl,
+      decision_verdict: verdict,
+      review_reused: true,
+      reused_from_head_sha: mode.judgedHeadSha,
+      ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
+      proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
+      ...reviewLedgerLegibilityFields(verdict),
+    });
+    return 0;
+  };
   const effects = buildSweepEffectsFromLib({
     repoRoot,
     localRepoName: resolveOwnerRepo().repo,
@@ -1615,6 +1668,7 @@ export function buildSweepEffects(
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
     reviewCommandImpl: reviewerCodeGate.call,
+    reviewReuseRunner,
     reviewerCodeStaleThisPassImpl: reviewerCodeGate.staleThisPass,
     stallNotice: escalatePostReviewStall,
     registeredOwnerRecovery: {

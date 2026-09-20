@@ -792,6 +792,9 @@ export interface BuildSweepEffectsDeps {
   log: (step: string, extra?: Record<string, unknown>) => void;
   policy?: SweepPolicy;
   reviewRunner?: (prNumber: number, isPlanFiling?: boolean) => Promise<number>;
+  /** W1-T3798 — reuse/discrimination is an explicit mode, so the adapter can run the cheap
+   *  deterministic path instead of silently treating both dispositions as a full review. */
+  reviewReuseRunner?: (pr: OpenPrView, mode: ReviewDispatchMode) => Promise<number>;
   /** The command the DEFAULT `reviewRunner` above calls. Separate from `reviewRunner` on purpose:
    *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
    *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
@@ -887,6 +890,11 @@ export interface BuildSweepEffectsDeps {
   fixRungCheckoutRefusedErrorImpl?: SweepRuntimeCtor;
   defaultBudgetUsd?: number;
 }
+
+export type ReviewDispatchMode =
+  | { kind: "full-review" }
+  | { kind: "reuse"; judgedHeadSha: string }
+  | { kind: "discriminate-only"; judgedHeadSha: string };
 
 /**
  * The default `gh` invocation for {@link buildSweepEffects}' `ghRunImpl` seam — a NAMED function
@@ -1497,15 +1505,29 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // (sweep.ts) still marks `acted:false` + `action_error` on this PR's
     // `sweep.disposed` line — this is a MORE SPECIFIC sibling record, not a
     // replacement for it.
-    postReview: async (pr) => {
-      log("sweep.post_review.attempt", { pr_number: pr.prNumber, head_sha: pr.headSha });
+    postReview: async (pr, mode = { kind: "full-review" }) => {
+      log("sweep.post_review.attempt", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        review_mode: mode.kind,
+        ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
+      });
       try {
-        const exit = await reviewRunner(pr.prNumber, pr.isPlanFiling);
-        log("sweep.post_review.done", { pr_number: pr.prNumber, head_sha: pr.headSha, exit });
+        const exit =
+          mode.kind === "full-review" || !deps.reviewReuseRunner
+            ? await reviewRunner(pr.prNumber, pr.isPlanFiling)
+            : await deps.reviewReuseRunner(pr, mode);
+        log("sweep.post_review.done", {
+          pr_number: pr.prNumber,
+          head_sha: pr.headSha,
+          exit,
+          review_mode: mode.kind,
+        });
       } catch (e) {
         log("sweep.post_review.failed", {
           pr_number: pr.prNumber,
           head_sha: pr.headSha,
+          review_mode: mode.kind,
           error: String((e as Error)?.message ?? e),
         });
         // A REPEATED failure escalates; a single one does not. Read back AFTER the log above so the
@@ -6840,7 +6862,7 @@ export interface SweepDeps {
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
    *  with each review-input key claimed synchronously before scheduling. */
-  postReview?: (pr: OpenPrView) => void | Promise<void>;
+  postReview?: (pr: OpenPrView, mode?: ReviewDispatchMode) => void | Promise<void>;
   /** W1-T3581 — provenance of the module graph THIS daemon process loaded at boot. A stale
    * reviewer-code refusal may bypass its ordinary time backoff only when this narrow predicate
    * proves the loaded code is at or after the refusal's recorded origin/main target. Omitted
@@ -8352,6 +8374,7 @@ export async function runSweep(
     // W1-T513: carried alongside the job so both release sites release the SAME key they claimed;
     // recomputing it from `pr` would work, but carrying it removes any chance of drift.
     reviewKey: string;
+    mode: ReviewDispatchMode;
   }> = [];
 
   /** The tail every disposition shares once `acted`, `actionError` and `standDownReason` are known —
@@ -8706,18 +8729,20 @@ export async function runSweep(
         dedupStandDownReason = reason;
         break;
       case "review-reused":
-      case "discriminate-only":
-        // W1-T3704 — SAME SHAPE AS "wait"/"held-draft" above: this task ships the DECISION (which
-        // of reuse/discriminate-only/full-review applies, see {@link reviewReuseVerdict}) and the
-        // ledger-recorded evidence a decision reads, not the effector that re-posts a reused verdict
-        // or re-runs discrimination alone — that dispatch is a separate, not-yet-wired producer
-        // (mirrors how `pendingAnswer`/`workflowRuns` shipped their own mechanism ahead of theirs).
-        // Forcing `alreadyDone` true keeps `acted` false unconditionally and seeds no ledger key, so
-        // the PR is re-derived and re-ledgered every pass rather than silently marked acted-on for
-        // an effect nothing here actually performed.
-        alreadyDone = true;
-        dedupStandDownReason = reason;
+      case "discriminate-only": {
+        // W1-T3798 — these are real review jobs, not terminal waits. They share the normal outcome
+        // key/dedup and bounded review pool, but carry an explicit cheap-path mode to the adapter.
+        const reviewKey = reviewOutcomeKeyForPr(pr);
+        const reviewDelivered = prior.reviewDelivered.has(reviewKey);
+        const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
+        alreadyDone = reviewDelivered || reviewDurablyRefused;
+        if (alreadyDone) {
+          dedupStandDownReason = reviewDelivered
+            ? `a verdict was already DELIVERED for ${reviewKey} — the reuse post is deduped`
+            : `a review post was already REFUSED for ${reviewKey} — the reuse post is deduped`;
+        }
         break;
+      }
       default:
         alreadyDone = false;
     }
@@ -9529,6 +9554,8 @@ export async function runSweep(
               }
               break;
             case "post-review":
+            case "review-reused":
+            case "discriminate-only":
               if (deps.postReview) {
                 // W1-T473: NEVER await inline — that is exactly the one-at-a-time shape this
                 // removes. The key is claimed and the PR queued immediately below, still inside
@@ -9602,7 +9629,14 @@ export async function runSweep(
       // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key into
       // the pool, where `claimReview` atomically claims it immediately before the attempt.
       const reviewKey = reviewOutcomeKeyForPr(pr);
-      pendingReviews.push({ index: prIndex, pr, reason, question, reviewKey });
+      const reuse = reviewReuseVerdict(reviewReuseInputsFrom(pr));
+      const mode: ReviewDispatchMode =
+        disposition === "review-reused" && reuse.kind === "reuse"
+          ? reuse
+          : disposition === "discriminate-only" && reuse.kind === "discriminate-only"
+            ? reuse
+            : { kind: "full-review" };
+      pendingReviews.push({ index: prIndex, pr, reason, question, reviewKey, mode });
       continue;
     }
 
@@ -9670,12 +9704,14 @@ export async function runSweep(
   };
 
   const runReview = async (job: (typeof orderedReviews)[number]): Promise<void> => {
+    const jobDisposition: Disposition =
+      job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
     const claim = claimReview(job.reviewKey);
     if (!claim.ok) {
       finalizeDisposition(
         job.index,
         job.pr,
-        "post-review",
+        jobDisposition,
         job.reason,
         job.question,
         false,
@@ -9711,7 +9747,7 @@ export async function runSweep(
       try {
         if (postReview) {
           try {
-            await postReview(job.pr);
+          await postReview(job.pr, job.mode);
           } catch (e) {
             acted = false;
             // W1-T529 — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v), the
@@ -9720,7 +9756,7 @@ export async function runSweep(
             // call never ran, while `review.post_refused` is read as a VERDICT that ESCALATES
             // unchanged input. THE REPEAT IS STILL BOUNDED, just not by a key: the pacer CONSUMES
             // its trip on the call it refuses.
-            const floorStandDown = budgetFloorStandDown(e, "post-review");
+            const floorStandDown = budgetFloorStandDown(e, jobDisposition);
             if (floorStandDown !== undefined) {
               standDownReason = floorStandDown;
               // W1-T2584: capacity is provider/account-wide, not a verdict about this PR. Once
@@ -9735,7 +9771,7 @@ export async function runSweep(
                 step: "sweep.action_failed",
                 pr_number: job.pr.prNumber,
                 pr_url: job.pr.prUrl,
-                disposition: "post-review",
+                disposition: jobDisposition,
                 error: actionError,
               });
               // W1-T529/W1-T2753 — THE BOUNDED RETRY KEY. `sweep.action_failed` alone leaves no
@@ -9771,7 +9807,7 @@ export async function runSweep(
       finalizeDisposition(
         job.index,
         job.pr,
-        "post-review",
+        jobDisposition,
         job.reason,
         job.question,
         acted,
