@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildAnalyticsBreakdowns, type AnalyticsBreakdownSourceState } from "../src/lib/analytics-breakdowns.js";
+import { buildAnalyticsBreakdowns } from "../src/lib/analytics-breakdowns.js";
 import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
 
 const NOW = "2026-09-20T12:00:00.000Z";
@@ -110,7 +110,7 @@ test("W1-T3809 criterion 3: missing receipts and unknown categories remain visib
 });
 
 test("W1-T3809 criterion 4: empty, unreadable, unauthorized, and not-collected inputs remain explicit without credentials or raw rows", () => {
-  const states: AnalyticsBreakdownSourceState[] = ["empty", "unreadable", "unauthorized", "not-collected"];
+  const states: Array<"empty" | "unreadable" | "unauthorized" | "not-collected"> = ["empty", "unreadable", "unauthorized", "not-collected"];
   for (const state of states) {
     const breakdowns = buildAnalyticsBreakdowns([], { sourceState: state });
     assert.deepEqual(breakdowns.dimensions.map((dimension) => dimension.state), [state, state]);

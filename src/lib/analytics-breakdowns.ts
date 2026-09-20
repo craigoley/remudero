@@ -1,9 +1,5 @@
 import type { OperatorAgentTaskOutcomeSignal } from "./operator-agent-outcomes.js";
 
-export type AnalyticsBreakdownSourceState = "observed" | "empty" | "unreadable" | "unauthorized" | "not-collected";
-
-export type AnalyticsBreakdownDimensionKey = "outcome" | "work-category";
-
 export interface AnalyticsBreakdownBucket {
   key: string;
   label: string;
@@ -12,15 +8,15 @@ export interface AnalyticsBreakdownBucket {
 }
 
 export interface AnalyticsBreakdownDimension {
-  key: AnalyticsBreakdownDimensionKey;
+  key: "outcome" | "work-category";
   label: string;
-  state: AnalyticsBreakdownSourceState;
+  state: "observed" | "empty" | "unreadable" | "unauthorized" | "not-collected";
   denominator: number;
   buckets: AnalyticsBreakdownBucket[];
 }
 
 export interface AnalyticsDrilldownRow extends AnalyticsBreakdownBucket {
-  dimension: AnalyticsBreakdownDimensionKey;
+  dimension: "outcome" | "work-category";
 }
 
 export interface AnalyticsBreakdowns {
@@ -29,7 +25,7 @@ export interface AnalyticsBreakdowns {
 }
 
 export interface AnalyticsBreakdownOptions {
-  sourceState?: AnalyticsBreakdownSourceState;
+  sourceState?: "observed" | "empty" | "unreadable" | "unauthorized" | "not-collected";
   operatorAgentOutcomes?: OperatorAgentTaskOutcomeSignal;
 }
 
@@ -55,7 +51,7 @@ function workCategory(value: unknown): string {
   return candidate && WORK_CATEGORY_PATTERN.test(candidate) ? candidate : "unknown";
 }
 
-function emptyBreakdowns(state: AnalyticsBreakdownSourceState): AnalyticsBreakdowns {
+function emptyBreakdowns(state: NonNullable<AnalyticsBreakdownOptions["sourceState"]>): AnalyticsBreakdowns {
   return {
     dimensions: [
       { key: "outcome", label: "Outcome", state, denominator: 0, buckets: [] },
@@ -77,7 +73,7 @@ function bucketRows(counts: Map<string, number>, denominator: number, order?: re
 }
 
 function buildFromAccumulator(
-  state: AnalyticsBreakdownSourceState,
+  state: NonNullable<AnalyticsBreakdownOptions["sourceState"]>,
   starts: Map<string, StartedRun>,
   terminals: Map<string, TerminalRun>,
   startsWithoutRunId: number,
