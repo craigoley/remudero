@@ -1,0 +1,106 @@
+- id: W1-T3869
+  title: "THE PRODUCTION SWEEP ENTRYPOINT NEVER SUPPLIES `updatePrBodyImpl`, SO THE MISSING-TRAILER REPAIR THROWS `buildSweepEffects requires updatePrBodyImpl from its entrypoint adapter` ON A LIVE PR — `requiredSweepRuntime` installs a throwing stub, the lib effect calls it, and a PR classified blocked-fixable dies at `sweep.action_failed` instead of reaching its repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [src/run-task.ts, test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts]
+  origin: architect
+  plan_refs: ["W1-T3283", "W1-T2948", "W1-T2890"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED ON A LIVE SWEEP (feedback fb-1789380725522-726d15, 2026-09-14): PR #5505 (W1-T3554,
+    head 966f29d) was classified blocked-fixable and the action then failed with the ledgered
+    `sweep.action_failed` message `buildSweepEffects requires updatePrBodyImpl from its entrypoint
+    adapter`. The classification was correct; the effect it selected could not run.
+    THE WIRING GAP IS EXACT AND STILL PRESENT IN SOURCE TODAY.
+    `src/lib/sweep.ts` declares `updatePrBodyImpl?: (prUrl: string, body: string) => Promise<void>`
+    on `BuildSweepEffectsDeps` (W1-T3283's own seam) and destructures it as
+    `updatePrBodyImpl = requiredSweepRuntime("updatePrBodyImpl")`. `requiredSweepRuntime` returns a
+    stub that THROWS `buildSweepEffects requires ${name} from its entrypoint adapter` WHEN CALLED —
+    a lazy refusal, which is why the daemon boots and sweeps fine until the one effect that needs
+    the writer is selected. `repairMissingTaskTrailer` awaits `updatePrBodyImpl(pr.prUrl,
+    repair.repairedBody)` before it logs `sweep.missing_task_trailer_body_write`, so the throw
+    lands inside the action.
+    NOTHING SUPPLIES IT. `src/run-task.ts`'s `buildSweepEffects` is the ONE production adapter —
+    all four in-repo construction sites go through it, and it then calls
+    `buildSweepEffectsFromLib({ ... })` with roughly fifty `*Impl` fields. `updatePrBodyImpl` is
+    not among them, and the string `updatePrBodyImpl` does not appear anywhere in
+    `src/run-task.ts`. The real writer is already exported two thousand lines above:
+    `updatePrBodyViaGh(prUrl, body)` → `writePrBodyRest` → `prBodyRestArgs` (W1-T2948's REST
+    transport), which the module's three other body-write sites already use.
+    SO THIS IS A ONE-LINE ADAPTER OMISSION WITH A LIVE COST: W1-T3283 shipped the repair and the
+    seam, and the entrypoint was never taught to fill it, which makes every blocked-fixable PR
+    whose body is missing its trailer un-repairable by the daemon and a manual `rmd fix` the only
+    route. It is NOT a defect in `requiredSweepRuntime`: the explicit refusal is what turned an
+    unwired dependency into a named, ledgered message instead of a silent no-op.
+  design: |
+    (i) SUPPLY THE REAL WRITER AT THE PRODUCTION ENTRYPOINT, once, in the `buildSweepEffectsFromLib`
+    deps object in `src/run-task.ts` — `updatePrBodyViaGh`, the same writer the module's other
+    body-write sites use, so the trailer repair rides W1-T2948's REST transport rather than a
+    second copy of a failing one. All four construction sites route through this function, so one
+    field covers the daemon tick, the light hook and the CLI paths alike.
+    (ii) KEEP THE LIBRARY'S EXPLICIT REFUSAL EXACTLY AS IT IS. `requiredSweepRuntime` must still
+    install a throwing stub for a deps object that omits the writer, and the message must keep
+    naming the field and the entrypoint adapter. An incomplete TEST adapter must fail loudly at the
+    call; substituting a silent no-op, a console warning, or a default inside `src/lib/sweep.ts`
+    would trade a visible wiring bug for an invisible one and would erase the evidence that made
+    this incident diagnosable.
+    (iii) THE PROOF MUST EXERCISE THE PRODUCTION ADAPTER PATH, NOT THE LIBRARY SEAM. A test that
+    injects `updatePrBodyImpl` into `buildSweepEffects` proves only that the lib effect works —
+    which was never in doubt — and would have passed on the day #5505 failed. The test must build
+    the effects through `src/run-task.ts`'s own `buildSweepEffects` and drive a real sweep-shaped
+    trailer-repair action against them.
+    (iv) NO NETWORK CALL, AND THERE IS A CLEAN DISCRIMINATOR AVAILABLE. The wired writer resolves
+    its target through `prBodyRestArgs` before any process is spawned, so the two states are
+    distinguishable off the failure text alone: unwired throws `requires updatePrBodyImpl from its
+    entrypoint adapter`, wired reaches the REST argv builder. Asserting the argv the wired writer
+    would send, or intercepting the transport, are both acceptable; a live `gh` call is not.
+    EXPLICITLY NOT IN SCOPE: changing what `repairMissingTaskTrailer` writes or when it fires
+    (W1-T3283 owns that), auditing the other `*Impl` fields for the same omission, re-classifying
+    or hand-repairing #5505, and any change to `requiredSweepRuntime` itself.
+  acceptance:
+    - claim: "a sweep-shaped missing-trailer repair driven through the production entrypoint's effects completes instead of throwing the entrypoint-adapter refusal"
+      proof: "unit test: W1-T3869: production entrypoint trailer repair completes"
+    - claim: "the repair is exercised through the entrypoint-built effect surface, never by injecting the writer at the library seam"
+      proof: "unit test: W1-T3869: trailer repair uses the entrypoint effect surface"
+    - claim: "the body write the wired writer would perform targets the PR the repair names, over the REST pulls endpoint rather than a live network call in the suite"
+      proof: "unit test: W1-T3869: wired writer targets the named PR over REST"
+    - claim: "a deps object that omits the writer still throws the named refusal, so an incomplete test adapter stays explicit-refusal"
+      proof: "unit test: W1-T3869: omitted writer still raises explicit refusal"
+    - claim: "the production entrypoint names the PR-body writer dependency it passes to the library builder"
+      proof: "grep: updatePrBodyImpl in src/run-task.ts"
+  falsifier: |
+    CLOSE IF the entrypoint already supplies it: `grep -n updatePrBodyImpl src/run-task.ts`.
+    MEASURED at filing time — zero matches, while `src/lib/sweep.ts` marks the field required and
+    the live ledger carries `sweep.action_failed` naming it on PR #5505.
+    THE ARM THAT DECIDES WHETHER THIS TASK WAS DONE OR FAKED: a test that reaches into the library
+    builder and hands it an `updatePrBodyImpl` passes today, before any change. If the new suite
+    passes against an unmodified `src/run-task.ts`, it is testing the seam and not the wiring, and
+    the task is not done.
+    SECOND CONTROL: the library must STILL refuse when the field is absent. If that arm goes green
+    by way of a default inside `src/lib/sweep.ts`, the repair has been moved rather than made, and
+    the next unwired dependency will fail silently instead of naming itself.
+    DO NOT make the suite perform a real `gh` call or a real body edit. The discriminator is the
+    refusal text versus the REST argv, both reachable without a network.
+  note: |
+    Rule 25 CHECKED: `src/run-task.ts` is ordinary src, not an instrument surface.
+    `risk: medium` — one field in one adapter object, on a path that writes a PR body the fleet
+    already writes at three other sites over the same transport. It argues DOWN (the change is a
+    single wiring line) and UP only because the effect performs an unattended write to a PR body;
+    medium is the honest middle.
+    ONE SOURCE FILE, DELIBERATELY. `src/lib/sweep.ts` needs no change and is NOT declared: its
+    required-dependency refusal is correct and design (ii) requires it to survive untouched.
+    Declaring it would widen the scope to a file whose current behaviour this task defends.
+    SEPARATE FROM W1-T3868 BY CONSTRUCTION. That shard repairs how a commit-refused fix round is
+    recorded and how its per-head claim is released; this one supplies a missing adapter field.
+    They share `src/run-task.ts` and will therefore serialise at dispatch, which is correct — they
+    are two concerns and must not be merged into one.
+    HONEST LIMIT: this makes the repair REACHABLE. It does not prove the trailer repair is right
+    for #5505, and it does not survey the other required-runtime fields for the same omission —
+    that audit is a separate filing if the class recurs.
