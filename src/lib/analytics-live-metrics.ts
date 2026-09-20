@@ -6,10 +6,8 @@
  * Missing and unusable sources remain explicit; a missing number is never rewritten as zero.
  */
 
-export type LiveMetricState = "observed" | "stale" | "unavailable" | "unreadable" | "unauthorized" | "not-probed" | "not-collected";
-
 export interface LiveMetric {
-  state: LiveMetricState;
+  state: "observed" | "stale" | "unavailable" | "unreadable" | "unauthorized" | "not-probed" | "not-collected";
   value?: number;
   asOf?: string;
   reason?: string;
