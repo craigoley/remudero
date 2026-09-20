@@ -13,6 +13,7 @@
   files:
     - src/lib/automation-action.ts
     - src/lib/serve.ts
+    - src/lib/operator-agent.ts
     - openapi/daemon.yaml
   status: queued
   attempts: 0
