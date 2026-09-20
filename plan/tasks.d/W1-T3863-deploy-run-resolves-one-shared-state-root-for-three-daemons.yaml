@@ -1,0 +1,143 @@
+- id: W1-T3863
+  title: "THREE WATCHDOGS CALL THEIR OWN `bin/rmd deploy-run --image-drift-only` AND ALL THREE DEPLOY CORE — `deployRunCommand` resolves its root from `loadConfig()`, one per-HOME file, so site and console fetch core's `daemon-install` concurrently with core and lose the ref-lock race they can never win"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    THE CALL SITE RESOLVES A ROOT NOBODY GAVE IT. `src/run-task.ts` `deployRunCommand`:
+
+        const config = loadConfig();
+        const installRoot = resolveInstallRoot(config);
+        const assessment = assessInstallForDeploy(installRoot,
+          { operatorRepoRoot: repoRoot, stateRoot: config.root });
+        ... deployFor({ installPath: ..., stateRoot: config.root, ledgerPath: ledgerPathFor(config) })
+
+    `loadConfig()` (src/lib/config.ts) reads `configPath()`, which derives from `homedir()`. All
+    three fleet daemons run as the SAME service user, so all three read ONE config and all three
+    get `root = /home/craigoleyagent/rmd-state2` — core's. `resolveInstallRoot` then returns
+    `config.installRoot ?? join(config.root, "daemon-install")`, i.e. CORE's checkout, for every
+    caller.
+
+    BUT THE LAUNCHERS EACH NAME A DIFFERENT ROOT. `deploy/install-host-units.sh`'s
+    `render_launcher` renders, per instance, with that instance's registry `state_dir`:
+
+        "$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only
+
+    The BINARY is per-instance; the ROOT it then resolves is not. Nothing on that command line,
+    and no exported variable, reaches `loadConfig`.
+
+    SO THE THREE 5-MINUTE TIMERS CONVERGE ON ONE GIT DIRECTORY, and the measurements already in
+    the plan are exactly that signature:
+
+      - W1-T3605 measured, over 24h on the live host: 275 watchdog ticks, 124 dead on
+        `git -C <state>/daemon-install fetch --quiet origin` -> "cannot lock ref
+        'refs/remotes/origin/heartbeat-azure': is at A but expected B". 45% of ticks. Grouped by
+        ref: heartbeat-azure 244, origin/main 32, feedback-landing-* 32 each. That task named the
+        sixth unfitness kind so the tick declines instead of throwing — it treated the SYMPTOM
+        correctly and deliberately left the contention alone.
+      - W1-T3736 measured three `deploy.skip` rows inside 0.5s, from THREE different pids, all
+        naming CORE's `runningHead`, in core's ledger. Three supervisors reporting against one
+        instance's state is precisely what one resolved root produces.
+
+    WHAT IT COSTS ON TOP OF THE RACE. Site and console never assess their OWN install checkout,
+    so the deploy question is never asked about them at all; W1-T3733 measured both daemons a day
+    stale. And the contention is self-inflicted: two of the three fetches are not merely racing,
+    they are fetching a repository that is none of their business.
+
+    WHY A NEW CONFIG FILE IS NOT THE ANSWER: `configPath()` is per-HOME by construction and is
+    read by every verb in the CLI; repointing it per-instance would move a fleet-wide resolution
+    to fix one invocation. The invocation that already knows the answer should say it.
+  design: |
+    (i) AN EXPLICIT OVERRIDE ON THIS INVOCATION ONLY. Add `--state-root <abs path>` to
+        `deploy-run` as a VALUE flag (`unknownArgError`'s third argument, src/lib/cli-args.ts —
+        it already skips the value token; the two existing flags stay in the bool list). No new
+        environment variable, no other verb, no change to `configPath()` or `loadConfig()`.
+
+    (ii) VALIDATE BEFORE USE: absolute, and an existing directory. Anything else — relative,
+         empty, missing, not a directory — is a NAMED NO-OP printed in the same
+         `### rmd deploy-run — no-op: <reason>` shape the unfit-install assessment already uses,
+         exiting 0. FAIL SAFE, NOT FAIL FAST, matching `deployRunCommand`'s own documented
+         posture and W1-T3605: a non-zero exit here makes the launcher print "deploy-run reported
+         a problem" every five minutes forever, and a silent fallback to `config.root` is worse
+         still — it is the defect this task closes, restored under a flag.
+
+    (iii) IT NEVER WRITES CONFIG. The override is an in-memory config-like for this process only:
+          it is not persisted, and it must not be routed through `loadConfig`'s create branch
+          (which would `resolveClaudeBin()` and write a file — W1-T2414's trap).
+
+    (iv) IT MUST CLEAR AN INHERITED EXPLICIT `installRoot`. `resolveInstallRoot` is
+         `config.installRoot ?? join(config.root, "daemon-install")`. Overriding only `root` while
+         a shared config carries an explicit absolute `installRoot` leaves every instance pointed
+         back at core's checkout and the whole change is inert. The override yields BOTH the state
+         root and the install root derived from it.
+
+    (v) EVERYTHING DOWNSTREAM TAKES THE OVERRIDDEN ROOT, once: `resolveInstallRoot`, the
+        `stateRoot` given to `assessInstallForDeploy` (so the separation invariant is checked
+        against the right pair), `deployFor`'s `stateRoot`, and `ledgerPathFor`.
+
+    (vi) RECYCLE INSTANCE DERIVATION STAYS REGISTRY-BASED. W1-T3732 derives `--instance` by
+         matching `realDeployDeps`' `stateRoot` against `.remudero/daemon-instances.yaml`, and
+         W1-T3733 reads the container that same registry names. Both keep working UNCHANGED —
+         they simply receive the state root that is true. Do NOT add an `--instance` flag here
+         and do not derive the instance from the override by string-building: two sources of
+         truth for one fact is what the registry exists to prevent.
+
+    (vii) RENDER IT FOR EVERY INSTANCE, INCLUDING CORE. `render_launcher` already holds the
+          per-instance `STATE_DIR`; the rendered invocation passes it on the deploy-run line.
+          Core's value is the root it resolves today, so core's behaviour is byte-identical in
+          effect — no instance is special-cased, because a launcher that renders the flag only
+          for the non-core instances leaves the one asymmetry a future fourth daemon inherits.
+
+    (viii) NO FLAG = TODAY. An invocation with no `--state-root` resolves exactly as it does now,
+           so an operator's hand-run `rmd deploy-run` is unchanged.
+
+    NOT IN SCOPE: where the deployer PLACES its ledger rows given a state root (W1-T3736 owns the
+    deployer-side assertion and is unblocked, not replaced, by this); which container the drift
+    read inspects (W1-T3733); provisioning an absent `daemon-install` for site and console
+    (`rmd install-checkout`, fb-1789314490993) — this task makes the absence legible per instance
+    rather than hidden behind core's checkout, it does not clone anything.
+  acceptance:
+    - claim: "deploy-run resolves its install root and its state root from an explicit override rather than from the shared HOME config root"
+      proof: "unit test: test/deploy-run-state-root-override.test.ts"
+    - claim: "an override that is relative, absent or not a directory is a named no-op that leaves the running daemon untouched and writes no config file"
+      proof: "unit test: test/deploy-run-state-root-override.test.ts"
+    - claim: "an invocation with no override resolves exactly as it does today, so the core deployment is unchanged"
+      proof: "unit test: test/deploy-run-state-root-override.test.ts"
+    - claim: "the core, site and console launcher renderings each resolve a distinct install root, so no two watchdog ticks name one fetch target"
+      proof: "unit test: test/instance-launchers-pass-their-own-state-root.test.ts"
+    - claim: "the rendered launcher passes the state root on its deploy-run invocation"
+      proof: "grep: state-root in deploy/install-host-units.sh"
+  falsifier: |
+    Override `config.root` but leave an explicit `config.installRoot` standing and the fourth
+    assertion goes red — all three renderings resolve core's checkout again, which is the whole
+    defect surviving the fix. Fall back to `config.root` when the override is unusable and the
+    second goes red: that arm silently restores the shared fetch target while reporting success.
+    Make the bad-root refusal exit non-zero and the second's "leaves the daemon untouched" arm
+    still passes while every tick prints a problem — so the test must assert the named no-op line
+    and the exit status, not merely that no deploy happened. Render the flag only for site and
+    console and the fourth goes red on core. Derive the recycle instance from the override string
+    instead of the registry and W1-T3732's unmatched-state-root test goes red, which is the guard
+    against recycling the wrong daemon.
+  risk: high
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T3605, W1-T3736, W1-T3733, W1-T3732, W1-T3596, W1-T924, W1-T3269]
+  files:
+    - src/run-task.ts
+    - src/lib/install-root.ts
+    - deploy/install-host-units.sh
+  status: queued
+  attempts: 0
+  note: |
+    `files:` names no test path, deliberately: `proof-unit-test-unresolvable` refuses a filing
+    that declares one (W1-T3730). The build adds the two test files the acceptance names.
+
+    risk:high / blast-radius — this edits the command every 5-minute watchdog tick on all three
+    live daemons runs, and the launcher that renders it. The no-flag path is the containment:
+    it must stay byte-equivalent to today.
+
+    NO depends_on: W1-T3732 is merged; W1-T3736 and W1-T3733 touch src/lib/deployer.ts only and
+    are independent of this file set, so the three can batch.
