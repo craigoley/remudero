@@ -1434,6 +1434,7 @@
     "test/the-ci-entry-shells-the-argv-ci-runs.test.ts": 0,
     "test/the-citation-miner-has-a-producer.test.ts": 798,
     "test/the-cli-on-path-resolves-to-the-live-tree.test.ts": 0,
+    "test/the-clock-census-records-its-own-baseline.test.ts": 67,
     "test/the-codex-lane-auto-loads-no-doctrine.test.ts": 0,
     "test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts": 1274,
     "test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts": 1125,
