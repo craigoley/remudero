@@ -19,6 +19,25 @@ import {
   sendJson,
   type PanelActionDeps,
 } from "./panel-actions.js";
+import {
+  advancePromotionState,
+  evaluateGuardrails,
+  expirePromotionIfDue,
+  findScopeConflict,
+  isPromotionActive,
+  rollbackPromotion,
+  validateGuardObservations,
+  validatePromotionRecord,
+  validatePromotionRollback,
+  validateReplaySummary,
+  type ExperimentPromotionState,
+  type GuardEvaluation,
+  type GuardObservation,
+  type PromotionAdvanceTarget,
+  type PromotionRecord,
+  type PromotionRollback,
+  type ReplaySummary,
+} from "./experiment-promotion.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -29,6 +48,11 @@ export const OPERATOR_AGENT_EXPERIMENT_DECISION_STEP = "panel.operator_agent_exp
 export const OPERATOR_AGENT_EXPERIMENT_OUTCOME_STEP = "panel.operator_agent_experiment_outcome";
 export const OPERATOR_AGENT_EXPERIMENT_ROLLBACK_STEP = "panel.operator_agent_experiment_rollback";
 export const OPERATOR_AGENT_EXPERIMENT_VERSION = "experiment-v1";
+export const OPERATOR_AGENT_PROMOTION_STEP = "panel.operator_agent_promotion";
+export const OPERATOR_AGENT_PROMOTION_REPLAY_STEP = "panel.operator_agent_promotion_replay";
+export const OPERATOR_AGENT_PROMOTION_DECISION_STEP = "panel.operator_agent_promotion_decision";
+export const OPERATOR_AGENT_PROMOTION_ADVANCE_STEP = "panel.operator_agent_promotion_advance";
+export const OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP = "panel.operator_agent_promotion_rollback";
 export const OPERATOR_AGENT_DEFAULT_SETTINGS = { enabled: true, confidenceThreshold: 0.9 } as const;
 
 export const OPERATOR_AGENT_CATEGORIES = ["optimize", "fix", "scale"] as const;
@@ -186,6 +210,29 @@ export interface OperatorAgentExperimentHistory extends OperatorAgentExperiment 
   outcome?: OperatorAgentExperimentOutcome;
 }
 
+/**
+ * One step of the experiment-promotion-v1 guarded flow (W1-T3856). Unlike the proposal/experiment
+ * events above, each promotion event carries the RESULTING `state` directly: the route handler
+ * computes it at write time from the current fold plus the engine (`advancePromotionState`,
+ * `rollbackPromotion`, `evaluateGuardrails`), so a later read never has to re-run the state machine
+ * over the full event history to know where a promotion stands.
+ */
+export interface OperatorAgentPromotionEvent {
+  kind: "replay" | "decision" | "advance" | "rollback";
+  at: string;
+  state: ExperimentPromotionState;
+  replay?: ReplaySummary;
+  decision?: "approved";
+  advance?: { target: PromotionAdvanceTarget; guard: GuardEvaluation; exposure?: number };
+  rollback?: PromotionRollback;
+  note?: string;
+}
+
+export interface OperatorAgentPromotionHistory extends PromotionRecord {
+  state: ExperimentPromotionState;
+  events: OperatorAgentPromotionEvent[];
+}
+
 type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { now?: () => number };
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
@@ -196,6 +243,11 @@ type ExperimentRegistrationInput = { experiment: OperatorAgentExperiment };
 type ExperimentDecisionInput = { experimentId: string; decision: "approved" | "rejected"; note?: string };
 type ExperimentOutcomeInput = { experimentId: string; outcome: OperatorAgentExperimentOutcome };
 type ExperimentRollbackInput = { experimentId: string; rollback: OperatorAgentExperimentRollback };
+type PromotionRegistrationInput = { promotion: PromotionRecord };
+type PromotionReplayInput = { promotionId: string; replay: ReplaySummary };
+type PromotionDecisionInput = { promotionId: string; decision: "approved"; note?: string };
+type PromotionAdvanceInput = { promotionId: string; target: PromotionAdvanceTarget; observations?: GuardObservation[]; exposure?: number };
+type PromotionRollbackInput = { promotionId: string; rollback: PromotionRollback };
 
 const MAX_ID = 160;
 const MAX_REPO = 200;
@@ -209,6 +261,8 @@ const MAX_EXPERIMENT_FIELD = 320;
 const MAX_EXPERIMENT_SOURCE = 220;
 const MAX_EXPERIMENT_ANCHORS = 12;
 const MAX_EXPERIMENT_EVENTS = 100;
+const MAX_PROMOTION_EVENTS = 100;
+const PROMOTION_ADVANCE_TARGETS = ["shadow", "canary", "observing", "promoted"] as const;
 const MIN_EXPERIMENT_DENOMINATOR = 5;
 const MIN_CONFIDENCE_THRESHOLD = 0.9;
 const MAX_CONFIDENCE_THRESHOLD = 0.99;
@@ -519,6 +573,51 @@ function validateExperimentRollbackInput(body: unknown): { error: string } | Exp
   return { experimentId: body.experimentId.trim(), rollback };
 }
 
+function isPromotionAdvanceTarget(value: unknown): value is PromotionAdvanceTarget {
+  return PROMOTION_ADVANCE_TARGETS.includes(value as PromotionAdvanceTarget);
+}
+
+function validatePromotionRegistration(body: unknown): { error: string } | PromotionRegistrationInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const promotion = validatePromotionRecord(body.promotion);
+  if (!promotion) return { error: "promotion is malformed, incomplete, or exceeds the experiment-promotion-v1 bounds" };
+  return { promotion };
+}
+
+function validatePromotionReplayInput(body: unknown): { error: string } | PromotionReplayInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!safeExperimentText(body.promotionId, MAX_EXPERIMENT_ID)) return { error: "promotionId is required" };
+  const replay = validateReplaySummary(body.replay);
+  if (!replay) return { error: "replay must be a bounded, well-formed replay summary" };
+  return { promotionId: body.promotionId.trim(), replay };
+}
+
+function validatePromotionDecisionInput(body: unknown): { error: string } | PromotionDecisionInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!safeExperimentText(body.promotionId, MAX_EXPERIMENT_ID)) return { error: "promotionId is required" };
+  if (body.decision !== "approved") return { error: "decision must be approved" };
+  if (body.note !== undefined && !safeExperimentText(body.note, MAX_NOTE)) return { error: "note must be a bounded string" };
+  return { promotionId: body.promotionId.trim(), decision: "approved", ...(body.note ? { note: body.note.trim() } : {}) };
+}
+
+function validatePromotionAdvanceInput(body: unknown): { error: string } | PromotionAdvanceInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!safeExperimentText(body.promotionId, MAX_EXPERIMENT_ID)) return { error: "promotionId is required" };
+  if (!isPromotionAdvanceTarget(body.target)) return { error: "target must be shadow, canary, observing, or promoted" };
+  const observations = validateGuardObservations(body.observations);
+  if (observations === null) return { error: "observations must be a bounded array of guard observations" };
+  if (body.exposure !== undefined && (typeof body.exposure !== "number" || !Number.isFinite(body.exposure))) return { error: "exposure must be a finite number" };
+  return { promotionId: body.promotionId.trim(), target: body.target, observations, ...(body.exposure !== undefined ? { exposure: body.exposure } : {}) };
+}
+
+function validatePromotionRollbackInput(body: unknown): { error: string } | PromotionRollbackInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!safeExperimentText(body.promotionId, MAX_EXPERIMENT_ID)) return { error: "promotionId is required" };
+  const rollback = validatePromotionRollback(body.rollback);
+  if (!rollback) return { error: "rollback requires a bounded plan and reason" };
+  return { promotionId: body.promotionId.trim(), rollback };
+}
+
 function readRows(ledgerPath: string): Array<Record<string, unknown>> {
   // The agent's history is a durable read, so it must include the live ledger and both supported
   // rotation forms. The live reader is intentionally not substituted here: a compacted decision
@@ -539,6 +638,18 @@ function readExperimentRows(ledgerPath: string): Array<Record<string, unknown>> 
       OPERATOR_AGENT_EXPERIMENT_DECISION_STEP,
       OPERATOR_AGENT_EXPERIMENT_OUTCOME_STEP,
       OPERATOR_AGENT_EXPERIMENT_ROLLBACK_STEP,
+    ],
+  }).rows;
+}
+
+function readPromotionRows(ledgerPath: string): Array<Record<string, unknown>> {
+  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: [
+      OPERATOR_AGENT_PROMOTION_STEP,
+      OPERATOR_AGENT_PROMOTION_REPLAY_STEP,
+      OPERATOR_AGENT_PROMOTION_DECISION_STEP,
+      OPERATOR_AGENT_PROMOTION_ADVANCE_STEP,
+      OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP,
     ],
   }).rows;
 }
@@ -695,6 +806,69 @@ export function readOperatorAgentExperiments(deps: OperatorAgentRouteDependencie
 
 function findExperiment(deps: OperatorAgentRouteDependencies, experimentId: string): OperatorAgentExperimentHistory | undefined {
   return readOperatorAgentExperiments(deps).find((experiment) => experiment.experimentId === experimentId);
+}
+
+function promotionFromRow(row: Record<string, unknown>): PromotionRecord | null {
+  return row.step === OPERATOR_AGENT_PROMOTION_STEP ? validatePromotionRecord(row.promotion) : null;
+}
+
+function promotionEventFromRow(row: Record<string, unknown>): { promotionId: string; event: OperatorAgentPromotionEvent } | null {
+  if (!safeExperimentText(row.promotion_id, MAX_EXPERIMENT_ID) || !iso(row.at) || typeof row.state !== "string") return null;
+  const promotionId = row.promotion_id.trim();
+  const at = new Date(row.at).toISOString();
+  const state = row.state as ExperimentPromotionState;
+  if (row.step === OPERATOR_AGENT_PROMOTION_REPLAY_STEP) {
+    const replay = validateReplaySummary(row.replay);
+    return replay ? { promotionId, event: { kind: "replay", at, state, replay } } : null;
+  }
+  if (row.step === OPERATOR_AGENT_PROMOTION_DECISION_STEP) {
+    if (row.decision !== "approved") return null;
+    return { promotionId, event: { kind: "decision", at, state, decision: "approved" } };
+  }
+  if (row.step === OPERATOR_AGENT_PROMOTION_ADVANCE_STEP) {
+    if (!isPromotionAdvanceTarget(row.target) || !isRecord(row.guard)) return null;
+    const guard = row.guard as unknown as GuardEvaluation;
+    return { promotionId, event: { kind: "advance", at, state, advance: { target: row.target, guard, ...(typeof row.exposure === "number" ? { exposure: row.exposure } : {}) } } };
+  }
+  if (row.step === OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP) {
+    const rollback = validatePromotionRollback(row.rollback);
+    return rollback ? { promotionId, event: { kind: "rollback", at, state, rollback } } : null;
+  }
+  return null;
+}
+
+/**
+ * Reads the durable experiment-promotion-v1 history from the ledger union. Each event was written
+ * with its resulting state already computed by the route handler (see {@link
+ * buildOperatorAgentPromotionAdvanceRoute}), so the current state is simply the last event's
+ * state, adjusted for expiry — never re-derived by replaying the guard/exposure logic at read time.
+ */
+export function readOperatorAgentPromotions(deps: OperatorAgentRouteDependencies): OperatorAgentPromotionHistory[] {
+  const promotions = new Map<string, PromotionRecord>();
+  const events = new Map<string, OperatorAgentPromotionEvent[]>();
+  for (const row of readPromotionRows(deps.ledgerPath)) {
+    const promotion = promotionFromRow(row);
+    if (promotion && !promotions.has(promotion.promotionId)) promotions.set(promotion.promotionId, promotion);
+    const parsed = promotionEventFromRow(row);
+    if (parsed && promotions.has(parsed.promotionId)) {
+      const next = [...(events.get(parsed.promotionId) ?? []), parsed.event];
+      if (next.length <= MAX_PROMOTION_EVENTS) events.set(parsed.promotionId, next);
+    }
+  }
+
+  const nowIso = new Date(deps.now?.() ?? Date.now()).toISOString();
+  return [...promotions.values()]
+    .map((promotion): OperatorAgentPromotionHistory => {
+      const history = events.get(promotion.promotionId) ?? [];
+      const last = history[history.length - 1];
+      const state = expirePromotionIfDue(last?.state ?? "proposed", promotion.expiresAt, nowIso);
+      return { ...promotion, state, events: history };
+    })
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt) || left.promotionId.localeCompare(right.promotionId));
+}
+
+function findPromotion(deps: OperatorAgentRouteDependencies, promotionId: string): OperatorAgentPromotionHistory | undefined {
+  return readOperatorAgentPromotions(deps).find((promotion) => promotion.promotionId === promotionId);
 }
 
 /** GET /v1/operator-agent/proposals — durable proposal and operator-decision history. */
@@ -916,6 +1090,194 @@ export function buildOperatorAgentExperimentRollbackRoute(deps: OperatorAgentRou
   };
 }
 
+/** GET /v1/operator-agent/promotions — durable experiment-promotion-v1 replay/shadow/canary history. */
+export function buildOperatorAgentPromotionReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/promotions",
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, { promotions: readOperatorAgentPromotions(deps), source: "ledger" }),
+  };
+}
+
+/** POST /v1/operator-agent/promotions — register a bounded promotion; canary exposure is serialized per policy scope. */
+export function buildOperatorAgentPromotionRegisterRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/promotions",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validatePromotionRegistration, (input, req, res) => {
+      const existing = findPromotion(deps, input.promotion.promotionId);
+      if (existing) {
+        const existingDefinition: PromotionRecord = {
+          version: existing.version,
+          promotionId: existing.promotionId,
+          ...(existing.experimentId ? { experimentId: existing.experimentId } : {}),
+          candidate: existing.candidate,
+          baseline: existing.baseline,
+          scope: existing.scope,
+          comparisonPopulation: existing.comparisonPopulation,
+          denominatorFloor: existing.denominatorFloor,
+          observationWindow: existing.observationWindow,
+          guardMetrics: existing.guardMetrics,
+          maxExposure: existing.maxExposure,
+          owner: existing.owner,
+          expiresAt: existing.expiresAt,
+          rollback: existing.rollback,
+          createdAt: existing.createdAt,
+          state: "proposed",
+        };
+        if (JSON.stringify(existingDefinition) !== JSON.stringify(input.promotion)) {
+          sendJson(res, 409, { error: "conflict", detail: `promotionId ${input.promotion.promotionId} already names a different promotion` });
+          return;
+        }
+        sendJson(res, 200, { ok: true, existing: true, promotion: existing });
+        return;
+      }
+      const active = readOperatorAgentPromotions(deps).filter((promotion) => isPromotionActive(promotion.state));
+      const conflict = findScopeConflict(active, input.promotion.scope, input.promotion.promotionId);
+      if (conflict) {
+        sendJson(res, 409, {
+          error: "conflict",
+          detail: `policy scope ${input.promotion.scope.repo}:${input.promotion.scope.policyScope} is already held by promotion ${conflict.promotionId}`,
+        });
+        return;
+      }
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_STEP, input.promotion.promotionId, bearerTokenId(req), { promotion: input.promotion });
+      sendJson(res, 201, { ok: true, existing: false, promotion: input.promotion });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/promotions/replay — attach a deterministic, side-effect-free replay summary. */
+export function buildOperatorAgentPromotionReplayRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/promotions/replay",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validatePromotionReplayInput, (input, req, res) => {
+      const existing = findPromotion(deps, input.promotionId);
+      if (!existing) {
+        sendJson(res, 404, { error: "not_found", detail: `no operator-agent promotion "${input.promotionId}"` });
+        return;
+      }
+      if (existing.state !== "proposed") {
+        sendJson(res, 409, { error: "conflict", detail: `promotion ${input.promotionId} is already ${existing.state}` });
+        return;
+      }
+      const at = new Date(deps.now?.() ?? Date.now()).toISOString();
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_REPLAY_STEP, input.promotionId, bearerTokenId(req), {
+        promotion_id: input.promotionId,
+        replay: input.replay,
+        state: "replayed",
+        at,
+      });
+      sendJson(res, 200, { ok: true, promotionId: input.promotionId, state: "replayed", replay: input.replay, at });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/promotions/decision — approve a replayed candidate; approval never manufactures an outcome. */
+export function buildOperatorAgentPromotionDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/promotions/decision",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validatePromotionDecisionInput, (input, req, res) => {
+      const existing = findPromotion(deps, input.promotionId);
+      if (!existing) {
+        sendJson(res, 404, { error: "not_found", detail: `no operator-agent promotion "${input.promotionId}"` });
+        return;
+      }
+      if (existing.state !== "replayed") {
+        sendJson(res, 409, { error: "conflict", detail: `promotion ${input.promotionId} must be replayed before approval, is ${existing.state}` });
+        return;
+      }
+      const at = new Date(deps.now?.() ?? Date.now()).toISOString();
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_DECISION_STEP, input.promotionId, bearerTokenId(req), {
+        promotion_id: input.promotionId,
+        decision: "approved",
+        state: "approved",
+        at,
+        ...(input.note ? { note: input.note } : {}),
+      });
+      sendJson(res, 200, { ok: true, promotionId: input.promotionId, state: "approved", at });
+    }),
+  };
+}
+
+/**
+ * POST /v1/operator-agent/promotions/advance — the one guarded step of the flow. Advances
+ * `approved -> shadow` on decision alone; every later step evaluates freshly submitted guard
+ * observations and only a `ready` evaluation reaches the requested target. A breach becomes
+ * `regressed`, insufficient evidence becomes `unmeasurable` — both are recorded, neither promotes.
+ */
+export function buildOperatorAgentPromotionAdvanceRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/promotions/advance",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validatePromotionAdvanceInput, (input, req, res) => {
+      const existing = findPromotion(deps, input.promotionId);
+      if (!existing) {
+        sendJson(res, 404, { error: "not_found", detail: `no operator-agent promotion "${input.promotionId}"` });
+        return;
+      }
+      const nowIso = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const guard: GuardEvaluation =
+        input.target === "shadow" ? { state: "ready", reasons: [], breachedMetrics: [] } : evaluateGuardrails(existing, input.observations ?? [], nowIso);
+      const result = advancePromotionState({ currentState: existing.state, target: input.target, guard, maxExposure: existing.maxExposure, exposure: input.exposure });
+      if (result.state === existing.state) {
+        sendJson(res, 409, { error: "conflict", detail: result.reason ?? `promotion ${input.promotionId} cannot advance to ${input.target} from ${existing.state}` });
+        return;
+      }
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_ADVANCE_STEP, input.promotionId, bearerTokenId(req), {
+        promotion_id: input.promotionId,
+        target: input.target,
+        guard,
+        state: result.state,
+        at: nowIso,
+        ...(input.exposure !== undefined ? { exposure: input.exposure } : {}),
+      });
+      sendJson(res, 200, { ok: true, promotionId: input.promotionId, state: result.state, ...(result.reason ? { reason: result.reason } : {}), at: nowIso });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/promotions/rollback — append a rollback receipt while preserving prior events. */
+export function buildOperatorAgentPromotionRollbackRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/promotions/rollback",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validatePromotionRollbackInput, (input, req, res) => {
+      const existing = findPromotion(deps, input.promotionId);
+      if (!existing) {
+        sendJson(res, 404, { error: "not_found", detail: `no operator-agent promotion "${input.promotionId}"` });
+        return;
+      }
+      const result = rollbackPromotion(existing.state);
+      if (!result.ok) {
+        sendJson(res, 409, { error: "conflict", detail: result.error });
+        return;
+      }
+      const at = new Date(deps.now?.() ?? Date.now()).toISOString();
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP, input.promotionId, bearerTokenId(req), {
+        promotion_id: input.promotionId,
+        rollback: input.rollback,
+        state: "rolled_back",
+        at,
+      });
+      sendJson(res, 200, { ok: true, promotionId: input.promotionId, state: "rolled_back", rollback: input.rollback, at });
+    }),
+  };
+}
+
 /** GET /v1/operator-agent/settings — durable settings or explicit conservative defaults. */
 export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
@@ -963,6 +1325,12 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentExperimentDecisionRoute(deps),
     buildOperatorAgentExperimentOutcomeRoute(deps),
     buildOperatorAgentExperimentRollbackRoute(deps),
+    buildOperatorAgentPromotionReadRoute(deps),
+    buildOperatorAgentPromotionRegisterRoute(deps),
+    buildOperatorAgentPromotionReplayRoute(deps),
+    buildOperatorAgentPromotionDecisionRoute(deps),
+    buildOperatorAgentPromotionAdvanceRoute(deps),
+    buildOperatorAgentPromotionRollbackRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
   ];

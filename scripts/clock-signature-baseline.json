@@ -114,6 +114,11 @@
     "legacy": 0,
     "newDate": 2
   },
+  "src/lib/experiment-promotion.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 5
+  },
   "src/lib/feedback-docket.ts": {
     "dateNow": 0,
     "legacy": 0,
@@ -235,9 +240,9 @@
     "newDate": 1
   },
   "src/lib/operator-agent.ts": {
-    "dateNow": 5,
+    "dateNow": 10,
     "legacy": 1,
-    "newDate": 16
+    "newDate": 22
   },
   "src/lib/operator-sync.ts": {
     "dateNow": 1,
