@@ -97,15 +97,15 @@
     and any change to `priorActionsFromLedger`'s seeding rule.
   acceptance:
     - claim: "a fix round whose harness commit was refused for a missing anchored COMMIT_MESSAGE is recorded as a non-success round rather than inheriting the worker envelope's success subtype"
-      proof: "unit test: test/a-commit-refused-fix-round-is-not-a-success.test.ts"
+      proof: "unit test: W1-T3868: a refused harness commit is recorded as non-success"
     - claim: "after a commit-refused round with NO new head, a later sweep pass over the same unchanged head re-dispatches instead of standing down on fix already dispatched"
-      proof: "unit test: test/a-commit-refused-fix-round-is-not-a-success.test.ts"
+      proof: "unit test: W1-T3868: an unchanged head is re-dispatched after commit refusal"
     - claim: "after a round that committed and pushed a valid head, a later sweep pass over that same head still stands down and does not re-dispatch"
-      proof: "unit test: test/a-commit-refused-fix-round-is-not-a-success.test.ts"
+      proof: "unit test: W1-T3868: a committed head remains deduplicated"
     - claim: "a reclaimable head still exhausts the existing strike cap and escalates, so repeated commit refusals cannot loop unbounded"
-      proof: "unit test: test/a-commit-refused-fix-round-is-not-a-success.test.ts"
+      proof: "unit test: W1-T3868: repeated refusals exhaust the strike cap"
     - claim: "the refused round still archives its worker transcript and still ledgers the refusal reason, so the evidence survives the repair"
-      proof: "unit test: test/a-commit-refused-fix-round-is-not-a-success.test.ts"
+      proof: "unit test: W1-T3868: refusal evidence keeps its transcript and ledger reason"
     - claim: "the sweep re-arm reads the fix-lane commit-refusal row by name"
       proof: "grep: fix.commit_refused in src/lib/sweep.ts"
   falsifier: |

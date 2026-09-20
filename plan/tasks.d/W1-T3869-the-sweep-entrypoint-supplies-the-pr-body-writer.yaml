@@ -66,13 +66,13 @@
     or hand-repairing #5505, and any change to `requiredSweepRuntime` itself.
   acceptance:
     - claim: "a sweep-shaped missing-trailer repair driven through the production entrypoint's effects completes instead of throwing the entrypoint-adapter refusal"
-      proof: "unit test: test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts"
+      proof: "unit test: W1-T3869: production entrypoint trailer repair completes"
     - claim: "the repair is exercised through the entrypoint-built effect surface, never by injecting the writer at the library seam"
-      proof: "unit test: test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts"
+      proof: "unit test: W1-T3869: trailer repair uses the entrypoint effect surface"
     - claim: "the body write the wired writer would perform targets the PR the repair names, over the REST pulls endpoint rather than a live network call in the suite"
-      proof: "unit test: test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts"
+      proof: "unit test: W1-T3869: wired writer targets the named PR over REST"
     - claim: "a deps object that omits the writer still throws the named refusal, so an incomplete test adapter stays explicit-refusal"
-      proof: "unit test: test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts"
+      proof: "unit test: W1-T3869: omitted writer still raises explicit refusal"
     - claim: "the production entrypoint names the PR-body writer dependency it passes to the library builder"
       proof: "grep: updatePrBodyImpl in src/run-task.ts"
   falsifier: |
