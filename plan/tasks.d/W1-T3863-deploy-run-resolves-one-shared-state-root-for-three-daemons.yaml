@@ -129,6 +129,8 @@
     - src/run-task.ts
     - src/lib/install-root.ts
     - deploy/install-host-units.sh
+    - test/deploy-run-state-root-override.test.ts
+    - test/instance-launchers-pass-their-own-state-root.test.ts
   status: queued
   attempts: 0
   note: |
