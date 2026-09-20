@@ -1,7 +1,7 @@
 - id: W1-T3897
   title: "MAKE HUMAN HANDOFF OPERABLE — ownership, claim, escalation age, response deadline, and closure receipts"
   repo: remudero
-  depends_on: [W1-T3879, W1-T3886, W1-T3883]
+  depends_on: [W1-T3879, W1-T3900, W1-T3883]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,7 +9,7 @@
   risk: high
   band_meaning: blast-radius
   origin: "research:instinct-automation-2026-09-20"
-  plan_refs: ["§Self-improvement", "W1-T3879", "W1-T3886", "W1-T3883"]
+  plan_refs: ["§Self-improvement", "W1-T3879", "W1-T3900", "W1-T3883"]
   files:
     - src/lib/human-handoff.ts
     - src/lib/operator-agent.ts
