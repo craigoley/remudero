@@ -1,0 +1,43 @@
+- id: W1-T3906
+  title: "CI-LEARNING LANDING TARGETS A FILE THAT EXISTS — generated lesson records name learnings/ci-gate-lessons.yaml even though the canonical indexed CI shard is learnings/ci.yaml, so the self-improvement queue points workers at a surface they cannot land"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  status: queued
+  attempts: 0
+  files: [src/lib/measurement-cadence.ts, src/run-task.ts, test/ci-learning-safe-landing.test.ts]
+  origin: "operator-follow-up#ci-learning-2026-09-20"
+  rationale: |
+    OBSERVED on origin/main before this filing: `CI_LEARNING_LESSONS_FILE` in
+    `src/lib/measurement-cadence.ts` emitted `learnings/ci-gate-lessons.yaml`, while the committed
+    learnings corpus contains `learnings/ci.yaml` and no `ci-gate-lessons.yaml`. The 33 historical
+    CI-learning shards W1-T3539 through W1-T3834 all carry the nonexistent path, so the queue's
+    remedy surface cannot be reached by a worker even though the landing bridge itself is durable.
+
+    The whole-plan idempotency reader already calls `loadPlan`, whose contract merges
+    `plan/tasks.yaml` with `plan/tasks.d/*.yaml`. This task preserves that contract with a
+    regression test so future refactors cannot silently reduce the query to the monolith and
+    re-file shard-backed origins.
+
+    This is a flow repair, not a new required PR check: ordinary implementation PRs remain
+    autonomous, and the CI-learning records remain subject to the existing judge/routing policy.
+    `W1-T3765` owns manual landing-queue reservation and transport; this task owns the generated
+    lesson target and its canonical corpus path, so it does not supersede or duplicate that queue
+    work.
+  acceptance:
+    - claim: "new CI-learning task records target the existing canonical CI learnings shard"
+      proof: "grep: export const CI_LEARNING_LESSONS_FILE = \"learnings/ci\\.yaml\" in src/lib/measurement-cadence.ts"
+    - claim: "the scoped CI-learning landing suite and whole-project typecheck pass together"
+      proof: "unit test: W1-T3492 criterion 1: scheduled CI-learning stages outside the checkout and lands exact task bytes"
+  falsifier: |
+    Restore the generated target to `learnings/ci-gate-lessons.yaml` and the canonical-path
+    assertion must fail. The implementation must not add a branch-protection requirement or make
+    an ordinary source PR wait for a human.
+  plan_refs: [W1-T3765]
+  note: |
+    Follow-up filed after W1-T3843's admission guard shipped in PR #6248 and after the settled
+    human-judgment cleanup merged in PR #6285. This task repairs the concrete landing surface so
+    future CI-learning output can flow through the existing self-improvement path.
