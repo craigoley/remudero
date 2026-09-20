@@ -620,6 +620,97 @@ components:
         entry:
           $ref: "#/components/schemas/FeedbackEntry"
 
+    OperatorActivityItem:
+      type: object
+      description: One bounded activity, workstream, or authoritative artifact row.
+      required:
+        - id
+        - kind
+        - summary
+        - source
+        - observedAt
+        - freshness
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum:
+            - activity
+            - workstream
+            - artifact
+        summary:
+          type: string
+        source:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum:
+            - verified
+            - stale
+            - unavailable
+            - unknown
+            - not-collected
+        taskId:
+          type: string
+        repository:
+          type: string
+        state:
+          type: string
+          enum:
+            - active
+            - blocked
+            - queued
+            - completed
+            - unknown
+        reason:
+          type: string
+        href:
+          type: string
+
+    OperatorActivityResult:
+      type: object
+      description: GET /v1/operator-activity's bounded, source-labeled read projection.
+      required:
+        - version
+        - state
+        - source
+        - observedAt
+      properties:
+        version:
+          type: string
+          enum:
+            - operator-activity-v1
+        state:
+          type: string
+          enum:
+            - verified
+            - stale
+            - unavailable
+            - unknown
+            - not-collected
+        source:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        cursor:
+          type: string
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/OperatorActivityItem"
+        truncated:
+          type: boolean
+        reason:
+          type: string
+        detail:
+          type: string
+
     TraceRun:
       type: object
       description: One run named on a task's ledger lines (src/lib/trace.ts's `TraceRun`).
@@ -1669,6 +1760,28 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/operator-activity:
+    get:
+      summary: Read the bounded operator activity, workstream, and artifact projection.
+      description: >
+        Read-only operator-activity-v1 composition over the existing ledger, plan projection,
+        dispatcher frontier, and authoritative trace links. The response never contains raw
+        prompts, transcripts, credentials, account identifiers, or browser-owned measurements.
+        Unavailable and unknown source states remain explicit rather than becoming empty healthy data.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Operator activity projection, including explicit non-verified states.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorActivityResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/feedback/decision:
     post:

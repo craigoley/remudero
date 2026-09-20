@@ -40,6 +40,7 @@ import {
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
+  readLedgerUnionBounded,
   type GhFailureReason,
   type GitHub,
   type StatusProjection,
@@ -744,6 +745,304 @@ export function buildPlanFrontier(
     if (held) rows.push({ id: task.id, title: task.title, runnable: false, reasonKind: held.kind, reason: held.reason });
   }
   return rows;
+}
+
+// ── GET /v1/operator-activity — one bounded operator story (W1-T3852) ──────
+
+export const OPERATOR_ACTIVITY_CONTRACT_VERSION = "operator-activity-v1" as const;
+export const OPERATOR_ACTIVITY_MAX_ITEMS = 200;
+
+export type OperatorActivityState = "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
+export type OperatorActivityFreshness = "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
+export type OperatorActivityItemKind = "activity" | "workstream" | "artifact";
+
+export type OperatorActivityItem = {
+  id: string;
+  kind: OperatorActivityItemKind;
+  summary: string;
+  source: string;
+  observedAt: string;
+  freshness: OperatorActivityFreshness;
+  taskId?: string;
+  repository?: string;
+  state?: "active" | "blocked" | "queued" | "completed" | "unknown";
+  reason?: string;
+  href?: string;
+};
+
+export type OperatorActivityEnvelope =
+  | {
+      version: typeof OPERATOR_ACTIVITY_CONTRACT_VERSION;
+      state: "verified" | "stale" | "unknown";
+      source: string;
+      observedAt: string;
+      cursor: string;
+      items: OperatorActivityItem[];
+      truncated: boolean;
+      reason?: string;
+    }
+  | {
+      version: typeof OPERATOR_ACTIVITY_CONTRACT_VERSION;
+      state: "unavailable" | "not-collected";
+      source: string;
+      observedAt: string;
+      cursor?: string;
+      reason: string;
+      detail?: string;
+    };
+
+export interface OperatorActivityProjectionInput {
+  plan: Plan;
+  projection: ReadonlyMap<string, StatusProjection>;
+  ledgerLines: ReadonlyArray<Record<string, unknown>> & { present?: boolean; torn?: number };
+  githubReadFailed?: boolean;
+  githubFailureReason?: string;
+  now?: () => number;
+  source?: string;
+}
+
+function boundedActivityText(value: unknown, max = 240): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  return value.trim().slice(0, max);
+}
+
+function activityTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return undefined;
+  return new Date(value).toISOString();
+}
+
+function activityTaskId(row: Record<string, unknown>): string | undefined {
+  return boundedActivityText(row.task_id, 160) ?? boundedActivityText(row.task, 160);
+}
+
+function activityRepository(row: Record<string, unknown>): string | undefined {
+  const repository = boundedActivityText(row.repository, 200) ?? boundedActivityText(row.repo, 200);
+  return repository && /^[^\s/]+\/[^\s/]+$/.test(repository) ? repository : undefined;
+}
+
+function activityId(row: Record<string, unknown>, observedAt: string, duplicate: number): string {
+  const explicit = boundedActivityText(row.id, 160) ?? boundedActivityText(row.event_id, 160);
+  if (explicit) return explicit;
+  const step = boundedActivityText(row.step, 120) ?? "ledger";
+  const task = activityTaskId(row) ?? "fleet";
+  const run = boundedActivityText(row.run_id, 120) ?? "";
+  return `activity:${step}:${task}:${run}:${observedAt}:${duplicate}`;
+}
+
+function activitySummary(row: Record<string, unknown>, taskId?: string): string | undefined {
+  const step = boundedActivityText(row.step, 120);
+  if (!step) return undefined;
+  return taskId ? `${step} (${taskId})` : step;
+}
+
+function activityRows(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  observedAt: string,
+): OperatorActivityItem[] {
+  const duplicates = new Map<string, number>();
+  return ledgerLines
+    .map((row): OperatorActivityItem | undefined => {
+      const occurredAt = activityTimestamp(row.ts);
+      const taskId = activityTaskId(row);
+      const summary = activitySummary(row, taskId);
+      if (!occurredAt || !summary) return undefined;
+      const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
+      const duplicate = duplicates.get(key) ?? 0;
+      duplicates.set(key, duplicate + 1);
+      return {
+        id: activityId(row, occurredAt, duplicate),
+        kind: "activity" as const,
+        summary,
+        source: `rmd:ledger:${boundedActivityText(row.step, 120) ?? "event"}`,
+        observedAt: occurredAt,
+        freshness: "verified" as const,
+        ...(taskId ? { taskId } : {}),
+        ...(activityRepository(row) ? { repository: activityRepository(row) } : {}),
+      } satisfies OperatorActivityItem;
+    })
+    .filter((item): item is OperatorActivityItem => Boolean(item))
+    .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))
+    .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
+}
+
+function workstreamRows(
+  plan: Plan,
+  projection: ReadonlyMap<string, StatusProjection>,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  observedAt: string,
+  githubReadFailed: boolean,
+  githubFailureReason: string | undefined,
+): OperatorActivityItem[] {
+  const source = "rmd:/v1/plan/view";
+  if (githubReadFailed) {
+    return [{
+      id: "workstream:plan",
+      kind: "workstream",
+      summary: "Plan workstream state is unknown until the status source is readable.",
+      source,
+      observedAt,
+      freshness: "unknown",
+      state: "unknown",
+      reason: githubFailureReason ?? "status-source-unavailable",
+      href: "/v1/plan/view",
+    }];
+  }
+  const isMerged: MergedSet = (id) => projection.get(id)?.merged === true;
+  const frontier = buildPlanFrontier(plan, isMerged, OPERATOR_ACTIVITY_MAX_ITEMS, ledgerLines);
+  const rows = frontier.map((row): OperatorActivityItem => {
+    const task = plan.byId.get(row.id);
+    const projected = projection.get(row.id);
+    const state = row.runnable ? "queued" : projected?.merged ? "completed" : projected?.status === "running" ? "active" : "blocked";
+    return {
+      id: `workstream:${row.id}`,
+      kind: "workstream",
+      summary: `${row.id}: ${boundedActivityText(task?.title, 180) ?? row.id} — ${row.reason}`,
+      source,
+      observedAt,
+      freshness: "verified",
+      taskId: row.id,
+      ...(task?.repo ? { repository: task.repo } : {}),
+      state,
+      ...(row.reason ? { reason: row.reason } : {}),
+      href: `/v1/trace?id=${encodeURIComponent(row.id)}`,
+    };
+  });
+  if (rows.length > 0) return rows;
+  return [{
+    id: "workstream:plan",
+    kind: "workstream",
+    summary: "The plan has no unfinished runnable or held frontier rows.",
+    source,
+    observedAt,
+    freshness: "verified",
+    state: "completed",
+    href: "/v1/plan/view",
+  }];
+}
+
+function artifactRows(
+  plan: Plan,
+  projection: ReadonlyMap<string, StatusProjection>,
+  workstreams: ReadonlyArray<OperatorActivityItem>,
+  observedAt: string,
+  freshness: OperatorActivityFreshness,
+): OperatorActivityItem[] {
+  const artifacts: OperatorActivityItem[] = [{
+    id: "artifact:plan",
+    kind: "artifact",
+    summary: "Authoritative plan frontier",
+    source: "rmd:/v1/plan/view",
+    observedAt,
+    freshness,
+    href: "/v1/plan/view",
+  }];
+  for (const item of workstreams) {
+    if (!item.taskId || artifacts.length >= OPERATOR_ACTIVITY_MAX_ITEMS) continue;
+    const task = plan.byId.get(item.taskId);
+    const p = projection.get(item.taskId);
+    artifacts.push({
+      id: `artifact:task:${item.taskId}`,
+      kind: "artifact",
+      summary: `Authoritative trace for ${item.taskId}${task?.title ? ` — ${boundedActivityText(task.title, 150)}` : ""}`,
+      source: "rmd:/v1/trace",
+      observedAt,
+      freshness,
+      taskId: item.taskId,
+      ...(task?.repo ? { repository: task.repo } : {}),
+      href: `/v1/trace?id=${encodeURIComponent(item.taskId)}`,
+    });
+    if (p?.prUrl && artifacts.length < OPERATOR_ACTIVITY_MAX_ITEMS) {
+      artifacts.push({
+        id: `artifact:receipt:${item.taskId}`,
+        kind: "artifact",
+        summary: `Authoritative change receipt for ${item.taskId}`,
+        source: "github:pull-request",
+        observedAt,
+        freshness,
+        taskId: item.taskId,
+        ...(task?.repo ? { repository: task.repo } : {}),
+        href: p.prUrl,
+      });
+    }
+  }
+  return artifacts.slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
+}
+
+export function buildOperatorActivityProjection(input: OperatorActivityProjectionInput): OperatorActivityEnvelope {
+  const now = input.now?.() ?? Date.now();
+  const observedAt = new Date(now).toISOString();
+  const source = input.source ?? "rmd:/v1/operator-activity";
+  if (input.ledgerLines.present === false) {
+    return { version: OPERATOR_ACTIVITY_CONTRACT_VERSION, state: "unavailable", source, observedAt, reason: "ledger-unavailable", detail: "The operator activity ledger was not present." };
+  }
+  const activities = activityRows(input.ledgerLines, observedAt);
+  const freshness: OperatorActivityFreshness = input.githubReadFailed ? "unknown" : "verified";
+  const workstreams = workstreamRows(input.plan, input.projection, input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
+  const artifacts = artifactRows(input.plan, input.projection, workstreams, observedAt, freshness);
+  const items = [...activities, ...workstreams, ...artifacts].slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
+  const latest = activities[0]?.observedAt ?? observedAt;
+  return {
+    version: OPERATOR_ACTIVITY_CONTRACT_VERSION,
+    state: input.githubReadFailed ? "unknown" : "verified",
+    source,
+    observedAt,
+    cursor: latest,
+    items,
+    truncated: activities.length + workstreams.length + artifacts.length > OPERATOR_ACTIVITY_MAX_ITEMS,
+    ...(input.githubReadFailed ? { reason: input.githubFailureReason ?? "status-source-unavailable" } : {}),
+  };
+}
+
+/**
+ * GET /v1/operator-activity — read-only, bounded, single-pass composition of the ledger, the
+ * already-derived plan projection, the dispatcher-owned frontier, and authoritative evidence links.
+ * No row triggers its own GitHub or filesystem read, and unavailable status never becomes a healthy
+ * empty workstream.
+ */
+export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-activity",
+    scope: "read",
+    handler: (_req, res) => {
+      const observedLedger = readLedgerUnionBounded(deps.ledgerPath);
+      if (!observedLedger.present) {
+        sendJson(res, 200, {
+          version: OPERATOR_ACTIVITY_CONTRACT_VERSION,
+          state: "unavailable",
+          source: "rmd:/v1/operator-activity",
+          observedAt: new Date().toISOString(),
+          reason: "ledger-unavailable",
+          detail: "The operator activity ledger was not present.",
+        } satisfies OperatorActivityEnvelope);
+        return;
+      }
+      try {
+        const plan = readPanelPlan(deps, readPlanSnapshot);
+        const projection = projectPlan(plan, {
+          ledgerPath: deps.ledgerPath,
+          github: deps.statusGithub,
+          readLedger: () => observedLedger,
+        });
+        sendJson(res, 200, buildOperatorActivityProjection({
+          plan,
+          projection,
+          ledgerLines: observedLedger,
+          githubReadFailed: deps.statusGithub.readFailed?.() === true,
+          githubFailureReason: deps.statusGithub.readFailureReason?.(),
+        }));
+      } catch (error) {
+        sendJson(res, 503, {
+          version: OPERATOR_ACTIVITY_CONTRACT_VERSION,
+          state: "unavailable",
+          source: "rmd:/v1/operator-activity",
+          observedAt: new Date().toISOString(),
+          reason: "projection-unavailable",
+          detail: error instanceof Error ? error.message.slice(0, 240) : "The operator activity projection was unavailable.",
+        } satisfies OperatorActivityEnvelope);
+      }
+    },
+  };
 }
 
 // ── Per-section filed/merged counts (W1-T376) ──────────────────────────────────────────────
@@ -1451,6 +1750,7 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
 /** Routes that can only read the process-owned plan snapshot. No write route accepts that capability. */
 export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
   return [
+    buildOperatorActivityRoute(deps, readPlanSnapshot),
     buildFeedbackInboxRoute(deps),
     buildTraceRoute(deps),
     buildDrainPreviewRoute(deps, readPlanSnapshot),
