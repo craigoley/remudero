@@ -936,6 +936,37 @@ components:
               items:
                 type: string
 
+    OperatorAgentSettings:
+      type: object
+      required: [enabled, confidenceThreshold]
+      properties:
+        enabled:
+          type: boolean
+        confidenceThreshold:
+          type: number
+          minimum: 0.9
+          maximum: 0.99
+
+    OperatorAgentSettingsRequest:
+      type: object
+      required: [settings]
+      properties:
+        settings:
+          $ref: "#/components/schemas/OperatorAgentSettings"
+
+    OperatorAgentSettingsResult:
+      type: object
+      required: [settings, source]
+      properties:
+        settings:
+          $ref: "#/components/schemas/OperatorAgentSettings"
+        source:
+          type: string
+          enum: [ledger, default]
+        updatedAt:
+          type: string
+          format: date-time
+
     # ── W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) -- the button set
     # src/lib/panel-skills.ts's ONE route returns, resolved from
     # `.remudero/skills/<name>.yaml` (lib/skill.ts's `Skill`, W1-T44) the SAME
@@ -1522,6 +1553,43 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/settings:
+    get:
+      summary: Read durable operator-agent settings.
+      description: Returns the last valid ledger settings row, or explicit conservative defaults when none exists.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Operator-agent settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentSettingsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Persist bounded operator-agent settings.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentSettingsRequest"
+      responses:
+        "200":
+          description: Settings persisted.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/skills:
     get:

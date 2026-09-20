@@ -63,6 +63,10 @@ function get(base: string, token: string): Promise<Response> {
   return fetch(`${base}/v1/operator-agent/proposals`, { headers: { authorization: `Bearer ${token}` } });
 }
 
+function getSettings(base: string, token: string): Promise<Response> {
+  return fetch(`${base}/v1/operator-agent/settings`, { headers: { authorization: `Bearer ${token}` } });
+}
+
 test("operator-agent routes keep reads separate from writes and persist proposal decisions in the ledger", async () => {
   const { ledgerPath, proposal } = fixture();
   await withService(ledgerPath, async (base) => {
@@ -113,6 +117,38 @@ test("operator-agent routes keep reads separate from writes and persist proposal
     "panel.operator_agent_outcome",
   ]);
   assert.equal(lines[1]?.proposal_id, proposal.proposalId);
+});
+
+test("reads the default operator-agent settings when no settings row exists; persists a valid operator-agent settings update in the ledger", async () => {
+  const { ledgerPath } = fixture();
+  await withService(ledgerPath, async (base) => {
+    const defaults = await getSettings(base, READ_TOKEN);
+    assert.equal(defaults.status, 200);
+    assert.deepEqual(await defaults.json(), { settings: { enabled: true, confidenceThreshold: 0.9 }, source: "default" });
+
+    assert.equal((await post(base, "/v1/operator-agent/settings", READ_TOKEN, { settings: { enabled: false, confidenceThreshold: 0.95 } })).status, 403);
+    const persisted = await post(base, "/v1/operator-agent/settings", WRITE_TOKEN, { settings: { enabled: false, confidenceThreshold: 0.95 } });
+    assert.equal(persisted.status, 200);
+    assert.deepEqual(await persisted.json(), { settings: { enabled: false, confidenceThreshold: 0.95 }, source: "ledger", updatedAt: "2026-09-19T10:00:00.000Z" });
+
+    const afterWrite = await getSettings(base, READ_TOKEN);
+    assert.equal(afterWrite.status, 200);
+    assert.deepEqual(await afterWrite.json(), { settings: { enabled: false, confidenceThreshold: 0.95 }, source: "ledger" });
+  }, () => Date.parse("2026-09-19T10:00:00.000Z"));
+
+  const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(lines[0]?.step, "panel.operator_agent_settings");
+});
+
+test("refuses an operator-agent confidence threshold outside the bounded range", async () => {
+  const { ledgerPath } = fixture();
+  await withService(ledgerPath, async (base) => {
+    for (const confidenceThreshold of [0.89, 1, "0.95"]) {
+      const response = await post(base, "/v1/operator-agent/settings", WRITE_TOKEN, { settings: { enabled: true, confidenceThreshold } });
+      assert.equal(response.status, 400);
+    }
+  });
+  assert.equal(existsSync(ledgerPath), false);
 });
 
 test("operator-agent decision refuses unknown and terminal proposals before writing", async () => {
