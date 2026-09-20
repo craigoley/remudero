@@ -15,7 +15,7 @@
       proof: "unit test: persists a valid operator-agent settings update in the ledger"
     - claim: "invalid thresholds and unknown settings payloads are refused"
       proof: "unit test: refuses an operator-agent confidence threshold outside the bounded range"
-  risk: medium
+  risk: high
   band_meaning: blast-radius
   origin: human
   files:
