@@ -8421,39 +8421,6 @@
   status: queued
   attempts: 0
 
-- id: W1-T49
-  title: Docs coherence — rmd --help, docs/cli-reference.md, and the website CLI page all derive from ONE registry
-  repo: remudero
-  depends_on: [W1-T47, W12-T1]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  risk: medium
-  origin: feedback#docs
-  plan_refs: ["§12A", "WS-12"]
-  rationale: "MASTER-PLAN §12A one source, three surfaces: rmd --help, GitHub /docs (docs/cli-reference.md),
-    and the website CLI page CANNOT disagree because they all render the SAME registry. A hand-edit to any
-    downstream copy is rejected by the drift gate (W1-T48). Depends on the registry (W1-T47) and the site
-    (W12-T1) that publishes it."
-  design: |
-    The website CLI page (WS-12) renders from the SAME registry/generator as rmd --help and
-    docs/cli-reference.md — no hand-authored CLI content on the site. One registry change propagates to all
-    three in one regeneration; the drift gate rejects any downstream hand-edit.
-  acceptance:
-    - claim: "a registry change propagates to all THREE surfaces in one regeneration"
-      proof: "unit test: one regeneration updates all three surfaces identically"
-    - claim: "a hand-edit to any downstream copy is REJECTED by the drift gate"
-      proof: "unit test: a hand-edit to a downstream copy turns the drift gate RED"
-  status: queued
-  attempts: 0
-  note: "PROOFS REWRITTEN 2026-07-31 (impl-BK) into executable dialect; both refused at the pre-dispatch linter
-    as free prose. Prior bodies verbatim, because each NAMES THE THREE SURFACES and the paste-the-diffs
-    evidence the one-line rewrites drop: (1) 'editing the registry + regenerating updates rmd --help,
-    docs/cli-reference.md, and the website CLI page identically — paste the three diffs from one regen';
-    (2) 'hand-editing docs/cli-reference.md OR the website CLI page (not the registry) turns the drift gate
-    RED — paste the red run for each'."
-
 - id: W1-T50
   title: Troubleshooting guide seeded from LEARNINGS failures (Tier B, docs-rubric enforced)
   repo: remudero

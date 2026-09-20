@@ -1,0 +1,36 @@
+- id: W1-T3873
+  title: "Core/site CLI-reference contract — coordinate the generated core artifact with the site-owned publication task"
+  repo: remudero
+  depends_on: [W1-T47, W1-T48]
+  type: manual
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 0.00
+  risk: medium
+  origin: human
+  plan_refs: ["§12A", "§Cross-repository ownership"]
+  files: [plan/tasks.d/W1-T3873-core-site-cli-reference-contract.yaml]
+  rationale: |
+    W1-T47 and W1-T48 already own the core command registry, generated `docs/cli-reference.md`, and
+    the core drift gate. The previous W1-T49 record was mis-scoped: it declared no files, depended on
+    withdrawn W12-T1, and assigned site paths to a remudero task even though `craigoley/remudero-site`
+    is a separate Next.js repository with its own plan and CI.
+
+    This record is now a human coordination boundary only. The site-owned implementation is PORTAL-T19
+    in remudero-site: it owns the pinned canonical-doc sync, CLI publication route, and publication
+    tests. The core record owns no site files and does not claim the site implementation. A reviewed
+    site pin must name a real core commit whose generated CLI artifact passes W1-T48; a floating `main`
+    fetch or a copied command list is explicitly out of contract.
+  design: |
+    Keep the core registry and generated artifact in remudero. Coordinate with the site task by
+    selecting a reviewed core commit and recording its exact SHA in the site's sync/provenance path.
+    Do not add remudero-site paths to this record, do not make the core daemon dispatch site work,
+    and do not treat the withdrawn W12-T1 record as an active dependency.
+  acceptance:
+    - claim: "the core plan names the site-owned PORTAL-T19 implementation without claiming site paths"
+      proof: "demonstration: operator verifies the core record names PORTAL-T19, declares no site paths, and records the reviewed site pin"
+    - claim: "the core task retains the generated registry/reference contract in W1-T47 and W1-T48 while removing the withdrawn W12-T1 dependency"
+      proof: "demonstration: operator verifies the W1-T47/W1-T48 dependency and confirms the retired W12-T1 dependency is absent"
+  status: queued
+  attempts: 0
+  note: "PORTAL-T19 is the site implementation owner. This human task is coordination/provenance only; it is not an auto-dispatchable site implementation and must not be credited as one."
