@@ -33034,6 +33034,19 @@ function boundedWorktreeOwnerPath(value: string): string {
 
 export type RegisteredFixOwnerSignal = "managed" | "foreign" | "unknown";
 
+/** Names of daemon-created worktrees that may enter the already fail-closed registered-owner recovery.
+ * A `run-` tree is the task's original implementation worktree; a `sweep-` tree is a later fix
+ * rung. Both remain constrained to the configured root, exact task id, numeric epoch, branch,
+ * cleanliness, remote identity, ancestry, claim, and process-cwd checks below. */
+const managedFixOwnerWorktreePrefixes = ["sweep", "run"] as const;
+
+function isManagedFixOwnerWorktreeName(name: string, taskId: string): boolean {
+  return managedFixOwnerWorktreePrefixes.some((prefix) => {
+    const expected = `${prefix}-${taskId}-`;
+    return name.startsWith(expected) && /^\d+$/.test(name.slice(expected.length));
+  });
+}
+
 export interface RegisteredFixOwnerSnapshot {
   path: string;
   pathState: RegisteredFixOwnerSignal;
@@ -33215,9 +33228,7 @@ export function captureRegisteredFixOwnerSnapshot(
     ownerPath = realpathSync(args.ownerPath);
     const root = realpathSync(args.worktreesRoot);
     const rel = relative(root, ownerPath);
-    const prefix = `sweep-${args.taskId}-`;
-    const suffix = basename(ownerPath).startsWith(prefix) ? basename(ownerPath).slice(prefix.length) : "";
-    snapshot.pathState = pathIsAtOrBelow(ownerPath, root) && !rel.includes(sep) && /^\d+$/.test(suffix)
+    snapshot.pathState = pathIsAtOrBelow(ownerPath, root) && !rel.includes(sep) && isManagedFixOwnerWorktreeName(basename(ownerPath), args.taskId)
       ? "managed"
       : "foreign";
     snapshot.path = boundedWorktreeOwnerPath(ownerPath);
