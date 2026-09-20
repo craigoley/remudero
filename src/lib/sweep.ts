@@ -3352,6 +3352,8 @@ export interface OpenPrView {
   reviewedMergeBaseSha?: string;
   currentMergeBaseSha?: string;
   reviewedHeadSha?: string;
+  reviewedContractDigest?: string;
+  currentContractDigest?: string;
 
   prNumber: number;
   prUrl: string;
@@ -5213,20 +5215,33 @@ export type ReviewReuseInputs = Pick<
   | "reviewedMergeBaseSha"
   | "currentMergeBaseSha"
   | "reviewedHeadSha"
+  | "reviewedContractDigest"
+  | "currentContractDigest"
 >;
 
 export function reviewReuseVerdict(pr: ReviewReuseInputs): ReviewReuseVerdict {
-  const { reviewedOwnDiffDigest, currentOwnDiffDigest, reviewedMergeBaseSha, currentMergeBaseSha, reviewedHeadSha } =
+  const {
+    reviewedOwnDiffDigest,
+    currentOwnDiffDigest,
+    reviewedMergeBaseSha,
+    currentMergeBaseSha,
+    reviewedHeadSha,
+    reviewedContractDigest,
+    currentContractDigest,
+  } =
     pr;
   if (
     reviewedOwnDiffDigest === undefined ||
     currentOwnDiffDigest === undefined ||
     reviewedMergeBaseSha === undefined ||
     currentMergeBaseSha === undefined ||
-    reviewedHeadSha === undefined
+    reviewedHeadSha === undefined ||
+    reviewedContractDigest === undefined ||
+    currentContractDigest === undefined
   ) {
     return { kind: "full-review" };
   }
+  if (reviewedContractDigest !== currentContractDigest) return { kind: "full-review" };
   if (reviewedOwnDiffDigest !== currentOwnDiffDigest) return { kind: "full-review" };
   return reviewedMergeBaseSha === currentMergeBaseSha
     ? { kind: "reuse", judgedHeadSha: reviewedHeadSha }
@@ -5251,6 +5266,8 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
     reviewedMergeBaseSha: pr.reviewedMergeBaseSha,
     currentMergeBaseSha: pr.currentMergeBaseSha,
     reviewedHeadSha: pr.reviewedHeadSha,
+    reviewedContractDigest: pr.reviewedContractDigest,
+    currentContractDigest: pr.currentContractDigest,
   };
 }
 

@@ -48,6 +48,7 @@ const PR_URL = "https://github.com/craigoley/remudero/pull/3704";
 const OWN_DIFF_DIGEST = "sha256:own-diff-abc123";
 const MERGE_BASE = "0ldbase00ldbase00ldbase00ldbase00ldbase0";
 const NEW_MERGE_BASE = "newbase1newbase1newbase1newbase1newbase1";
+const CONTRACT_DIGEST = "contract-v1:unchanged-contract";
 
 /** {@link ReviewReuseInputs} is declared OFF `OpenPrView` on purpose (see that type's own doc in
  *  sweep.ts) — no producer assigns any of its five keys onto a real `OpenPrView` yet, so a fixture
@@ -83,6 +84,8 @@ function unchangedInputs(): Partial<ReviewReuseInputs> {
     reviewedMergeBaseSha: MERGE_BASE,
     currentMergeBaseSha: MERGE_BASE,
     reviewedHeadSha: JUDGED_HEAD,
+    reviewedContractDigest: CONTRACT_DIGEST,
+    currentContractDigest: CONTRACT_DIGEST,
   };
 }
 
@@ -143,7 +146,7 @@ test("W1-T3798 base-only-runs-discrimination", async () => {
 
 test("W1-T3798 changed-contract-forces-full-review", async () => {
   const deps = modeDeps();
-  await runSweep([orphanedPr({ ...unchangedInputs(), currentOwnDiffDigest: "sha256:changed" })], deps);
+  await runSweep([orphanedPr({ ...unchangedInputs(), currentContractDigest: "contract-v1:changed-contract" })], deps);
   assert.deepEqual(deps.modes, ["full-review"]);
 });
 

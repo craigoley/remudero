@@ -99,6 +99,38 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
   return `v2:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
 
+/** Stable identity of the reviewer contract, independent of a PR head, diff, or prose report.
+ * Reuse may only carry a verdict across a base move when this identity is unchanged. */
+export interface ReviewContractDigestInput {
+  taskId: string;
+  acceptance: readonly AcceptanceCriterion[];
+  declaredFiles?: readonly string[];
+  risk?: TaskRisk;
+  budgetUsd?: number;
+  policyRevision?: string;
+  engineRevision?: string;
+}
+
+export function reviewContractDigest(input: ReviewContractDigestInput): string {
+  const acceptance = input.acceptance.map((criterion) => ({
+    claim: criterion.claim,
+    proof: criterion.proof,
+    satisfied_by: criterion.satisfied_by ?? null,
+    holdout: criterion.holdout === true,
+  }));
+  const encoded = JSON.stringify({
+    version: 1,
+    taskId: input.taskId,
+    acceptance,
+    declaredFiles: input.declaredFiles ?? [],
+    risk: input.risk ?? null,
+    budgetUsd: input.budgetUsd ?? null,
+    policyRevision: input.policyRevision ?? REVIEW_DECISION_POLICY_REVISION,
+    engineRevision: input.engineRevision ?? REVIEW_ENGINE_REVISION,
+  });
+  return `contract-v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+}
+
 export interface ReviewEvaluatorProvenance {
   provider: string | null;
   requestedModel: string | null;
@@ -553,6 +585,8 @@ export interface ReviewVerdict {
    *  shape) is distinguishable from one that changes nothing (design ii) or changes the PR's own work (design iv).
    *  Same absent-means-unreadable rule as {@link ownDiffDigest}. */
   mergeBaseSha?: string;
+  /** W1-T3798 — the exact task contract resolved by this verdict. */
+  reviewContractDigest?: string;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -3919,6 +3953,8 @@ export interface PriorReviewVerdict {
   ownDiffDigest?: string;
   /** W1-T3704 (design i) — the recorded `merge_base_sha`, same absent-means-unreadable rule as {@link ownDiffDigest}. */
   mergeBaseSha?: string;
+  /** W1-T3798 — the recorded task-contract identity, absent means unreadable. */
+  reviewContractDigest?: string;
 }
 
 /** Result of applying the W1-T178 verdict-stability rule to a freshly computed verdict. */
@@ -3958,6 +3994,7 @@ export function priorReviewVerdictFromLedger(
       // read downstream as "unreadable", never coerced to a default value (see the field's own doc).
       ...(typeof line.own_diff_digest === "string" ? { ownDiffDigest: line.own_diff_digest } : {}),
       ...(typeof line.merge_base_sha === "string" ? { mergeBaseSha: line.merge_base_sha } : {}),
+      ...(typeof line.review_contract_digest === "string" ? { reviewContractDigest: line.review_contract_digest } : {}),
     };
   }
   return prior;
@@ -4619,6 +4656,7 @@ export function reviewLedgerLegibilityFields(
         | "proofReuses"
         | "ownDiffDigest"
         | "mergeBaseSha"
+        | "reviewContractDigest"
       >
     >,
 ): {
@@ -4636,6 +4674,7 @@ export function reviewLedgerLegibilityFields(
   failure_reason?: string;
   own_diff_digest?: string;
   merge_base_sha?: string;
+  review_contract_digest?: string;
 } {
   // `capped_reason` rides alongside `capped` rather than in its own line, so the ONE record that says a verdict was
   // capped also says why. Absent (never null/"") on an uncapped verdict, so the shape is byte-identical when healthy.
@@ -4665,6 +4704,7 @@ export function reviewLedgerLegibilityFields(
     // an `own_diff_digest: undefined`/`merge_base_sha: undefined` key nobody asked for.
     ...(verdict.ownDiffDigest === undefined ? {} : { own_diff_digest: verdict.ownDiffDigest }),
     ...(verdict.mergeBaseSha === undefined ? {} : { merge_base_sha: verdict.mergeBaseSha }),
+    ...(verdict.reviewContractDigest === undefined ? {} : { review_contract_digest: verdict.reviewContractDigest }),
     ...(failed
       ? {
           failure_class: reviewFailureClass({

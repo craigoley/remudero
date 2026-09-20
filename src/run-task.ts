@@ -1109,6 +1109,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
+  reviewContractDigest,
   reviewInputDigest,
   cappedReason,
   reviewLedgerLegibilityFields,
@@ -5461,7 +5462,7 @@ async function runReview(args: {
   prUrl: string;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number };
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -5861,6 +5862,14 @@ async function runReview(args: {
     ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+  const contractDigest = reviewContractDigest({
+    taskId: task.id,
+    acceptance: task.acceptance ?? [],
+    declaredFiles: task.files,
+    risk: task.risk,
+    budgetUsd: task.budget_usd ?? args.budgetUsd,
+  });
+  verdict = { ...verdict, reviewContractDigest: contractDigest };
 
   // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
   // it instead of re-deriving a verdict that did not change. `ReviewVerdict.ownDiffDigest` and
@@ -10262,8 +10271,7 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
       reviewTask = {
-        id: opts.task.id,
-        title: opts.task.title,
+        ...opts.task,
         acceptance: resolvedContract.criteria,
         files: resolvedContract.taskDeclaredFiles,
       };
@@ -16798,7 +16806,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           prUrl: view.url,
           // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
           headRefName: view.headRefName,
-          task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, files: taskDeclaredFiles },
+          task: {
+            id: taskId ?? `PR-${view.number}`,
+            acceptance: criteria,
+            files: taskDeclaredFiles,
+            risk: taskRisk,
+            budget_usd: taskBudgetUsd,
+          },
           report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
           settingsFile,
           config,
@@ -32468,6 +32482,15 @@ export function buildOpenPrViews(
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
     const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, taskId) : undefined;
+    const currentContractDigest = taskRecord?.acceptance?.length
+      ? reviewContractDigest({
+          taskId: taskRecord.id,
+          acceptance: taskRecord.acceptance,
+          declaredFiles: taskRecord.files,
+          risk: taskRecord.risk,
+          budgetUsd: taskRecord.budget_usd,
+        })
+      : undefined;
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
@@ -32634,6 +32657,8 @@ export function buildOpenPrViews(
       reviewedOwnDiffDigest: priorReviewForReuse?.ownDiffDigest,
       reviewedMergeBaseSha: priorReviewForReuse?.mergeBaseSha,
       reviewedHeadSha: priorReviewForReuse?.headSha,
+      reviewedContractDigest: priorReviewForReuse?.reviewContractDigest,
+      currentContractDigest,
       currentOwnDiffDigest: reviewReuseCurrent.get(pr.number)?.ownDiffDigest,
       currentMergeBaseSha: reviewReuseCurrent.get(pr.number)?.mergeBaseSha,
       priorReviewAttemptsForInput: reviewAttempts.attempts,

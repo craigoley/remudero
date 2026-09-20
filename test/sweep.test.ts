@@ -5081,6 +5081,8 @@ function noOpPushPr(over: Record<string, unknown> = {}): OpenPrView {
     reviewedMergeBaseSha: "base1",
     currentMergeBaseSha: "base1",
     reviewedHeadSha: "oldhead0",
+    reviewedContractDigest: "contract-v1:W1-REUSE",
+    currentContractDigest: "contract-v1:W1-REUSE",
     ...over,
   } as Partial<OpenPrView>) as OpenPrView;
 }
