@@ -41,10 +41,10 @@
     bounded fix/escalation path name the remaining defect. Do not add a second GitHub
     diff request, weaken proof discrimination, or change retro scope/marker rules.
   acceptance:
-    - claim: "retro acceptance repair remains a real, test-covered production rung"
-      proof: "unit test: the rung REPAIRS a body that parses to one criterion with an empty proof"
-    - claim: "the retro command owns its post-publication acceptance repair"
-      proof: "grep: repairRetroAcceptanceBlock( in src/run-task.ts"
+    - claim: "a repaired retro acceptance proof comes from one physical added diff line and does not match the merge base"
+      proof: "unit test: the repaired grep proof comes from one added physical line and is absent from the base"
+    - claim: "a deletion-only diff preserves the defective body and records that no safe proof exists"
+      proof: "unit test: a deletion-only diff leaves the defective body untouched and records no safe proof"
   falsifier: |
     Restore the prose fallback. The focused repair fixture must parse a criterion
     whose proof has no executable dialect, while the repaired implementation emits
@@ -55,6 +55,10 @@
   note: |
     reservation holder is this filing branch, verified by `rmd next-task-id` reserving
     W1-T3819 on origin before this shard was written; no hand-off is required.
+
+    amendment: the original empty-proof repair and call-site proofs remain useful suite coverage,
+    but both already pass at the implementation PR's merge base and cannot establish this task.
+    The amended proofs name the two new diff-derived behaviors that the implementation adds.
 
     This is separate from the current retro's stale-worker-code interruption. The
     current task fixes the deterministic fallback that creates an invalid proof when
