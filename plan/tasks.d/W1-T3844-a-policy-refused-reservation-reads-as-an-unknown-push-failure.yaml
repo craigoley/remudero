@@ -96,9 +96,14 @@
     only because the claim could not be made.
     AN OPERATOR MUST CONFIRM THIS ID before a build starts; nothing holds it.
 
-    FILES NOTE (W1-T3730): the build EXTENDS an existing suite --
-    test/a-refused-push-is-not-an-unreachable-origin.test.ts, which already covers the local,
-    unreachable and unknown arms and is the right home for the fourth. `files:` still omits it:
-    a `test/` path here reads to `lint-plan`'s `proof-unit-test-unresolvable` check as "this diff
-    ships the suite", and the proof TITLES above do not exist yet even though the FILE does, so
-    listing it on a plan-only filing refuses them. The build adds it to `files:` at that point.
+    FILES NOTE: the build EXTENDS an existing suite --
+    test/a-refused-push-is-not-an-unreachable-origin.test.ts, which already covered the local,
+    unreachable and unknown arms and is the right home for the fourth. `files:` deliberately does
+    NOT list it, and the original prediction here that the build would add it was WRONG -- adding
+    it was tried and `lint-plan` refused: Rule 19 sizing reads the two differing slugs
+    (`a-policy-refused-reservation-...` vs `a-refused-push-...`) as a span across two concerns at
+    risk:low. The gate offers a rename discount, but only when the suite is this task's OWN
+    falsifier, and warns that renaming otherwise games Rule 19 rather than satisfying it. This
+    suite pre-existed for this same concern rather than being written for these criteria, so the
+    discount was not taken and the shard declares only the product file it changes. The suite
+    rides as a LOGGED scope_guard overrun, which is not a refusal.
