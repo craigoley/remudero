@@ -10,7 +10,7 @@
   origin: "fleet-lifeguard#expired-installation-token-window-2026-09-07"
   plan_refs: ["W1-T1024", "W1-T1068", "W1-T2311", "W1-T2554"]
   files: [src/lib/github-app.ts, test/github-app.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET 2026-09-07, from the complete three-form ledger union and

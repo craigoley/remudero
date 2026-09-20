@@ -1,0 +1,63 @@
+- id: W1-T3823
+  title: "A NEWER GITHUB REVIEW SUCCESS CAN MASK AN AUTHORITATIVE LEDGER FAILURE — the success-recovery row re-reviews only when its exact-input ledger attempt count is zero, so a manual or external success written after a daemon failure makes the board green while the ledger gate correctly refuses auto-merge forever; re-run the authoritative reviewer once when the dated live status strictly succeeds the exact ledger attempt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 10.00
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  origin: "fleet-incident#pr-6153-external-success-after-ledger-failure-2026-09-20"
+  plan_refs: ["W1-T230", "W1-T2299", "W1-T2860"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on core PR #6153. The daemon posted an authoritative
+    `review.posted` failure at 2026-09-19T23:14:57Z for the current head and
+    exact v2 review-input digest. GitHub now reports `remudero-review` success
+    created at 23:48:47Z by `cao825`, but no corresponding later `review.posted`
+    row exists. The sweep records `blocked-ambiguous`: the status is green while
+    the ledgered verdict is capped, and W1-T230 correctly refuses auto-merge.
+
+    W1-T2860 already handles the zero-ledger sibling, but its predicate requires
+    `priorReviewAttemptsForInput === 0`. The earlier daemon failure counts as one
+    exact-input attempt, so the newer status never reaches the authoritative
+    reviewer. Trusting the mutable GitHub status would weaken W1-T230; ignoring it
+    leaves an apparently green PR permanently unable to merge.
+  design: |
+    Add a pure, fail-closed predicate beside the existing success-shaped recovery
+    rule. It matches only when required checks are green, the current review status
+    is success, the exact input has at least one completed ledger attempt, both the
+    status timestamp and exact-input ledger timestamp parse, and the current status
+    is strictly later. Route this contradiction to the existing post-review lane,
+    never to arming. Name the path `review_status_supersedes_ledger_attempt` in the
+    disposition evidence.
+
+    A normal daemon post writes its GitHub status before its ledger row, so its
+    ledger timestamp is later and cannot self-trigger. A rerun that posts failure
+    changes the live state away from success; one that posts success appends its
+    own newer ledger evidence. Missing, malformed, equal, or older timestamps, a
+    zero-attempt success, red/pending checks, and a post refusal retain their
+    current behavior. Do not infer reviewer identity from GitHub, fabricate a
+    ledger verdict, relax W1-T230, or turn a status write into merge authority.
+  acceptance:
+    - claim: "a dated external success strictly newer than a current exact-input ledger failure re-enters the authoritative review lane rather than mergeable or blocked-ambiguous"
+      proof: "grep: review_status_supersedes_ledger_attempt in src/lib/sweep.ts"
+    - claim: "normal daemon ordering and unreadable or non-newer status timestamps cannot re-admit a settled review"
+      proof: "grep: external-success-recovery in test/sweep.test.ts"
+  falsifier: |
+    Feed the real shape: one exact-input `review.posted` failure at 23:14 and a
+    GitHub success at 23:48. Delete the new predicate: it must reach the old capped
+    hold. Restore it: it must dispatch one post-review action, with no arm call.
+    Then set the status timestamp equal to or before the ledger row, omit either
+    timestamp, make checks red, or simulate the normal status-before-ledger order:
+    any re-review admission is a failure. After the rerun appends its ledger row,
+    replaying the same status must not create a second admission.
+  note: |
+    reservation holder is this filing branch, verified by `rmd next-task-id`
+    reserving W1-T3823 on origin before this shard was written; no hand-off is required.
+
+    The W1-T3817 plan amendment is intentionally separate. It corrects that task's
+    non-discriminating acceptance proof; this task preserves the generic rule that
+    an externally writable status can never certify a merge by itself.

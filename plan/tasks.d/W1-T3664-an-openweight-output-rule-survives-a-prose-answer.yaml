@@ -11,7 +11,7 @@
   files: [src/lib/worker-provider.ts, test/an-openweight-output-rule-survives-a-prose-answer.test.ts]
   origin: oper#subscription-offload-2026-09-16
   plan_refs: ["W1-T3567", "W1-T3621", "W1-T3350", "W1-T3569"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16 over the deduped ledger union: 200 draft attempts, 100 errors, 50.0%. Every

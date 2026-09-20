@@ -10,7 +10,7 @@
   files: [src/lib/last-seen.ts, test/a-recap-checkpoint-advances-when-it-is-read.test.ts]
   origin: oper#pizza-bot-comparison-2026-09-16
   plan_refs: ["W1-T163"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16 on the live daemon. `GET /v1/status` already carries both halves of a

@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-grep-proof-whose-only-match-is-a-comment-certifies-nothing.test.ts]
   origin: "operator-session#false-green-proofs-2026-09-08"
   plan_refs: ["W1-T273", "W1-T2895", "W1-T2888"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A `grep:` proof that reads 0 fails LOUDLY — `executed_fail` overrides keyword coverage and the

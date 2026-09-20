@@ -88,8 +88,10 @@ import {
 import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
+import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
+import { buildOperatorAgentRoutes } from "./operator-agent.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -109,6 +111,8 @@ import {
   type AnalyticsSnapshot,
   type AnalyticsSnapshotCacheDeps,
 } from "./analytics-route.js";
+import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
+import { createLiveAnalyticsSnapshotCache, type LiveAnalyticsSnapshotCacheOptions } from "./live-analytics-snapshot-cache.js";
 import { escapeHtml, renderConsoleShellScript } from "./console-shell-script.js";
 import { consoleShellClientSource } from "./console-shell-client.js";
 import { inboxDigestsPath } from "./digest.js";
@@ -301,6 +305,10 @@ export interface ServeDeps {
    * callers can inject the reader/clock/timers but cannot point this cache at a second state root.
    */
   analytics?: Omit<AnalyticsSnapshotCacheDeps, "stateDir" | "log">;
+  /** Process-owned filesystem snapshots for the live analytics fields; never request-time readers. */
+  liveAnalytics?: Omit<LiveAnalyticsSnapshotCacheOptions, "root">;
+  /** Already-captured process-owned live signals for `/v1/analytics`; never a request-time reader. */
+  liveMetrics?: () => LiveAnalyticsMetrics;
   /**
    * W1-T371: additive tailnet-identity auth — forwarded verbatim to `createService`'s
    * `identity` option (see service.ts's {@link IdentityAuth} for the two gates it enforces).
@@ -3556,6 +3564,7 @@ function assembleServeRoutes(
   };
   const rawRoutes = [
     projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen)),
+    buildRepoDashboardRoute({ root: deps.questionsRoot }),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     buildDaemonHealthRoute(daemonHealthDeps),
@@ -3616,6 +3625,7 @@ function assembleServeRoutes(
     // (ledgerPanelAction, panel-actions.ts:134), which is identical across both PanelActionDeps
     // instances built above -- so this route reads no root at all and cannot be misrooted.
     buildDrainFeedbackRoute(fleetControlDeps),
+    ...buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath }),
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
@@ -3643,7 +3653,7 @@ function assembleServeRoutes(
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
     // cancellation; this route receives no ledger path or reader capability.
-    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot }),
+    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics }),
     buildAuthScopeRoute(),
     // W1-T2409: the in-console write-grant "ask" — see buildConsoleWriteGrantRoute's own doc.
     buildConsoleWriteGrantRoute(deps.tokens),
@@ -3768,6 +3778,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     stateDir: dirname(deps.ledgerPath),
     log: deps.log,
   });
+  const liveAnalyticsCache = createLiveAnalyticsSnapshotCache({
+    ...deps.liveAnalytics,
+    root: deps.fleetControlRoot,
+  });
   // W1-T2229: resolved ONCE, here, and threaded through to `buildServeRoutes` below (explicitly,
   // via the spread) so `GET /v1/version` and the shell's "console build" chip report the EXACT
   // sha {@link gateStaleCodeExit} is comparing against — never a second independent resolution
@@ -3781,7 +3795,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
-    beforeExit: analyticsCache.stop,
+    beforeExit: () => {
+      analyticsCache.stop();
+      liveAnalyticsCache.stop();
+    },
     lastReadAt: () => lastReadAt,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
@@ -3796,7 +3813,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       lastReadAt = systemClock.now();
       prewarm.noteRead();
     });
-  const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces }, analyticsCache.current);
+  const routeAssembly = assembleServeRoutes(
+    { ...deps, consoleSha, confirmNonces, liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current },
+    analyticsCache.current,
+  );
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
     // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
@@ -3852,6 +3872,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", prewarm.stop);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
+  server.once("listening", liveAnalyticsCache.start);
+  server.on("close", liveAnalyticsCache.stop);
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 

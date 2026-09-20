@@ -12,7 +12,7 @@
     - test/a-reservation-says-whether-anything-still-holds-it.test.ts
   origin: "operator-session#pr-fix-sweep-2026-09-09"
   plan_refs: ["W1-T1055", "W1-T2316", "W1-T278"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09 over every `refs/rmd-id/*` ref on origin, fetched and read directly:

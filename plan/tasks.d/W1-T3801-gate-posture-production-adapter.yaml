@@ -1,0 +1,90 @@
+- id: W1-T3801
+  title: "THE GATE-POSTURE ADAPTER EXISTS BUT NO PRODUCTION REFUSAL REACHES IT — choose one bounded non-security gate and route its deterministic finding through the existing judge without adding human approval to the normal path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/gate-posture.ts
+    - src/run-task.ts
+    - test/gate-posture-production-adapter.test.ts
+  origin: "operator-session#aiuc-1-2026-09-19"
+  plan_refs: ["W1-T3330", "W1-T3318", "W1-T3321"]
+  rationale: |
+    FILED FROM CURRENT MAIN at 91505089d. `decideGatePosture` already implements the intended
+    consequence seam: no finding means no judge, a deterministic finding is handed to the judge,
+    judge unavailability restores the current gate behavior, recoverable STOP is downgraded to
+    LAND+DEBT, and each decision is ledger-shaped (`src/lib/gate-posture.ts:158-205`). The source
+    census can enumerate refusal surfaces (`src/lib/gate-posture.ts:291-382`).
+
+    THE PRODUCTION GAP IS OBSERVED, NOT INFERRED. A source call-site census on current main finds
+    `decideGatePosture` only at its definition outside tests; the production candidate path calls
+    `runRiskJudge` directly at `src/run-task.ts:15089-15162`. Therefore the adapter's policy is
+    tested but its gate-facing behavior cannot occur in production today.
+
+    THIS TASK CANNOT CHOOSE ITS FIRST PRODUCTION GATE SILENTLY. The operator has ruled that normal
+    automation must flow and that an LLM judge may escalate only when a decision is genuinely
+    needed. Selecting a gate also selects its side effects and its blast radius. That is why this
+    shard is `verify: human`: the human step is one policy ruling about the first pilot, not a
+    review requirement on every autonomous change.
+  design: |
+    (i) FIRST RECORD THE RULING. Before changing a production caller, record the selected gate,
+    its deterministic predicate, its current consequence, its recoverability, the permitted
+    repair/debt callback, and the explicit reason the pilot is not a security or merge-authority
+    gate. If the ruling is absent, report the evidence and leave production behavior unchanged.
+
+    (ii) PILOT NARROWLY. The recommended first pilot is one non-security, recoverable repository
+    hygiene finding with a deterministic local repair or bounded LAND+DEBT path, if current source
+    proves such a repair exists. Do not start with credentials, destructive migrations, CI-red,
+    merge-authority, or tenant-isolation gates.
+
+    (iii) KEEP FACTS DETERMINISTIC. The gate supplies the finding; the LLM chooses only LAND,
+    REPAIR, LAND+DEBT, or STOP. A healthy path must not spawn a judge. Do not let the judge argue
+    that a supplied finding is false, and do not replace the existing candidate-change judge path.
+
+    (iv) PRESERVE FAIL-SAFE COMPATIBILITY. A judge outage, malformed consequence, repair failure,
+    or debt-filing failure restores the gate's existing behavior. A recoverable finding may not
+    become STOP solely because the model is conservative. An unrecoverable security finding may
+    not land autonomously.
+
+    (v) MAKE EFFECTS IDEMPOTENT AND VISIBLE. The selected adapter must call only one bounded
+    repair/debt action, avoid duplicate follow-ups on retry, and write the gate, finding,
+    consequence, fallback, reason, verdict, and side-effect result to the ledger without raw
+    sensitive context.
+
+    (vi) VERIFY THE TWO SIDES. Test the selected gate's finding and no-finding paths, judge outage,
+    malformed output, recoverable STOP, unrecoverable STOP, repair/debt failure, retry deduplication,
+    and the unchanged behavior of every non-selected gate. Demonstrate one real bounded run after
+    the tests pass; do not call an unobserved integration green.
+  acceptance:
+    - claim: "the selected pilot gate and its consequence policy are recorded as an operator ruling before production wiring"
+      proof: "demonstration: operator records the selected gate, recoverability, current consequence, permitted side effect, and pilot exclusions"
+    - claim: "the selected gate supplies a deterministic finding and the existing judge chooses only the consequence"
+      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+    - claim: "a healthy path and every non-selected gate do not spawn the risk judge"
+      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+    - claim: "judge outage, malformed consequence, repair failure, or debt-filing failure restores the existing gate behavior"
+      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+    - claim: "recoverable STOP cannot stop solely because the model is conservative, while unrecoverable STOP cannot land"
+      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+    - claim: "the selected side effect is bounded, retry-safe, and represented in a privacy-safe ledger decision"
+      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+    - claim: "one bounded production run demonstrates the selected adapter's observed outcome without adding routine human approval"
+      proof: "demonstration: run the selected gate once with a known deterministic finding and attach the resulting ledger receipt"
+  falsifier: |
+    CLOSE THIS TASK without implementation if a current-main source census finds a real production
+    caller that routes a gate refusal through `decideGatePosture`, and the caller already satisfies
+    the selected policy's outage, recoverability, side-effect, retry, and ledger criteria. The
+    current falsifier query is `git grep -n "decideGatePosture(" -- src ':!test/**'` after fetching
+    the latest main; a definition alone is not a caller.
+  notes: |
+    reservation hand-off: run-unfiled-1789840800000 -> run-W1-T3801-1789843200000
+    SCOPE FENCE: do not wire every discovered surface in one change, do not insert an approval gate
+    into ordinary PR flow, and do not give the judge authority to overturn deterministic facts.
+    If the operator's first-gate ruling changes the files or side effect materially, split the
+    implementation into a new task rather than widening this one.

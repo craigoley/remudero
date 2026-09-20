@@ -1736,13 +1736,18 @@ function filesFetcher(byPr: Record<number, unknown>): GhApiFetcher & { calls: st
   f.calls = calls;
   return f;
 }
-const file = (filename: string, additions = 5, deletions = 2) => ({ filename, additions, deletions });
+const file = (
+  filename: string,
+  additions = 5,
+  deletions = 2,
+  patch = `@@ -1,2 +1,5 @@\n-old one ${filename}\n-old two ${filename}\n+new one ${filename}\n+new two ${filename}\n+new three ${filename}\n+new four ${filename}\n+new five ${filename}`,
+) => ({ filename, additions, deletions, patch });
 
 test("W1-T2384: prFilesRestArgs asks for ONE pull request's files, paged at 100", () => {
   assert.deepEqual(prFilesRestArgs(OWNER, REPO, 1955), ["api", "repos/craigoley/remudero/pulls/1955/files?per_page=100"]);
 });
 
-test("W1-T2384: every path the PR touches is also touched by the superseding PR ⇒ superseded, carrying evidence rather than a bare integer", () => {
+test("W1-T2384: every old patch hunk contained by the superseding PR ⇒ superseded, carrying evidence rather than a bare integer", () => {
   const f = filesFetcher({ 1955: [file("src/lib/sweep.ts"), file("test/sweep.test.ts")], 1960: [file("src/lib/sweep.ts"), file("test/sweep.test.ts"), file("src/lib/board.ts")] });
   const v = fetchSupersessionVerdict(OWNER, REPO, 1955, 1960, "W1-T900", f, isInPlanScope);
   assert.equal(v.status, "superseded");
@@ -1751,6 +1756,89 @@ test("W1-T2384: every path the PR touches is also touched by the superseding PR 
   assert.equal(v.evidence!.taskId, "W1-T900");
   assert.equal(v.evidence!.diff.matchedHunks, 2);
   assert.equal(v.evidence!.diff.rawLineCount, 14, "the corpus control: 2 files x (5 added + 2 deleted)");
+});
+
+test("semantic supersession: identical hunk payloads still credit a rebase that moves their coordinates", () => {
+  const f = filesFetcher({
+    451: [file("src/lib/repo-dashboard.ts", 1, 1, "@@ -80,3 +80,3 @@ normalize\n-old measurement\n+unavailable measurement")],
+    455: [file("src/lib/repo-dashboard.ts", 1, 1, "@@ -102,3 +102,3 @@ normalize\n-old measurement\n+unavailable measurement")],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", f, isInPlanScope);
+  assert.equal(v.status, "superseded");
+  assert.equal(v.evidence?.diff.matchedHunks, 1);
+});
+
+test("semantic supersession: every hunk must survive, while trailing newlines and coordinates are transport noise", () => {
+  const oldPatch = "@@ -1,2 +1,2 @@ first\n-old first\n+new first\n@@ -10,2 +10,2 @@ second\n-old second\n+new second\n";
+  const newPatch = "@@ -41,2 +41,2 @@ first\n-old first\n+new first\n@@ -90,2 +90,2 @@ second\n-old second\n+new second\n";
+  const f = filesFetcher({
+    451: [file("src/lib/repo-dashboard.ts", 2, 2, oldPatch)],
+    455: [file("src/lib/repo-dashboard.ts", 2, 2, newPatch)],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", f, isInPlanScope);
+  assert.equal(v.status, "superseded");
+  assert.equal(v.evidence?.diff.matchedHunks, 2);
+});
+
+test("semantic supersession: #451/#455-shaped same filenames with different redaction and test hunks stay indeterminate", () => {
+  const f = filesFetcher({
+    451: [
+      file("app/api/console/repos/route.ts"),
+      file("lib/repo-dashboard.ts", 1, 1, "@@ -80,3 +80,3 @@ normalize\n-old telemetry\n+unavailable telemetry"),
+      file("tests/unit/repo-dashboard-route.test.ts", 1, 0, "@@ -60,3 +60,3 @@ route\n+expect(body).not.toContain('secret ledger sentinel')"),
+    ],
+    455: [
+      file("app/api/console/repos/route.ts"),
+      file("lib/repo-dashboard.ts", 1, 1, "@@ -86,3 +86,3 @@ normalize\n-old telemetry\n+unavailable measurement class"),
+      file("tests/unit/repo-dashboard-route.test.ts", 1, 0, "@@ -89,3 +89,3 @@ route\n+expect(body).not.toContain('evil.example.test')"),
+    ],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", f, isInPlanScope);
+  assert.equal(v.status, "indeterminate");
+  assert.equal(v.diff?.matchedHunks, 1, "only the byte-identical route hunk is evidence");
+  assert.match(v.detail, /filenames alone/);
+});
+
+test("semantic supersession: a missing text patch fails closed even when every filename overlaps", () => {
+  const f = filesFetcher({
+    451: [file("src/lib/repo-dashboard.ts", 1, 1, "@@ -80,3 +80,3 @@ normalize\n-old telemetry\n+unavailable telemetry")],
+    455: [{ filename: "src/lib/repo-dashboard.ts", additions: 1, deletions: 1 }],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", f, isInPlanScope);
+  assert.equal(v.status, "indeterminate");
+  assert.match(v.detail, /no complete text patch/);
+});
+
+test("semantic supersession: malformed patch text and duplicate file observations fail closed", () => {
+  const noHeader = filesFetcher({
+    451: [file("src/lib/repo-dashboard.ts", 3, 2, "not a unified diff")],
+    455: [file("src/lib/repo-dashboard.ts")],
+  });
+  assert.equal(fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", noHeader, isInPlanScope).status, "indeterminate");
+
+  const invalidBody = filesFetcher({
+    451: [file("src/lib/repo-dashboard.ts", 3, 2, "@@ -1,1 +1,1 @@\n!not a diff line")],
+    455: [file("src/lib/repo-dashboard.ts")],
+  });
+  assert.equal(fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", invalidBody, isInPlanScope).status, "indeterminate");
+
+  const duplicatePath = filesFetcher({
+    451: [file("src/lib/repo-dashboard.ts"), file("src/lib/repo-dashboard.ts")],
+    455: [file("src/lib/repo-dashboard.ts")],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", duplicatePath, isInPlanScope);
+  assert.equal(v.status, "indeterminate");
+  assert.match(v.detail, /empty or duplicate filename/);
+});
+
+test("semantic supersession: a patch whose line totals disagree with GitHub metadata fails closed", () => {
+  const f = filesFetcher({
+    451: [file("src/lib/repo-dashboard.ts", 2, 1, "@@ -1,1 +1,1 @@ normalize\n-old telemetry\n+unavailable telemetry")],
+    455: [file("src/lib/repo-dashboard.ts")],
+  });
+  const v = fetchSupersessionVerdict(OWNER, REPO, 451, 455, "API-T28", f, isInPlanScope);
+  assert.equal(v.status, "indeterminate");
+  assert.match(v.detail, /no complete text patch/);
 });
 
 test("W1-T2384: no shared path ⇒ unique, a POSITIVE finding and never a silent absence", () => {

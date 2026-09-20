@@ -13,7 +13,7 @@
     - test/source-size-suite-contract.test.ts
   origin: "operator-session#source-size-must-create-follow-up-not-block-current-pr-2026-09-05"
   plan_refs: ["W1-T2734"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT 255bb84f. W1-T2734 replaced the habitual source-size gate with a

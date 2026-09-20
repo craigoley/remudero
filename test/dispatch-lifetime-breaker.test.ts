@@ -252,6 +252,23 @@ test("W1-T316: drainCommand's WIRED isLifetimeCapExceeded tracks a REAL ledger, 
   }
 });
 
+test("W1-T3758: drainCommand loads a readable archive projection before wiring its breaker", async () => {
+  const config = drainFixtureConfig();
+  try {
+    const archivePath = join(config.root, "state", "ledger.2026-09-17T00-04-00-000Z.ndjson");
+    mkdirSync(dirname(archivePath), { recursive: true });
+    writeFileSync(archivePath, `${JSON.stringify({ task_id: "W1-T3758-ARCHIVE-WIRED", step: "run.start" })}\n`);
+    const deps = await captureDrainDeps(config, emptyPlanPath());
+    assert.equal(
+      deps.isLifetimeCapExceeded!("W1-T3758-ARCHIVE-WIRED"),
+      false,
+      "one archived run.start must remain below the lifetime cap through real drain wiring",
+    );
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
+  }
+});
+
 function daemonFixtureHome(): { home: string; root: string; planPath: string } {
   const home = mkdtempSync(join(tmpdir(), "rmd-lifetime-daemon-"));
   const root = join(home, "Remudero");

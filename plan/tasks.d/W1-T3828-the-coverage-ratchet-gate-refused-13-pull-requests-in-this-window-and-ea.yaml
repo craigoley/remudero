@@ -1,0 +1,19 @@
+- id: W1-T3828
+  title: "THE coverage-ratchet GATE REFUSED 13 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:6062:coverage-ratchet"
+  ci_learning_prs: [6062, 6077, 6077, 6088, 6092, 6096, 6098, 6099, 6113, 6135, 6138, 6154, 6156]
+  files:
+    - learnings/ci-gate-lessons.yaml
+  acceptance:
+    - claim: "the lane that trips the coverage-ratchet gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:6062:coverage-ratchet in learnings/ci-gate-lessons.yaml"
+  note: |
+    Filed by the ci-learning rung from ci-learning:6062:coverage-ratchet; machine-authored and parked for human verification.

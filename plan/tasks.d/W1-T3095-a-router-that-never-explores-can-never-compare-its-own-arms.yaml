@@ -11,7 +11,7 @@
   files: [src/lib/mount-exploration.ts, src/run-task.ts, test/a-router-that-never-explores-can-never-compare-its-own-arms.test.ts]
   origin: "operator-session#router-efficiency-2026-09-08"
   plan_refs: ["P53", "W1-T167", "W1-T2560", "W1-T2573", "W1-T2574", "W1-T2575", "W1-T2577"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-08 by running `recommendMounts` over `buildMountHeadroomSweep`'s own cells

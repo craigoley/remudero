@@ -482,7 +482,7 @@ export function workerLedgerFields(r: WorkerResult): {
     tokens: r.tokens,
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
-    billing_mode: billingMode(r.childEnvKeys),
+    billing_mode: r.provider === "cash" ? "api" : billingMode(r.childEnvKeys),
     max_turns: r.maxTurns,
     // The account this spend is attributed to — a NAME, never a credential, carried verbatim off `WorkerResult.accountLabel`.
     // `undefined`, never guessed, when none resolved (W1-T268).
@@ -1227,7 +1227,19 @@ export function harnessOwnsGitFor(tools: readonly string[] | undefined): boolean
 }
 
 export function cashCanServeToolSurface(tools: readonly string[] | undefined): boolean {
-  if (tools === undefined || tools.length === 0) return false;
+  // AN EMPTY BOUND IS NOT AN ABSENT ONE. `tools: []` is a DELIBERATE declaration carried by every
+  // pure-judge rung here — `RISK_JUDGE_TOOLS` (lib/risk-judge.ts) is literally `[]`, and both
+  // feedback judges say why inline: "everything it needs is in the prompt — no exploration". Such
+  // a spawn asks for NO capability, so there is nothing for the check-runner to be unable to
+  // implement, and `every(...)` over an empty list is vacuously true — the correct answer, never
+  // reached while this shared the `undefined` early return.
+  //
+  // MEASURED 2026-09-17, retro's promotion judge under a squeeze: cash_fallback_refused "not
+  // implementable by cash ()" — the empty parenthesis is the bug rendering itself.
+  //
+  // `undefined` STILL REFUSES for its own stated reason: it inherits the UNRESTRICTED surface,
+  // which includes Bash. Absent is not empty.
+  if (tools === undefined) return false;
   return tools.every((tool) => OPENWEIGHT_FUNCTIONS[tool] !== undefined);
 }
 
@@ -2067,6 +2079,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       args.model,
       args.effort,
       Buffer.byteLength(args.prompt ?? "", "utf8"),
+      { cashSqueezed: args.cashSqueezed === true },
     );
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "cash",

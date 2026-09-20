@@ -14,7 +14,7 @@
     - test/one-manifest-predicate-reads-the-declared-workspaces.test.ts
   origin: "operator-session#5757-has-been-waiting-for-a-review-2026-09-16"
   plan_refs: ["W1-T3680"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: |

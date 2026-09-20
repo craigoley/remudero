@@ -12,7 +12,7 @@
     - test/a-retro-that-cannot-read-github-declines-in-silence.test.ts
   origin: "operator-session#ci-learning-repair-2026-09-10"
   plan_refs: ["W1-T2981", "W1-T2289", "W1-T186"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10. The last `retro.start` anywhere in the three-form ledger union is

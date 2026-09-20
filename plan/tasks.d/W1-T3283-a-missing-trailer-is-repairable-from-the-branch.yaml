@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/a-missing-trailer-is-repairable-from-the-branch.test.ts]
   origin: "operator-session#board-drive-2026-09-09"
   plan_refs: ["W1-T1060", "W1-T3231", "W1-T2998"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

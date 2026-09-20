@@ -13,7 +13,7 @@
     - test/host-update-reclaim.test.ts
   origin: "operator-session#openweight-trial-2026-09-15"
   plan_refs: ["W1-T2725", "W1-T2847", "W1-T3090", "W1-T411"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED on the live Azure host 2026-09-15, root filesystem at 85% (4.3G free of 29G):

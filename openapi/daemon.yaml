@@ -204,6 +204,130 @@ components:
             W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp
             `recap` was computed as-of. Absent alongside `recap` for the same two reasons.
 
+    RepoDashboardHealth:
+      type: object
+      description: >
+        The health projection for one managed repository. The current daemon has no per-repo
+        health source, so every measurement is explicitly unknown rather than rendered as zero or
+        healthy.
+      required:
+        - status
+        - queuedtasks
+        - errorrate
+        - last_run
+        - alerts
+      properties:
+        status:
+          type: string
+          enum:
+            - unknown
+        queuedtasks:
+          type: [integer, "null"]
+        errorrate:
+          type: [number, "null"]
+        last_run:
+          type: [string, "null"]
+        alerts:
+          type: [array, "null"]
+          items:
+            type: string
+
+    RepoDashboardTelemetry:
+      type: object
+      description: Per-repository telemetry, unavailable until a durable per-repo aggregation source exists.
+      required:
+        - tokens7d
+        - modelsused
+        - cost_7d
+      properties:
+        tokens7d:
+          type: [number, "null"]
+        modelsused:
+          type: array
+          items:
+            type: string
+        cost_7d:
+          type: [number, "null"]
+
+    RepoDashboardSettings:
+      type: object
+      description: Per-repository settings, unavailable until durable settings persistence exists.
+      required:
+        - proofpolicy
+        - workerpoolsize
+        - alertthreshold
+      properties:
+        proofpolicy:
+          type: [string, "null"]
+        workerpoolsize:
+          type: [integer, "null"]
+        alertthreshold:
+          type: [number, "null"]
+
+    RepoDashboardEntry:
+      type: object
+      description: >
+        One repository from the validated `.remudero/managed-repos.json` set. Managed membership
+        is not evidence of OAuth connection, activation, health, telemetry, or settings.
+      required:
+        - id
+        - reponame
+        - repourl
+        - connected_at
+        - active
+        - managed
+        - source
+        - health
+        - telemetry
+        - settings
+      properties:
+        id:
+          type: string
+          description: Canonical `owner/repo` identity from the managed-repo set.
+        reponame:
+          type: string
+          description: Repository name from the canonical identity.
+        repourl:
+          type: string
+          description: Deterministic GitHub URL for the canonical identity; no GitHub read is implied.
+        connected_at:
+          type: [string, "null"]
+        active:
+          type: [boolean, "null"]
+        managed:
+          type: boolean
+        source:
+          type: string
+          enum:
+            - managed-repos
+        health:
+          $ref: "#/components/schemas/RepoDashboardHealth"
+        telemetry:
+          $ref: "#/components/schemas/RepoDashboardTelemetry"
+        settings:
+          $ref: "#/components/schemas/RepoDashboardSettings"
+
+    RepoDashboardResult:
+      type: object
+      description: >
+        GET /v1/repos's read-only managed-repo portfolio. An empty `repos` array is a measured
+        empty managed set; it is not an unavailable response.
+      required:
+        - generated_at
+        - source
+        - repos
+      properties:
+        generated_at:
+          type: string
+        source:
+          type: string
+          enum:
+            - managed-repos
+        repos:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoDashboardEntry"
+
     RecapEvent:
       type: object
       description: >
@@ -625,6 +749,240 @@ components:
             - string
             - "null"
 
+    OperatorAgentEvidence:
+      type: object
+      required:
+        - label
+        - value
+        - source
+        - observedAt
+        - freshness
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+        source:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+
+    OperatorAgentProposal:
+      type: object
+      required:
+        - proposalId
+        - repo
+        - proposalText
+        - confidence
+        - reasoning
+        - category
+        - status
+        - createdAt
+        - evidence
+      properties:
+        proposalId:
+          type: string
+        repo:
+          type: string
+        proposalText:
+          type: string
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        reasoning:
+          type: string
+        category:
+          type: string
+          enum: [optimize, fix, scale]
+        status:
+          type: string
+          enum: [pending, accepted, rejected, expired]
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorAgentEvidence"
+
+    OperatorAgentHistory:
+      type: object
+      required:
+        - proposalId
+        - repo
+        - proposalText
+        - confidence
+        - reasoning
+        - category
+        - status
+        - createdAt
+        - evidence
+        - decisionHistory
+      properties:
+        proposalId:
+          type: string
+        repo:
+          type: string
+        proposalText:
+          type: string
+        confidence:
+          type: number
+        reasoning:
+          type: string
+        category:
+          type: string
+          enum: [optimize, fix, scale]
+        status:
+          type: string
+          enum: [pending, accepted, rejected, expired]
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorAgentEvidence"
+        decisionHistory:
+          type: array
+          items:
+            type: object
+            required: [decision, at]
+            properties:
+              decision:
+                type: string
+                enum: [accepted, rejected, more-info]
+              at:
+                type: string
+                format: date-time
+              note:
+                type: string
+        outcome:
+          type: object
+          required: [summary, observedAt]
+          properties:
+            summary:
+              type: string
+            helped:
+              type: boolean
+            observedAt:
+              type: string
+              format: date-time
+            evidence:
+              type: array
+              items:
+                type: string
+
+    OperatorAgentProposalList:
+      type: object
+      required: [proposals, source]
+      properties:
+        proposals:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorAgentHistory"
+        source:
+          type: string
+          enum: [ledger]
+
+    OperatorAgentProposalRegistration:
+      type: object
+      required: [proposal]
+      properties:
+        proposal:
+          $ref: "#/components/schemas/OperatorAgentProposal"
+
+    OperatorAgentDecisionRequest:
+      type: object
+      required: [proposalId, decision]
+      properties:
+        proposalId:
+          type: string
+        decision:
+          type: string
+          enum: [accepted, rejected, more-info]
+        note:
+          type: string
+
+    OperatorAgentOutcomeRequest:
+      type: object
+      required: [proposalId, outcome]
+      properties:
+        proposalId:
+          type: string
+        outcome:
+          type: object
+          required: [summary, observedAt]
+          properties:
+            summary:
+              type: string
+            helped:
+              type: boolean
+            observedAt:
+              type: string
+              format: date-time
+            evidence:
+              type: array
+              items:
+                type: string
+
+    OperatorAgentSettings:
+      type: object
+      required: [enabled, confidenceThreshold]
+      properties:
+        enabled:
+          type: boolean
+        confidenceThreshold:
+          type: number
+          minimum: 0.9
+          maximum: 0.99
+
+    OperatorAgentSettingsScope:
+      type: object
+      description: Settings are durable per repository; the console must select the repository explicitly.
+      required: [kind, repository]
+      properties:
+        kind:
+          type: string
+          enum: [repository]
+        repository:
+          type: string
+          minLength: 1
+
+    OperatorAgentSettingsRequest:
+      type: object
+      required: [settings]
+      properties:
+        settings:
+          $ref: "#/components/schemas/OperatorAgentSettings"
+        scope:
+          $ref: "#/components/schemas/OperatorAgentSettingsScope"
+
+    OperatorAgentSettingsResult:
+      type: object
+      required: [settings, source]
+      properties:
+        settings:
+          $ref: "#/components/schemas/OperatorAgentSettings"
+        source:
+          type: string
+          enum: [ledger, default]
+        scope:
+          $ref: "#/components/schemas/OperatorAgentSettingsScope"
+        updatedAt:
+          type: string
+          format: date-time
+
     # ── W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) -- the button set
     # src/lib/panel-skills.ts's ONE route returns, resolved from
     # `.remudero/skills/<name>.yaml` (lib/skill.ts's `Skill`, W1-T44) the SAME
@@ -747,6 +1105,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    Conflict:
+      description: The requested proposal transition conflicts with the durable ledger state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
 
 # W3-T2 (MASTER-PLAN §7, WS-5a): the read-only live board's first real business routes --
 # a task/ledger-state snapshot (REST) and its live-update companion (SSE). Both are built on
@@ -755,6 +1119,30 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/repos:
+    get:
+      summary: The read-only managed-repo portfolio for the console dashboard.
+      description: >
+        Reads and validates `.remudero/managed-repos.json` (src/lib/managed-repos.ts). The
+        endpoint reports repository identity only; OAuth connection, activation, health,
+        telemetry, settings, logs, and test-run state remain explicitly unknown until they have
+        durable daemon sources.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The validated managed-repo portfolio, including an honest empty result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepoDashboardResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/status:
     get:
       summary: The current board snapshot -- one StatusProjection per plan task.
@@ -1080,6 +1468,152 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/operator-agent/proposals:
+    get:
+      summary: Read durable operator-agent proposals and decision history.
+      description: >
+        Returns only proposal, decision, and observed-outcome records reconstructed from the
+        append-only ledger, including supported rotated ledger files. No raw analytics payload or
+        bearer token is returned.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable operator-agent history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentProposalList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Register an evidence-backed operator-agent proposal.
+      description: >
+        Idempotently records the proposal identity and evidence in the ledger. A repeated
+        proposalId with different repository or text is rejected as a conflict.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentProposalRegistration"
+      responses:
+        "201":
+          description: Proposal registered.
+        "200":
+          description: Identical proposal already registered.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/proposals/decision:
+    post:
+      summary: Record an operator decision on an operator-agent proposal.
+      description: >
+        Records accepted, rejected, or more-info. More-info leaves the proposal pending and is
+        retained as a learning signal. Accepted proposals have no outcome until a later outcome
+        request supplies observed evidence.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentDecisionRequest"
+      responses:
+        "200":
+          description: Decision recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/proposals/outcome:
+    post:
+      summary: Record a later observed outcome for an accepted proposal.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentOutcomeRequest"
+      responses:
+        "200":
+          description: Outcome recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/settings:
+    get:
+      summary: Read durable operator-agent settings.
+      description: Returns the last valid ledger settings row, or explicit conservative defaults when none exists.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: repository
+          in: query
+          required: false
+          description: Explicit repository scope. When present, only rows for this repository are read.
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Operator-agent settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentSettingsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Persist bounded operator-agent settings.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentSettingsRequest"
+      responses:
+        "200":
+          description: Settings persisted.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/skills:
     get:

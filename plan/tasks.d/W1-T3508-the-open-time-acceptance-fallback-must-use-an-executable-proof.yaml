@@ -11,7 +11,7 @@
   origin: "operator-session#daemon-build-followups-2026-09-13"
   plan_refs: ["W1-T3066", "W1-T1060"]
   files: [src/run-task.ts, test/a-pr-opens-with-a-judgeable-body.test.ts, test/acceptance-gate-body-repair.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-13 on daemon-created PR #5347 at head faca42ca: the dedicated

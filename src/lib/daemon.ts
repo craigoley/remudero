@@ -81,6 +81,7 @@ import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, typ
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import type { DispatchValueContext } from "./dispatch-value.js";
+import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
@@ -609,12 +610,22 @@ export interface DaemonOpts {
   sweepRetriggerIntervalMs?: number;
 }
 
+/** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
+ * service status: `guarded` and `degraded` both decline a restart, but only the latter means the daemon could not
+ * read its own freshness. The optional shape preserves existing injected test seams; the real service adapter always
+ * supplies it (W1-T3756). */
+export type DaemonFreshnessNotStale =
+  | { arm: "unassessed"; serviceStatus: "guarded" | "degraded"; detail?: string }
+  | { arm: "dirty"; oldSha?: string; newSha?: string }
+  | { arm: "up_to_date" }
+  | { arm: "immaterial"; oldSha: string; newSha: string };
+
 /** The result of comparing this process's own boot sha against origin/main (W1-T126). `stale` carries the sha pair, so
  * the caller and the ledger line it drives name exactly what advanced. `installNeeded` means the pull also changed
  * the manifest or lockfile, so the install runs before the loop stops for restart, never after, and a stale
  * dependency tree never survives into the relaunched process (W1-T151). */
 export type DaemonFreshness =
-  | { stale: false }
+  | { stale: false; notStale?: DaemonFreshnessNotStale }
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean };
 
 /** W1-T3618 — a sweep pass's OWN report of a freshness discovery {@link DaemonDeps.checkFreshness}
@@ -1075,6 +1086,7 @@ function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolc
  * transient. This prevents arbitrary worker prose such as "internal server error" from being
  * swallowed while retaining the stderr/code fields Node does not always copy into Error.message. */
 function transientGhDispatchFailure(err: unknown): { detail: string } | undefined {
+  if (err instanceof GhJsonUnreadableResponseError) return { detail: err.message };
   if (typeof err !== "object" || err === null) return undefined;
   const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
   const message = String(failure.message ?? "");
@@ -2010,6 +2022,23 @@ export async function runDaemon(
     return s;
   };
 
+  // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
+  // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
+  // every tick sees the same answer it acts on. Injected legacy callers may omit `notStale`; only
+  // the real adapter is the production evidence producer, so an absent annotation remains silent.
+  const logNotStaleFreshness = (freshness: DaemonFreshness | undefined): void => {
+    if (!freshness || freshness.stale || !freshness.notStale) return;
+    const outcome = freshness.notStale;
+    log("daemon.freshness_not_stale", {
+      arm: outcome.arm,
+      ...(outcome.arm === "unassessed" ? { service_status: outcome.serviceStatus } : {}),
+      ...(outcome.arm === "unassessed" && outcome.detail ? { detail: outcome.detail } : {}),
+      ...(outcome.arm === "dirty" && outcome.oldSha ? { old_sha: outcome.oldSha } : {}),
+      ...(outcome.arm === "dirty" && outcome.newSha ? { new_sha: outcome.newSha } : {}),
+      ...(outcome.arm === "immaterial" ? { old_sha: outcome.oldSha, new_sha: outcome.newSha } : {}),
+    });
+  };
+
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   const stopForFreshness = async (
@@ -2280,6 +2309,7 @@ export async function runDaemon(
     // origin/main advancing past this process's boot sha is noticed on the very next tick where the
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
     const freshness = deps.checkFreshness?.();
+    logNotStaleFreshness(freshness);
     if (freshness?.stale) {
       // FORWARD PROGRESS OUTRANKS FRESHNESS FOR THE FIRST CYCLE, AND ONLY THE FIRST (W1-T2965).
       // This exit sits ABOVE the sweep and dispatch, so W1-T2960's admission-gate deferral is
@@ -3428,6 +3458,7 @@ export async function runDaemon(
     // false. `reviewerCodeStale` is still computed here because `refetchedFreshness` (and the
     // `daemon.freshness_deferred` log below, which IS reached) reads it.
     const selfFreshness = deps.checkFreshness?.();
+    logNotStaleFreshness(selfFreshness);
     const reviewerCodeStale = staleReviewerAction.kind === "restart" ? sweepCycleOutcome?.reviewerCodeStale : undefined;
     const refetchedFreshness: DaemonFreshness | undefined =
       selfFreshness?.stale || !reviewerCodeStale

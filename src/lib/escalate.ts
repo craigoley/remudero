@@ -353,6 +353,9 @@ export interface IssueGateway {
   ensureLabel?(label: string): boolean;
 }
 
+/** The close transport reports whether GitHub accepted the citation or only the terminal close. */
+export type IssueCloseOutcome = "commented" | "comment_cap";
+
 /** Per-class label, alongside the blanket `needs-human` queue label. */
 const CLASS_LABEL: Record<EscalationClass, string> = {
   BLOCKED: "escalation-blocked",
@@ -1247,7 +1250,20 @@ export function ghIssueGateway(
       return parseLabelledIssuesRest(run(labelledIssuesRestArgs(repoArg, label, "open")));
     },
     closeWithComment(url, comment) {
-      run(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
+      try {
+        run(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
+        return "commented";
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const cap1 = "Commenting is disabled on issues with more than 2500 comments";
+        const cap2 = "Commenting is disabled on issues with more than 2500 comments.";
+        if (msg.includes(cap1) || msg.includes(cap2)) {
+          // GitHub rejects closing with a citation comment when the cap is reached; close without a comment
+          run(["issue", "close", url, "--repo", repoArg]);
+          return "comment_cap";
+        }
+        throw err;
+      }
     },
     comment(url, body) {
       run(["issue", "comment", url, "--repo", repoArg, "--body", body]);

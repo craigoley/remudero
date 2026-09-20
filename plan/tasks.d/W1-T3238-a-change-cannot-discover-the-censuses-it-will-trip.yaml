@@ -10,7 +10,7 @@
   origin: "operator-session#census-membership-missed-clock-signature-2026-09-09"
   plan_refs: ["W1-T2969", "W1-T2905"]
   files: [src/lib/ci-parity.ts, test/an-unmodelled-census-is-named-with-what-it-walks.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09 on origin/main: `rmd census-membership --base origin/main` reports

@@ -624,11 +624,10 @@ export function codexCandidatesForCapability(
  * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
  * gpt-5.6-luna now leads it (measured 2026-09-16), taking gpt-5-mini's place outright: cheaper on both axes
  * and 0 reasoning tokens where mini spent 64 of 76. gpt-5.6-terra TRAILS as the escalation, at 10x
- * luna, reached only when luna is unavailable. ECONOMY AND BALANCED ARE UNTOUCHED: nano is cheaper
- * than luna per token, and W1-T3614 fixed those leads from measured PER-TASK cost, which luna has
- * not yet been measured against. gpt-oss-120b TRAILS rather than being deleted,
- * the same demotion shape the `codex` table uses for a demoted model, so a deployment that stops
- * answering falls back instead of failing the lane.
+ * luna, reached only when luna is unavailable. ECONOMY AND BALANCED KEEP their measured
+ * per-task leads from W1-T3614, while Luna is retained as the explicit cash-squeeze candidate. The
+ * squeeze selector promotes it only after the subscription auction blocks; routine cash work keeps
+ * its measured OSS/nano order.
  */
 // W1-T3614: economy leads with gpt-oss-120b and balanced with gpt-5-nano, MIRRORING
 // .remudero/mounts.yaml exactly -- a checkout with no mounts table must not silently prefer a
@@ -637,8 +636,8 @@ export function codexCandidatesForCapability(
 // measured 2026-09-15, a 259,181-token inbox_draft favours nano 2.83x while a 446-token escalation
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-oss-120b", "gpt-5-nano"],
-  balanced: ["gpt-5-nano", "gpt-oss-120b"],
+  economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
   frontier: ["gpt-5.6-luna", "gpt-5.6-terra"],
 };
 
@@ -779,6 +778,11 @@ export interface OpenWeightModelSelection {
   estimatedTokens?: number;
 }
 
+export interface OpenWeightSelectionOptions {
+  /** Promote Luna only for the cash request reached after the subscription auction blocks. */
+  cashSqueezed?: boolean;
+}
+
 /**
  * Resolve and validate a deployment before it can enter an Azure URL.
  *
@@ -803,9 +807,16 @@ export function selectOpenWeightModel(
   requestedModel: string | undefined,
   requestedEffort: string | undefined,
   promptBytes?: number,
+  options: OpenWeightSelectionOptions = {},
 ): OpenWeightModelSelection {
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
-  const candidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
+  const configured = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
+  // Cash and subscription are separate billing lanes. A normal cash request keeps the measured
+  // OSS/nano order, but a cash request reached only after a blocked subscription auction may use
+  // Luna first. The context gate still wins: a squeeze never routes an oversized prompt to Luna.
+  const candidates = options.cashSqueezed && configured.includes("gpt-5.6-luna")
+    ? ["gpt-5.6-luna", ...configured.filter((candidate) => candidate !== "gpt-5.6-luna")]
+    : configured;
   const safe = candidates.filter((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
   if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
   if (promptBytes === undefined) {
@@ -1530,16 +1541,30 @@ export interface CodexWorkerOutputLimitError extends Error {
   readonly stream: "stdout" | "stderr";
   readonly limitBytes: number;
   readonly observedBytes: number;
+  /** Bounded byte totals for complete JSONL events retained before stdout hit its cap. */
+  readonly eventBytesByKind: Readonly<Record<string, number>>;
+  /** Ledger-shaped alias kept on the error so the emitted retro field has a typed source. */
+  readonly event_bytes_by_kind: Readonly<Record<string, number>>;
+  /** Bytes in the incomplete JSONL line held when the cap fired. */
+  readonly pendingLineBytes: number;
 }
 
 export function isCodexWorkerOutputLimitError(error: unknown): error is CodexWorkerOutputLimitError {
   if (!(error instanceof Error) || error.name !== "CodexWorkerOutputLimitError") return false;
   const candidate = error as Partial<CodexWorkerOutputLimitError>;
+  // Older callers and test fixtures construct this typed error before the bounded event
+  // evidence fields were added. Keep the established type guard compatible with those
+  // producers; real spawn failures always populate both fields below.
   return (
     candidate.reasonClass === "bounded_output" &&
     (candidate.stream === "stdout" || candidate.stream === "stderr") &&
     typeof candidate.limitBytes === "number" &&
-    typeof candidate.observedBytes === "number"
+    typeof candidate.observedBytes === "number" &&
+    (candidate.pendingLineBytes === undefined || typeof candidate.pendingLineBytes === "number") &&
+    (candidate.eventBytesByKind === undefined ||
+      (candidate.eventBytesByKind !== null && typeof candidate.eventBytesByKind === "object")) &&
+    (candidate.event_bytes_by_kind === undefined ||
+      (candidate.event_bytes_by_kind !== null && typeof candidate.event_bytes_by_kind === "object"))
   );
 }
 
@@ -1547,6 +1572,8 @@ function codexWorkerOutputLimitError(
   stream: "stdout" | "stderr",
   limitBytes: number,
   observedBytes: number,
+  eventBytesByKind: Readonly<Record<string, number>> = {},
+  pendingLineBytes = 0,
 ): CodexWorkerOutputLimitError {
   const error = new Error(
     `Codex worker ${stream} output exceeded its ${limitBytes}-byte retention budget ` +
@@ -1558,8 +1585,27 @@ function codexWorkerOutputLimitError(
     stream,
     limitBytes,
     observedBytes,
+    eventBytesByKind,
+    event_bytes_by_kind: eventBytesByKind,
+    pendingLineBytes,
   });
 }
+
+const CODEX_EVENT_BYTE_KIND_KEYS = [
+  "thread.started",
+  "turn.started",
+  "turn.completed",
+  "turn.failed",
+  "error",
+  "item.completed:agent_message",
+  "item.completed:command_execution",
+  "item.completed:file_change",
+  "item.completed:reasoning",
+  "item.completed:web_search",
+  "malformed",
+  "other",
+] as const;
+type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
 class CodexJsonlAccumulator {
@@ -1572,6 +1618,9 @@ class CodexJsonlAccumulator {
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
+  private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
+    CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
+  ) as Record<CodexEventByteKind, number>;
 
   constructor(private nowMs: number) {}
 
@@ -1602,16 +1651,32 @@ class CodexJsonlAccumulator {
     };
   }
 
+  eventBytesByKind(): Readonly<Record<string, number>> {
+    return { ...this.eventBytes };
+  }
+
+  pendingLineBytes(): number {
+    return Buffer.byteLength(this.pending, "utf8");
+  }
+
   private consumeLine(line: string): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
+      this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       return;
     }
+    const eventType = typeof event.type === "string" ? event.type : undefined;
+    const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
+    const combined = itemType && eventType ? `${eventType}:${itemType}` : eventType;
+    const kind: CodexEventByteKind = CODEX_EVENT_BYTE_KIND_KEYS.includes(combined as CodexEventByteKind)
+      ? (combined as CodexEventByteKind)
+      : "other";
+    this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
     if (event.type === "turn.started") this.numTurns += 1;
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
@@ -1902,7 +1967,13 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (skipGitRepoCheck) shared.splice(2, 0, "--skip-git-repo-check");
   if (model) shared.push("--model", model);
   if (effort) shared.push("-c", `model_reasoning_effort=\"${effort}\"`);
-  if (args.resumeSessionId) return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
+  // `codex exec resume` accepts none of the fresh worker's workspace-write, cwd, or bounded-Git
+  // containment arguments. A resumed writer must therefore start fresh through the ordinary
+  // contained path below; the prompt already carries its predecessor's repair evidence. Read-only
+  // and disposable-review continuations retain the CLI resume form byte-for-byte.
+  if (args.resumeSessionId && (readOnly || disposableReview)) {
+    return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
+  }
   const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
   return [
     "exec",
@@ -1928,8 +1999,13 @@ export async function spawnCodexWorker(
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
  * config field and never enters a worker environment or a ledger row. */
 export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
-/** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
-export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
+/**
+ * PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the
+ * live probe. The live cash union then recorded 54 replies truncated at the 5,000-token ceiling
+ * (53 inbox drafts and one review). 8,000 is a bounded increase, not a removal: this exact value
+ * still limits both context admission and the maximum cash reservation for every request.
+ */
+export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 8_000;
 /**
  * PRIMARY CONTROL (W1-T1266): the wall-clock bound on ONE cash request. Nothing else bounds a hung
  * one -- before this the `fetch` carried no `signal` at all, so a stalled Azure request held the
@@ -2538,6 +2614,12 @@ export interface OpenWeightSpawnArgs {
   requestTimeoutMs?: number;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Test-only port around the bubblewrap check runner. Production always starts the fixed argv
+   * in a fresh user and network namespace; tests use this port to exercise child-env handling on
+   * hosts where bubblewrap is intentionally unavailable.
+   */
+  runCheck?: (input: OpenWeightCheckInput) => string;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
    *  `now` because the daily allowance keys on a UTC calendar day, which is read off the ISO
    *  instant rather than re-derived from milliseconds. */
@@ -2625,6 +2707,99 @@ export const OPENWEIGHT_READONLY_GIT_SUBCOMMANDS: readonly string[] = ["log", "s
  *  cash cap bounds spend, this bounds time — so this is what normally ends the loop, not a
  *  fallback behind some other limit. */
 export const OPENWEIGHT_CHECK_TIMEOUT_MS = 10 * 60_000;
+
+/** The Linux-only runner that gives a fixed check a new user and network namespace. */
+export const OPENWEIGHT_CHECK_SANDBOX = "bwrap";
+
+export interface OpenWeightCheckInput {
+  argv: readonly string[];
+  cwd: string;
+  env: Record<string, string>;
+  workerHome: string;
+  /** Test-only platform port. Production leaves this absent and uses the host platform. */
+  platform?: NodeJS.Platform;
+}
+
+/**
+ * Environment for a fixed-argv cash check.  The Azure key is deliberately read by the daemon
+ * before the tool loop, but a model-selected check must never inherit it (or any other daemon
+ * credential) merely because the adapter itself runs in this process.  `HOME` and `TMPDIR` are
+ * private per-worker paths, so a check cannot rediscover operator shell state through either.
+ *
+ * This is intentionally narrower than the Claude/Codex worker environments: the check table has
+ * no forge, shell, or network command, and it needs only executable discovery plus locale.  Add a
+ * variable here only with a demonstrated fixed-check need; copying `process.env` would turn the
+ * adapter boundary into a claim rather than a control.
+ */
+export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const tmp = join(workerHome, "tmp");
+  mkdirSync(tmp, { recursive: true });
+  const out: Record<string, string> = {
+    HOME: workerHome,
+    TMPDIR: tmp,
+    PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+  };
+  for (const key of ["LANG", "LC_ALL"] as const) {
+    const value = env[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Bubblewrap arguments for a model-selected fixed check. The worktree and isolated worker home
+ * are the only application mounts; the host root is NOT mounted at all. A small read-only runtime
+ * plus a new network namespace denies both host-secret reads and routes to the daemon, forge, or
+ * public network. `argv` is already an internal table entry — never model-supplied text.
+ */
+export function openWeightCheckSandboxArgv(
+  input: Pick<OpenWeightCheckInput, "argv" | "cwd" | "workerHome"> & { platform?: NodeJS.Platform },
+): string[] {
+  const platform = input.platform ?? process.platform;
+  if (platform !== "linux") {
+    throw new Error("cash RunCheck requires Linux bubblewrap; refusing an unsandboxed local check");
+  }
+  const cwd = realpathSync(input.cwd);
+  const workerHome = realpathSync(input.workerHome);
+  if (cwd === "/" || workerHome === "/") throw new Error("cash RunCheck refuses / as a writable sandbox bind");
+  const runtimeRoots = ["/usr", "/lib", "/lib64", "/bin", "/usr/local"].filter(existsSync);
+  const dirs = new Set<string>();
+  for (const path of [cwd, workerHome]) {
+    let current = path;
+    while (current !== "/") {
+      dirs.add(current);
+      current = dirname(current);
+    }
+  }
+  const createDirs = [...dirs].sort((a, b) => a.split("/").length - b.split("/").length);
+  return [
+    "--die-with-parent",
+    "--unshare-user",
+    "--unshare-net",
+    ...runtimeRoots.flatMap((path) => ["--ro-bind", path, path]),
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    ...createDirs.flatMap((path) => ["--dir", path]),
+    "--bind", cwd, cwd,
+    ...(workerHome === cwd ? [] : ["--bind", workerHome, workerHome]),
+    "--chdir", cwd,
+    "--",
+    ...input.argv,
+  ];
+}
+
+/** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
+export function runOpenWeightCheck(input: OpenWeightCheckInput): string {
+  return execFileSync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv(input), {
+    cwd: realpathSync(input.cwd),
+    env: input.env,
+    encoding: "utf8",
+    timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
 
 /** Raised INSTEAD of executing an unlisted check, before any process spawns. */
 export class OpenWeightUnlistedCheckError extends RmdError {
@@ -2744,7 +2919,14 @@ function objectArguments(raw: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd: string): unknown {
+function executeOpenWeightTool(
+  name: string,
+  args: Record<string, unknown>,
+  cwd: string,
+  checkEnv: Record<string, string>,
+  workerHome: string,
+  runCheck: ((input: OpenWeightCheckInput) => string) | undefined,
+): unknown {
   switch (name) {
     case "read_file":
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
@@ -2768,16 +2950,15 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
     }
     case "run_check": {
       // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
-      // takes an array and never a shell, so metacharacters are inert rather than discouraged.
+      // takes an array and never a shell, while runOpenWeightCheck puts even repository code in a
+      // fresh network namespace before it runs.
       const argv = openWeightCheckArgv(args.check, args.paths);
-      const [command, ...rest] = argv;
       try {
-        const stdout = execFileSync(command, rest, {
+        const stdout = (runCheck ?? runOpenWeightCheck)({
+          argv,
           cwd: realpathSync(cwd),
-          encoding: "utf8",
-          timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
-          maxBuffer: 8 * 1024 * 1024,
-            stdio: ["ignore", "pipe", "pipe"],
+          workerHome,
+          env: checkEnv,
         });
         return { check: args.check, exitCode: 0, output: stdout.slice(-20_000) };
       } catch (err) {
@@ -2807,6 +2988,80 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
     default:
       throw new Error(`openweight tool '${name}' is not implemented`);
   }
+}
+
+/**
+ * Verify the boundary a cash worker actually receives, without asking a model to simulate a
+ * shell it is never offered.  This is the cash counterpart to the subscription containment probe:
+ * an outside-cwd write must be rejected by the same resolver `write_file` uses, while every
+ * runnable command remains an internally-declared, shell-less, non-network argv.
+ *
+ * The check is deliberately executable at run time.  A CI-only census would not protect a daemon
+ * that is running a mounted checkout whose capability table has drifted from the image.
+ */
+export function assertOpenWeightToolBoundary(
+  cwd: string,
+  deps: {
+    platform?: NodeJS.Platform;
+    runSandbox?: (argv: readonly string[]) => void;
+    /** Test seam for the real bubblewrap invocation. Production defaults to execFileSync. */
+    execFile?: typeof execFileSync;
+    /** Test seam for the resolver that every cash file tool uses in production. */
+    resolveContainedPath?: typeof openWeightContainedPath;
+  } = {},
+): string {
+  const root = realpathSync(cwd);
+  const resolveContainedPath = deps.resolveContainedPath ?? openWeightContainedPath;
+  const allowed = resolveContainedPath(root, "cash-boundary-probe.txt");
+  const allowedRelative = relative(root, allowed);
+  if (allowedRelative === ".." || allowedRelative.startsWith(`..${sep}`) || isAbsolute(allowedRelative)) {
+    throw new Error("cash containment probe resolved an inside-cwd path outside the worker root");
+  }
+
+  let outsideWriteRefused = false;
+  try {
+    resolveContainedPath(root, "../cash-boundary-probe.txt");
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "tool path escapes the worker cwd") throw error;
+    outsideWriteRefused = true;
+  }
+  if (!outsideWriteRefused) {
+    throw new Error("cash containment probe could not prove outside-cwd writes are refused");
+  }
+
+  if (OPENWEIGHT_FUNCTIONS.Bash !== undefined) {
+    throw new Error("cash containment probe found a shell capability");
+  }
+  const forbidden = new Set(["gh", "curl", "wget", "ssh", "scp", "npm", "npx", "pnpm", "yarn", "pip", "docker", "nc", "sh", "bash", "zsh", "env", "eval"]);
+  const checks = Object.entries(OPENWEIGHT_CHECKS);
+  if (checks.length === 0) throw new Error("cash containment probe found no fixed check table");
+  for (const [name, argv] of checks) {
+    const command = argv[0]?.split("/").at(-1);
+    if (!command || forbidden.has(command)) {
+      throw new Error(`cash containment probe found unsafe fixed check '${name}'`);
+    }
+    if (command === "git" && !OPENWEIGHT_READONLY_GIT_SUBCOMMANDS.includes(argv[1] ?? "")) {
+      throw new Error(`cash containment probe found non-read-only git check '${name}'`);
+    }
+    if (argv.some((part) => /:\/\/|^https?:|^git@|[;&|`$><]/.test(part))) {
+      throw new Error(`cash containment probe found network or shell syntax in check '${name}'`);
+    }
+  }
+  const sandboxArgs = openWeightCheckSandboxArgv({
+    argv: ["/bin/true"],
+    cwd: root,
+    workerHome: root,
+    platform: deps.platform,
+  });
+  (deps.runSandbox ?? ((argv) => {
+    (deps.execFile ?? execFileSync)(OPENWEIGHT_CHECK_SANDBOX, argv, {
+      cwd: root,
+      env: openWeightCheckEnv(root),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }))(sandboxArgs);
+  return "cash adapter boundary proved: outside-cwd writes refused; fixed checks require a fresh network namespace";
 }
 
 /**
@@ -2949,6 +3204,9 @@ export async function spawnOpenWeightWorker(
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     const env = args.env ?? process.env;
+    // Built once, before any model tool call.  The Azure key stays in `env` for the HTTPS request
+    // below, but never crosses this distinct process boundary into `run_check`.
+    const checkEnv = openWeightCheckEnv(args.workerHome, env);
     const webSearchConsented = cashWebSearchEnabled(config);
     const tools = openWeightTools(args.tools, webSearchConsented);
     const key = env[OPENWEIGHT_API_KEY_ENV];
@@ -3098,7 +3356,14 @@ export async function spawnOpenWeightWorker(
                   },
                 }),
               )
-            : JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
+            : JSON.stringify(executeOpenWeightTool(
+                name,
+                objectArguments(call.function?.arguments),
+                args.cwd,
+                checkEnv,
+                args.workerHome,
+                args.runCheck,
+              ));
         } catch (error) {
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
@@ -3244,7 +3509,13 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   const exceedOutputBudget = (stream: "stdout" | "stderr", limitBytes: number, observedBytes: number) => {
     if (outputLimit || timedOut) return;
-    outputLimit = codexWorkerOutputLimitError(stream, limitBytes, observedBytes);
+    outputLimit = codexWorkerOutputLimitError(
+      stream,
+      limitBytes,
+      observedBytes,
+      stream === "stdout" ? stdout.eventBytesByKind() : {},
+      stream === "stdout" ? stdout.pendingLineBytes() : 0,
+    );
     if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
   };
   const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };

@@ -10,7 +10,7 @@
   origin: "operator-session#no-image-has-ever-been-deployed-on-a-schedule-2026-09-09"
   plan_refs: ["W1-T3199", "W1-T3200", "W1-T3201", "W1-T3240", "W1-T2877", "W1-T2953", "W1-T3233", "W1-T3583"]
   files: [deploy/install-host-units.sh, docs/operator-guide.md, test/host-units-install.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR SUPERSESSION, 2026-09-14 — W1-T3245 was implemented in #5551 with the plan edits

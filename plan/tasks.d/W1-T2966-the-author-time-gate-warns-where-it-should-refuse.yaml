@@ -10,7 +10,7 @@
   origin: operator-session
   plan_refs: ["W1-T2544", "W1-T305", "W1-T369", "§12"]
   files: [scripts/acceptance-author-gate.mjs, test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2544 SHIPPED THE DETECTION AND STOPPED SHORT OF THE REFUSAL ITS OWN TITLE ASKS FOR. That

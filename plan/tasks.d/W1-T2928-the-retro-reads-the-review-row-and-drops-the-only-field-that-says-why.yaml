@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§8", "W1-T19", "W1-T33"]
   files: [src/lib/retro.ts, test/review-feedback-reaches-the-learning-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LEARNING LOOP ALREADY EXISTS AND ALREADY READS THIS ROW. `buildGather` reads `review.posted`

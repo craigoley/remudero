@@ -12,7 +12,7 @@
     - test/ci-parity.test.ts
   origin: "operator-session#a-filing-passed-locally-and-failed-the-gate-2026-09-16"
   plan_refs: ["W1-T373", "W1-T294", "W1-T3699"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: |

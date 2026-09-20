@@ -14,7 +14,7 @@
     - test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts
   origin: "operator-session#auto-rebase-5505-2026-09-14"
   plan_refs: ["W1-T3422", "W1-T3277", "W1-T3410", "W1-T2620"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main 1aad61229 (2026-09-14). W1-T3422 correctly admits a stale-red

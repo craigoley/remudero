@@ -11,7 +11,7 @@
   files: [src/lib/worker.ts, test/an-orphaned-worker-process-is-reaped.test.ts]
   origin: oper#fleet-outage-2026-09-16
   plan_refs: ["W1-T3628", "W1-T3627", "W1-T208", "W1-T2251"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: main -> chore/file-orphan-worker-reaper-1789522145

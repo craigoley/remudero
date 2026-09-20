@@ -1,0 +1,34 @@
+name: PR title lint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commitlint:
+    name: commitlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: commitlint (the PR title — read LIVE via gh pr view)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq .title)"
+          if [ -z "$PR_TITLE" ]; then
+            echo "::error::commitlint: gh pr view returned an EMPTY title for PR #$PR_NUMBER -- this is an empty read (API/auth failure), distinct from a non-conventional title. Do not edit the title to fix this; investigate the gh call."
+            exit 1
+          fi
+          printf '%s\n' "$PR_TITLE" | npx commitlint --config commitlint.config.mjs --verbose

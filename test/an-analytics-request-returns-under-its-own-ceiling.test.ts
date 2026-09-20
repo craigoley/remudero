@@ -239,7 +239,41 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
           notCollectedReason: "queue depth is /v1/status's own live counter, not read by this projection",
         },
       ],
+      operatorAgent: cold.consoleV1.operatorAgent,
     },
+    routingTelemetry: {
+      version: "routing-v1",
+      evidenceState: "not-collected-in-retained-ledger",
+      assignmentsObserved: 0,
+      terminalResultsObserved: 0,
+      terminalResultsWithoutAssignment: 0,
+      assignmentsWithoutTerminalResult: 0,
+      buckets: [],
+      daily: [],
+    },
+    queue: {
+      pending: {
+        state: "not-collected",
+        reason: "no process-owned status snapshot is available",
+      },
+      trend: {
+        state: "not-collected",
+        reason: "live-only signal; historical queue and provider trends are not collected",
+      },
+    },
+    provider: {
+      allowance: {
+        remaining: {
+          state: "not-probed",
+          reason: "no process-owned provider snapshot is available",
+        },
+        trend: {
+          state: "not-collected",
+          reason: "live-only signal; historical queue and provider trends are not collected",
+        },
+      },
+    },
+    timeSeries: cold.timeSeries,
   });
   assert.ok(Object.isFrozen(cold), "the process-owned value is immutable");
   await cache.refresh();

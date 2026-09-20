@@ -12,7 +12,7 @@
   files: [DECISIONS.md]
   origin: "operator-session#w1-t3075-ratification-record-2026-09-11"
   plan_refs: ["W1-T3075", "W1-T3074", "W1-T3412", "P48"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main 03804ae. MASTER-PLAN.md records W1-T3075 as RATIFIED on 2026-09-11

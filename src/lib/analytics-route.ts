@@ -48,11 +48,30 @@
  */
 
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
+import {
+  buildAnalyticsTimeSeries,
+  createHistoricalSeriesAccumulator,
+  type HistoricalSeriesAccumulator,
+  type LedgerTimeSeries,
+} from "./analytics-timeseries.js";
+import {
+  buildAnalyticsBreakdowns,
+  createAnalyticsBreakdownAccumulator,
+  type AnalyticsBreakdownAccumulator,
+  type AnalyticsBreakdownDimension,
+  type AnalyticsDrilldownRow,
+} from "./analytics-breakdowns.js";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
+import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal } from "./operator-agent-capacity.js";
+import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow, type OperatorAgentDecisionSignal } from "./operator-agent-decisions.js";
+import { adaptOperatorAgentProofRows, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal } from "./operator-agent-proof.js";
+import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "./operator-agent-outcomes.js";
+import { verdictCalibrationReport } from "./verdict-calibration.js";
+import { adaptLiveAnalyticsMetrics, emptyLiveAnalyticsMetrics, type LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -75,6 +94,52 @@ export interface WorkerDurationLaneBucket {
   count: number;
   totalDurationMs: number;
   avgDurationMs: number;
+}
+
+/**
+ * One bounded model-routing aggregate. `assignments` records the pre-execution policy decision;
+ * terminal counters and measurements stay zero until a durable worker result joins that decision.
+ * This deliberately never exposes prompts, account labels, raw capacity responses, or ledger
+ * excerpts through the analytics route.
+ */
+export interface RoutingTelemetryBucket {
+  provider: string;
+  assignedModel: string;
+  taskType: string;
+  routingRule: string;
+  assignments: number;
+  terminalResults: number;
+  successes: number;
+  failures: number;
+  totalTokens: number;
+  totalDurationMs: number;
+  totalCostUsd: number;
+  fallbackReasons: Array<{ reason: string; count: number }>;
+}
+
+/** One UTC-day point for the operator's token-per-terminal-result efficiency trend. */
+export interface RoutingTelemetryDay {
+  day: string;
+  terminalResults: number;
+  totalTokens: number;
+  totalCostUsd: number;
+}
+
+/**
+ * The routing-v1 aggregate consumes the assignment/terminal evidence that already exists in the
+ * ledger. It intentionally distinguishes an assignment with no terminal receipt from a completed
+ * call, because treating the former as a failed or zero-cost call would manufacture evidence.
+ */
+export interface RoutingTelemetrySnapshot {
+  version: "routing-v1";
+  /** No retained assignment event means the dashboard has no routing sample; it is not a zero. */
+  evidenceState: "observed" | "not-collected-in-retained-ledger";
+  assignmentsObserved: number;
+  terminalResultsObserved: number;
+  terminalResultsWithoutAssignment: number;
+  assignmentsWithoutTerminalResult: number;
+  buckets: RoutingTelemetryBucket[];
+  daily: RoutingTelemetryDay[];
 }
 
 /** `GET /v1/analytics`'s body — the four questions, one field group each. */
@@ -106,6 +171,17 @@ export interface AnalyticsSnapshot {
    *  four questions above — see {@link ConsoleV1Projection}'s doc for the contract-gap this
    *  closes. */
   consoleV1: ConsoleV1Projection;
+  /** Bounded routing policy/receipt attribution for the operator console. */
+  routingTelemetry: RoutingTelemetrySnapshot;
+  /** Current process-owned queue/provider signals; historical trends remain explicitly uncollected. */
+  queue: LiveAnalyticsMetrics["queue"];
+  provider: LiveAnalyticsMetrics["provider"];
+  /** Five bounded ledger-backed series; queue and provider trends remain live-only. */
+  timeSeries: LedgerTimeSeries[];
+  /** Outcome and work-category dimensions built from terminal run evidence. */
+  dimensions: AnalyticsBreakdownDimension[];
+  /** Flat rows for console drilldown views, derived from the same bounded dimensions. */
+  drilldowns: AnalyticsDrilldownRow[];
 }
 
 /** A console-v1 metric's provenance, carried explicitly because the console renders it and
@@ -146,6 +222,15 @@ export interface ConsoleV1Metric {
   notCollectedReason?: string;
 }
 
+/** The operator-agent evidence families carried beside the existing console-v1 metric catalog. */
+export interface OperatorAgentProjection {
+  version: "operator-agent-v1";
+  proof: OperatorAgentProofSignal;
+  outcomes: OperatorAgentTaskOutcomeSignal;
+  decisions: OperatorAgentDecisionSignal;
+  capacity: OperatorAgentCapacitySignal;
+}
+
 /** `GET /v1/analytics`'s console-v1 projection — the catalog the console's own analytics page
  *  reads. `version` travels WITH the payload (design note, W1-T3623 acceptance iv) so a caller
  *  naming a version this instance does not emit can be REFUSED by {@link
@@ -156,6 +241,35 @@ export interface ConsoleV1Projection {
   version: string;
   asOf: string | null;
   metrics: ConsoleV1Metric[];
+  operatorAgent: OperatorAgentProjection;
+}
+
+export interface OperatorAgentProjectionInputs {
+  proofRows?: readonly OperatorAgentProofLedgerRow[];
+  decisionRows?: readonly OperatorDecisionLedgerRow[];
+  capacityRows?: readonly OperatorAgentCapacityLedgerRow[];
+  outcomes?: OperatorAgentTaskOutcomeSignal;
+}
+
+function emptyOperatorAgentProjection(): OperatorAgentProjection {
+  return {
+    version: "operator-agent-v1",
+    proof: adaptOperatorAgentProofRows([]),
+    outcomes: adaptVerdictCalibrationReport(verdictCalibrationReport([], "")),
+    decisions: adaptOperatorDecisionRows([]),
+    capacity: adaptOperatorAgentCapacityRows([]),
+  };
+}
+
+/** Compose independently measured signals without allowing a missing producer to become zero. */
+export function buildOperatorAgentProjection(inputs: OperatorAgentProjectionInputs = {}): OperatorAgentProjection {
+  return {
+    version: "operator-agent-v1",
+    proof: adaptOperatorAgentProofRows(inputs.proofRows ?? []),
+    outcomes: inputs.outcomes ?? adaptVerdictCalibrationReport(verdictCalibrationReport([], "")),
+    decisions: adaptOperatorDecisionRows(inputs.decisionRows ?? []),
+    capacity: adaptOperatorAgentCapacityRows(inputs.capacityRows ?? []),
+  };
 }
 
 /** Carried in the payload rather than hardcoded client-side — mirrors account-usage.ts's
@@ -195,6 +309,7 @@ export interface ConsoleV1ProjectionInputs {
   costModeledUsd: number;
   taskDurationsMs: readonly number[];
   queuePending?: number;
+  operatorAgent?: OperatorAgentProjection;
 }
 
 /** Nearest-rank p50 (`sorted[floor((n-1)/2)]`) — `undefined`, never `0`, on an empty sample: a
@@ -250,7 +365,12 @@ export function buildConsoleV1Metrics(inputs: ConsoleV1ProjectionInputs): Consol
 /** Wraps {@link buildConsoleV1Metrics} with the version/asOf envelope the console's catalog
  *  expects on the wire. */
 export function buildConsoleV1Projection(asOf: string | null, inputs: ConsoleV1ProjectionInputs): ConsoleV1Projection {
-  return { version: CONSOLE_V1_PROJECTION_VERSION, asOf, metrics: buildConsoleV1Metrics(inputs) };
+  return {
+    version: CONSOLE_V1_PROJECTION_VERSION,
+    asOf,
+    metrics: buildConsoleV1Metrics(inputs),
+    operatorAgent: inputs.operatorAgent ?? emptyOperatorAgentProjection(),
+  };
 }
 
 export type ConsoleV1ProjectionResolution =
@@ -293,6 +413,60 @@ interface AnalyticsAccumulator {
    *  (worker.ts's `workerLedgerFields`) — the SAME lines already discriminated by `model !==
    *  undefined` above, so this adds no new pass over the corpus. */
   tokensTotal: CacheHitTokens & { output: number };
+  routingTelemetry: RoutingTelemetryAccumulator;
+  /** Sanitized rows retained only for the four operator-agent evidence adapters. */
+  operatorAgentRows: {
+    proof: OperatorAgentProofLedgerRow[];
+    decisions: OperatorDecisionLedgerRow[];
+    capacity: OperatorAgentCapacityLedgerRow[];
+  };
+  historicalSeries: HistoricalSeriesAccumulator;
+  breakdowns: AnalyticsBreakdownAccumulator;
+}
+
+type RoutingAssignment = {
+  id: string;
+  provider: string;
+  model: string;
+  taskType: string;
+  routingRule: string;
+  preferenceBypassed: boolean;
+};
+
+/** The minimum terminal receipt needed for aggregation. Raw terminal ledger rows can carry
+ * stderr excerpts, so the streaming accumulator never retains them while waiting for a join. */
+type RoutingTerminalReceipt = {
+  success?: boolean;
+  tokens: number;
+  durationMs: number;
+  costUsd: number;
+  servedModel?: string;
+  capabilityFallback: boolean;
+  day?: string;
+};
+
+type RoutingTelemetryBucketState = Omit<RoutingTelemetryBucket, "fallbackReasons"> & {
+  fallbackReasons: Map<string, number>;
+};
+
+interface RoutingTelemetryAccumulator {
+  taskTypesByRun: Map<string, string>;
+  assignmentsById: Map<string, RoutingAssignment>;
+  terminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
+  pendingTerminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
+  bucketsByKey: Map<string, RoutingTelemetryBucketState>;
+  daysByDay: Map<string, RoutingTelemetryDay>;
+}
+
+function routingTelemetryAccumulator(): RoutingTelemetryAccumulator {
+  return {
+    taskTypesByRun: new Map(),
+    assignmentsById: new Map(),
+    terminalsByAssignmentId: new Map(),
+    pendingTerminalsByAssignmentId: new Map(),
+    bucketsByKey: new Map(),
+    daysByDay: new Map(),
+  };
 }
 
 function analyticsAccumulator(): AnalyticsAccumulator {
@@ -305,11 +479,276 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     workerDurationsByLane: new Map(),
     workerDurationsMeasured: false,
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    routingTelemetry: routingTelemetryAccumulator(),
+    operatorAgentRows: { proof: [], decisions: [], capacity: [] },
+    historicalSeries: createHistoricalSeriesAccumulator(),
+    breakdowns: createAnalyticsBreakdownAccumulator(),
+  };
+}
+
+const OPERATOR_AGENT_DECISION_STEPS = new Set([
+  "panel.manual_approved",
+  "panel.proposal_accepted",
+  "panel.proposal_rejected",
+  "panel.proposal_declined",
+  "automerge.hold_engaged",
+  "automerge.hold_released",
+  "automerge.armed",
+  "automerge.clean_status_direct_merge",
+  "automerge.direct_merge_failed",
+  "automerge.direct_merge_preflight_head_unavailable",
+  "automerge.direct_merge_preflight_refused",
+  "automerge.direct_merge_update_failed",
+  "automerge.direct_merge_updated",
+  "automerge.rate_limited_rest_merge",
+  "automerge.rate_limited_rest_merge_conflict",
+  "automerge.rate_limited_rest_merge_refused",
+  "automerge.rate_limited_rest_merge_retry",
+]);
+
+const OPERATOR_AGENT_CAPACITY_FIELDS = [
+  "repo",
+  "repository",
+  "configured_capacity",
+  "configured_pool_size",
+  "worker_pool_size",
+  "wip_limit",
+  "admitted_lanes",
+  "lane_budget",
+  "active_workers",
+  "queued_work",
+  "queue_pending",
+  "window_start",
+  "measurement_start",
+  "window_end",
+  "measurement_end",
+] as const;
+
+const OPERATOR_AGENT_CAPACITY_OBSERVATION_FIELDS = OPERATOR_AGENT_CAPACITY_FIELDS.filter(
+  (field) => field !== "repo" && field !== "repository",
+);
+
+/** Retain only the bounded fields the operator-agent adapters need; prompts and ledger excerpts
+ * never enter the analytics snapshot's response path. */
+type SelectedOperatorAgentRow =
+  | { family: "proof"; row: OperatorAgentProofLedgerRow }
+  | { family: "decisions"; row: OperatorDecisionLedgerRow }
+  | { family: "capacity"; row: OperatorAgentCapacityLedgerRow };
+
+function operatorAgentRow(line: Record<string, unknown>): SelectedOperatorAgentRow | undefined {
+  const step = str(line.step);
+  if (step === "review.posted") {
+    return { family: "proof", row: { step, task_id: line.task_id, proof_exec: line.proof_exec } };
+  }
+  if (step && OPERATOR_AGENT_DECISION_STEPS.has(step)) {
+    return {
+      family: "decisions",
+      row: {
+        step,
+        task_id: line.task_id,
+        task_class: line.task_class,
+        task_type: line.task_type,
+        class: line.class,
+        origin: line.origin,
+        actor: line.actor,
+        by: line.by,
+      },
+    };
+  }
+  if (OPERATOR_AGENT_CAPACITY_OBSERVATION_FIELDS.some((field) => field in line)) {
+    return {
+      family: "capacity",
+      row: Object.fromEntries(OPERATOR_AGENT_CAPACITY_FIELDS.map((field) => [field, line[field]])),
+    };
+  }
+  return undefined;
+}
+
+function routingBucketFor(
+  acc: RoutingTelemetryAccumulator,
+  assignment: RoutingAssignment,
+): RoutingTelemetryBucketState {
+  const key = [assignment.provider, assignment.model, assignment.taskType, assignment.routingRule].join("\0");
+  const existing = acc.bucketsByKey.get(key);
+  if (existing) return existing;
+  const created: RoutingTelemetryBucketState = {
+    provider: assignment.provider,
+    assignedModel: assignment.model,
+    taskType: assignment.taskType,
+    routingRule: assignment.routingRule,
+    assignments: 0,
+    terminalResults: 0,
+    successes: 0,
+    failures: 0,
+    totalTokens: 0,
+    totalDurationMs: 0,
+    totalCostUsd: 0,
+    fallbackReasons: new Map(),
+  };
+  acc.bucketsByKey.set(key, created);
+  return created;
+}
+
+function tokensOnLine(line: Record<string, unknown>): number {
+  const tokens = line.tokens;
+  if (!tokens || typeof tokens !== "object") return 0;
+  const value = tokens as Record<string, unknown>;
+  return (num(value.input) ?? 0) + (num(value.output) ?? 0) + (num(value.cacheRead) ?? 0) + (num(value.cacheCreation) ?? 0);
+}
+
+function boundedRoutingRule(assignment: Record<string, unknown>): string {
+  const routing = assignment.routing;
+  if (!routing || typeof routing !== "object") return "unreported";
+  const value = routing as Record<string, unknown>;
+  const mode = str(value.mode) ?? "unreported";
+  const selectionPath = str(value.selectionPath);
+  return selectionPath ? `${mode}:${selectionPath}` : mode;
+}
+
+function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Record<string, unknown>): RoutingAssignment | undefined {
+  if (line.step !== "worker.assignment" || !line.worker_assignment || typeof line.worker_assignment !== "object") return undefined;
+  const raw = line.worker_assignment as Record<string, unknown>;
+  const selected = raw.selected;
+  if (!selected || typeof selected !== "object") return undefined;
+  const selection = selected as Record<string, unknown>;
+  const id = str(raw.id);
+  const provider = str(selection.provider);
+  const model = str(selection.model);
+  if (!id || !provider || !model) return undefined;
+  const runId = str(line.run_id);
+  const routing = raw.routing;
+  const preferenceBypassed = Boolean(
+    routing && typeof routing === "object" && (routing as Record<string, unknown>).preferenceBypass,
+  );
+  return {
+    id,
+    provider,
+    model,
+    taskType: (runId && acc.taskTypesByRun.get(runId)) ?? "unknown",
+    routingRule: boundedRoutingRule(raw),
+    preferenceBypassed,
+  };
+}
+
+function routingTerminalReceipt(line: Record<string, unknown>): RoutingTerminalReceipt {
+  const ts = str(line.ts);
+  return {
+    ...(typeof line.success === "boolean" ? { success: line.success } : {}),
+    tokens: tokensOnLine(line),
+    durationMs: num(line.worker_duration_ms) ?? 0,
+    costUsd: num(line.total_cost_usd) ?? 0,
+    ...(str(line.served_model) ? { servedModel: str(line.served_model) } : {}),
+    capabilityFallback: Boolean(line.codex_capability_fallback && typeof line.codex_capability_fallback === "object"),
+    ...(ts && Number.isFinite(Date.parse(ts)) ? { day: new Date(ts).toISOString().slice(0, 10) } : {}),
+  };
+}
+
+function terminalFallbackReasons(assignment: RoutingAssignment, terminal: RoutingTerminalReceipt): string[] {
+  const reasons: string[] = [];
+  if (assignment.preferenceBypassed) reasons.push("provider-preference-bypass");
+  if (terminal.capabilityFallback) reasons.push("capability-table-unavailable");
+  const served = terminal.servedModel;
+  if (served && served !== assignment.model) reasons.push("provider-served-different-model");
+  return reasons;
+}
+
+function applyRoutingTerminal(
+  acc: RoutingTelemetryAccumulator,
+  assignment: RoutingAssignment,
+  terminal: RoutingTerminalReceipt,
+): void {
+  const bucket = routingBucketFor(acc, assignment);
+  bucket.terminalResults += 1;
+  if (terminal.success === true) bucket.successes += 1;
+  else if (terminal.success === false) bucket.failures += 1;
+  bucket.totalTokens += terminal.tokens;
+  bucket.totalDurationMs += terminal.durationMs;
+  bucket.totalCostUsd += terminal.costUsd;
+  for (const reason of terminalFallbackReasons(assignment, terminal)) {
+    bucket.fallbackReasons.set(reason, (bucket.fallbackReasons.get(reason) ?? 0) + 1);
+  }
+  if (terminal.day) {
+    const current = acc.daysByDay.get(terminal.day) ?? { day: terminal.day, terminalResults: 0, totalTokens: 0, totalCostUsd: 0 };
+    current.terminalResults += 1;
+    current.totalTokens += terminal.tokens;
+    current.totalCostUsd += terminal.costUsd;
+    acc.daysByDay.set(terminal.day, current);
+  }
+}
+
+function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: Record<string, unknown>): void {
+  if (line.step === "run.start") {
+    const runId = str(line.run_id);
+    const taskType = str(line.type);
+    if (runId && taskType) acc.taskTypesByRun.set(runId, taskType);
+  }
+
+  const assignment = routingAssignmentFromLine(acc, line);
+  if (assignment) {
+    if (acc.assignmentsById.has(assignment.id)) return;
+    acc.assignmentsById.set(assignment.id, assignment);
+    routingBucketFor(acc, assignment).assignments += 1;
+    const pending = acc.pendingTerminalsByAssignmentId.get(assignment.id);
+    if (pending) {
+      acc.pendingTerminalsByAssignmentId.delete(assignment.id);
+      acc.terminalsByAssignmentId.set(assignment.id, pending);
+      applyRoutingTerminal(acc, assignment, pending);
+    }
+    return;
+  }
+
+  // `workerLedgerFields` appears on intermediate worker rows such as `implement.done` as
+  // well as on the run's final `verdict`. The assignment is a pre-execution policy fact, but
+  // only the verdict names the terminal outcome. Treating the first intermediate row as the
+  // receipt would turn a completed call into an `unreported` failure and discard its final
+  // token/duration/cost envelope.
+  if (line.step !== "verdict") return;
+  const assignmentId = str(line.selection_assignment_id);
+  if (!assignmentId || acc.terminalsByAssignmentId.has(assignmentId) || acc.pendingTerminalsByAssignmentId.has(assignmentId)) return;
+  const terminal = routingTerminalReceipt(line);
+  const selected = acc.assignmentsById.get(assignmentId);
+  if (selected) {
+    acc.terminalsByAssignmentId.set(assignmentId, terminal);
+    applyRoutingTerminal(acc, selected, terminal);
+  } else {
+    acc.pendingTerminalsByAssignmentId.set(assignmentId, terminal);
+  }
+}
+
+function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTelemetrySnapshot {
+  return {
+    version: "routing-v1",
+    evidenceState: acc.assignmentsById.size > 0 ? "observed" : "not-collected-in-retained-ledger",
+    assignmentsObserved: acc.assignmentsById.size,
+    terminalResultsObserved: acc.terminalsByAssignmentId.size,
+    terminalResultsWithoutAssignment: acc.pendingTerminalsByAssignmentId.size,
+    assignmentsWithoutTerminalResult: acc.assignmentsById.size - acc.terminalsByAssignmentId.size,
+    buckets: [...acc.bucketsByKey.values()]
+      .map((bucket) => ({
+        ...bucket,
+        fallbackReasons: [...bucket.fallbackReasons.entries()]
+          .map(([reason, count]) => ({ reason, count }))
+          .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason)),
+      }))
+      .sort((left, right) => right.assignments - left.assignments || left.assignedModel.localeCompare(right.assignedModel)),
+    daily: [...acc.daysByDay.values()].sort((left, right) => left.day.localeCompare(right.day)).slice(-30),
   };
 }
 
 /** Fold one logical ledger event into all four analytics questions in one pass. */
 function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
+  acc.historicalSeries.add(line);
+  acc.breakdowns.add(line);
+  const selectedOperatorAgentRow = operatorAgentRow(line);
+  if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "capacity") acc.operatorAgentRows.capacity.push(selectedOperatorAgentRow.row);
+
+  // Assignment/terminal attribution is folded from this SAME union pass. It has its
+  // own bounded, join-aware accumulator because an assignment is a policy fact and a terminal
+  // row is an outcome fact; neither may be inferred from the other.
+  accumulateRoutingTelemetryLine(acc.routingTelemetry, line);
+
   if (line.step === "cli.invoked") {
     acc.invocationsMeasured = true;
     const verb = str(line.verb) ?? "(unknown)";
@@ -363,7 +802,16 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   }
 }
 
-function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): AnalyticsSnapshot {
+export interface AnalyticsDeriveOptions {
+  /** Optional host-side git calibration; the ledger reader cannot infer post-merge outcomes. */
+  operatorAgentOutcomes?: OperatorAgentTaskOutcomeSignal;
+}
+
+function snapshotFromAccumulator(
+  acc: AnalyticsAccumulator,
+  nowIso: string,
+  options: AnalyticsDeriveOptions = {},
+): AnalyticsSnapshot {
   const taskDurationsMs: TaskDurationEntry[] = [];
   let noTerminalTaskCount = 0;
   for (const [runId, start] of acc.startsByRun) {
@@ -399,7 +847,17 @@ function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): Ana
       cacheReuseTokens: acc.tokensTotal,
       costModeledUsd,
       taskDurationsMs: taskDurationsMs.map((entry) => entry.durationMs),
+      operatorAgent: buildOperatorAgentProjection({
+        proofRows: acc.operatorAgentRows.proof,
+        decisionRows: acc.operatorAgentRows.decisions,
+        capacityRows: acc.operatorAgentRows.capacity,
+        outcomes: options.operatorAgentOutcomes,
+      }),
     }),
+    routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
+    ...emptyLiveAnalyticsMetrics(),
+    timeSeries: buildAnalyticsTimeSeries(acc.historicalSeries, nowIso),
+    ...buildAnalyticsBreakdowns(acc.breakdowns, { operatorAgentOutcomes: options.operatorAgentOutcomes }),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -414,10 +872,11 @@ function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): Ana
 export function deriveAnalyticsSnapshot(
   lines: ReadonlyArray<Record<string, unknown>>,
   nowIso: string,
+  options: AnalyticsDeriveOptions = {},
 ): AnalyticsSnapshot {
   const accumulator = analyticsAccumulator();
   for (const line of lines) accumulateAnalyticsLine(accumulator, line);
-  return snapshotFromAccumulator(accumulator, nowIso);
+  return snapshotFromAccumulator(accumulator, nowIso, options);
 }
 
 /** Fold an already-deduplicated stream without materialising its input. */
@@ -425,6 +884,7 @@ export async function deriveAnalyticsSnapshotFromStream(
   lines: AsyncIterable<Record<string, unknown>>,
   clock: Clock,
   signal?: AbortSignal,
+  options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshot> {
   const accumulator = analyticsAccumulator();
   for await (const line of lines) {
@@ -432,7 +892,7 @@ export async function deriveAnalyticsSnapshotFromStream(
     accumulateAnalyticsLine(accumulator, line);
   }
   signal?.throwIfAborted();
-  return snapshotFromAccumulator(accumulator, clock.iso());
+  return snapshotFromAccumulator(accumulator, clock.iso(), options);
 }
 
 /**
@@ -445,11 +905,13 @@ export async function deriveAnalyticsSnapshotFromLedger(
   stateDir: string,
   clock: Clock,
   signal?: AbortSignal,
+  options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshot> {
   return deriveAnalyticsSnapshotFromStream(
     openLedgerUnion(stateDir, { dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP, signal }),
     clock,
     signal,
+    options,
   );
 }
 
@@ -492,18 +954,80 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   Object.freeze(value.workersByLaneModel);
   for (const entry of value.taskDurationsMs) Object.freeze(entry);
   Object.freeze(value.taskDurationsMs);
+  for (const series of value.timeSeries) {
+    for (const point of series.points) Object.freeze(point);
+    Object.freeze(series.points);
+    Object.freeze(series);
+  }
+  Object.freeze(value.timeSeries);
+  for (const dimension of value.dimensions) {
+    for (const bucket of dimension.buckets) Object.freeze(bucket);
+    Object.freeze(dimension.buckets);
+    Object.freeze(dimension);
+  }
+  Object.freeze(value.dimensions);
+  for (const row of value.drilldowns) Object.freeze(row);
+  Object.freeze(value.drilldowns);
   for (const bucket of value.workerDurationsByLane) Object.freeze(bucket);
   Object.freeze(value.workerDurationsByLane);
   for (const metric of value.consoleV1.metrics) Object.freeze(metric);
   Object.freeze(value.consoleV1.metrics);
+  Object.freeze(value.consoleV1.operatorAgent.proof.unmeasurable);
+  Object.freeze(value.consoleV1.operatorAgent.proof);
+  for (const item of value.consoleV1.operatorAgent.outcomes.classes) {
+    Object.freeze(item.taskIds);
+    Object.freeze(item);
+  }
+  for (const item of value.consoleV1.operatorAgent.outcomes.unmeasurable) Object.freeze(item);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.classes);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.unmeasurable);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.unmeasurableByCause);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes.policy);
+  Object.freeze(value.consoleV1.operatorAgent.outcomes);
+  for (const item of value.consoleV1.operatorAgent.decisions.explicitDecisions) Object.freeze(item);
+  for (const item of value.consoleV1.operatorAgent.decisions.automaticMergeEvents) Object.freeze(item);
+  for (const item of value.consoleV1.operatorAgent.decisions.classes) {
+    Object.freeze(item.taskIds);
+    Object.freeze(item.actorIds);
+    Object.freeze(item);
+  }
+  for (const item of value.consoleV1.operatorAgent.decisions.unmeasurable) Object.freeze(item);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.explicitDecisions);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.automaticMergeEvents);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.classes);
+  Object.freeze(value.consoleV1.operatorAgent.decisions.unmeasurable);
+  for (const item of value.consoleV1.operatorAgent.capacity.measurements) Object.freeze(item);
+  for (const item of value.consoleV1.operatorAgent.capacity.unavailable) Object.freeze(item.missing);
+  for (const item of value.consoleV1.operatorAgent.capacity.unavailable) Object.freeze(item);
+  Object.freeze(value.consoleV1.operatorAgent.capacity.measurements);
+  Object.freeze(value.consoleV1.operatorAgent.capacity.unavailable);
+  Object.freeze(value.consoleV1.operatorAgent.capacity);
+  Object.freeze(value.consoleV1.operatorAgent);
   Object.freeze(value.consoleV1);
+  Object.freeze(value.queue.pending);
+  Object.freeze(value.queue.trend);
+  Object.freeze(value.queue);
+  Object.freeze(value.provider.allowance.remaining);
+  Object.freeze(value.provider.allowance.trend);
+  Object.freeze(value.provider.allowance);
+  Object.freeze(value.provider);
+  for (const bucket of value.routingTelemetry.buckets) {
+    for (const reason of bucket.fallbackReasons) Object.freeze(reason);
+    Object.freeze(bucket.fallbackReasons);
+    Object.freeze(bucket);
+  }
+  Object.freeze(value.routingTelemetry.buckets);
+  for (const day of value.routingTelemetry.daily) Object.freeze(day);
+  Object.freeze(value.routingTelemetry.daily);
+  Object.freeze(value.routingTelemetry);
   return Object.freeze(value) as AnalyticsSnapshot;
 }
 
 /** Complete schema before any evidence has been read. `asOf: null` is the critical distinction:
  * stamping the clock here would claim the empty collections were observed at process start. */
 export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
-  return freezeAnalyticsSnapshot({
+  const breakdowns = buildAnalyticsBreakdowns([], { sourceState: "not-collected" });
+  const snapshot: AnalyticsSnapshot = {
     asOf: null,
     measures: ANALYTICS_SCOPE_NOTE,
     invocationsByVerb: {},
@@ -520,7 +1044,29 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
       costModeledUsd: 0,
       taskDurationsMs: [],
     }),
+    routingTelemetry: {
+      version: "routing-v1",
+      evidenceState: "not-collected-in-retained-ledger",
+      assignmentsObserved: 0,
+      terminalResultsObserved: 0,
+      terminalResultsWithoutAssignment: 0,
+      assignmentsWithoutTerminalResult: 0,
+      buckets: [],
+      daily: [],
+    },
+    ...emptyLiveAnalyticsMetrics(),
+    timeSeries: buildAnalyticsTimeSeries([], null),
+    dimensions: breakdowns.dimensions,
+    drilldowns: breakdowns.drilldowns,
+  };
+  // Keep the pre-existing cold-cache object enumerable shape stable for callers that compare
+  // the retained cache value directly; buildAnalyticsRoute materializes these fields on the
+  // wire, and property access remains available to process-owned consumers.
+  Object.defineProperties(snapshot, {
+    dimensions: { value: snapshot.dimensions, enumerable: false, writable: false },
+    drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
   });
+  return freezeAnalyticsSnapshot(snapshot);
 }
 
 function systemSchedule(callback: () => void, delayMs: number): AnalyticsTimer {
@@ -654,7 +1200,10 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
  * `GET /v1/analytics` — read-scoped and synchronously served from process-owned state. It cannot
  * start, join or await a union scan because its inline input exposes only the current value.
  */
-export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnapshot }): Route {
+export function buildAnalyticsRoute(deps: {
+  currentSnapshot: () => AnalyticsSnapshot;
+  currentLiveMetrics?: () => LiveAnalyticsMetrics;
+}): Route {
   return {
     method: "GET",
     path: "/v1/analytics",
@@ -665,7 +1214,11 @@ export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnap
       // before. Named and unrecognised, the request is REFUSED (409) rather than answered with
       // today's shape under a version string the caller never asked for.
       const requestedVersion = new URL(req.url ?? "/", "http://local").searchParams.get("projectionVersion") ?? undefined;
-      const snapshot = deps.currentSnapshot();
+      const base = deps.currentSnapshot();
+      // The analytics cache owns historical refreshes. Live metrics are a separate, already
+      // captured process-owned value, so this handler never starts a refresh or provider read.
+      const live = deps.currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics();
+      const snapshot = { ...base, ...live, dimensions: base.dimensions, drilldowns: base.drilldowns } as AnalyticsSnapshot;
       const resolution = resolveConsoleV1Projection(snapshot, requestedVersion);
       if (!resolution.ok) {
         sendJson(res, 409, resolution);

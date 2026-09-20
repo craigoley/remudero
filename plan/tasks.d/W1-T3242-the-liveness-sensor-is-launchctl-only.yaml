@@ -10,7 +10,7 @@
   files: [src/lib/report-commands.ts, src/lib/status-board.ts, test/liveness-is-sensed-on-the-host-it-runs-on.test.ts]
   origin: "operator-session#deploy-visibility-2026-09-09"
   plan_refs: ["W1-T3200", "W1-T2450", "W1-T301", "W1-T2349", "W1-T484"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

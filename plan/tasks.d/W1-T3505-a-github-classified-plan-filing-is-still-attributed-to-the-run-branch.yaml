@@ -11,7 +11,7 @@
   origin: "operator-session#queue-auto-recovery-2026-09-13"
   plan_refs: ["W1-T2439", "W1-T2864", "W1-T3063", "W1-T3503"]
   files: [src/run-task.ts, test/openpr-taskid-resolver.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     REISSUE OF W1-T3503, NOT A SECOND IMPLEMENTATION. W1-T3503 was filed on PR #5342 after its

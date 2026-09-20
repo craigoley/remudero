@@ -30,7 +30,7 @@ export type SupersessionStatus = "superseded" | "unique" | "complementary" | "in
 export interface SupersessionDiffFinding {
   /** Total diff lines the read observed, BEFORE any hunk matching — the corpus control. */
   rawLineCount: number;
-  /** Hunks matched against symbols already present on the superseding PR/task. */
+  /** Old unified-diff hunk payloads contained in the superseding PR's matching files. */
   matchedHunks: number;
 }
 

@@ -13,7 +13,7 @@
     - test/expiring-fixture-census.test.ts
   origin: "operator-session#site-console-cell-ci-self-recovery-2026-09-14"
   plan_refs: ["W1-T3278", "W1-T3272", "W1-T2671", "W1-T2782"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the original W1-T3565 head `de7646be3bf0251aac9240005504068f06a62129`.

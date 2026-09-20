@@ -19,7 +19,7 @@
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-ruling#non-subscription-ladder-2026-09-15"
   plan_refs: ["W1-T3546", "W1-T3569", "W1-T3598", "W1-T3603", "W1-T3608", "W1-T2573"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     OPERATOR RULING 2026-09-15: "instead of calling it openweight ladder, let's call it something

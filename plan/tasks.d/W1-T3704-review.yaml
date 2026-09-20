@@ -14,7 +14,7 @@
     - test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts
   origin: "operator-session#the-queue-is-losing-by-two-an-hour-2026-09-16"
   plan_refs: ["W1-T3702", "W1-T3699", "W1-T273"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: |

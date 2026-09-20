@@ -17,7 +17,7 @@
   origin: "operator-session#board-wide-red-2026-09-10"
   note: "reservation hand-off: main -> codex/queue-evidence-reconciliation"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T3331", "W1-T2620", "W1-T3309", "W1-T1127"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3331 recorded a real incident: after main fixed the expiring-fixture census, nine PRs

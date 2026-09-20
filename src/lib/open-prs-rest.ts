@@ -914,6 +914,7 @@ interface RestPrFile {
   filename?: string;
   additions?: number;
   deletions?: number;
+  patch?: string;
 }
 
 /** BACKSTOP: GitHub serves at most 100 files on the single page this bounded reader requests. */
@@ -1073,11 +1074,61 @@ export function hydratePlanFilingFiles(
  *  had (W1-T2384). W1-T920 declared the field and the gated row, then deferred the detector to "a
  *  separate shard" that was never filed.
  *
- *  Both PRs' changed-file lists, compared by path. `rawLineCount` is every added and deleted line
- *  observed before any matching, so a read that saw nothing is indeterminate, never "unique".
+ *  Both PRs' changed-file lists, then their unified-diff hunk payloads, are compared. A shared
+ *  filename is not replacement evidence: every old hunk payload must appear in the newer PR.
+ *  `rawLineCount` is every added and deleted line observed before any matching, so a read that saw
+ *  nothing is indeterminate, never "unique".
  *  Outcomes: one side wholly in plan scope while the other holds non-plan work is "complementary"
- *  (W1-T2779); every path also touched by the superseding PR is "superseded"; no shared path is
- *  "unique"; a partial overlap or an empty control is "indeterminate". */
+ *  (W1-T2779); every old patch hunk contained in the newer PR is "superseded"; no shared path is
+ *  "unique"; a partial overlap, absent patch, or non-contained hunk is "indeterminate". */
+
+/** Coordinate-free, byte-significant unified-diff hunk payloads. */
+interface PatchHunkObservation {
+  hunks: readonly string[];
+  additions: number;
+  deletions: number;
+}
+
+function unifiedHunkPayloads(patch: unknown): PatchHunkObservation | undefined {
+  if (typeof patch !== "string" || patch.length === 0) return undefined;
+  const hunks: string[] = [];
+  let current: string[] | undefined;
+  let additions = 0;
+  let deletions = 0;
+  const lines = patch.replace(/\r\n?/g, "\n").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  for (const line of lines) {
+    if (line.startsWith("@@ ")) {
+      if (current !== undefined && current.length > 0) hunks.push(current.join("\n"));
+      current = [];
+      continue;
+    }
+    if (current === undefined) return undefined;
+    if (line.startsWith("+")) additions += 1;
+    else if (line.startsWith("-")) deletions += 1;
+    if (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ") || line === "\\ No newline at end of file") {
+      current.push(line);
+      continue;
+    }
+    return undefined;
+  }
+  if (current !== undefined && current.length > 0) hunks.push(current.join("\n"));
+  return hunks.length > 0 ? { hunks, additions, deletions } : undefined;
+}
+
+function containedHunkCount(required: readonly string[], candidate: readonly string[]): number {
+  const available = new Map<string, number>();
+  for (const hunk of candidate) available.set(hunk, (available.get(hunk) ?? 0) + 1);
+  let matched = 0;
+  for (const hunk of required) {
+    const count = available.get(hunk) ?? 0;
+    if (count === 0) continue;
+    available.set(hunk, count - 1);
+    matched += 1;
+  }
+  return matched;
+}
+
 export function fetchSupersessionVerdict(
   owner: string,
   repo: string,
@@ -1091,17 +1142,22 @@ export function fetchSupersessionVerdict(
   const theirs = fetch(prFilesRestArgs(owner, repo, supersedingPrNumber)) as RestPrFile[];
   if (!Array.isArray(ours) || !Array.isArray(theirs)) throw new Error("supersession read carried no file list");
 
-  const ourPaths = ours.map((f) => f.filename).filter((f): f is string => typeof f === "string" && f.length > 0);
-  const theirPaths = new Set(theirs.map((f) => f.filename).filter((f): f is string => typeof f === "string" && f.length > 0));
+  const ourFiles = new Map(ours.map((f) => [f.filename, f] as const).filter((entry): entry is [string, RestPrFile] => typeof entry[0] === "string" && entry[0].length > 0));
+  const theirFiles = new Map(theirs.map((f) => [f.filename, f] as const).filter((entry): entry is [string, RestPrFile] => typeof entry[0] === "string" && entry[0].length > 0));
+  const ourPaths = [...ourFiles.keys()];
+  const theirPaths = new Set(theirFiles.keys());
   const rawLineCount = ours.reduce((n, f) => n + (f.additions ?? 0) + (f.deletions ?? 0), 0);
   const theirRawLineCount = theirs.reduce((n, f) => n + (f.additions ?? 0) + (f.deletions ?? 0), 0);
-  const matchedHunks = ourPaths.filter((f) => theirPaths.has(f)).length;
-  const diff = { rawLineCount, matchedHunks };
+  const sharedPathCount = ourPaths.filter((f) => theirPaths.has(f)).length;
+  const baseDiff = { rawLineCount, matchedHunks: 0 };
 
   // THE CONTROL FIRST. An empty corpus cannot support either finding — see this function's own doc.
   if (ourPaths.length === 0 || rawLineCount === 0 || theirPaths.size === 0 || theirRawLineCount === 0) {
     const emptyPrNumber = ourPaths.length === 0 || rawLineCount === 0 ? prNumber : supersedingPrNumber;
-    return { status: "indeterminate", detail: `the diff read for #${emptyPrNumber} observed no changed lines — no finding is supportable`, diff } as SupersessionVerdict;
+    return { status: "indeterminate", detail: `the diff read for #${emptyPrNumber} observed no changed lines — no finding is supportable`, diff: baseDiff } as SupersessionVerdict;
+  }
+  if (ourFiles.size !== ours.length || theirFiles.size !== theirs.length) {
+    return { status: "indeterminate", detail: "the diff read carried an empty or duplicate filename — no auto-close is supportable", diff: baseDiff };
   }
 
   // W1-T2779: a plan filing and an implementation are complementary, never duplicates. A positive
@@ -1126,22 +1182,51 @@ export function fetchSupersessionVerdict(
       detail:
         `#${planIsOurs ? prNumber : supersedingPrNumber} is plan-only while ` +
         `#${planIsOurs ? supersedingPrNumber : prNumber} contains non-plan work — complementary stages of ${taskId}`,
-      diff,
+      diff: baseDiff,
     };
   }
-  if (matchedHunks === ourPaths.length) {
+  if (sharedPathCount === 0) {
+    return { status: "unique", detail: `none of #${prNumber}'s ${ourPaths.length} changed path(s) is touched by #${supersedingPrNumber}` };
+  }
+  if (sharedPathCount !== ourPaths.length) {
+    return {
+      status: "indeterminate",
+      detail: `#${prNumber} shares ${sharedPathCount} of ${ourPaths.length} changed path(s) with #${supersedingPrNumber} — a partial overlap supports neither finding`,
+      diff: baseDiff,
+    };
+  }
+
+  let requiredHunkCount = 0;
+  let matchedHunks = 0;
+  for (const path of ourPaths) {
+    const ourFile = ourFiles.get(path)!;
+    const theirFile = theirFiles.get(path)!;
+    const oursHunks = unifiedHunkPayloads(ourFile.patch);
+    const theirsHunks = unifiedHunkPayloads(theirFile.patch);
+    const oursComplete = oursHunks !== undefined && oursHunks.additions === ourFile.additions && oursHunks.deletions === ourFile.deletions;
+    const theirsComplete = theirsHunks !== undefined && theirsHunks.additions === theirFile.additions && theirsHunks.deletions === theirFile.deletions;
+    if (!oursComplete || !theirsComplete) {
+      return {
+        status: "indeterminate",
+        detail: `#${prNumber} and #${supersedingPrNumber} share every changed path, but ${path} has no complete text patch — no auto-close is supportable`,
+        diff: { rawLineCount, matchedHunks },
+      };
+    }
+    requiredHunkCount += oursHunks.hunks.length;
+    matchedHunks += containedHunkCount(oursHunks.hunks, theirsHunks.hunks);
+  }
+  const diff = { rawLineCount, matchedHunks };
+  if (matchedHunks === requiredHunkCount) {
     return {
       status: "superseded",
       evidence: { supersedingPrNumber, taskId, diff },
-      detail: `every one of #${prNumber}'s ${ourPaths.length} changed path(s) is also changed by #${supersedingPrNumber}`,
+      detail: `every one of #${prNumber}'s ${requiredHunkCount} patch hunk(s) is contained in #${supersedingPrNumber}`,
     };
-  }
-  if (matchedHunks === 0) {
-    return { status: "unique", detail: `none of #${prNumber}'s ${ourPaths.length} changed path(s) is touched by #${supersedingPrNumber}` };
   }
   return {
     status: "indeterminate",
-    detail: `#${prNumber} shares ${matchedHunks} of ${ourPaths.length} changed path(s) with #${supersedingPrNumber} — a partial overlap supports neither finding`,
+    detail: `#${prNumber} has ${matchedHunks} of ${requiredHunkCount} patch hunk(s) contained in #${supersedingPrNumber} — changed filenames alone cannot support an auto-close`,
+    diff,
   };
 }
 

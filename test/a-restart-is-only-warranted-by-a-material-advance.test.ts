@@ -60,7 +60,7 @@ test("W1-T2964: a plan-only advance is not material", () => {
   );
   assert.deepEqual(
     daemonFreshnessFromService(svc),
-    { stale: false },
+    { stale: false, notStale: { arm: "immaterial", oldSha: HEAD, newSha: ORIGIN } },
     "and the adapter declines to restart a process the advance cannot affect",
   );
 });

@@ -13,7 +13,7 @@
     - test/the-transport-paces-its-own-reads.test.ts
   origin: "operator-session#gh-cadence-2026-09-09"
   plan_refs: ["W1-T3275", "W1-T1066", "W1-T2897"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The diff is one module, but 24

@@ -881,6 +881,64 @@ test("W1-T2860: runSweep invokes only the existing review lane for an unowned su
   assert.equal(summary.byDisposition["post-review"], 1);
 });
 
+test("external-success-recovery: a newer live success re-reviews after an exact-input ledger failure", async () => {
+  const ledgerAt = "2026-09-19T23:14:57.000Z";
+  const statusAt = "2026-09-19T23:48:47.000Z";
+  const candidate = pr({
+    prNumber: 6153,
+    reviewState: "success",
+    checksState: "green",
+    reviewInputDigest: "v2:exact-input",
+    priorReviewAttemptsForInput: 1,
+    reviewInputLastAttemptAt: ledgerAt,
+    reviewVerdictPostedAt: statusAt,
+    reviewPostRefused: false,
+  });
+
+  const recovered = deriveDisposition(candidate, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(recovered.disposition, "post-review");
+  assert.match(recovered.reason, /review_status_supersedes_ledger_attempt/);
+
+  const posted: number[] = [];
+  const deps = fakeDeps({ postReview: (current) => { posted.push(current.prNumber); } });
+  const summary = await runSweep([candidate], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(posted, [candidate.prNumber]);
+  assert.deepEqual(deps.armed, [], "a live status never grants merge authority");
+  assert.equal(summary.byDisposition["post-review"], 1);
+
+  const settled = { ...candidate, priorReviewAttemptsForInput: 2, reviewInputLastAttemptAt: statusAt };
+  assert.notEqual(
+    deriveDisposition(settled, DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "post-review",
+    "the authoritative rerun's ledger row closes this admission path",
+  );
+
+  const rejectedCases: Array<[string, Partial<OpenPrView>]> = [
+    ["equal timestamps", { reviewInputLastAttemptAt: statusAt }],
+    ["older status", { reviewVerdictPostedAt: ledgerAt }],
+    ["malformed status", { reviewVerdictPostedAt: "not-a-date" }],
+    ["missing status", { reviewVerdictPostedAt: undefined }],
+    ["missing ledger timestamp", { reviewInputLastAttemptAt: undefined }],
+    ["normal daemon ordering", { reviewInputLastAttemptAt: "2026-09-19T23:49:00.000Z" }],
+    ["post refusal", { reviewPostRefused: true }],
+    ["red checks", { checksState: "red" }],
+    ["pending checks", { checksState: "pending" }],
+  ];
+  for (const [label, changes] of rejectedCases) {
+    assert.notEqual(
+      deriveDisposition({ ...candidate, ...changes }, DEFAULT_SWEEP_POLICY, NOW).disposition,
+      "post-review",
+      `${label} must not re-admit the settled review`,
+    );
+  }
+
+  assert.notEqual(
+    deriveDisposition({ ...candidate, priorReviewAttemptsForInput: 0 }, DEFAULT_SWEEP_POLICY, NOW).reason,
+    recovered.reason,
+    "zero attempts use the existing success-recovery path, not this supersession path",
+  );
+});
+
 // W1-T440: the SAME empty (unmetCriteria === []) has two causes — a trailer resolved a task id
 // and the ledger genuinely came back with nothing unmet (contradictory, above), versus no
 // trailer at all so unmetFromLedger was never consulted (unrecoverable, here). Same

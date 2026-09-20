@@ -116,7 +116,7 @@
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/worker.ts, src/run-task.ts, test/prune-liveness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "AMENDED at recon intake, 2026-07-21. Task is QUEUED - verified that zero merged PRs carry its
     Remudero-Task trailer - so standing rule 21 does not apply.

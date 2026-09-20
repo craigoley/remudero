@@ -35,8 +35,23 @@ test("W1-T3692: a lane needing Bash is REFUSED, so a build lane is never handed 
 
 test("W1-T3692: an UNBOUNDED spawn is never eligible — absent bound refuses, it does not assume", () => {
   assert.equal(cashCanServeToolSurface(undefined), false);
-  assert.equal(cashCanServeToolSurface([]), false);
   assert.match(String(cashFallbackRefusal(base, undefined)), /unbounded/);
+
+  // AN EMPTY BOUND USED TO ASSERT `false` HERE, on this same line, and that was a CONFLATION this
+  // test's own title argues against: it is about the UNBOUNDED case, and `[]` rode along under
+  // that heading without a reason of its own. The two are opposites. `undefined` means the worker
+  // inherits the unrestricted surface (Bash included), which is exactly why it refuses. `[]` is a
+  // deliberate declaration that the spawn wants NO capability — the most divertable shape there
+  // is, and `tools.every(...)` over it is vacuously true.
+  //
+  // Reversed on measured evidence, not tidiness: retro's promotion judge died under the live
+  // squeeze on 2026-09-17 with `"not implementable by cash ()"` — the empty parenthesis being the
+  // bug rendering itself. Every pure-judge rung here declares `[]` (`RISK_JUDGE_TOOLS` is
+  // literally that; both feedback judges say "everything it needs is in the prompt"), so this
+  // refusal took the whole judge population off cash for the entire squeeze window.
+  //
+  // See test/a-no-tool-judge-is-the-most-divertable-spawn.test.ts for the full case.
+  assert.equal(cashCanServeToolSurface([]), true, "an empty bound is not an absent one");
 });
 
 test("W1-T3692: the fallback is OFF unless the operator opted in, so it cannot arrive by upgrade", () => {

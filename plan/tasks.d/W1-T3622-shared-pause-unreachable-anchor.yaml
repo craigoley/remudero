@@ -10,7 +10,7 @@
   files: [src/lib/fleet-control.ts, test/shared-pause-unreachable-anchor.test.ts]
   origin: oper#console-daemon-paused-eight-hours-2026-09-15
   plan_refs: ["W1-T2262"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THE LIVE CONSOLE DAEMON, 2026-09-15. It logged `daemon.pause` 33 times between

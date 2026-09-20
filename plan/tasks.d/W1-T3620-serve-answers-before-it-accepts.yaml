@@ -11,7 +11,7 @@
   files: [src/run-task.ts, test/serve-answers-before-it-accepts.test.ts]
   origin: oper#graceful-recycle-measurement-2026-09-15
   plan_refs: ["W1-T2229", "W1-T154", "W1-T3207"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THE LIVE DAEMON 2026-09-15, after a graceful recycle taken at a moment with zero

@@ -82,7 +82,7 @@
   origin: human
   plan_refs: [W1-T3737, W1-T3729, W1-T912]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3738-40-the-cycle

@@ -276,6 +276,15 @@ export function ownFalsifierRenameExit(candidates: readonly string[]): string {
  *  undeclared band stays SILENT, so no caller regresses on the standing backlog; with it, a
  *  newly-high task blocks and an already-high one warns. Why: docs/forensics/task-linter.md#sizingviolation. */
 export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation | undefined {
+  // Special-case: retired withdrawals never dispatch, downgrade sizing to a warning.
+  if (task.retirement === "withdrawn") {
+    return {
+      check: "sizing",
+      severity: "warn",
+      message:
+        `retired (withdrawn) shard ${task.id} will never be built — sizing observation downgraded to warn`,
+    };
+  }
   // The same slug `duplicateTitleViolations` reads, never re-derived — this module reads no disk.
   // Blank or absent ⇒ undefined, keeping the W1-T2543 discount for callers with no slug (W1-T2525).
   const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() || undefined;
@@ -527,6 +536,7 @@ function isVibeProof(proof: string): boolean {
 export function proofShapeViolations(task: Task): LintViolation[] {
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; prior-merge credit stands in place of a proof.
     if (isVibeProof(c.proof ?? "")) {
       violations.push({
         check: "proof-shape",

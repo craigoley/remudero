@@ -10,7 +10,7 @@
   origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
   plan_refs: ["W1-T3386", "W1-T2544"]
   files: [src/lib/body-repair.ts, test/the-body-repair-rung-ships-proofs-it-never-ran.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A REPAIR RUNG THAT CAN MAKE A PR WORSE IS WORSE THAN NO REPAIR RUNG. MEASURED on PR 5108: the

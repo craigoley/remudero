@@ -31,9 +31,10 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { writeAtomic } from "./fs-race-safe.js";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
   DEPLOY_RESTART_RATE_CEILING_MS,
@@ -1234,6 +1235,24 @@ export interface RealDeployOpts {
   execFile?: (cmd: string, args: string[]) => string;
 }
 
+/** Resolve the deploy supervisor's ledger from the state root it is operating on.
+ *
+ * The caller's legacy `ledgerPath` is deliberately not consulted here: a supervisor can be
+ * launched from a checkout whose default config points at another instance's state. A relative
+ * or empty root is a refusal, never permission to fall back to that default; the state directory
+ * may be created later by the ledger writer.
+ */
+export function deployLedgerPath(stateRoot: string): string {
+  const validRoot =
+    typeof stateRoot === "string" &&
+    stateRoot.trim().length > 0 &&
+    isAbsolute(stateRoot);
+  if (!validRoot) {
+    throw new Error(`cannot resolve deploy ledger — state root refused: ${String(stateRoot)}`);
+  }
+  return join(stateRoot, "state", LEDGER_FILENAME);
+}
+
 function parseDeployRestartPressureState(raw: string): DeployRestartPressureState {
   const parsed = JSON.parse(raw) as {
     total?: unknown;
@@ -1290,13 +1309,14 @@ export function buildDeployLogger(
  * one is a clean boot, several means KeepAlive is restart-storming a broken daemon.
  */
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
+  const ledgerPath = deployLedgerPath(o.stateRoot);
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
   const windowMs = o.healthWindowMs ?? 45_000;
   const pollMs = o.healthPollMs ?? 3_000;
 
-  const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(o.ledgerPath, sinceMs);
+  const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(ledgerPath, sinceMs);
 
   // ── THE RESTART SEAM'S TWO REAL BACKENDS (W1-T3200) ── selected by PROBED capability, never by
   // `process.platform`: a host with launchctl uses it (today's only path, macOS); a host with only
@@ -1383,7 +1403,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   };
 
   return {
-    log: o.log ?? buildDeployLogger(o.ledgerPath),
+    log: o.log ?? buildDeployLogger(ledgerPath),
     now: () => Date.now(),
     fetch: () => {
       git(["fetch", "origin", "--quiet"]);
@@ -1442,7 +1462,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       if (tracked) git(["checkout", "--", path]);
       else unlinkSync(join(o.installPath, path));
     },
-    runningHead: () => readLatestBootSha(o.ledgerPath),
+    runningHead: () => readLatestBootSha(ledgerPath),
     // W1-T3240 — THE PRODUCER, shipped with its consumer. `/etc/rmd-build-sha` is written into
     // the image at build time and is the ONLY sha on this host not read off the bind mount,
     // which is why `runningHead` above cannot stand in for it. Read through `docker exec`,
@@ -1459,7 +1479,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     },
     // Same ledger, same live-file-only read as `runningHead` directly above — the rollback anchor
     // (see runDeployCycle's rollback branch for why it is not `installHead()`).
-    lastGoodBootSha: (excludeSha) => readLastGoodBootSha(o.ledgerPath, excludeSha),
+    lastGoodBootSha: (excludeSha) => readLastGoodBootSha(ledgerPath, excludeSha),
     dirtyFiles: () =>
       git(["status", "--porcelain"])
         .split("\n")

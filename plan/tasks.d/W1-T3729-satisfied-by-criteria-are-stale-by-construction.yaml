@@ -92,7 +92,7 @@
   origin: human
   plan_refs: [W1-T3693]
   files: [scripts/proof-discrimination-gate.mjs]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3729-satisfied-by-stale-by-construction

@@ -11,7 +11,7 @@
   origin: oper#smart-routing-audit-2026-09-15
   band_meaning: blast-radius
   plan_refs: ["W1-T3546", "W1-T3569", "W1-T3575", "W1-T3613"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ADAPTER ALREADY KEEPS A PER-DEPLOYMENT TABLE FOR EVERY PROPERTY THAT VARIES — except the

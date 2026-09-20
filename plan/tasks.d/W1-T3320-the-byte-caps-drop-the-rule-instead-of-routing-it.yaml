@@ -11,7 +11,7 @@
   files: [scripts/claude-md-budget-ratchet.mjs, test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts]
   origin: "operator-session#gate-posture-2026-09-10"
   plan_refs: ["W1-T3318", "W1-T503", "W1-T2507", "W1-T2831"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE OPERATOR'S RULING (W1-T3318) APPLIED TO THE CLEAREST CASE IN THE REPO. This gate does not

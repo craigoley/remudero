@@ -11,7 +11,7 @@
   files: [CLAUDE.md, src/lib/learnings.ts, src/run-task.ts, test/the-doctrine-index-points-at-every-body.test.ts]
   origin: "operator-session#doctrine-modularization-2026-09-10"
   plan_refs: ["W1-T2508", "W1-T2507", "W1-T3320", "W1-T3322", "W1-T503"]
-  status: queued
+  status: merged
   attempts: 0
   # ⚠ WRONGLY CREDITED, AND THE FLEET CANNOT SEE THIS TASK. #4960 filed this shard and a background
   # lane pushed a commit onto that branch adding `Remudero-Task: W1-T3323`; the squash carried it to

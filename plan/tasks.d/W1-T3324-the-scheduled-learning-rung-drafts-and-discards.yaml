@@ -14,7 +14,7 @@
     - test/the-scheduled-learning-rung-drafts-and-discards.test.ts
   origin: "operator-session#ci-learning-repair-2026-09-10"
   plan_refs: ["W1-T2959", "W1-T2968", "W1-T3032", "W1-T3044"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR OBSERVATION 2026-09-10, and it was correct against my own first reading: "how can it

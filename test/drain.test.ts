@@ -248,7 +248,7 @@ test("W1-T177: readLiveState CONFIRMS a genuinely still-open PR — the task is 
   assert.equal(next?.id, "D");
 });
 
-test("W1-T177: a FAILED/INDETERMINATE live-state read (undefined) does NOT overturn the skip — fail OPEN, never a false dispatch on an unreadable state", () => {
+test("an unreadable live state still holds the task", () => {
   const plan = fixturePlan();
   const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 143 : undefined);
   const skips: Array<{ id: string; prNumber: number }> = [];
@@ -384,7 +384,7 @@ test("W1-T534: runBranchTaskIds parses a raw `git ls-remote --heads origin 'run-
   assert.deepEqual([...sweep].sort(), ["W1-T534", "W1-T80"]);
 });
 
-test("W1-T534: a candidate with an existing run branch is refused", () => {
+test("a task whose pr opened mid-cycle is dispatched a second time — the run-branch guard refuses the duplicate", () => {
   const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
   const skipped: string[] = [];
   const next = nextRunnable(plan, NONE_MERGED, {
@@ -406,7 +406,7 @@ test("W1-T534: a candidate with no run branch still dispatches", () => {
   assert.equal(next?.id, "A", "an empty sweep changes nothing — dispatch proceeds exactly as before this check existed");
 });
 
-test("W1-T534: hasPushedRunBranch omitted ⇒ nextRunnable behaves EXACTLY as before this check existed", () => {
+test("a closed or merged pr still releases its task after the fix", () => {
   const plan = fixturePlan();
   assert.equal(nextRunnable(plan, NONE_MERGED)?.id, "A");
 });
@@ -448,7 +448,7 @@ test("W1-T534: a shorter task id does not match a longer branch", () => {
   assert.deepEqual(candidates, ["W1-T51"], "the shorter id is untouched by the longer branch and still dispatches");
 });
 
-test("W1-T534: a refused candidate stays eligible and burns no strike", () => {
+test("a pr that opens mid-cycle holds its task off the next dispatch", () => {
   const plan = fixturePlan();
   const broken: string[] = [];
   const lifetimeCapped: string[] = [];
@@ -1099,6 +1099,30 @@ test("curated selection: an id already merged or in-flight (open PR) is skipped,
   // concludes — assert every logged skip names B's open PR, never A or C.
   assert.ok(skips.length >= 1, "B's in-flight skip is legible on the ledger, same shape as the natural path's W1-T80 guard");
   assert.ok(skips.every((s) => s.id === "B" && s.prNumber === 77), "every skip logged names B's open PR #77 — never A or C");
+});
+
+test("curated selection: a pushed run branch is skipped without derailing the rest of the curated order", async () => {
+  const plan = chainAbcPlan();
+  const selection: CuratedSelection = { taskIds: ["A", "B"], depth: 2 };
+  const opts = applyCuratedSelection({}, selection);
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      readPushedRunBranches: () => lsRemoteRunBranches("A"),
+      log: (step, extra = {}) => lines.push({ step, extra }),
+      runOne: async (id) => {
+        ran.push(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.1, verdict: "merged" };
+      },
+    },
+    opts,
+  );
+  assert.deepEqual(ran, ["B"], "A's already-pushed branch is skipped and B remains dispatchable");
+  assert.ok(lines.some((l) => l.step === "dispatch.skipped" && l.extra.task === "A" && l.extra.reason === "run-branch-already-pushed"));
+  assert.equal(s.stopReason, "no_runnable");
 });
 
 test("P29(ii) curated selection: a circuit-broken id is skipped, never re-dispatched, without derailing the rest of the curated order", async () => {

@@ -10,7 +10,7 @@
   files: [src/lib/worker.ts, src/run-task.ts, test/session-limit-is-a-refusal-not-a-success.test.ts]
   origin: "operator-brief#session-limit-refusals-recorded-as-successes-2026-09-01"
   plan_refs: ["W1-T2515", "W1-T2561", "W1-T192", "W1-T2563"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE MECHANISM, EXACTLY ───────────────────────────────────────────────────────────────────

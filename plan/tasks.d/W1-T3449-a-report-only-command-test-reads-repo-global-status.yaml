@@ -11,7 +11,7 @@
   files: [test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts]
   origin: "operator-session#dropped-follow-ups-daemon-and-queue-2026-09-12"
   plan_refs: ["W1-T2957", "W1-T3338"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on PR #5282 at head 9fb024f075e4255d455c07ff8b9e4163cd8a7961, Actions run

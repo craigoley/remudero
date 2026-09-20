@@ -1,0 +1,18 @@
+id: recoverable-repair
+description: a deterministic finding has a computable repair
+finding:
+  gate: proof
+  finding: missing executable proof can be added automatically
+  evidence: ["proof executor reported no matching test"]
+  recoverability: recoverable
+  currentConsequence: REPAIR
+judge:
+  verdict: low
+  confidence: 0.94
+  reasons: ["the finding names a bounded repair"]
+  gateConsequence: REPAIR
+expected:
+  outcome: REPAIR
+  judgmentSpawned: true
+  fallback: false
+  sideEffect: repair

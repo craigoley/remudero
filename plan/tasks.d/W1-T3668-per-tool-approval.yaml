@@ -11,7 +11,7 @@
   files: [docs/recon/per-tool-approval.md]
   origin: oper#pizza-bot-comparison-2026-09-16
   plan_refs: ["W1-T500", "W1-T2696"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16 on this repo. Approval exists at two grains and neither is the tool call:

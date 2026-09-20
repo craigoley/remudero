@@ -1,0 +1,72 @@
+- id: W1-T3835
+  title: "A degraded CAPPED review terminal must retry when proof execution becomes available for the same PR head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files:
+    - src/lib/review.ts
+    - src/run-task.ts
+    - test/review-decision-finality.test.ts
+  origin: "recon#console-1394-degraded-terminal-replay-2026-09-20"
+  plan_refs: ["W1-T58", "W1-T65", "W1-T72", "W1-T185", "W1-T228", "W1-T230", "W1-T2722", "W1-T3580"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on console PR #1394 at head 9faabf8. Its first semantic review correctly
+    failed because the body had no Acceptance block. After the body was repaired, a
+    separate sidecar could not authenticate a PR-head fetch and posted a CAPPED,
+    keyword-only terminal with no proof execution. The healthy console daemon later
+    refreshed its GitHub App token, fetched and materialized that exact PR head, but
+    `claimReviewDecision` returned the earlier terminal before `runReview` reached
+    proof execution. Adding a factual Review retry paragraph changed the material
+    review input and allowed the healthy daemon to execute 2/2 proofs and post PASS.
+
+    The body edit was an incident bridge, not a recovery mechanism. A transient
+    execution-environment failure must not permanently consume the exact-input review
+    decision for a PR head when the system can later observe that same head. Ordinary
+    terminal replay remains required for completed reviews; generic CAPPED outcomes
+    such as malformed proofs or plan-only diffs must not become retry loops.
+  design: |
+    Preserve the existing acquire-before-read decision lock and normal exact-input
+    terminal replay. Reopen only a stored terminal that is both CAPPED and
+    keyword-only because the PR-head execution context was absent, and only when the
+    current caller has successfully materialized the exact PR-head checkout before
+    claiming the decision. Do not place host availability, timestamps, provider
+    identity, or an arbitrary retry counter in `reviewDecisionDigest`; those are not
+    material review inputs and would weaken exact-input deduplication.
+
+    A recomputation after that narrow reopening must keep W1-T228's status conflict
+    protection: it may strengthen the prior CAPPED evidence to an executed verdict,
+    but it must not silently overwrite a full terminal with a weaker verdict or
+    manufacture an arm from unavailable evidence. Record the new terminal evidence
+    so the ledgered arming path can see the executed result. Keep the existing
+    W1-T3580 engine-revision rearm behavior unchanged; this recovery is for a changed
+    execution capability, not a changed review engine.
+  acceptance:
+    - claim: "a CAPPED keyword-only terminal retries only after the same PR head is materialized and reaches its proof executor, while a completed terminal for that decision remains replayed"
+      proof: "unit test: W1-T3835: an exact-head checkout reopens only a prior CAPPED keyword-only terminal"
+  falsifier: |
+    Delete the narrow degraded-terminal reopening predicate. The first fixture must
+    return a replay before its proof executor runs; restored code must own the
+    decision and observe the proof. Seed a prior executed terminal in the second
+    fixture: any new executor invocation or second terminal is a failure. A fixture
+    using a malformed proof or a plan-only diff must remain replayed, proving that
+    availability alone is not a general CAPPED retry.
+  note: |
+    Reservation holder is this filing branch. `rmd next-task-id` reserved W1-T3835
+    on origin before this shard was written; no hand-off is required.
+
+    The live incident's terminal was produced by a sidecar without the daemon's
+    GitHub-App credential environment. The healthy daemon subsequently proved token
+    refresh, PR-head fetch and worktree materialization independently. This task
+    does not relax credential handling or treat an unreadable checkout as evidence.
+
+    W1-T58/W1-T65/W1-T72 establish the execution floor; W1-T185/W1-T230 establish
+    the CAPPED and ledgered-arm boundaries; W1-T228/W1-T2722 establish terminal
+    finality; W1-T3580 establishes a material engine-revision rearm. This task
+    adds only recovery from a prior no-execution terminal after exact-head proof
+    execution becomes available, leaving those completed boundaries intact.

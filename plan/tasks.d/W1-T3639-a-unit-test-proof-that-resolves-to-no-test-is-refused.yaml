@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/a-unit-test-proof-that-resolves-to-no-test-is-refused.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T100", "W1-T101", "W1-T246", "W1-T2905"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED OVER ONE NIGHT'S PR BOARD: four pull requests were refused by remudero-review for the

@@ -14,7 +14,7 @@
   files: [src/lib/review.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3646", "W1-T3647", "W1-T2525"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, AND IT TURNED MAIN RED FOR ROUGHLY TWO HOURS.

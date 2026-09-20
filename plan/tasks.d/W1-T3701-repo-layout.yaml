@@ -13,7 +13,7 @@
     - test/a-house-layout-site-is-judged-against-the-merge-base.test.ts
   origin: "operator-session#two-prs-hit-the-same-ratchet-in-one-day-2026-09-16"
   plan_refs: ["W1-T2922", "W1-T3699"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   note: |

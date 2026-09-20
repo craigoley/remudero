@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   risk: high
-  status: queued
+  status: merged
   attempts: 0
   files:
     - src/run-task.ts

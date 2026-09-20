@@ -11,7 +11,7 @@
   files: [src/lib/ci-parity.ts, test/host-caused-suite-reds.test.ts]
   origin: "operator-decision#w1-t2785-file-date-cluster-gap-2026-09-03"
   plan_refs: ["W1-T2776"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED 2026-09-03 on the mini: `node --test test/fleet-heartbeat-supervisor-tick.test.ts`

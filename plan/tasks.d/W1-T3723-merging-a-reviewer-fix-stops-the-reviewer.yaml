@@ -89,7 +89,7 @@
   origin: human
   plan_refs: [W1-T228, W1-T445, W1-T3691, W1-T3596]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: freshreview -> plan3723

@@ -1,0 +1,89 @@
+- id: W1-T3758
+  title: "A FLEET-WIDE CAPACITY OUTAGE SPENDS EVERY TASK'S LIFETIME DISPATCH BUDGET — nine queued tasks are now permanently undispatchable because the squeeze burned ten run.start rows each, and the cap has no operator override"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/status.ts, src/run-task.ts, src/lib/ledger-union.ts]
+  origin: oper#squeeze-session-2026-09-18
+  plan_refs: ["W1-T2423", "W1-T3523", "W1-T271"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON THE LIVE LEDGER, 2026-09-18. Since the daemon restarted onto working code, it has
+    run 15 sweep passes and dispatched NOTHING. The entire visible frontier is refused:
+
+        lifetime-capped   9 tasks   W1-T3673,3674,3675,3676,3677,3678,3679,3718,3719
+        skipped          10 tasks   (run-branch-already-pushed)
+        indeterminate     8 tasks
+
+    W1-T3718 carries EXACTLY ten `run.start` rows and no `run.end` at all. Every one falls
+    between 2026-09-17T22:25 and 2026-09-18T01:11 — precisely the window in which no provider had
+    headroom and `daemon.spawn_infra_blocked` was firing. Each dispatch died before a worker ran,
+    and each still counted.
+
+    The task's own title is "THE FIX RUNG CANNOT SPAWN A WORKER AT ALL AND BOTH FALLBACKS ARE
+    OPERATOR-DISABLED". The task describing the outage was killed by the outage it described.
+
+    THIS IS W1-T2423's CLASS, APPLIED TO THE ONE BOUND THAT WAS DELIBERATELY LEFT OUT. W1-T2423
+    (merged) fixed exactly this for the STREAK breaker: "a probe refusal counts as a dispatch that
+    produced nothing". `dispatchesEver` was then deliberately excluded from that exclusion, and
+    W1-T3523 design (ii) states the reason in the code:
+
+        "an orphan dispatch is still a dispatch by that measure: the host spent a worker slot on it
+         whether or not the worker ever wrote a second row. Excluding orphans here would let a task
+         that reliably kills its own worker (an OOM, a poison input) re-dispatch forever with
+         NOTHING counting it"
+
+    THAT REASONING IS SOUND AND IS NOT IN QUESTION. It is also about a different thing. "A task
+    that reliably kills its own worker" is TASK-ATTRIBUTABLE: the input is poison, and the count is
+    the signal. A capacity block is FLEET-WIDE and task-independent — the host did NOT spend a
+    worker slot, because no slot existed to spend, and every task alive in that window is
+    identically affected. The ledger already distinguishes the two by name:
+    `daemon.spawn_infra_blocked`.
+
+    SO THE BOUND IS MEASURING THE FLEET'S WEATHER AND CHARGING IT TO THE TASK.
+
+    AND THERE IS NO WAY OUT WITHOUT CODE. `DEFAULT_MAX_TASK_LIFETIME_DISPATCHES = 10` is
+    hardcoded; grepping `policy.ts` and `plan/policy.yaml` finds no override, so an operator
+    facing nine hard-stuck tasks has no lever short of editing the ledger, which this repo forbids
+    — the archives ARE the record.
+
+    THE FIX, AND ITS BOUNDARY: a `run.start` whose run ended in a FLEET-WIDE capacity refusal
+    does not count toward `dispatchesEver`. Keyed on the recorded infrastructure cause, never on
+    "the run wrote no second row" — that weaker test is exactly what W1-T3523 refused, and
+    correctly. An OOM, a poison input, a worker that dies on its own must all still count.
+
+    SECOND DELIVERABLE, BECAUSE THE FIRST DOES NOT UNSTICK WHAT IS ALREADY STUCK: those nine tasks
+    carry their ten rows forever. Either the exclusion is retroactive (it reads history, so it is),
+    or an operator override exists. Verify after building that all nine become dispatchable again,
+    and SAY SO with counts — a fix that only prevents the next occurrence leaves this outage's
+    damage permanent.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add — the only way past
+    `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
+
+  acceptance:
+    - claim: "a dispatch that died in a fleet-wide capacity refusal does not count toward the lifetime cap"
+      proof: "unit test: W1-T3758: a capacity-blocked dispatch is not charged to the task"
+    - claim: "a worker that dies on its own still counts, so the W1-T3523 guarantee is intact"
+      proof: "unit test: W1-T3758: a worker that exits on its own still counts"
+    - claim: "the nine tasks this outage capped are dispatchable again"
+      proof: "unit test: W1-T3758: the outage-capped population clears"
+  note: |
+    reservation hand-off: main -> plan/file-outage-burned-caps-1789714767
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.
+
+    Scope amendment, 2026-09-18: the live corpus now has 354 rotations. The existing audited
+    synchronous union reached all of them in 4.0 s but added 605 MiB RSS even for W1-T3718's
+    207 matching rows; it is unsafe on a daemon admission path. The existing stream took 9.1 s
+    and 54 MiB but deliberately hides unread archives, so it cannot establish a retrospective
+    exclusion safely. This task therefore also owns an audited, bounded-memory streaming union
+    read. It must never subtract a capacity refusal from a partial history; if an archive is
+    unreadable, the existing live-only lifetime decision remains unchanged. It is not permission
+    to use a best-effort partial history to clear a cap.

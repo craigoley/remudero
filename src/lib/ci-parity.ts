@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
@@ -789,7 +789,11 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
  *  drift the way a hand-copied argv does.
  *  Why: docs/forensics/ci-parity.md. */
 export function coverageScratchDir(repoRoot: string): string {
-  return join(repoRoot, "coverage", "tmp");
+  // The test runner and fixtures both derive temporary paths from TMPDIR. Keeping it below the
+  // checkout makes a fixture intended to be outside Git resolve INSIDE that checkout, defeating
+  // its non-repository control and the worker-home placement invariant. A stable sibling remains
+  // cleared by testWithCoverageLeaf before the next coverage run without changing that meaning.
+  return join(dirname(repoRoot), ".remudero-coverage", basename(repoRoot), "tmp");
 }
 
 function coverageShardRoot(repoRoot: string): string {
@@ -1805,6 +1809,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     reason: "hosted CodeQL scanner with its own database and GitHub upload contract; running it locally is not CI's command",
   },
   standaloneNpmScriptEntry("coverage-session-blanking.yml", "coverage-session-blanking", "coverage-session-blanking:check"),
+  {
+    workflow: "pr-title-lint.yml",
+    job: "commitlint",
+    mirrored: false,
+    reason: "reads the live pull-request title through GitHub's event-bound gh token; the local pre-push gate has no PR event or title identity to substitute honestly",
+  },
   {
     workflow: "dependency-review.yml",
     job: "dependency-review",

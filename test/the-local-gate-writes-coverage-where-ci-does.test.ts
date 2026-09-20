@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CI_PARITY_TABLE, coverageScratchDir } from "../src/lib/ci-parity.js";
@@ -48,14 +48,14 @@ function coverageCall(): { args: string[]; env?: NodeJS.ProcessEnv } {
   return call!;
 }
 
-test("the coverage leaf points TMPDIR at a repo-local scratch, not the host's tmp", () => {
+test("the coverage leaf points TMPDIR at a bounded sibling scratch, outside the checkout", () => {
   assert.equal(coverageCall().env?.TMPDIR, coverageScratchDir(REPO_ROOT));
 });
 
-test("that scratch is inside the repo, under the already-gitignored coverage/ directory", () => {
+test("that scratch is a stable sibling namespace, never a child of the Git worktree", () => {
   const dir = coverageScratchDir(REPO_ROOT);
-  assert.ok(dir.startsWith(join(REPO_ROOT, "coverage")), `must live under coverage/; got ${dir}`);
-  assert.ok(!dir.startsWith(tmpdir()), "the leak site is os.tmpdir(); the scratch must not be there");
+  assert.equal(dir, join(dirname(REPO_ROOT), ".remudero-coverage", basename(REPO_ROOT), "tmp"));
+  assert.ok(!dir.startsWith(`${REPO_ROOT}/`), `must be outside the checkout; got ${dir}`);
 });
 
 test("an injected env is MERGED over process.env, never replacing it", () => {

@@ -5039,6 +5039,40 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
   return activityAt > verdictAt;
 }
 
+export function reviewStatusSupersedesLedgerAttempt(
+  pr: Pick<
+    OpenPrView,
+    | "checksState"
+    | "requiredContextsUnreadable"
+    | "reviewState"
+    | "reviewInputDigest"
+    | "priorReviewAttemptsForInput"
+    | "reviewInputLastAttemptAt"
+    | "reviewVerdictPostedAt"
+    | "reviewPostRefused"
+  >,
+): boolean {
+  const attempts = pr.priorReviewAttemptsForInput;
+  if (
+    pr.checksState !== "green" ||
+    pr.requiredContextsUnreadable === true ||
+    pr.reviewState !== "success" ||
+    pr.reviewInputDigest === undefined ||
+    typeof attempts !== "number" ||
+    !Number.isSafeInteger(attempts) ||
+    attempts < 1 ||
+    pr.reviewPostRefused === true ||
+    pr.reviewVerdictPostedAt === undefined ||
+    pr.reviewInputLastAttemptAt === undefined
+  ) {
+    return false;
+  }
+  const statusAt = Date.parse(pr.reviewVerdictPostedAt);
+  const ledgerAt = Date.parse(pr.reviewInputLastAttemptAt);
+  if (Number.isNaN(statusAt) || Number.isNaN(ledgerAt)) return false;
+  return statusAt > ledgerAt;
+}
+
 /** W1-T3704 — THE REUSE DECISION (design ii-v). A verdict RECORDS what it judged (review.ts); this
  *  decides what a LATER push, orphaning that verdict, is actually owed. Deliberately placed here
  *  and not in review.ts: "the recorded verdict lives with the reviewer and the reuse decision lives
@@ -5219,8 +5253,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // `fetchSupersessionVerdict` returned `"indeterminate"` — "supports neither finding". This row
     // closed it anyway. Reopened by hand, and closed AGAIN sixteen minutes later.
     //
-    // SO THE TEST IS NOW THE POSITIVE ONE: `superseded` means every one of this PR's changed paths
-    // is also changed by the newer one. `indeterminate`, `unique`, `complementary` and NO VERDICT
+    // SO THE TEST IS NOW THE POSITIVE ONE: `superseded` means every one of this PR's patch hunks
+    // is contained by the newer one. `indeterminate`, `unique`, `complementary` and NO VERDICT
     // AT ALL (a hydration that threw) all leave the pull request open. A genuine duplicate still
     // closes, which is the case this row exists for and the one it keeps.
     //
@@ -5234,7 +5268,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr) =>
       `superseded-by #${pr.supersededBy}` +
       (pr.supersessionVerdict?.evidence
-        ? ` — every one of its ${pr.supersessionVerdict.evidence.diff.matchedHunks} changed path(s) is also changed there`
+        ? ` — every one of its ${pr.supersessionVerdict.evidence.diff.matchedHunks} patch hunk(s) is contained there`
         : ""),
   },
   {
@@ -5532,6 +5566,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
       );
     },
+  },
+  {
+    disposition: "post-review",
+    when: (pr) => reviewStatusSupersedesLedgerAttempt(pr),
+    reason: () =>
+      "review_status_supersedes_ledger_attempt — GitHub reports a dated success strictly later than " +
+      "the latest completed exact-input ledger attempt; re-running the authoritative reviewer before " +
+      "auto-merge",
   },
   {
     // W1-T2860 — GitHub can carry an exact-head remudero-review SUCCESS without the completed
@@ -5881,9 +5923,28 @@ export function decideSweepArm(
   // the run flow's classification is worktree-bound and this pass has no worktree, so the field
   // would be permanently unproducible.
   irreversible?: boolean,
+  /** W1-T3471: archive∪live evidence consulted only after the live-file miss. `complete:false`
+   *  means the archive corpus was unavailable or incomplete, so the historical fail-open remains. */
+  readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined,
 ): ArmDecision {
   const armId = pr.taskId ?? `PR-${pr.prNumber}`;
-  const facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha);
+  let facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha);
+  if (!facts && readLedgerUnion) {
+    try {
+      const union = readLedgerUnion();
+      if (union?.complete) {
+        facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha);
+        if (!facts) {
+          return {
+            arm: false,
+            reason: "complete ledger union shows no review.posted verdict for this task and head — refusing to arm",
+          };
+        }
+      }
+    } catch {
+      // An unreadable archive is not evidence of absence; retain the historical fail-open below.
+    }
+  }
   if (!facts) {
     return { arm: true, reason: "no ledgered verdict recoverable for this head — arming as before (no evidence to refuse on)" };
   }
@@ -6916,6 +6977,9 @@ export interface SweepDeps {
   runId: string;
   /** Ledger reader (dedup); defaults to readLedgerLines. Injectable for tests. */
   readLedger?: (path: string) => Array<Record<string, unknown>>;
+  /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
+   *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
+  readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
   /** Ledger appender; defaults to appendLedger. Injectable for tests. */
   appendLine?: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void;
   /** Injected clock for the stale window (default Date.now). */
@@ -7876,6 +7940,14 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
+  // W1-T3471: a live miss is not enough to call a verdict absent. Read the bounded archive∪live
+  // union only on that rare path; an unreadable or archive-free corpus stays incomplete so the
+  // historical fail-open remains intact.
+  const readArmLedgerUnion = deps.readLedgerUnion ?? (() => {
+    const union = resolveLedgerUnion(dirname(deps.ledgerPath), ".*", undefined, { step: "review.posted" });
+    if (union.archiveCount === 0 || !union.ok) return { complete: false, lines: [] };
+    return { complete: true, lines: parseLedger(union.matches.join("\n")) };
+  });
   const prior = priorActionsFromLedger(ledgerLines);
   // W1-T3202 — FULL-SWEEP CAPACITY IS DERIVED ONCE, BEFORE ANY REPAIR CAN SPAWN. Reviews reserve
   // only their live spawning width (plan filings are deterministic), and the same active-worker
@@ -8337,7 +8409,7 @@ export async function runSweep(
     // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
     // is wired, so any caller that omits it (every pre-existing fixture) keeps the old ladder.
     let planShardRepairDue = false;
-    if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines).arm) {
+    if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
       const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
@@ -8628,7 +8700,7 @@ export async function runSweep(
               // worthless while this independent path arms the same verdict seconds later. Stand
               // down instead — `acted:false` keeps this PR out of `prior.armed`, so the next pass
               // re-derives and arms the moment executed proof or a ledgered override lands.
-              const armDecision = decideSweepArm(pr, ledgerLines);
+              const armDecision = decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion);
               if (!armDecision.arm) {
                 acted = false;
                 standDownReason = armDecision.reason;
@@ -9063,9 +9135,54 @@ export async function runSweep(
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               break;
             }
-            case "stale":
+            case "stale": {
+              // W1-T3784 — re-read only the supersession winner immediately before this destructive
+              // write; production wires the existing fresh GitHub reader.
+              const supersedingPrNumber =
+                pr.supersededBy != null && pr.supersessionVerdict?.status === "superseded"
+                  ? pr.supersededBy
+                  : undefined;
+              if (supersedingPrNumber !== undefined && deps.readLiveState) {
+                const winnerPr = {
+                  ...pr,
+                  prNumber: supersedingPrNumber,
+                  prUrl: pr.prUrl.replace(/\d+\/?$/, `${supersedingPrNumber}`),
+                } as OpenPrView;
+                let winnerState: LiveStateResult | undefined;
+                let winnerReadFailure: string | undefined;
+                try {
+                  winnerState = await deps.readLiveState(winnerPr);
+                } catch (error) {
+                  const reason = String((error as Error)?.message ?? error).slice(0, 160);
+                  winnerState = undefined;
+                  winnerReadFailure = reason;
+                }
+                const winnerIsOpen = winnerState?.ok === true && winnerState.state === "OPEN";
+                if (!winnerIsOpen) {
+                  acted = false;
+                  const winnerObservation = winnerState?.ok === true
+                    ? winnerState.state ?? "MALFORMED"
+                    : winnerReadFailure
+                      ? `UNREADABLE (${winnerReadFailure})`
+                      : "UNREADABLE";
+                  standDownReason =
+                    `supersession close stood down: successor #${supersedingPrNumber} is ${winnerObservation}`;
+                  if (!deps.dryRun) {
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: "sweep.supersession_close.stood_down",
+                      pr_number: pr.prNumber,
+                      superseding_pr_number: supersedingPrNumber,
+                      reason: standDownReason,
+                    });
+                  }
+                  break;
+                }
+              }
               await deps.close(pr, reason);
               break;
+            }
             case "refused-escalate":
               await deps.escalate(pr, reason, question!);
               break;

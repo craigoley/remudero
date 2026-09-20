@@ -1,0 +1,27 @@
+- id: W1-T3824
+  title: "Persist operator-agent enablement and confidence settings in the daemon ledger"
+  repo: remudero
+  depends_on: [W1-T3794]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "The console controls are currently session-only because the daemon has no durable settings contract. Operator preferences should survive refreshes without being confused with proposal decisions."
+  design: "Add a bounded read/write operator-agent settings route backed by a dedicated ledger step. Use conservative defaults when no settings row exists, last-valid-row semantics across the ledger union, and explicit validation for enabled plus a confidence threshold in [0.9, 0.99]. Keep settings separate from proposal registration, decision, and outcome rows."
+  acceptance:
+    - claim: "the settings read distinguishes a durable row from conservative defaults"
+      proof: "unit test: reads the default operator-agent settings when no settings row exists"
+    - claim: "settings writes are bounded and durable"
+      proof: "unit test: persists a valid operator-agent settings update in the ledger"
+    - claim: "invalid thresholds and unknown settings payloads are refused"
+      proof: "unit test: refuses an operator-agent confidence threshold outside the bounded range"
+  risk: high
+  band_meaning: blast-radius
+  origin: human
+  files:
+    - openapi/daemon.yaml
+    - src/lib/operator-agent.ts
+    - test/operator-agent.test.ts
+  status: queued
+  attempts: 0
+  note: "reservation hand-off: work-6167 -> run-W1-T3824-1789863660"

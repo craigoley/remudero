@@ -1,0 +1,70 @@
+- id: W1-T3799
+  title: "THE BASH-3 PORTABILITY REWRITE EXPANDS EMPTY ARRAYS UNDER set -u — recycle aborts before its bounded safety wait"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [deploy/recycle-container.sh]
+  origin: "recon#core-preflight-recycle-first-run-2026-09-19"
+  plan_refs: ["W1-T2598", "W1-T3595"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON ORIGIN/MAIN, 2026-09-19. The real W1-T2598 recycle-wait fixture's default Docker
+    stub reports that the target container exists, supplies one runtime environment entry, and
+    supplies an empty image environment. Five of seven assertions therefore fail in the drift
+    comparison before their wait assertions run, with `IMAGE_ENV_LINES[@]: unbound variable`.
+    The script has `set -euo pipefail`; W1-T3595 correctly replaced Bash-4-only `readarray` with
+    population loops and initializes both arrays. But Bash 3.2 has a separate nounset behavior:
+    `a=(); for value in "${a[@]}"; do :; done` aborts with `a[@]: unbound variable`. The current
+    inner image-environment loop and the runtime-environment loops use exactly that unsafe form.
+
+    The prior no-container explanation was falsified before implementation: that branch does not
+    reach either line-array loop, and moving declarations above `docker inspect` leaves the
+    reproduced empty-array expansion unchanged. `W1-T2598` is already merged and its intended
+    wait policy is not at fault. The regression prevents a normal recycle from reaching its
+    credential, bounded-wait, and refusal logic. It is not a host-caused suite red: the shipped
+    script, its real fixture, and the host's Bash 3.2 reproduce it on the current checkout.
+  design: |
+    Preserve the existing array population and all credential, drift, pull, pause, and wait
+    decisions. At every expansion of `CONTAINER_ENV_LINES` and `IMAGE_ENV_LINES` that may
+    legitimately contain zero elements, use Bash's nounset-safe default expansion so Bash 3.2
+    treats an empty result as zero loop iterations rather than an unset-variable abort. Do not
+    weaken `set -u` or insert a sentinel value: the former hides unrelated unset errors and the
+    latter changes the drift comparison's data.
+
+    Add focused real-script coverage for both relevant states: the current container-present,
+    empty-image-environment regression reaches the bounded-wait refusal; and a first-container
+    recycle with its credential supplied by the fixture shell does the same. Because Linux CI's
+    Bash may not reproduce Bash 3.2's empty-array rule, the regression must also make the safe
+    expansion form explicit in a source-shape assertion. The host's Bash 3.2 control is the
+    direct behavioral falsifier; the mutation test keeps the protection load-bearing in every CI
+    environment.
+
+    Do not suppress the drift check, change W1-T2598's 3000-second policy, or alter the declared
+    runtime environment list. Those change safety decisions rather than repair Bash 3.2's empty
+    array expansion.
+
+    FILES NOTE (W1-T3730): the build adds its new test after this filing. It is omitted from
+    `files:` so this plan-only PR does not claim to resolve a future test filename.
+  acceptance:
+    - claim: "a recycle with no existing target container reaches the ordinary bounded-wait refusal instead of aborting on an unset runtime-environment array"
+      proof: "unit test: W1-T3799: no-container recycle reaches its bounded wait"
+    - claim: "the no-container fixture's refusal still reports the W1-T2598 wait evidence rather than bypassing the safety gate"
+      proof: "unit test: W1-T3799: no-container recycle retains the wait refusal evidence"
+  falsifier: |
+    Replace either safe empty-array expansion with the current bare `${array[@]}` form. On Bash
+    3.2 with `set -u`, the relevant real-script fixture must again abort with the shell's
+    unbound-array error before it can report the bounded wait. The CI mutation assertion must
+    fail on that source shape even where the runner's newer Bash does not reproduce the legacy
+    behavior; restoring the safe expansion makes both protections pass.
+  note: |
+    reservation holder is this filing branch, verified from `refs/rmd-id/W1-T3799` before the
+    shard was written; no hand-off is required.
+
+    amendment #6140: the original no-container causal chain was falsified before implementation.
+    The repaired record names Bash 3.2's empty-array nounset behavior and its safe expansion
+    boundary; its acceptance claims remain unchanged.

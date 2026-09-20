@@ -1,0 +1,58 @@
+- id: W1-T3820
+  title: "AN UNCHANGED PRE-DISPATCH REFUSAL ESCALATES ON EVERY TICK — dispatch-repair.ts records the second identical verdict as escalated but keeps deciding escalate for every later read, so a task can create thousands of duplicate operator escalations without a worker, a changed verdict, or new evidence; make the terminal escalation idempotent and ledger the held decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 8.00
+  files: [src/lib/dispatch-repair.ts, src/run-task.ts, test/a-refused-task-is-repaired-not-re-attempted.test.ts]
+  origin: "recon#console-CONSOLE-T12-escalation-loop-2026-09-19"
+  plan_refs: ["W1-T3657"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED from the console daemon ledger before its task-record repairs landed.
+    CONSOLE-T12's same deterministic sizing verdict had been escalated more than 3,000
+    times. `repairRefusedTask` calls `decideRepairDispatch`; for every prior record
+    with the same verdict it returns `escalate`, increments `attempts`, calls GitHub,
+    and writes the incremented record. There is no state for "this exact verdict has
+    already been escalated". The intended one-repair then one-escalation flow therefore
+    stops repeat workers but not repeat operator noise or GitHub writes.
+
+    The console is now building AGENT-T2 after its malformed records were corrected,
+    so this is no longer the current throughput blocker. It remains a fleet-wide
+    recurrence defect for the next deterministic pre-dispatch refusal.
+  design: |
+    Extend the durable prior-refusal shape with an explicit terminal-escalation state.
+    First observation of a verdict dispatches exactly one repair action. The second
+    identical observation raises and records exactly one escalation. Every later
+    identical observation returns a held/no-op decision: it must not invoke GitHub,
+    increment the attempt count, or dispatch a worker. A changed verdict clears the
+    terminal state and earns one new repair action.
+
+    Thread the held decision through the `runTask` composition root and append a
+    dedicated ledger row naming the task, unchanged-verdict reason, and the original
+    escalation attempt. Preserve compatibility with old `{verdict, attempts}` files:
+    they are treated as not-yet-terminal, so the next identical refusal earns its one
+    escalation rather than disappearing silently. Do not alter linter policy, retry
+    budgets, or make a pre-dispatch-linter failure spawn a worker.
+  acceptance:
+    - claim: "an identical linter verdict produces at most one repair action and one operator escalation before it is held"
+      proof: "unit test: ACCEPTANCE 3: an unchanged verdict is held after one escalation"
+    - claim: "the run-task pre-dispatch refusal composition root records a held decision"
+      proof: 'grep: dispatch.repair.held in src/run-task.ts'
+  falsifier: |
+    Feed the same verdict through the real repair entry point three times. Before the
+    change it invokes the escalation callback twice and persists attempts 3. After
+    the change it invokes the callback once, preserves the terminal attempt count,
+    and the third pass emits the held ledger reason. Change the verdict on pass four:
+    it must dispatch one fresh repair rather than remain held.
+  note: |
+    reservation holder is this filing branch, verified by `rmd next-task-id` reserving
+    W1-T3820 on origin before this shard was written; no hand-off is required.
+
+    This task intentionally does not claim that `dispatchRepairLaneDefault` creates a
+    worker. That separate misleading no-op is a different design concern and needs a
+    proposal-capable, scoped writer rather than another escalation bound.

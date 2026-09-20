@@ -12,7 +12,7 @@
     - test/daemon-freshness.test.ts
   origin: "incident#stale-post-retro-admission-2026-09-04"
   plan_refs: ["W1-T126", "W1-T936", "W1-T1065", "W1-T1272", "W1-T2265"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET ON 2026-09-04. The daemon process booted from checkout

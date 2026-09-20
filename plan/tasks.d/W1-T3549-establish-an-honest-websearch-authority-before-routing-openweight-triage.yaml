@@ -13,7 +13,7 @@
     - docs/recon/openweight-triage-websearch-authority.md
   origin: "operator-session#open-weight-routing-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3546", "W1-T3547", "W1-T3094"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     This is a bounded evidence task, not a routing task. `TRIAGE_WORKER_TOOLS` declares

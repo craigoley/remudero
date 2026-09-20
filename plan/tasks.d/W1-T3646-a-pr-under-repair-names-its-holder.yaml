@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-pr-under-repair-names-its-holder.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3647", "W1-T3645"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ACROSS ONE NIGHT OF BOARD REPAIR, with the duplicates named:

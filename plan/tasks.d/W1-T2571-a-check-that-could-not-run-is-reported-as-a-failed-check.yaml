@@ -10,7 +10,7 @@
   files: [deploy/verify-image.sh, test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts]
   origin: "operator-brief#verify-image-infra-misdiagnosis-2026-09-01"
   plan_refs: ["W1-T1082", "W1-T320"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE DEFECT, AND THE FILE ALREADY KNOWS THE RULE IT BREAKS ────────────────────────────────

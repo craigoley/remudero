@@ -11,7 +11,7 @@
   files: [src/run-task.ts, src/lib/escalate.ts, test/fix-rung-open-escalation-stand-down.test.ts, test/escalation-issue-list-rest.test.ts]
   origin: "operator-session#site-console-self-recovery-2026-09-14"
   plan_refs: ["W1-T2799", "W1-T3557", "W1-T3565", "W1-T195"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on remudero-site PR #21 (2026-09-14). PORTAL-T4 legitimately removed public

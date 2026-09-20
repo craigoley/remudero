@@ -1,0 +1,80 @@
+- id: W1-T3757
+  title: "THE CADENCE FALLBACK OVER-REPORTS FOR THE ONLY TWO ROWS THAT USE IT, AGAINST ITS OWN STATED INVARIANT — `feedback-docket` is weekly by construction and is judged against a day, so it reads stale for 96 of every 168 hours while behaving exactly as designed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: "measured 2026-09-18 on the live board — both CADENCE rows reading stale are false alarms, and they are exactly the two rows lacking a policyKey"
+  plan_refs: [W1-T436]
+  files: [src/lib/status-board.ts, test/the-cadence-fallback-does-not-over-report.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3757-cadence-fallback-over-reports
+  rationale: |
+    MEASURED 2026-09-18 on the live board. The CADENCE section has nine rows; seven read fresh and
+    two read stale:
+
+      feedback-docket, stale (8d4h ago) — has not advanced in 196h against a 1440-minute cadence
+      last-seen,       stale (6d17h ago) — has not advanced in 161h against a 1440-minute cadence
+
+    Both are false alarms, and they are exactly the two rows in `CADENCE_MARKERS` that carry NO
+    `policyKey` — so both fall back to `CADENCE_DEFAULT_INTERVAL_MINUTES` (24 * 60).
+
+    (1) THE FALLBACK STATES AN INVARIANT THAT THESE ROWS BREAK. Its own comment: "A DAY, which is
+        longer than every declared interval, so an undeclared rung is judged conservatively and
+        this default can only ever under-report." That reasoning is sound for a rung faster than a
+        day. `feedback-docket` is not one. `feedbackDocketDue` gates on `SEVEN_DAYS_MS`, and the
+        rung's own doc calls it "the weekly feedback docket's rung ... cron Mondays, 7-day
+        lookback". Its real interval is SEVEN TIMES the fallback, so the default OVER-reports —
+        the one direction the comment rules out.
+
+        The arithmetic is not marginal: 3 intervals of grace is 72h, the rung legitimately fires
+        every 168h, so the row reads stale for 96 of every 168 hours — 57% of the time — with
+        nothing wrong.
+
+    (2) THE SECOND ROW IS NOT A RUNG AT ALL. `last-seen.json` is written by `rmd serve`
+        (lib/serve.ts), and `serve` is reported two sections above as NOT RUNNING. A marker whose
+        writer is deliberately down is not a cadence that failed; judging it on any interval
+        reports the wrong thing.
+
+    (3) THE COST IS THE SECTION, NOT THE ROW. Two of nine rows are permanently red for reasons
+        that are not defects. A section a reader learns to skip cannot report the rung that
+        genuinely stops — which is the entire purpose of CADENCE.
+  design: |
+    (i) EVERY ROW DECLARES ITS INTERVAL. Give `feedback-docket` a `policyKey` and declare the
+        weekly interval where the other seven declare theirs, so the row is judged against the
+        gate that actually governs it (`SEVEN_DAYS_MS`). One source of truth per rung.
+
+    (ii) THE FALLBACK'S INVARIANT IS ENFORCED, NOT JUST STATED. A comment promising the default
+         "can only ever under-report" is exactly the kind of claim that goes quietly false. Assert
+         it: no rung may have a real interval longer than the fallback without declaring one.
+
+    (iii) A MARKER WHOSE WRITER IS DOWN READS AS THAT, NOT AS STALE. `last-seen` depends on
+          `serve`, whose liveness this same board already resolves. Staleness judged against a
+          cadence is the wrong question when the writer is not running.
+
+    DO NOT SIMPLY LENGTHEN `CADENCE_DEFAULT_INTERVAL_MINUTES`. That silences these two rows by
+    making every future undeclared rung slower to report — trading a false alarm for a missed one,
+    in a section whose value is catching the rung that stopped.
+  acceptance:
+    - claim: "a rung whose real interval exceeds the fallback must declare one, and the check refuses it otherwise"
+      proof: "grep: may not rely on the fallback in src/lib/status-board.ts"
+    - claim: "the feedback docket is judged against the weekly gate that actually governs it"
+      proof: "grep: SEVEN_DAY in src/lib/status-board.ts"
+    - claim: "the fallback interval itself is unchanged — the fix is not a longer default"
+      proof: "grep: the fallback interval is unchanged in test/the-cadence-fallback-does-not-over-report.test.ts"
+  falsifier: |
+    NOTE ON CRITERION 3's PROOF. Grepping the unchanged constant was refused by
+    proof-discrimination on #5982, and correctly: an unchanged line matches the merge base too,
+    so it establishes nothing. The claim is a NEGATIVE one, and its discriminating evidence is
+    the assertion that would fail if the default were lengthened — which lives in a test file
+    absent at the base. Do not repoint it back at the constant.
+
+    Lengthen `CADENCE_DEFAULT_INTERVAL_MINUTES` and the third assertion goes red while the first
+    two would pass on it — which is why the third exists. Declare the docket's interval as a day
+    rather than a week and the second goes red. Drop the enforcement and leave only the comment,
+    and the first goes red on a fixture rung whose interval exceeds the fallback.

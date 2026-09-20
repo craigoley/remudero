@@ -12,8 +12,10 @@ import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.j
  * naming the OBSERVED blocker (W1-T186). Judgment ({@link RiskJudgeVerdict}) and action
  * ({@link planRiskJudgeAction}) stay separate — the mapping is pure, no LLM call inside it.
  *
- * JUDGE-UNAVAILABLE (spawn error, timeout, unparseable response) always falls back to
- * ESCALATE, never silent-proceeds (W1-T130) — enforced inside {@link assessRisk} itself.
+ * JUDGE-UNAVAILABLE (spawn error, timeout, unparseable response) is represented as a distinct
+ * availability state. The reusable/default controller remains fail-closed to ESCALATE (W1-T130),
+ * while an explicitly configured autonomous caller may retain its deterministic gate behavior
+ * without manufacturing an LLM risk decision.
  *
  * STABLE ON UNCHANGED INPUT (W1-T178): an optional {@link RiskJudgeCache}, keyed on {@link
  * canonicalRiskJudgeInputKey}, reuses a prior verdict rather than risking a flapped re-judgment.
@@ -28,6 +30,7 @@ import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.j
 // ── The verdict contract ────────────────────────────────────────────────
 
 export type RiskJudgeVerdictLabel = "low" | "high";
+export type RiskJudgeAvailability = "available" | "unavailable";
 export type RiskJudgeGateConsequence = "LAND" | "REPAIR" | "LAND+DEBT" | "STOP";
 
 export const RISK_JUDGE_GATE_CONSEQUENCES: readonly RiskJudgeGateConsequence[] = [
@@ -41,7 +44,9 @@ export const RISK_JUDGE_GATE_CONSEQUENCES: readonly RiskJudgeGateConsequence[] =
  *  criterion 6 names verbatim: `{verdict, reasons, confidence}`. */
 export interface RiskJudgeVerdict {
   verdict: RiskJudgeVerdictLabel;
-  /** Concrete, OBSERVED reasons (W1-T186) — never an inferred symptom. Ledgered verbatim. */
+  /** Absent for the historical parsed shape; present when no LLM decision was available. */
+  availability?: RiskJudgeAvailability;
+  /** Concrete, OBSERVED reasons (W1-T186) — never an inferred symptom. Ledgered after deterministic scrubbing. */
   reasons: string[];
   /** 0..1, the judge's OWN self-reported confidence. Ledgered verbatim (round ii). */
   confidence: number;
@@ -188,6 +193,105 @@ export interface RiskJudgeInput {
   headSha?: string;
 }
 
+// ── The judge privacy boundary ─────────────────────────────────────────
+
+/** Findings produced by the deterministic boundary before untrusted text reaches the judge. */
+export type RiskJudgeScrubFinding = "credential";
+
+export interface RiskJudgeScrubResult {
+  text: string;
+  findings: readonly RiskJudgeScrubFinding[];
+}
+
+export interface ScrubbedRiskJudgeInput {
+  input: RiskJudgeInput;
+  findings: readonly RiskJudgeScrubFinding[];
+}
+
+const CREDENTIAL_ASSIGNMENT_PATTERN =
+  /\b(api[_-]?key|access[_-]?token|auth(?:entication)?[_-]?token|client[_-]?secret|password|passwd|secret|private[_-]?key)(\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]]+)/gi;
+const CREDENTIAL_QUERY_PATTERN = /([?&](?:token|access_token|api_key|password|secret|code)=)[^&#\s]+/gi;
+const CONFIRMED_CREDENTIAL_PATTERN =
+  /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[porus]_[A-Za-z0-9]{20,}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AIza[0-9A-Za-z_-]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16})\b/g;
+const PRIVATE_KEY_PATTERN = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/g;
+const URL_PASSWORD_PATTERN = /(https?:\/\/)[^\s/@:]+:[^\s/@]*@/gi;
+const URL_USER_PATTERN = /(https?:\/\/)(?!<redacted-credential>@)[^\s/@]+@/gi;
+const AUTH_HEADER_PATTERN = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi;
+const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const PHONE_PATTERN = /(?<![\w])(?:\+\d{1,3}[\s.-])?(?:\(?\d{3}\)?[\s.-])\d{3}[\s.-]\d{4}(?!\w)/g;
+const GITHUB_OWNER_PATTERN = /(github\.com\/)[^/\s]+(?=\/)/gi;
+const UNIX_HOME_PATTERN = /\/(?:Users|home)\/[^/\s"'`),;]+/g;
+const WINDOWS_HOME_PATTERN = /[A-Za-z]:\\Users\\[^\\\s"'`),;]+/g;
+
+function scrubRiskJudgeString(text: string, findings: Set<RiskJudgeScrubFinding>): string {
+  let scrubbed = text;
+  const markCredential = (pattern: RegExp, replacement: string): void => {
+    const next = scrubbed.replace(pattern, replacement);
+    if (next !== scrubbed) findings.add("credential");
+    scrubbed = next;
+  };
+
+  markCredential(PRIVATE_KEY_PATTERN, "<redacted-credential>");
+  markCredential(URL_PASSWORD_PATTERN, "$1<redacted-credential>@");
+  markCredential(AUTH_HEADER_PATTERN, "<redacted-credential>");
+  markCredential(CONFIRMED_CREDENTIAL_PATTERN, "<redacted-credential>");
+
+  scrubbed = scrubbed.replace(CREDENTIAL_ASSIGNMENT_PATTERN, "$1$2<redacted-secret>");
+  scrubbed = scrubbed.replace(CREDENTIAL_QUERY_PATTERN, "$1<redacted-secret>");
+  scrubbed = scrubbed.replace(URL_USER_PATTERN, "$1<redacted-user>@");
+  scrubbed = scrubbed.replace(EMAIL_PATTERN, "<redacted-email>");
+  scrubbed = scrubbed.replace(PHONE_PATTERN, "<redacted-phone>");
+  scrubbed = scrubbed.replace(UNIX_HOME_PATTERN, "/<redacted-user-home>");
+  scrubbed = scrubbed.replace(WINDOWS_HOME_PATTERN, "<redacted-user-home>");
+  return scrubbed.replace(GITHUB_OWNER_PATTERN, "$1<redacted-owner>");
+}
+
+/** Scrub untrusted text before it is sent to the judge or written into a decision reason. */
+export function scrubRiskJudgeText(text: string): RiskJudgeScrubResult {
+  const findings = new Set<RiskJudgeScrubFinding>();
+  return { text: scrubRiskJudgeString(text, findings), findings: [...findings] };
+}
+
+function scrubRiskJudgeValue(value: unknown, findings: Set<RiskJudgeScrubFinding>): unknown {
+  if (typeof value === "string") return scrubRiskJudgeString(value, findings);
+  if (Array.isArray(value)) return value.map((item) => scrubRiskJudgeValue(item, findings));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, scrubRiskJudgeValue(item, findings)]),
+    );
+  }
+  return value;
+}
+
+/** Clone and scrub the full input, preserving useful change/gate structure and never mutating callers. */
+export function scrubRiskJudgeInput(input: RiskJudgeInput): ScrubbedRiskJudgeInput {
+  const findings = new Set<RiskJudgeScrubFinding>();
+  return {
+    input: scrubRiskJudgeValue(input, findings) as RiskJudgeInput,
+    findings: [...findings],
+  };
+}
+
+function scrubRiskJudgeVerdict(
+  verdict: RiskJudgeVerdict,
+  inputFindings: readonly RiskJudgeScrubFinding[] = [],
+): RiskJudgeVerdict {
+  const findings = new Set<RiskJudgeScrubFinding>(inputFindings);
+  const reasons = verdict.reasons.map((reason) => scrubRiskJudgeString(reason, findings));
+  const scrubbed: RiskJudgeVerdict = { ...verdict, reasons };
+  if (!findings.has("credential")) return scrubbed;
+  return {
+    ...scrubbed,
+    verdict: "high",
+    confidence: 1,
+    gateConsequence: "STOP",
+    reasons: [
+      "deterministic security finding: confirmed credential-shaped material was scrubbed before the risk judge ran; autonomous landing is not permitted",
+      ...reasons,
+    ],
+  };
+}
+
 // ── The fresh judge prompt (never shown the static risk: field) ──────────
 
 function renderRecord(label: string, record: Record<string, unknown>): string {
@@ -281,10 +385,12 @@ export function isPlanOnlyAmendment(
 }
 
 export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
-  const filesLine = input.change.files?.length ? input.change.files.join(", ") : "(no files listed)";
+  const scrubbed = scrubRiskJudgeInput(input);
+  const safeInput = scrubbed.input;
+  const filesLine = safeInput.change.files?.length ? safeInput.change.files.join(", ") : "(no files listed)";
   // W1-T2371: NARROWED ONLY on the founding shape, and the narrowing is stated to the judge rather
   // than applied silently — it may still classify HIGH for any other reason it sees.
-  const planOnlyAmendmentNote = isPlanOnlyAmendment(input.change.description, input.change.changeView)
+  const planOnlyAmendmentNote = isPlanOnlyAmendment(safeInput.change.description, safeInput.change.changeView)
     ? [
         ``,
         `THIS IS A PLAN-ONLY AMENDMENT. The subject declares plan work and the observed`,
@@ -296,6 +402,14 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
         `THIS NARROWS ONE INFERENCE ONLY. Every other ground for HIGH survives intact:`,
         `if the amendment weakens a criterion, contradicts a ruling, or drifts from`,
         `established practice, classify HIGH exactly as you would on any other change.`,
+      ]
+    : [];
+
+  const securityFindingNote = scrubbed.findings.includes("credential")
+    ? [
+        ``,
+        `DETERMINISTIC SECURITY FINDING: confirmed credential-shaped material was present in the supplied context and was removed before this prompt.`,
+        `Treat this finding as TRUE. It is a hard-stop candidate: do not classify the candidate as safe to land autonomously.`,
       ]
     : [];
 
@@ -337,16 +451,17 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `the change drifts from the plan or established practice, or the ACTUAL CHANGE`,
     `shape looks unusual, classify HIGH exactly as you would otherwise — regardless`,
     `of how the description reads.`,
-    ...riskJudgeGateConsequenceLines(input),
+    ...securityFindingNote,
+    ...riskJudgeGateConsequenceLines(safeInput),
     ``,
-    `CANDIDATE CHANGE: ${input.change.description}`,
+    `CANDIDATE CHANGE: ${safeInput.change.description}`,
     `FILES TOUCHED (declared): ${filesLine}`,
     ``,
-    ...renderChangeViewLines(input.change.changeView),
+    ...renderChangeViewLines(safeInput.change.changeView),
     ``,
-    renderRecord("GATES STATE", input.gatesState),
+    renderRecord("GATES STATE", safeInput.gatesState),
     ``,
-    renderRecord("PLAN CONTEXT", input.planContext),
+    renderRecord("PLAN CONTEXT", safeInput.planContext),
     ``,
     `Classify this change's RISK — exactly one of:`,
     `  low   — coherent with the plan, well-trodden, gates state is clean; safe to proceed`,
@@ -356,7 +471,7 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `each of these lines, and nothing else on the line:`,
     `  RISK_VERDICT: <low|high>`,
     `  RISK_CONFIDENCE: <0.0-1.0>`,
-    ...("gate_finding" in input.gatesState ? [`  RISK_GATE_CONSEQUENCE: <LAND|REPAIR|LAND+DEBT|STOP>`] : []),
+    ...("gate_finding" in safeInput.gatesState ? [`  RISK_GATE_CONSEQUENCE: <LAND|REPAIR|LAND+DEBT|STOP>`] : []),
     `and one or more lines naming the OBSERVED basis for your verdict — observed IN`,
     `THE TEXT ABOVE, never an inferred symptom of code you have not read (the`,
     `W1-T186 emitter discipline, applied to this judge's own evidentiary limits):`,
@@ -430,9 +545,10 @@ export function parseRiskJudgeVerdict(text: string): RiskJudgeVerdict {
  *  Why: docs/forensics/risk-judge.md#malformed_response_verdict. */
 const MALFORMED_RESPONSE_VERDICT: RiskJudgeVerdict = {
   verdict: "high",
+  availability: "unavailable",
   confidence: 0,
   reasons: [
-    "judge output carried no parseable RISK_VERDICT — failing closed (never silent-proceed); " +
+    "judge output carried no parseable RISK_VERDICT — no LLM risk decision was made; " +
       "this is a MALFORMED RESPONSE, not an adverse risk judgment",
   ],
 };
@@ -449,6 +565,8 @@ export interface RiskJudgeAction {
 export interface RiskJudgeConfig {
   /** Below this self-reported confidence, even a `low` verdict escalates. Default 0.7. */
   confidenceThreshold?: number;
+  /** Default is fail-closed ESCALATE. Autonomous callers may retain deterministic gate behavior. */
+  judgeUnavailableAction?: RiskJudgeActionKind;
 }
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
@@ -459,8 +577,9 @@ const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
  *  fail-closed reasons (prefixed "judge …") are exempt — already truthful about their basis.
  *  Why: docs/forensics/risk-judge.md#evidencequalifiedreason. */
 function evidenceQualifiedReason(reason: string): string {
-  if (reason.startsWith("judge ")) return reason;
-  return `on the change's description/files alone, no diff was read — ${reason}`;
+  const safeReason = scrubRiskJudgeText(reason).text;
+  if (safeReason.startsWith("judge ")) return safeReason;
+  return `on the change's description/files alone, no diff was read — ${safeReason}`;
 }
 
 function reasonsText(verdict: RiskJudgeVerdict): string {
@@ -472,6 +591,12 @@ function reasonsText(verdict: RiskJudgeVerdict): string {
  *  ESCALATES; otherwise PROCEEDS. The static `risk:` field plays no part. */
 export function planRiskJudgeAction(verdict: RiskJudgeVerdict, config: RiskJudgeConfig = {}): RiskJudgeAction {
   const threshold = config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
+  if (verdict.gateConsequence === "STOP") {
+    return {
+      kind: "escalate",
+      reason: `STOP gate consequence — ${reasonsText(verdict)}`,
+    };
+  }
   if (verdict.verdict === "high") {
     return {
       kind: "escalate",
@@ -543,31 +668,35 @@ export interface RiskJudgeDeps {
 
 /** Assess ONE candidate change: `{change, gatesState, planContext} -> {verdict, reasons,
  *  confidence}` (acceptance criterion 6). JUDGE-UNAVAILABLE (spawn error, timeout, thrown
- *  rejection) is caught HERE and turned into a fail-closed `high`/confidence-0 verdict —
- *  never silent-proceed (W1-T130); every reuse site inherits the guarantee. STABLE ON
+ *  rejection) is caught HERE and turned into a compatibility `high`/confidence-0 verdict with
+ *  `availability: "unavailable"`; the availability marker prevents an autonomous caller from
+ *  confusing an observation failure with an adverse LLM judgment. STABLE ON
  *  UNCHANGED INPUT (W1-T178): with `deps.cache`, an unchanged input returns the cached
  *  verdict rather than re-invoking `judge`. */
 export async function assessRisk(input: RiskJudgeInput, deps: RiskJudgeDeps): Promise<RiskJudgeVerdict> {
-  const key = canonicalRiskJudgeInputKey(input);
+  const scrubbedInput = scrubRiskJudgeInput(input);
+  const key = canonicalRiskJudgeInputKey(scrubbedInput.input);
   const cached = deps.cache?.get(key);
   if (cached) return cached;
 
   let verdict: RiskJudgeVerdict;
   try {
-    verdict = await deps.judge(input);
+    verdict = await deps.judge(scrubbedInput.input);
   } catch (err) {
+    const errorText = err instanceof Error ? err.message : String(err);
     verdict = {
       verdict: "high",
+      availability: "unavailable",
       confidence: 0,
       reasons: [
-        `judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing closed to ESCALATE, ` +
-          "never silent-proceed (the cannot-observe→wait polarity, W1-T130, applied to the judge itself)",
+        `judge unavailable (${scrubRiskJudgeText(errorText).text}) — no LLM risk decision was made`,
       ],
     };
   }
 
-  deps.cache?.set(key, verdict);
-  return verdict;
+  const safeVerdict = scrubRiskJudgeVerdict(verdict, scrubbedInput.findings);
+  deps.cache?.set(key, safeVerdict);
+  return safeVerdict;
 }
 
 // ── runRiskJudge: the dispatch-side DI orchestrator (mirrors flight-judge.ts's
@@ -640,8 +769,10 @@ export interface RiskJudgeResult {
 }
 
 /** Assess one candidate change and act deterministically: PROCEED (nothing further
- *  happens) or ESCALATE (`deps.escalate` is called). Ledgers ONE `risk_judge.decision`
- *  line, verdict/reasons/confidence verbatim, before deciding whether to escalate. */
+ *  happens) or ESCALATE (`deps.escalate` is called). The default remains fail-closed for an
+ *  unavailable judge; an explicit `judgeUnavailableAction: "proceed"` lets an autonomous
+ *  caller retain the deterministic gates that already ran. Ledgers ONE `risk_judge.decision`
+ *  line, verdict/reasons/confidence after deterministic privacy scrubbing, before deciding whether to escalate. */
 export async function runRiskJudge(
   input: RiskJudgeInput,
   deps: RiskJudgeOrchestratorDeps,
@@ -649,12 +780,19 @@ export async function runRiskJudge(
 ): Promise<RiskJudgeResult> {
   const log = deps.log ?? (() => {});
   const verdict = await assessRisk(input, deps);
-  const action = planRiskJudgeAction(verdict, config);
+  const action =
+    verdict.availability === "unavailable" && config.judgeUnavailableAction === "proceed"
+      ? {
+          kind: "proceed" as const,
+          reason: "risk judge unavailable — retaining the deterministic gate behavior; no LLM risk decision was made",
+        }
+      : planRiskJudgeAction(verdict, config);
 
   // Read once, after assessRisk's own spawning is done, onto the same row (keys OMITTED when unwired).
   const spent = deps.spend?.total();
   log("risk_judge.decision", {
     verdict: verdict.verdict,
+    ...(verdict.availability === undefined ? {} : { availability: verdict.availability }),
     reasons: verdict.reasons,
     confidence: verdict.confidence,
     ...(verdict.gateConsequence === undefined ? {} : { gate_consequence: verdict.gateConsequence }),
@@ -766,8 +904,9 @@ export const RISK_JUDGE_MAX_ATTEMPTS = 3;
 /** Build a `judge` function wired to a real spawn. THE RETRY RE-REQUESTS, NEVER RE-ASKS
  *  (W1-T2212): the same args (prompt included) go to `spawn` on every attempt. Only an
  *  `unparseable` outcome retries, bounded at {@link RISK_JUDGE_MAX_ATTEMPTS}; a parsed
- *  verdict returns immediately. At the bound, {@link MALFORMED_RESPONSE_VERDICT} returns,
- *  still fail-closed to ESCALATE. Why: docs/forensics/risk-judge.md#realriskjudge. */
+ *  verdict returns immediately. At the bound, {@link MALFORMED_RESPONSE_VERDICT} returns;
+ *  the caller's unavailable-judge policy then decides whether to retain deterministic flow or
+ *  escalate. Why: docs/forensics/risk-judge.md#realriskjudge. */
 export function realRiskJudge(opts: {
   mount: Mount;
   cwd: string;
@@ -804,8 +943,8 @@ export function realRiskJudge(opts: {
         return {
           ...MALFORMED_RESPONSE_VERDICT,
           reasons: [
-            `judge output carried no parseable RISK_VERDICT after ${attempt} attempt(s) — failing ` +
-              "closed (never silent-proceed); this is a MALFORMED RESPONSE, not an adverse risk judgment",
+            `judge output carried no parseable RISK_VERDICT after ${attempt} attempt(s) — no LLM ` +
+              "risk decision was made; this is a MALFORMED RESPONSE, not an adverse risk judgment",
           ],
         };
       }

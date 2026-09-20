@@ -10,7 +10,7 @@
   origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
   plan_refs: ["W1-T2498", "W1-T3390"]
   files: [src/lib/escalate.ts, test/every-escalation-opened-today-was-non-conforming.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     SIXTEEN OUT OF SIXTEEN. MEASURED over the full rotation union for 2026-09-11: every

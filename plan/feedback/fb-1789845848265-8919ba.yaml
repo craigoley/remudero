@@ -1,0 +1,40 @@
+id: fb-1789845848265-8919ba
+ts: 2026-09-19T19:24:08.265Z
+raw: "Prevent plan-only PRs from auto-merging when newly added or changed task
+  shards have substantive plan-linter diagnostics. Incident: PR #6127
+  auto-merged the console analytics tasks although rmd lint-plan --base
+  origin/main warned that every criterion shared a whole-file proof and three
+  new modules had no production call-site proof; one task also placed fields
+  where the live console cannot read them. Research current CI and task-linter
+  severity policy. Implement a bounded guard that fails plan-only PR validation
+  for new/changed tasks on shared-proof, unreachable-new-module/call-site, and
+  proof-scope diagnostics, while leaving inherited warnings outside the diff
+  nonblocking. Add discriminating tests for a new bad task that fails and an
+  unchanged historical warning that does not."
+attachments: []
+origin: cli
+status: proposed
+reply_to: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6148
+summary:
+  headline: Block new task-linter defects in plan-only PRs
+  what_happened: "CI currently treats shared-proof and several call-site and
+    proof-scope findings as warnings, so PR #6127 auto-merged despite
+    substantive defects. Existing warnings on unchanged tasks are not
+    diff-scoped for blocking."
+  decision: Implement a changed-task-only guard that blocks these three
+    diagnostics while preserving inherited warnings as nonblocking.
+  options:
+    - label: Implement bounded guard
+      consequence: Prevents defective new or edited tasks from auto-merging without
+        reopening historical warnings.
+    - label: Keep warning-only policy
+      consequence: Preserves current merge flow but leaves the incident’s failure path
+        available.
+    - label: Block all plan warnings
+      consequence: Raises safety broadly but risks stopping unrelated PRs over
+        inherited legacy findings.
+expansion: null
+submission_key: null
+thread_id: null
+answered_by: null

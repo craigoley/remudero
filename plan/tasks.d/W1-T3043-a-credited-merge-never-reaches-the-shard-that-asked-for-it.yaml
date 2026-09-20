@@ -10,7 +10,7 @@
   files: [src/lib/plan-reconcile.ts, test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts]
   origin: "operator-request#clean-task-list-2026-09-07"
   plan_refs: ["W1-T150", "W1-T2794", "W1-T75"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LIFECYCLE HAS NO CLOSING WRITE, AND CLAUDE.md SAYS SO IN AS MANY WORDS: "The credit

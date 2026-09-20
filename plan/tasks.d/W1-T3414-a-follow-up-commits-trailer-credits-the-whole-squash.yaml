@@ -11,7 +11,7 @@
   files: [scripts/acceptance-author-gate.mjs, test/acceptance-author-gate.test.ts]
   origin: "operator-session#W1-T3134-false-credit-2026-09-11"
   plan_refs: ["W1-T3149", "W1-T3388", "W1-T205"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED on `origin/main` 2026-09-11, over merged commits from the preceding 14 days. For each

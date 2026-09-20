@@ -32,6 +32,14 @@ test("runRiskJudge has EXACTLY ONE call site in run-task.ts's dispatch path", ()
   assert.equal(calls.length, 1, "a second call site would mean a second, un-reviewed dispatch decision path");
 });
 
+test("run-task's autonomous candidate path retains deterministic flow when the advisory judge is unavailable", () => {
+  assert.match(
+    runTaskSrc,
+    /runRiskJudge\(riskJudgeInput,[\s\S]{0,12000}judgeUnavailableAction:\s*"proceed"/,
+    "the production candidate path must opt into the explicit unavailable-judge policy rather than manufacturing a human escalation",
+  );
+});
+
 test("the risk judge call sits BETWEEN the capped-refusal branch and pollToGate — every candidate change is assessed before the merge gate", () => {
   const cappedReturnIdx = runTaskSrc.indexOf('return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };\n    }\n\n    // ── RISK JUDGE');
   assert.ok(cappedReturnIdx >= 0, "the risk judge block must immediately follow the capped-refusal branch's closing brace");

@@ -11,7 +11,7 @@
   files: [src/lib/daemon.ts, test/daemon-freshness.test.ts, test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts]
   origin: "operator-session#freshness-exit-aborted-W1-T2862-fix-2026-09-05"
   plan_refs: ["W1-T2379", "W1-T2744", "W1-T2845", "W1-T2863"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET 2026-09-05T04:30Z-04:40Z. The final sweep for stale daemon run

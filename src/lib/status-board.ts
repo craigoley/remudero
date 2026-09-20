@@ -887,6 +887,11 @@ export interface CadenceMarkerDef {
   file: string;
   /** `plan/policy.yaml` key whose `minIntervalMinutes` paces this rung, when one exists. */
   policyKey?: string;
+  /** W1-T3755's sibling defect: a rung whose OWN period is fixed in code rather than in policy
+   *  declares it here. Such a rung MAY NOT RELY ON THE FALLBACK — see
+   *  {@link CADENCE_DEFAULT_INTERVAL_MINUTES}, whose conservatism holds only for rungs faster than
+   *  a day. Checked by {@link cadenceDefsMisjudgedByFallback}, not left to a comment. */
+  intervalMinutes?: number;
 }
 
 /** How many of a rung's OWN intervals may elapse before its marker reads stale.
@@ -903,6 +908,9 @@ export const CADENCE_STALE_INTERVALS = 3;
  *  default can only ever under-report. */
 export const CADENCE_DEFAULT_INTERVAL_MINUTES = 24 * 60;
 
+/** Seven days in minutes — the weekly docket's own period. */
+export const SEVEN_DAYS_MINUTES = 7 * 24 * 60;
+
 /** The nine markers periodic rungs write. DATA — a rung added later is a row, not a branch. */
 export const CADENCE_MARKERS: readonly CadenceMarkerDef[] = [
   { name: "retro", file: "last-retro.json", policyKey: "retro" },
@@ -912,7 +920,11 @@ export const CADENCE_MARKERS: readonly CadenceMarkerDef[] = [
   { name: "wipe-test-cadence", file: "last-wipe-test-cadence.json", policyKey: "wipeTestCadence" },
   { name: "ci-learning-cadence", file: "last-ci-learning-cadence.json", policyKey: "ciLearningCadence" },
   { name: "auto-triage", file: "last-auto-triage.json", policyKey: "autoTriage" },
-  { name: "feedback-docket", file: "last-feedback-docket.json" },
+  // SEVEN DAYS, because `feedbackDocketDue` (lib/feedback-docket.ts) gates on `SEVEN_DAYS_MS` and
+  // the rung's own doc calls it "the weekly feedback docket's rung ... cron Mondays, 7-day
+  // lookback". Judged against the 1440-minute fallback it read stale for 96 of every 168 hours
+  // while behaving exactly as designed — measured on the live board 2026-09-18.
+  { name: "feedback-docket", file: "last-feedback-docket.json", intervalMinutes: SEVEN_DAYS_MINUTES },
   { name: "last-seen", file: "last-seen.json" },
 ];
 
@@ -948,13 +960,39 @@ export interface CadenceSection {
  * marker, which is the `never` state and never a skip. `intervalMinutesFor` returns the rung's
  * declared `minIntervalMinutes`, or `undefined` to take {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
  */
+/**
+ * The registry rows the fallback would MISJUDGE — every def that declares no interval of its own
+ * and whose real period the caller reports as longer than {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
+ *
+ * WHY THIS IS A FUNCTION AND NOT A COMMENT. The fallback's own doc promises it "can only ever
+ * under-report", and that promise went quietly false the moment a weekly rung joined the table
+ * without declaring its period: three intervals of grace is 72h against a real 168h cadence, so
+ * the row read stale 57% of the time with nothing wrong. A claim a reader must re-verify by hand
+ * is the class of guard this repo has already paid for; this one is checkable.
+ *
+ * In one line: a rung slower than a day may not rely on the fallback, and this says which ones
+ * are relying on it anyway.
+ */
+export function cadenceDefsMisjudgedByFallback(
+  defs: readonly CadenceMarkerDef[],
+  realPeriodMinutesFor: (def: CadenceMarkerDef) => number | undefined,
+): string[] {
+  return defs
+    .filter((def) => {
+      if (def.intervalMinutes !== undefined) return false;
+      const real = realPeriodMinutesFor(def);
+      return real !== undefined && real > CADENCE_DEFAULT_INTERVAL_MINUTES;
+    })
+    .map((def) => def.name);
+}
+
 export function cadenceMarkerRows(
   markers: readonly CadenceMarkerDef[],
   readMarkerAgeMs: (def: CadenceMarkerDef) => number | undefined,
   intervalMinutesFor: (def: CadenceMarkerDef) => number | undefined,
 ): CadenceMarkerRow[] {
   return markers.map((def) => {
-    const intervalMinutes = intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
+    const intervalMinutes = def.intervalMinutes ?? intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
     const ageMs = readMarkerAgeMs(def);
     if (ageMs === undefined) {
       return {

@@ -11,7 +11,7 @@
   files: [src/lib/learnings.ts, scripts/generate-learnings-index.mjs, test/a-learning-is-selected-by-what-the-task-will-touch-not-only-where.test.ts]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T19", "W1-T33", "W1-T2760", "W1-T86"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at b8892bc4 in `src/lib/learnings.ts`: `matchCount(entry, taskFiles)` counts glob

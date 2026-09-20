@@ -1,0 +1,45 @@
+- id: W1-T3837
+  title: "GNU-only find metadata breaks agent-history reclaim on macOS — deploy/host-update.sh uses find -printf, so the newly merged W1-T3626 reclaim leaves old history in place and exits the dry-run path non-zero"
+  repo: remudero
+  depends_on: [W1-T3626]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files: [deploy/host-update.sh, test/agent-history-does-not-fill-the-root-disk.test.ts]
+  origin: "preflight#macos-find-printf-2026-09-20"
+  plan_refs: ["W1-T3626", "W1-T3612"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the macOS operator host with /usr/bin/find: the agent-history suite's four
+    metadata-dependent tests fail after W1-T3626 because its production section invokes GNU
+    find's -printf primary. macOS find rejects that primary before it emits any mtime, size or
+    path records. The failures are not harmless test noise: the reclaim reports zero removals,
+    the oldest-first trace is absent, the dry-run command exits 1, and the live-worker mutant
+    never reaches the reclaim body. Ubuntu CI has GNU find, so this portability gap is invisible
+    on the required runner while the operator's nightly macOS path is broken.
+  design: |
+    Keep W1-T3626's age threshold, oldest-first ordering, per-tree reporting, dry-run semantics,
+    live-container refusal and state-directory boundary unchanged. Replace only the GNU-specific
+    metadata enumeration with a platform-portable producer of the same mtime, byte-size and path
+    fields, or an equivalent platform-specific branch whose output is normalized before sorting.
+    Add or strengthen the existing real-script fixtures so the same acceptance names cover both
+    the normal reclaim and dry-run paths on the affected host. Do not widen the task into a new
+    retention policy or a different cleanup target.
+  acceptance:
+    - claim: "agent-history reclaim obtains each file's metadata through the named portable metadata helper rather than GNU-only find formatting"
+      proof: "grep: agent_history_file_metadata in deploy/host-update.sh"
+    - claim: "portable metadata enumeration chooses and records the GNU-or-BSD stat format before it sorts reclaimed paths oldest-first"
+      proof: "grep: AGENT_HISTORY_STAT_FORMAT in deploy/host-update.sh"
+    - claim: "the dry-run byte total is accumulated from portable file metadata before it is rendered"
+      proof: "grep: would_bytes=0 in deploy/host-update.sh"
+  falsifier: |
+    On macOS, restore the current find -printf producer while leaving the tests and fixtures
+    unchanged; the three positive tests above must return to their present failures. On Linux,
+    run the same suite to prove the fix did not merely special-case the macOS output. If either
+    platform loses the live-container refusal or state-directory invariant, the task is not met.
+  note: |
+    reservation hand-off: plan/W1-T3837-host-update-find-portability -> plan/W1-T3836-host-update-find-portability

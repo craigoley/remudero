@@ -80,22 +80,18 @@ test("an absent, unsupported, or below-reserve Spark is bypassed for eligible Lu
   assert.equal(select([SPARK, LUNA], limits(96, 35)).model, "gpt-5.6-luna", "below reserve");
 });
 
-test("Spark stays in economy and every non-economy candidate row remains unchanged", () => {
+test("Spark stays in economy while balanced rows are Luna-first and frontier remains Sol-first", () => {
   // gpt-5.5 is being decommissioned (2026-09-14), so it is a TRAILING fallback in every row and
   // leads none. `frontier.low` no longer names it alone: a single-candidate row whose only model
   // stops being offered makes Codex read `readable:false`, which silently migrates that lane onto
   // Claude rather than failing loudly. Spark's economy containment below is unchanged.
-  // `balanced.low` WAS ["gpt-5.4"] -- the very shape the comment above describes, one row over and
-  // already realised. MEASURED 2026-09-16 against this account's own app-server `model/list`: the
-  // account is offered exactly gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna and gpt-5.5. gpt-5.4 is
-  // NOT among them, so that row had no eligible candidate at all and Codex read `readable:false`
-  // -> the lane migrated silently onto Claude. It now mirrors medium/high: terra leads (a
-  // same-capability primary, never a cross-band promotion -- W1-T2842 forbids promoting beyond a
-  // band without measured task outcomes) with the same trailing fallbacks.
+  // W1-T3762's bounded balanced-policy experiment leads with Luna, keeps Terra as its immediate
+  // same-capability fallback, and leaves every frontier row Sol-first. The exact shape below is a
+  // regression guard against a future stale assertion reverting the committed mount policy.
   assert.deepEqual(CAPABILITIES.codex.balanced, {
-    low: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
-    medium: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
-    high: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
+    low: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"],
+    medium: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"],
+    high: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"],
   });
   assert.deepEqual(CAPABILITIES.codex.frontier, {
     low: ["gpt-5.6-sol", "gpt-5.5"],

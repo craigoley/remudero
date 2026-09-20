@@ -18,7 +18,7 @@
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
   plan_refs: ["W1-T62", "W1-T77", "W1-T78", "W1-T94", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T2573", "W1-T3094", "W1-T2559", "W1-T258", "W1-T3095"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS IS PHASE ONE OF THE OPEN-WEIGHT PROGRAM, DELIBERATELY WITH NO THIRD PROVIDER AND NO

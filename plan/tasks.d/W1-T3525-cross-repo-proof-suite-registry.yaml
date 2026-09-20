@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, src/lib/ci-parity.ts, test/cross-repo-proof-suite-registry.test.ts]
   origin: "feedback#fb-1789304800826-670f46"
   plan_refs: ["W1-T3178", "W1-T1062", "W1-T3073", "W1-T72"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3178 (queued, not yet merged — this task DEPENDS on it) teaches the dialect exactly two

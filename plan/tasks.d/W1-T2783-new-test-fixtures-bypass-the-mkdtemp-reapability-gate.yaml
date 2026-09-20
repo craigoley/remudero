@@ -11,7 +11,7 @@
   files: [test/open-prs-rest.test.ts, test/retro.test.ts, test/mkdtemp-callsite-check.test.ts]
   origin: "operator-session#post-w1-t2773-mkdtemp-regression-2026-09-03"
   plan_refs: ["W1-T2773", "W1-T2775", "W1-T2781"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on current origin/main 990b1e98: `npm run --silent mkdtemp-callsite-check`

@@ -633,13 +633,17 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # never prints one. Skipped, not assumed clean, when the image env itself could not be read.
   UNDECLARED_RUNTIME_VARS=""
   if [ "${IMAGE_ENV_KNOWN}" -eq 1 ]; then
-    for line in "${CONTAINER_ENV_LINES[@]}"; do
+    # Bash 3.2 treats even `array=()` as unbound under `set -u`; keep a legitimately empty
+    # runtime-env list as zero iterations rather than turning the safety check into an abort.
+    for line in "${CONTAINER_ENV_LINES[@]-}"; do
       name="${line%%=*}"
       value="${line#*=}"
       [ -n "${name}" ] || continue
       image_has_name=0
       image_value=""
-      for iline in "${IMAGE_ENV_LINES[@]}"; do
+      # The image may deliberately declare no environment at all. The same Bash-3.2 nounset
+      # behavior applies here, so an empty image env must mean "no matching name", not abort.
+      for iline in "${IMAGE_ENV_LINES[@]-}"; do
         case "${iline}" in
           "${name}="*) image_has_name=1; image_value="${iline#*=}" ;;
         esac
@@ -679,7 +683,7 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # name what it consulted instead of asserting it.
   for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
     val=""
-    for line in "${CONTAINER_ENV_LINES[@]}"; do
+    for line in "${CONTAINER_ENV_LINES[@]-}"; do
       case "${line}" in
         "${name}="*) val="${line#*=}" ;;
       esac

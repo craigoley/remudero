@@ -304,28 +304,28 @@ test("only synthesis.inbox_draft declares provider openweight, after its Read/Gr
     }
   }
 
-  const config: Config = {
-    claudeBin: "/unused/claude",
-    root: "/tmp/rmd-mount-affinity-inbox-real",
-    dailyCapUsd: 1,
-    workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
-  };
-  const args = buildInboxDraftSpawnArgs({
-    cwd: "/tmp/rmd-mount-affinity-inbox-real/worktree",
-    settingsFile: SETTINGS_FILE,
-    prompt: "draft this task",
-    mount: inboxDraftMount,
-    config,
-    disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-  });
-  assert.equal(args.mountProvider, "cash");
-  assert.deepEqual(args.tools, ["Read", "Grep", "Glob"], "the exact declared surface this row is eligible on");
-
-  // Re-prove the surface against the REAL adapter (not just the mount table): declaring
-  // Read/Grep/Glob must not throw the "does not implement declared tool(s)" refusal the adapter
-  // raises for triage's WebSearch (see the "undeclared tool" test above).
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-inbox-surface-"));
   try {
+    const config: Config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 1,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    };
+    const args = buildInboxDraftSpawnArgs({
+      cwd: join(root, "worktree"),
+      settingsFile: SETTINGS_FILE,
+      prompt: "draft this task",
+      mount: inboxDraftMount,
+      config,
+      disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+    });
+    assert.equal(args.mountProvider, "cash");
+    assert.deepEqual(args.tools, ["Read", "Grep", "Glob"], "the exact declared surface this row is eligible on");
+
+    // Re-prove the surface against the REAL adapter (not just the mount table): declaring
+    // Read/Grep/Glob must not throw the "does not implement declared tool(s)" refusal the adapter
+    // raises for triage's WebSearch (see the "undeclared tool" test above).
     const result = await spawnOpenWeightWorker(
       {
         cwd: root,
@@ -460,12 +460,15 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   // later edit that deletes the trailing entry fails here rather than silently killing the lane.
   assert.deepEqual(
     capabilities?.cash?.balanced.low,
-    ["gpt-5-nano", "gpt-oss-120b"],
-    "the declared openweight row, not fallback data, is the capability source",
+    ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
+    "the declared cash row, not fallback data, is the capability source",
   );
   assert.equal(selected.capability, "balanced");
   assert.equal(selected.model, "gpt-5-nano", "the ladder's LEADING candidate is what resolves");
   assert.equal(selected.effort, "low");
+
+  const squeezed = selectOpenWeightModel(capabilities, "sonnet", "low", 4_000, { cashSqueezed: true });
+  assert.equal(squeezed.model, "gpt-5.6-luna", "a cash squeeze promotes the independently available Luna deployment");
 
   const renamed = selectOpenWeightModel({
     ladder: { economy: 1, balanced: 2, frontier: 3 },
@@ -487,6 +490,53 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   const malformedModels = structuredClone(raw);
   (((malformedModels.capabilities as Record<string, unknown>).cash as Record<string, unknown>).economy as Record<string, unknown>).low = [];
   assert.throws(() => validateMounts(malformedModels), /capabilities\.cash\.economy\.low.*non-empty/);
+});
+
+test("the real cash mount passes the squeeze promotion without reading subscription capacity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-luna-squeeze-"));
+  try {
+    const settingsFile = join(root, "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    const selections: string[] = [];
+    const config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: { normal: 10, squeezed: 25 },
+      workerProviders: { enabled: ["cash"], cashEndpoint: "https://example.test/" },
+    } as Config;
+    const spawnOpenWeight = async (_args: unknown, _config: Config, selection: { model: string; effort: string }) => {
+      selections.push(selection.model);
+      return { ...openWeightResult(), model: selection.model, provider: "cash" as const };
+    };
+
+    await spawnWorker({
+      cwd: REPO_ROOT,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      prompt: "short cash work",
+      model: "sonnet",
+      effort: "low",
+      mountProvider: "cash",
+      cashSqueezed: true,
+      config,
+      providerRouting: { spawnOpenWeight },
+    } as never);
+    await spawnWorker({
+      cwd: REPO_ROOT,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      prompt: "short cash work",
+      model: "sonnet",
+      effort: "low",
+      mountProvider: "cash",
+      config,
+      providerRouting: { spawnOpenWeight },
+    } as never);
+
+    assert.deepEqual(selections, ["gpt-5.6-luna", "gpt-5-nano"], "only the squeeze cash spawn promotes Luna");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the openweight adapter prepends its output contract to every request and contains tools and bounds their conversation", async (t) => {
@@ -958,6 +1008,11 @@ test("a permitted openweight check that exits non-zero is fed back as a result, 
         tools: ["Read", "RunCheck"],
         maxTurns: 3,
         env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        // This test owns the tool-result contract, not the Linux Bubblewrap boundary. Exercise
+        // execFileSync's real non-zero path through the test-only runner port: CI images do not
+        // promise Bubblewrap, while production cash checks refuse if it is unavailable.
+        runCheck: ({ argv, cwd, env }) =>
+          execFileSync(argv[0]!, argv.slice(1), { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
         fetchImpl: async (_input, init) => {
           bodies.push(String(init?.body ?? ""));
           turn += 1;

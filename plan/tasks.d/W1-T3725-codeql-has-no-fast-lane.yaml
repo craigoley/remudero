@@ -92,7 +92,7 @@
   origin: human
   plan_refs: [W1-T2428]
   files: [.github/workflows/codeql.yml]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> planfast

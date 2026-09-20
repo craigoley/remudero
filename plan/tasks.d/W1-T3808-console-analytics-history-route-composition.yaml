@@ -1,0 +1,34 @@
+- id: W1-T3808
+  title: "COMPOSE FIVE LEDGER-BACKED HISTORICAL SERIES AT THE TOP LEVEL — retain explicit gaps and leave live trends uncollected"
+  repo: remudero
+  depends_on: [W1-T3807]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  origin: "feedback#fb-1789845640231-c117a2"
+  plan_refs: ["W1-T477", "W1-T3623"]
+  files: [src/lib/analytics-timeseries.ts, src/lib/analytics-route.ts, test/console-analytics-history-route.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Replaces W1-T3804 and the historical half of W1-T3806. The five supported historical metric
+    families already exist in the ledger stream; queue depth and provider allowance do not. The
+    producer and top-level route composition therefore ship as one call-site-proven task.
+  design: |
+    Add a bounded ledger-backed time-series producer for exactly five evidenced metric families,
+    naming UTC window, bucket width, aggregation, coverage, and points. Compose timeSeries at the
+    top level of GET /v1/analytics. Pre-collection, partial, missing, unreadable, and not-collected
+    buckets are explicit gaps, never healthy zeroes. Keep queue and provider historical trends
+    explicitly not-collected until retained evidence exists; do not infer them from live scalars.
+  acceptance:
+    - claim: "the producer returns five bounded ordered historical series with named windows and aggregations"
+      proof: "grep: W1-T3808 criterion 1 in test/console-analytics-history-route.test.ts"
+    - claim: "the production analytics route calls the historical producer and emits top-level timeSeries"
+      proof: "grep: buildAnalyticsTimeSeries( in src/lib/analytics-route.ts"
+    - claim: "pre-collection, partial, missing, unreadable, and not-collected intervals remain explicit gaps"
+      proof: "grep: W1-T3808 criterion 3 in test/console-analytics-history-route.test.ts"
+    - claim: "queue and provider historical trends remain explicitly not-collected and no raw rows or task identifiers escape"
+      proof: "grep: W1-T3808 criterion 4 in test/console-analytics-history-route.test.ts"

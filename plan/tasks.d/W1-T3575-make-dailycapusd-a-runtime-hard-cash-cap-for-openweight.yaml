@@ -14,7 +14,7 @@
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-session#open-weight-resequence-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3546", "W1-T3569"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-resequence-1789389121907

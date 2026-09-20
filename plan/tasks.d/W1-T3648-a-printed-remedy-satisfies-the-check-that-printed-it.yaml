@@ -10,7 +10,7 @@
   files: [scripts/task-id-existence-check.mjs, test/a-printed-remedy-satisfies-the-check-that-printed-it.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3640"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON PR #5703, and it cost a wrong fix that looked right.

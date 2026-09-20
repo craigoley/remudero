@@ -12,7 +12,7 @@
   files: [src/lib/skill-workshop.ts, src/run-task.ts, test/skill-workshop.test.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts]
   origin: "operator-request#skill-workshop-lifecycle-2026-09-11"
   plan_refs: ["W1-T2766", "W1-T3101", "W1-T2959"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main dc970e6e. The workshop already requires at least two supporting merged

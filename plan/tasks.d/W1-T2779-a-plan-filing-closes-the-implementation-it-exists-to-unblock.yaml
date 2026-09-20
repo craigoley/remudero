@@ -16,7 +16,7 @@
     - test/sweep.test.ts
   origin: "operator-session#plan-filing-closed-implementations-2026-09-03"
   plan_refs: ["W1-T205", "W1-T384", "W1-T920", "W1-T932", "W1-T2384", "W1-T2692"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on 2026-09-03: implementation PR #3818 (W1-T2777) failed Standing Rule 15 because

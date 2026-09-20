@@ -1,0 +1,105 @@
+- id: W1-T3755
+  title: "THE DAEMON'S RUNNING HEAD LIVES IN A ROW COMPACTION EXPIRES, SO FOR ALL BUT THE FIRST MINUTES OF A DAEMON'S LIFE THE DEPLOYER CANNOT TELL WHETHER IT IS STALE — and the operator-facing warning it degrades to names a real-looking sha and prescribes a command that cannot clear it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: "measured 2026-09-18 on the live fleet while auditing a persistent STALE line that turned out to be a missing input, not a stale daemon"
+  plan_refs: [W1-T3245, W1-T244, W1-T3756]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3755-running-head-expires
+  rationale: |
+    MEASURED 2026-09-18 on the live fleet. Ground truth first: the daemon process started at
+    00:49 today and its checkout is ONE commit behind origin/main. It is healthy.
+
+    What the fleet reports about it:
+
+      rmd status   daemon : running — boot 8d7h ago (3b8a43554f7f)
+                   head vs origin/main : STALE (3b8a43554f7f vs 326f8cda4e90)
+                   next action: `rmd deploy` to fast-forward + restart at the next idle gap
+
+      deploy.skip  "daemon running head not recorded (install HEAD == origin/main) — mount
+                    staleness cannot be ruled out, and the recycle tick does not restart on it
+                    either way (W1-T3245)"
+
+    And the input both depend on, executed directly against the live ledger:
+
+      readLatestBootSha('state/ledger.ndjson')  -> undefined
+      readLastGoodBootSha('state/ledger.ndjson') -> undefined
+
+    (1) THE PRODUCER'S LIFETIME IS SHORTER THAN THE CONSUMER'S NEED. `daemon.boot` carries the
+        `head_sha` both readers want, and compaction retains it only inside
+        `HEALTH_STEP_RETENTION_WINDOW_MS` (lib/ledger.ts). That window's own comment says what it
+        was sized for: "Comfortably larger than any real health window here (deployer.ts's own
+        default is 45s), so `assessBootHealth` never loses a line still inside its window."
+        `readLatestBootSha` is a SECOND consumer, and its need lasts as long as the PROCESS —
+        hours or days. Nothing reconciled the two when the second was added.
+
+        Traced through today's rotations: the boot wrote its row at 00:49:39; the 00:52 and 01:52
+        snapshots both carry it; the 04:28 snapshot does not; the live ledger — which spans
+        2026-09-11T02:24 to now — holds ZERO `daemon.boot` rows. The row expired while the process
+        it describes was still running, and is still running now.
+
+    (2) THE DEGRADATION IS DOCUMENTED FOR ONE READER AND NOT THE OTHER. `readLastGoodBootSha`
+        says ageing out is safe, and it is: "callers MUST fall back to `installHead()`, never treat
+        that as 'roll back to nothing'". `readLatestBootSha` carries no such note and its consumer
+        does not fall back — `decideDeployTrigger` reads `undefined` as fail-eager STALE (its own
+        comment, 2026-09-16), so the deployer parks in "cannot be ruled out" indefinitely.
+
+    (3) A WARNING ITS OWN REMEDY CANNOT CLEAR IS WORSE THAN SILENCE. `rmd deploy` is what the
+        board prescribes, and it skips for exactly the same missing record — the operator is sent
+        to the one command guaranteed not to help. Measured cost: reading this board twice in one
+        session, I twice concluded the fleet was running 8-day-old code. It was not. The line is
+        convincing because `3b8a43554f7f` IS a real commit (the image build sha), so a missing
+        input renders as a precise finding rather than as a gap.
+  design: |
+    SIBLING, NOT DUPLICATE — W1-T3756. That task reads the same incident one layer up:
+    `daemonFreshnessFromService` collapses four answers into one silent false, so the daemon
+    cannot say WHY it did not restart. This one is why the DEPLOYER cannot tell whether it
+    should. Their `files:` do not intersect (self-sync.ts/daemon.ts there, deployer.ts here), so
+    the duplicate-surface check will not pair them — hence this reference. A builder taking
+    either should read the other first: fixing the reporting while the record still expires
+    yields a daemon that explains, precisely, that it does not know.
+
+    (i) THE RUNNING HEAD IS PROCESS-SCOPED STATE, NOT A HEALTH EVENT. Give it a lifetime that
+        matches the process by keeping the NEWEST `daemon.boot` unconditionally — exactly one
+        row, so retention stays bounded and a restart storm still cannot grow it.
+
+        THIS IS lib/ledger.ts's PASS 2, not the deployer's read. Traced 2026-09-18: the rotated
+        snapshots lose the row too (present at 00:52 and 01:52, absent by 04:28), so no reader-side
+        fallback can recover it — the row must survive compaction or it is gone everywhere. PASS
+        2's own comment says what the window is for, and one exempt row keeps it: a storm's boot
+        spam still collapses to a single line.
+
+    THE BOARD HALF IS W1-T3759. Rendering an absent running head as `unknown`, and not
+    prescribing a deploy that would skip, is a separate concern in a separate file and was
+    split out under Rule 19. It stays true however this task is fixed.
+
+    DO NOT WIDEN `HEALTH_STEP_RETENTION_WINDOW_MS`. It is the change that looks easiest and it
+    re-couples two consumers with different needs — the next consumer with a longer need breaks it
+    again, silently, exactly as this one did.
+
+    NOT IN SCOPE: why the status board currently surfaces an 8-day-old boot sha rather than
+    nothing. That path was not traced to its source here, and (ii) must hold regardless of the
+    answer — it is about what a missing input renders as, not about where this particular
+    substitute came from.
+  acceptance:
+    - claim: "the newest boot row survives the health-step retention window, so the running head stays readable for the life of the process"
+      proof: "grep: outlives the health window in src/lib/ledger.ts"
+    - claim: "a restart storm still cannot bloat the core — exactly one boot row is exempt, never all of them"
+      proof: "grep: exactly one boot row in src/lib/ledger.ts"
+    - claim: "the retention window itself is unchanged and older boot rows still age out"
+      proof: "grep: HEALTH_STEP_RETENTION_WINDOW_MS is not the seam in src/lib/ledger.ts"
+  falsifier: |
+    Widen `HEALTH_STEP_RETENTION_WINDOW_MS` and the third assertion goes red while the first
+    would pass on it — which is exactly why the third exists. Exempt EVERY `daemon.boot` rather
+    than the newest and the second goes red: that restores the boot-spam bloat PASS 2 was
+    written to stop, which is the one way this fix could be worse than the bug. Exempt the
+    OLDEST rather than the newest and the first goes red, since the running head would name a
+    process that has since been replaced.

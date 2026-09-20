@@ -16,7 +16,7 @@
     - test/sweep.test.ts
   origin: "operator-session#green-review-queue-still-serial-2026-09-03"
   plan_refs: ["W1-T526", "W1-T1049", "W1-T2439", "W1-T2583", "W1-T2584", "W1-T2593", "W1-T2771"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED LIVE on the Azure fleet, not inferred from a board snapshot. PR #3857 posted

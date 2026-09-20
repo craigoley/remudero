@@ -13,7 +13,7 @@
     - test/feedback-landing-union-writer.test.ts
   origin: architect
   plan_refs: ["W1-T3559", "W1-T530", "W1-T191", "W1-T2749", "W1-T3532", "§7B"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL FOUR FACTS BELOW WERE READ IN `src/lib/feedback-landing.ts` AT THIS COMMIT.

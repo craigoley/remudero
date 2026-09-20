@@ -10,7 +10,7 @@
     - src/lib/ci-parity.ts
     - test/a-required-check-outside-ci-yml-has-a-local-route.test.ts
   origin: "sweep-forensics#2026-09-10-queue-day"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "the parity surface enumerates PR-triggering workflows beyond ci.yml, so a check living in its own file is not invisible to the local gate"

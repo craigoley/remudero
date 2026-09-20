@@ -11,7 +11,7 @@
   files: [src/lib/review.ts, test/review-engine-revision-rearm.test.ts]
   origin: "operator-session#console-pr-12-review-replay-2026-09-14"
   plan_refs: ["W1-T3564", "W1-T2872", "W1-T2722"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Core PR #5542 / W1-T3564 added the private console's tests/ Vitest proof profile. In an

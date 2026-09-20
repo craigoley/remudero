@@ -13,7 +13,7 @@
     - src/lib/worker-provider.ts
   origin: "operator-session#squeeze-readiness-2026-09-16"
   plan_refs: ["W1-T258", "W1-T3692", "W1-T3696", "W1-T2859", "W1-T3097", "W1-T3546", "W1-T3558", "W1-T3575", "W1-T3607"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED ON origin/main 2026-09-16. `grep -rn overflow src/lib/worker-provider.ts

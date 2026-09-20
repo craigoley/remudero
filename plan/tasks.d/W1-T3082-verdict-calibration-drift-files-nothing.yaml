@@ -11,7 +11,7 @@
   files: [src/lib/verdict-calibration.ts, src/lib/measurement-cadence.ts, plan/policy.yaml, test/a-calibration-drift-reaches-the-inbox.test.ts]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T424", "W1-T418", "W1-T437", "P48"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MASTER-PLAN §Self-improvement, "Verdict calibration": "a periodic job compares them against

@@ -188,6 +188,7 @@ test("acceptance 3: assessRisk falls back to a fail-closed HIGH verdict when the
   assert.equal(v.confidence, 0);
   assert.match(v.reasons.join(" "), /judge unavailable/i);
   assert.match(v.reasons.join(" "), /spawn timed out after 400 turns/);
+  assert.equal(v.availability, "unavailable");
 });
 
 test("acceptance 3: runRiskJudge on judge-unavailable ESCALATES (never proceeds) and calls deps.escalate", async () => {
@@ -207,6 +208,32 @@ test("acceptance 3: runRiskJudge on judge-unavailable ESCALATES (never proceeds)
   assert.notEqual(result.action.kind, "proceed");
   assert.equal(calls.escalate, 1);
   assert.equal(result.escalationUrl, "https://github.com/owner/repo/issues/42");
+});
+
+test("an explicitly autonomous caller retains deterministic flow when the judge is unavailable", async () => {
+  const calls = { escalate: 0 };
+  const log: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const result = await runRiskJudge(
+    baseInput(),
+    {
+      judge: async () => {
+        throw new Error("no snapshot");
+      },
+      escalate: async () => {
+        calls.escalate++;
+        return "https://github.com/owner/repo/issues/43";
+      },
+      log: (step, extra) => log.push({ step, extra }),
+    },
+    { judgeUnavailableAction: "proceed" },
+  );
+  assert.equal(result.verdict.availability, "unavailable");
+  assert.equal(result.action.kind, "proceed");
+  assert.equal(calls.escalate, 0);
+  assert.equal(result.escalationUrl, undefined);
+  const decision = log.find((entry) => entry.step === "risk_judge.decision");
+  assert.equal(decision?.extra?.availability, "unavailable");
+  assert.equal(decision?.extra?.action, "proceed");
 });
 
 // ── acceptance 4: verdict + reasons + confidence ledgered VERBATIM per decision ──

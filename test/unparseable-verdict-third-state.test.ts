@@ -7,6 +7,7 @@ import {
   parseRiskJudgeResponse,
   planRiskJudgeAction,
   realRiskJudge,
+  runRiskJudge,
   RISK_JUDGE_MAX_ATTEMPTS,
   type RiskJudgeInput,
   type RiskJudgeVerdict,
@@ -196,6 +197,26 @@ test("risk-judge acceptance 6 (W1-T2212 design iv): the malformed-response verdi
   const verdict = await judge(baseInput());
   assert.equal(verdict.confidence, 0);
   assert.match(verdict.reasons.join(" "), /MALFORMED RESPONSE/);
+});
+
+test("the autonomous candidate policy can retain deterministic flow after bounded malformed-output retries", async () => {
+  const spawn = (async () => fakeWorkerResult(UNPARSEABLE_TEXT)) as typeof spawnWorker;
+  const judge = realRiskJudge({ mount: MOUNT, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  let escalated = false;
+  const result = await runRiskJudge(
+    baseInput(),
+    {
+      judge,
+      escalate: async () => {
+        escalated = true;
+        return "https://github.com/owner/repo/issues/44";
+      },
+    },
+    { judgeUnavailableAction: "proceed" },
+  );
+  assert.equal(result.verdict.availability, "unavailable");
+  assert.equal(result.action.kind, "proceed");
+  assert.equal(escalated, false);
 });
 
 test("risk-judge acceptance 6: parseRiskJudgeResponse alone never fabricates a 'high, confidence 1' verdict for unparseable text (the issue #2696 shape)", () => {

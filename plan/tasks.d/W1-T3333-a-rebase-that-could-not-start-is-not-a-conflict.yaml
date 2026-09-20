@@ -12,7 +12,7 @@
     - test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts
   origin: "operator-session#4946-real-git-rebase-2026-09-10"
   plan_refs: ["W1-T2999", "W1-T186"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-10 while diagnosing #4946. `rebaseDirtyFleetBranchViaGit` wraps
