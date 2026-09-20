@@ -1,0 +1,83 @@
+- id: W1-T3839
+  title: "THE CENSUS PRINTS `BLOCKED` AND EXITS 0 — the inherited-crossing downgrade is right for a PR lane and makes every run against a main checkout a verdict whose headline and exit code say opposite things"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 10.00
+  files: [scripts/expiring-fixture-census.mjs]
+  origin: "2026-09-20 -- a session verifying main's health after #6213 read this output as green and had to be corrected by re-running under CENSUS_MAIN_BRANCH_RUN"
+  plan_refs: ["W1-T3655", "W1-T3388"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS TASK DOES NOT ARGUE WITH W1-T3655. That task made an inherited crossing reported but not
+    charged to a PR that did not plant it, and added the push-to-main lane
+    (`CENSUS_MAIN_BRANCH_RUN`) so a stamp sitting on main is caught by the run that owns it. Both
+    are correct and neither is in question. CI is not wrong here. The REPORT is.
+
+    MEASURED 2026-09-20 on origin/main, twice, in the same session:
+
+      node scripts/expiring-fixture-census.mjs            -> prints "BLOCKED -- 6 fixture(s) CROSS
+                                                             their threshold", exits 0
+      CENSUS_MAIN_BRANCH_RUN=1 ... same script            -> prints the same headline, exits 1
+
+    Same tree, same six stamps, opposite exit codes, and in the first run the headline and the
+    exit code state opposite conclusions about the same fact. Every crossing line carried
+    `[inherited from the base -- NOT this diff]`, which is accurate: on a main checkout the base
+    IS the tree, so `readBaseFile` attributes all six to the base and `introduced` is empty.
+
+    WHY IT MATTERS DESPITE CI BEING RIGHT. The script is the thing a human or an agent runs to ask
+    "is main healthy". It answers that question with the word BLOCKED and a success exit, and the
+    two readings are both defensible, so the reader picks one. In this session the exit code was
+    believed and main was nearly reported healthy while six stamps were crossing; the error was
+    caught only by re-running under the env var on a hunch. A gate that requires an undocumented
+    environment variable to make its headline agree with its exit status is not reporting, it is a
+    quiz.
+
+    THE FIX IS IN THE WORDING AND THE CODE PATH THAT CHOOSES IT, NOT IN THE THRESHOLD. Nothing
+    about which crossings block should change. What must change is that a run charging nothing
+    must not headline BLOCKED, and a run that headlines BLOCKED must not exit 0. Either half alone
+    fixes the contradiction; doing both makes the output self-describing at a glance.
+  design: |
+    (i) THE HEADLINE STATES WHAT THIS RUN DECIDED. When every crossing is inherited and nothing is
+        charged, the first line says so -- that the run is clear, that N inherited crossings are
+        reported below, and which lane owns them -- instead of the word BLOCKED.
+
+    (ii) A `BLOCKED` HEADLINE AND A ZERO EXIT MUST BE UNREACHABLE TOGETHER. Assert the invariant in
+         the suite, not just at the one call site, so a later refactor cannot reintroduce it.
+
+    (iii) THE INHERITED LINES STAY VISIBLE. W1-T3655 made them reported rather than hidden and that
+          is right; this must not turn them into silence. Reported-and-not-charged is the outcome,
+          and the headline should say exactly that.
+
+    (iv) DO NOT CHANGE WHAT BLOCKS. `introduced`, `populationDrop` and the `CENSUS_MAIN_BRANCH_RUN`
+         lane keep their exact current behaviour. This is a reporting change.
+
+    NOT IN SCOPE: AGED_FIELDS completeness, which is W1-T3838's.
+  acceptance:
+    - claim: "a report whose headline says BLOCKED can never accompany a zero exit"
+      proof: "unit test: W1-T3839: a BLOCKED headline never accompanies a zero exit"
+    - claim: "a run whose crossings are all inherited reports them and says it charged nothing, rather than saying BLOCKED"
+      proof: "unit test: W1-T3839: an all-inherited run reports its crossings without a BLOCKED headline"
+    - claim: "which crossings block is unchanged, including the population drop and the main-branch lane"
+      proof: "unit test: W1-T3839: what blocks is unchanged by the wording"
+  falsifier: |
+    Run the census on a tree where every crossing is inherited: the headline must not read BLOCKED
+    and the exit must stay 0. Introduce one crossing in the diff itself: the headline must read
+    BLOCKED and the exit must be 1. Restore the original formatter and the first assertion goes red
+    -- that is the defect, reproduced. Change any crossing's blocking status and the third goes red,
+    which (iv) forbids.
+  note: |
+    RESERVATION: `rmd next-task-id --reserve` could NOT claim this id from this session; every push
+    to this remote returns HTTP 403 at the `git-receive-pack` POST, so nothing was minted. W1-T3839
+    is the id after the one `rmd` named as next, and both scope-time checks read clear for it at
+    filing time: no `run-W1-T3839-*` head on origin, no `refs/rmd-id/W1-T3839`, no shard on main,
+    and no merged PR carrying its trailer. AN OPERATOR MUST CONFIRM THE CLAIM before a build
+    starts; the loser of a race renumbers.
+
+    FILES NOTE (W1-T3730): `files:` deliberately omits the test file the build will add, for the
+    same `proof-unit-test-unresolvable` reason recorded on W1-T3838. The build adds it and lists it
+    then.

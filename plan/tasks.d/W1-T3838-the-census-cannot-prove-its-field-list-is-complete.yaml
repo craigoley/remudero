@@ -1,0 +1,96 @@
+- id: W1-T3838
+  title: "THE CENSUS PROVES EVERY FIELD IT LISTS IS STILL AGED AND NOTHING PROVES THE LIST IS COMPLETE — AGED_FIELDS carries exactly one row, so an expiry-shaped fixture stamp detonates with no notice from the gate whose entire purpose is seven days of it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [scripts/expiring-fixture-census.mjs]
+  origin: "fleet-incident#operator-agent-expiresat-2026-09-20"
+  plan_refs: ["W1-T3334", "W1-T3388", "W1-T3655", "W1-T3270"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-20, and the census gave zero warning for a fixture that had been scheduled to
+    detonate for days.
+
+    THE INCIDENT. test/operator-agent.test.ts built its fixture with
+    `expiresAt: "2026-09-20T10:00:00.000Z"`. `buildOperatorAgentHistory` marks a proposal `expired`
+    on `Date.parse(expiresAt) <= now`, with `now` defaulting to the real clock. At 10:00Z that day
+    the two cases which inject no clock began receiving the expired verdict where they assert the
+    live one. `main` reddened, and PRs #6205, #6208 and #6213 all carried the same failure at once.
+    It was fixed under #6215 by deriving the stamp from `Date.now()`.
+
+    WHY THE CENSUS SAID NOTHING, PRECISELY. `AGED_FIELDS` has exactly one row, `lastActivityAt`.
+    `expiresAt` is not in it, so `censusExpiringFixtures` never looked at the stamp. The census
+    measured 95 stamps that morning and reported none crossing, which was true of the field it
+    reads and useless about the one that fired.
+
+    THE STRUCTURAL POINT, WHICH IS NOT "ADD A ROW". `assertFieldsStillAged` already pins each row
+    against its own source: rename the field or drop the comparison and the census fails rather
+    than quietly covering nothing. That guard runs in exactly one direction. It proves
+    LISTED => STILL REAL. Nothing anywhere proves REAL => LISTED. So the census is protected
+    against its table going stale and entirely unprotected against its table being incomplete, and
+    incompleteness is the failure that actually happened. Adding `expiresAt` as a second row fixes
+    today's bomb and leaves the third field, whenever it is written, exactly as invisible.
+
+    WHAT THE BUILD MUST DO. Derive the covered set instead of trusting it: scan `src` for fields
+    compared against the clock to reach a time-based verdict -- the `Date.parse(x.field)` and
+    `Date.now()` comparison shapes `assertFieldsStillAged` already knows how to recognise -- and
+    refuse when a discovered field is absent from `AGED_FIELDS` and not explicitly waived on a
+    reviewed line. The census then fails closed when the codebase grows a clock comparison nobody
+    taught it about, which is the only version of this gate that cannot silently cover nothing.
+
+    A WAIVER LINE IS REQUIRED, NOT OPTIONAL. A discovered field may legitimately need no census
+    row, and without a reviewed escape the first false positive gets the whole check deleted. The
+    waiver must carry its reason on the line, exactly as the existing per-fixture exempt markers
+    do.
+
+    SIZING NOTE. Ship the discovery as a REFUSAL only once its population is observed. A bound
+    that fires on a healthy condition is this repo's recurring defect (CLAUDE.md, investigation
+    discipline): run the discovery across `src` first, read what it finds, and let that decide
+    whether it lands refusing or advisory. If the sweep surfaces a large tail of legitimate
+    non-census fields, land it advisory and ratchet.
+  design: |
+    (i) DISCOVERY, NOT ENUMERATION. The covered set is computed from `src`, never hand-listed. A
+        hand-list is the thing that failed.
+
+    (ii) FAIL CLOSED ON AN UNKNOWN FIELD. A clock-aged field that is neither in `AGED_FIELDS` nor
+         waived is a census failure naming the field and the file that ages it.
+
+    (iii) THE WAIVER CARRIES ITS REASON ON THE LINE. Same shape as the existing fixture exempt
+          markers, so one convention covers both.
+
+    (iv) DO NOT WEAKEN THE EXISTING DIRECTION. `assertFieldsStillAged` stays exactly as it is;
+         this adds the inverse, it does not replace it.
+
+    NOT IN SCOPE: the inherited-crossing downgrade and the report's exit-code disagreement, which
+    are W1-T3839's. This task must not be able to pass by changing how a crossing is reported.
+  acceptance:
+    - claim: "a field aged against the clock in src but absent from AGED_FIELDS fails the census instead of being silently uncovered"
+      proof: "unit test: W1-T3838: an unlisted clock-aged field fails the census"
+    - claim: "the failure names the uncovered field and the source that ages it"
+      proof: "unit test: W1-T3838: the completeness failure names the field and its source"
+    - claim: "a discovered field waived with a reason on the line passes without weakening the unlisted-field refusal"
+      proof: "unit test: W1-T3838: a waived field passes and an unwaived one still fails"
+  falsifier: |
+    Restore the operator-agent fixture's fixed `expiresAt` literal against a clock set past it: the
+    completeness check must name `expiresAt` as an uncovered clock-aged field. Delete the discovery
+    and that assertion goes green again while the bomb is live -- which is the whole defect. Remove
+    the waiver path and a legitimate non-census field reddens an unrelated PR, which (iii) forbids.
+    Weaken `assertFieldsStillAged` and its own existing suite must still refuse.
+  note: |
+    RESERVATION: `rmd next-task-id --reserve` could NOT claim this id from this session. The atomic
+    claim pushes `refs/rmd-id/<id>`, and every push to this remote returns HTTP 403 at the
+    `git-receive-pack` POST from here, so nothing was minted. The id is the one `rmd` itself named
+    as next, twice, and both scope-time checks read clear for it at filing time: no
+    `run-W1-T3838-*` head on origin, no `refs/rmd-id/W1-T3838`, no shard on main, and no merged PR
+    carrying its trailer. AN OPERATOR MUST CONFIRM THE CLAIM before a build starts; if the id was
+    taken in the meantime, this shard renumbers, per the loser-renumbers rule.
+
+    FILES NOTE (W1-T3730): `files:` deliberately omits the test file the build will add. A `test/`
+    path here reads to `lint-plan`'s `proof-unit-test-unresolvable` check as "this diff ships the
+    suite", which then refuses every forward-referencing proof title above. The build MUST add the
+    test file named in those proofs and add it to `files:` at that point.
