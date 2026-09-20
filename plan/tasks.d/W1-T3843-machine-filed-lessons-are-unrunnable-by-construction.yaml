@@ -5,9 +5,10 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 25.00
-  files: [src/lib/plan.ts]
+  files: [src/lib/plan.ts, src/lib/task-linter.ts, src/lib/relint.ts, src/run-task.ts, test/machine-filed-task-admission.test.ts, scripts/test-tier-manifest.json]
   origin: "2026-09-20 census of plan/tasks.d during a five-PR unblocking session"
   plan_refs: ["W1-T3206", "W1-T3748"]
   status: queued
@@ -76,11 +77,11 @@
     33 records.
   acceptance:
     - claim: "filing a machine-authored task that no dispatcher can select under the current releasedIds is refused"
-      proof: "unit test: W1-T3843: an unselectable machine-filed task is refused at filing"
+      proof: "unit test: test/machine-filed-task-admission.test.ts"
     - claim: "a machine-authored task declaring a files: path that exists in no commit is refused by the same check"
-      proof: "unit test: W1-T3843: a machine-filed task naming a nonexistent file is refused"
+      proof: "unit test: test/machine-filed-task-admission.test.ts"
     - claim: "a human-authored verify:human task is unaffected, so the W1-T3206 review path still works"
-      proof: "unit test: W1-T3843: a human-authored verify:human task still files"
+      proof: "unit test: test/machine-filed-task-admission.test.ts"
   falsifier: |
     Re-file any of the 33 existing ci-learning records as they stand: the new check must refuse
     it, naming both that no dispatcher can select it and that learnings/ci-gate-lessons.yaml does
