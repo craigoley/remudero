@@ -139,6 +139,42 @@ autonomous-PR tools like Composio AO; control-plane tools like MartinLoop (budge
 
 COMMODITY BOUNDARY (2026-07-16): parallel-worktree session management is now table stakes — dozens of OSS tools plus Claude Code's NATIVE managed worktrees, workflow primitives, and agent teams [research: cc-native-worktrees-2026, cc-workflows-2026]. The moat is items 1–6 plus the receipts thesis (WS-12), never the concurrency mechanism.
 
+## Operator product direction — delegation, not chat
+
+Muse is useful inspiration for the interaction grammar, not a product specification for Remudero.
+The Remudero version is: **Plan → Work → Evidence → Needs me**. A workstream is derived from the
+existing git plan, dispatcher frontier, ledger, trace, and receipts; it is not a second goal
+database. Background work may continue while the operator is away, but the console reports only
+durable state changes, blocked decisions, and authoritative artifacts — never implied activity or
+an optimistic success.
+
+The operator-facing contract should make five questions cheap to answer: what changed, what is
+running, what is next, what is waiting on me, and which evidence supports this card. `Now`,
+`Needs me`, `Plan`, `Activity`, and `Evidence` are projections of the same source-labeled data,
+not separate truths. Every projection preserves verified/stale/unavailable/unknown/not-collected,
+and every mutation names scope and consequence, revalidates at click time, and ends in a durable
+receipt. See W1-T3840 for the bounded public contract that lets a private console compose these
+surfaces without copying raw prompts, transcripts, credentials, or account identifiers.
+
+Borrow the trust affordances — explicit permissions, inspectable activity, meaningful-change
+thresholds, editable scoped settings, and approval cards — while refusing the consumer-agent
+assumptions: no hidden memory, no personal-account identity layer, no chat transcript as system
+of record, no silent proactive action, and no browser-held host credential. Research source:
+`research:muse-ux-2026-09-20`.
+
+## Self-improvement direction — experiments, not vibes
+
+The harness should improve itself through guarded experiments, not through a model's confidence or
+an accepted recommendation being mistaken for success. Every proposed change needs a falsifiable
+hypothesis, bounded intervention, source-backed baseline, denominator, observation window, and
+rollback path. Acceptance is a human decision; success is a later measured outcome. Missing,
+stale, mixed, or below-floor evidence is `unmeasurable`, never a favorable zero.
+
+The operator also needs one conservative incident identity across activity, inbox, evidence, and
+regression views. Grouping reduces duplicate cards but never deletes ledger evidence. Resolution is
+tied to a shipped artifact, regression requires newer evidence, and snooze ends on a named
+condition or new activity. W1-T3841 and W1-T3842 make these rules durable and source-labeled.
+
 ## NET STATE
 
 ### CAPABILITY SNAPSHOT

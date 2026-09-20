@@ -1,0 +1,59 @@
+- id: W1-T3842
+  title: "REPEATED FAILURE HAS NO PRODUCT-LEVEL IDENTITY — add conservative incident grouping, release-aware regression, and condition-based snooze without hiding individual evidence"
+  repo: remudero
+  depends_on: ["W1-T3840"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  risk: high
+  band_meaning: span
+  origin: "research:issue-triage-and-regression-2026-09-20"
+  plan_refs: ["W1-T2558", "W1-T3179", "W1-T3840", "§7B"]
+  files: [src/lib/panel-graph.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED in the current plan: local dedup arms already exist for cost anomalies, escalations,
+    reviews, and proposals, but they answer transport-specific questions. W1-T2558 records the
+    cost-anomaly sentinel repeating the same finding, and W1-T3179 records a head-independent
+    escalation re-asking the same question after every new commit. Those fixes do not give the
+    operator one stable incident identity across activity, inbox, evidence, and regression views.
+
+    Sentry's grouping model is useful because it reduces noise while erring toward separation when
+    the cause is ambiguous, and its release-aware regression model reopens a resolved issue only
+    when a genuinely newer event arrives. Linear's triage/snooze model is useful because snoozing
+    ends on a chosen condition or new activity, not because the system silently forgets the issue.
+    Remudero needs the same product semantics, with every individual ledger event retained.
+
+    THIS IS A FOLLOW-UP TO W1-T3840, NOT A SECOND ACTIVITY FEED. W1-T3840 owns the bounded envelope
+    and its source/freshness contract; this task owns only the stable incident key and lifecycle
+    transitions that let several observations render as one honest card.
+  design: |
+    Add a versioned incident identity to the W1-T3840 activity projection. The identity is derived
+    only from bounded semantic fields available in the source: repository/instance, failure class,
+    task or operation scope, source revision/release, and the named causal discriminator. If a
+    discriminator is absent or ambiguous, emit an ungroupable incident rather than guessing.
+
+    Project lifecycle states `new`, `active`, `resolved`, `regressed`, `snoozed`, and
+    `unmeasurable`. A resolution references the shipped commit/PR/receipt that made the claim. A
+    regression requires a newer observed event than that resolution; replaying an old event does
+    not reopen it. Snooze stores the condition or new-activity trigger and makes the item visible
+    again when that trigger fires. Grouping suppresses duplicate cards only; it never deletes or
+    rewrites the underlying evidence rows.
+  acceptance:
+    - claim: "identical repeated observations share one incident identity while every underlying observation remains inspectable"
+      proof: "unit test: repeated incident observations group without losing evidence rows"
+    - claim: "ambiguous or materially different causes stay separate rather than being merged by a fuzzy title"
+      proof: "unit test: ambiguous incident identity splits instead of guessing a group"
+    - claim: "a resolved incident regresses only on a newer source event or release, never when an old event is replayed"
+      proof: "unit test: incident regression requires a newer observed event than the resolution"
+    - claim: "snoozing stores a condition or new-activity trigger and reopens on that trigger without deleting the incident"
+      proof: "unit test: incident snooze reopens on new activity and preserves the record"
+    - claim: "missing source fields remain explicitly ungroupable and never become a confident healthy or duplicate-free state"
+      proof: "unit test: incident identity reports ungroupable when its discriminator is unavailable"
+  falsifier: |
+    Delete one grouped observation, merge two causes solely because their titles match, reopen an
+    incident from an old event, snooze it forever without a trigger, or assign a group when the
+    causal discriminator is unavailable. The corresponding criterion must fail.
+  note: "This is product-level incident identity, not a replacement for existing transport deduplication. The operator sees one card; the ledger keeps every observation."
