@@ -1233,7 +1233,10 @@ test("ghIssueGateway.closeWithComment: closes the issue with the citation commen
       return "";
     },
   });
-  gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574");
+  assert.equal(
+    gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574"),
+    "commented",
+  );
   assert.deepEqual(calls, [
     ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero", "--comment", "resolved by #574"],
   ]);
@@ -1250,7 +1253,10 @@ test("ghIssueGateway.closeWithComment: retries without a comment at GitHub's com
       return "";
     },
   });
-  gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574");
+  assert.equal(
+    gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574"),
+    "comment_cap",
+  );
   assert.deepEqual(calls, [
     ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero", "--comment", "resolved by #574"],
     ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero"],
