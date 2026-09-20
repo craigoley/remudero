@@ -513,6 +513,7 @@
     "test/config-schema.test.ts": 201,
     "test/config.test.ts": 221,
     "test/confirm-nonce-expiry.test.ts": 329,
+    "test/console-analytics-breakdown-route.test.ts": 0,
     "test/console-analytics-contract-gap.test.ts": 0,
     "test/console-analytics-history-route.test.ts": 0,
     "test/console-analytics-live-route.test.ts": 0,
