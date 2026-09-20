@@ -1,0 +1,55 @@
+- id: W1-T3897
+  title: "MAKE HUMAN HANDOFF OPERABLE — ownership, claim, escalation age, response deadline, and closure receipts"
+  repo: remudero
+  depends_on: [W1-T3879, W1-T3900, W1-T3883]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Self-improvement", "W1-T3879", "W1-T3900", "W1-T3883"]
+  files:
+    - src/lib/human-handoff.ts
+    - src/lib/operator-agent.ts
+    - src/lib/serve.ts
+    - src/lib/ledger.ts
+    - openapi/daemon.yaml
+    - test/human-handoff-ownership.test.ts
+    - test/human-handoff-claim.test.ts
+    - test/human-handoff-escalation.test.ts
+    - test/human-handoff-expiry.test.ts
+    - test/human-handoff-closure.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Proactive follow-up and agent handoff can safely ask a human, but a Needs me item without an owner,
+    age, deadline, or closure rule becomes a second kind of dropped work. Instinct's continuity promise
+    only helps if the human boundary itself is supervised.
+  design: |
+    Add `human-handoff-v1` with reason, source receipt, required decision, principal and repository
+    scope, owner or unclaimed state, claim lease, priority, response deadline, escalation policy, quiet
+    hours, current freshness, and closure outcome. Claims are idempotent and expire safely. An item may
+    be reassigned or escalated only through a linked receipt; no escalation grants the next person more
+    authority than the original action profile.
+
+    Closure distinguishes answered, action accepted, action refused, expired, superseded, and unavailable.
+    A handoff remains open when delivery occurred but no decision or authoritative outcome exists.
+  acceptance:
+    - claim: "a handoff records why a human is needed, source receipt, scope, owner state, priority, deadline, and freshness"
+      proof: "unit test: test/human-handoff-ownership.test.ts"
+    - claim: "claim and reassign operations are idempotent, scoped, and receipt-backed"
+      proof: "unit test: test/human-handoff-claim.test.ts"
+    - claim: "unclaimed, aging, quiet-hour, escalated, expired, and unavailable states remain distinct"
+      proof: "unit test: test/human-handoff-escalation.test.ts"
+    - claim: "an expired claim cannot silently authorize work and is returned to a bounded handoff state"
+      proof: "unit test: test/human-handoff-expiry.test.ts"
+    - claim: "closure records the human decision and authoritative outcome rather than treating delivery as completion"
+      proof: "unit test: test/human-handoff-closure.test.ts"
+    - claim: "the follow-up path creates a human-handoff record for work that cannot proceed autonomously"
+      proof: "grep: createHumanHandoff( in src/lib/operator-agent.ts"
+  falsifier: |
+    Let a handoff close on delivery, let a claim live forever, escalate into wider authority, lose the
+    source receipt, or hide an overdue unclaimed item. The corresponding proof must fail.
+  note: "This is the durable core queue contract; console API and UI tasks own authenticated composition only."

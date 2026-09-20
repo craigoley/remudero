@@ -17,6 +17,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+const GIT_UNTRACKED_FILES_ALL = "--untracked-files=all";
 import {
   architectModel,
   configPath as instanceConfigPath,
@@ -5412,7 +5413,7 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", "--untracked-files=all"], {
+    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -8358,6 +8359,8 @@ export async function runFixRung(opts: {
   proofDiscrimination?: ProofDiscriminationEvidence;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
+    harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
     /**
      * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
      * for, or the bare verdict every pre-existing stub already returns. Read it through
@@ -9855,7 +9858,8 @@ export async function runFixRung(opts: {
     // in `if (fixHarnessOwnsGit)` would only duplicate that precondition — and would put eight
     // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
     // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
-    harnessCommitForShellLessWorker({
+    let harnessCommitRefusalReason: string | undefined;
+    const harnessCommitCount = (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
       harnessOwnsGit: fixHarnessOwnsGit,
       commitCount: 0,
       report: workerTranscript(fixResult),
@@ -9863,7 +9867,11 @@ export async function runFixRung(opts: {
       declaredPaths: opts.task.files ?? [],
       log: deps.log,
       say: deps.say,
+      onRefusal: (reason) => {
+        harnessCommitRefusalReason = reason;
+      },
     });
+    const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
@@ -9953,11 +9961,21 @@ export async function runFixRung(opts: {
       );
     }
     sessionToResume = fixResult.sessionId;
+    if (harnessCommitRefused) {
+      deps.log("fix.commit_refused", {
+        strike: strikes,
+        round,
+        mode: fixMode,
+        head_sha: priorHeadSha,
+        reason: harnessCommitRefusalReason,
+      });
+    }
     deps.log("fix.done", {
       strike: strikes,
       round,
       session_id: fixResult.sessionId,
-      subtype: fixResult.subtype,
+      subtype: harnessCommitRefused ? "commit_refused" : fixResult.subtype,
+      ...(harnessCommitRefused ? { worker_subtype: fixResult.subtype } : {}),
       cost_usd: fixResult.costUsd,
       billing_mode: billingMode(fixResult.childEnvKeys),
       account_label: fixResult.accountLabel,
@@ -10000,6 +10018,25 @@ export async function runFixRung(opts: {
       log: deps.log,
       say: deps.say,
     });
+
+    // A shell-less worker that omitted or failed its harness commit produced no new head. The
+    // refusal row is the positive release signal sweep.ts reads on the next pass; do not push an
+    // unchanged worktree or wait for CI against the old head, and let the cumulative ledger strike
+    // budget decide whether a later pass may try again or must escalate.
+    if (harnessCommitRefused) {
+      deps.say(
+        `fix rung: strike ${strikes}/${opts.strikeCap} refused by the harness — no commit was produced: ` +
+          `${harnessCommitRefusalReason}`,
+      );
+      return {
+        outcome: "stood_down",
+        review,
+        strikes,
+        retriggers,
+        reason: "harness commit refused",
+        standDownReason: harnessCommitRefusalReason,
+      };
+    }
 
     deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush);
 
@@ -21883,17 +21920,25 @@ function defaultCreditedMergedIds(): Set<string> {
   );
 }
 
+/** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
+ * must direct larger status repairs into multiple reviewable plan-only PRs. */
+export const PLAN_RECONCILE_REVIEW_FILE_CEILING = 300;
+
 /** The operator-facing summary. Names the mode FIRST, so a dry run can never be misread as applied. */
 export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): string {
   const skipped = Object.entries(summary.skipped)
     .filter(([, n]) => n > 0)
     .map(([k, n]) => `${k}=${n}`)
     .join(" · ");
+  const reviewHint =
+    summary.rewritten.length > PLAN_RECONCILE_REVIEW_FILE_CEILING
+      ? `\nreview ceiling: ${summary.rewritten.length} changed shards exceed GitHub's ${PLAN_RECONCILE_REVIEW_FILE_CEILING}-file diff limit; split the changes across multiple plan-only PRs before landing`
+      : "\nre-run with --write to apply, then land the diff as one plan-only PR";
   return (
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
-    (summary.rewritten.length > 0 && !write ? "\nre-run with --write to apply, then land the diff as one plan-only PR" : "")
+    (summary.rewritten.length > 0 && !write ? reviewHint : "")
   );
 }
 
@@ -33446,7 +33491,7 @@ export function captureRegisteredFixOwnerSnapshot(
   if (snapshot.attachmentState !== "exact") return snapshot;
 
   try {
-    const status = execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1", "--untracked-files=all"], {
+    const status = execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -33736,7 +33781,7 @@ export function commitWorkerEdits(
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
-  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z"]));
+  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
   if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
 
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths));
@@ -33833,6 +33878,8 @@ export function harnessCommitForShellLessWorker(
     declaredPaths: readonly string[];
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
+    /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row. */
+    onRefusal?: (reason: string) => void;
   },
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
@@ -33841,16 +33888,22 @@ export function harnessCommitForShellLessWorker(
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined) {
-    input.log("implement.harness_commit_refused", { reason: "no anchored COMMIT_MESSAGE line in the report" });
+    const reason = "no anchored COMMIT_MESSAGE line in the report";
+    input.log("implement.harness_commit_refused", { reason });
+    input.onRefusal?.(reason);
     return input.commitCount;
   }
   const committed = commit(input.worktreePath, input.declaredPaths, asked);
+  const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
-    ...(committed.reason ? { reason: committed.reason } : {}),
+    ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
   });
-  if (!committed.committed) return input.commitCount;
+  if (!committed.committed) {
+    input.onRefusal?.(refusalReason);
+    return input.commitCount;
+  }
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
 }

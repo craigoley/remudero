@@ -1,0 +1,55 @@
+- id: W1-T3895
+  title: "LEARN OPERATOR PREFERENCES WITHOUT LEARNING AUTHORITY — scoped feedback, provenance, expiry, and opt-out"
+  repo: remudero
+  depends_on: [W1-T3824, W1-T3826, W1-T3882]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Self-improvement", "W1-T3824", "W1-T3826", "W1-T3882"]
+  files:
+    - src/lib/preference-policy.ts
+    - src/lib/operator-agent.ts
+    - src/lib/ledger.ts
+    - openapi/daemon.yaml
+    - test/preference-policy-scope.test.ts
+    - test/preference-policy-evidence.test.ts
+    - test/preference-policy-application.test.ts
+    - test/preference-policy-expiry.test.ts
+    - test/preference-policy-optout.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3824 and W1-T3826 make explicit operator settings durable and scoped. That is different from
+    learning a preference from repeated accept, reject, or reframe decisions. The latter can make the
+    product feel more helpful, but silently turning behavior into authority would be a dangerous form of
+    self-modification.
+  design: |
+    Add `operator-preference-v1` for a bounded preference hypothesis with principal and repository
+    scope, observed decisions, source receipts, sample floor, confidence, freshness, expiry, explanation,
+    and opt-out state. Preferences may change ordering, notification style, or clarification wording;
+    they may never grant a capability, raise a budget, lower an approval level, or suppress a refusal.
+
+    Candidate preferences run in replay or shadow mode and remain proposed until explicitly accepted.
+    Rejection, correction, scope change, expiry, and deletion create linked events. Unknown or
+    insufficient evidence is shown as unmeasurable rather than a default preference.
+  acceptance:
+    - claim: "a learned preference records principal scope, repository scope, source decisions, sample floor, confidence, freshness, and expiry"
+      proof: "unit test: test/preference-policy-scope.test.ts"
+    - claim: "preference evidence is linked to bounded operator decisions and never stores raw prompts or transcripts"
+      proof: "unit test: test/preference-policy-evidence.test.ts"
+    - claim: "a preference can affect presentation or ordering but cannot grant authority or bypass a refusal"
+      proof: "unit test: test/preference-policy-application.test.ts"
+    - claim: "stale, insufficient, expired, corrected, and unmeasurable preferences stop applying"
+      proof: "unit test: test/preference-policy-expiry.test.ts"
+    - claim: "operators can opt out or delete a preference and receive a durable receipt"
+      proof: "unit test: test/preference-policy-optout.test.ts"
+    - claim: "the operator-agent path applies preferences only after the authority and refusal checks"
+      proof: "grep: applyScopedPreference( in src/lib/operator-agent.ts"
+  falsifier: |
+    Infer a preference from raw private text, use it to widen authority, apply stale evidence, hide an
+    opt-out, or call a low-sample hypothesis a fact. The corresponding proof must fail.
+  note: "This complements durable settings and trust evaluation; it is not autonomous policy mutation."
