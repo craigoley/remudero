@@ -235,9 +235,9 @@
     "newDate": 1
   },
   "src/lib/operator-agent.ts": {
-    "dateNow": 2,
+    "dateNow": 5,
     "legacy": 1,
-    "newDate": 6
+    "newDate": 16
   },
   "src/lib/operator-sync.ts": {
     "dateNow": 1,
