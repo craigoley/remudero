@@ -222,6 +222,18 @@ export function refusePopulationDrop(currentByFile, recordedByFile = RECORDED_PO
   return drops.sort((a, b) => a.file.localeCompare(b.file));
 }
 
+/**
+ * The ONE place "does this run block" is decided (W1-T3839). `formatReport`'s headline and
+ * `main()`'s exit code both call this rather than each re-deriving `introduced` themselves, so a
+ * BLOCKED headline and a zero exit cannot drift apart again the way they did before this existed:
+ * a crossing this diff introduced, or a population drop, blocks; an inherited-only crossing does
+ * not (W1-T3655) -- see the header note (iv) for why that boundary itself is unchanged.
+ */
+export function isBlocked({ reported, populationDrop = [] }) {
+  const introduced = reported.filter((r) => r.inherited !== true);
+  return introduced.length > 0 || populationDrop.length > 0;
+}
+
 /** ISO day for a report line — the DATE IT GOES RED is the whole point of the output. */
 export function expiryDay(expiresAt) {
   return new Date(expiresAt).toISOString().slice(0, 10);
@@ -241,8 +253,20 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
     if (out.length > 0) out.push("");
     const introduced = reported.filter((r) => r.inherited !== true);
     const inherited = reported.filter((r) => r.inherited === true);
-    const verdict = "BLOCKED";
-    out.push(`expiring-fixture-census: ${verdict} -- ${reported.length} fixture(s) CROSS their threshold within ${marginDays} day(s):`);
+    // W1-T3839: THE HEADLINE STATES WHAT THIS RUN DECIDED, NOT WHAT EXISTS. `introduced` is the
+    // only thing THIS run charges -- see `isBlocked`, the single place that decision is made, which
+    // `main()` also calls for the exit code so the two can never read this tree differently. When
+    // every crossing here is inherited (introduced.length === 0) this run charges nothing, so the
+    // headline must not say BLOCKED even though crossings are still reported below (iii) -- a
+    // BLOCKED headline next to a zero exit is exactly the contradiction this task exists to close.
+    if (introduced.length > 0) {
+      out.push(`expiring-fixture-census: BLOCKED -- ${reported.length} fixture(s) CROSS their threshold within ${marginDays} day(s):`);
+    } else {
+      out.push(
+        `expiring-fixture-census: CLEAR -- this run charges nothing; ${reported.length} inherited crossing(s) reported below, owned ` +
+          `by the base and caught on the push-to-main lane (${CENSUS_MAIN_BRANCH_RUN}):`,
+      );
+    }
     for (const r of [...reported].sort((a, b) => a.daysLeft - b.daysLeft)) {
       const owner = r.inherited === true ? "  [inherited from the base -- NOT this diff]" : "";
       out.push(`  - ${r.file}:${r.line}  ${r.field}="${r.stamp}" vs ${r.threshold}  --  goes red ${expiryDay(r.expiresAt)} (${r.daysLeft.toFixed(1)}d)${owner}`);
@@ -363,8 +387,7 @@ export function main({
   // stamp sitting on main is caught by the run that owns it. With that run in place, a crossing
   // marked `inherited === true` is reported -- never hidden -- but no longer charged to a PR that
   // did not plant it; only a crossing this diff itself introduced, or a population drop, blocks.
-  const introduced = result.reported.filter((r) => r.inherited !== true);
-  const blocked = introduced.length > 0 || populationDrop.length > 0;
+  const blocked = isBlocked({ reported: result.reported, populationDrop });
   emitCiReport("expiring-fixture-census", report, { blocked });
   return blocked ? 1 : 0;
 }

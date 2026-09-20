@@ -21,12 +21,14 @@ const {
   emitCiReport,
   encodeAnnotation,
   formatReport,
+  isBlocked,
   main,
   refusePopulationDrop,
 } = (await import(pathToFileURL(SCRIPT).href)) as {
     AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
     EXEMPT_MARKER: string;
     MARGIN_DAYS: number;
+    isBlocked: (o: { reported: Array<{ inherited?: boolean }>; populationDrop?: Array<unknown> }) => boolean;
     assertFieldsStillAged: (readFile?: (p: string) => string) => void;
     censusExpiringFixtures: (o: {
       files: string[];
@@ -91,6 +93,51 @@ function tree(files: Record<string, string>) {
 }
 
 const at = (msFromNow: number) => new Date(NOW + msFromNow).toISOString();
+
+test("W1-T3839: a BLOCKED headline never accompanies a zero exit", () => {
+  const reported = [{
+    file: "test/a.test.ts",
+    line: 1,
+    field: "lastActivityAt",
+    threshold: "sweep.staleDays",
+    stamp: at(-13 * DAY),
+    expiresAt: NOW + DAY,
+    daysLeft: 1,
+    inherited: false,
+  }];
+  const report = formatReport({ population: 1, reported, exempt: [], alreadyExpired: [] });
+
+  assert.match(report, /expiring-fixture-census: BLOCKED/);
+  assert.equal(isBlocked({ reported }), true, "the formatter's BLOCKED decision is the nonzero exit decision");
+});
+
+test("W1-T3839: an all-inherited run reports its crossings without a BLOCKED headline", () => {
+  const reported = [{
+    file: "test/a.test.ts",
+    line: 1,
+    field: "lastActivityAt",
+    threshold: "sweep.staleDays",
+    stamp: at(-13 * DAY),
+    expiresAt: NOW + DAY,
+    daysLeft: 1,
+    inherited: true,
+  }];
+  const report = formatReport({ population: 1, reported, exempt: [], alreadyExpired: [] });
+
+  assert.match(report, /expiring-fixture-census: CLEAR -- this run charges nothing/);
+  assert.match(report, /test\/a\.test\.ts:1/);
+  assert.doesNotMatch(report, /BLOCKED/);
+  assert.equal(isBlocked({ reported }), false, "the inherited-only lane remains clear for this PR");
+});
+
+test("W1-T3839: what blocks is unchanged by the wording", () => {
+  const inherited = [{ inherited: true }];
+  const introduced = [{ inherited: false }];
+
+  assert.equal(isBlocked({ reported: inherited }), false, "inherited crossings remain visible but uncharged");
+  assert.equal(isBlocked({ reported: introduced }), true, "a crossing introduced by the diff still blocks");
+  assert.equal(isBlocked({ reported: [], populationDrop: [{ file: "test/deleted.test.ts" }] }), true, "population drops still block");
+});
 
 test("W1-T3272: a fixture about to cross its threshold is reported, and the report names the date it goes red", () => {
   // 13 days old against a 14-day rung: still fresh today, red tomorrow. This is the shape that took
@@ -461,7 +508,7 @@ test("W1-T3388: with no base reader the strict, un-attributed reading is unchang
   assert.doesNotMatch(formatReport(r), /inherited from the base/);
 });
 
-test("W1-T3388: attribution names the owner and does NOT move the gate — an inherited crossing still BLOCKS", () => {
+test("W1-T3388: attribution names the owner and does NOT hide an inherited crossing", () => {
   // THE ANTI-WEAKENING PIN. Letting an inherited crossing pass is the obvious next step and is not
   // taken: this census runs on pull_request only, so nothing else would ever observe a stamp
   // sitting on main, and a warning no gate enforces is how the bomb reaches its own red date
@@ -471,8 +518,9 @@ test("W1-T3388: attribution names the owner and does NOT move the gate — an in
   const r = censusExpiringFixtures({ ...tree({ "test/a.test.ts": line }), readBaseFile: () => line });
 
   assert.equal(r.reported[0].inherited, true);
-  assert.match(formatReport(r), /expiring-fixture-census: BLOCKED/, "the verdict word must stay BLOCKED");
-  assert.ok(r.reported.length > 0, "and the crossing must remain in `reported`, which decides the exit code");
+  assert.match(formatReport(r), /expiring-fixture-census: CLEAR/, "the report says this PR charged nothing");
+  assert.doesNotMatch(formatReport(r), /BLOCKED/);
+  assert.equal(isBlocked(r), false, "the inherited crossing stays visible but does not charge this PR");
 });
 
 test("W1-T3388: a file absent at the base is read as this diff's own, not as an error", () => {
