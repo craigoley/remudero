@@ -40,11 +40,11 @@
     declared-path security boundary itself.
   acceptance:
     - claim: "a task-declared new file inside a brand-new (previously nonexistent) directory is committed by commitWorkerEdits"
-      proof: "unit test: test/commit-worker-edits-new-directory.test.ts"
+      proof: "unit test: W1-T3849: a declared new file inside a brand-new directory is committed"
     - claim: "an unrelated new file nested in an undeclared new directory remains uncommitted and reported in undeclared"
-      proof: "unit test: test/commit-worker-edits-new-directory.test.ts"
+      proof: "unit test: W1-T3849: an unrelated new file in the SAME new directory stays uncommitted and reported"
     - claim: "the status read now enumerates untracked files individually rather than collapsing a new directory to one entry"
-      proof: "grep: untracked-files=all in src/run-task.ts"
+      proof: "unit test: W1-T3849: status enumerates all untracked files individually before classification"
   falsifier: |
     In a throwaway repo, declare files `["a/one.ts", "a/two.ts"]` where `a/` does not exist yet
     on the tracked tree; create BOTH `a/one.ts` (declared) and `a/three.ts` (undeclared, same new
