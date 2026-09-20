@@ -1,0 +1,21 @@
+id: fb-1789364933974-18dfc1
+ts: 2026-09-14T05:48:53.974Z
+raw: Strengthen the marketing site Playwright suite without inventing unreleased
+  product behavior. Keep the production next start test server and desktop plus
+  Pixel 7 projects. Expand the public-route contract to cover keyboard
+  navigation, reachable and truthful interest-registration and portal calls to
+  action, document title/meta/viewport, browser console errors, and horizontal
+  overflow on every supported public route. Add a bounded public preview smoke
+  strategy only if it can obtain the exact Vercel preview URL from CI without
+  bypassing protection. The current waitlist is intentionally an honest
+  unavailable state; do not assert a fake submission until a real registration
+  endpoint exists. Retain failure traces and reports.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
