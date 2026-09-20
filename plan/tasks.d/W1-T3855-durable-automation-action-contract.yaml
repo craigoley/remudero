@@ -1,0 +1,61 @@
+- id: W1-T3855
+  title: "MAKE AUTOMATION ACTIONS EXPLICIT — versioned preflight, idempotency, approval, rollback, and receipt contract for safe flow execution"
+  repo: remudero
+  depends_on: ["W1-T3852", "W1-T3853"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:automated-flow-and-self-improvement-2026-09-20"
+  plan_refs: ["§Self-improvement", "§7B", "W1-T3852", "W1-T3853"]
+  files:
+    - src/lib/automation-action.ts
+    - src/lib/operator-agent.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    RMD has durable proposals, decisions, experiments, and outcomes, but an automated flow still
+    needs one explicit contract for the step between "the system recommends this" and "the system
+    may execute this". Without that seam, every future runbook or promotion path can invent its own
+    preconditions, approval semantics, retry behavior, and receipt shape.
+
+    Progressive-delivery systems make exposure and rollback explicit; incident automation systems
+    make RBAC, approval gates, and circuit breakers explicit. RMD should adopt that discipline in
+    a small public-core contract while keeping production policy changes reviewable and preserving
+    the human boundary for high-risk actions. W1-T3853 remains the experiment-record owner; this
+    task owns only the execution/preflight seam that an approved experiment may request.
+  design: |
+    Add a bounded `automation-action-v1` contract in the existing ledger and route model. An action
+    declares its stable action id, flow/experiment scope, repository or instance scope, risk tier,
+    preconditions, required freshness, idempotency key, expiry, dry-run capability, approval state,
+    rollback/refusal path, and authoritative receipt reference.
+
+    Preflight must return explicit `ready`, `refused`, `stale`, `unknown`, `expired`, or
+    `in-progress` outcomes. Execution must be idempotent and append a receipt; it must never turn a
+    missing precondition, unavailable source, or duplicate request into an optimistic success. High
+    risk actions remain approval-gated. Rollback is a new linked event, never history mutation.
+    Keep the contract redacted and bounded: no raw prompts, credentials, arbitrary model prose, or
+    browser-owned measurements.
+  acceptance:
+    - claim: "an action validates scope, risk, freshness, expiry, idempotency, approval, and rollback metadata before execution"
+      proof: "unit test: automation action refuses incomplete scope freshness approval or rollback metadata"
+    - claim: "preflight distinguishes ready, refused, stale, unknown, expired, and in-progress rather than manufacturing a healthy action"
+      proof: "unit test: automation action preserves explicit preflight refusal states"
+    - claim: "duplicate idempotency keys return the existing durable receipt without executing twice"
+      proof: "unit test: automation action is idempotent and reuses its receipt"
+    - claim: "execution and rollback append bounded linked receipts without rewriting the original action history"
+      proof: "unit test: automation action records execution and rollback as linked receipts"
+    - claim: "the public contract omits credentials, raw prompts, arbitrary model prose, and browser-owned measurements"
+      proof: "unit test: automation action redacts sensitive and unbounded fields"
+  falsifier: |
+    Allow an action with no scope or rollback path, map an unavailable source to ready, execute the
+    same idempotency key twice, overwrite the original receipt during rollback, or accept a raw
+    prompt/credential field. The corresponding proof must fail.
+  note: |
+    This is the execution boundary for future runbooks and guarded promotions. It does not itself
+    grant autonomous production mutation; risk tier and approval remain authoritative.
+    reservation hand-off: unknown -> run-W1-T3855-1789927800000

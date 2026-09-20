@@ -1,0 +1,62 @@
+- id: W1-T3856
+  title: "TURN EXPERIMENTS INTO A GUARDED FLOW — deterministic replay, shadow observation, canary promotion, stop conditions, and automatic rollback"
+  repo: remudero
+  depends_on: ["W1-T3853", "W1-T3855"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:automated-flow-and-self-improvement-2026-09-20"
+  plan_refs: ["§Self-improvement", "W1-T3795", "W1-T3800", "W1-T3853", "W1-T3855"]
+  files:
+    - src/lib/experiment-promotion.ts
+    - src/lib/operator-agent.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3853 makes an experiment falsifiable, but a record alone does not create a self-improvement
+    loop. The missing flow is the safe progression from a candidate policy to measured exposure:
+    replay historical cases, observe without changing behavior, expose a bounded canary, evaluate
+    stop conditions, then promote or roll back with a durable receipt.
+
+    Temporal's event-history replay discipline and Argo/LaunchDarkly's metric-guarded progressive
+    delivery provide the useful pattern. RMD should implement only the contract it needs, backed by
+    the existing ledger and measurement boundaries, rather than adopting a second workflow engine
+    or treating model confidence as a promotion signal.
+  design: |
+    Add an `experiment-promotion-v1` state machine with `proposed`, `replayed`, `approved`,
+    `shadow`, `canary`, `observing`, `promoted`, `neutral`, `regressed`, `rolled_back`, `expired`,
+    and `unmeasurable` states. A promotion record names the candidate and baseline, comparable
+    population, denominator floor, observation window, guard metrics, abort thresholds, maximum
+    exposure, owner, expiry, and rollback action.
+
+    Replay must be deterministic and side-effect-free. Shadow mode may collect comparisons but cannot
+    alter production behavior. Canary exposure is serialized per policy scope and may advance only
+    after guardrails and sample floors pass. Any guardrail breach, stale evidence, missing denominator,
+    or measurement failure pauses or aborts the flow; it never promotes. Promotion and rollback are
+    durable linked events. The operator can approve a candidate, but only later observed evidence can
+    establish success.
+  acceptance:
+    - claim: "replay evaluates a candidate against a bounded historical corpus without external side effects or production mutation"
+      proof: "unit test: experiment promotion replays deterministically without executing actions"
+    - claim: "shadow and canary states preserve baseline, population, sample floor, window, and guard metrics"
+      proof: "unit test: experiment promotion carries comparable baseline and canary guardrails"
+    - claim: "insufficient samples, stale evidence, mixed populations, and failed measurements become unmeasurable or aborted"
+      proof: "unit test: experiment promotion refuses promotion when evidence is insufficient"
+    - claim: "a guardrail breach aborts or rolls back the canary and never promotes it"
+      proof: "unit test: experiment promotion auto-aborts on a guardrail regression"
+    - claim: "promotion and rollback are serialized per policy scope and append linked receipts"
+      proof: "unit test: experiment promotion serializes scope and preserves rollback receipts"
+  falsifier: |
+    Let replay mutate production state, advance a canary without the sample floor, compare mixed
+    populations, promote after a stale read, allow two candidates for one scope, or mark an accepted
+    experiment successful before observation. Each corresponding proof must fail.
+  note: |
+    This is the self-improvement loop after W1-T3853 and W1-T3855. It may automate low-risk
+    reversible changes only when the action contract authorizes them; it never bypasses the reviewed
+    PR boundary for code or plan changes.
+    reservation hand-off: unknown -> run-W1-T3855-1789927800000
