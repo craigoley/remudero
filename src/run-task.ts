@@ -33393,12 +33393,20 @@ function refCommitMatchesDirtyRecovery(repoDir: string, recoveryRef: string, loc
   }
 }
 
+export interface PreserveTrackedDirtyFixOwnerDeps {
+  treesMatch?: (patchTree: string, ownerTree: string) => boolean;
+  matchesDirtyRecovery?: (repoDir: string, recoveryRef: string, localSha: string, tree: string) => boolean;
+}
+
 export function preserveTrackedDirtyFixOwner(
   repoDir: string,
   ownerPath: string,
   branch: string,
   localSha: string,
+  deps: PreserveTrackedDirtyFixOwnerDeps = {},
 ): string {
+  const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
+  const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
   const observedHead = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -33430,12 +33438,12 @@ export function preserveTrackedDirtyFixOwner(
       stdio: ["pipe", "pipe", "pipe"],
     });
   });
-  if (patchTree !== ownerTree) {
+  if (!treesMatch(patchTree, ownerTree)) {
     throw new Error(`dirty recovery patch tree ${patchTree} does not match owner tree ${ownerTree}`);
   }
 
   const recoveryRef = `${DIRTY_FIX_OWNER_RECOVERY_REF_PREFIX}/${branch}/${localSha}/${patchTree}`;
-  if (!refCommitMatchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
+  if (!matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
     const recoveryCommit = execFileSync(
       "git",
       ["-C", repoDir, "commit-tree", patchTree, "-p", localSha, "-m", `chore(recovery): preserve dirty fix owner ${branch}`],
@@ -33449,7 +33457,7 @@ export function preserveTrackedDirtyFixOwner(
       stdio: ["ignore", "pipe", "pipe"],
     });
   }
-  if (!refCommitMatchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
+  if (!matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
     throw new Error(`dirty recovery ref ${recoveryRef} is not the expected immutable commit`);
   }
   return recoveryRef;
