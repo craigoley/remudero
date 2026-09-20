@@ -106,15 +106,15 @@
     therefore FIXED BY THIS CHANGE WITHOUT BEING EDITED, which is the point of fixing it here.
   acceptance:
     - claim: "a landing whose local tracking ref still holds a sha while the remote branch is absent lands its records by creating the branch fresh under the empty-expected-value lease, and no remote branch, worktree, source file or unrelated tracking ref is touched"
-      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+      proof: "unit test: a deleted landing ref creates a fresh branch with an empty expected lease"
     - claim: "a landing branch that still exists and genuinely moved once re-derives the union exactly once and then lands, unchanged from today"
-      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+      proof: "unit test: one live landing move rederives exactly once"
     - claim: "a landing branch that genuinely moves twice is still refused, and the tip it never read is not force-replaced"
-      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+      proof: "unit test: two live landing moves refuse without force replacement"
     - claim: "an absent remote landing ref is surfaced as an absent ref and never reported as a concurrent tip move"
-      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+      proof: "unit test: an absent landing ref reports absence not a concurrent move"
     - claim: "a branch that exists but whose pending content cannot be read is still refused rather than collapsing to an empty fresh-branch create"
-      proof: "unit test: test/feedback-landing-deleted-ref.test.ts"
+      proof: "unit test: unreadable landing content refuses without fresh create"
     - claim: "the landing reader consults a named targeted landing-ref refresh before the lease is derived"
       proof: "grep: refreshLandingRef( in src/lib/feedback-landing.ts"
   falsifier: |
