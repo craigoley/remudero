@@ -273,6 +273,42 @@ test("W1-T3704 (2, runSweep): a discriminate-only verdict likewise takes no gate
   assert.match(String(disposed?.reason), /discrimination alone/);
 });
 
+test("W1-T3798 (dedup): a review-reused verdict already DELIVERED for this current head is not re-posted", async () => {
+  const deps = modeDeps();
+  deps.ledgerPath = writeLedger([
+    { step: "review.posted", task_id: TASK, head_sha: CURRENT_HEAD },
+  ]).path;
+  const pr = orphanedPr(unchangedInputs());
+  const summary = await runSweep([pr], deps);
+
+  assert.equal(summary.byDisposition["review-reused"], 1);
+  assert.equal(summary.actionsTaken, 0);
+  assert.deepEqual(deps.modes, [], "the reuse post is deduped, not sent a second time for this head");
+
+  const disposed = readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.acted, false);
+  assert.match(String(disposed?.stand_down_reason), /already DELIVERED/);
+  assert.match(String(disposed?.stand_down_reason), /the reuse post is deduped/);
+});
+
+test("W1-T3798 (dedup): a discriminate-only verdict already REFUSED for this current head is not re-run, and is never conflated with delivered", async () => {
+  const deps = modeDeps();
+  deps.ledgerPath = writeLedger([
+    { step: "review.post_refused", task_id: TASK, head_sha: CURRENT_HEAD, reason: "no acceptance criteria" },
+  ]).path;
+  const pr = orphanedPr({ ...unchangedInputs(), currentMergeBaseSha: NEW_MERGE_BASE });
+  const summary = await runSweep([pr], deps);
+
+  assert.equal(summary.byDisposition["discriminate-only"], 1);
+  assert.equal(summary.actionsTaken, 0);
+  assert.deepEqual(deps.modes, []);
+
+  const disposed = readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.acted, false);
+  assert.match(String(disposed?.stand_down_reason), /already REFUSED/);
+  assert.doesNotMatch(String(disposed?.stand_down_reason), /DELIVERED/);
+});
+
 // ── acceptance 2: own diff same, merge base moved → discrimination only ───────────────────────
 
 test("W1-T3704 (2): a push that only moves the merge base re-runs discrimination alone rather than the whole review", () => {
