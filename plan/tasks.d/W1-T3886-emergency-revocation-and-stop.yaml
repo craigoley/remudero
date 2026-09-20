@@ -61,4 +61,6 @@
   falsifier: |
     Let an in-scope action through an active stop, claim a connector cancelled work it cannot cancel,
     clear from stale evidence, or omit the incident reason and scope. The corresponding proof must fail.
-  note: "W1-T2296 provides incident reconstruction; this task provides real-time containment and recovery gates."
+  note: |
+    reservation hand-off: run-TRIAGE-fb-1789932379027-b989eb-1789934528354 -> run-W1-T3892-1789939553136
+    W1-T2296 provides incident reconstruction; this task provides real-time containment and recovery gates.
