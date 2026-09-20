@@ -18,7 +18,7 @@
   risk: high
   band_meaning: blast-radius
   origin: human
-  note: "reservation hand-off: run-W1-T3818-1789861944 -> run-PLAN-W1-T3818-1789861944"
+  note: "reservation hand-off: run-W1-T3818-1789861944 -> run-PLAN-W1-T3818-1789861944; implement only after W1-T3824 is merged (dependency is omitted until that task exists on main)"
   files:
     - src/lib/operator-agent.ts
     - openapi/daemon.yaml
