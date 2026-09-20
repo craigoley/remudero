@@ -119,7 +119,7 @@ test("operator-agent routes keep reads separate from writes and persist proposal
   assert.equal(lines[1]?.proposal_id, proposal.proposalId);
 });
 
-test("operator-agent settings read defaults conservatively and persists valid updates", async () => {
+test("reads the default operator-agent settings when no settings row exists; persists a valid operator-agent settings update in the ledger", async () => {
   const { ledgerPath } = fixture();
   await withService(ledgerPath, async (base) => {
     const defaults = await getSettings(base, READ_TOKEN);
@@ -140,7 +140,7 @@ test("operator-agent settings read defaults conservatively and persists valid up
   assert.equal(lines[0]?.step, "panel.operator_agent_settings");
 });
 
-test("operator-agent settings refuse a threshold outside the bounded range", async () => {
+test("refuses an operator-agent confidence threshold outside the bounded range", async () => {
   const { ledgerPath } = fixture();
   await withService(ledgerPath, async (base) => {
     for (const confidenceThreshold of [0.89, 1, "0.95"]) {
