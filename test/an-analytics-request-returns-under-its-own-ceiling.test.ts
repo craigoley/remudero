@@ -273,6 +273,7 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
         },
       },
     },
+    timeSeries: cold.timeSeries,
   });
   assert.ok(Object.isFrozen(cold), "the process-owned value is immutable");
   await cache.refresh();

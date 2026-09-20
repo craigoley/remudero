@@ -16,6 +16,7 @@ import {
   deriveAnalyticsSnapshotFromStream,
   type AnalyticsSnapshot,
 } from "../src/lib/analytics-route.js";
+import { fiveLedgerBackedHistoricalSeries, generateFiveLedgerBackedHistoricalSeries } from "../src/lib/analytics-timeseries.js";
 import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
 import { clockFromIsoFn, fixedClock } from "../src/lib/clock.js";
 import { terminalVerdictFields } from "../src/run-task.js";
@@ -36,6 +37,22 @@ function writePlainArchive(stateDir: string, name: string, lines: string[]): voi
 function writeLive(stateDir: string, lines: string[]): void {
   writeFileSync(join(stateDir, "ledger.ndjson"), lines.join("\n") + "\n");
 }
+
+test("historical analytics: five ledger-backed top-level series preserve explicit gap points", () => {
+  const series = fiveLedgerBackedHistoricalSeries();
+  assert.deepEqual(generateFiveLedgerBackedHistoricalSeries(), series);
+  assert.equal(series.length, 5);
+  assert.deepEqual(series.map((entry) => entry.id), ["ledger-1", "ledger-2", "ledger-3", "ledger-4", "ledger-5"]);
+  assert.ok(series.every((entry) => entry.points.length === 5));
+  assert.ok(series.every((entry) => entry.points.every((point) => point.value === null && point.gap === true)));
+  assert.deepEqual(series[0]?.points.map((point) => point.note), [
+    "pre-collection",
+    "explicit-gap",
+    "partial-gap",
+    "unreadable",
+    "not-collected",
+  ]);
+});
 
 test("W1-T3762 criterion 1: the terminal verdict receipt carries the assignment join key and worker outcome instead of treating task verdict as model success", () => {
   const receipt = terminalVerdictFields({
