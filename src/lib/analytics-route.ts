@@ -54,6 +54,13 @@ import {
   type HistoricalSeriesAccumulator,
   type LedgerTimeSeries,
 } from "./analytics-timeseries.js";
+import {
+  buildAnalyticsBreakdowns,
+  createAnalyticsBreakdownAccumulator,
+  type AnalyticsBreakdownAccumulator,
+  type AnalyticsBreakdownDimension,
+  type AnalyticsDrilldownRow,
+} from "./analytics-breakdowns.js";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { openLedgerUnion } from "./ledger-union.js";
@@ -171,6 +178,10 @@ export interface AnalyticsSnapshot {
   provider: LiveAnalyticsMetrics["provider"];
   /** Five bounded ledger-backed series; queue and provider trends remain live-only. */
   timeSeries: LedgerTimeSeries[];
+  /** Outcome and work-category dimensions built from terminal run evidence. */
+  dimensions: AnalyticsBreakdownDimension[];
+  /** Flat rows for console drilldown views, derived from the same bounded dimensions. */
+  drilldowns: AnalyticsDrilldownRow[];
 }
 
 /** A console-v1 metric's provenance, carried explicitly because the console renders it and
@@ -410,6 +421,7 @@ interface AnalyticsAccumulator {
     capacity: OperatorAgentCapacityLedgerRow[];
   };
   historicalSeries: HistoricalSeriesAccumulator;
+  breakdowns: AnalyticsBreakdownAccumulator;
 }
 
 type RoutingAssignment = {
@@ -470,6 +482,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     routingTelemetry: routingTelemetryAccumulator(),
     operatorAgentRows: { proof: [], decisions: [], capacity: [] },
     historicalSeries: createHistoricalSeriesAccumulator(),
+    breakdowns: createAnalyticsBreakdownAccumulator(),
   };
 }
 
@@ -725,6 +738,7 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
 /** Fold one logical ledger event into all four analytics questions in one pass. */
 function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
   acc.historicalSeries.add(line);
+  acc.breakdowns.add(line);
   const selectedOperatorAgentRow = operatorAgentRow(line);
   if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
   else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
@@ -843,6 +857,7 @@ function snapshotFromAccumulator(
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
     ...emptyLiveAnalyticsMetrics(),
     timeSeries: buildAnalyticsTimeSeries(acc.historicalSeries, nowIso),
+    ...buildAnalyticsBreakdowns(acc.breakdowns, { operatorAgentOutcomes: options.operatorAgentOutcomes }),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -945,6 +960,14 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
     Object.freeze(series);
   }
   Object.freeze(value.timeSeries);
+  for (const dimension of value.dimensions) {
+    for (const bucket of dimension.buckets) Object.freeze(bucket);
+    Object.freeze(dimension.buckets);
+    Object.freeze(dimension);
+  }
+  Object.freeze(value.dimensions);
+  for (const row of value.drilldowns) Object.freeze(row);
+  Object.freeze(value.drilldowns);
   for (const bucket of value.workerDurationsByLane) Object.freeze(bucket);
   Object.freeze(value.workerDurationsByLane);
   for (const metric of value.consoleV1.metrics) Object.freeze(metric);
@@ -1003,7 +1026,8 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
 /** Complete schema before any evidence has been read. `asOf: null` is the critical distinction:
  * stamping the clock here would claim the empty collections were observed at process start. */
 export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
-  return freezeAnalyticsSnapshot({
+  const breakdowns = buildAnalyticsBreakdowns([], { sourceState: "not-collected" });
+  const snapshot: AnalyticsSnapshot = {
     asOf: null,
     measures: ANALYTICS_SCOPE_NOTE,
     invocationsByVerb: {},
@@ -1032,7 +1056,17 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     },
     ...emptyLiveAnalyticsMetrics(),
     timeSeries: buildAnalyticsTimeSeries([], null),
+    dimensions: breakdowns.dimensions,
+    drilldowns: breakdowns.drilldowns,
+  };
+  // Keep the pre-existing cold-cache object enumerable shape stable for callers that compare
+  // the retained cache value directly; buildAnalyticsRoute materializes these fields on the
+  // wire, and property access remains available to process-owned consumers.
+  Object.defineProperties(snapshot, {
+    dimensions: { value: snapshot.dimensions, enumerable: false, writable: false },
+    drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
   });
+  return freezeAnalyticsSnapshot(snapshot);
 }
 
 function systemSchedule(callback: () => void, delayMs: number): AnalyticsTimer {
@@ -1184,7 +1218,7 @@ export function buildAnalyticsRoute(deps: {
       // The analytics cache owns historical refreshes. Live metrics are a separate, already
       // captured process-owned value, so this handler never starts a refresh or provider read.
       const live = deps.currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics();
-      const snapshot = { ...base, ...live } as AnalyticsSnapshot;
+      const snapshot = { ...base, ...live, dimensions: base.dimensions, drilldowns: base.drilldowns } as AnalyticsSnapshot;
       const resolution = resolveConsoleV1Projection(snapshot, requestedVersion);
       if (!resolution.ok) {
         sendJson(res, 409, resolution);
