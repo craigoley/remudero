@@ -1,0 +1,76 @@
+- id: W1-T3852
+  title: "Give the operator one bounded story of long-running work: a source-labeled activity, workstream, and artifact projection without creating a second plan or memory store"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  band_meaning: span
+  origin: "research:muse-ux-2026-09-20"
+  plan_refs: ["§7", "§7B", "W1-T315", "W1-T3854"]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on public main 089af54ccefc4a38c3666c632e1a8a3eb93d6992: the daemon already has the
+    ingredients for a useful operator story, but they are separate projections. `panel-graph.ts`
+    exposes a plan progress/frontier view at lines 565-740, a trace provenance graph at lines
+    398-451, and a decision inbox at lines 1065-1123. `operator-agent.ts` separately persists
+    bounded proposal evidence, decisions, outcomes, and settings. The console therefore has to
+    learn several response shapes before it can answer the simple operator questions: what is
+    happening, what is waiting on me, what is next, and what evidence supports this card.
+
+    Muse's useful interaction idea is the delegation grammar — goal -> background work -> a
+    meaningful change or approval -> an inspectable activity log/artifact — not a consumer
+    identity model, a hidden memory database, or a chat transcript as the source of truth. This
+    task brings that grammar into RMD's existing durable plan, ledger, trace, and receipt model.
+    It must not add a second goal database, invent proactive work, or make a GitHub outage look
+    like an empty or healthy workstream.
+
+    INFERRED PRODUCT VALUE: a single bounded read projection will let the private console compose
+    Now, Needs me, Plan, Activity, and Evidence without duplicating selection logic in a hosted
+    application. The projection is a contract seam, not a claim that every source is already
+    available on every instance.
+  design: |
+    Add a versioned, read-only operator-activity envelope with bounded arrays for:
+
+    (i) activity rows — durable event identity, kind, task/repository scope, observed time,
+        source reference, and freshness; no raw prompts, transcripts, credentials, or account ids;
+
+    (ii) workstreams — a derived view of the existing plan/projection/frontier, including the
+         objective, current state, next runnable or blocked reason, and the same source/freshness
+         envelope; the implementation must call the dispatcher-owned `runnableCandidates` /
+         `dispatchOrder` path rather than sort or re-implement eligibility;
+
+    (iii) artifacts — bounded links to an existing trace, plan, task, decision, run, or receipt,
+          with enough provenance for a consumer to open the authoritative detail without copying
+          its contents into a new store.
+
+    Preserve `verified`, `stale`, `unavailable`, `unknown`, and `not-collected` as distinct
+    outcomes. A failed source must carry its reason and may carry last-known data only when the
+    envelope marks it stale/unknown. Add a stable cursor or observed watermark for consumers that
+    need meaningful-change notifications, but do not add a push scheduler or notification policy
+    here. Keep the route read-scoped, bounded, and single-pass over already-derived projections.
+  acceptance:
+    - claim: "every activity, workstream, and artifact row carries a stable identity, source, observed time, and freshness state"
+      proof: "unit test: operator activity rows preserve source observed time and freshness"
+    - claim: "a failed upstream source remains unavailable or unknown with its reason instead of becoming an empty or healthy workstream"
+      proof: "unit test: operator activity preserves unavailable source reasons without zero defaults"
+    - claim: "workstream ordering and eligibility reuse the dispatcher-owned frontier selector rather than a second local sort"
+      proof: "unit test: operator workstreams reuse dispatcher frontier order and eligibility"
+    - claim: "artifact rows link to bounded authoritative evidence and omit raw prompts transcripts credentials and account identifiers"
+      proof: "unit test: operator artifacts expose bounded evidence links without raw content"
+    - claim: "the projection has a stable version and bounded limits and is mounted as a read-only route without per-row upstream calls"
+      proof: "unit test: operator activity is versioned bounded read-only and single-pass"
+  falsifier: |
+    Delete the source/freshness fields and the first test must fail. Make a GitHub read fail and
+    return an empty healthy-looking workstream and the second must fail. Replace the dispatcher
+    selector with a local title/id sort and the third must fail. Add a raw transcript or credential
+    field to an artifact and the fourth must fail. Remove the schema version, exceed the declared
+    limit, or issue one upstream request per row and the fifth must fail.
+  note: "This is the public contract seam for a private console. It does not add browser UI, consumer-style memory, a new goal store, credentials, or a host action. W1-T3854 is an explicit follow-up: it consumes this projection to add incident identity/regression semantics; it does not replace or duplicate the activity envelope."
