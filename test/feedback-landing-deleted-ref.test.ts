@@ -100,7 +100,7 @@ function deleteRemoteBranch(bareOrigin: string, branch: string, expectedSha: str
 
 // ── acceptance 1: a deleted ref lands fresh under the empty-expected-value lease ────────────
 
-test("a deleted landing ref creates a fresh branch under the empty-expected-value lease — no other ref, worktree or source file is touched", () => {
+test("a deleted landing ref creates a fresh branch with an empty expected lease — no other ref, worktree or source file is touched", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   writeFeedbackEntry(root, "fb-first", "first record — lands, then GitHub deletes the branch on merge");
