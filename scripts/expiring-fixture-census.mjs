@@ -252,12 +252,12 @@ export function assertFieldListComplete({ files, readFile, agedFields = AGED_FIE
 
 /**
  * MEASURED 2026-09-20 (W1-T3838), by running {@link discoverClockAgedFields} over every tracked
- * `src/**\/*.ts` file: 11 (field, source) findings -- 10 distinct field names, two of them
- * (`ts`, `expires_at`) discovered at two sources each -- exist beyond `lastActivityAt`, none of
- * them written as a hardcoded ISO fixture literal this census's own population ever measured (the
- * sizing note this task shipped with: run the discovery, read what it finds, and let that decide
- * whether it lands refusing or advisory). Refusing on all eleven in the same change that adds the
- * discovery would touch eleven different files, only one of them this incident's own
+ * `src/**\/*.ts` file: 14 (field, source) findings -- 11 distinct field names, with `ts`,
+ * `expires_at`, and `lastActivityAt` each discovered at two sources -- exist beyond
+ * `lastActivityAt`, none of them written as a hardcoded ISO fixture literal this census's own
+ * population ever measured (the sizing note this task shipped with: run the discovery, read what
+ * it finds, and let that decide whether it lands refusing or advisory). Refusing on all fourteen
+ * in the same change that adds the discovery would touch eleven different files, only one of them this incident's own
  * (src/lib/operator-agent.ts), with no bearing on this task's one declared concern --
  * scripts/expiring-fixture-census.mjs's AGED_FIELDS completeness, not a src-wide audit of every
  * clock comparison. So {@link main} treats
