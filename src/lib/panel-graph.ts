@@ -750,6 +750,7 @@ export function buildPlanFrontier(
 // ── GET /v1/operator-activity — one bounded operator story (W1-T3852) ──────
 
 export const OPERATOR_ACTIVITY_CONTRACT_VERSION = "operator-activity-v1" as const;
+/** PRIMARY CONTROL: the projection's response item bound, enforced before serialization. */
 export const OPERATOR_ACTIVITY_MAX_ITEMS = 200;
 
 export type OperatorActivityState = "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
