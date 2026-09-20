@@ -14,8 +14,23 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6231
+summary:
+  headline: Declared files failing to commit from directories
+  what_happened: Git status reports only the directory path for new files, not
+    individual files within it. This causes declared files to be skipped during
+    commit.
+  decision: Fix the file listing to show individual files instead of directories,
+    then verify each against declared paths before committing.
+  options:
+    - label: Have system enumerate files and verify against declarations
+      consequence: Only declared files commit; undeclared excluded; task completes and
+        security maintained
+    - label: Auto-commit all files in declared directories
+      consequence: Faster but risks committing undeclared files mixed in same directories
+    - label: Require task declarations to list exact file paths only
+      consequence: Eliminates directory ambiguity but requires change to all existing
+        task definitions
 expansion: null
 submission_key: null
 thread_id: null
