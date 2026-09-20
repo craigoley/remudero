@@ -22,6 +22,6 @@
     - openapi/daemon.yaml
     - src/lib/operator-agent.ts
     - test/operator-agent.test.ts
-    - plan/tasks.d/W1-T3824-operator-agent-settings-contract.yaml
   status: queued
   attempts: 0
+  note: "reservation hand-off: work-6167 -> run-W1-T3824-1789863660"
