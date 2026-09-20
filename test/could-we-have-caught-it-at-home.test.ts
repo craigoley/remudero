@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyRefusalLocality, refusalLocalityReport, stripMatrixSuffix, type ParityRow } from "../src/lib/ci-failure-corpus.js";
+import {
+  classifyRefusalLocality,
+  refusalLocalityReport,
+  stripMatrixSuffix,
+  MATRIX_SUFFIX_RE,
+  type ParityRow,
+} from "../src/lib/ci-failure-corpus.js";
 
 // ── W1-T3740 — THE SCOREBOARD THE LOOP NEVER HAD ─────────────────────────────────────────────
 //
@@ -140,4 +146,11 @@ test("an unregistered job survives normalisation as unknown", () => {
 
   // And a name with no matrix suffix at all passes through untouched.
   assert.equal(stripMatrixSuffix("lint-plan"), "lint-plan");
+});
+
+test("MATRIX_SUFFIX_RE itself: matches a shard suffix and rejects a plain job name", () => {
+  // Drives the regex's OWN unhealthy arm (no suffix -> no match) and its healthy arm (a real
+  // matrix suffix -> match), directly against the exported symbol, not only through the wrapper.
+  assert.equal(MATRIX_SUFFIX_RE.test("ci-shard"), false);
+  assert.equal(MATRIX_SUFFIX_RE.test("ci-shard (1/4)"), true);
 });

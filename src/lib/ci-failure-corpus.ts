@@ -141,7 +141,7 @@ export interface ParityRow {
 // name it `ci-shard`. The strip is EXACT and NARROW — a trailing ` (<n>/<m>)`, nothing else — so
 // `coverage-shard` never resolves toward `coverage-ratchet` merely for sharing a prefix. See the
 // task rationale (W1-T3743) for why a looser strip re-opens the falsifier W1-T3740 already caught.
-const MATRIX_SUFFIX_RE = / \(\d+\/\d+\)$/;
+export const MATRIX_SUFFIX_RE = / \(\d+\/\d+\)$/;
 
 /**
  * Strip a trailing GitHub matrix suffix, e.g. `"ci-shard (1/4)"` -> `"ci-shard"`. A name with no
