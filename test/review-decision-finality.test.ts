@@ -97,6 +97,80 @@ test("W1-T2722: one decision has one atomic owner; a completed terminal is repla
   }
 });
 
+test("W1-T3835: an exact-head checkout reopens only a prior CAPPED keyword-only terminal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-decision-degraded-retry-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const digest = reviewDecisionDigest(digestInput);
+  const cappedKeywordOnly: ReviewVerdict = {
+    ...verdict("success"),
+    criteria: [{ claim: "proof runs", proof: "unit test: test/review.test.ts", met: true, reason: "keyword match", proof_exec: "not_executable" }],
+    capped: true,
+    keywordOnly: true,
+  };
+  const executedPass: ReviewVerdict = {
+    ...cappedKeywordOnly,
+    summary: "executed",
+    capped: false,
+    keywordOnly: false,
+    criteria: [{ ...cappedKeywordOnly.criteria[0]!, reason: "proof passed", proof_exec: "executed_pass" }],
+  };
+  try {
+    appendLedger(ledgerPath, {
+      run_id: "degraded", task_id: TASK, step: "review.posted", pr_url: PR, head_sha: HEAD,
+      review_decision_digest: digest, decision_verdict: cappedKeywordOnly,
+    });
+    const unavailable = await claimReviewDecision({ ledgerPath, taskId: TASK, prUrl: PR, digest });
+    assert.equal(unavailable.kind, "replay", "without an exact-head checkout the terminal remains final");
+
+    const retry = await claimReviewDecision({ ledgerPath, taskId: TASK, prUrl: PR, digest, headCheckoutDir: "/exact/pr-head" });
+    assert.equal(retry.kind, "owned");
+    assert.equal(retry.reopenedDegradedTerminal, true);
+    let proofExecutions = 0;
+    if (retry.kind === "owned") {
+      proofExecutions++;
+      const posted: string[] = [];
+      const status = await postReviewStatusGuarded({
+        owner: "o", repo: "r", sha: HEAD, state: "success", taskId: TASK, evidence: "executed",
+        ledgerPath, runId: "executed", prUrl: PR, reviewDecisionDigest: digest,
+        reopenedDegradedTerminal: retry.reopenedDegradedTerminal,
+        fetchLifecycle: () => ({ merged: false, closed: false }),
+        post: ({ state }) => void posted.push(state),
+      });
+      assert.equal(status.posted, true, "the recovered executed verdict may replace the degraded terminal");
+      assert.deepEqual(posted, ["success"]);
+      appendLedger(ledgerPath, {
+        run_id: "executed", task_id: TASK, step: "review.posted", pr_url: PR, head_sha: HEAD,
+        review_decision_digest: digest, decision_verdict: executedPass,
+      });
+      retry.release();
+    }
+    const completed = await claimReviewDecision({ ledgerPath, taskId: TASK, prUrl: PR, digest, headCheckoutDir: "/exact/pr-head" });
+    assert.equal(proofExecutions, 1);
+    assert.equal(completed.kind, "replay", "the executed terminal remains replayed after recovery");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3835: malformed-proof and plan-only CAPPED terminals stay replayed", async () => {
+  for (const [label, planOnly] of [["malformed", false], ["plan-only", true]] as const) {
+    const dir = mkdtempSync(join(tmpdir(), `rmd-decision-${label}-`));
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const digest = reviewDecisionDigest({ ...digestInput, diff: `diff --git a/${label} b/${label}\n` });
+    try {
+      appendLedger(ledgerPath, {
+        run_id: label, task_id: TASK, step: "review.posted", pr_url: PR, head_sha: HEAD,
+        review_decision_digest: digest,
+        decision_verdict: { ...verdict("success"), capped: true, keywordOnly: false, planOnly },
+      });
+      const claim = await claimReviewDecision({ ledgerPath, taskId: TASK, prUrl: PR, digest, headCheckoutDir: "/exact/pr-head" });
+      assert.equal(claim.kind, "replay", `${label} CAPPED evidence is not a degraded keyword-only terminal`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 async function conflictCase(priorState: ReviewState, attemptedState: ReviewState): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "rmd-decision-conflict-"));
   const ledgerPath = join(dir, "ledger.ndjson");

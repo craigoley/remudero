@@ -5579,7 +5579,7 @@ async function runReview(args: {
     headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files,
   });
   const decisionClaim = await claimReviewDecision({
-    ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest,
+    ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
   if (decisionClaim.kind === "replay") {
     return {
@@ -5892,6 +5892,7 @@ async function runReview(args: {
     prUrl,
     reviewInputDigest: inputDigest,
     reviewDecisionDigest: decisionDigest,
+    reopenedDegradedTerminal: decisionClaim.reopenedDegradedTerminal,
     reviewEngineRevision: REVIEW_ENGINE_REVISION,
     evaluatorProvenance,
     reviewerCodeFreshness,

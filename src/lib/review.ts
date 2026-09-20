@@ -152,9 +152,17 @@ function readLiveLedgerRecords(ledgerPath: string): Array<Record<string, unknown
 }
 
 export type ReviewDecisionClaim =
-  | { kind: "owned"; release: () => void }
+  | { kind: "owned"; release: () => void; reopenedDegradedTerminal?: boolean }
   | { kind: "in_flight" }
   | { kind: "replay"; terminal: ReviewDecisionTerminal };
+
+/** Only a terminal that never had a PR-head execution context may be retried when one is now available. */
+function isReopenableDegradedTerminal(
+  terminal: ReviewDecisionTerminal,
+  hasHeadCheckout: boolean,
+): boolean {
+  return hasHeadCheckout && terminal.verdict.capped && terminal.verdict.keywordOnly;
+}
 
 /** Acquire-before-read closes the terminal-check/create race; a live owner makes the loser stand down. */
 export async function claimReviewDecision(opts: {
@@ -162,6 +170,8 @@ export async function claimReviewDecision(opts: {
   taskId: string;
   prUrl: string;
   digest: string;
+  /** A successfully materialized checkout at the exact PR head; absent means replay remains final. */
+  headCheckoutDir?: string;
   lockOpts?: AcquireReviewStatusLockOpts;
 }): Promise<ReviewDecisionClaim> {
   const lockPath = join(dirname(opts.ledgerPath), "review-decision-claims", `${opts.digest.replace(":", "-")}.lock`);
@@ -174,6 +184,9 @@ export async function claimReviewDecision(opts: {
   }
   const terminal = lastReviewDecisionTerminal(readLiveLedgerRecords(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
   if (terminal) {
+    if (isReopenableDegradedTerminal(terminal, opts.headCheckoutDir !== undefined)) {
+      return { kind: "owned", release: () => handle.release(), reopenedDegradedTerminal: true };
+    }
     handle.release();
     return { kind: "replay", terminal };
   }
@@ -8007,6 +8020,8 @@ export interface PostReviewStatusGuardedOpts {
   prUrl?: string;
   reviewInputDigest?: string;
   reviewDecisionDigest?: string;
+  /** Permit replacement only of the matching CAPPED keyword-only terminal reopened after exact-head materialization. */
+  reopenedDegradedTerminal?: boolean;
   reviewEngineRevision?: string;
   evaluatorProvenance?: ReviewEvaluatorProvenance;
   /** A just-in-time reading of the module graph producing this terminal verdict. When supplied,
@@ -8117,7 +8132,9 @@ export async function postReviewStatusGuarded(
     const priorDecision = opts.prUrl !== undefined && opts.reviewDecisionDigest !== undefined
       ? lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, opts.reviewDecisionDigest)
       : undefined;
-    if (!lifecycle.merged && !lifecycle.closed && priorDecision) {
+    const replacingDegradedTerminal = opts.reopenedDegradedTerminal === true && priorDecision !== undefined &&
+      isReopenableDegradedTerminal(priorDecision, true);
+    if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal) {
       if (priorDecision.state === opts.state) {
         return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
       }
