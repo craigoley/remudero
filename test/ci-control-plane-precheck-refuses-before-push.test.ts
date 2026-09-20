@@ -141,3 +141,12 @@ test("W1-T3423: an unrelated product push skips the static route without a test 
   assert.match(result.stdout, /ci-control-plane-precheck: SKIP/);
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /^TAP version/m);
 });
+
+test("W1-T3423: the hook preserves its no-test-runner boundary", (t) => {
+  const f = fixture(t);
+  writeFileSync(join(f.work.dir, "src", "product.ts"), "export const productChange = true;\n");
+  f.commit("control-plane positive control");
+  const result = f.push();
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /^TAP version/m);
+});
