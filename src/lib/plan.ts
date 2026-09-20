@@ -220,9 +220,51 @@ export class TaskAdmissionError extends PlanError {
   }
 }
 
+export interface TaskFilingAdmissionOpts {
+  releasedIds?: ReadonlySet<string>;
+  isMerged?: MergedResolver;
+  repoRoot?: string;
+  pathExists?: (repoRoot: string, repoPath: string) => boolean;
+}
+
 export interface Plan {
   tasks: Task[];
   byId: Map<string, Task>;
+}
+
+const defaultTaskPathExists = (repoRoot: string, repoPath: string): boolean => {
+  try {
+    return statSync(join(repoRoot, repoPath)).isFile();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason }.ok;
+  }
+};
+
+export function assertMachineTaskFileable(
+  plan: Plan,
+  task: Task,
+  opts: TaskFilingAdmissionOpts = {},
+): void {
+  if (task.author_class !== "machine") return;
+
+  const reasons: string[] = [];
+  try {
+    assertRunnable(plan, task, opts.isMerged ?? yamlStatusMerged, opts.releasedIds ?? new Set<string>());
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    reasons.push(`not selectable by the dispatcher: ${reason}`);
+  }
+
+  const repoRoot = opts.repoRoot ?? process.cwd();
+  const pathExists = opts.pathExists ?? defaultTaskPathExists;
+  const missing = (task.files ?? []).filter((repoPath) => !pathExists(repoRoot, repoPath));
+  if (missing.length > 0) reasons.push(`declares file path(s) absent from the checkout: ${missing.join(", ")}`);
+  if (reasons.length > 0) {
+    throw new PlanError(`task ${task.id} is machine-authored — ${reasons.join("; ")}`, {
+      ...(missing.length > 0 ? { missingPaths: missing } : {}),
+    });
+  }
 }
 
 function req<T>(v: T | undefined, field: string, id: string): T {
