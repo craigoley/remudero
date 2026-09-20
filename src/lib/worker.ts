@@ -2920,7 +2920,8 @@ function isLiveQuestionStoreRoot(repoRoot: string): boolean {
   if (!isTestRunner()) return false;
   try {
     return realpathSync(repoRoot) === realpathSync(process.cwd());
-  } catch {
+  } catch (error) {
+    void error;
     return false;
   }
 }
