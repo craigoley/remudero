@@ -203,3 +203,56 @@ test("unit test: self-improvement experiment history preserves version redaction
   assert.deepEqual(history.experiments.map((item) => item.experimentId).sort(), ["experiment:repo:rotated", "experiment:repo:worker-pool"]);
   assert.ok(history.experiments.every((item) => item.version === "experiment-v1"));
 });
+
+test("unit test: self-improvement experiment routes are idempotent and refuse invalid lifecycle transitions", async () => {
+  const { ledgerPath, experiment } = fixture();
+  const proposedOutcome = fixture("experiment:repo:proposed-outcome").experiment;
+  const proposedRollback = fixture("experiment:repo:proposed-rollback").experiment;
+
+  await withService(ledgerPath, async (base) => {
+    assert.equal((await post(base, "/v1/operator-agent/experiments", { experiment })).status, 201);
+
+    const duplicate = await post(base, "/v1/operator-agent/experiments", { experiment });
+    assert.equal(duplicate.status, 200);
+    assert.equal((await duplicate.json()).existing, true);
+
+    const conflicting = await post(base, "/v1/operator-agent/experiments", {
+      experiment: { ...experiment, hypothesis: "A different hypothesis with the same experiment id." },
+    });
+    assert.equal(conflicting.status, 409);
+
+    assert.equal((await post(base, "/v1/operator-agent/experiments/decision", {
+      experimentId: "experiment:repo:missing",
+      decision: "approved",
+    })).status, 404);
+
+    assert.equal((await post(base, "/v1/operator-agent/experiments/decision", {
+      experimentId: experiment.experimentId,
+      decision: "approved",
+    })).status, 200);
+    assert.equal((await post(base, "/v1/operator-agent/experiments/decision", {
+      experimentId: experiment.experimentId,
+      decision: "rejected",
+    })).status, 409);
+
+    assert.equal((await post(base, "/v1/operator-agent/experiments/outcome", {
+      experimentId: "experiment:repo:missing",
+      outcome: { state: "observing", summary: "No such experiment.", observedAt: NOW },
+    })).status, 404);
+    assert.equal((await post(base, "/v1/operator-agent/experiments", { experiment: proposedOutcome })).status, 201);
+    assert.equal((await post(base, "/v1/operator-agent/experiments/outcome", {
+      experimentId: proposedOutcome.experimentId,
+      outcome: { state: "observing", summary: "Not approved yet.", observedAt: NOW },
+    })).status, 409);
+
+    assert.equal((await post(base, "/v1/operator-agent/experiments/rollback", {
+      experimentId: "experiment:repo:missing",
+      rollback: experiment.rollback,
+    })).status, 404);
+    assert.equal((await post(base, "/v1/operator-agent/experiments", { experiment: proposedRollback })).status, 201);
+    assert.equal((await post(base, "/v1/operator-agent/experiments/rollback", {
+      experimentId: proposedRollback.experimentId,
+      rollback: proposedRollback.rollback,
+    })).status, 409);
+  });
+});
