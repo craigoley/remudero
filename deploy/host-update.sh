@@ -873,9 +873,28 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
         echo "host-update: agent history reclaim — ${hdir}: no such directory, skipping"
         continue
       fi
+      # `find -printf` is GNU-only. BSD find has the same `-print0` primitive, so keep the
+      # traversal portable and ask the host's `stat` for the two metadata fields separately.
+      # Probe the format once per tree: GNU stat accepts `-c`; BSD stat accepts `-f`.
+      AGENT_HISTORY_STAT_FORMAT="bsd"
+      if stat -c '%Y %s' "${hdir}" >/dev/null 2>&1; then
+        AGENT_HISTORY_STAT_FORMAT="gnu"
+      fi
+      agent_history_file_metadata() {
+        if [ "${AGENT_HISTORY_STAT_FORMAT}" = "gnu" ]; then
+          stat -c '%Y %s' "$1"
+        else
+          stat -f '%m %z' "$1"
+        fi
+      }
       if [ "${DRY_RUN}" -eq 1 ]; then
-        would_kb="$(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -printf '%s\n' 2>/dev/null \
-          | awk '{s+=$1} END{printf "%d", s/1024}')"
+        would_bytes=0
+        while IFS= read -r -d '' path; do
+          metadata="$(agent_history_file_metadata "${path}")" || continue
+          file_size="${metadata#* }"
+          would_bytes=$((would_bytes + file_size))
+        done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
+        would_kb=$((would_bytes / 1024))
         echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
         continue
       fi
@@ -888,7 +907,14 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
           removed=$((removed + 1))
           echo "  removed ${path}"
         fi
-      done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -n)
+      done < <(
+        find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null |
+          while IFS= read -r -d '' path; do
+            metadata="$(agent_history_file_metadata "${path}")" || continue
+            printf '%s\t%s\t%s\n' "${metadata%% *}" "${metadata#* }" "${path}"
+          done |
+          sort -n
+      )
       freed_kb=$((freed_bytes / 1024))
       echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
     done

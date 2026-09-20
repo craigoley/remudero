@@ -62,6 +62,46 @@ function writeDockerStub(dir: string): void {
   chmodSync(join(dir, "docker"), 0o755);
 }
 
+/** The absolute path of the REAL `find` binary, resolved once via the shell's own `command -v` so
+ *  the stub below can delegate to it without recursing into itself through PATH. */
+function realFindPath(): string {
+  const r = spawnSync("bash", ["-c", "command -v find"], { encoding: "utf8" });
+  const p = (r.stdout ?? "").trim();
+  assert.ok(p, `could not resolve a real \`find\` binary to wrap: ${r.stderr ?? "no output"}`);
+  return p;
+}
+
+/**
+ * W1-T3837 — simulate BSD find's rejection of the GNU-only `-printf` primary, ON LINUX CI.
+ *
+ * Every runner this suite executes on ships GNU find, which happily accepts `-printf` — so
+ * running the OLD (pre-fix) script's `find -printf …` unmodified on this host cannot reproduce
+ * the macOS failure the task describes, and a fixture that only exercises real find leaves the
+ * fix's own proof unable to tell "before" from "after" (`check-proof --base` reports both as
+ * passing — see `scripts/proof-discrimination-gate.mjs`). `-printf` is the ONE primitive that
+ * differs between GNU and BSD find for this script's purposes, so this stub intercepts exactly
+ * that flag — printing nothing and exiting non-zero, matching BSD find's real behavior — and
+ * delegates every other invocation, including the portable `-print0` primary the fix now uses
+ * exclusively, straight through to the real binary. Under `set -euo pipefail` (host-update.sh:54)
+ * a pre-fix `find -printf` failing here kills the pipeline exactly as it does on a real macOS
+ * host; the post-fixed script never calls `-printf` at all, so it is unaffected.
+ */
+function writeFindStub(dir: string, realFind: string): void {
+  const find = [
+    "#!/usr/bin/env bash",
+    'for a in "$@"; do',
+    '  if [ "$a" = "-printf" ]; then',
+    '    echo "find: -printf: unknown primary or operator" >&2',
+    "    exit 1",
+    "  fi",
+    "done",
+    `exec "${realFind}" "$@"`,
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, "find"), find, { mode: 0o755 });
+  chmodSync(join(dir, "find"), 0o755);
+}
+
 interface Run {
   status: number;
   stdout: string;
@@ -120,6 +160,7 @@ function runHostUpdate(mode: "good" | "live", extraEnv: NodeJS.ProcessEnv = {}, 
   // refusal overrides RMD_GIT_RECLAIM_DIRS itself, and `extraEnv` is spread last so it wins.
   const gitTarget = gitRepo({ kind: "reclaim-target" });
   writeDockerStub(dir);
+  writeFindStub(dir, realFindPath());
   const r = spawnSync("bash", [scriptPath, "--reclaim-only"], {
     encoding: "utf8",
     cwd: REPO_ROOT,
@@ -209,6 +250,7 @@ test("--dry-run reports what would free without removing anything", () => {
   // refusal overrides RMD_GIT_RECLAIM_DIRS itself, and `extraEnv` is spread last so it wins.
   const gitTarget = gitRepo({ kind: "reclaim-target" });
   writeDockerStub(dir);
+  writeFindStub(dir, realFindPath());
   const dryRun = spawnSync("bash", [SCRIPT, "--reclaim-only", "--dry-run"], {
     encoding: "utf8",
     cwd: REPO_ROOT,
@@ -223,8 +265,12 @@ test("--dry-run reports what would free without removing anything", () => {
       RMD_CLAUDE_DIR: mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-claude-empty2-`)),
     },
   });
-  assert.equal(dryRun.status, 0);
+  assert.equal(dryRun.status, 0, dryRun.stderr);
   assert.match(dryRun.stdout ?? "", /agent history reclaim \(DRY RUN\)/);
+  // The 4096-byte fixture file must be COUNTED, not merely tolerated: under the BSD-find stub the
+  // pre-fix `find -printf` producer emits nothing, so a version that only checked exit status and
+  // the DRY RUN label would still pass on a script that silently reported 0B reclaimable.
+  assert.match(dryRun.stdout ?? "", /would free 4\.0KB/, "the old file's real size must be computed via the portable producer");
   assert.ok(existsSync(codex.old), "a dry run must remove nothing");
 });
 
