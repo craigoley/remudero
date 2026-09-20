@@ -48,7 +48,7 @@
     execution capability, not a changed review engine.
   acceptance:
     - claim: "a CAPPED keyword-only terminal retries only after the same PR head is materialized and reaches its proof executor, while a completed terminal for that decision remains replayed"
-      proof: "unit test: test/review-decision-finality.test.ts"
+      proof: "unit test: W1-T3835: an exact-head checkout reopens only a prior CAPPED keyword-only terminal"
   falsifier: |
     Delete the narrow degraded-terminal reopening predicate. The first fixture must
     return a replay before its proof executor runs; restored code must own the
