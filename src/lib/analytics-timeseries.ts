@@ -57,7 +57,5 @@ export function fiveLedgerBackedHistoricalSeries(): LedgerTimeSeries[] {
   });
 }
 
-export type HistoricalSeriesBundle = LedgerTimeSeries[];
-
 // Named export to ease imports from analytics-route
 export { fiveLedgerBackedHistoricalSeries as generateFiveLedgerBackedHistoricalSeries };
