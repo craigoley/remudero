@@ -19,7 +19,21 @@ import {
   type SweepDeps,
 } from "../src/lib/sweep.js";
 
-const NOW = Date.parse("2026-09-11T12:00:00.000Z");
+/** W1-T3837 — DERIVED FROM THE CLOCK, NEVER A CONSTANT, because one caller in this file does not
+ *  take an injected one. `deriveDisposition` is handed `NOW` explicitly at every call site below,
+ *  but `routeFix` ("rmd fix routes a refusal to escalation too") takes no clock and ages the
+ *  fixture against the REAL one. With a fixed pair this suite was a time bomb of exactly the shape
+ *  W1-T3270 documents on test/stale-ci-gate-wiring.test.ts: on 2026-09-25 the 09-11 stamp turns
+ *  `policy.staleDays` (14) old, `routeFix` disposes the PR `stale` BEFORE reaching the refusal
+ *  branch this test exists to exercise, and the case fails with no diff involved.
+ *
+ *  MEASURED before the fix, by shifting every date literal in this file back one year — which is
+ *  what the wall clock does to it by simply advancing:
+ *    Expected values to be strictly equal:  actual 'refused' - expected 'escalated'
+ *  Holding the pair on the clock keeps the one-hour offset every injected-NOW case relies on AND
+ *  keeps the fixture fresh for the caller that has no injection. */
+const NOW = Date.now();
+const RECENT_ACTIVITY_ISO = new Date(NOW - 60 * 60 * 1000).toISOString();
 
 function refusalReport(): string {
   return [
@@ -52,7 +66,7 @@ function refusalPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [refusalCriterion()],
     priorStrikes: 1,
-    lastActivityAt: "2026-09-11T11:00:00.000Z",
+    lastActivityAt: RECENT_ACTIVITY_ISO,
     headSha: "refusal-head",
     autoMergeArmed: false,
     ...over,

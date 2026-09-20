@@ -58,7 +58,7 @@ function dirtyFleetPr(branch: string, oldHead: string): OpenPrView {
     checksState: "none",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-12T00:00:00.000Z",
+    lastActivityAt: "2026-09-12T00:00:00.000Z", // expiring-fixture: exempt -- inert: aged to 2019 nothing fails, so no clock reads this stamp at all
     headSha: oldHead,
     headRefName: branch,
     autoMergeArmed: false,
