@@ -1641,6 +1641,11 @@ export function buildSweepEffects(
     fetchCiFailuresImpl: fetchCiFailures,
     runReviewImpl: runReview,
     fetchPrBodyImpl: fetchPrBodyViaGh,
+    // W1-T3869: the missing-trailer repair's writer. Unwired, `requiredSweepRuntime` throws
+    // `buildSweepEffects requires updatePrBodyImpl from its entrypoint adapter` the moment
+    // `repairMissingTaskTrailer` calls it — which is exactly what killed PR #5505's sweep action.
+    // Same REST writer the module's other three body-write sites already use.
+    updatePrBodyImpl: updatePrBodyViaGh,
     readHeadShaImpl: readHeadShaRest,
     ghLiveHeadImpl: ghLiveHead,
     fetchPrDiffFilesImpl: fetchPrDiffFilesViaGh,
