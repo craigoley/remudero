@@ -13,7 +13,7 @@ raw: "Prevent plan-only PRs from auto-merging when newly added or changed task
   unchanged historical warning that does not."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/6148
 summary:

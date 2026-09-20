@@ -16,7 +16,7 @@ raw: "Correct the merged analytics plan from PR #6127 before dispatch. OBSERVED:
   proofs. Do not change routing policy or expose credentials."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/6135
 summary:
