@@ -1619,6 +1619,7 @@ export function buildSweepEffects(
       remove: removeAbandonedFixWorktreeOwner,
       publishAhead: publishAbandonedFixOwnerAhead,
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
+      preserveTrackedDirty: preserveTrackedDirtyFixOwner,
     },
     depReviewCommandImpl: depReviewCommand,
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
@@ -33060,7 +33061,7 @@ export interface RegisteredFixOwnerSnapshot {
   path: string;
   pathState: RegisteredFixOwnerSignal;
   attachmentState: "exact" | "detached_or_other" | "unknown";
-  treeState: "clean" | "dirty" | "unknown";
+  treeState: "clean" | "tracked_dirty" | "untracked_dirty" | "unknown";
   remoteState: "exact" | "changed" | "unknown";
   historyState: "contained" | "ahead" | "diverged" | "unknown";
   claimState: "clear" | "occupied" | "unknown";
@@ -33073,7 +33074,7 @@ export interface RegisteredFixOwnerSnapshot {
 }
 
 export type RegisteredFixOwnerRecoveryDecision =
-  | { kind: "reclaim-contained" | "publish-ahead" | "preserve-diverged" }
+  | { kind: "reclaim-contained" | "publish-ahead" | "preserve-diverged" | "preserve-tracked-dirty" }
   | {
       kind: "keep";
       reason:
@@ -33100,8 +33101,9 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.attachmentState === "detached_or_other")
     return { kind: "keep", reason: "detached_or_wrong_branch" };
   if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
-  if (snapshot.treeState === "dirty") return { kind: "keep", reason: "dirty_worktree" };
-  if (snapshot.treeState !== "clean") return { kind: "keep", reason: "tree_probe_unreadable" };
+  if (snapshot.treeState === "untracked_dirty") return { kind: "keep", reason: "dirty_worktree" };
+  if (snapshot.treeState !== "clean" && snapshot.treeState !== "tracked_dirty")
+    return { kind: "keep", reason: "tree_probe_unreadable" };
   if (snapshot.remoteState === "changed") return { kind: "keep", reason: "remote_head_changed" };
   if (snapshot.remoteState !== "exact") return { kind: "keep", reason: "remote_head_unreadable" };
   if (snapshot.historyState === "unknown") return { kind: "keep", reason: "history_probe_unreadable" };
@@ -33109,6 +33111,7 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.claimState !== "clear") return { kind: "keep", reason: "branch_claim_unreadable" };
   if (snapshot.processState === "occupied") return { kind: "keep", reason: "process_cwd_owner" };
   if (snapshot.processState !== "clear") return { kind: "keep", reason: "process_cwd_probe_unreadable" };
+  if (snapshot.treeState === "tracked_dirty") return { kind: "preserve-tracked-dirty" };
   if (snapshot.historyState === "ahead") return { kind: "publish-ahead" };
   if (snapshot.historyState === "diverged") return { kind: "preserve-diverged" };
   return { kind: "reclaim-contained" };
@@ -33267,11 +33270,19 @@ export function captureRegisteredFixOwnerSnapshot(
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    snapshot.treeState = status.length === 0 ? "clean" : "dirty";
+    if (status.length === 0) {
+      snapshot.treeState = "clean";
+    } else {
+      const untracked = execFileSync("git", ["-C", ownerPath, "ls-files", "--others", "--exclude-standard", "-z"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      snapshot.treeState = untracked.length === 0 ? "tracked_dirty" : "untracked_dirty";
+    }
   } catch (e) {
     return { ...snapshot, error: String(e) };
   }
-  if (snapshot.treeState !== "clean") return snapshot;
+  if (snapshot.treeState === "untracked_dirty") return snapshot;
 
   if (!args.observedRemoteSha) return snapshot;
   snapshot.remoteState = args.observedRemoteSha === args.expectedRemoteSha ? "exact" : "changed";
@@ -33327,6 +33338,121 @@ export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: s
   });
   removeRunLock(worktreePath);
   removeWorktreeBase(worktreePath);
+}
+
+const DIRTY_FIX_OWNER_RECOVERY_REF_PREFIX = "refs/rmd-recovery/fix-dirty";
+const DIRTY_FIX_OWNER_RECOVERY_IDENTITY = {
+  GIT_AUTHOR_NAME: "remudero-fleet[bot]",
+  GIT_AUTHOR_EMAIL: "remudero-fleet[bot]@users.noreply.github.com",
+  GIT_COMMITTER_NAME: "remudero-fleet[bot]",
+  GIT_COMMITTER_EMAIL: "remudero-fleet[bot]@users.noreply.github.com",
+} as const;
+
+function temporaryIndexTree(
+  repoDir: string,
+  baseSha: string,
+  mutate: (env: NodeJS.ProcessEnv) => void,
+): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-dirty-fix-owner-index-"));
+  const env = { ...process.env, GIT_INDEX_FILE: join(dir, "index") };
+  try {
+    execFileSync("git", ["-C", repoDir, "read-tree", baseSha], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    mutate(env);
+    return execFileSync("git", ["-C", repoDir, "write-tree"], {
+      encoding: "utf8",
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function refCommitMatchesDirtyRecovery(repoDir: string, recoveryRef: string, localSha: string, tree: string): boolean {
+  try {
+    const commit = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", recoveryRef], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const parent = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", `${recoveryRef}^1`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const recoveredTree = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", `${recoveryRef}^{tree}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return /^[0-9a-f]{40}$/i.test(commit) && parent === localSha && recoveredTree === tree;
+  } catch (error) {
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+    if (stderr.includes("Needed a single revision")) return false;
+    throw error;
+  }
+}
+
+export function preserveTrackedDirtyFixOwner(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+): string {
+  const observedHead = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
+  const untracked = execFileSync("git", ["-C", ownerPath, "ls-files", "--others", "--exclude-standard", "-z"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (untracked.length > 0) throw new Error("dirty owner has untracked paths");
+  const patch = execFileSync("git", ["-C", ownerPath, "diff", "--binary", "--no-ext-diff", localSha], {
+    encoding: "utf8",
+    maxBuffer: 1 << 26,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
+
+  const ownerTree = temporaryIndexTree(ownerPath, localSha, (env) => {
+    execFileSync("git", ["-C", ownerPath, "add", "-A"], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  });
+  const patchTree = temporaryIndexTree(repoDir, localSha, (env) => {
+    execFileSync("git", ["-C", repoDir, "apply", "--cached", "--binary", "--whitespace=nowarn"], {
+      input: patch,
+      env,
+      maxBuffer: 1 << 26,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  });
+  if (patchTree !== ownerTree) {
+    throw new Error(`dirty recovery patch tree ${patchTree} does not match owner tree ${ownerTree}`);
+  }
+
+  const recoveryRef = `${DIRTY_FIX_OWNER_RECOVERY_REF_PREFIX}/${branch}/${localSha}/${patchTree}`;
+  if (!refCommitMatchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
+    const recoveryCommit = execFileSync(
+      "git",
+      ["-C", repoDir, "commit-tree", patchTree, "-p", localSha, "-m", `chore(recovery): preserve dirty fix owner ${branch}`],
+      {
+        encoding: "utf8",
+        env: { ...process.env, ...DIRTY_FIX_OWNER_RECOVERY_IDENTITY },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    ).trim();
+    execFileSync("git", ["-C", repoDir, "update-ref", recoveryRef, recoveryCommit, ZERO_GIT_OID], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+  if (!refCommitMatchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
+    throw new Error(`dirty recovery ref ${recoveryRef} is not the expected immutable commit`);
+  }
+  return recoveryRef;
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {

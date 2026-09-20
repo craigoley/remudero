@@ -45,6 +45,7 @@ import {
   fixBranchClaimKey,
   preserveAbandonedFixOwnerDivergence,
   publishAbandonedFixOwnerAhead,
+  preserveTrackedDirtyFixOwner,
   readBoundedProcessCwdCensus,
   readRegisteredFixOwnerClaim,
   registeredFixWorktreeOwner,
@@ -490,7 +491,7 @@ test("W1-T2952: only a clean, exact, unowned managed fix worktree is reclaimable
     [{ pathState: "unknown" }, "worktree_path_unreadable"],
     [{ attachmentState: "detached_or_other" }, "detached_or_wrong_branch"],
     [{ attachmentState: "unknown" }, "branch_probe_unreadable"],
-    [{ treeState: "dirty" }, "dirty_worktree"],
+    [{ treeState: "untracked_dirty" }, "dirty_worktree"],
     [{ treeState: "unknown" }, "tree_probe_unreadable"],
     [{ remoteState: "changed" }, "remote_head_changed"],
     [{ remoteState: "unknown" }, "remote_head_unreadable"],
@@ -526,6 +527,110 @@ test("W1-T3170 ancestry continues through abandonment probes", () => {
       decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, historyState, processState: "occupied" }),
       { kind: "keep", reason: "process_cwd_owner" },
     );
+  }
+});
+
+test("W1-T3822: tracked-only residue reaches preservation only after every existing owner proof", () => {
+  assert.deepEqual(
+    decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, treeState: "tracked_dirty" }),
+    { kind: "preserve-tracked-dirty" },
+  );
+  for (const override of [
+    { remoteState: "changed" as const },
+    { historyState: "unknown" as const },
+    { claimState: "occupied" as const },
+    { processState: "unknown" as const },
+  ]) {
+    assert.equal(
+      decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, treeState: "tracked_dirty", ...override }).kind,
+      "keep",
+      `a tracked-dirty owner with ${JSON.stringify(override)} must remain untouched`,
+    );
+  }
+});
+
+test("W1-T3822: tracked-only residue is captured as an immutable commit whose tree matches the owner", () => {
+  const root = tmp("rmd-fbcs-dirty-owner-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3822-1789876000000";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const ownerPath = join(root, "worktrees", "sweep-W1-T3822-1789876000000");
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    writeFileSync(join(ownerPath, "seed.txt"), "changed but unstaged\n");
+    writeFileSync(join(ownerPath, "staged.txt"), "staged new tracked file\n");
+    execFileSync("git", ["-C", ownerPath, "add", "staged.txt"]);
+    const remoteSha = sha(repoDir, `origin/${branch}`);
+    const snapshot = captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot: join(root, "worktrees"),
+      ownerPath,
+      taskId: "W1-T3822",
+      branch,
+      expectedRemoteSha: remoteSha,
+      observedRemoteSha: remoteSha,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    }, {
+      readClaim: () => "clear",
+      processCensus: () => ({ state: "clear", scanned: 1 }),
+    });
+    assert.equal(snapshot.treeState, "tracked_dirty");
+    assert.deepEqual(decideRegisteredFixOwnerRecovery(snapshot), { kind: "preserve-tracked-dirty" });
+    assert.ok(snapshot.localSha);
+
+    const recoveryRef = preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, snapshot.localSha!);
+    const recoveredPath = join(root, "recovered");
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", "--detach", recoveredPath, recoveryRef]);
+    assert.equal(readFileSync(join(recoveredPath, "seed.txt"), "utf8"), "changed but unstaged\n");
+    assert.equal(readFileSync(join(recoveredPath, "staged.txt"), "utf8"), "staged new tracked file\n");
+    assert.equal(sha(repoDir, `${recoveryRef}^1`), snapshot.localSha);
+    assert.equal(
+      preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, snapshot.localSha!),
+      recoveryRef,
+      "the same observed tree reuses rather than overwrites its immutable recovery ref",
+    );
+    assert.ok(execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1"], { encoding: "utf8" }).length > 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3822: an untracked path remains a no-touch decline before dirty recovery", () => {
+  const root = tmp("rmd-fbcs-dirty-untracked-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3822-1789876000001";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const ownerPath = join(root, "worktrees", "sweep-W1-T3822-1789876000001");
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    writeFileSync(join(ownerPath, "untracked.txt"), "must remain\n");
+    const remoteSha = sha(repoDir, `origin/${branch}`);
+    const snapshot = captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot: join(root, "worktrees"),
+      ownerPath,
+      taskId: "W1-T3822",
+      branch,
+      expectedRemoteSha: remoteSha,
+      observedRemoteSha: remoteSha,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    });
+    assert.equal(snapshot.treeState, "untracked_dirty");
+    assert.deepEqual(decideRegisteredFixOwnerRecovery(snapshot), { kind: "keep", reason: "dirty_worktree" });
+    assert.throws(() => preserveTrackedDirtyFixOwner(repoDir, ownerPath, branch, sha(ownerPath, "HEAD")));
+    assert.equal(readFileSync(join(ownerPath, "untracked.txt"), "utf8"), "must remain\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -948,6 +1053,82 @@ test("W1-T3170 diverged owner is preserved before reclaim", async () => {
     assert.deepEqual(order, ["preserve", "remove"]);
     assert.equal(logs.filter((entry) => entry.step === "sweep.fix.checkout_owner_divergence_preserved").length, 1);
     assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3822: tracked-only owner residue is preserved before reclamation and one ordinary repair", async () => {
+  const root = tmp("rmd-fbcs-dirty-dispatch-");
+  const branch = "run-W1-T500-1785600000016";
+  const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000016");
+  const localSha = "c".repeat(40);
+  const recoveryRef = `refs/rmd-recovery/fix-dirty/${branch}/${localSha}/${"d".repeat(40)}`;
+  const order: string[] = [];
+  let registeredOwner: string | undefined = ownerPath;
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repos", "scratch-fbcs-repo");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    const worker = { sessionId: "W1-T3822-DIRTY", costUsd: 0, text: "REPORT\nrecovery integration probe\n", blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
+    const { logs, threw } = await driveDispatchFix(
+      root,
+      branch,
+      () => registeredOwner,
+      {
+        capture: () => ({ ...SAFE_OWNER_SNAPSHOT, path: ownerPath, treeState: "tracked_dirty", localSha }),
+        preserveTrackedDirty: (_repo, seenOwner, seenBranch, seenLocal) => {
+          assert.deepEqual([seenOwner, seenBranch, seenLocal], [ownerPath, branch, localSha]);
+          order.push("preserve");
+          return recoveryRef;
+        },
+        remove: (canonical, owner) => {
+          order.push("remove");
+          removeAbandonedFixWorktreeOwner(canonical, owner);
+          registeredOwner = undefined;
+        },
+      },
+      async () => worker,
+      { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "fixture failure" }] },
+    );
+    assert.equal(threw, undefined);
+    assert.deepEqual(order, ["preserve", "remove"]);
+    assert.equal(logs.filter((entry) => entry.step === "sweep.fix.checkout_owner_dirty_preserved").length, 1);
+    assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3822: untracked dirty residue is named and never preserved, removed or dispatched", async () => {
+  const root = tmp("rmd-fbcs-untracked-dispatch-");
+  const branch = "run-W1-T500-1785600000017";
+  const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000017");
+  let preserved = false;
+  let removed = false;
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const { logs, threw } = await driveDispatchFix(
+      root,
+      branch,
+      ownerPath,
+      {
+        capture: () => ({ ...SAFE_OWNER_SNAPSHOT, path: ownerPath, treeState: "untracked_dirty" }),
+        preserveTrackedDirty: () => { preserved = true; },
+        remove: () => { removed = true; },
+      },
+      async () => { throw new Error("an untracked owner must not reach worker dispatch"); },
+    );
+    assert.equal(threw, undefined);
+    assert.equal(preserved, false);
+    assert.equal(removed, false);
+    assert.equal(logs.filter((entry) => entry.step === "sweep.fix.dirty_recovery_untracked_refused").length, 1);
+    assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
