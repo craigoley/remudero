@@ -504,6 +504,7 @@
     "test/commit-msg-hook.test.ts": 4408,
     "test/commit-trailer-surface-squash-setting.test.ts": 948,
     "test/commit-trailer-survives-squash.test.ts": 1654,
+    "test/commit-worker-edits-new-directory.test.ts": 0,
     "test/commitlint-config.test.ts": 3060,
     "test/commitlint-mode.test.ts": 4017,
     "test/compaction-zero-is-unexplained.test.ts": 751,
