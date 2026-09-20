@@ -60,9 +60,19 @@ test("W1-T3747: a credited build whose declared test path shipped passes", () =>
     lintTask(t, { creditedBuild: true, moduleExists: (path) => path === shipped || path === "src/lib/task-linter.ts" }).violations.some((v) => v.check === "credited-test-path"),
     false,
   );
+  assert.equal(
+    creditedTestPathViolations(task(), { creditedBuild: true, moduleExists: () => false }).length,
+    1,
+    "the passing case must be paired with a live missing-path control so this proof cannot pass on the base linter",
+  );
 });
 
 test("W1-T3747: a plan-only filing is exempt", () => {
+  assert.equal(
+    creditedTestPathViolations(task(), { creditedBuild: true, moduleExists: () => false }).length,
+    1,
+    "the exemption is meaningful only when the credited build path is otherwise refused",
+  );
   assert.deepEqual(
     creditedTestPathViolations(task(), {
       creditedBuild: true,
