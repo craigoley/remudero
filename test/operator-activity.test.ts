@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   OPERATOR_ACTIVITY_CONTRACT_VERSION,
   OPERATOR_ACTIVITY_MAX_ITEMS,
@@ -35,7 +36,7 @@ const PLAN_YAML = `
 `;
 
 function plan(): Plan {
-  const directory = mkdtempSync(join(tmpdir(), "operator-activity-"));
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-`));
   const path = join(directory, "tasks.yaml");
   writeFileSync(path, PLAN_YAML);
   return loadPlan(path);
