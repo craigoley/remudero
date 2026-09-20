@@ -75,7 +75,7 @@
     - claim: "a clean new shard passes and a mixed source diff does not take the plan-only exemption"
       proof: "unit test: test/plan-only-new-task-diagnostics.test.ts"
     - claim: "the guard is wired into the CI plan-only validation path rather than only exposed as an unused helper"
-      proof: "grep: plan-only in src/run-task.ts"
+      proof: "grep: promoteIntroducedPlanOnlyDiagnostics( in src/run-task.ts"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION if the current plan-only CI gate already compares base and head
     diagnostics and refuses exactly these three introduced classes while preserving inherited
