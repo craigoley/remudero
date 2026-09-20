@@ -1,0 +1,23 @@
+id: fb-1789874581744-a3f4d4
+ts: 2026-09-20T03:23:01.744Z
+raw: "Prevent console escalation issue flooding. OBSERVED in the live console
+  ledger: AGENT-T2 and UI-T27 each opened a new needs-human issue roughly once
+  per minute; CONSOLE-T26 repeated through issue #1414. In src/run-task.ts, the
+  pre-dispatch-linter escalation summary embeds the changing attempts count. In
+  src/lib/escalate.ts, no-PR, no-cause duplicate matching compares the full
+  rendered title, so every count change defeats deduplication. Implement a
+  narrow producer fix: keep the linter-refusal issue summary/title stable, move
+  the attempt count into detail or ledger-only context, and add a behavioral
+  test proving attempts 2 and 3 reuse one issue and ledger escalation.deduped.
+  Preserve distinct producer/cause behavior; do not weaken the broader dedup
+  identity. Validate against the real issue gateway seam and open the normal
+  core PR."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

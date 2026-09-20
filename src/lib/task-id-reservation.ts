@@ -432,6 +432,8 @@ export interface RemoteReserveDeps {
    * landing branch exists locally.
    */
   filingBranch?: string;
+  /** W1-T3742: capture the takeover hand-off line; defaults to the real console. */
+  say?: (line: string) => void;
 }
 
 export interface ReservationHolderLine {
@@ -487,6 +489,11 @@ export function formatReservationAnchorMessage(holder: ReservationHolderLine): s
 
 export function formatHandMintReservationMessage(taskId: string, holder: ReservationHolderLine): string {
   return `reserve ${taskId} ${holder.branch}\n\n${formatReservationHolderLine({ ...holder, source: holder.source ?? "hand-mint" })}`;
+}
+
+// W1-T3742: the single pasteable hand-off line, shared by mint and its tests.
+export function reservationHandoffNoteLine(holderBranch: string, filerBranch: string): string {
+  return `reservation hand-off: ${holderBranch} -> ${filerBranch}`;
 }
 
 export function parseReservationHolderLine(message: string): ParsedReservationHolderLine {
@@ -661,6 +668,8 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       }
       lastStderr = undefined;
       wonAnchors.set(taskId, amended);
+      // W1-T3742: print only when the recorded holder differs from the filer.
+      if (takenOverFrom !== branch) (deps.say ?? console.log)(reservationHandoffNoteLine(takenOverFrom, branch));
       return "created";
     },
     recordFilingBranch(taskId, branch) {

@@ -1,0 +1,23 @@
+id: fb-1789939342172-971cbe
+ts: 2026-09-20T21:22:22.173Z
+raw: "Core review finalization recovery: console PR #1493 has a stable head and
+  green CI, but review run review-PR1493-1789938859721 completed its Sonnet
+  verdict successfully then recorded review.post_refused because the review
+  input changed during execution, leaving the required remudero-review status
+  pending. Prevent a benign freshness race from stranding a PR: terminal posting
+  must distinguish a changed head/body acceptance subject from incidental
+  PR/status activity, preserve the original pending evidence, and re-drive
+  promptly with a fresh immutable input snapshot when needed. Add a
+  discriminating test that induces incidental activity without a head/body
+  change and proves success replaces pending, plus a true body/head change
+  falsifier that still refuses. Never forge a status or merge around the review
+  gate."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

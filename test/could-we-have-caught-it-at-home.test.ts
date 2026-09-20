@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyRefusalLocality, refusalLocalityReport, type ParityRow } from "../src/lib/ci-failure-corpus.js";
+import {
+  classifyRefusalLocality,
+  refusalLocalityReport,
+  stripMatrixSuffix,
+  MATRIX_SUFFIX_RE,
+  type ParityRow,
+} from "../src/lib/ci-failure-corpus.js";
 
 // ── W1-T3740 — THE SCOREBOARD THE LOOP NEVER HAD ─────────────────────────────────────────────
 //
@@ -26,6 +32,7 @@ import { classifyRefusalLocality, refusalLocalityReport, type ParityRow } from "
 const REGISTRY: ParityRow[] = [
   { job: "comment-load-ratchet", mirrored: true },
   { job: "coverage-ratchet", mirrored: true },
+  { job: "ci-shard", mirrored: false, reason: "matrix job; local mirroring is a wall-clock decision on W1-T3737's measurements" },
   { job: "squash-trailer-gate", mirrored: false, reason: "reads the pull_request event payload; a local checkout cannot supply it honestly" },
   { job: "a-drifted-exclusion", mirrored: false },
 ];
@@ -99,4 +106,51 @@ test("the report names the already-catchable count", () => {
   const none = refusalLocalityReport([], REGISTRY, DEFAULT_TIER);
   assert.equal(none.alreadyCatchable, 0);
   assert.match(none.lines[0], /0 of 0/);
+});
+
+// ── W1-T3743 — THE MATRIX SUFFIX IS A SPELLING, NOT A DIFFERENT JOB ──────────────────────────
+//
+// GitHub reports `ci-shard` as `ci-shard (1/4)`; the registry names it `ci-shard`. Before this,
+// the join never stripped the suffix, so a live, registered, required job read as `unknown-job`
+// on its very first use — the drift signal the classification exists to raise, firing on itself.
+
+test("a matrix-suffixed job resolves to its registry entry", () => {
+  assert.equal(
+    classifyRefusalLocality("ci-shard (1/4)", REGISTRY, DEFAULT_TIER),
+    "excluded-with-reason",
+    "the join strips the shard suffix and finds ci-shard's own registry row, not unknown-job",
+  );
+  assert.equal(stripMatrixSuffix("ci-shard (1/4)"), "ci-shard");
+  assert.equal(stripMatrixSuffix("coverage-shard (3/4)"), "coverage-shard");
+
+  const r = refusalLocalityReport(["ci-shard (1/4)"], REGISTRY, DEFAULT_TIER);
+  assert.equal(r.counts["unknown-job"], 0);
+  assert.equal(r.counts["excluded-with-reason"], 1);
+});
+
+test("a shared prefix is not a match after normalising", () => {
+  // THE STRIP MUST NOT BECOME A FUZZY MATCH. `coverage-shard` shares a prefix with the registered
+  // `coverage-ratchet`, and normalising its matrix suffix away must not make the two collide.
+  assert.equal(
+    classifyRefusalLocality("coverage-shard (3/4)", REGISTRY, DEFAULT_TIER),
+    "unknown-job",
+    "coverage-shard and coverage-ratchet are different jobs even once the suffix is stripped",
+  );
+});
+
+test("an unregistered job survives normalisation as unknown", () => {
+  // A name that normalises to nothing registered is still drift — normalising narrows what counts
+  // as drift, it must not abolish the signal entirely.
+  assert.equal(classifyRefusalLocality("never-heard-of-it (2/4)", REGISTRY, DEFAULT_TIER), "unknown-job");
+  assert.equal(stripMatrixSuffix("never-heard-of-it (2/4)"), "never-heard-of-it");
+
+  // And a name with no matrix suffix at all passes through untouched.
+  assert.equal(stripMatrixSuffix("lint-plan"), "lint-plan");
+});
+
+test("MATRIX_SUFFIX_RE itself: matches a shard suffix and rejects a plain job name", () => {
+  // Drives the regex's OWN unhealthy arm (no suffix -> no match) and its healthy arm (a real
+  // matrix suffix -> match), directly against the exported symbol, not only through the wrapper.
+  assert.equal(MATRIX_SUFFIX_RE.test("ci-shard"), false);
+  assert.equal(MATRIX_SUFFIX_RE.test("ci-shard (1/4)"), true);
 });

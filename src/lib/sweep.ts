@@ -7513,7 +7513,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
  *  later pass stands down FOREVER. `fix.resolved` is never counted as stalled. TASK-ID KEYED, safe
  *  because every caller guards on the PR's CURRENT head. W1-T1210 — A TASKID WITH NO `fix.dispatch`
  *  ROW IS THE SAME SHAPE ONE STEP EARLIER, and the ABSENCE of the row is the falsifier. */
-function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
+export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
   if (!taskId) return false;
   let stalled = false;
   let dispatched = false;
@@ -7523,6 +7523,10 @@ function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, tas
       dispatched = true;
       stalled = false;
     } else if (line.step === "fix.ci_not_green") {
+      stalled = true;
+    } else if (line.step === "fix.commit_refused") {
+      // W1-T3868: the fix lane ran, but the harness refused to create a commit. The row is the
+      // positive outcome that releases the same-head claim for the next sweep pass.
       stalled = true;
     } else if (line.step === "fix.review") {
       stalled = line.state !== "success";

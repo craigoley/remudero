@@ -1,0 +1,60 @@
+- id: W1-T3899
+  title: "VERIFY EXTERNAL EFFECTS — postconditions, reconciliation, partial success, and connector truth"
+  repo: remudero
+  depends_on: [W1-T3855, W1-T3880]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Self-improvement", "§Credential boundary", "W1-T3855", "W1-T3880"]
+  files:
+    - src/lib/action-reconciliation.ts
+    - src/lib/worker-provider.ts
+    - src/lib/ledger.ts
+    - openapi/daemon.yaml
+    - test/action-reconciliation-postconditions.test.ts
+    - test/action-reconciliation-partial-success.test.ts
+    - test/action-reconciliation-drift.test.ts
+    - test/action-reconciliation-retry.test.ts
+    - test/action-reconciliation-redaction.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3855 already supplies idempotency, dry-run, rollback, and a durable action receipt. A receipt
+    proves what RMD attempted; it does not prove that an external calendar, repository, provider, or
+    host now has the intended state. Without postcondition verification, a connector timeout can look
+    like success or failure and self-improvement will learn from the wrong outcome.
+
+    This task adds the external-state truth layer without creating a second action contract or credential
+    store. It is the implementation seam needed before RMD can safely arrange real-world work.
+  design: |
+    Add an `external-effect-v1` result envelope linked to the originating action and capability grant.
+    It names the connector and target identity, requested operation, precondition snapshot, expected
+    postconditions, observed state, observation time, freshness, idempotency key, reconciliation state,
+    partial-success details, retry or compensation path, and redacted evidence reference.
+
+    A connector must distinguish applied, refused, pending, partially-applied, drifted, stale, and
+    unobservable outcomes. Reconciliation may retry only within the original authority and budget. It
+    must never convert an unavailable observation into success, leak provider output, or silently repeat
+    a non-idempotent operation.
+  acceptance:
+    - claim: "each external effect carries expected postconditions, target identity, freshness, and a linked originating action"
+      proof: "unit test: test/action-reconciliation-postconditions.test.ts"
+    - claim: "partial, pending, refused, drifted, stale, and unobservable outcomes remain distinct"
+      proof: "unit test: test/action-reconciliation-partial-success.test.ts"
+    - claim: "observed external drift never renders as successful completion and names the reconciliation state"
+      proof: "unit test: test/action-reconciliation-drift.test.ts"
+    - claim: "reconciliation retries remain within the original idempotency, authority, and budget boundaries"
+      proof: "unit test: test/action-reconciliation-retry.test.ts"
+    - claim: "connector evidence is redacted and an unavailable observation cannot become a healthy receipt"
+      proof: "unit test: test/action-reconciliation-redaction.test.ts"
+    - claim: "the provider path calls external-effect reconciliation after a bounded action attempt"
+      proof: "grep: reconcileExternalEffect( in src/lib/worker-provider.ts"
+  falsifier: |
+    Mark a timeout successful without an observation, hide partial application, retry outside the
+    original grant, repeat a non-idempotent operation, or store raw provider output. The corresponding
+    proof must fail.
+  note: "W1-T3855 owns action admission and receipts; this task owns the postcondition and external-state readback."

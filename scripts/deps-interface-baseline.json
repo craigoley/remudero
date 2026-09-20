@@ -1,4 +1,6 @@
 {
-  "_comment": "Deps interface/type declaration ceiling under src/**/*.ts. Measured by test/deps-interface-census.test.ts; deliberate growth must be reviewed here, while shrinkage can leave the ceiling unchanged until a migration lowers it.",
-  "depsInterfaceCount": 158
+  "_comment": "Deps interface/type and seam census under src/**/*.ts. The recorded populations can only fall; growth is refused, while identical member-sets are reported as the route to consolidation.",
+  "depsInterfaceCount": 158,
+  "inlineSeamCount": 112,
+  "aliasedSeamCount": 1
 }
