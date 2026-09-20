@@ -124,7 +124,8 @@ the four scheduled instruments never contend for the same runner window.
 
 ### Base lines 101-123 — ONE ENTRY PER HOST, space-separated…
 
-ONE ACTIVE ENTRY PER FLEET HOST, space-separated. `heartbeat-azure` is the only active entry;
+ONE ACTIVE ENTRY PER FLEET HOST, space-separated. The active watcher population is exactly
+`heartbeat-azure`; it is the only active entry;
 the Mac-mini's `heartbeat-mini` transport is retired and is no longer watched. Adding a host is
 one word here plus `RMD_HEARTBEAT_BRANCH=<that word>` in its cron line — and an entry whose
 branch does not exist yet costs nothing, because absence is silent per branch.
