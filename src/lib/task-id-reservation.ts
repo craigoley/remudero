@@ -432,6 +432,14 @@ export interface RemoteReserveDeps {
    * landing branch exists locally.
    */
   filingBranch?: string;
+  /**
+   * W1-T3742: where {@link gitRemoteRefReserver}'s `reclaim` prints the hand-off line it produces
+   * for a takeover, via {@link reservationHandoffNoteLine} — never a second spelling of it.
+   * Defaults to `console.log`, so `rmd next-task-id --reserve` (the one caller that reaches this
+   * without overriding it) prints the line for real, at the moment a filer is about to hand-write
+   * a shard's note. Injectable so a test can capture it without stubbing the global console.
+   */
+  say?: (line: string) => void;
 }
 
 export interface ReservationHolderLine {
@@ -487,6 +495,17 @@ export function formatReservationAnchorMessage(holder: ReservationHolderLine): s
 
 export function formatHandMintReservationMessage(taskId: string, holder: ReservationHolderLine): string {
   return `reserve ${taskId} ${holder.branch}\n\n${formatReservationHolderLine({ ...holder, source: holder.source ?? "hand-mint" })}`;
+}
+
+// W1-T3742: THE ONE LINE A FILER MUST BE ABLE TO PASTE VERBATIM, produced here and nowhere else
+// in `src/`. `task-id-existence-check.mjs`'s matcher (W1-T3648) is end-of-line anchored, so this
+// returns ONLY the bare hand-off text — nothing before or after it — the same contract that
+// function's own copy documents. THE ONE OPTION NOT AVAILABLE is re-spelling this as a template
+// string beside it: two producers of one matched line is the defect W1-T3739's scaffolder closed
+// on the filing side, reopened here on the mint side (see {@link gitRemoteRefReserver}'s `reclaim`,
+// the one caller in this module that reaches it).
+export function reservationHandoffNoteLine(holderBranch: string, filerBranch: string): string {
+  return `reservation hand-off: ${holderBranch} -> ${filerBranch}`;
 }
 
 export function parseReservationHolderLine(message: string): ParsedReservationHolderLine {
@@ -661,6 +680,12 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       }
       lastStderr = undefined;
       wonAnchors.set(taskId, amended);
+      // W1-T3742: THE MINT PRINTS THE HAND-OFF LINE, not the filer. A takeover is precisely the
+      // moment a reservation's RECORDED holder (`takenOverFrom`, read from the reservation itself,
+      // never guessed) diverges from who is about to file — the shape #5894 got wrong by inferring
+      // the holder from the branch the filer was on. `branch` IS the filer here (this reclaim's own
+      // `filingBranch()`), so nothing prints when there is nothing to hand off.
+      if (takenOverFrom !== branch) (deps.say ?? console.log)(reservationHandoffNoteLine(takenOverFrom, branch));
       return "created";
     },
     recordFilingBranch(taskId, branch) {
