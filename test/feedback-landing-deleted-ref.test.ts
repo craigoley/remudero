@@ -209,7 +209,9 @@ test("unit test: one live landing move rederives exactly once — the retry land
 
   let racedOnce = false;
   let pushCount = 0;
+  let refreshReads = 0;
   const racingGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "ls-remote") refreshReads++;
     if (args[0] === "push") {
       pushCount++;
       if (!racedOnce) {
@@ -230,6 +232,7 @@ test("unit test: one live landing move rederives exactly once — the retry land
   assert.equal(bResult.landed, true, "B's re-derived retry must still succeed against the moved tip");
   assert.equal(bResult.error, undefined, "a successfully recomputed retry is not reported as an error");
   assert.equal(pushCount, 2, "exactly one rebuild-and-retry — the first attempt plus one retry, never more");
+  assert.ok(refreshReads > 0, "the live branch is refreshed from the authoritative remote before deriving its lease");
 
   const tree = landingTree(bareOrigin);
   assert.match(tree, /fb-move-a\.yaml/);
@@ -254,7 +257,9 @@ test("unit test: two live landing moves refuse without force replacement — the
     encoding: "utf8",
   }).trim();
 
+  let refreshReads = 0;
   const alwaysStaleLeaseGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "ls-remote") refreshReads++;
     if (args[0] === "push") {
       throw new Error(`! [rejected] refs/heads/${LANDING_BRANCH} -> ${LANDING_BRANCH} (stale info)`);
     }
@@ -276,6 +281,7 @@ test("unit test: two live landing moves refuse without force replacement — the
     encoding: "utf8",
   }).trim();
   assert.equal(headAfterB, headBeforeB, "a refused call must never move the branch");
+  assert.ok(refreshReads > 0, "the live branch is refreshed before the CAS refusal is evaluated");
 });
 
 // ── acceptance 5: unreadable pending content still refuses, never a fresh empty create ──────
@@ -296,7 +302,9 @@ test("unit test: unreadable landing content refuses without fresh create — con
   // unexpectedly. This must refuse the whole call, never collapse into "absent" and recreate an
   // empty branch that would silently drop the record already landed there.
   writeFeedbackEntry(root, "fb-unreadable-2", "a second record — must not ride a false empty-create either");
+  let refreshReads = 0;
   const unreadableLsTreeGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "ls-remote") refreshReads++;
     if (args[0] === "ls-tree") {
       throw new Error("simulated: transient read failure, NOT 'branch does not exist'");
     }
@@ -314,6 +322,7 @@ test("unit test: unreadable landing content refuses without fresh create — con
   assert.doesNotMatch(second.error ?? "", /tip moved/i, "an unreadable-content refusal is never mislabelled as a concurrent tip move");
   assert.equal(createCount2(), 0, "no PR was ever created off an unproven union");
   assert.equal(mergeCount2(), 0, "auto-merge was never armed off an unproven union");
+  assert.ok(refreshReads > 0, "the existing branch is refreshed before its pending content is read");
 
   const tree = landingTree(bareOrigin);
   assert.match(tree, /fb-unreadable\.yaml/, "the branch's real, already-landed content is untouched by the refusal");
