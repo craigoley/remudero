@@ -48,7 +48,7 @@ export function readTaskIdReservation(path: string): TaskIdReservationInfo | nul
 /** How a reservation failure is machine-classified: "unreachable" is a failed remote read/write
  *  (recoverable), "exhausted" means the scanned window was already fully held, "local" is a
  *  non-contention LOCAL store fault naming no remote id/ref. Ledgered as fields, never a string. */
-export type ReservationFailureOutcome = "unreachable" | "exhausted" | "local" | "unknown";
+export type ReservationFailureOutcome = "unreachable" | "exhausted" | "local" | "refused" | "unknown";
 
 /**
  * Raised when a reservation fails for a reason that is NOT contention — an unwritable state
@@ -304,7 +304,7 @@ export function taskIdReservationRef(taskId: string): string {
 
 /** The outcome of one remote reservation attempt. `taken` is contention (advance); `unreachable`
  *  is a failed READ of the world and must never be read as "free" — the fail-closed direction. */
-export type RemoteReserveOutcome = "created" | "taken" | "unreachable" | "local" | "unknown";
+export type RemoteReserveOutcome = "created" | "taken" | "unreachable" | "local" | "refused" | "unknown";
 
 /** Matches a DEFAULT-FAMILY reservation ref and captures its number. Anchored at both ends so a
  *  suffixed id (`W1-T1B`) is NOT read as the bare number; `[0-9]` not `\d` since a POSIX engine drops the latter silently. */
@@ -394,6 +394,13 @@ export interface RemoteRefReserver {
 export function classifyReservationPushFailure(stderr: string): RemoteReserveOutcome {
   if (/pre-push\s+REFUSED\./i.test(stderr)) return "local";
   if (/non-fast-forward|already exists|fetch first|rejected/i.test(stderr)) return "taken";
+  // W1-T3844: an HTTP client error at receive-pack is the SERVER DECLINING THE WRITE, not an
+  // origin we could not reach -- the `info/refs?service=git-receive-pack` GET that precedes every
+  // push had to succeed for the transport to get this far. This arm MUST precede `unreachable`:
+  // git's usual spelling is `fatal: unable to access '<url>': The requested URL returned error:
+  // 403`, and `unable to access` belongs to that pattern, so ordering the other way reports a
+  // reachable origin as unreachable.
+  if (/RPC failed[^\n]*HTTP 4\d\d|requested URL returned error: 4\d\d/i.test(stderr)) return "refused";
   if (/could not read from remote repository|could not resolve host|unable to access|connection (?:timed out|refused)|network is unreachable|no route to host|ssh: connect to host/i.test(stderr)) {
     return "unreachable";
   }
@@ -765,6 +772,18 @@ export function reserveTaskIdRemote(
       throw new TaskIdReservationError(
         `local pre-push gate refused reservation of ${idFor(n)} — refusing to mint. git said:\n${stderr}`,
         { taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), outcome: "local" },
+      );
+    }
+    if (outcome === "refused") {
+      const stderr = reserver.lastAttemptStderr?.() ?? "(no stderr was emitted)";
+      throw new TaskIdReservationError(
+        `origin REFUSED the reservation write for ${idFor(n)} — refusing to mint. The origin is ` +
+          "reachable (the receive-pack advertisement succeeded); it is the ref write itself that " +
+          "was declined, which an egress policy that permits `refs/heads/*` and no other namespace " +
+          "produces. Nothing was claimed. `--no-reserve still yields an id`, as a FLOOR that may " +
+          "collide upward — so treat the number as unheld and confirm it before building. " +
+          `git said:\n${stderr}`,
+        { taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), outcome: "refused" },
       );
     }
     if (outcome === "unknown") {

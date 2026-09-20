@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: low
   budget_usd: 12.00
-  files: [src/lib/task-id-reservation.ts]
+  files: [src/lib/task-id-reservation.ts, test/a-refused-push-is-not-an-unreachable-origin.test.ts]
   origin: "2026-09-20 — an agent session could not mint any task id for ~40 minutes and filed two shards with unclaimed ids as a result"
   plan_refs: ["W1-T1055", "W1-T3091"]
   status: queued
