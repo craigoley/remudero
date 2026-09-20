@@ -1,4 +1,4 @@
-- id: W1-T3873
+- id: W1-T3884
   title: "Core/site CLI-reference contract — coordinate the generated core artifact with the site-owned publication task"
   repo: remudero
   depends_on: [W1-T47, W1-T48]
@@ -9,7 +9,7 @@
   risk: medium
   origin: human
   plan_refs: ["§12A", "§Cross-repository ownership"]
-  files: [plan/tasks.d/W1-T3873-core-site-cli-reference-contract.yaml]
+  files: [plan/tasks.d/W1-T3884-core-site-cli-reference-contract.yaml]
   rationale: |
     W1-T47 and W1-T48 already own the core command registry, generated `docs/cli-reference.md`, and
     the core drift gate. The previous W1-T49 record was mis-scoped: it declared no files, depended on
