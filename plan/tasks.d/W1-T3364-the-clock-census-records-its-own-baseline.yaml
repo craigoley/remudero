@@ -14,11 +14,11 @@
   attempts: 0
   acceptance:
     - claim: "the clock-signature baseline has a generator that writes the row it measured, like its two sibling ratchets"
-      proof: "unit test: the generator writes a measured row into the clock-signature baseline"
+      proof: "unit test: test/the-clock-census-records-its-own-baseline.test.ts"
     - claim: "a read-only mode reports a pending change and leaves the baseline byte-identical"
-      proof: "unit test: the no-record mode leaves the clock-signature baseline byte-identical"
+      proof: "unit test: test/the-clock-census-records-its-own-baseline.test.ts"
     - claim: "a run that cannot measure refuses rather than reporting a clean baseline"
-      proof: "unit test: an unreadable tree exits non-zero instead of recording"
+      proof: "unit test: test/the-clock-census-records-its-own-baseline.test.ts"
   rationale: |
     MEASURED 2026-09-10. `package.json` ships `comment-load-ratchet`/`comment-load-signal` and
     `source-size-ratchet`/`source-size-signal`. There is no clock-signature equivalent, and no
