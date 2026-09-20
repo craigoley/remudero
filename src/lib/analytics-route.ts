@@ -47,7 +47,8 @@
  * once W1-T433's second cell exists — this shard deliberately does not build that consumer.
  */
 
-import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";\nimport { fiveLedgerBackedHistoricalSeries, type LedgerTimeSeries } from "./analytics-timeseries.js";
+import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
+import { fiveLedgerBackedHistoricalSeries, type LedgerTimeSeries } from "./analytics-timeseries.js";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { openLedgerUnion } from "./ledger-union.js";
