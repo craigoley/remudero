@@ -111,6 +111,7 @@ import {
   type AnalyticsSnapshot,
   type AnalyticsSnapshotCacheDeps,
 } from "./analytics-route.js";
+import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
 import { escapeHtml, renderConsoleShellScript } from "./console-shell-script.js";
 import { consoleShellClientSource } from "./console-shell-client.js";
 import { inboxDigestsPath } from "./digest.js";
@@ -303,6 +304,8 @@ export interface ServeDeps {
    * callers can inject the reader/clock/timers but cannot point this cache at a second state root.
    */
   analytics?: Omit<AnalyticsSnapshotCacheDeps, "stateDir" | "log">;
+  /** Already-captured process-owned live signals for `/v1/analytics`; never a request-time reader. */
+  liveMetrics?: () => LiveAnalyticsMetrics;
   /**
    * W1-T371: additive tailnet-identity auth — forwarded verbatim to `createService`'s
    * `identity` option (see service.ts's {@link IdentityAuth} for the two gates it enforces).
@@ -3647,7 +3650,7 @@ function assembleServeRoutes(
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
     // cancellation; this route receives no ledger path or reader capability.
-    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot }),
+    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics }),
     buildAuthScopeRoute(),
     // W1-T2409: the in-console write-grant "ask" — see buildConsoleWriteGrantRoute's own doc.
     buildConsoleWriteGrantRoute(deps.tokens),
