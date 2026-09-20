@@ -9,6 +9,7 @@
 
 import { dirname } from "node:path";
 import type { Route } from "./service.js";
+import { clockFromMillisFn } from "./clock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
   appendPanelLedger,
@@ -401,7 +402,7 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
     scope: "write",
     tier: "low",
     handler: jsonAction(validateSettingsInput, (input, req, res) => {
-      const updatedAt = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const updatedAt = clockFromMillisFn(deps.now).iso();
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_SETTINGS_STEP, "operator-agent-settings", bearerTokenId(req), {
         settings: input.settings,
         updatedAt,
