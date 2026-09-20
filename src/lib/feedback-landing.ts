@@ -510,6 +510,38 @@ function landingRepoArgs(identity: Pick<LandingIdentity, "targetRepository">): s
 }
 
 /**
+ * Whether `refs/heads/<branch>` still exists on the remote, established before {@link
+ * readBranchPending} fixes `branchTipSha` (W1-T3888, design (i)(b)) — a bare fetch never prunes a
+ * gone remote-tracking ref (git-fetch(1) PRUNING), so a stale local ref reads as live, fooling
+ * {@link remoteBranchTree}'s own read too. `ls-remote` answers "absent" without throwing, unlike a
+ * targeted fetch (which THROWS on absence, conflating it with "the read failed" — design (iii)
+ * forbids that); on absence, `update-ref -d <ref> <oldvalue>` reconciles it SHA-GUARDED, the live
+ * hand repair this task's rationale describes. Touches exactly this ONE ref, never the falsifier's
+ * forbidden broad sweep. A throw here propagates, never "assume absent".
+ */
+function refreshLandingRef(git: GitExec, branch: string): boolean {
+  const advertised = git(["ls-remote", "--heads", "origin", `refs/heads/${branch}`]).trim();
+  if (advertised.length > 0) {
+    git(["fetch", "origin", "--quiet", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    return true;
+  }
+  let staleSha: string | undefined;
+  try {
+    staleSha = git(["rev-parse", `refs/remotes/origin/${branch}`]).trim();
+  } catch {
+    staleSha = undefined; // nothing local to reconcile — a branch genuinely never pushed
+  }
+  if (staleSha) {
+    try {
+      git(["update-ref", "-d", `refs/remotes/origin/${branch}`, staleSha]);
+    } catch {
+      // Reconciled already, or moved under us — either way, `ls-remote`'s "absent" stands.
+    }
+  }
+  return false;
+}
+
+/**
  * The tree {@link finishLanding} is about to push, plus the exact ref value it was read
  * against — the "value the compare-and-swap is computed from" (W1-T3560). Every writer (disk
  * scan or in-memory content) produces one of these the same way: `origin/main` union
@@ -577,22 +609,30 @@ function decideFeedbackStage(git: GitExec, remoteSha: string, localBytes: string
  * so a disjoint sibling's batch is carried forward exactly as {@link landContent} already did
  * before this task, instead of being silently replaced by a tree that never read it.
  *
- * `tipSha: undefined` means the branch has genuinely never been pushed — nothing pending there,
- * by construction. `ok: false` means the branch EXISTS but its content could not be read: that
- * must never collapse into "assume empty", or a transient read failure silently drops whatever
- * the branch was actually carrying — exactly the failure mode the old inline fallback-to-empty in
- * {@link landContent} could not distinguish from "no pending branch yet".
+ * `tipSha: undefined` means the branch was never pushed, or was deleted on the remote since
+ * (W1-T3888) — either way nothing pending there. `ok: false` means the branch's content, or its
+ * own remote existence, could not be established: never "assume empty", the failure mode the old
+ * inline fallback-to-empty in {@link landContent} could not distinguish from "nothing pending".
  * Why: docs/forensics/feedback-landing.md#readbranchpending.
  */
 function readBranchPending(
   git: GitExec,
   kind: LandingKind,
 ): { ok: true; tipSha: string | undefined; files: string[] } | { ok: false; reason: string } {
+  let remoteHasBranch: boolean;
+  try {
+    remoteHasBranch = refreshLandingRef(git, kind.branch); // W1-T3888: the ACTUAL remote state
+  } catch (e) {
+    return { ok: false, reason: `cannot refresh ${kind.branch}'s remote ref: ${String((e as Error)?.message ?? e)}` };
+  }
+  // A positively observed absence (W1-T3888) — the "never pushed" shape below already handles.
+  if (!remoteHasBranch) return { ok: true, tipSha: undefined, files: [] };
   let tipSha: string;
   try {
     tipSha = git(["rev-parse", `origin/${kind.branch}`]).trim();
-  } catch {
-    return { ok: true, tipSha: undefined, files: [] };
+  } catch (e) {
+    // Confirmed EXISTENCE above, yet still unreadable — a genuine failure, not "assume empty".
+    return { ok: false, reason: `cannot read ${kind.branch}'s tip after confirming it exists on the remote: ${String((e as Error)?.message ?? e)}` };
   }
   try {
     const files = git(["ls-tree", "-r", "--name-only", `origin/${kind.branch}`])
@@ -745,9 +785,9 @@ function finishLanding(
     ).trim();
 
     // Compare-and-swap, not a bare force-push (W1-T3560): the lease asserts the branch is still
-    // exactly at `b.branchTipSha` (or still absent, for a first-ever push) — the value the union
-    // above was read against. The #954 guard below must move WITH this call on any future
-    // refactor — dropping it silently reopens the hole #954 closed.
+    // exactly at `b.branchTipSha` (or still absent — never pushed, or deleted, W1-T3888) — the
+    // value the union above was read against. The #954 guard below must move WITH this call on
+    // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
     const lease = b.branchTipSha
       ? `--force-with-lease=refs/heads/${kind.branch}:${b.branchTipSha}`
