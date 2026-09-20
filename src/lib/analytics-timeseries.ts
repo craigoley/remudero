@@ -137,7 +137,7 @@ function buildHistoricalSeries(state: Map<string, HistoricalBucket>, nowIso: str
   const window = `${firstDay}/${lastDay}`;
   const pointFor = (day: string, id: (typeof HISTORICAL_SERIES)[number]["id"]): TimeSeriesPoint => {
     const bucket = state.get(day);
-    if (!bucket?.observed) return gapPoint(day, "missing");
+    if (bucket === undefined || bucket.observed !== true) return gapPoint(day, "missing");
     if (id === "runs.completed") return observedPoint(day, bucket.completedRuns);
     if (id === "tokens.total") return observedPoint(day, bucket.tokensTotal);
     if (id === "cost.modeled.usd") return observedPoint(day, bucket.costUsd);
