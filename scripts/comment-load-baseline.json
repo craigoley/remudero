@@ -245,6 +245,7 @@
   "src/lib/ledger-steps.ts": 250,
   "src/lib/ledger-union.ts": 250,
   "src/lib/ledger.ts": 750,
+  "src/lib/live-analytics-snapshot-cache.ts": 250,
   "src/lib/live-write-guard.ts": 123,
   "src/lib/log-rotation.ts": 50,
   "src/lib/main-health-rung.ts": 10,

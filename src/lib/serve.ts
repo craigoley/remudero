@@ -112,6 +112,7 @@ import {
   type AnalyticsSnapshotCacheDeps,
 } from "./analytics-route.js";
 import type { LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
+import { createLiveAnalyticsSnapshotCache, type LiveAnalyticsSnapshotCacheOptions } from "./live-analytics-snapshot-cache.js";
 import { escapeHtml, renderConsoleShellScript } from "./console-shell-script.js";
 import { consoleShellClientSource } from "./console-shell-client.js";
 import { inboxDigestsPath } from "./digest.js";
@@ -304,6 +305,8 @@ export interface ServeDeps {
    * callers can inject the reader/clock/timers but cannot point this cache at a second state root.
    */
   analytics?: Omit<AnalyticsSnapshotCacheDeps, "stateDir" | "log">;
+  /** Process-owned filesystem snapshots for the live analytics fields; never request-time readers. */
+  liveAnalytics?: Omit<LiveAnalyticsSnapshotCacheOptions, "root">;
   /** Already-captured process-owned live signals for `/v1/analytics`; never a request-time reader. */
   liveMetrics?: () => LiveAnalyticsMetrics;
   /**
@@ -3775,6 +3778,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     stateDir: dirname(deps.ledgerPath),
     log: deps.log,
   });
+  const liveAnalyticsCache = createLiveAnalyticsSnapshotCache({
+    ...deps.liveAnalytics,
+    root: deps.fleetControlRoot,
+  });
   // W1-T2229: resolved ONCE, here, and threaded through to `buildServeRoutes` below (explicitly,
   // via the spread) so `GET /v1/version` and the shell's "console build" chip report the EXACT
   // sha {@link gateStaleCodeExit} is comparing against — never a second independent resolution
@@ -3788,7 +3795,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
-    beforeExit: analyticsCache.stop,
+    beforeExit: () => {
+      analyticsCache.stop();
+      liveAnalyticsCache.stop();
+    },
     lastReadAt: () => lastReadAt,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
@@ -3803,7 +3813,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       lastReadAt = systemClock.now();
       prewarm.noteRead();
     });
-  const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces }, analyticsCache.current);
+  const routeAssembly = assembleServeRoutes(
+    { ...deps, consoleSha, confirmNonces, liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current },
+    analyticsCache.current,
+  );
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
     // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
@@ -3859,6 +3872,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", prewarm.stop);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
+  server.once("listening", liveAnalyticsCache.start);
+  server.on("close", liveAnalyticsCache.stop);
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
