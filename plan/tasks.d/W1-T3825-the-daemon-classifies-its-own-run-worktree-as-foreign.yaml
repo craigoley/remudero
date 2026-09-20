@@ -69,6 +69,8 @@
     and live process; any classification as managed or recovery side effect is a
     failure.
   note: |
+    reservation hand-off: unknown -> chore/file-run-worktree-identity-1789864865000
+
     reservation holder is this filing branch, verified by `rmd next-task-id`
     reserving W1-T3825 on origin before this shard was written; no hand-off is required.
 
