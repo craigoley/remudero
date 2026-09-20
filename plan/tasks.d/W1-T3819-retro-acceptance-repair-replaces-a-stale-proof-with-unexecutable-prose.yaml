@@ -1,0 +1,65 @@
+- id: W1-T3819
+  title: "RETRO ACCEPTANCE REPAIR REPLACES A STALE PROOF WITH UNEXECUTABLE PROSE — repairRetroAcceptanceBlock at src/run-task.ts:15915 repairs a malformed or generic body using prose that no proof runner can execute, so the retro PR remains blocked-fixable after the harness has already published it; derive one escaped grep proof from an actual added physical diff line, or record that no safe criterion can be constructed without editing the body"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 8.00
+  files: [src/run-task.ts, test/retro-acceptance-repair.test.ts]
+  origin: "recon#retro-6158-acceptance-fallback-2026-09-19"
+  plan_refs: ["W1-T136", "W1-T3066", "W1-T908"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the live core daemon on 2026-09-19. `repairRetroAcceptanceBlock`
+    detected an invalid or stale Acceptance block and wrote a replacement whose sole
+    proof begins `SHIPPED-log/NET-STATE/...`; that text has neither the `grep:` nor
+    `unit test:` dialect required by the review executor. The fallback therefore
+    converts one review-blocking body defect into another. The retro child for
+    RETRO-1789858570652 subsequently reached a blocked-fixable disposition rather
+    than a terminal review.
+
+    The repair runs only after the harness has pushed the retro branch, and the
+    command already fetches the PR diff immediately after the repair. At that point
+    the actual added lines and paths are available without inventing a claim. A
+    fallback proof must be evidence from that exact diff, not a static source symbol
+    that predates the retro and fails proof discrimination.
+  design: |
+    Fetch the raw PR diff once after the owned retro PR exists and before the
+    acceptance repair; reuse that same diff for the existing plan-only guard. Thread
+    a diff-derived proof candidate into `repairRetroAcceptanceBlock`. Select only a
+    non-empty, added physical line paired with its actual changed path, escape it for
+    the review executor's BRE `grep:` invocation, and render a one-line Acceptance
+    criterion from that candidate. The result must parse through the real
+    `parseAcceptanceBlock`, execute at head, and be absent from the merge base.
+
+    If the diff has no safely representable added line, do not replace the body with
+    prose and do not claim a successful repair. Preserve the existing body, emit a
+    distinct durable `acceptance.repair.unrepresentable` reason, and let the normal
+    bounded fix/escalation path name the remaining defect. Do not add a second GitHub
+    diff request, weaken proof discrimination, or change retro scope/marker rules.
+  acceptance:
+    - claim: "a repaired retro acceptance proof comes from one physical added diff line and does not match the merge base"
+      proof: "unit test: the repaired grep proof comes from one added physical line and is absent from the base"
+    - claim: "a deletion-only diff preserves the defective body and records that no safe proof exists"
+      proof: "unit test: a deletion-only diff leaves the defective body untouched and records no safe proof"
+  falsifier: |
+    Restore the prose fallback. The focused repair fixture must parse a criterion
+    whose proof has no executable dialect, while the repaired implementation emits
+    a `grep:` proof derived from an added fixture line and the real proof executor
+    finds it only at head. Separately feed a deletion-only or unrepresentable diff:
+    any body edit or `acceptance.repaired` row is a failure, because no honest proof
+    was available.
+  note: |
+    reservation holder is this filing branch, verified by `rmd next-task-id` reserving
+    W1-T3819 on origin before this shard was written; no hand-off is required.
+
+    amendment: the original empty-proof repair and call-site proofs remain useful suite coverage,
+    but both already pass at the implementation PR's merge base and cannot establish this task.
+    The amended proofs name the two new diff-derived behaviors that the implementation adds.
+
+    This is separate from the current retro's stale-worker-code interruption. The
+    current task fixes the deterministic fallback that creates an invalid proof when
+    repair does run; it does not change freshness/restart policy.

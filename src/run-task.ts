@@ -344,6 +344,7 @@ import {
   resolveFleetControlHold,
   runDaemon,
   type CrashLoopVerdict,
+  type DaemonFreshness,
   type DaemonOpts,
   type DaemonSummary,
   type HeadroomPolicy,
@@ -4777,8 +4778,9 @@ export interface PollDeps {
    * ONCE per wait (never per poll — see its own call site) and defaults to
    * {@link ghRequiredStatusCheckContexts}. `undefined` (unreadable protection or a genuinely
    * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
-   */
+  */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
+  externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -4944,12 +4946,21 @@ export function ciGateFromRollup(
 /** PRIMARY CONTROL: bounded CI evidence distinguishes terminal causes; unavailable is distinct from an observed empty set. */
 export const CI_GATE_EVIDENCE_MAX = 8;
 
-export type CiGateOutcome = {
-  state: "green" | "red" | "timeout";
-  sha?: string;
-  checks?: string[];
-  checkCount?: number;
-};
+export type CiGateOutcome =
+  | {
+      state: "green" | "red" | "timeout";
+      sha?: string;
+      checks?: string[];
+      checkCount?: number;
+    }
+  | {
+      state: "freshness_handoff";
+      sha: string;
+      oldSha: string;
+      newSha: string;
+      checks?: never;
+      checkCount?: never;
+    };
 
 function boundedCiGateChecks(names: Iterable<string>): { checks: string[]; checkCount: number } {
   const all = [...new Set([...names].map((name) => name.trim() || "unknown"))].sort((a, b) => a.localeCompare(b));
@@ -4958,6 +4969,9 @@ function boundedCiGateChecks(names: Iterable<string>): { checks: string[]; check
 
 export function ciGateBlockReason(r: CiGateOutcome | "green" | "red" | "timeout"): string {
   const state = ciGateState(r);
+  if (state === "freshness_handoff") {
+    return "daemon code became stale while CI was pending; yielded at the recorded external-wait boundary";
+  }
   const base = `ci ${state} before review`;
   if (typeof r === "string" || r.checks === undefined) return `${base}; relevant checks unavailable`;
   const checkCount = Math.max(r.checkCount ?? r.checks.length, r.checks.length);
@@ -4970,7 +4984,9 @@ export function ciGateBlockReason(r: CiGateOutcome | "green" | "red" | "timeout"
 
 /** W1-T2804: normalize a {@link CiGateOutcome} or a bare verdict (what a caller-supplied
  *  `waitForCiGreen` stub returns) to the verdict. */
-export function ciGateState(r: CiGateOutcome | "green" | "red" | "timeout"): "green" | "red" | "timeout" {
+export function ciGateState(
+  r: CiGateOutcome | "green" | "red" | "timeout",
+): "green" | "red" | "timeout" | "freshness_handoff" {
   return typeof r === "string" ? r : r.state;
 }
 
@@ -5178,7 +5194,25 @@ async function waitForCiGreen(
     // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
     // WORKING one, and the polling row beside it cannot carry that decision because the rotator
     // is right to shed it. See `runIsAwaitingExternal`.
-    if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
+    if (i === 0) {
+      log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
+      // W1-T3793: yield only after retaining the external-wait record.
+      const freshness = deps.externalWaitFreshness?.();
+      if (freshness) {
+        log("run.freshness_handoff", {
+          waiting_on: "ci",
+          head_sha: sha,
+          old_sha: freshness.oldSha,
+          new_sha: freshness.newSha,
+        });
+        return {
+          state: "freshness_handoff",
+          sha,
+          oldSha: freshness.oldSha,
+          newSha: freshness.newSha,
+        };
+      }
+    }
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled) {
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW, sha });
@@ -12217,6 +12251,7 @@ interface RunTaskBodyOptions {
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserver;
   containmentExec?: ProbeExecutor;
+  externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   isolationExec?: IsolationProbeExecutor;
   maskLearnings?: boolean;
   maskRecon?: boolean;
@@ -12567,6 +12602,7 @@ async function runTask(
      *  `deps.probeExec` already uses, without touching `loadConfig()` (unavailable in CI) or
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
+    externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
     /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
@@ -14621,7 +14657,28 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // lives here, before arming. A ci that never greens is blocked_ci (no review
     // over unproven code); a review=failure is blocked_review (the required check
     // is red and GitHub will not merge). Pending is never treated as pass.
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
+      externalWaitFreshness: opts.externalWaitFreshness,
+    });
+    if (ci.state === "freshness_handoff") {
+      const reason =
+        `daemon code advanced ${ci.oldSha.slice(0, 7)}..${ci.newSha.slice(0, 7)} while CI was pending; ` +
+        "yielded at the recorded external-wait boundary so the next daemon lifetime can review this PR";
+      say("daemon freshness handoff: CI is pending; leaving PR open for the refreshed daemon");
+      log("verdict", {
+        verdict: "blocked_transient",
+        pr_url: prUrl,
+        reason,
+        head_sha: ci.sha,
+        old_sha: ci.oldSha,
+        new_sha: ci.newSha,
+        cost_usd: costUsd,
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
+      });
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_transient" };
+    }
     const ciState = ciGateState(ci);
     if (ciState !== "green") {
       const reason = ciGateBlockReason(ci);
@@ -28338,6 +28395,7 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    runTask?: typeof runTask;
     /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
      * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
      * the full and light paths without reading this source file as text. */
@@ -28986,6 +29044,7 @@ export async function daemonCommand(
   }
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;
+  const runTaskFn = deps.runTask ?? runTask;
   // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
   const retroHooks = target.isSelf ? buildRetroDaemonHooks() : undefined;
   // impl-DM: the auto-triage rung's producer. SELF-TARGET ONLY, for the same reason the retro is —
@@ -29120,7 +29179,7 @@ export async function daemonCommand(
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
         runOne: (taskId) =>
-          runTask(taskId, {
+          runTaskFn(taskId, {
             planPath: target.planPath,
             config,
             allowStale,
@@ -29138,6 +29197,13 @@ export async function daemonCommand(
             // fetch + ONE plan parse instead of paying for it per lane. Inert when
             // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
             planSnapshot: planSyncCoalescer.sync,
+            // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
+            // existing adapter is material-and-clean only; unassessed, dirty, and degraded
+            // readings remain undefined and therefore cannot manufacture a restart.
+            externalWaitFreshness: () => {
+              const freshness = daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env));
+              return freshness.stale ? freshness : undefined;
+            },
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous

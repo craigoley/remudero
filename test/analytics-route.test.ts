@@ -318,6 +318,7 @@ test("W1-T3762 criterion 2: routing telemetry names incomplete joins instead of 
 test("W1-T3762: routing fallbacks are counted and a populated telemetry snapshot is frozen before cache publication", async () => {
   const populated = deriveAnalyticsSnapshot(
     [
+      { step: "panel.manual_approved", task_id: "W1-T-cache", task_class: "chore", origin: "operator" },
       { step: "run.start", run_id: "R3", type: "implement" },
       {
         step: "worker.assignment",
@@ -360,6 +361,10 @@ test("W1-T3762: routing fallbacks are counted and a populated telemetry snapshot
   assert.ok(Object.isFrozen(bucket.fallbackReasons[0]), "fallback rows are immutable after publication");
   assert.ok(Object.isFrozen(bucket.fallbackReasons), "fallback list is immutable after publication");
   assert.ok(Object.isFrozen(bucket), "routing bucket is immutable after publication");
+  const decisionClass = published.consoleV1.operatorAgent.decisions.classes[0]!;
+  assert.ok(Object.isFrozen(decisionClass.taskIds), "operator decision task ids are immutable after publication");
+  assert.ok(Object.isFrozen(decisionClass.actorIds), "operator decision actor ids are immutable after publication");
+  assert.ok(Object.isFrozen(decisionClass), "operator decision classes are immutable after publication");
 });
 
 test("deriveAnalyticsSnapshot: question 3 — run.start-to-verdict join per run_id, no-terminal counted explicitly, never dropped", () => {
@@ -463,6 +468,108 @@ test("deriveAnalyticsSnapshotFromStream stamps asOf after the stream has been co
   const snapshot = await deriveAnalyticsSnapshotFromStream(rows(), clockFromIsoFn(() => phase));
 
   assert.equal(snapshot.asOf, "after", "streaming preserves the old route's post-read asOf boundary");
+});
+
+test("W1-T3794 criterion 2: the four operator signal families are composed under one versioned console-v1 response without changing routing policy", () => {
+  const snapshot = deriveAnalyticsSnapshot(
+    [
+      { step: "review.posted", task_id: "W1-T1", proof_exec: ["executed_pass", "executed_fail"] },
+      { step: "panel.manual_approved", task_id: "W1-T1", task_class: "chore", origin: "operator" },
+      { step: "automerge.armed", task_id: "W1-T2", task_class: "chore" },
+      {
+        step: "capacity.snapshot",
+        repo: "repo-x",
+        configured_capacity: 2,
+        admitted_lanes: 2,
+        active_workers: 2,
+        queued_work: 3,
+        window_start: "2026-08-14T00:00:00.000Z",
+        window_end: "2026-08-14T00:05:00.000Z",
+      },
+      { step: "run.start", run_id: "route-1", type: "chore", ts: "2026-08-14T00:00:00.000Z" },
+      {
+        step: "worker.assignment",
+        run_id: "route-1",
+        worker_assignment: {
+          id: "assignment-1",
+          selected: { provider: "codex", model: "gpt-5.6-luna" },
+          routing: { mode: "default" },
+        },
+      },
+      {
+        step: "verdict",
+        selection_assignment_id: "assignment-1",
+        success: true,
+        model: "gpt-5.6-luna",
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheCreation: 0 },
+        total_cost_usd: 0.01,
+        ts: "2026-08-14T00:00:01.000Z",
+        run_id: "route-1",
+      },
+    ],
+    "2026-08-14T00:10:00.000Z",
+  );
+
+  assert.equal(snapshot.consoleV1.operatorAgent.version, "operator-agent-v1");
+  assert.equal(snapshot.consoleV1.operatorAgent.proof.status, "measured");
+  assert.equal(snapshot.consoleV1.operatorAgent.outcomes.status, "not-collected");
+  assert.equal(snapshot.consoleV1.operatorAgent.decisions.status, "measured");
+  assert.equal(snapshot.consoleV1.operatorAgent.capacity.status, "measured");
+  assert.equal(snapshot.consoleV1.operatorAgent.capacity.measurements[0]?.recommendation, "scale-up");
+  assert.equal(snapshot.routingTelemetry.version, "routing-v1");
+  assert.equal(snapshot.routingTelemetry.assignmentsObserved, 1);
+});
+
+test("W1-T3794 criterion 3: unavailable, unmeasurable, and below-floor sources remain explicit and never become healthy zeros", () => {
+  const snapshot = deriveAnalyticsSnapshot(
+    [
+      { step: "review.posted", task_id: "W1-T3" },
+      { step: "panel.manual_approved", task_id: "W1-T4", task_class: "feature" },
+      { step: "capacity.snapshot", repo: "repo-y", queued_work: 4 },
+    ],
+    "2026-08-14T00:10:00.000Z",
+    {
+      operatorAgentOutcomes: {
+        signal: "task-outcomes",
+        status: "measured",
+        policy: { windowDays: 14, overlapRuleDescription: "fixture" },
+        minPopulationFloor: 5,
+        classes: [
+          {
+            verdictClass: "full-pass",
+            total: 2,
+            revertedCount: 0,
+            followupFixedCount: 0,
+            revertRate: null,
+            followupFixRate: null,
+            lanes: "review",
+            rateRefusedReason: "below-population-floor",
+            taskIds: ["W1-T3", "W1-T4"],
+          },
+        ],
+        unmeasurable: [],
+        unmeasurableByCause: {
+          "no-head-sha": 0,
+          "no-review-posted": 0,
+          "merge-sha-unrecoverable": 0,
+          "git-history-unavailable": 0,
+        },
+        armsSeen: 2,
+        armsClassified: 2,
+      },
+    },
+  );
+
+  const agent = snapshot.consoleV1.operatorAgent;
+  assert.equal(agent.proof.status, "not-collected");
+  assert.equal(agent.proof.denominator, null);
+  assert.equal(agent.proof.unmeasurable[0]?.cause, "missing-proof-exec");
+  assert.equal(agent.outcomes.classes[0]?.revertRate, null);
+  assert.equal(agent.outcomes.classes[0]?.rateRefusedReason, "below-population-floor");
+  assert.equal(agent.decisions.status, "not-collected");
+  assert.equal(agent.decisions.unmeasurable[0]?.cause, "missing-actor");
+  assert.equal(agent.capacity.status, "not-collected");
+  assert.ok(agent.capacity.unavailable[0]?.missing.includes("missing-configured-capacity"));
 });
 
 // ── the route itself ─────────────────────────────────────────────────────────────────────────
