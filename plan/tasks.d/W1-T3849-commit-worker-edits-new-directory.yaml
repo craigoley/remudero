@@ -52,7 +52,9 @@
     classified `undeclared` — `commitWorkerEdits` commits neither. After the fix, `a/one.ts` is
     committed and `a/three.ts` remains uncommitted and listed in `undeclared`.
   note: |
-    Scoped strictly to the enumeration bug the feedback measured. Nothing here changes the
+    Scoped strictly to the enumeration bug the feedback measured. The named test file does not
+    exist at filing time and is this task's own falsifier, so its matching shard slug records the
+    single commitWorkerEdits enumeration concern rather than widening the task. Nothing here changes the
     declared-path security boundary `pathIsUnderDeclaredSurface` already enforces, and nothing
     here touches the plan-only/exact-membership split `scopeGuardOutOfScopeFiles` uses elsewhere
     in src/run-task.ts.
