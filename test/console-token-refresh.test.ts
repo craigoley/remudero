@@ -186,6 +186,47 @@ test("W1-T3807 follow-up: the production serve assembly wires the live snapshot 
   assert.equal(providerReads, 1, "the cache reads the provider snapshot once at startup, not per analytics request");
 });
 
+test("W1-T3807 follow-up: stale serve cleanup stops both analytics caches before exit", async () => {
+  const root = tmpRoot();
+  let analyticsStops = 0;
+  let liveStops = 0;
+  const exits: number[] = [];
+  const originalExit = process.exit;
+  process.exit = ((code?: number) => {
+    exits.push(code ?? 0);
+    return undefined as never;
+  }) as typeof process.exit;
+  const server = buildServeServer(depsFor(root, {
+    consoleSha: "a".repeat(40),
+    analytics: {
+      schedule: () => ({ unref() {}, cancel: () => { analyticsStops += 1; } }),
+    },
+    liveAnalytics: {
+      schedule: () => ({ cancel: () => { liveStops += 1; } }),
+    },
+  }));
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const controller = new AbortController();
+    const response = await fetch(`http://127.0.0.1:${port}/v1/status/stream`, {
+      headers: { authorization: `Bearer ${READ_TOKEN}` },
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    controller.abort();
+    for (let i = 0; i < 20 && exits.length === 0; i += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    assert.deepEqual(exits, [0]);
+    assert.ok(analyticsStops >= 1, "analytics cache was stopped before the process exit");
+    assert.ok(liveStops >= 1, "live analytics cache was stopped before the process exit");
+  } finally {
+    server.close();
+    process.exit = originalExit;
+  }
+});
+
 // ── (1) A PATH THAT CAN REPLACE THE CREDENTIAL, NEVER FIXED AT SPAWN ────────────────────────────
 
 test("W1-T2269: an unconfigured console arms nothing — byte-identical to before this task", () => {

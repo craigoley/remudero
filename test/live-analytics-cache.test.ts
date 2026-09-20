@@ -40,6 +40,40 @@ test("W1-T3807 follow-up: the status reader counts only queued task projections"
   });
 });
 
+test("W1-T3807 follow-up: malformed daemon output is unavailable evidence", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-live-analytics-malformed-"));
+  mkdirSync(join(root, "state"));
+  writeFileSync(join(root, "state", "status.json"), "{not-json");
+  assert.equal(readLiveStatusSnapshot(root), undefined);
+});
+
+test("W1-T3807 follow-up: a started cache refreshes again when its scheduled callback fires", async () => {
+  let tick!: () => void;
+  let statusReads = 0;
+  let cancelled = 0;
+  const cache = createLiveAnalyticsSnapshotCache({
+    root: "/state",
+    readStatus: () => {
+      statusReads += 1;
+      return { counts: { queued: statusReads } };
+    },
+    readProvider: () => undefined,
+    schedule: (callback) => {
+      tick = callback;
+      return { cancel: () => { cancelled += 1; } };
+    },
+  });
+
+  cache.start();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(statusReads, 1);
+  tick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(statusReads, 2);
+  cache.stop();
+  assert.equal(cancelled, 1);
+});
+
 test("W1-T3807 follow-up: the live cache refreshes queue and provider snapshots off the analytics request path", async () => {
   let statusReads = 0;
   let providerReads = 0;
