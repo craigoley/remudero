@@ -10,19 +10,18 @@
   rationale: "W1-T3824 establishes single-repository ledger persistence, but the console can aggregate multiple repositories. The first console integration correctly refuses to select an arbitrary daemon; this task chooses the cross-repository settings scope and updates selection semantics."
   design: "Choose and implement an explicit global or per-repository settings scope across the daemon and console, preserve conservative defaults when scope is absent, and expose the selected scope in reads, writes, history, and UI. Never silently persist a global preference to the first configured repository."
   acceptance:
-    - claim: "the plan declares a dedicated core settings read-scope test"
-      proof: "grep: test/operator-agent-settings-scope-read\\.test\\.ts in plan/tasks.d/W1-T3826-multi-repo-agent-settings-scope.yaml"
-    - claim: "the plan declares a dedicated core settings write-scope test"
-      proof: "grep: test/operator-agent-settings-scope-write\\.test\\.ts in plan/tasks.d/W1-T3826-multi-repo-agent-settings-scope.yaml"
-    - claim: "the plan declares a dedicated core settings fallback test"
-      proof: "grep: test/operator-agent-settings-scope-fallback\\.test\\.ts in plan/tasks.d/W1-T3826-multi-repo-agent-settings-scope.yaml"
+    - claim: "multi-repository settings reads preserve scope and do not select an arbitrary daemon"
+      proof: "unit test: test/operator-agent-settings-scope-read.test.ts"
+    - claim: "settings writes target the operator-selected durable scope"
+      proof: "unit test: test/operator-agent-settings-scope-write.test.ts"
+    - claim: "core settings responses preserve the selected scope and conservative fallback"
+      proof: "unit test: test/operator-agent-settings-scope-fallback.test.ts"
   risk: high
   band_meaning: blast-radius
   origin: human
   note: |
     reservation hand-off: run-W1-T3818-1789861944 -> run-PLAN-W1-T3818-1789861944
   files:
-    - plan/tasks.d/W1-T3826-multi-repo-agent-settings-scope.yaml
     - src/lib/operator-agent.ts
     - openapi/daemon.yaml
     - test/operator-agent-settings-scope-read.test.ts
