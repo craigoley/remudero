@@ -1,17 +1,18 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-19T23:04:37.709Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-20T00:22:11.124Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-40 run(s) since the last retro marker. Verdicts: {"failed":1,"incomplete":37,"merged":1,"no_pr":1}.
+40 run(s) since the last retro marker. Verdicts: {"failed":3,"incomplete":28,"merged":5,"no_pr":4}.
 
 ### Shipped since marker
+- RETRO → https://github.com/craigoley/remudero/pull/6158 (gate-side merge; run ended incomplete)
+- TRIAGE-fb-1789845640231-c117a2 → https://github.com/craigoley/remudero/pull/6135 (gate-side merge; run ended incomplete)
 - TRIAGE-fb-1789845848265-8919ba → https://github.com/craigoley/remudero/pull/6148 (gate-side merge; run ended incomplete)
-- W1-T3674 → https://github.com/craigoley/remudero/pull/6005 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
 - W1-T3722 → https://github.com/craigoley/remudero/pull/6096 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
 - W1-T3735 → https://github.com/craigoley/remudero/pull/6119 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
 - W1-T3736 → https://github.com/craigoley/remudero/pull/6141 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
