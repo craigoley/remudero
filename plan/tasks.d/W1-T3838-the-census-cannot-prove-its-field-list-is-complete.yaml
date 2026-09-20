@@ -28,6 +28,15 @@
     measured 95 stamps that morning and reported none crossing, which was true of the field it
     reads and useless about the one that fired.
 
+    MEASURED ON THE TREE THAT CARRIED THE LIVE BOMB. On `61a44170` -- main immediately before
+    #6215, with `expiresAt: "2026-09-20T10:00:00.000Z"` still present at
+    test/operator-agent.test.ts:31 -- `CENSUS_MAIN_BRANCH_RUN=1 node
+    scripts/expiring-fixture-census.mjs` exits 1 and names six crossing fixtures. Not one of them
+    is test/operator-agent.test.ts, and the string `operator-agent` does not occur in the output
+    at all. The census was running, and refusing, and looking straight past the file that took
+    main and three PRs down hours later. That is the shape of the gap: not a gate that was off,
+    a gate that was on and could not see.
+
     THE STRUCTURAL POINT, WHICH IS NOT "ADD A ROW". `assertFieldsStillAged` already pins each row
     against its own source: rename the field or drop the comparison and the census fails rather
     than quietly covering nothing. That guard runs in exactly one direction. It proves
