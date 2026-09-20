@@ -42,8 +42,8 @@
     a later readable sweep. Do not post a separate comment, suppress the normal
     citation where GitHub accepted it, or broaden the fallback to arbitrary errors.
   acceptance:
-    - claim: "the issue gateway normally closes with its resolution citation"
-      proof: "unit test: ghIssueGateway.closeWithComment: closes the issue with the citation comment"
+    - claim: "the issue gateway retries a capped citation close exactly once without a comment"
+      proof: "unit test: ghIssueGateway.closeWithComment: retries without a comment at GitHub's comment cap"
   falsifier: |
     Make the injected gateway fail its commented close with GitHub's exact comment-cap
     response: the test must observe one commented argv followed by one plain close
