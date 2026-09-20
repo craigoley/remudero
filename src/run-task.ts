@@ -33196,14 +33196,9 @@ export interface CaptureRegisteredFixOwnerDeps {
   processCensus?: (ownerPath: string) => ProcessCwdCensus;
   readClaim?: (inflightDir: string, claimKey: string) => "clear" | "occupied" | "unknown";
   now?: () => number;
-  /**
-   * W1-T3822's capture-verification seams live here rather than in a shape of their own.
-   * `captureRegisteredFixOwnerSnapshot` and `preserveTrackedDirtyFixOwner` are siblings under the
-   * single `registeredOwnerRecovery` composition root, and both of these seams verify a capture:
-   * that the reconstructed patch tree equals the owner's, and that the written recovery ref
-   * reproduces it. W1-T2894's ceiling only falls when siblings reuse a seam instead of each
-   * minting one, so these are members here instead of a second *Deps interface.
-   */
+  /** W1-T3822 capture-verification seams, shared with `preserveTrackedDirtyFixOwner`: both are
+   *  siblings under the one `registeredOwnerRecovery` root, so they reuse this shape rather than
+   *  mint a second one -- W1-T2894's ceiling only falls when siblings share (W1-T3744). */
   treesMatch?: (patchTree: string, ownerTree: string) => boolean;
   matchesDirtyRecovery?: (repoDir: string, recoveryRef: string, localSha: string, tree: string) => boolean;
 }
