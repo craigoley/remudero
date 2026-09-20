@@ -118,6 +118,7 @@ export function reviewContractDigest(input: ReviewContractDigestInput): string {
     satisfied_by: criterion.satisfied_by ?? null,
     holdout: criterion.holdout === true,
   }));
+  const engineRevision = input.engineRevision ?? REVIEW_ENGINE_REVISION;
   const encoded = JSON.stringify({
     version: 1,
     taskId: input.taskId,
@@ -126,7 +127,7 @@ export function reviewContractDigest(input: ReviewContractDigestInput): string {
     risk: input.risk ?? null,
     budgetUsd: input.budgetUsd ?? null,
     policyRevision: input.policyRevision ?? REVIEW_DECISION_POLICY_REVISION,
-    engineRevision: input.engineRevision ?? REVIEW_ENGINE_REVISION,
+    engineRevision,
   });
   return `contract-v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }

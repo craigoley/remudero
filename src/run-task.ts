@@ -1627,7 +1627,7 @@ export function buildSweepEffects(
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
       return reviewCommand(String(pr.prNumber), ["--repo", deps.repo]);
     }
-    const posted = await postReviewStatusGuarded({
+    const reusedStatus = await postReviewStatusGuarded({
       owner: deps.owner,
       repo: deps.repo,
       sha: pr.headSha,
@@ -1642,7 +1642,7 @@ export function buildSweepEffects(
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
     });
-    if (!posted.posted && !posted.replayed) return 1;
+    if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: pr.taskId,
