@@ -25488,13 +25488,22 @@ async function retroCommand(
   });
   const report = reportWithoutPromotion + promotionSection + netStateAdvisorySection;
 
-  const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
+  // W1-T3746: the retro prompt must describe BOTH legal execution surfaces. A capacity-diverted
+  // retro has no shell, so it reports a commit subject for the harness; a subscription-backed
+  // retro still commits its own plan edit. The spawn carries the cash surface below, and the
+  // unconditional harness bridge after the spawn owns the shell-less arm.
+  const prompt = retroPrompt(report, calibrationTable(gather.byType), runId, true);
   try {
     const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       // W1-T3616: retro edits ONLY MASTER-PLAN.md then `git add` + commits it — Edit, never Write.
       tools: [...resolveDispatchLaneToolBound("retro", mountsTable.synthesis.retro.provider ?? "claude")],
+      // W1-T3746: a blocked subscription auction may divert this committing lane to the
+      // shell-less cash surface. The prompt above explicitly carries the matching harness-owned
+      // commit contract, so the fallback is coherent rather than a worker being told to run git
+      // commands it cannot see.
+      ...cashDivertSpawnFields("retro"),
       settingsFile,
       model: arch, // W1-T2559: retro's own `synthesis.retro` mount, not the Architect's
       mountProvider: mountsTable.synthesis.retro.provider,
@@ -25503,6 +25512,19 @@ async function retroCommand(
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
       prompt,
+    });
+    // W1-T3746: the cash worker cannot commit MASTER-PLAN.md. Run the shared bridge before the
+    // harness regenerates its derived artifacts, so the existing no-op guard and publication path
+    // observe the worker's substantive edit. A shell-capable retro has a non-zero commit count
+    // and passes through this helper untouched.
+    harnessCommitForShellLessWorker({
+      harnessOwnsGit: worker.provider === "cash" || worker.provider === "openweight",
+      commitCount: commitsAhead(worktreePath, "origin/main"),
+      report: workerTranscript(worker),
+      worktreePath,
+      declaredPaths: ["MASTER-PLAN.md"],
+      log,
+      say,
     });
     log("retro.synthesized", {
       session_id: worker.sessionId,
@@ -25881,7 +25903,15 @@ export const RETRO_ACCEPTANCE_BLOCK_GRAMMAR: readonly string[] = [
 ];
 
 /** The Architect retro prompt — fed ONLY the deterministic gather + current plan. */
-export function retroPrompt(gatherReport: string, calTable: string, runId: string): string {
+export function retroPrompt(gatherReport: string, calTable: string, runId: string, shellLessFallback = false): string {
+  const commitInstructions = shellLessFallback
+    ? [
+        "- If your surface includes Bash, git add MASTER-PLAN.md && commit with a concise message;",
+        "  if your surface is shell-less, do NOT run git commands: include one anchored",
+        "  `COMMIT_MESSAGE: <type>(<scope>): <subject>` line in your REPORT and the harness commits,",
+        "  regenerates its artifacts, pushes and opens the PR.",
+      ]
+    : ["- git add MASTER-PLAN.md && commit with a concise message;"];
   return [
     "You are the REMUDERO ARCHITECT running a RETRO (MASTER-PLAN §Self-improvement). You ride a HIGHER",
     "tier than implement workers. You are fed ONLY the deterministic GATHER below and the current",
@@ -25919,7 +25949,7 @@ export function retroPrompt(gatherReport: string, calTable: string, runId: strin
     calTable,
     "",
     "Then, from the working directory:",
-    "- git add MASTER-PLAN.md && commit with a concise message;",
+    ...commitInstructions,
     "- STOP after the local commit. Do NOT push, open or edit a PR, create a task, or change branches.",
     "  The harness owns publication: it regenerates its artifacts, runs the exact plan-reading CI",
     "  suite set, and only after that passes pushes this branch and opens or updates its one PR.",
