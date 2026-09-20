@@ -42,6 +42,39 @@ test("W1-T3843: an unselectable machine-filed task is refused at filing", () => 
   assert.equal(admission.severity, "block");
 });
 
+test("W1-T3843: a blocked machine-filed task names its blocked admission reason", () => {
+  const filed = task({ author_class: "machine", status: "blocked", note: "operator hold" });
+  const result = lintTask(filed, {
+    machineFilingAdmission: {
+      plan: planFor(filed),
+      releasedIds: new Set([filed.id]),
+      pathExists: () => true,
+    },
+  });
+
+  const admission = result.violations.find((v) => v.check === "machine-filing-admission");
+  assert.ok(admission);
+  assert.match(admission.message, /task W1-T3843-fixture is blocked/);
+});
+
+test("W1-T3843: an unmerged machine-filed dependency names the unmet task", () => {
+  const dependency = task({ id: "W1-T3843-dependency", verify: "auto" });
+  const filed = task({ author_class: "machine", depends_on: [dependency.id] });
+  const plan: Plan = { tasks: [filed, dependency], byId: new Map([[filed.id, filed], [dependency.id, dependency]]) };
+  const result = lintTask(filed, {
+    machineFilingAdmission: {
+      plan,
+      releasedIds: new Set([filed.id]),
+      isMerged: () => false,
+      pathExists: () => true,
+    },
+  });
+
+  const admission = result.violations.find((v) => v.check === "machine-filing-admission");
+  assert.ok(admission);
+  assert.match(admission.message, /unmerged dependencies: W1-T3843-dependency/);
+});
+
 test("W1-T3843: a machine-filed task naming a nonexistent file is refused", () => {
   const filed = task({ author_class: "machine", files: ["learnings/ci-gate-lessons.yaml"] });
   const result = lintTask(filed, {
