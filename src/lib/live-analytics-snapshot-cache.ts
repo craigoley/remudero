@@ -37,6 +37,7 @@ export function readLiveStatusSnapshot(root: string): LiveStatusSnapshot | undef
   try {
     text = readFileSync(join(root, ...STATUS_PATH), "utf8");
   } catch {
+    // An unreadable daemon projection is an unavailable snapshot, not a queued-task count.
     return undefined;
   }
   if (Buffer.byteLength(text, "utf8") > MAX_STATUS_BYTES) return undefined;
@@ -44,6 +45,7 @@ export function readLiveStatusSnapshot(root: string): LiveStatusSnapshot | undef
   try {
     parsed = JSON.parse(text);
   } catch {
+    // Malformed daemon output is unavailable evidence; do not treat it as an empty projection.
     return undefined;
   }
   const projection = record(parsed);
@@ -59,7 +61,7 @@ export function readLiveStatusSnapshot(root: string): LiveStatusSnapshot | undef
   return { ...(generatedAt ? { generated_at: generatedAt } : {}), counts: { queued } };
 }
 
-export interface LiveAnalyticsSnapshotCacheDeps {
+export interface LiveAnalyticsSnapshotCacheOptions {
   root: string;
   readStatus?: (root: string) => LiveStatusSnapshot | undefined;
   readProvider?: (root: string) => LiveProviderSnapshot | undefined;
@@ -85,7 +87,7 @@ function systemSchedule(callback: () => void, delayMs: number): { cancel(): void
  * A refresh failure replaces neither prior metric with an invented value; the cache retains the
  * previous projection, or its explicit cold state before the first successful read.
  */
-export function createLiveAnalyticsSnapshotCache(deps: LiveAnalyticsSnapshotCacheDeps): LiveAnalyticsSnapshotCache {
+export function createLiveAnalyticsSnapshotCache(deps: LiveAnalyticsSnapshotCacheOptions): LiveAnalyticsSnapshotCache {
   const readStatus = deps.readStatus ?? readLiveStatusSnapshot;
   const readProvider = deps.readProvider ?? readProviderRoutingStatus;
   const refreshIntervalMs = deps.refreshIntervalMs ?? LIVE_ANALYTICS_REFRESH_INTERVAL_MS;
