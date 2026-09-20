@@ -53,6 +53,7 @@
   "scripts/claude-md-budget-ratchet.mjs": 250,
   "scripts/clock-shift.mjs": 19,
   "scripts/clock-signature-baseline.json": 250,
+  "scripts/clock-signature-ratchet.mjs": 250,
   "scripts/clock-sweep-baseline.json": 0,
   "scripts/clock-sweep.mjs": 153,
   "scripts/comment-load-baseline.json": 0,

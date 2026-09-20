@@ -138,6 +138,35 @@ const DECLARED: readonly Declared[] = [
   // ── chmod: root bypasses read/write denial, so these change meaning at uid 0 ────────────────
   {
     kind: "chmod",
+    file: "the-clock-census-records-its-own-baseline.test.ts",
+    key: "0o555",
+    count: 1,
+    reason:
+      "W1-T3364: makes the baseline directory non-writable so the clock-signature ratchet's real " +
+      "write-failure catch returns code 2. The test intentionally exercises a permission failure; " +
+      "on uid 0 the chmod is vacuous, but the runner pole is non-root and the assertion remains loud.",
+  },
+  {
+    kind: "chmod",
+    file: "the-clock-census-records-its-own-baseline.test.ts",
+    key: "0o444",
+    count: 1,
+    reason:
+      "W1-T3364: makes the baseline file read-only inside the non-writable directory so the " +
+      "clock-signature ratchet cannot replace it and must report the recording failure. This is " +
+      "an intentional permission fixture; uid 0 bypass is documented rather than hidden.",
+  },
+  {
+    kind: "chmod",
+    file: "the-clock-census-records-its-own-baseline.test.ts",
+    key: "0o644",
+    count: 1,
+    reason:
+      "W1-T3364: restores the baseline file's normal mode during fixture teardown after the " +
+      "read-only write-failure probe. It is paired with the declared 0o444 site above.",
+  },
+  {
+    kind: "chmod",
     file: "worktree-reap-liveness.test.ts",
     key: "0o000",
     count: 3,

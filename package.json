@@ -78,6 +78,8 @@
     "source-size-signal": "node scripts/source-size-ratchet.mjs",
     "source-size-ratchet": "node scripts/source-size-ratchet.mjs",
     "source-size-baseline:legacy": "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",
+    "clock-signature-ratchet": "node scripts/clock-signature-ratchet.mjs",
+    "clock-signature-signal": "node scripts/clock-signature-ratchet.mjs --no-record",
     "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs",
     "build:console": "npm --prefix apps/dashboard run build",
     "comment-load-signal": "node scripts/comment-load-ratchet.mjs --no-record",
