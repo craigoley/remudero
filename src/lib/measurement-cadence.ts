@@ -2711,10 +2711,12 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
   ].join("\n");
 }
 
-/** The one `learnings/` file a drafted remedy names. A concrete path, not the `learnings/*.yaml`
+/** The canonical CI learning shard a drafted remedy names. A concrete path, not the `learnings/*.yaml`
  *  GLOB: a `grep:` proof is a BASIC REGEX, so a glob matches nothing and the criterion would
- *  degrade silently (CLAUDE.md's proof section). */
-export const CI_LEARNING_LESSONS_FILE = "learnings/ci-gate-lessons.yaml";
+ *  degrade silently (CLAUDE.md's proof section). Keep this pointed at the existing subsystem
+ *  shard: the landing bridge writes plan records, and the eventual worker must land the lesson in
+ *  the corpus that `loadLearningsCorpus` actually indexes. */
+export const CI_LEARNING_LESSONS_FILE = "learnings/ci.yaml";
 
 /** Parse rendered shard bytes back and lint them. EXPORTED so BOTH arms are reachable: every draft
  *  the renderer produces takes the LINT arm, so the UNPARSEABLE one is testable only here — a catch
