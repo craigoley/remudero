@@ -1062,6 +1062,7 @@
     "test/plan-proposals.test.ts": 237,
     "test/plan-reading-fast-lane-sharding.test.ts": 0,
     "test/plan-reconcile-credit-parity.test.ts": 0,
+    "test/plan-reconcile-diff-ceiling.test.ts": 0,
     "test/plan-resequence-pr-invalidation-wiring.test.ts": 0,
     "test/plan-resequence-pr-invalidation.test.ts": 0,
     "test/plan-sections-render.test.ts": 333,

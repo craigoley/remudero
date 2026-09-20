@@ -21850,17 +21850,25 @@ function defaultCreditedMergedIds(): Set<string> {
   );
 }
 
+/** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
+ * must direct larger status repairs into multiple reviewable plan-only PRs. */
+export const PLAN_RECONCILE_REVIEW_FILE_CEILING = 300;
+
 /** The operator-facing summary. Names the mode FIRST, so a dry run can never be misread as applied. */
 export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): string {
   const skipped = Object.entries(summary.skipped)
     .filter(([, n]) => n > 0)
     .map(([k, n]) => `${k}=${n}`)
     .join(" · ");
+  const reviewHint =
+    summary.rewritten.length > PLAN_RECONCILE_REVIEW_FILE_CEILING
+      ? `\nreview ceiling: ${summary.rewritten.length} changed shards exceed GitHub's ${PLAN_RECONCILE_REVIEW_FILE_CEILING}-file diff limit; split the changes across multiple plan-only PRs before landing`
+      : "\nre-run with --write to apply, then land the diff as one plan-only PR";
   return (
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
-    (summary.rewritten.length > 0 && !write ? "\nre-run with --write to apply, then land the diff as one plan-only PR" : "")
+    (summary.rewritten.length > 0 && !write ? reviewHint : "")
   );
 }
 
