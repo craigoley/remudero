@@ -5126,3 +5126,30 @@ test("W1-T3704: a no-op push whose MERGE BASE moved disposes discriminate-only, 
   assert.equal(summary.byDisposition["review-reused"], 0, "and must NOT be reused");
   assert.equal(summary.actionsTaken, 0);
 });
+
+test("W1-T3798: a reused or discriminated review with a prior terminal outcome is explicitly deduped", async () => {
+  const lp = ledgerPath();
+  const reused = noOpPushPr();
+  const refused = noOpPushPr({
+    prNumber: 78,
+    prUrl: "url/78",
+    taskId: "W1-REFUSED",
+    headSha: "newhead2",
+    currentMergeBaseSha: "base2",
+  });
+  // These rows are the prior terminal outcomes read by priorActionsFromLedger. They must suppress
+  // the cheap review posts while still leaving the disposition visible in this pass's ledger.
+  appendLedger(lp, { run_id: "SWEEP-OLD", task_id: reused.taskId!, step: "review.posted", head_sha: reused.headSha, state: "success" });
+  appendLedger(lp, { run_id: "SWEEP-OLD", task_id: refused.taskId!, step: "review.post_refused", head_sha: refused.headSha, state: "refused" });
+
+  const deps = fakeDeps({ ledgerPath: lp });
+  const summary = await runSweep([reused, refused], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(summary.byDisposition["review-reused"], 1);
+  assert.equal(summary.byDisposition["discriminate-only"], 1);
+  assert.equal(summary.actionsTaken, 0);
+  const disposed = readLedgerLines(lp).filter((line) => line.step === "sweep.disposed");
+  assert.equal(disposed.length, 2);
+  assert.match(String(disposed.find((line) => line.task_id === reused.taskId)?.stand_down_reason), /verdict was already DELIVERED/);
+  assert.match(String(disposed.find((line) => line.task_id === refused.taskId)?.stand_down_reason), /review post was already REFUSED/);
+});
