@@ -25,6 +25,9 @@
  * dispatch.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -38,6 +41,9 @@ import {
 import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { buildSweepEffects } from "../src/run-task.js";
 
 const NOW = Date.parse("2026-09-16T19:00:00Z");
 const RECENT = "2026-09-16T18:50:00Z";
@@ -127,6 +133,68 @@ function modeDeps(): SweepDeps & { modes: string[] } {
     },
   };
 }
+
+test("W1-T3798 production adapter posts reuse and routes discrimination through the fallback reviewer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-adapter-"));
+  const bin = mkdtempSync(join(tmpdir(), "rmd-review-reuse-gh-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const oldPath = process.env.PATH;
+  const calls: string[] = [];
+  writeFileSync(
+    join(bin, "gh"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *"pulls/3704"*) printf \'{"state":"open","merged":false,"head":{"sha":"cafef00dcafef00dcafef00dcafef00dcafef00d"},"body":""}\\n\' ;;',
+      "  *) printf '{}\\n' ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  appendLedger(ledgerPath, {
+    run_id: "prior",
+    task_id: TASK,
+    step: "review.posted",
+    state: "success",
+    head_sha: JUDGED_HEAD,
+    decision_verdict: { state: "success", criteria: [{ proof_exec: "executed_pass" }] },
+    proof_exec: ["executed_pass"],
+  });
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "scratch",
+      config: { root } as never,
+      ledgerPath,
+      runId: "reuse-adapter",
+      plan: { tasks: [], byId: new Map() },
+      log: (step) => calls.push(step),
+      reviewRunner: async () => {
+        calls.push("fallback-review");
+        return 0;
+      },
+    });
+    await withLiveWritesAllowed(() =>
+      effects.postReview!(
+        orphanedPr({ taskId: TASK }),
+        { kind: "reuse", judgedHeadSha: JUDGED_HEAD },
+      ),
+    );
+    assert.ok(calls.includes("sweep.post_review.done"), "reuse must post a durable current-head verdict");
+
+    await effects.postReview!(orphanedPr({ taskId: TASK }), { kind: "discriminate-only", judgedHeadSha: JUDGED_HEAD });
+    assert.ok(calls.includes("fallback-review"), "base-only changes must run the existing reviewer fallback");
+
+    await effects.postReview!(orphanedPr({ taskId: undefined }), { kind: "reuse", judgedHeadSha: JUDGED_HEAD });
+    assert.equal(calls.filter((step) => step === "fallback-review").length, 2, "unreadable evidence falls back too");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
 
 test("W1-T3798 reuse-posts-current-head-verdict", async () => {
   const deps = modeDeps();

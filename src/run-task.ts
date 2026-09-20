@@ -1608,6 +1608,8 @@ export function buildSweepEffects(
       spawnReview: spawnRmdReviewForFreshTree,
     }),
   );
+  const reviewFallbackRunner =
+    deps.reviewRunner ?? ((_prNumber: number, _isPlanFiling?: boolean) => reviewCommand(String(_prNumber), ["--repo", deps.repo]));
   const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
     // A base move still needs fresh proof discrimination; the existing deterministic review path
     // is the safe fallback until a proof-only runner can be exposed without duplicating review.ts.
@@ -1617,7 +1619,7 @@ export function buildSweepEffects(
         head_sha: pr.headSha,
         ...(mode.kind === "discriminate-only" ? { judged_head_sha: mode.judgedHeadSha } : {}),
       });
-      return reviewCommand(String(pr.prNumber), ["--repo", deps.repo]);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
     }
     const prior = readLedgerLines(deps.ledgerPath)
       .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
@@ -1625,7 +1627,7 @@ export function buildSweepEffects(
     const verdict = prior?.decision_verdict as ReviewVerdict | undefined;
     if (!pr.taskId || !verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
-      return reviewCommand(String(pr.prNumber), ["--repo", deps.repo]);
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
     }
     const reusedStatus = await postReviewStatusGuarded({
       owner: deps.owner,
