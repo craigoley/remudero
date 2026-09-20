@@ -22251,7 +22251,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
   let releasedIdsForAdmission = new Set<string>();
-  if (scope) {
+  if (scope && !offline) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
       releasedIdsForAdmission = releasedTaskIds(readLedgerRawLines(ledgerPathFor(config)));

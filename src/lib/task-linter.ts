@@ -3325,8 +3325,6 @@ export interface LintOpts {
    *  {@link unboundCriterionViolations} reports warnings only; present ⇒ growth above the recorded
    *  per-file count blocks while at-or-below baseline remains advisory. */
   unboundCriterionBaseline?: UnboundCriterionBaseline;
-  /** W1-T3843 — filing-time facts for machine-authored tasks. Absent outside the changed-task
-   *  filing/relint paths so the standing plan is not retroactively reddened. */
   machineFilingAdmission?: MachineFilingAdmissionContext;
 }
 
