@@ -1,0 +1,26 @@
+id: fb-1789932379027-b989eb
+ts: 2026-09-20T19:26:19.027Z
+raw: "Observed live on 2026-09-20: core GET /v1/analytics reads
+  projectionVersion and resolveConsoleV1Projection correctly, but then always
+  serializes the full AnalyticsSnapshot. A named projectionVersion=console-v1
+  therefore returns the generic multi-megabyte snapshot instead of the bounded
+  consoleV1 envelope. Concurrent reads returned analytics at 8.37 MB and made
+  status/inbox/analytics take roughly 8-10 seconds, while the hosted console
+  correctly enforces a 128 KiB bound and renders typed unavailable. W1-T3623 is
+  marked merged but its route test currently asserts the incorrect full-snapshot
+  behavior for a matching named version. Semantically supersede that completion:
+  add a discriminating wire-level regression proving a matching
+  projectionVersion returns only consoleV1, unversioned legacy reads retain the
+  full snapshot, unknown versions remain 409, and concurrent read paths do not
+  await or serialize the generic analytics snapshot. Preserve source/freshness
+  and not-collected semantics; do not hide this by raising console limits or
+  timeouts."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
