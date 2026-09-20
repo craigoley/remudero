@@ -100,6 +100,45 @@ test("W1-T3595: the census predicate recognises every shape this script used to 
   }
 });
 
+test("W1-T3813: BSD-date fallback preserves oldest-lock age evidence", () => {
+  assert.match(SCRIPT_SOURCE, /epoch_of_started_at\(\)/, "timeout evidence needs one portable timestamp parser");
+  assert.match(SCRIPT_SOURCE, /date -u -d "\$\{iso\}" \+%s/, "Linux must retain the GNU date path");
+  assert.match(
+    SCRIPT_SOURCE,
+    /date -u -j -f "%Y-%m-%dT%H:%M:%S" "\$\{trimmed\}" \+%s/,
+    "macOS must have a BSD date path",
+  );
+  assert.match(
+    SCRIPT_SOURCE,
+    /started_epoch="\$\(epoch_of_started_at "\$\{started_at\}"\)"/,
+    "oldest-work evidence must use the portable parser",
+  );
+});
+
+test("W1-T3813: malformed timestamp stays absent from age evidence", () => {
+  assert.match(SCRIPT_SOURCE, /out="\$\(date -u -d "\$\{iso\}" \+%s 2>\/dev\/null\)"/, "GNU parse failures must be contained");
+  assert.match(SCRIPT_SOURCE, /out="\$\(date -u -j -f "%Y-%m-%dT%H:%M:%S" "\$\{trimmed\}" \+%s 2>\/dev\/null\)"/, "BSD parse failures must be contained");
+  assert.match(SCRIPT_SOURCE, /return 0\n}\n\noldest_inflight_age_s\(\)/, "both parser failures must return an empty result");
+  assert.doesNotMatch(SCRIPT_SOURCE, /epoch_of_started_at[\s\S]{0,800}printf ['"]0['"]/, "malformed timestamps must not become fabricated zero ages");
+});
+
+test("W1-T3799: optional recycle mounts are appended only when present before docker run", () => {
+  assert.match(SCRIPT_SOURCE, /DOCKER_RUN_ARGS=\(/, "the run command must be assembled through a stable argv");
+  assert.match(
+    SCRIPT_SOURCE,
+    /if \[ "\$\{#CODEX_MOUNT_ARGS\[@\]\}" -gt 0 \]; then/,
+    "the optional Codex mount must be appended only when it exists",
+  );
+  assert.match(
+    SCRIPT_SOURCE,
+    /if \[ "\$\{#CONTAINER_CONFIG_MOUNT_ARGS\[@\]\}" -gt 0 \]; then/,
+    "the optional config mount must be appended only when it exists",
+  );
+  assert.match(SCRIPT_SOURCE, /docker run "\$\{DOCKER_RUN_ARGS\[@\]\}"/, "docker must receive the assembled argv");
+  assert.doesNotMatch(SCRIPT_SOURCE, /docker run[\s\S]{0,600}"\$\{CODEX_MOUNT_ARGS\[@\]\}"/);
+  assert.doesNotMatch(SCRIPT_SOURCE, /docker run[\s\S]{0,600}"\$\{CONTAINER_CONFIG_MOUNT_ARGS\[@\]\}"/);
+});
+
 // ── (iv) THE FALSIFIER — restoring a banned primitive fails the census, for both kinds ─────────
 
 test("W1-T3595: MUTANT: reinstating readarray anywhere in the script fails the census", () => {
