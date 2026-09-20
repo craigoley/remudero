@@ -60,7 +60,7 @@ export function readBaseline(text, path = "clock-signature-baseline.json") {
   return parsed;
 }
 
-function main(argv) {
+export function main(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
