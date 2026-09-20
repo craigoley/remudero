@@ -8434,9 +8434,9 @@
   files: [plan/tasks.yaml]
   acceptance:
     - claim: "the former W1-T49 record is withdrawn and its site implementation is owned by PORTAL-T19"
-      proof: "grep: retirement: withdrawn in plan/tasks.yaml"
+      proof: "grep: retirement: withdrawn # PORTAL-T19 in plan/tasks.yaml"
   status: blocked
-  retirement: withdrawn
+  retirement: withdrawn # PORTAL-T19 owns the site implementation
   attempts: 0
   note: "The former W1-T49 implementation shape claimed site-owned work and a withdrawn dependency. The live coordination/provenance record is W1-T3887 in plan/tasks.d; the separate remudero-site repository owns PORTAL-T19. This tombstone remains so historical source citations resolve without re-opening the retired implementation."
 
