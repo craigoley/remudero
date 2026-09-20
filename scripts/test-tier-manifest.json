@@ -366,6 +366,7 @@
     "test/auto-triage-rung.test.ts": 1541,
     "test/auto-triage-wiring.test.ts": 20766,
     "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
+    "test/automation-action.test.ts": 0,
     "test/automerge-hold.test.ts": 1941,
     "test/autonomy-ratchet.test.ts": 3921,
     "test/awareness-surface-ratchet.test.ts": 1073,

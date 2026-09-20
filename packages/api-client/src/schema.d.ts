@@ -405,6 +405,90 @@ export interface components {
       experimentId: string;
       rollback: OperatorAgentExperimentRollback;
     };
+    AutomationActionScope: {
+      /** owner/repository scope resolved by the server. */
+      repository: string;
+      instance?: string;
+    };
+    AutomationActionPrecondition: {
+      name: string;
+      state: "satisfied" | "missing" | "stale" | "unknown";
+      observedAt: string;
+      reason?: string;
+    };
+    AutomationActionRollback: {
+      actionId: string;
+      plan: string;
+      reason: string;
+    };
+    AutomationAction: {
+      version: "automation-action-v1";
+      actionId: string;
+      flowId: string;
+      scope: AutomationActionScope;
+      risk: "low" | "medium" | "high";
+      preconditions: (AutomationActionPrecondition)[];
+      requiredFreshnessMs: number;
+      observedAt: string;
+      idempotencyKey: string;
+      expiresAt: string;
+      dryRunSupported: boolean;
+      approvalRequired: boolean;
+      rollback: AutomationActionRollback;
+    };
+    AutomationActionReceipt: {
+      receiptId: string;
+      actionId: string;
+      idempotencyKey: string;
+      decision: "approve" | "reject" | "cancel" | "rollback";
+      status: "in-progress" | "refused";
+      at: string;
+      linkedReceiptId?: string;
+      reason?: string;
+    };
+    AutomationActionPreflight: {
+      state: "ready" | "refused" | "stale" | "unknown" | "expired" | "in-progress";
+      reason?: string;
+      source: "ledger" | "unavailable";
+      observedAt?: string;
+      freshness?: "fresh" | "stale" | "unavailable";
+      changedSince?: string;
+    };
+    AutomationActionHistory: {
+      version: "automation-action-v1";
+      actionId: string;
+      flowId: string;
+      scope: AutomationActionScope;
+      risk: "low" | "medium" | "high";
+      preconditions: (AutomationActionPrecondition)[];
+      requiredFreshnessMs: number;
+      observedAt: string;
+      idempotencyKey: string;
+      expiresAt: string;
+      dryRunSupported: boolean;
+      approvalRequired: boolean;
+      rollback: AutomationActionRollback;
+      preflight: AutomationActionPreflight;
+      receipts: (AutomationActionReceipt)[];
+    };
+    AutomationActionList: {
+      version: "automation-action-v1";
+      actions: (AutomationActionHistory)[];
+      source: "ledger" | "unavailable";
+      reason?: string;
+    };
+    AutomationActionRegistration: {
+      action: AutomationAction;
+    };
+    AutomationActionPreflightRequest: {
+      actionId: string;
+    };
+    AutomationActionDecisionRequest: {
+      actionId: string;
+      decision: "approve" | "reject" | "cancel" | "rollback";
+      idempotencyKey: string;
+      reason?: string;
+    };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
     SkillEntry: {
       /** The skill's identity -- its filename minus `.yaml`. */
@@ -686,6 +770,57 @@ export interface paths {
           "403": Error;
           "404": Error;
           "409": Error;
+        };
+    };
+  };
+  "/v1/automation/actions": {
+    get: {
+      responses: {
+          "200": AutomationActionList;
+          "401": Error;
+          "403": Error;
+          "503": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "201": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/automation/actions/preflight": {
+    post: {
+      responses: {
+          "200": {
+            version: "automation-action-v1";
+            actionId: string;
+            preflight: AutomationActionPreflight;
+          };
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": Error;
+        };
+    };
+  };
+  "/v1/automation/actions/decision": {
+    post: {
+      responses: {
+          "200": {
+            ok: boolean;
+            existing: boolean;
+            receipt: AutomationActionReceipt;
+          };
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+          "503": Error;
         };
     };
   };

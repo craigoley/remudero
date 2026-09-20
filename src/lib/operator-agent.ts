@@ -19,6 +19,7 @@ import {
   sendJson,
   type PanelActionDeps,
 } from "./panel-actions.js";
+import { buildAutomationActionRoutes } from "./automation-action.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -954,6 +955,7 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
 
 export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
+    ...buildAutomationActionRoutes(deps),
     buildOperatorAgentProposalReadRoute(deps),
     buildOperatorAgentProposalRegisterRoute(deps),
     buildOperatorAgentDecisionRoute(deps),

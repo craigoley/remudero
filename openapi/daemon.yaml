@@ -1216,6 +1216,217 @@ components:
         rollback:
           $ref: "#/components/schemas/OperatorAgentExperimentRollback"
 
+    AutomationActionScope:
+      type: object
+      required: [repository]
+      properties:
+        repository:
+          type: string
+          description: owner/repository scope resolved by the server.
+        instance:
+          type: string
+
+    AutomationActionPrecondition:
+      type: object
+      required: [name, state, observedAt]
+      properties:
+        name:
+          type: string
+        state:
+          type: string
+          enum: [satisfied, missing, stale, unknown]
+        observedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+
+    AutomationActionRollback:
+      type: object
+      required: [actionId, plan, reason]
+      properties:
+        actionId:
+          type: string
+        plan:
+          type: string
+        reason:
+          type: string
+
+    AutomationAction:
+      type: object
+      required: [version, actionId, flowId, scope, risk, preconditions, requiredFreshnessMs, observedAt, idempotencyKey, expiresAt, dryRunSupported, approvalRequired, rollback]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actionId:
+          type: string
+        flowId:
+          type: string
+        scope:
+          $ref: "#/components/schemas/AutomationActionScope"
+        risk:
+          type: string
+          enum: [low, medium, high]
+        preconditions:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/AutomationActionPrecondition"
+        requiredFreshnessMs:
+          type: integer
+          minimum: 1
+        observedAt:
+          type: string
+          format: date-time
+        idempotencyKey:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        dryRunSupported:
+          type: boolean
+        approvalRequired:
+          type: boolean
+        rollback:
+          $ref: "#/components/schemas/AutomationActionRollback"
+
+    AutomationActionReceipt:
+      type: object
+      required: [receiptId, actionId, idempotencyKey, decision, status, at]
+      properties:
+        receiptId:
+          type: string
+        actionId:
+          type: string
+        idempotencyKey:
+          type: string
+        decision:
+          type: string
+          enum: [approve, reject, cancel, rollback]
+        status:
+          type: string
+          enum: [in-progress, refused]
+        at:
+          type: string
+          format: date-time
+        linkedReceiptId:
+          type: string
+        reason:
+          type: string
+
+    AutomationActionPreflight:
+      type: object
+      required: [state, source]
+      properties:
+        state:
+          type: string
+          enum: [ready, refused, stale, unknown, expired, in-progress]
+        reason:
+          type: string
+        source:
+          type: string
+          enum: [ledger, unavailable]
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum: [fresh, stale, unavailable]
+        changedSince:
+          type: string
+
+    AutomationActionHistory:
+      type: object
+      required: [version, actionId, flowId, scope, risk, preconditions, requiredFreshnessMs, observedAt, idempotencyKey, expiresAt, dryRunSupported, approvalRequired, rollback, preflight, receipts]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actionId:
+          type: string
+        flowId:
+          type: string
+        scope:
+          $ref: "#/components/schemas/AutomationActionScope"
+        risk:
+          type: string
+          enum: [low, medium, high]
+        preconditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationActionPrecondition"
+        requiredFreshnessMs:
+          type: integer
+        observedAt:
+          type: string
+          format: date-time
+        idempotencyKey:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        dryRunSupported:
+          type: boolean
+        approvalRequired:
+          type: boolean
+        rollback:
+          $ref: "#/components/schemas/AutomationActionRollback"
+        preflight:
+          $ref: "#/components/schemas/AutomationActionPreflight"
+        receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationActionReceipt"
+
+    AutomationActionList:
+      type: object
+      required: [version, actions, source]
+      properties:
+        version:
+          type: string
+          enum: [automation-action-v1]
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationActionHistory"
+        source:
+          type: string
+          enum: [ledger, unavailable]
+        reason:
+          type: string
+
+    AutomationActionRegistration:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: "#/components/schemas/AutomationAction"
+
+    AutomationActionPreflightRequest:
+      type: object
+      required: [actionId]
+      additionalProperties: false
+      properties:
+        actionId:
+          type: string
+
+    AutomationActionDecisionRequest:
+      type: object
+      required: [actionId, decision, idempotencyKey]
+      additionalProperties: false
+      properties:
+        actionId:
+          type: string
+        decision:
+          type: string
+          enum: [approve, reject, cancel, rollback]
+        idempotencyKey:
+          type: string
+        reason:
+          type: string
+
     # ── W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) -- the button set
     # src/lib/panel-skills.ts's ONE route returns, resolved from
     # `.remudero/skills/<name>.yaml` (lib/skill.ts's `Skill`, W1-T44) the SAME
@@ -1975,6 +2186,147 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+
+  /v1/automation/actions:
+    get:
+      summary: Read bounded automation actions, preflight states, and durable receipts.
+      description: >
+        Returns the append-only automation-action-v1 projection. Missing or unreadable ledger
+        state is explicit as `source: unavailable`; it is never rendered as an empty healthy list.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Automation action history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationActionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The action ledger could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      summary: Register a bounded automation action declaration.
+      description: >
+        Registers an action idempotently. The declaration contains server-verifiable scope,
+        freshness, approval, expiry, and rollback metadata; credentials, prompts, measurements,
+        and daemon URLs are rejected.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationActionRegistration"
+      responses:
+        "201":
+          description: Action registered.
+        "200":
+          description: Identical action already registered.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/automation/actions/preflight:
+    post:
+      summary: Preflight one automation action without executing it.
+      description: >
+        Returns one of ready, refused, stale, unknown, expired, or in-progress. The source and
+        freshness fields remain explicit when the ledger is unavailable.
+      security:
+        - bearerRead: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationActionPreflightRequest"
+      responses:
+        "200":
+          description: Preflight projection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, actionId, preflight]
+                properties:
+                  version:
+                    type: string
+                    enum: [automation-action-v1]
+                  actionId:
+                    type: string
+                  preflight:
+                    $ref: "#/components/schemas/AutomationActionPreflight"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The action ledger could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/automation/actions/decision:
+    post:
+      summary: Record an idempotent automation decision and durable receipt.
+      description: >
+        Approve, reject, cancel, or roll back an action. Approval and rollback are durable intent
+        receipts with status in-progress; this route never claims execution completed. Reusing an
+        idempotency key returns the existing receipt without executing twice.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationActionDecisionRequest"
+      responses:
+        "200":
+          description: Durable receipt recorded or reused.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, existing, receipt]
+                properties:
+                  ok:
+                    type: boolean
+                  existing:
+                    type: boolean
+                  receipt:
+                    $ref: "#/components/schemas/AutomationActionReceipt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          description: The action ledger could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/skills:
     get:
