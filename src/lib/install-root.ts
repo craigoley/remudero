@@ -25,7 +25,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 /** The subset of {@link Config} this module reads — structural, to avoid a config.ts import
@@ -44,6 +44,23 @@ export interface InstallRootConfigLike {
  */
 export function resolveInstallRoot(config: InstallRootConfigLike): string {
   return config.installRoot ?? join(config.root, "daemon-install");
+}
+
+export type DeployStateRootValidation = { ok: true } | { ok: false; reason: string };
+
+export function validateDeployStateRoot(stateRoot: string): DeployStateRootValidation {
+  if (!isAbsolute(stateRoot)) {
+    return { ok: false, reason: `--state-root must be an absolute path, got '${stateRoot}'` };
+  }
+  try {
+    if (!statSync(stateRoot).isDirectory()) {
+      return { ok: false, reason: `--state-root is not a directory: ${stateRoot}` };
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `--state-root is not an existing directory: ${stateRoot} (${detail})` };
+  }
+  return { ok: true };
 }
 
 /** True when `child` is `parent` itself, or nested under it. Path-string safe: both sides are
