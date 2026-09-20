@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
-import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
-import { RETIREMENT_REASONS, unmetDependencies } from "./plan.js";
+import type { AcceptanceCriterion, MachineFilingAdmissionContext, Plan, Task, TaskStatus } from "./plan.js";
+import { RETIREMENT_REASONS, machineFilingAdmissionViolations, unmetDependencies } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
@@ -67,6 +67,7 @@ export type LintCheck =
   | "post-merge-proof-changed"
   | "post-merge-correction-without-prompt"
   | "machine-author-verify"
+  | "machine-filing-admission"
   | "blocked-task-disposition"
   | "blocked-record-unruled"
   | "blocked-without-disposition"
@@ -3324,6 +3325,9 @@ export interface LintOpts {
    *  {@link unboundCriterionViolations} reports warnings only; present ⇒ growth above the recorded
    *  per-file count blocks while at-or-below baseline remains advisory. */
   unboundCriterionBaseline?: UnboundCriterionBaseline;
+  /** W1-T3843 — filing-time facts for machine-authored tasks. Absent outside the changed-task
+   *  filing/relint paths so the standing plan is not retroactively reddened. */
+  machineFilingAdmission?: MachineFilingAdmissionContext;
 }
 
 /** Lint one task, aggregating every check below. The hard checks — sizing, headless-fitness,
@@ -3424,6 +3428,16 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (ruling) violations.push(ruling);
   const machineAuthor = machineAuthorVerifyViolation(task);
   if (machineAuthor) violations.push(machineAuthor);
+  if (opts.machineFilingAdmission) {
+    const reasons = machineFilingAdmissionViolations(task, opts.machineFilingAdmission);
+    if (reasons.length > 0) {
+      violations.push({
+        check: "machine-filing-admission",
+        severity: "block",
+        message: reasons.join("; "),
+      });
+    }
+  }
   const rule15 = rule15FilingViolation(task);
   if (rule15) violations.push(rule15);
   const declaredScope = declaredScopeViolation(task);

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { loadPlan, parseTasksFromYaml } from "./plan.js";
@@ -125,9 +126,19 @@ export function lintFiledTasks(
   }
   const wanted = new Set(filedIds);
   const out: RelintViolation[] = [];
+  const admissionOpts: LintOpts = opts.machineFilingAdmission
+    ? opts
+    : {
+        ...opts,
+        machineFilingAdmission: {
+          plan,
+          releasedIds: new Set<string>(),
+          pathExists: (repoRelPath: string) => existsSync(join(worktreeRoot, repoRelPath)),
+        },
+      };
   for (const task of plan.tasks) {
     if (!wanted.has(task.id)) continue;
-    for (const v of lintTask(task, opts).violations) if (v.severity === "block") out.push(v);
+    for (const v of lintTask(task, admissionOpts).violations) if (v.severity === "block") out.push(v);
   }
   return out;
 }
