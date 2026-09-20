@@ -1,0 +1,64 @@
+- id: W1-T3886
+  title: "STOP SAFELY UNDER PRESSURE — fleet, repository, instance, and principal emergency revocation"
+  repo: remudero
+  depends_on: [W1-T3878, W1-T3880, W1-T3883]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Credential boundary", "§Self-improvement", "W1-T3853", "W1-T3878", "W1-T3880", "W1-T3883"]
+  files:
+    - src/lib/emergency-control.ts
+    - src/lib/operator-agent.ts
+    - src/lib/serve.ts
+    - src/lib/ledger.ts
+    - openapi/daemon.yaml
+    - test/emergency-control-scope.test.ts
+    - test/emergency-control-admission.test.ts
+    - test/emergency-control-running.test.ts
+    - test/emergency-control-clear.test.ts
+    - test/emergency-control-receipts.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Profiles, capability grants, and agent handoffs already have individual revocation paths. Incident
+    response still needs one operator action that stops new admission across a chosen blast-radius and
+    records why. Revoke-one controls are too slow when a connector, model, account, or host is behaving
+    unexpectedly.
+
+    This is emergency containment, not a hidden superuser bypass. It must fail closed, preserve an
+    attributable receipt, and distinguish preventing new work from cancelling an already-running
+    external effect.
+
+    W1-T3853 owns experiment records and promotion evidence; this task owns the independent emergency
+    admission circuit and its recovery receipts.
+  design: |
+    Add an `emergency-stop-v1` state with scope `fleet`, `repository`, `instance`, or `principal`, a
+    named reason, issuer, issued time, expiry or explicit clear requirement, affected capability and
+    delegation classes, and linked incident receipt. While active, new action admission, follow-up
+    promotion, capability use, and agent handoff in scope refuse by name. Running effects transition to
+    stop-requested only when their connector supports cancellation; otherwise they remain observable and
+    bounded without pretending cancellation succeeded.
+
+    Clearing a stop requires explicit human confirmation, a fresh authoritative health/preflight read,
+    and a linked clear receipt. A partial or unavailable revocation source blocks clearing.
+  acceptance:
+    - claim: "emergency stops bind an explicit scope, issuer, reason, expiry or clear policy, and incident receipt"
+      proof: "unit test: test/emergency-control-scope.test.ts"
+    - claim: "active stops refuse new actions, follow-up promotion, capability use, and agent handoff in scope"
+      proof: "unit test: test/emergency-control-admission.test.ts"
+    - claim: "running effects distinguish cancellation requested, unsupported, applied, and unobservable states"
+      proof: "unit test: test/emergency-control-running.test.ts"
+    - claim: "a stop cannot be cleared without explicit human confirmation and fresh authoritative health evidence"
+      proof: "unit test: test/emergency-control-clear.test.ts"
+    - claim: "stop, refusal, cancellation, and clear events produce linked bounded receipts"
+      proof: "unit test: test/emergency-control-receipts.test.ts"
+    - claim: "the operator-agent admission path calls the emergency-control module before execution"
+      proof: "grep: checkEmergencyStop( in src/lib/operator-agent.ts"
+  falsifier: |
+    Let an in-scope action through an active stop, claim a connector cancelled work it cannot cancel,
+    clear from stale evidence, or omit the incident reason and scope. The corresponding proof must fail.
+  note: "W1-T2296 provides incident reconstruction; this task provides real-time containment and recovery gates."

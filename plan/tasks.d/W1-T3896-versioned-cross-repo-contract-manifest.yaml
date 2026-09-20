@@ -1,0 +1,46 @@
+- id: W1-T3896
+  title: "PUBLISH ONE CROSS-REPOSITORY CONTRACT MANIFEST — versioned states, fixtures, provenance, and compatibility policy"
+  repo: remudero
+  depends_on: [W1-T3855, W1-T3892, W1-T3885]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:instinct-automation-2026-09-20"
+  plan_refs: ["§Cross-repository ownership", "W1-T3855", "W1-T3892", "W1-T3885"]
+  files:
+    - contracts/automation-flow-v1.json
+    - contracts/automation-flow-v1-fixtures.json
+    - scripts/validate-contract-manifest.mjs
+    - openapi/daemon.yaml
+    - test/contract-manifest-source.test.ts
+    - test/contract-manifest-fixtures.test.ts
+    - test/contract-manifest-breaking.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Core, console, and site now have several coordinated plan surfaces, but the plan format does not
+    itself prove that a console adapter understands the same action, receipt, freshness, and refusal
+    states as the daemon. A versioned manifest gives the public core one canonical compatibility object;
+    the console can pin and test it without inventing a foreign plan dependency.
+  design: |
+    Publish a machine-readable manifest for the automation flow contracts, including schema version,
+    source revision, state and enum vocabulary, required fields, redaction rules, fixture corpus,
+    backward-compatibility policy, and explicit unavailable or stale semantics. The validator must be
+    deterministic and source the manifest from the checked-in contract files, never a floating branch or
+    live daemon. Any breaking state or field change requires a new version and linked migration note.
+  acceptance:
+    - claim: "the manifest names the reviewed source revision, schema version, states, fields, redaction rules, and compatibility policy"
+      proof: "unit test: test/contract-manifest-source.test.ts"
+    - claim: "the fixture corpus covers ready, refused, stale, unknown, expired, in-progress, pending, and partial outcomes"
+      proof: "unit test: test/contract-manifest-fixtures.test.ts"
+    - claim: "the validator rejects an undocumented state, missing required field, or breaking change without a new version"
+      proof: "unit test: test/contract-manifest-breaking.test.ts"
+    - claim: "the manifest and validator are generated from checked-in core contracts rather than a floating remote"
+      proof: "grep: validateContractManifest( in scripts/validate-contract-manifest.mjs"
+  falsifier: |
+    Let a console-facing state exist only in prose, omit a refusal from fixtures, accept a breaking
+    field change under the same version, or fetch the contract from floating main. The proof must fail.
+  note: "This is the core half of interoperability; the console owns its pinned compatibility gate."
