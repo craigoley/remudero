@@ -3153,6 +3153,39 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   ];
 }
 
+/**
+ * W1-T3814 — plan-only filings may not introduce substantive authoring diagnostics and still
+ * auto-merge. These three checks are intentionally WARN in the whole-plan and implementation
+ * paths: existing backlog carries measured findings, and a global severity flip would strand it.
+ * The plan-only caller supplies the base task's diagnostics so this pure adapter can promote only
+ * a finding that is NEW on a changed shard (or any finding on a newly added shard). Inherited
+ * findings stay visible as warnings; an absent base is not treated as inherited and therefore
+ * fails closed for a changed shard.
+ */
+export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new Set([
+  "shared-proof",
+  "call-site",
+  "proof-scope",
+]);
+
+export function promoteIntroducedPlanOnlyDiagnostics(
+  head: readonly LintViolation[],
+  base: readonly LintViolation[] | undefined,
+  newlyAdded: boolean,
+): LintViolation[] {
+  const baseDiagnostics = new Set((base ?? []).map((violation) => `${violation.check}\u0000${violation.message}`));
+  return head.map((violation) => {
+    if (!PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS.has(violation.check)) return violation;
+    const signature = `${violation.check}\u0000${violation.message}`;
+    if (!newlyAdded && base !== undefined && baseDiagnostics.has(signature)) return violation;
+    return {
+      ...violation,
+      severity: "block",
+      message: `${violation.message} — introduced by this plan-only shard; resolve it before filing (W1-T3814)`,
+    };
+  });
+}
+
 /** MONOLITH-FILING — one storage convention for new tasks. PR #1060 redirected `rmd triage` to
  *  propose a new task as its own shard, but that is ONLY A PROMPT INSTRUCTION TO AN LLM:
  *  `decideTriage` filters `!f.startsWith("plan/")`, so a shard passes and so does a monolith append.
