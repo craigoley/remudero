@@ -11,6 +11,8 @@ const SRC_ROOT = join(REPO_ROOT, "src");
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "deps-interface-baseline.json");
 
 const DEPS_DECLARATION = /^(?:export\s+)?(?:interface|type)\s+([A-Za-z0-9_]+Deps)\b/gm;
+const SEAM_DECLARATION = /^(?:export\s+)?(?:interface|type)\s+([A-Za-z0-9_]+(?:Deps|Seams))\b/gm;
+const INLINE_SEAM = /\bdeps\??\s*:\s*\{/g;
 
 function listTsFiles(dir: string): string[] {
   const out: string[] = [];
@@ -34,6 +36,56 @@ export function depsInterfaceDeclarations(): string[] {
     for (const match of text.matchAll(DEPS_DECLARATION)) names.add(match[1]!);
   }
   return [...names].sort();
+}
+
+/** W1-T3744: count the two spellings which used to walk around the `*Deps` census. */
+export function countsInlineAndAliasedSeams(): { inline: number; aliased: string[] } {
+  let inline = 0;
+  const aliased = new Set<string>();
+  for (const file of listTsFiles(SRC_ROOT)) {
+    const text = readFileSync(file, "utf8");
+    inline += [...text.matchAll(INLINE_SEAM)].length;
+    for (const match of text.matchAll(SEAM_DECLARATION)) {
+      const name = match[1]!;
+      if (name.endsWith("Seams")) aliased.add(name);
+    }
+  }
+  return { inline, aliased: [...aliased].sort() };
+}
+
+function declarationBodies(): Array<{ name: string; body: string }> {
+  const out: Array<{ name: string; body: string }> = [];
+  for (const file of listTsFiles(SRC_ROOT)) {
+    const text = readFileSync(file, "utf8");
+    for (const match of text.matchAll(SEAM_DECLARATION)) {
+      const open = text.indexOf("{", match.index! + match[0].length);
+      if (open < 0) continue;
+      let depth = 0;
+      for (let i = open; i < text.length; i += 1) {
+        if (text[i] === "{") depth += 1;
+        else if (text[i] === "}" && --depth === 0) {
+          out.push({ name: match[1]!, body: text.slice(open + 1, i) });
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Report, but do not refuse, declarations carrying an identical member-set. */
+export function identicalMemberSetReport(): string[] {
+  const groups = new Map<string, string[]>();
+  for (const declaration of declarationBodies()) {
+    const key = declaration.body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "").replace(/\s+/g, " ").trim();
+    const names = groups.get(key) ?? [];
+    names.push(declaration.name);
+    groups.set(key, names);
+  }
+  return [...groups.entries()]
+    .filter(([, names]) => names.length > 1)
+    .map(([members, names]) => `identical member-set: ${names.sort().join(", ")} => ${members}`)
+    .sort();
 }
 
 function declarationFilesByName(): Map<string, string[]> {
@@ -80,4 +132,19 @@ test("each counted Deps declaration name resolves to at least one source file", 
   for (const name of depsInterfaceDeclarations()) {
     assert.ok((byName.get(name) ?? []).length > 0, `${name} must name the file(s) that declared it`);
   }
+});
+
+test("inline and aliased seams are counted and identical member-sets are reported without refusing", () => {
+  const counts = countsInlineAndAliasedSeams();
+  const raw = JSON.parse(readFileSync(BASELINE_PATH, "utf8")) as {
+    inlineSeamCount?: number;
+    aliasedSeamCount?: number;
+  };
+  assert.ok(counts.inline > 0, "the census must see at least one inline structural seam");
+  assert.ok(counts.aliased.length > 0, "the census must see at least one *Seams declaration");
+  assert.ok(counts.inline <= (raw.inlineSeamCount ?? 0), `inline seams grew from ${raw.inlineSeamCount} to ${counts.inline}`);
+  assert.ok(counts.aliased.length <= (raw.aliasedSeamCount ?? 0), `aliased seams grew from ${raw.aliasedSeamCount} to ${counts.aliased.length}`);
+  const report = identicalMemberSetReport();
+  if (report.length > 0) console.log(report.join("\n"));
+  assert.ok(Array.isArray(report), "identical member-set reporting is advisory");
 });
