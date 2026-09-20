@@ -46,6 +46,7 @@ import {
   preserveAbandonedFixOwnerDivergence,
   publishAbandonedFixOwnerAhead,
   preserveTrackedDirtyFixOwner,
+  resetTrackedDirtyFixOwner,
   readBoundedProcessCwdCensus,
   readRegisteredFixOwnerClaim,
   registeredFixWorktreeOwner,
@@ -595,6 +596,31 @@ test("W1-T3822: tracked-only residue is captured as an immutable commit whose tr
       "the same observed tree reuses rather than overwrites its immutable recovery ref",
     );
     assert.ok(execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1"], { encoding: "utf8" }).length > 0);
+
+    // W1-T3822 falsifier: "...the recovery ref must reproduce the dirty tree exactly before the
+    // owner is reset and removed". A plain `git worktree remove` (no --force, by design) REFUSES
+    // a dirty worktree, so without this reset the owner would stay dirty and every subsequent poll
+    // would decline all over again on `owner_remove_failed` -- the tracked-only sibling of the
+    // exact permanent stand-down this task exists to repair. Proven here against the REAL owner
+    // worktree, not a mock: reset, then the SAME unmodified `removeAbandonedFixWorktreeOwner`
+    // W1-T2952's clean-owner path already uses.
+    resetTrackedDirtyFixOwner(ownerPath, snapshot.localSha!);
+    assert.equal(
+      execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1"], { encoding: "utf8" }),
+      "",
+      "the reset must leave the owner exactly as clean as its preserved HEAD",
+    );
+    removeAbandonedFixWorktreeOwner(repoDir, ownerPath);
+    assert.equal(
+      execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], { encoding: "utf8" }).includes(ownerPath),
+      false,
+      "the plain, non-forcing removal path must actually succeed once the owner is reset",
+    );
+    assert.equal(
+      execFileSync("git", ["-C", repoDir, "branch", "--list", branch], { encoding: "utf8" }).trim().length > 0,
+      true,
+      "the branch itself survives removal — only the worktree checkout is reclaimed",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1129,6 +1155,10 @@ test("W1-T3822: tracked-only owner residue is preserved before reclamation and o
           order.push("preserve");
           return recoveryRef;
         },
+        resetTrackedDirty: (_repo, seenOwner, seenBranch, seenLocal) => {
+          assert.deepEqual([seenOwner, seenBranch, seenLocal], [ownerPath, branch, localSha]);
+          order.push("reset");
+        },
         remove: (canonical, owner) => {
           order.push("remove");
           removeAbandonedFixWorktreeOwner(canonical, owner);
@@ -1139,7 +1169,7 @@ test("W1-T3822: tracked-only owner residue is preserved before reclamation and o
       { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "fixture failure" }] },
     );
     assert.equal(threw, undefined);
-    assert.deepEqual(order, ["preserve", "remove"]);
+    assert.deepEqual(order, ["preserve", "reset", "remove"]);
     assert.equal(logs.filter((entry) => entry.step === "sweep.fix.checkout_owner_dirty_preserved").length, 1);
     assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 1);
   } finally {
@@ -1229,6 +1259,37 @@ test("W1-T3822: tracked-dirty recovery declines closed when preservation itself 
     assert.equal(
       logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined")?.extra?.owner_recovery_reason,
       "owner_dirty_recovery_preserve_failed",
+    );
+    assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3822: tracked-dirty recovery declines closed when the post-preservation reset fails, and never removes the still-dirty owner", async () => {
+  const root = tmp("rmd-fbcs-dirty-reset-failed-");
+  const branch = "run-W1-T500-1785600000020";
+  const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000020");
+  const order: string[] = [];
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const { logs, threw } = await driveDispatchFix(
+      root,
+      branch,
+      ownerPath,
+      {
+        capture: () => ({ ...SAFE_OWNER_SNAPSHOT, path: ownerPath, treeState: "tracked_dirty" }),
+        preserveTrackedDirty: () => { order.push("preserve"); return "refs/rmd-recovery/fix-dirty/unused"; },
+        resetTrackedDirty: () => { order.push("reset"); throw new Error("reset failed"); },
+        remove: () => { order.push("remove"); },
+      },
+      async () => { throw new Error("a failed reset must never reach worker dispatch"); },
+    );
+    assert.equal(threw, undefined);
+    assert.deepEqual(order, ["preserve", "reset"], "a failed reset must never reach removal");
+    assert.equal(
+      logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined")?.extra?.owner_recovery_reason,
+      "owner_dirty_recovery_reset_failed",
     );
     assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 0);
   } finally {

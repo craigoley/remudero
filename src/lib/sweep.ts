@@ -635,6 +635,7 @@ export interface RegisteredFixOwnerRecoveryDeps {
   publishAhead?: SweepRuntimeFn;
   preserveDiverged?: SweepRuntimeFn;
   preserveTrackedDirty?: SweepRuntimeFn;
+  resetTrackedDirty?: SweepRuntimeFn;
 }
 
 // ── W1-T3691 — STALE-REVIEWER-CODE SKIP RECURRENCE. A `review.skipped_stale_reviewer_code` skip
@@ -2018,6 +2019,31 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 branch: realBranch,
                 worktree_path: snapshot.path,
                 local_sha_prefix: localSha.slice(0, 12),
+                error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+              });
+              return;
+            }
+            // The recovery ref above is now durably proven to reproduce this owner's tree. Plain
+            // `git worktree remove` below refuses a dirty worktree, so the owner's tracked
+            // modifications (already safe in the recovery ref) are reset away here -- never
+            // force-removing the worktree itself, only resetting the tree the ref already covers.
+            try {
+              (registeredOwnerRecovery.resetTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.resetTrackedDirty"))(
+                repoDir,
+                registeredOwner,
+                realBranch,
+                localSha,
+              );
+            } catch (e) {
+              log("sweep.fix.checkout_claim_declined", {
+                reason: "registered_worktree_owner",
+                owner_recovery_reason: "owner_dirty_recovery_reset_failed",
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+                local_sha_prefix: localSha.slice(0, 12),
+                recovery_ref: preservedRecoveryRef.slice(0, 512),
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
               return;

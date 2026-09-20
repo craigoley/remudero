@@ -1620,6 +1620,8 @@ export function buildSweepEffects(
       publishAhead: publishAbandonedFixOwnerAhead,
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
       preserveTrackedDirty: preserveTrackedDirtyFixOwner,
+      resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
+        resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
     depReviewCommandImpl: depReviewCommand,
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
@@ -33461,6 +33463,22 @@ export function preserveTrackedDirtyFixOwner(
     throw new Error(`dirty recovery ref ${recoveryRef} is not the expected immutable commit`);
   }
   return recoveryRef;
+}
+
+// W1-T3822 — the tracked-only diff is durably captured by `preserveTrackedDirtyFixOwner` above,
+// but capture alone does not make the owner reclaimable: `removeAbandonedFixWorktreeOwner` runs a
+// plain `git worktree remove` with no `--force` (by design — a forced removal is exactly the data
+// loss this whole recovery arm exists to avoid), and plain `git worktree remove` REFUSES a
+// worktree carrying modified or untracked files. Left uncalled, the owner would stay dirty after
+// preservation and `remove` would fail closed on the exact same worktree every poll -- the
+// tracked-only sibling of the `dirty_worktree` stand-down this task exists to repair, just
+// surfacing under `owner_remove_failed` instead of `dirty_worktree`. This resets the owner's
+// tracked state to its OWN already-preserved HEAD, never anywhere else, and only after the caller
+// has confirmed the recovery ref reproduces that exact tree.
+export function resetTrackedDirtyFixOwner(ownerPath: string, localSha: string): void {
+  execFileSync("git", ["-C", ownerPath, "reset", "--hard", localSha], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
