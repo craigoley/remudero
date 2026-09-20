@@ -31,6 +31,24 @@ test("scoped settings fallback preserves the selected scope and conservative def
   }
 });
 
+test("malformed repository scope is refused before a settings read", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-operator-agent-settings-scope-invalid-read-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildOperatorAgentRoutes({ ledgerPath }) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/operator-agent/settings?repository=${encodeURIComponent("")}`, {
+      headers: { authorization: `Bearer ${READ_TOKEN}` },
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "invalid_request", detail: "repository must identify a repository" });
+  } finally {
+    server.close();
+  }
+});
+
 test("malformed repository scope is refused before a settings write", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-operator-agent-settings-scope-invalid-"));
   mkdirSync(join(root, "state"), { recursive: true });
