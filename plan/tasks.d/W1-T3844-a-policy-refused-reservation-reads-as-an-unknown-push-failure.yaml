@@ -1,0 +1,104 @@
+- id: W1-T3844
+  title: "A POLICY-REFUSED RESERVATION READS AS `UNKNOWN push failure` AND OFFERS NO WAY FORWARD — classifyReservationPushFailure has no case for an HTTP 403 at receive-pack, so a reachable origin that simply will not accept the ref namespace is reported as an unclassified git error and the caller is never told --no-reserve exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 12.00
+  files: [src/lib/task-id-reservation.ts]
+  origin: "2026-09-20 — an agent session could not mint any task id for ~40 minutes and filed two shards with unclaimed ids as a result"
+  plan_refs: ["W1-T1055", "W1-T3091"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-20 in a Claude Code remote session. `rmd next-task-id` (reserving by default
+    since W1-T3091) died with:
+
+      ### rmd next-task-id --reserve: REFUSED
+        UNKNOWN push failure while reserving W1-T3838 — refusing to mint. git said:
+        error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+        send-pack: unexpected disconnect while reading sideband packet
+
+    Two things are wrong with that, and neither is the 403 itself.
+
+    (1) THE CLASSIFICATION IS WRONG, AND FALLS TO THE WORST BUCKET.
+        `classifyReservationPushFailure` tests, in order, for a local pre-push refusal, for
+        contention (`already exists`/`non-fast-forward`/`rejected`), and for unreachability
+        (`could not read from remote`/`could not resolve host`/...). An HTTP 403 at
+        `git-receive-pack` matches none, so it returns `"unknown"` — the fail-closed bucket whose
+        whole purpose is "we do not know what this is". But we DO know. The origin is plainly
+        reachable: the `info/refs?service=git-receive-pack` GET immediately before it returned 200
+        from GitHub. This is a WRITE the path refused, with the read half working. That is a
+        distinct, recognisable condition and it currently has no name.
+
+    (2) THE MESSAGE IS A DEAD END, AND THE TOOL'S OWN OTHER REFUSAL PATH IS NOT.
+        The degraded-open-PR-surface refusal already tells the caller: "Printing (without
+        --reserve) still works — only the ATOMIC claim refuses." That sentence is exactly what a
+        caller needs here too, and `--no-reserve` genuinely does work in this situation — measured
+        the same session, `rmd next-task-id --no-reserve` printed W1-T3843 and exited 0 while every
+        reserving call was still failing. The push-failure path says none of it. So a caller who
+        hits (1) concludes the reserver is unusable and either stops or invents an id by hand. In
+        the observed session the operator filed two shards with UNCLAIMED ids and a hand-written
+        caveat — precisely the collision class W1-T3091 made reserving the default to prevent.
+
+    WHAT THIS TASK IS NOT. It is not a way to reserve anyway. When an egress policy refuses the
+    write, the correct behaviour is to report it, and the environment's own guidance says so in
+    those terms. This task makes the tool SAY THE RIGHT THING AND OFFER THE PATH THAT EXISTS; it
+    must not add a REST-API or alternate-namespace fallback that performs the refused write by
+    another route.
+  design: |
+    (i) NAME THE CONDITION. Add a `"refused"` outcome for a write the remote path declined while
+        the remote is reachable — the HTTP 4xx-at-receive-pack shape. It is neither `unreachable`
+        (the read worked) nor `unknown` (we know exactly what it is). Keep it FAIL-CLOSED: it
+        still refuses to mint, exactly as today. This changes the report, not the safety.
+
+    (ii) THE REFUSAL NAMES THE ESCAPE. The message must state that the origin is reachable, that
+         the ref write itself was declined, and that `--no-reserve` still yields an id (a FLOOR,
+         with the collision risk that implies). Same sentence the degraded-surface path already
+         gives; one convention, both paths.
+
+    (iii) DO NOT WEAKEN THE OTHER ARMS. `local`, `taken` and `unreachable` keep their exact
+          current predicates and precedence; `unknown` remains the fallback for genuinely
+          unrecognised stderr.
+
+    NOT IN SCOPE: any mechanism that completes the refused write by another route, and the egress
+    policy itself, which is environment configuration and not this repo's to change.
+  acceptance:
+    - claim: "an HTTP 403 at receive-pack with a reachable origin classifies as refused, not unknown and not unreachable"
+      proof: "unit test: W1-T3844: a 403 at receive-pack classifies as refused"
+    - claim: "the refusal message names --no-reserve as the path that still yields an id"
+      proof: "grep: --no-reserve still yields an id in src/lib/task-id-reservation.ts"
+    - claim: "contention, local pre-push refusal and genuine unreachability keep their existing classifications"
+      proof: "unit test: W1-T3844: the other push-failure arms are unchanged"
+  falsifier: |
+    Feed `classifyReservationPushFailure` the exact stderr above: it must return `refused`. Delete
+    the new arm and it returns `unknown` again — the defect, reproduced. Feed it
+    `already exists` and it must still return `taken`; feed it `could not resolve host` and it
+    must still return `unreachable`. Assert the refusal still exits non-zero: turning this into a
+    soft warning would mint optimistically, which W1-T1055 exists to prevent.
+  note: |
+    RESERVATION: could not be claimed, and a race was then LOST because of it. `rmd next-task-id
+    --reserve` pushes `refs/rmd-id/<id>`, and this environment's egress proxy refuses every
+    `git-receive-pack` update outside `refs/heads/*` with a local HTTP 403 -- proven by control: a
+    successful refs/heads push's POST carries `X-Github-Request-Id` and GitHub cache headers, the
+    refused one carries none and returns in 29ms; `repos/.../rulesets` is empty, so this is not
+    GitHub and not this repo. With no claim possible, these were filed on ids that
+    `rmd next-task-id --no-reserve` reported free and that both scope-time checks read clear.
+    While the shards were being written, PR #6227 claimed the first two of them, and
+    `task-id-existence` caught the duplicate on #6228's first CI run. Per the loser-renumbers
+    rule, the two contested shards were renumbered upward, the third being uncontested. (The
+    superseded numbers are named in that CI log, not here: a prose id literal is itself read by
+    the open-PR scan, so repeating one would re-assert a claim this shard has just given up --
+    which is why the help tells authors to write the placeholder form W1-T<n> in prose.) That is
+    exactly the collision W1-T3091 made reserving the default to prevent, and it happened here
+    only because the claim could not be made.
+    AN OPERATOR MUST CONFIRM THIS ID before a build starts; nothing holds it.
+
+    FILES NOTE (W1-T3730): the build EXTENDS an existing suite --
+    test/a-refused-push-is-not-an-unreachable-origin.test.ts, which already covers the local,
+    unreachable and unknown arms and is the right home for the fourth. `files:` still omits it:
+    a `test/` path here reads to `lint-plan`'s `proof-unit-test-unresolvable` check as "this diff
+    ships the suite", and the proof TITLES above do not exist yet even though the FILE does, so
+    listing it on a plan-only filing refuses them. The build adds it to `files:` at that point.

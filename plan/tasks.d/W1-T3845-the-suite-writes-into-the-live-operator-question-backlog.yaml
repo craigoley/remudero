@@ -1,0 +1,99 @@
+- id: W1-T3845
+  title: "THE SUITE WRITES INTO THE LIVE OPERATOR QUESTION BACKLOG — appendQuestion resolves plan/questions.ndjson from a caller-supplied root, 92 test files drive it with the acme/remudero fixture host, and on any host that runs both the tests and the daemon the operator's real §2 backlog fills with questions about pull requests that do not exist"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 12.00
+  files: [src/lib/worker.ts]
+  origin: "2026-09-20 — measured on this container's plan/questions.ndjson while auditing the escalation path"
+  plan_refs: []
+  status: queued
+  attempts: 0
+  rationale: |
+    SCOPE FIRST, SO THIS IS NOT OVERSTATED. plan/questions.ndjson is GITIGNORED and untracked, so
+    none of this reaches the repository and no merged diff carries it. The blast radius is a
+    single machine: any host that runs the test suite AND runs the daemon that reads that file.
+    That is not hypothetical — it is the ordinary shape of a developer box and of any fleet host
+    where someone runs `npm test`.
+
+    WHAT WAS MEASURED, on this container's copy after an ordinary session:
+
+      181 total lines
+      149 naming `acme/remudero`   — a fixture host that does not exist
+       79 naming task `W1-TESC`    — a fixture task id
+       32 rendering as `PR #undefined (undefined)`
+
+    So 82% of the operator's §2 question backlog is test residue, and a real question filed into
+    that file arrives as one line among four fakes.
+
+    THE MECHANISM. `appendQuestion` (src/lib/worker.ts) appends to
+    `join(dir, "questions.ndjson")` where `dir` derives from a caller-supplied root. Nothing
+    constrains that root to a temporary directory, and 92 test files exercise the paths that
+    reach it using the `acme/remudero` fixture. The store is shared by `appendQuestionAnswer` and
+    read back fresh by the sweep's durable §2 backlog, so a polluted file is read as real.
+
+    THE SECOND DEFECT, SMALLER BUT WORSE WHEN IT BITES. 32 of those lines read
+    `PR #undefined (undefined) stays BLOCKED-AMBIGUOUS ... until the operator answers`. That is an
+    uninterpolated template, not a fixture artifact of the host name. It means the question
+    RENDERER can emit a question that names no pull request. If that path is reachable with real
+    inputs, a genuine escalation can reach an operator with nothing in it to act on — and an
+    operator question that cannot be answered is worse than no question, because the sweep waits
+    on it.
+
+    THESE ARE SEPARABLE AND BOTH BELONG HERE: the first says the suite must not be able to write
+    to the live store, the second says a question must not be able to render without its subject.
+  design: |
+    (i) THE SUITE CANNOT REACH THE LIVE STORE. Under test, a write to the real
+        plan/questions.ndjson is refused rather than silently performed. Refuse loudly — a test
+        that wants the behaviour passes a temporary root, which is what they should all already
+        be doing.
+
+    (ii) A QUESTION WITHOUT ITS SUBJECT DOES NOT RENDER. If the pull request identity is missing,
+         the question is refused at construction, naming what was absent, instead of emitting
+         `#undefined`. An operator must never receive an unanswerable question.
+
+    (iii) DO NOT REWRITE THE 92 TESTS AS PART OF THIS. If (i) makes some of them fail, they were
+          already writing to the live store and that is the finding; fix them, but if the count is
+          large, land (i) as a loud refusal behind the test-environment check first and let the
+          measurement decide the rest.
+
+    (iv) DO NOT MIGRATE OR DELETE ANY EXISTING questions.ndjson. It is untracked local state on
+         whatever machine holds it, and deleting an operator's backlog to clean up fixtures would
+         be a far worse bug than the one being fixed.
+
+    NOT IN SCOPE: the §2 backlog's semantics, the sweep's reading of it, and the answer path.
+  acceptance:
+    - claim: "a question write that would land in the repository's real plan/questions.ndjson is refused under test"
+      proof: "unit test: W1-T3845: a question write to the live store is refused under test"
+    - claim: "a question whose pull request identity is missing is refused instead of rendering PR #undefined"
+      proof: "unit test: W1-T3845: a question with no pull request identity does not render"
+    - claim: "a question written to a temporary root still succeeds exactly as before"
+      proof: "unit test: W1-T3845: a temporary-root question write is unaffected"
+  falsifier: |
+    Drive `appendQuestion` with the repository root under test: it must refuse. Remove the guard
+    and the line lands in the live file — the defect, reproduced. Construct a question with no PR
+    identity: it must refuse rather than emit `#undefined`. Write to a tmpdir root and the
+    existing behaviour must be byte-identical, or the guard has caught the wrong population.
+  note: |
+    RESERVATION: could not be claimed, and a race was then LOST because of it. `rmd next-task-id
+    --reserve` pushes `refs/rmd-id/<id>`, and this environment's egress proxy refuses every
+    `git-receive-pack` update outside `refs/heads/*` with a local HTTP 403 -- proven by control: a
+    successful refs/heads push's POST carries `X-Github-Request-Id` and GitHub cache headers, the
+    refused one carries none and returns in 29ms; `repos/.../rulesets` is empty, so this is not
+    GitHub and not this repo. With no claim possible, these were filed on ids that
+    `rmd next-task-id --no-reserve` reported free and that both scope-time checks read clear.
+    While the shards were being written, PR #6227 claimed the first two of them, and
+    `task-id-existence` caught the duplicate on #6228's first CI run. Per the loser-renumbers
+    rule, the two contested shards were renumbered upward, the third being uncontested. (The
+    superseded numbers are named in that CI log, not here: a prose id literal is itself read by
+    the open-PR scan, so repeating one would re-assert a claim this shard has just given up --
+    which is why the help tells authors to write the placeholder form W1-T<n> in prose.) That is
+    exactly the collision W1-T3091 made reserving the default to prevent, and it happened here
+    only because the claim could not be made.
+    AN OPERATOR MUST CONFIRM THIS ID before a build starts; nothing holds it.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add, for the same
+    `proof-unit-test-unresolvable` reason recorded on W1-T3838.
