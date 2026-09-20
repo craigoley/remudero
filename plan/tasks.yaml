@@ -5946,6 +5946,7 @@
   risk: high
   origin: architect
   status: blocked
+  retirement: retired # operator-ratified W1-T1B evidence reviewed
   pr: 3                     # merged PR #3 -> deriveStatus resolves this task as merged
   attempts: 0
   note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
@@ -5994,6 +5995,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'a REVIEW worker with FRESH context posts remudero-review to the PR head commit after ci is
@@ -6037,6 +6039,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'protection requires exactly [ci, remudero-review]' /
@@ -6100,6 +6103,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'parseDecisionRequest survives the WS-0 near-miss (inline (RECOMMENDED) marker capturing
@@ -6140,6 +6144,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE WITHDRAWN CRITERION, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     claim 'the dontAsk fallback path (currently UNTESTED code) is exercised' /
@@ -6194,6 +6199,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE WITHDRAWN CRITERION, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     claim 'provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)' /
@@ -6321,6 +6327,7 @@
   risk: high
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'mounts table keyed by (task_type x risk x thinking) resolves to real knobs (model, effort,
@@ -6404,6 +6411,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'BLOCKED/MANUAL/HARD-STOP escalations open labeled issues with options + a recommendation' /
@@ -6568,6 +6576,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "MANUAL prerequisite: craigoley org → Settings → Third-party Access → enable fine-grained PATs.
     PROOF REWRITTEN 2026-07-31 (impl-BK) into executable dialect; it refused at the pre-dispatch linter on a
@@ -6604,6 +6613,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim 'Pause halts new spawns; in-flight tasks run to FULL completion (verdict + merge)' /
@@ -6836,6 +6846,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired
   attempts: 0
   note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
     (1) claim '`rmd` is on PATH after install and runs from OUTSIDE the repo dir' /
@@ -7974,6 +7985,7 @@
   risk: medium
   origin: architect
   status: blocked
+  retirement: retired # operator-ratified W1-T37 evidence reviewed
   attempts: 0
   note: "Architect (rule-20 sweep): the grep-and-retrieve transcript proof may be satisfied by ANY real
     drained run whose worker greps a §-heading from the injected index — not a purpose-built run.
