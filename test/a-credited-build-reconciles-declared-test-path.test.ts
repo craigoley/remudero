@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { creditedTestPathViolations, lintTask } from "../src/lib/task-linter.js";
+import { lintTask } from "../src/lib/task-linter.js";
 import type { Task } from "../src/lib/plan.js";
 
 const MISSING = "test/w1-t3747-does-not-exist.test.ts";
@@ -27,6 +27,10 @@ function task(over: Partial<Task> = {}): Task {
     origin: "architect",
     ...over,
   } as Task;
+}
+
+function creditedTestPathViolations(t: Task, opts: Parameters<typeof lintTask>[1] = {}) {
+  return lintTask(t, opts).violations.filter((violation) => violation.check === "credited-test-path");
 }
 
 test("W1-T3747: a credited build with an absent declared test path is refused", () => {

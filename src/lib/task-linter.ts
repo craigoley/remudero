@@ -1334,7 +1334,7 @@ function proofTestPath(w: WhitelistedProof): string | undefined {
   return path?.startsWith("test/") ? path : undefined;
 }
 
-export function creditedTestPathViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+function creditedTestPathViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   if (opts.creditedBuild !== true || opts.planOnlyFiling === true || !opts.moduleExists) return [];
   const paths = new Set<string>();
   for (const path of task.files ?? []) if (path.startsWith("test/")) paths.add(path);

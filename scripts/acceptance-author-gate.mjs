@@ -57,7 +57,7 @@ import {
 import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
 import { loadPlan } from "../src/lib/plan.ts";
 import { isInPlanScope } from "../src/lib/plan-scope.ts";
-import { creditedTestPathViolations } from "../src/lib/task-linter.ts";
+import { lintTask } from "../src/lib/task-linter.ts";
 import { taskIdFromRunBranch } from "../src/lib/status.ts";
 import { execFileSync } from "node:child_process";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
@@ -535,10 +535,10 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
       declaredAcceptance = undefined;
     }
     if (Array.isArray(declaredFiles)) {
-      const violations = creditedTestPathViolations(
+      const violations = lintTask(
         { id: creditedTaskId, files: declaredFiles, acceptance: Array.isArray(declaredAcceptance) ? declaredAcceptance : [] },
         { creditedBuild: true, moduleExists: (path) => existsSync(join(REPO_ROOT, path)) },
-      );
+      ).violations.filter((violation) => violation.check === "credited-test-path");
       if (violations.length > 0) return { ok: false, defect: "credited-test-path", message: violations.map((v) => v.message).join(" ") };
     }
   }
