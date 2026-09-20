@@ -21,7 +21,7 @@
  * throws before anything is spawned.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -151,16 +151,16 @@ test("W1-T3869: wired writer targets the named PR over REST", async () => {
   }
 });
 
-test("W1-T3869: omitted writer still raises explicit refusal", async () => {
+test("W1-T3869: omitted writer still raises explicit refusal while production entrypoint supplies the writer", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t3869-refusal-"));
+  const shim = ghShim([{ when: "api -X PATCH", stdout: "{}" }], { kind: "w1-t3869-refusal-production-control" });
+  const oldPath = process.env.PATH;
   try {
-    // Keep this control discriminating: the refusal is intentionally unchanged, but this
-    // task's production adapter must now name the writer it supplies.  If the wiring is
-    // removed, the control fails before it can look like a stale green proof.
-    assert.match(
-      readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8"),
-      /updatePrBodyImpl/,
-      "the production adapter must carry the writer dependency this control protects",
+    process.env.PATH = `${shim.dir}:${oldPath}`;
+    const productionEffects = buildSweepEffects(entrypointDeps(root, () => {}));
+    await assert.doesNotReject(
+      async () => productionEffects.repairMissingTaskTrailer!(PR, REPAIR),
+      "the same omitted-writer deps must succeed through the production entrypoint",
     );
     const deps: BuildSweepEffectsDeps = {
       owner: "craigoley",
@@ -184,6 +184,8 @@ test("W1-T3869: omitted writer still raises explicit refusal", async () => {
       "the library's own required-runtime refusal must survive this task untouched",
     );
   } finally {
+    process.env.PATH = oldPath;
+    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
 });
