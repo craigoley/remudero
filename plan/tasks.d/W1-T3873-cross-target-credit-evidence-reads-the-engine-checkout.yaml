@@ -105,13 +105,13 @@
     dispatch ordering. Self-target credit evaluation must be behaviourally identical.
   acceptance:
     - claim: "a target-repo plan-only filing pull request does not credit a task with no run, while a target-repo source implementation in the same pass still credits"
-      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+      proof: "unit test: a target plan-only filing stays uncredited when no run exists"
     - claim: "merged-path and merge-subject evidence for a non-self target is read from that target's checkout, so an engine-repository pull request carrying the same number cannot answer for a target pull request"
-      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+      proof: "unit test: a target implementation merge still earns credit"
     - claim: "a missing, foreign or unreadable target checkout yields empty evidence and leaves the existing fail-closed outcome and every self-target result unchanged"
-      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+      proof: "unit test: foreign target evidence stays empty and fail-closed"
     - claim: "the credit pass performs no additional GitHub read and builds each evidence map once per pass, never once per task"
-      proof: "unit test: test/cross-target-credit-evidence.test.ts"
+      proof: "unit test: target credit evidence is read once per pass"
     - claim: "both credit builders resolve their git-evidence root through the named target helper instead of the engine module constant"
       proof: "grep: creditEvidenceRootFor( in src/run-task.ts"
     - claim: "the committed subtract-only operator ruling names the PORTAL-T19 and pull request 107 pairing with a reason and an operator author"
