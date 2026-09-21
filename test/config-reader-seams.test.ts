@@ -347,7 +347,10 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
   // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
   // needed no edit.
-  assert.equal(readers.length, 30, `expected 30 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-ONE since W1-T3969's semantic review watchdog reads the same worker-abandon policy
+  // for its idle-activity bound. It is intentionally counted here (and remains seamed by the
+  // existing runReview injection path) so a new policy reader cannot hide behind a green shard.
+  assert.equal(readers.length, 31, `expected 31 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

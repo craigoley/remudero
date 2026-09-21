@@ -5694,6 +5694,10 @@ async function runReview(args: {
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
   reviewerMount?: Mount;
+  /** Resolved worker-abandon bound for the advisory reviewer. Production callers that already
+   *  resolved the run policy pass it through; the fallback keeps direct review invocations on
+   *  the same policy row without inventing a second timeout. */
+  reviewerClockBoundMs?: number;
   /**
    * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
    * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
@@ -5929,7 +5933,7 @@ async function runReview(args: {
             // watchdog as dispatch workers so a provider/SDK stall cannot hold the decision claim
             // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
             // a terminal verdict when this bound trips.
-            clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon },
+            clockBound: { boundMs: args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon },
             streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
