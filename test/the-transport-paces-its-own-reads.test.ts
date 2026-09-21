@@ -26,6 +26,7 @@ import {
   readGhReadCadenceStampMs,
   resolveGhTransportFloorMode,
   stampGhRead,
+  withGhTransportFloor,
 } from "../src/lib/github-transport.js";
 
 // ── W1-T3297 — THE TRANSPORT WATCHED THE LIMIT THAT DOES NOT FIRE ────────────────────────────
@@ -150,6 +151,23 @@ test("the floor is advisory by default and refuses only when explicitly enforced
   assert.equal(ghReadCadenceDecision({ ...inWindow, mode: "advisory" }).allow, true);
   assert.equal(ghReadCadenceDecision({ ...inWindow, mode: "advisory" }).paced, true);
   assert.equal(ghReadCadenceDecision({ ...inWindow, mode: "enforce" }).allow, false);
+});
+
+test("unattended automation enforces the floor for its lifetime and restores the caller mode", async () => {
+  const env = {} as NodeJS.ProcessEnv;
+  let inside: string | undefined;
+  await withGhTransportFloor(() => {
+    inside = env.RMD_GH_TRANSPORT_FLOOR;
+  }, env);
+  assert.equal(inside, "enforce");
+  assert.equal(env.RMD_GH_TRANSPORT_FLOOR, undefined);
+
+  env.RMD_GH_TRANSPORT_FLOOR = "advisory";
+  await withGhTransportFloor(() => {
+    inside = env.RMD_GH_TRANSPORT_FLOOR;
+  }, env);
+  assert.equal(inside, "advisory", "an explicit operator mode remains authoritative");
+  assert.equal(env.RMD_GH_TRANSPORT_FLOOR, "advisory");
 });
 
 // ── (5) FAIL OPEN ON EVERY INTERNAL ERROR ───────────────────────────────────────────────────
