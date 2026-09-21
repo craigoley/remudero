@@ -73,3 +73,35 @@ test("operator-agent decisions are not collected when every explicit decision la
   assert.equal(signal.classes.length, 0);
   assert.equal(signal.automaticMergeEvents.length, 0);
 });
+
+test("unit test: operator-agent adapters preserve aggregate evidence while bounding repeated detail arrays", () => {
+  const rows: OperatorDecisionLedgerRow[] = [
+    ...Array.from({ length: 150 }, (_, index) => ({
+      step: "panel.proposal_accepted",
+      task_id: `W1-T${index}`,
+      task_class: "chore",
+      origin: "operator-1",
+    })),
+    ...Array.from({ length: 150 }, (_, index) => ({
+      step: "automerge.armed",
+      task_id: `W1-T-auto-${index}`,
+      task_class: "chore",
+    })),
+    ...Array.from({ length: 150 }, () => ({
+      step: "panel.proposal_rejected",
+      task_id: "W1-T-unmeasurable",
+      task_class: "feature",
+    })),
+  ];
+
+  const signal = adaptOperatorDecisionRows(rows);
+
+  assert.equal(signal.explicitDecisionCount, 150);
+  assert.equal(signal.explicitDecisions.length, 100);
+  assert.equal(signal.automaticMergeEventCount, 150);
+  assert.equal(signal.automaticMergeEvents.length, 100);
+  assert.equal(signal.unmeasurableCount, 150);
+  assert.equal(signal.unmeasurable.length, 100);
+  assert.equal(signal.classes[0]?.approvalDenominator, 150);
+  assert.equal(signal.classes[0]?.taskIds.length, 100);
+});
