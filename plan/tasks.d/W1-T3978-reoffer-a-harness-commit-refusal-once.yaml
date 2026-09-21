@@ -81,15 +81,15 @@
     no-PR retriable.
   acceptance:
     - claim: "the implementation preserves a producer-owned harness commit boundary instead of parsing worker prose"
-      proof: "grep: harnessCommitForShellLessWorker in src/run-task.ts"
+      proof: "unit test: the producer-owned helper refusal becomes a distinct terminal classification"
     - claim: "the implementation changes the durable independent-failure decision at its status projection seam"
-      proof: "grep: latestIndependentFailureBlock in src/lib/status.ts"
+      proof: "unit test: ordinary no_pr remains blocked, while the exact refusal is eligible only before its marker is spent"
     - claim: "the one-time reoffer is emitted by the daemon rather than guessed from a terminal worker report"
-      proof: "grep: dispatch\\.blocked_independent in src/lib/daemon.ts"
+      proof: "unit test: the daemon emits one durable retry marker and re-offers the refused task once"
     - claim: "the non-matching already-satisfied path remains a distinct terminal route"
-      proof: "grep: already_satisfied in src/run-task.ts"
+      proof: "unit test: the refusal and retry marker are retained decision evidence"
     - claim: "the decision's persistence boundary is explicit in the ledger retention set"
-      proof: "grep: DECISION_RELEVANT_LEDGER_STEPS in src/lib/ledger.ts"
+      proof: "grep: harness_commit_retry in test/harness-commit-refusal-retry.test.ts"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTING if a current status projection already distinguishes a generic
     independent no_pr from an exact harness-commit refusal and re-offers the latter once with a
