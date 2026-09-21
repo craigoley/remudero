@@ -75,6 +75,14 @@ const PR_REPAIR: PrRef = {
   headRefName: "fix/cadence-markers-create-their-directory",
   body: "The marker write assumed a directory that nothing created.",
 };
+const PR_W1_T13_MENTION: PrRef = {
+  number: 3005,
+  url: "https://github.com/craigoley/remudero/pull/3005",
+  state: "MERGED",
+  title: "fix(status): preserve the source status projection",
+  headRefName: "fix/status-projection",
+  body: "The implementation discusses the completed manual drill W1-T13 in explanatory prose.",
+};
 
 /** Minimal gateway: enumerates merged PRs and answers `changedFiles`. Nothing else is needed —
  *  every other credit path is left unanswered on purpose, which is what "uncredited" means. */
@@ -221,6 +229,43 @@ test("W1-T3939: warning remains report only", () => {
   assert.equal(withPr.status, without.status, "the warning does not move task status");
   assert.equal(withPr.merged, without.merged, "the warning does not grant merge credit");
   assert.equal(withPr.source, without.source, "the warning does not change credit source");
+});
+
+test("W1-T3940 criterion 1: repo:none manual record is silent when unrelated prose names its id", () => {
+  const g = gateway([PR_W1_T13_MENTION], { [PR_W1_T13_MENTION.url]: SRC });
+  const manual = {
+    ...task("W1-T13"),
+    repo: "none",
+    type: "manual",
+    verify: "human",
+    status: "done",
+  } as Task;
+  const projection = project(["W1-T13"], { ledgerPath: ledgerFile([]), github: g }, [manual]).get("W1-T13")!;
+  assert.equal(projection.uncreditedBuild, undefined, "a non-repository manual record cannot own a Remudero diff");
+  assert.equal(projection.merged, false, "silencing the impossible attribution does not grant merge credit");
+});
+
+test("W1-T3940 criterion 2: queued Remudero task keeps the existing uncredited-build warning", () => {
+  const g = gateway([PR_W1_T13_MENTION], { [PR_W1_T13_MENTION.url]: SRC });
+  const queued = project(["W1-T13"], { ledgerPath: ledgerFile([]), github: g }, [task("W1-T13")]).get("W1-T13")!;
+  assert.equal(queued.uncreditedBuild?.prNumber, 3005, "repository-backed queued work keeps the fail-open warning");
+});
+
+test("W1-T3940 criterion 3: repo:none carve-out remains report-only", () => {
+  const withPr = project(
+    ["W1-T13"],
+    { ledgerPath: ledgerFile([]), github: gateway([PR_W1_T13_MENTION], { [PR_W1_T13_MENTION.url]: SRC }) },
+    [{ ...task("W1-T13"), repo: "none", type: "manual", verify: "human", status: "done" } as Task],
+  ).get("W1-T13")!;
+  const without = project(
+    ["W1-T13"],
+    { ledgerPath: ledgerFile([]), github: gateway([], {}) },
+    [{ ...task("W1-T13"), repo: "none", type: "manual", verify: "human", status: "done" } as Task],
+  ).get("W1-T13")!;
+  assert.equal(withPr.uncreditedBuild, undefined);
+  assert.equal(withPr.status, without.status, "the carve-out does not move task status");
+  assert.equal(withPr.merged, without.merged, "the carve-out does not grant merge credit");
+  assert.equal(withPr.source, without.source, "the carve-out does not change credit source");
 });
 
 test("acceptance: a gateway that cannot enumerate merged PRs, or cannot read changed files, stays silent rather than guessing", () => {

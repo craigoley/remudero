@@ -156,6 +156,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "POST /v1/operator-agent/consequence/preflight",
     "ledger-only consequence-policy preflight receipt; classification, confirmation, financial, approval, and receipt behavior are covered in test/consequence-policy-*.test.ts",
   ],
+  [
+    "POST /v1/operator-agent/delegation/handoff",
+    "ledger-only delegation handoff receipt; envelope, replay, human-gate, and receipt behavior are covered in test/agent-delegation-*.test.ts",
+  ],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([

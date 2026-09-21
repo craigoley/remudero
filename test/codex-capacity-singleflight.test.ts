@@ -333,7 +333,10 @@ test("ordinary failures back off without reviving stale headroom, then one post-
     }, () => { kills += 1; }) as never;
   };
   const cfg = config("/tmp/codex-singleflight-backoff", 20);
-  const deps = { now: () => now, timeoutMs: 5, capabilities: CAPABILITIES, spawn };
+  // Leave enough wall-clock room for the hedge timer to fire before the primary timeout; a
+  // five-millisecond bound races the event loop and made this census test report either one or
+  // two failed children depending on runner load.
+  const deps = { now: () => now, timeoutMs: 20, capabilities: CAPABILITIES, spawn };
 
   const initial = await readCodexCapacity(cfg, { ...deps, requestedModel: "sonnet", requestedEffort: "medium" });
   assert.equal(initial.readable, true);
@@ -348,7 +351,7 @@ test("ordinary failures back off without reviving stale headroom, then one post-
   assert.equal(backedOff.readable, false);
   assert.deepEqual(backedOff.windows, [], "the earlier successful quota must not reappear after a failed fresh probe");
   assert.match(backedOff.detail ?? "", /failure backoff/);
-  assert.equal(spawns, 3, "the failed fresh read spends its one timeout retry before backing off");
+  assert.equal(spawns, 3, "the failed fresh read starts one hedge before backing off");
 
   now += 20;
   mode = "success";
