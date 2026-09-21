@@ -10,6 +10,7 @@ import {
   spawnRmdReviewForFreshTree,
 } from "../src/run-task.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // ── W1-T3723 — A STALE REVIEWER REVIEWS FROM A FRESH TREE INSTEAD OF WAITING FOR A RESTART ────
 //
@@ -192,32 +193,29 @@ test("W1-T3962 fresh reviewer unproven tree control: mismatched, dirty, missing,
 
 test("W1-T3962 fresh reviewer restart reuse control: the production defaults reuse an exact clean detached tree and link its canonical dependencies", async () => {
   const root = makeTempDir("t3962-fresh-reviewer-restart");
-  const repo = join(root, "repo");
-  const remote = join(root, "remote.git");
   const worktreeRoot = join(root, "worktrees");
-  mkdirSync(repo, { recursive: true });
   mkdirSync(worktreeRoot, { recursive: true });
-  execFileSync("git", ["init", "--quiet", repo]);
-  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.invalid"]);
-  execFileSync("git", ["-C", repo, "config", "user.name", "Remudero test"]);
+  const sourceStore = gitRepo({ kind: "t3962-source" });
+  const remoteStore = gitRepo({ bare: true, kind: "t3962-remote" });
+  const repo = sourceStore.dir;
+  const remote = remoteStore.dir;
   writeFileSync(join(repo, "tracked.txt"), "base\n");
   mkdirSync(join(repo, "node_modules"));
-  execFileSync("git", ["-C", repo, "add", "tracked.txt"]);
-  execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "base"]);
-  execFileSync("git", ["init", "--bare", "--quiet", remote]);
-  execFileSync("git", ["-C", repo, "remote", "add", "origin", remote]);
-  execFileSync("git", ["-C", repo, "push", "--quiet", "-u", "origin", "HEAD:main"]);
-  const sha = execFileSync("git", ["-C", repo, "rev-parse", "origin/main"], { encoding: "utf8" }).trim();
+  sourceStore.git("add", "tracked.txt");
+  sourceStore.git("commit", "--quiet", "-m", "base");
+  sourceStore.addRemote("origin", remote);
+  sourceStore.git("push", "--quiet", "-u", "origin", "HEAD:main");
+  const sha = sourceStore.git("rev-parse", "origin/main");
   let adds = 0;
   const spawns: string[] = [];
   const git = (args: string[]) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString();
-  const addWorktree = (dir: string, path: string, revision: string) => {
+  const addTree = (dir: string, path: string, revision: string) => {
     adds += 1;
     execFileSync("git", ["-C", dir, "worktree", "add", "--detach", path, revision], { stdio: "pipe" });
   };
   const build = () => buildFreshTreeReviewRunner(repo, {
     git,
-    addWorktree,
+    addWorktree: addTree,
     spawnReview: async (worktree) => { spawns.push(worktree); return 0; },
     worktreeRoot,
   });
