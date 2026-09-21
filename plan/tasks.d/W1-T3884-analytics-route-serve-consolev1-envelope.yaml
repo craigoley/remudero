@@ -42,4 +42,4 @@
     - claim: "an unknown named projectionVersion is still refused with 409, never answered with either payload shape"
       proof: "unit test: W1-T3884: unknown projectionVersion remains a 409 refusal"
     - claim: "the handler serves both branches from already process-owned state, never awaiting or starting a scan"
-      proof: "grep: requestedVersion === undefined [?] snapshot : resolution[.]projection in src/lib/analytics-route.ts"
+      proof: "grep: sendJson(res, 200, requestedVersion === undefined in src/lib/analytics-route.ts"
