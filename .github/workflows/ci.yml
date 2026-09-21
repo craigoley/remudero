@@ -745,6 +745,19 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+      - name: Validate the coverage test-tier manifest before spending a shard (W1-T2904)
+        # A missing manifest row is a deterministic precondition failure, not a coverage result.
+        # Check it immediately after classification so a newly added test cannot consume the
+        # Playwright install or an instrumented shard before the real cause is reported. The
+        # merge-base argument is essential: inherited omissions belong to main, while a row
+        # introduced by this diff is the author's admission failure.
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping source coverage tier validation."
+            exit 0
+          fi
+          node scripts/test-tier-manifest.mjs --check --base HEAD^1
       - name: Install (clean, from lockfile)
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
