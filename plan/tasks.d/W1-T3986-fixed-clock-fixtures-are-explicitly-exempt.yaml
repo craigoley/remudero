@@ -16,7 +16,7 @@
   status: queued
   priority: 1
   rationale: |
-    OBSERVED on current origin/main 7ac1b30564350a849caac7595c07fe6f237830ad. The required
+    OBSERVED on current origin/main 9f2e6ca0ffada0ed70dff0c3566a31618fe19612. The required
     `expiring-fixture-census` blocks main because two `lastActivityAt` literals in
     `test/an-open-pr-does-not-rot-while-it-waits.test.ts` cross the seven-day warning window on
     2026-09-23, and one literal in `test/plan-resequence-pr-invalidation.test.ts` crosses it on
@@ -47,6 +47,8 @@
     injected/frozen test clock: acceptance must refuse the vague marker rather than masking a live
     fixture. Change the test clock wiring or production disposition: the focused suite must fail.
   note: |
+    reservation hand-off: run-W1-T3985-1790029051936 -> run-W1-T3986-1790029051936
+
     Rule 25 CHECKED: both declared files are test fixtures and no instrument, workflow, reviewer, or
     baseline surface is in scope. `risk: high`, `band_meaning: span` is required by Rule 19 because
     the two fixture files are separate census populations even though the repair is the same narrow
