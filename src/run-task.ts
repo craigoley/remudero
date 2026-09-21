@@ -24390,7 +24390,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
-        planReconcile,
+        planReconcile: { ...planReconcile },
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),
