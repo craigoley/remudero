@@ -55,7 +55,7 @@ async function withRoute<T>(route: ReturnType<typeof createGitHubEventWakeHandle
   }
 }
 
-test("webhook enforce requires complete ratification", () => {
+test("W1-T3973 criterion 4: webhook enforce requires complete ratification", () => {
   const raw = policyRaw();
   (((raw.githubEventWake as Record<string, unknown>).semanticCheckMode as Record<string, unknown>).value) = "enforce";
   assertPolicyError(() => validatePolicy(raw), /enforceRatification.*required/);
