@@ -10,7 +10,7 @@
   budget_usd: 90.00
   origin: human
   plan_refs: ["W1-T76", "W1-T95", "W1-T404", "W1-T500", "CONSOLE-T18", "API-T51"]
-  files: [src/lib/fleet-control.ts, src/lib/panel-actions.ts, src/lib/daemon.ts, src/lib/serve.ts, src/run-task.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/panel-actions.test.ts, test/daemon.test.ts]
+  files: [src/lib/fleet-control.ts, src/lib/panel-actions.ts, src/lib/daemon.ts, src/lib/serve.ts, src/run-task.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/panel-actions.test.ts, test/daemon.test.ts, test/pr-action-request.test.ts, test/pr-action-route.test.ts]
   rationale: |
     The daemon already derives every open pull request's exact-head disposition, review state and
     worker telemetry. It also has two bounded operator verbs: `rmd fix <pr>` reuses the normal
@@ -44,9 +44,9 @@
     a caller.
   acceptance:
     - claim: "a confirmed fix or review request writes one bounded durable intent and a ledger birth record with the hashed caller identity"
-      proof: "unit test: confirmed PR actions write durable attributed requests"
+      proof: "unit test: test/pr-action-request.test.ts"
     - claim: "malformed action names and PR numbers are refused before a marker or ledger write"
-      proof: "unit test: POST /v1/pr-actions rejects malformed or unconfirmed bodies"
+      proof: "unit test: test/pr-action-route.test.ts"
     - claim: "the normal daemon poll consumes at most one request and invokes the existing selected-repository fix or review path"
       proof: "unit test: console PR action: one durable request reaches the established action seam once"
     - claim: "a named action refusal is logged, consumed, and cannot turn into a crash-loop retry"
