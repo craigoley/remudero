@@ -1,44 +1,17 @@
 /**
  * src/lib/capability-grant.ts — W1-T3880: USE CAPABILITIES WITHOUT EXPOSING SECRETS.
  *
- * Broad personal-agent integrations (browser, provider, host actions) make real work possible,
- * but passing a password, a payment credential, or a browser cookie through model context turns
- * every prompt-injection and logging mistake into a credential incident. `secret-boundary.ts`
- * (W1-T2699) already proved the pattern for the ONE credential the daemon always holds — the
- * model bearer and the git token — by substituting a value-free SENTINEL at the network edge and
- * resolving the real value only inside the daemon's own process. `capability-grant-v1` is the
- * SAME shape generalised to a credential this repo does not yet hold at all: a scoped, short-lived
- * `id` (a "grant reference"), NEVER the secret it stands for, that a provider or host adapter
- * resolves at the LAST RESPONSIBLE MOMENT — the model, the browser payload, the ledger and
- * ordinary logs see only the reference and a redacted outcome.
- *
- * THE GRANT'S OWN SHAPE HAS NO PLACE FOR A SECRET TO HIDE. {@link CapabilityGrant} carries a
- * non-secret `id`, a target identity, an operation ALLOWLIST, a repo/instance scope, an audience,
- * an expiry, a bounded (or one-time) use limit, an approval receipt, a redaction policy and a
- * revocation link — no `value`/`token`/`secret` field exists on the type at all, so there is
- * nothing for a careless `JSON.stringify` of a grant to leak. The real value, when one exists,
- * lives only behind a `CapabilitySecretResolver` thunk an issuer registers OUT OF BAND
- * ({@link InMemoryCapabilityGrantStore.issue}) — read fresh, never captured, exactly like
- * `BoundaryDestination.realValue` in secret-boundary.ts — and {@link verifyCapabilityGrant} and
- * {@link useCapabilityGrant} never call it: only a caller that has ALREADY verified the grant, and
- * is about to use it, resolves the secret at all.
- *
- * UNTRUSTED CONTENT IS DATA, NEVER AUTHORITY (the design's second half, and
- * untrusted-envelope.ts's W1-T2700 doctrine generalised past prose). {@link verifyCapabilityGrant}
- * never accepts a grant object from its caller — it always resolves the CANONICAL grant from the
- * trusted {@link CapabilityGrantStore} by `id`, so a forged "wider grant" embedded in an email, a
- * document, a page or tool output has no path INTO the check at all. Every grant this module
- * returns is deep-frozen at construction, so even a caller holding a live reference cannot widen
- * one in place. And the allowlist check is EXACT membership (`Array.prototype.includes`), never a
- * prefix or substring test, so a requested operation that merely CONTAINS an allowed one (the
- * capability-ladder lesson: "a capability is data, not a substring match") cannot ride it through.
+ * A capability grant is a scoped, short-lived, non-secret `id` a provider or host adapter
+ * resolves to a real credential/operation at the LAST RESPONSIBLE MOMENT — the same sentinel
+ * shape `secret-boundary.ts` (W1-T2699) proved for the model bearer and git token, generalised
+ * to a credential this repo does not yet hold at all. {@link CapabilityGrant} has no field a
+ * secret could hide in; see it and {@link verifyCapabilityGrant} for the two load-bearing
+ * invariants (no-secret-on-the-type, store-resolved-never-caller-supplied).
  *
  * FALSIFIER: put a secret in a grant/receipt/verification/request field (there is none to put it
- * in), accept a grant after its `expiresAt` or after revocation, replay a nonce, exceed a grant's
- * `useLimit`, or let a request whose `operation`/`target`/`audience` came from untrusted content
- * widen what {@link verifyCapabilityGrant} accepts. See test/capability-grant-scope.test.ts,
- * test/capability-grant-secrets.test.ts, test/capability-grant-replay.test.ts,
- * test/capability-grant-content.test.ts and test/capability-grant-receipts.test.ts.
+ * in), accept a grant after expiry or revocation, replay a nonce, exceed a `useLimit`, or let a
+ * request built from untrusted content widen what {@link verifyCapabilityGrant} accepts. See
+ * test/capability-grant-{scope,secrets,replay,content,receipts}.test.ts.
  */
 
 import { randomUUID } from "node:crypto";
