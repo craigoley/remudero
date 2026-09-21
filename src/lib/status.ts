@@ -2805,13 +2805,15 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // for this land anyway?". The index is SUPPLIED by `projectPlan` off the merged list it already fetched —
   // W1-T257's guard counts batched calls and a second one would break it. A declared file scope prevents prose
   // mentions in unrelated PRs from becoming warnings; an unscoped task preserves the historical fail-open path.
-  const uncredited = uncreditedBuildWarning(
-    task.id,
-    deps.proseNamedTaskIds,
-    deps.github.changedFiles?.bind(deps.github),
-    task.files,
-  );
-  if (uncredited) projection.uncreditedBuild = uncredited;
+  if (task.status !== "blocked") {
+    const uncredited = uncreditedBuildWarning(
+      task.id,
+      deps.proseNamedTaskIds,
+      deps.github.changedFiles?.bind(deps.github),
+      task.files,
+    );
+    if (uncredited) projection.uncreditedBuild = uncredited;
+  }
 
   const escalation = resolveEscalation(ledgerLines, task.id, deps.github, deps.ledgerIndex);
   if (escalation) {
