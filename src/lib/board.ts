@@ -920,7 +920,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
 // rungs. GitHub only decorates a row that already carries a PR link; a failed decoration marks
 // it `githubUnavailable` and never removes it (see {@link decoratePrTitle}).
 
-export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started";
+export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started" | "worker";
 
 /** The steps that record the daemon's resolution of an operator-initiated console action
  *  (W1-T266) — an allowlist, not a removal of the `!task` guard every other pseudo-id line
@@ -945,6 +945,12 @@ export interface RecentActivityEntry {
   numTurns?: number;
   prNumber?: number;
   prUrl?: string;
+  /** Present for `worker.activity` rows; all are bounded/structured, never raw tool payloads. */
+  eventKind?: "working" | "tool-executing" | "message";
+  toolName?: string;
+  toolReason?: string;
+  toolDurationMs?: number;
+  toolOutcome?: "success" | "error";
   /** GitHub decoration, never a gate — the PR's title, present only when a read resolved it. */
   prTitle?: string;
   /** GitHub decoration attempted and failed for this row's `prUrl` — the row still renders, ledger-only. */
@@ -1043,6 +1049,24 @@ function classifyLine(
       return { taskId, title, ts, verb: "escalated", detail: typeof line.class === "string" ? line.class : undefined, prUrl, prNumber };
     case "implement.done":
       return { taskId, title, ts, verb: "spend", costUsd, numTurns, prUrl, prNumber };
+    case "worker.activity":
+      return {
+        taskId,
+        title,
+        ts,
+        verb: "worker",
+        detail: typeof line.event_kind === "string" ? line.event_kind : "activity",
+        eventKind:
+          line.event_kind === "working" || line.event_kind === "tool-executing" || line.event_kind === "message"
+            ? line.event_kind
+            : undefined,
+        ...(typeof line.tool_name === "string" ? { toolName: line.tool_name } : {}),
+        ...(typeof line.tool_reason === "string" ? { toolReason: line.tool_reason } : {}),
+        ...(typeof line.tool_duration_ms === "number" ? { toolDurationMs: Math.max(0, line.tool_duration_ms) } : {}),
+        ...(line.tool_outcome === "success" || line.tool_outcome === "error" ? { toolOutcome: line.tool_outcome } : {}),
+        prUrl,
+        prNumber,
+      };
     // W1-T266 — the daemon's resolution of an operator's Run click. See OPERATOR_ACTION_STEPS.
     // The `reason` is carried VERBATIM (bar the length bound below) rather than mapped to
     // friendlier prose: a translation table here would be a second place for the truth to live,

@@ -2087,6 +2087,13 @@ export const WORKER_STATE_LEDGER_STEP = "worker.state";
  */
 export const WORKER_TURNS_LEDGER_STEP = "worker.turns";
 
+/** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions)
+ *  and `worker.turns` (count changes), this is the operator-facing activity ledger: it gives the
+ *  console a real tool name, a bounded rationale, tool timing/outcome, and heartbeat cadence
+ *  without exposing prompts, tool arguments, or tool output. It is diagnostic telemetry only and
+ *  must never become a dispatch decision input. */
+export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
+
 /**
  * W1-T2557: appended AT MOST ONCE per run, the instant {@link WorkerStateTracker.turnsSoFar}
  * first clears the bound {@link WorkerStateSensor.setRunawayBound} configured (see {@link
@@ -2186,6 +2193,20 @@ export interface WorkerStateSensor {
   setRunawayBound: (bound: number | undefined) => void;
 }
 
+const WORKER_TELEMETRY_TEXT_MAX_CHARS = 240;
+
+/** Keep a worker-authored sentence useful as a tool rationale without turning status telemetry
+ *  into a transcript or a prompt/output transport. Control characters collapse to spaces and the
+ *  visible ellipsis makes truncation honest. */
+function boundedWorkerTelemetryText(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length <= WORKER_TELEMETRY_TEXT_MAX_CHARS
+    ? normalized
+    : `${normalized.slice(0, WORKER_TELEMETRY_TEXT_MAX_CHARS)}…`;
+}
+
 /**
  * Build the real `worker.state` sensor for one run: a {@link WorkerStateTracker} folding the
  * observed stream into the 3-value vocabulary, appending a `worker.state` ledger row (keyed by
@@ -2215,6 +2236,8 @@ export function buildWorkerStateSensor(args: {
   let runawayBoundTurns: number | undefined;
   let lastEmittedTurns: number | undefined;
   let runawaySignaled = false;
+  let lastWorkerText: string | undefined;
+  let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
 
   const recordTransition = (next: WorkerState): void => {
     try {
@@ -2281,6 +2304,50 @@ export function buildWorkerStateSensor(args: {
     if (event.text) {
       tailLines = capWorkerTailLines([...tailLines, event.text]);
       writeWorkerTailBestEffort(tailPath, tailLines);
+    }
+    const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
+    const eventAt = new Date(event.tsMs).toISOString();
+    const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
+    try {
+      appendLedger(args.ledgerPath, {
+        run_id: args.runId,
+        task_id: args.taskId,
+        step: WORKER_ACTIVITY_LEDGER_STEP,
+        event_kind: event.kind,
+        event_at: eventAt,
+        ...(event.workerRole ? { worker_role: event.workerRole } : {}),
+        ...(event.provider ? { provider: event.provider } : {}),
+        ...(event.requestedModel ? { requested_model: event.requestedModel } : {}),
+        ...(event.servedModel ? { served_model: event.servedModel } : {}),
+        ...(event.turnsSoFar === undefined ? {} : { turns_so_far: event.turnsSoFar }),
+        ...(event.kind === "tool-executing"
+          ? {
+              tool_name: toolName ?? "unknown",
+              ...(lastWorkerText ? { tool_reason: boundedWorkerTelemetryText(lastWorkerText) } : {}),
+              tool_started_at: eventAt,
+            }
+          : {}),
+        ...(toolEnded && activeTool
+          ? {
+              tool_name: activeTool.name,
+              tool_completed_at: eventAt,
+              tool_duration_ms: Math.max(0, event.tsMs - activeTool.startedAtMs),
+              ...(event.toolOutcome ? { tool_outcome: event.toolOutcome } : {}),
+            }
+          : {}),
+      });
+    } catch {
+      // Best-effort: telemetry must never be able to take down the worker it observes.
+    }
+    if (event.kind === "working") lastWorkerText = event.text;
+    if (event.kind === "tool-executing") {
+      activeTool = {
+        name: toolName ?? "unknown",
+        startedAtMs: event.tsMs,
+        reason: boundedWorkerTelemetryText(lastWorkerText),
+      };
+    } else {
+      activeTool = undefined;
     }
     const next = tracker.observe(event);
     if (next) recordTransition(next);
@@ -5540,6 +5607,9 @@ async function runReview(args: {
    * site and drive the Codex adapter without a live subscription call.
    */
   reviewerSpawnWorker?: typeof spawnWorker;
+  /** Reuses the parent run's bounded sensor so advisory review workers are visible in the same
+   *  task lane instead of disappearing behind the final `review.reviewer` ledger row. */
+  workerTelemetry?: WorkerStateSensor;
   /** The (task_type="reviewer" × the under-review task's risk) mount (§9,
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
@@ -5745,8 +5815,11 @@ async function runReview(args: {
           }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
-        const reviewer = args.account(
-          await (args.reviewerSpawnWorker ?? spawnWorker)({
+        const stopTelemetry = args.workerTelemetry?.startPolling();
+        let reviewer: WorkerResult;
+        try {
+          reviewer = args.account(
+            await (args.reviewerSpawnWorker ?? spawnWorker)({
             cwd: snapshot.cwd,
             permissionMode: "bypassPermissions",
             settingsFile: args.settingsFile,
@@ -5770,9 +5843,15 @@ async function runReview(args: {
             // merge on the board. One unconditional line, exactly like recon/diagnose — the
             // branch lives in `cashDivertSpawnFields`, where a unit test can reach it.
             ...cashDivertSpawnFields("review"),
+            runId: args.runId,
+            taskId: task.id,
+            streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
-          }),
-        );
+            }),
+          );
+        } finally {
+          stopTelemetry?.();
+        }
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
         semantic = candidateSemantic;
@@ -8308,6 +8387,8 @@ export async function runFixRung(opts: {
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
+  /** Parent run sensor shared by implement, fix, and advisory review workers. */
+  workerTelemetry?: WorkerStateSensor;
   /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
    *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
   openTaskIds?: ReadonlySet<string>;
@@ -10346,6 +10427,7 @@ export async function runFixRung(opts: {
       say: deps.say,
       account: deps.account,
       reviewerMount: opts.reviewBase.reviewerMount,
+      workerTelemetry: opts.workerTelemetry,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
       reviewerCodeFreshness: opts.reviewerCodeFreshness,
       ledgerPath: deps.ledgerPath,
@@ -13422,6 +13504,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
     task_class: taskClass,
     mount_class: mountClass,
+    provider: mount.provider,
+    worker_role: "implementer",
     budget_usd: budgetUsd,
     soft_threshold_usd: softThresholdUsd,
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
@@ -15048,6 +15132,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say,
       account,
       reviewerMount,
+      workerTelemetry: workerStateSensor,
       // A run that established the cash adapter as its containment boundary must keep this
       // reviewer on that same boundary; otherwise a recovered subscription could run after a
       // cash-only proof. Ordinary runs retain runReview's existing default router.
@@ -15101,6 +15186,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         strikeCap: fixStrikeCap(config),
         initialReview: review,
         reviewBase: { owner, repo: task.repo, headCheckoutDir: worktreePath, reviewerMount },
+        workerTelemetry: workerStateSensor,
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
         deps: {

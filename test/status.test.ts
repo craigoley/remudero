@@ -1094,6 +1094,63 @@ test("W1-T155: in-flight review phase — implement.done (PR not yet opened) adv
   assert.equal(proj.phase, "review");
 });
 
+test("worker telemetry projection exposes role, model, heartbeat, current tool, completed tool timing, and first-signal latency", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    {
+      ts: "2026-07-20T10:00:00.000Z",
+      run_id: "r1",
+      task_id: "W1-TX",
+      step: "run.start",
+      type: "implement",
+      provider: "claude",
+      worker_role: "implementer",
+      mount: { model: "claude-sonnet", effort: "high" },
+    },
+    {
+      ts: "2026-07-20T10:00:03.000Z",
+      event_at: "2026-07-20T10:00:03.000Z",
+      run_id: "r1",
+      task_id: "W1-TX",
+      step: "worker.activity",
+      event_kind: "tool-executing",
+      tool_name: "Bash",
+      tool_reason: "run the focused test",
+      tool_started_at: "2026-07-20T10:00:03.000Z",
+      provider: "claude",
+      requested_model: "claude-sonnet",
+    },
+    {
+      ts: "2026-07-20T10:00:05.000Z",
+      event_at: "2026-07-20T10:00:05.000Z",
+      run_id: "r1",
+      task_id: "W1-TX",
+      step: "worker.activity",
+      event_kind: "message",
+      tool_name: "Bash",
+      tool_completed_at: "2026-07-20T10:00:05.000Z",
+      tool_duration_ms: 2_000,
+      tool_outcome: "success",
+      provider: "claude",
+      served_model: "claude-sonnet-2026",
+    },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T10:00:06.000Z") });
+  assert.equal(proj.workerTelemetry?.role, "recon", "the current phase is the active worker role");
+  assert.equal(proj.workerTelemetry?.provider, "claude");
+  assert.equal(proj.workerTelemetry?.requestedModel, "claude-sonnet");
+  assert.equal(proj.workerTelemetry?.servedModel, "claude-sonnet-2026");
+  assert.equal(proj.workerTelemetry?.lastEventKind, "message");
+  assert.equal(proj.workerTelemetry?.firstSignalLatencyMs, 3_000);
+  assert.deepEqual(proj.workerTelemetry?.lastTool, {
+    name: "Bash",
+    durationMs: 2_000,
+    completedAt: "2026-07-20T10:00:05.000Z",
+    outcome: "success",
+  });
+  assert.equal(proj.workerTelemetry?.currentTool, undefined);
+});
+
 test("W1-T155: in-flight review phase — an OPEN pr.opened also puts a task in review, WITH the resolved PR attached", () => {
   const url = "https://github.com/craigoley/remudero/pull/50";
   const github = fakeGitHub({ byRef: { [url]: { number: 50, url, state: "OPEN" } } });
