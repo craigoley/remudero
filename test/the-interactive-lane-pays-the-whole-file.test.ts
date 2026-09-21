@@ -32,7 +32,13 @@ test("W1-T3136: the interactive lane's paid CLAUDE.md cost is pinned to the live
   const rules = parseRuleHeadlines(source);
   const sourceBytes = byteLength(source);
 
-  assert.equal(rules.length, 56, "the interactive index must still parse the real rule corpus");
+  // A FLOOR, NOT A FREEZE — see the same control in
+  // `test/the-doctrine-index-points-at-every-body.test.ts`. This line proves the byte figures below
+  // were measured over the REAL corpus rather than a stub; an equality additionally refuses every
+  // rule added after it was written, which is not what this suite is pinning — the cap and the
+  // pressure floor beneath it are. The genuine freeze is that suite's
+  // `test/fixtures/doctrine-pre-migration-W1-T3323.json`, which reddens by name on a DELETION.
+  assert.ok(rules.length >= 56, `the interactive index must still parse the real rule corpus; got ${rules.length}`);
   assert.ok(sourceBytes <= baseline.capBytes, `CLAUDE.md is ${sourceBytes} bytes against cap ${baseline.capBytes}`);
   assert.ok(sourceBytes > baseline.capBytes * 0.8, `CLAUDE.md is ${sourceBytes}; this test is no longer measuring pressure`);
   assert.ok(
