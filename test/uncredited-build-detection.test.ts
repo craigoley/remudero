@@ -42,13 +42,13 @@ const ledgerFile = (lines: Array<Record<string, unknown>>): string => {
 
 /** Drives the REAL production path: `projectPlan` fetches the merged list once and builds the
  *  prose index from it, exactly as it does for W1-T257's batching. */
-function project(ids: string[], deps: Parameters<typeof projectPlan>[1]) {
-  const plan = { tasks: ids.map((i) => task(i)) } as unknown as Plan;
+function project(ids: string[], deps: Parameters<typeof projectPlan>[1], tasks?: Task[]) {
+  const plan = { tasks: tasks ?? ids.map((i) => task(i)) } as unknown as Plan;
   return projectPlan(plan, deps);
 }
 
-const task = (id: string): Task =>
-  ({ id, title: id, repo: "remudero", type: "implement", depends_on: [], status: "queued" }) as unknown as Task;
+const task = (id: string, files?: string[]): Task =>
+  ({ id, title: id, repo: "remudero", type: "implement", depends_on: [], status: "queued", ...(files === undefined ? {} : { files }) }) as unknown as Task;
 
 /** The three real shapes, as PRs the batched gateway would hand back. */
 const PR_3095: PrRef = {
@@ -104,6 +104,14 @@ function gateway(
 
 const SRC = ["src/lib/sweep.ts", "src/lib/daemon.ts", "test/x.test.ts"];
 const PLAN_ONLY = ["plan/tasks.d/W1-T2392-a-build.yaml"];
+const PR_PROSE_ONLY_MENTION: PrRef = {
+  number: 4746,
+  url: "https://github.com/craigoley/remudero/pull/4746",
+  state: "MERGED",
+  title: "feat(dispatch): keep the worker moving after an uncredited build",
+  headRefName: "run-W1-T3216-build",
+  body: 'The implementation uses namesATask("W1-T1041") → true as an explanatory example.',
+};
 
 // ── Q3: the predicate, proved on all three real shapes ───────────────────────────────────────
 
@@ -114,6 +122,29 @@ test("acceptance: the warn FIRES on the #3095 shape — every credit surface emp
   assert.ok(proj.uncreditedBuild, "and it is reported");
   assert.equal(proj.uncreditedBuild!.prNumber, 3095);
   assert.equal(proj.uncreditedBuild!.namedIn, "body", "#3095 names W1-T2379 in its BODY, not its title");
+});
+
+test("W1-T3934: a prose-only mention outside the task scope is not an uncredited build", () => {
+  const g = gateway([PR_PROSE_ONLY_MENTION], { [PR_PROSE_ONLY_MENTION.url]: ["src/lib/daemon.ts", "src/lib/drain.ts"] });
+  const proj = project(
+    ["W1-T1041"],
+    { ledgerPath: ledgerFile([]), github: g },
+    [task("W1-T1041", [".github/workflows/ci.yml", ".github/workflows/ci-gate.yml", "test/workflow-job-timeouts.test.ts"])],
+  ).get("W1-T1041")!;
+  assert.equal(proj.uncreditedBuild, undefined, "the merged source diff does not overlap W1-T1041's declared scope");
+});
+
+test("an overlapping source build remains an uncredited-build warning", () => {
+  const g = gateway([PR_3095], { [PR_3095.url]: SRC });
+  const proj = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: g }, [task("W1-T2379", ["src/lib/sweep.ts"])])
+    .get("W1-T2379")!;
+  assert.equal(proj.uncreditedBuild?.prNumber, 3095, "an in-scope source diff still warns");
+});
+
+test("an unscoped task preserves the uncredited-build warning", () => {
+  const g = gateway([PR_3095], { [PR_3095.url]: SRC });
+  const proj = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: g }).get("W1-T2379")!;
+  assert.equal(proj.uncreditedBuild?.prNumber, 3095, "no declared scope keeps the fail-open warning");
 });
 
 test("acceptance: the warn is SILENT on a credited task — a merged, trailer-credited PR never reaches this at all", () => {
@@ -142,7 +173,7 @@ test("acceptance: the warn is SILENT on a plan-only FILING that names its own id
 
 // ── it reports and does nothing else ──────────────────────────────────────────────────────────
 
-test("acceptance: the warn changes no decision — status, merged and every other field are identical with and without it", () => {
+test("the warning MOVES NO DISPOSITION — status, merged and every other field are identical with and without it", () => {
   const withPr = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: gateway([PR_3095], { [PR_3095.url]: SRC }) }).get("W1-T2379")!;
   const without = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: gateway([], {}) }).get("W1-T2379")!;
   assert.ok(withPr.uncreditedBuild, "the first really did warn");
