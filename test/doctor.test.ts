@@ -200,16 +200,17 @@ test("W1-T1209: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  // +5, not +3: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
+  // +6, not +3: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
   // W1-T2332 a THIRD (checkout-depth), W1-T2627 a FOURTH (worktree-base), R-49 a FIFTH
-  // (node-version-pin), and W1-T3665 a SIXTH (provider-capacity) later still — this file's own
+  // (node-version-pin), W1-T3665 a SIXTH (provider-capacity), and W1-T3728 a SEVENTH
+  // (cash-spendability) later still — this file's own
   // baseInputs() carries a healthy sweep.pass/sweep.summary pair, a full checkoutDepth, no live
   // worktrees, a matching node pin and no provider capacity reading at all, so all six read OK.
   assert.equal(
     report.checks.length,
-    preExisting.length + 7,
+    preExisting.length + 8,
     "repair-stall, sweep-liveness, checkout-depth, worktree-base, node-version-pin, capture-surfaces and " +
-      "provider-capacity all joined the report",
+      "provider-capacity and cash-spendability all joined the report",
   );
 });
 
@@ -355,16 +356,16 @@ test("W1-T1236: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  // +4, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline,
+  // +5, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline,
   // W1-T2627 a further one still (worktree-base), R-49 one more (node-version-pin), and W1-T3665
-  // one more still (provider-capacity) — this file's own baseInputs() carries a healthy, full
+  // one more still (provider-capacity), and W1-T3728 adds cash-spendability — this file's own baseInputs() carries a healthy, full
   // checkoutDepth, no live worktrees, a matching node pin and no provider capacity reading at all,
   // so all four read OK.
   assert.equal(
     report.checks.length,
-    preExisting.length + 6,
+    preExisting.length + 7,
     "sweep-liveness, checkout-depth, worktree-base, node-version-pin, capture-surfaces and provider-capacity " +
-      "all joined the report",
+      "and cash-spendability all joined the report",
   );
 });
 
