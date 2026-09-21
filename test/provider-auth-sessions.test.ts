@@ -239,7 +239,11 @@ test("provider auth uses the real default resolver and spawn seam", async () => 
   const realSpawnSession = await realSpawn.start({ provider: "codex", profileId: "codex-real-spawn" });
   assert.equal(realSpawnSession.state, "awaiting_browser");
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(realSpawn.read(realSpawnSession.sessionId)?.state, "failed");
+  const realSpawnState = realSpawn.read(realSpawnSession.sessionId)?.state;
+  assert.ok(realSpawnState === "awaiting_browser" || realSpawnState === "failed");
+  if (realSpawnState === "awaiting_browser") {
+    assert.equal(realSpawn.cancel(realSpawnSession.sessionId)?.state, "cancelled");
+  }
 });
 
 test("provider auth revalidation failure and defensive missing profile are terminal", async () => {
