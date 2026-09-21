@@ -63,7 +63,7 @@ test("W1-T3961: the default executor runs a real grep proof", () => {
 });
 
 test("W1-T3961: an executor error is reported as unreadable", () => {
-  const result = censusSatisfiedTasks([task("W1-T9", ["grep: satisfied-task-census in scripts"])]);
+  const result = censusSatisfiedTasks([task("W1-T9", ["grep: [ in src/run-task.ts"])]);
   assert.equal(result.findings.length, 0);
 });
 
