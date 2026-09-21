@@ -107,7 +107,7 @@ export interface FollowUpEvaluationContext {
   notificationPolicy?: FollowUpNotificationPolicy;
 }
 
-export interface FollowUpLedgerDeps {
+export interface FollowUpLedgerContext {
   ledgerPath: string;
   now?: Clock;
   origin?: string;
@@ -145,6 +145,7 @@ function validQuietHours(value: unknown): FollowUpQuietHours | null {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: policy.timezone }).format();
   } catch {
+    // Intl rejects unknown IANA zones; invalid notification policy is intentionally discarded.
     return null;
   }
   return { timezone: policy.timezone.trim(), start: policy.start, end: policy.end };
@@ -381,7 +382,7 @@ export function readFollowUpHistory(ledgerPath: string, now: number = systemCloc
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt) || left.candidateId.localeCompare(right.candidateId));
 }
 
-export function appendFollowUpCandidate(deps: FollowUpLedgerDeps, candidate: FollowUpCandidate): void {
+export function appendFollowUpCandidate(deps: FollowUpLedgerContext, candidate: FollowUpCandidate): void {
   appendLedger(deps.ledgerPath, {
     run_id: `FOLLOW-UP-${deps.now?.now() ?? systemClock.now()}`,
     task_id: candidate.candidateId,
@@ -391,7 +392,7 @@ export function appendFollowUpCandidate(deps: FollowUpLedgerDeps, candidate: Fol
   });
 }
 
-export function appendFollowUpState(deps: FollowUpLedgerDeps, evaluation: FollowUpEvaluation): void {
+export function appendFollowUpState(deps: FollowUpLedgerContext, evaluation: FollowUpEvaluation): void {
   appendLedger(deps.ledgerPath, {
     run_id: `FOLLOW-UP-${deps.now?.now() ?? systemClock.now()}`,
     task_id: evaluation.candidateId,
@@ -405,7 +406,7 @@ export function appendFollowUpState(deps: FollowUpLedgerDeps, evaluation: Follow
   });
 }
 
-export function appendFollowUpControl(deps: FollowUpLedgerDeps, event: FollowUpEvent): void {
+export function appendFollowUpControl(deps: FollowUpLedgerContext, event: FollowUpEvent): void {
   appendLedger(deps.ledgerPath, {
     run_id: `FOLLOW-UP-${deps.now?.now() ?? systemClock.now()}`,
     task_id: event.candidateId,
@@ -416,7 +417,7 @@ export function appendFollowUpControl(deps: FollowUpLedgerDeps, event: FollowUpE
   });
 }
 
-export function appendFollowUpReceipt(deps: FollowUpLedgerDeps, receipt: FollowUpReceipt, candidateId: string): void {
+export function appendFollowUpReceipt(deps: FollowUpLedgerContext, receipt: FollowUpReceipt, candidateId: string): void {
   appendLedger(deps.ledgerPath, {
     run_id: `FOLLOW-UP-${deps.now?.now() ?? systemClock.now()}`,
     task_id: candidateId,
