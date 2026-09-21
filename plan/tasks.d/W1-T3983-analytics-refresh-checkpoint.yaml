@@ -1,0 +1,53 @@
+- id: W1-T3983
+  title: "ANALYTICS REFRESH TIMES OUT ON THE RETAINED LEDGER — 333 MB of rotations leaves console-v1 cold after a serve restart, so the operator agent renders no telemetry"
+  repo: remudero
+  depends_on: ["W1-T3977"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  band_meaning: blast-radius
+  files:
+    - src/lib/analytics-route.ts
+    - src/lib/ledger-union.ts
+    - test/an-analytics-request-returns-under-its-own-ceiling.test.ts
+    - test/analytics-route.test.ts
+  origin: "feedback#fb-1790023306998-analytics-refresh-timeout"
+  plan_refs: ["W1-T477", "W1-T3977", "CONSOLE-T34"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED live 2026-09-21 after W1-T3977/#6443 and the console parser fix shipped: the serve
+    container has 501 rotated ledger files totalling 333,259,448 bytes plus 6,808 live rows.
+    The retained corpus contains positive controls (201 review.posted rows with proof_exec and
+    seven rows carrying active_workers), but the first process-owned analytics refresh logged
+    serve.analytics_refresh.timeout after 123,321ms with retained_as_of null. The public agent
+    page then rendered its honest cold state — no telemetry and no proposals — even though the
+    authenticated route answered 200 with a 2,807-byte envelope. The console's 5-second upstream
+    ceiling makes a cold cache after every serve replacement an operator-visible outage, and
+    raising that consumer ceiling would only hide the unbounded producer scan.
+  design: |
+    Preserve the existing full-retained-history meaning of the analytics contract and its
+    explicit cannot-observe states. Add a safe, versioned archive checkpoint or equivalent
+    incremental accumulator at the analytics boundary so immutable rotations are incorporated
+    once and later refreshes read only the changed live tail/new rotations. Make the checkpoint
+    atomic, reject malformed or mismatched state, and fall back to the current full scan rather
+    than manufacturing zeros. The first successful scan must publish a bounded snapshot before
+    the serve safety ceiling on a production-shaped retained corpus; a refresh timeout must keep
+    the last-good snapshot, or retain the explicit cold state when no successful snapshot exists.
+    Do not raise the console's 128 KiB response bound, drop historical rows, silently skip an
+    unreadable archive, or mark an unmeasured operator-agent signal as measured.
+  acceptance:
+    - claim: "a hosted analytics request stays available while its background refresh is blocked and renders explicit cold evidence"
+      proof: "unit test: analytics request returns from cache while refresh is blocked"
+    - claim: "the full rotation union remains replay-safe while the aggregate does not retain the raw corpus"
+      proof: "unit test: deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to the identical snapshot"
+    - claim: "checkpoint corruption and refresh timeout preserve explicit cold or last-good evidence rather than fabricating zeros"
+      proof: "unit test: cold and failed refreshes never manufacture analytics evidence"
+  falsifier: |
+    Delete the checkpoint/incremental path and rerun the large-corpus and read-count tests: the
+    first refresh must again miss the safety budget or the second refresh must reopen every old
+    rotation. Replace an unreadable or mismatched checkpoint with an empty aggregate: the explicit
+    cold/last-good evidence test must fail because it must never read unavailable history as zero.
+  note: "This task repairs analytics refresh liveness and provenance after the operator-agent response bound shipped. It does not raise response limits, change proposal policy, or make the agent autonomous. The plan-only filing intentionally leaves implementation for a separate post-merge PR, and its filing proof names this exact task record path. reservation hand-off: run-W1-T3983-analytics -> run-W1-T3983-1790023859928"
