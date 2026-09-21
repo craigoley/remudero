@@ -1,0 +1,68 @@
+- id: W1-T3982
+  title: "THE SATELLITE DAEMONS CANNOT RUN THE ALERT-FIX LANE BECAUSE THEIR REPOSITORIES HAVE NO ALERT POLICY — bootstrap an explicit per-project policy contract and name an unactivated policy instead of failing as an opaque command error"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  band_meaning: blast-radius
+  plan_refs: ["W1-T55", "W1-T90", "W1-T75", "W1-T115", "W1-T143", "W1-T147", "W1-T151", "W1-T160"]
+  files: [src/lib/alert-lane.ts, src/lib/project-init.ts, src/lib/repo-layout.ts, src/run-task.ts, test/satellite-alert-policy-bootstrap.test.ts]
+  rationale: |
+    OBSERVED 2026-09-21: `rmd alert-fix --repo remudero-console --dry-run` on the live console
+    daemon refused before it could classify the repository's open CodeQL alert. The exact reason
+    was ENOENT for `repos/remudero-console/plan/alert-policy.yaml`. The site target has the same
+    absence. Thus the core's alert-fix machinery, deterministic policy and cadence do not make
+    satellite alert remediation automatic; their target-local precondition was never provisioned.
+
+    The current loader is intentionally fail-closed, which is correct. Falling back silently to
+    remudero's own `plan/alert-policy.yaml` would apply one repository's authority boundaries to a
+    different codebase. Worse, the validator hard-requires the core-specific golden path
+    `src/lib/review.ts`, so copying the core file into a Next application would satisfy a string
+    check without protecting that application's real API, middleware, workflow, secrets or operator
+    surfaces. A missing policy must therefore remain a refusal, but it must become a named,
+    actionable bootstrap state rather than an opaque process error.
+
+    The user wants automated low-risk flow, not automatic authority drift. The correct endpoint is
+    an explicit policy artifact per target with a target-owned critical-path set and an auditable
+    activation/rule decision. Until that decision is present, no satellite alert can be auto-fixed;
+    once present, only policy-eligible alerts may enter the existing constrained alert-fix lane.
+  design: |
+    (1) Separate the core-only golden fixture from the generic policy validator. The validator must
+    require a nonempty, target-owned category set, but no cross-repository load may pass merely
+    because it includes a path that does not exist in its target. Keep a direct test that the core
+    policy still protects its real review path.
+
+    (2) Have project initialization/onboarding materialize a reviewable alert-policy proposal or
+    template for each managed target, with an explicit inactive/audit-only posture until its owner
+    chooses the low-risk severities and critical-path globs. Never inherit core policy data and never
+    activate a policy as a side effect of `alert-fix` itself.
+
+    (3) Change the target alert-fix read path to report `policy-absent` or `policy-unactivated` as a
+    bounded, ledgered bootstrap refusal with the target and expected path. The daemon/status surface
+    must distinguish this from a GitHub read failure and from a policy that read successfully but
+    escalated an alert. A later policy PR makes the next cadence eligible without a restart.
+
+    (4) Prove core compatibility, a satellite target with no policy, a target whose template is
+    inactive, and one explicitly activated low-risk non-critical alert. The falsifier removes the
+    target policy activation and must return to the named refusal; an alert must never dispatch only
+    because another repository's policy happens to exist.
+  acceptance:
+    - claim: "the alert-fix policy loader has one named target-aware load path"
+      proof: "grep: loadAlertPolicyForRepo in src/lib/alert-lane.ts"
+    - claim: "repository layout owns an alert-policy location instead of an alert caller re-deriving a core path"
+      proof: "grep: alertPolicy in src/lib/repo-layout.ts"
+    - claim: "project initialization is the existing controlled surface for target repository setup"
+      proof: "grep: project in src/lib/project-init.ts"
+    - claim: "the alert-fix command is a single production entry point that can ledger a named bootstrap refusal"
+      proof: "grep: alertFixCommand in src/run-task.ts"
+  status: queued
+  attempts: 0
+  origin: oper#observed-console-and-site-alert-policy-absence-2026-09-21
+  note: |
+    reservation holder: codex/plan-satellite-alert-policy.
+    risk:high — a policy changes unattended security-fix authority. This task does not grant it by
+    fallback or upgrade. It separates schema portability, explicit target activation, and visible
+    refusal so each target's owner can ratify the boundary from evidence.
