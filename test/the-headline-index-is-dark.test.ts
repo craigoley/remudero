@@ -35,7 +35,14 @@ test("W1-T3134 (1): absent workerRuleHeadlines row lifts false and renders no he
 test("W1-T3134 (2): enabling the same real CLAUDE.md carries every rule headline", () => {
   const markdown = readFileSync(CLAUDE_MD, "utf8");
   const rules = parseRuleHeadlines(markdown);
-  assert.equal(rules.length, 56, "the real CLAUDE.md corpus must still carry all 56 rule bullets");
+  // A FLOOR, NOT A FREEZE — the same control `test/the-doctrine-index-points-at-every-body.test.ts`
+  // already spells this way. What this line is for is proving the part was rendered over the REAL
+  // corpus rather than an empty or stub file; an equality additionally refuses every rule added
+  // after it was written, which is not a property anyone chose and which no other suite enforces.
+  // The genuine freeze lives where it belongs: that suite's
+  // `test/fixtures/doctrine-pre-migration-W1-T3323.json` pins all 56 pre-migration headlines
+  // verbatim and each body by sha256, so a DELETION still reddens CI by name.
+  assert.ok(rules.length >= 56, `the real CLAUDE.md corpus must still carry all 56 rule bullets; got ${rules.length}`);
 
   const part = buildRuleHeadlinesPart(true, CLAUDE_MD);
   assert.notEqual(part, "", "the enabled arm must differ from the absent-row dark arm");
