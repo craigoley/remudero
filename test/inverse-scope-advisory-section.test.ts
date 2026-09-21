@@ -115,7 +115,7 @@ test("wiring: runReview computes the inverse scope section AND pushes it into th
   const runReviewSrc = src.slice(start, end);
 
   assert.match(runReviewSrc, /const inverseScopeSection = inverseScopeAdvisorySection\(/, "runReview must render it");
-  assert.match(runReviewSrc, /\|\| inverseScopeSection\)/, "…gate the comment on it…");
+  assert.match(runReviewSrc, /const parts: string\[\] = \[\]/, "the comment body must collect advisory sections");
   assert.match(runReviewSrc, /if \(inverseScopeSection\) parts\.push\(inverseScopeSection\)/, "…and append it");
 
   // INDEPENDENCE: the binding verdict never sees it. Advisory means advisory.

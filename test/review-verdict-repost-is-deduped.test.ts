@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   execGhPrComment,
+  execGhPrReview,
   fetchNewestPrComment,
+  fetchNewestPrReview,
   isDuplicateReviewComment,
   postReviewCommentGuarded,
   type PrCommentRecord,
@@ -38,7 +42,7 @@ test("W1-T2419 wiring: runReview posts the verdict comment via postReviewComment
   const body = runTaskSrc.slice(start, end);
 
   assert.ok(
-    body.includes("postReviewCommentGuarded(prUrl, body)"),
+    body.includes("postReviewCommentGuarded(prUrl, body, { commitSha: headSha })"),
     "runReview must post the verdict comment through postReviewCommentGuarded",
   );
   assert.ok(
@@ -102,6 +106,19 @@ test("fetchNewestPrComment: undefined on a URL that is not a PR URL (defensive, 
     throw new Error("must not be called");
   });
   assert.equal(result, undefined);
+});
+
+test("fetchNewestPrReview: reads formal pull-request reviews and returns the newest submitted review", () => {
+  const calls: string[][] = [];
+  const result = fetchNewestPrReview("https://github.com/o/r/pull/3140", (args) => {
+    calls.push(args);
+    return [
+      { body: "oldest", submitted_at: "2026-08-27T21:06:02Z" },
+      { body: "newest", submitted_at: "2026-08-27T21:18:57Z" },
+    ];
+  });
+  assert.deepEqual(result, { body: "newest", created_at: "2026-08-27T21:18:57Z" });
+  assert.deepEqual(calls, [["api", "repos/o/r/pulls/3140/reviews?per_page=100"]]);
 });
 
 // ── postReviewCommentGuarded: THE ONE POST SITE ─────────────────────────────────────────────────
@@ -198,4 +215,34 @@ test("postReviewCommentGuarded: ten consecutive sweep passes with an unchanged v
 
 test("execGhPrComment is exported (PATH-stubbable `gh`, mirrors execGhStatusPost's own reasoning)", () => {
   assert.equal(typeof execGhPrComment, "function");
+});
+
+test("execGhPrReview submits a formal COMMENT review bound to the judged head", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-formal-review-gh-"));
+  const capture = join(root, "args");
+  const oldPath = process.env.PATH;
+  try {
+    writeFileSync(
+      join(root, "gh"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > ${capture}\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${root}:${oldPath}`;
+    execGhPrReview("https://github.com/o/r/pull/3140", "formal body", "cafebabe");
+    assert.deepEqual(readFileSync(capture, "utf8").trim().split("\n"), [
+      "api",
+      "-X",
+      "POST",
+      "repos/o/r/pulls/3140/reviews",
+      "-f",
+      "body=formal body",
+      "-f",
+      "event=COMMENT",
+      "-f",
+      "commit_id=cafebabe",
+    ]);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

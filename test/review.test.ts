@@ -2905,6 +2905,10 @@ test("W1-T359: runReview posts the unmet-criteria PR comment, and folds the advi
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *reviews\\?*) echo '[]' ;;
+      *reviews*)
+        for arg in "$@"; do case "$arg" in body=*) printf '%s' "\${arg#body=}" > ${commentFile} ;; esac; done
+        echo '{}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0001"}}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -2917,11 +2921,6 @@ case "$1 $2" in
   "pr diff") cat <<'DIFF'
 ${diff}
 DIFF
-    ;;
-  "pr comment")
-    # record the posted body so the test can assert on it -- never a network call
-    shift 3
-    printf '%s' "$2" > ${commentFile}
     ;;
   *) exit 0 ;;
 esac
@@ -2983,6 +2982,10 @@ test("W1-T359: a throwing rubric judge degrades to today's review — no advisor
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *reviews\\?*) echo '[]' ;;
+      *reviews*)
+        for arg in "$@"; do case "$arg" in body=*) printf '%s' "\${arg#body=}" > ${commentFile} ;; esac; done
+        echo '{}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"}}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -2993,7 +2996,6 @@ case "$1 $2" in
       *) echo '{}' ;;
     esac ;;
   "pr diff") echo "diff --git a/src/lib/alpha.ts b/src/lib/alpha.ts" ;;
-  "pr comment") shift 3; printf '%s' "$2" > ${commentFile} ;;
   *) exit 0 ;;
 esac
 `,

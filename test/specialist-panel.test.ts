@@ -156,9 +156,9 @@ test("buildSpecialistSpawnArgs: every specialist's real spawn carries ONLY the r
   }
 });
 
-test("buildSpecialistCommentArgs: posts a PR COMMENT, never a commit status/merge call", () => {
+test("buildSpecialistCommentArgs: submits a PR review COMMENT, never a commit status/merge call", () => {
   const args = buildSpecialistCommentArgs("https://github.com/x/y/pull/1", "looks fine");
-  assert.deepEqual(args, ["pr", "comment", "https://github.com/x/y/pull/1", "--body", "looks fine"]);
+  assert.deepEqual(args, ["pr", "review", "https://github.com/x/y/pull/1", "--comment", "--body", "looks fine"]);
   assert.ok(!args.includes("api"));
   assert.ok(!args.some((a) => /status/i.test(a)));
   assert.ok(!args.some((a) => /merge/i.test(a)));

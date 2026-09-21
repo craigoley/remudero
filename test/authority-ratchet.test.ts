@@ -15,7 +15,7 @@
 //   (b) a `gh api` REST call carrying an explicit non-GET verb: `"-X", "POST"|"PATCH"|"PUT"|
 //       "DELETE"`.
 //   (c) a `gh` subcommand argv literal known to write: `["pr"|"issue", "create"|"merge"|
-//       "comment"|"close"]`.
+//       "comment"|"review"|"close"]`.
 //   (d) a raw `git push` argv literal: `["push", ...]`.
 // Measured at this task's own HEAD: 14 files. AUTHORITY_TABLE (src/lib/authority.ts) names all
 // 14 by `module`. The baseline is empty — this ratchet requires every detected file to be NAMED,
@@ -55,7 +55,7 @@ function trackedSrcFiles(): string[] {
 
 const ASSERT_LIVE_WRITE_RE = /assertLiveWriteAllowed\(\s*"([a-z-]+)"/g;
 const GH_VERB_RE = /"-X"\s*,\s*"(POST|PATCH|PUT|DELETE)"/;
-const GH_SUBCOMMAND_RE = /\[\s*"(pr|issue)"\s*,\s*"(create|merge|comment|close)"/;
+const GH_SUBCOMMAND_RE = /\[\s*"(pr|issue)"\s*,\s*"(create|merge|comment|close|review)"/;
 const GIT_PUSH_ARGV_RE = /\[\s*"push"/;
 
 /** Every reason this ratchet flagged `file`, e.g. `["assertLiveWriteAllowed:git-push", "gh-subcommand:pr:create"]`. */
@@ -121,6 +121,7 @@ test("FALSIFIER: each detector shape matches its own known-write fixture text", 
   assert.match('assertLiveWriteAllowed("git-push", "pushing the run branch");', ASSERT_LIVE_WRITE_RE);
   assert.match('["api", "-X", "POST", `repos/${owner}/${repo}/pulls`]', GH_VERB_RE);
   assert.match('["pr", "create", "--fill"]', GH_SUBCOMMAND_RE);
+  assert.match('["pr", "review", "--comment"]', GH_SUBCOMMAND_RE);
   assert.match('["issue", "close", issueUrl]', GH_SUBCOMMAND_RE);
   assert.match('deps.run(["push", "origin", `${anchor}:${ref}`])', GIT_PUSH_ARGV_RE);
 });

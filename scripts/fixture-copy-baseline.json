@@ -4,6 +4,6 @@
   "repoBuilderFunctionNames": 69,
   "fakeGithubBuilderNames": 37,
   "fakeGithubBuilderFiles": 85,
-  "ghPathShimFiles": 87,
+  "ghPathShimFiles": 88,
   "ledgerHelperNames": 51
 }

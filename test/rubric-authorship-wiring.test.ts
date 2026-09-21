@@ -31,7 +31,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
  * technique test/run-review-holdout-integration.test.ts and test/review-status-gate.test.ts
  * already use). The only value supplied is `headRefName` — a genuine `runReview` argument that
  * `reviewCommand` already passes from `gh pr view` — and the assertion is made on the ADVISORY
- * TEXT the real code renders and hands to `gh pr comment`. Nothing between the argument and
+ * TEXT the real code renders and hands to `gh pr review --comment`. Nothing between the argument and
  * the observation is stubbed: `judgeReview`, `judgeRubric`, `checkSatisfiedByGuard` and
  * `rubricAdvisorySection` all really run. What IS stubbed sits strictly AFTER the observation —
  * the post-verdict `arm`/`disarm`, for the reason spelled out at their call site below.
@@ -58,7 +58,7 @@ const CRITERION_EDIT_DIFF = [
   '+      proof: "grep: WITHDRAWN AS ALREADY SATISFIED in plan/tasks.yaml"',
 ].join("\n");
 
-/** A `gh` stub answering what `runReview` drives, and CAPTURING the `pr comment` body — the
+/** A `gh` stub answering what `runReview` drives, and CAPTURING the formal review body — the
  *  channel the advisory actually reaches an operator through. */
 function writeGhStub(binDir: string, commentFile: string): void {
   const script = `#!/bin/sh
@@ -68,6 +68,10 @@ case "$1 $2" in
     # \`pr view --json headRefOid\` — answered in REST's own shape, since mapRestPr reads
     # head.sha. Same sha as the pr-view arm below so every assertion here is unchanged.
     case "$*" in
+      *reviews\\?*) echo '[]' ;;
+      *reviews*)
+        for arg in "$@"; do case "$arg" in body=*) printf '%s' "\${arg#body=}" >> ${commentFile} ;; esac; done
+        echo '{}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"abc1234def5678"}}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -82,12 +86,6 @@ case "$1 $2" in
 ${CRITERION_EDIT_DIFF}
 RMDDIFF
     ;;
-  "pr comment")
-    shift
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = "--body" ]; then printf '%s' "$2" >> ${commentFile}; fi
-      shift
-    done ;;
   *) exit 0 ;;
 esac
 `;
@@ -156,17 +154,14 @@ async function advisoryFor(headRefName: string | undefined): Promise<string> {
 // ── DIRECTION 1: the exemption is REACHABLE for the first time ──────────────────────────────
 
 // ASSERTED AS A PAIRED CONTRAST, NOT AS AN ABSENCE. The exempted case's observable signature
-// is an EMPTY advisory — the guard is the only rubric item this diff trips, so exempting it
-// leaves nothing to post and `rubricAdvisorySection` returns undefined. Asserting only "the
-// bad string is absent" would then pass over an empty string for any reason at all, including
-// a `runReview` that never reached the rubric. Running BOTH head refs through the same diff in
-// one test makes the head ref the ONLY difference, so the contrast — and not either half — is
-// the evidence.
+// is a formal PASS review without the guard text. Running BOTH head refs through the same diff
+// makes the head ref the ONLY difference, so the contrast — and not either half — is the evidence.
 test("runReview: the head ref alone decides the exemption — hand-opened is exempted, the identical diff on a run branch is not", async () => {
   const hand = await advisoryFor("chore/plan-record-corrections-2026-08-06");
   const run = await advisoryFor("run-W1-T385-1786012345678");
 
-  assert.equal(hand, "", `a hand-opened plan-only PR trips no rubric item, so no advisory is posted; got:\n${hand}`);
+  assert.match(hand, /remudero-review=success/, "the clean hand-opened verdict still submits a formal review");
+  assert.doesNotMatch(hand, /satisfied-by-guard/, "a hand-opened plan-only PR has no rule-15 advisory");
   assert.notEqual(run, "", "the identical diff on a dispatched run branch MUST still produce an advisory");
   assert.match(run, /satisfied-by-guard/, "and that advisory must be the rule-15 guard");
   assert.ok(!/worker/i.test(hand), "the advisory never asserts a worker author on a hand-opened PR");

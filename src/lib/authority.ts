@@ -84,6 +84,7 @@ export type AuthorityBoundary =
   | "gh-pr-merge"
   | "gh-pr-update-branch"
   | "gh-pr-comment"
+  | "gh-pr-review"
   | "gh-pr-close"
   | "gh-pr-body-patch"
   | "gh-issue-create"
@@ -387,22 +388,22 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   },
   {
     id: "post-review-pr-comment",
-    action: "post a PR comment appending review evidence",
+    action: "submit a PR review with review evidence",
     module: "src/lib/review.ts",
-    symbol: "execFileSync(\"gh\", [\"pr\", \"comment\", ...])",
-    boundary: "gh-pr-comment",
+    symbol: "execGhPrReview -> POST pulls/{number}/reviews (event=COMMENT)",
+    boundary: "gh-pr-review",
     gate: "always",
     ledgerSteps: [],
     verb: "rmd review <pr>",
-    note: "Same live-write-guard gap as post-review-status. Refuses to append when the body is byte-identical to what is already posted.",
+    note: "Same live-write-guard gap as post-review-status. Refuses to submit when the body is byte-identical to the newest formal review.",
   },
   // ── src/lib/specialist-panel.ts ──────────────────────────────────────────────────────────
   {
     id: "specialist-panel-comment",
-    action: "post the specialist panel's comment on a PR",
+    action: "submit the specialist panel's review on a PR",
     module: "src/lib/specialist-panel.ts",
-    symbol: "buildSpecialistCommentArgs -> gh pr comment",
-    boundary: "gh-pr-comment",
+    symbol: "buildSpecialistCommentArgs -> gh pr review --comment",
+    boundary: "gh-pr-review",
     gate: "always",
     ledgerSteps: [],
     verb: "rmd run-task / rmd drain (specialist panel rung)",
