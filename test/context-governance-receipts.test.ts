@@ -64,11 +64,51 @@ test("unit test: revoke and delete produce bounded receipts without returning ra
     assert.equal(registered.status, 201);
     assert.equal(JSON.stringify(await registered.json()).includes(context.content), false);
 
+    const same = await post(base, "/v1/operator-agent/context", { context });
+    assert.equal(same.status, 200);
+    assert.equal((await same.json()).existing, true);
+
+    const different = await post(base, "/v1/operator-agent/context", {
+      context: { ...context, content: "A DIFFERENT PRIVATE VALUE" },
+    });
+    assert.equal(different.status, 409);
+
+    const unknownRevoke = await post(base, "/v1/operator-agent/context/revoke", {
+      contextId: "ctx:missing",
+      authorityRef: context.authorityRef,
+    });
+    assert.equal(unknownRevoke.status, 404);
+
+    const wrongRevoke = await post(base, "/v1/operator-agent/context/revoke", {
+      contextId: context.contextId,
+      authorityRef: "consent:someone-else:answer",
+    });
+    assert.equal(wrongRevoke.status, 403);
+
     const revoke = await post(base, "/v1/operator-agent/context/revoke", { contextId: context.contextId, authorityRef: context.authorityRef, reason: "operator withdrew consent" });
     assert.equal(revoke.status, 200);
     const revokeBody = (await revoke.json()) as { receipt: Record<string, unknown> };
     assert.deepEqual(Object.keys(revokeBody.receipt).sort(), ["affectedDerivations", "at", "authorityRef", "contextId", "operation", "receiptId"].sort());
     assert.equal(JSON.stringify(revokeBody).includes(context.content), false);
+
+    const repeatedRevoke = await post(base, "/v1/operator-agent/context/revoke", { contextId: context.contextId, authorityRef: context.authorityRef });
+    assert.equal(repeatedRevoke.status, 200);
+    assert.equal((await repeatedRevoke.json()).existing, true);
+
+    const recreated = await post(base, "/v1/operator-agent/context", { context });
+    assert.equal(recreated.status, 409);
+
+    const unknownDelete = await post(base, "/v1/operator-agent/context/delete", {
+      contextId: "ctx:missing",
+      authorityRef: context.authorityRef,
+    });
+    assert.equal(unknownDelete.status, 404);
+
+    const wrongDelete = await post(base, "/v1/operator-agent/context/delete", {
+      contextId: context.contextId,
+      authorityRef: "consent:someone-else:answer",
+    });
+    assert.equal(wrongDelete.status, 403);
 
     const deleted = await post(base, "/v1/operator-agent/context/delete", { contextId: context.contextId, authorityRef: context.authorityRef });
     assert.equal(deleted.status, 200);
@@ -79,5 +119,8 @@ test("unit test: revoke and delete produce bounded receipts without returning ra
     const repeated = await post(base, "/v1/operator-agent/context/delete", { contextId: context.contextId, authorityRef: context.authorityRef });
     assert.equal(repeated.status, 200);
     assert.equal(JSON.stringify(await repeated.json()).includes(context.content), false);
+
+    const revokeDeleted = await post(base, "/v1/operator-agent/context/revoke", { contextId: context.contextId, authorityRef: context.authorityRef });
+    assert.equal(revokeDeleted.status, 409);
   });
 });
