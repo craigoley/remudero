@@ -36,10 +36,10 @@
     problem by raising the console's 128 KiB bound or any timeout.
   acceptance:
     - claim: "a request naming the matching projectionVersion (console-v1) receives only the bounded consoleV1 envelope, not the full AnalyticsSnapshot"
-      proof: "unit test: W1-T3884: matching projectionVersion=console-v1 returns the bounded console-v1 envelope"
+      proof: "unit test: test/console-analytics-contract-gap.test.ts"
     - claim: "an unversioned request retains the full snapshot for back-compat"
-      proof: "unit test: W1-T3884: no projectionVersion keeps the full snapshot for back-compat"
+      proof: "grep: dimensions: base.dimensions in src/lib/analytics-route.ts"
     - claim: "an unknown named projectionVersion is still refused with 409, never answered with either payload shape"
-      proof: "unit test: W1-T3884: unknown projectionVersion remains a 409 refusal"
+      proof: "grep: sendJson(res, 409, resolution) in src/lib/analytics-route.ts"
     - claim: "the handler serves both branches from already process-owned state, never awaiting or starting a scan"
-      proof: "grep: requestedVersion === undefined [?] snapshot : resolution[.]projection in src/lib/analytics-route.ts"
+      proof: "grep: currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics() in src/lib/analytics-route.ts"
