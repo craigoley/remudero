@@ -735,7 +735,9 @@ export interface DaemonDeps {
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
   reloadPlan?: () => Plan | null;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
-  refreshMerged: () => MergedSet;
+  refreshMerged: (plan?: Plan) => MergedSet;
+  /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
+  onPlanReload?: (plan: Plan) => void;
   /** The in-flight guard: the open PR number for a task, re-derived from the same projection `refreshMerged` just
    * built, never a second read path. Optional (W1-T80, the #143/#145 duplicate-build race). */
   isOpenPr?: OpenPrCheck;
@@ -2302,6 +2304,7 @@ export async function runDaemon(
         const fresh = deps.reloadPlan();
         if (fresh) {
           plan = fresh;
+          deps.onPlanReload?.(fresh);
           log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
         }
       } catch (e) {
@@ -2370,7 +2373,7 @@ export async function runDaemon(
       if (drain) log("console.drain_consumed", { origin: drain.origin });
     }
 
-    const isMerged = deps.refreshMerged();
+    const isMerged = deps.refreshMerged(planForBatch);
 
     // Reconcile the daemon-lifetime parks from the SAME cached projection dispatch uses below. A
     // credited merge is conclusive. A confirmed absence of an open PR is conclusive only when both

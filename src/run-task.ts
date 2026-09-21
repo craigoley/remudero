@@ -903,6 +903,7 @@ import {
   taskRecordPath,
   readBlobsAtRef,
   mergePlanBlobs,
+  loadPlanAtRef,
 } from "./lib/plan.js";
 import { exitCodeFor } from "./lib/errors.js";
 import {
@@ -28619,14 +28620,16 @@ export function planReloader(
   // Any directory INSIDE the work tree is enough: git walks up from `-C` to find `.git`. Deriving
   // it from `planPath` keeps this in step with whatever plan location the caller resolved, rather
   // than introducing a second notion of where the repo is.
-  const repoDirForGit = dirname(target.planPath);
+  const planRepoRoot = dirname(dirname(target.planPath));
+  const planRelativePath = relative(planRepoRoot, target.planPath) || "plan/tasks.yaml";
+  const repoDirForGit = planRepoRoot;
   const treeSha =
     deps.treeSha ??
     (() =>
       execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
         encoding: "utf8",
       }).trim());
-  const load = deps.load ?? ((pp: string) => loadPlan(pp));
+  const load = deps.load ?? (() => loadPlanAtRef(planRepoRoot, planRelativePath, "origin/main"));
   let lastSha: string | undefined;
   return () => {
     const sha = treeSha();
@@ -28653,9 +28656,13 @@ export function planReloader(
       return null;
     }
     if (sha === lastSha) return null;
+    // Do not advance the observed sha until the committed ref has parsed successfully. A transient
+    // fetch/object/read failure must be retried on the next tick, rather than permanently pinning
+    // the daemon to the old plan while claiming it observed the new one.
+    const fresh = load(target.planPath);
     lastSha = sha;
     log("daemon.plan_changed", { tree_sha: sha.slice(0, 12), allow_stale: allowStale });
-    return load(target.planPath);
+    return fresh;
   };
 }
 
@@ -29347,15 +29354,16 @@ export async function daemonCommand(
   // `refreshMerged`, below) buys that property directly and per tick, without discarding the
   // delta cache alongside it — see that method's own doc for why a failed half's EMPTY rows are
   // dropped WITH its verdict rather than left behind under a healthy label.
+  const activePlanRef: { current: Plan } = { current: plan };
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
-  const refreshMerged: () => MergedSet = () => {
+  const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
     // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
     boardOpenPrCount.reset();
     const proj = projectPlan(
-      plan,
+      planOverride,
       { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
       statusPath,
     );
@@ -29782,6 +29790,9 @@ export async function daemonCommand(
       plan,
       {
         refreshMerged,
+        onPlanReload: (fresh) => {
+          activePlanRef.current = fresh;
+        },
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
@@ -30035,6 +30046,7 @@ export async function daemonCommand(
           (t: Task) => lastProj?.get(t.id)?.merged ?? false,
           undefined,
           targetCheckoutRoot,
+          () => activePlanRef.current,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -30054,6 +30066,7 @@ export async function daemonCommand(
           // eligibility predicate, never two independently-derived ones.
           (t: Task) => lastProj?.get(t.id)?.merged ?? false,
           undefined,
+          () => activePlanRef.current,
         ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
@@ -35936,6 +35949,7 @@ export function buildSweepHook(
   // that path explicit so same-named repositories under different owners cannot reap this repo's
   // origin by accident.
   targetCheckoutRoot?: string,
+  planAccessor?: () => Plan,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -36013,13 +36027,14 @@ export function buildSweepHook(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
+      const activePlan = planAccessor?.() ?? plan;
       const effects = buildSweepEffects({
         owner: owner,
         repo: repo,
         config: config,
         ledgerPath: ledgerPath,
         runId: runId,
-        plan: plan,
+        plan: activePlan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
         pacer,
@@ -36037,7 +36052,7 @@ export function buildSweepHook(
       // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
+      const creditCandidates = buildCreditCandidates(owner, repo, activePlan, ledgerPath, log, boardGithub);
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
@@ -36064,7 +36079,7 @@ export function buildSweepHook(
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
       // W1-T195, closure here); same level-triggered doctrine as the credit rung below. Its
       // own read failures degrade to [] internally, so it never strands the credit rung.
-      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
+      await sweepEscalationReconcile(owner, repo, activePlan, ledgerPath, runId, log, { github: boardGithub });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
@@ -36315,6 +36330,7 @@ export function buildSweepLightHook(
   reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
+  planAccessor?: () => Plan,
 ): () => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -36334,13 +36350,14 @@ export function buildSweepLightHook(
         isMerged,
         readMainPlan: resolvedReadMainPlan,
       });
+      const activePlan = planAccessor?.() ?? plan;
       const effects = buildSweepEffects({
         owner: owner,
         repo: repo,
         config: config,
         ledgerPath: ledgerPath,
         runId: runId,
-        plan: plan,
+        plan: activePlan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
       });
