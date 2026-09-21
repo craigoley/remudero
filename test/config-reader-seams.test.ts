@@ -347,10 +347,9 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
   // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
   // needed no edit.
-  // THIRTY-ONE since the advisory reviewer's `clockBound` (run-task.ts, W1-T3960) landed — also
-  // SEAMED (`reviewerAbandonMs ?? loadDefaultPolicy()`), so a semantic reviewer gets the same
-  // injectable quiet-stream policy as every ordinary worker spawn. It is a consumer at the call
-  // site, not an allowlist exception: the override is what makes its default readable in tests.
+  // THIRTY-ONE since the advisory reviewer's `clockBound` (run-task.ts, W1-T3960) landed. The
+  // reviewer uses the existing `reviewerClockBoundMs ?? loadDefaultPolicy()` seam, so it receives
+  // the same injectable quiet-stream policy as every ordinary worker spawn.
   assert.equal(readers.length, 31, `expected 31 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
