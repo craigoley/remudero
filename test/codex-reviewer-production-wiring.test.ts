@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { spawnCodexWorker } from "../src/lib/worker-provider.js";
+import { WorkerAbandonedError } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { loadDefaultPolicy } from "../src/lib/policy.js";
 import { runReview } from "../src/run-task.js";
@@ -191,6 +192,89 @@ esac
     assert.equal(existsSync(codexTmpDir ?? root), false, "the private writable test scratch is reaped after review");
     assert.equal(execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headSha);
     assert.equal(execFileSync("git", ["-C", sourceDir, "status", "--porcelain"], { encoding: "utf8" }), "");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3960: an abandoned reviewer writes the bound evidence to its ledger row", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-abandoned-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-codex-review-abandoned-gh-"));
+  const oldPath = process.env.PATH;
+  try {
+    const sourceDir = join(root, "source");
+    mkdirSync(join(sourceDir, "src"), { recursive: true });
+    const dependencyRoot = join(root, "dependencies");
+    mkdirSync(dependencyRoot);
+    symlinkSync(realpathSync(dependencyRoot), join(sourceDir, "node_modules"), "dir");
+    execFileSync("git", ["init", "-q", sourceDir]);
+    execFileSync("git", ["-C", sourceDir, "config", "user.name", "RMD Test"]);
+    execFileSync("git", ["-C", sourceDir, "config", "user.email", "rmd-test@example.invalid"]);
+    writeFileSync(join(sourceDir, "src", "example.ts"), "export const fixed = true;\n", "utf8");
+    execFileSync("git", ["-C", sourceDir, "add", "src/example.ts"]);
+    execFileSync("git", ["-C", sourceDir, "commit", "-q", "-m", "fixture"]);
+    const headSha = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const settingsFile = join(root, "settings.json");
+    const ledgerPath = join(root, "ledger.ndjson");
+    writeFileSync(settingsFile, "{}", "utf8");
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":3960,"html_url":"https://github.com/acme/remudero/pull/3960","updated_at":"t","body":"","head":{"ref":"b","sha":"${headSha}"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") printf '%s\n' 'diff --git a/src/example.ts b/src/example.ts' '+++ b/src/example.ts' '+export const fixed = true;' ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    let abandoned: Record<string, unknown> | undefined;
+    const reviewerSpawnWorker = async (): Promise<WorkerResult> => {
+      throw new WorkerAbandonedError({ elapsedMs: 7_201, boundMs: 7_200, lastState: "working", lastStateMs: 12_345 });
+    };
+    const result = await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/3960",
+      task: {
+        id: "W1-T3960",
+        files: ["src/example.ts"],
+        acceptance: [{ claim: "the fixed source is present", proof: "grep: fixed in src/example.ts" }],
+      },
+      report: "fixed in src/example.ts",
+      settingsFile,
+      config: { claudeBin: "/unused", root } as never,
+      log: (step: string, extra?: Record<string, unknown>) => {
+        if (step === "review.reviewer.abandoned") abandoned = extra;
+      },
+      say: () => {},
+      account: (worker: WorkerResult) => worker,
+      spawnReviewer: true,
+      reviewerSpawnWorker,
+      reviewerMount: { model: "gpt-5.5", effort: "high", maxTurns: 10, contextBudget: 120_000 },
+      headCheckoutDir: sourceDir,
+      ledgerPath,
+      runId: "RUN-W1-T3960",
+      disarm: () => "not-armed" as const,
+      arm: () => ({ armed: false, reason: "test" }),
+    } as never);
+
+    assert.equal(result.reviewerOutcome, "spawn_error");
+    assert.deepEqual(abandoned, {
+      reason_class: "worker_abandoned",
+      elapsed_ms: 7_201,
+      bound_ms: 7_200,
+      last_state: "working",
+      last_state_ms: 12_345,
+    });
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
