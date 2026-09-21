@@ -494,7 +494,7 @@ test(
     const root = mkdtempSync(join(tmpdir(), "arm-nogreen-root-"));
     const planPath = join(root, "tasks.yaml");
     writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
     armOpenGitFixture(root);
 
@@ -711,7 +711,7 @@ test(
     // W1-T948: the tdd:strict variant, so this SAME run also exercises run-task.ts's
     // specialist-panel call site. Inert for everything this test already asserts.
     writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN_TDD_STRICT);
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
     armOpenGitFixture(root);
 
@@ -850,7 +850,7 @@ test(
     const root = mkdtempSync(join(tmpdir(), "arm-open-riskjudge-root-"));
     const planPath = join(root, "tasks.yaml");
     writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
     armOpenGitFixture(root);
 
@@ -1160,7 +1160,7 @@ test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) 
   const root = mkdtempSync(join(tmpdir(), "arm-verdict-merged-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   armOpenGitFixture(root);
 
@@ -1288,7 +1288,7 @@ test(
     const root = mkdtempSync(join(tmpdir(), "arm-open-fixrung-root-"));
     const planPath = join(root, "tasks.yaml");
     writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
     armOpenGitFixture(root);
 
     const FIXED_TS = 1785100000002;

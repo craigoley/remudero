@@ -234,7 +234,7 @@ async function runFixture(
 ): Promise<Array<Record<string, unknown>>> {
   const root = mkdtempSync(join(tmpdir(), "nopid-root-"));
   writeFileSync(join(root, "tasks.yaml"), FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   const FIXED_TS = 1785100000000;

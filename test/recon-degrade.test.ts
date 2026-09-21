@@ -161,7 +161,7 @@ async function runFixture(
   const root = mkdtempSync(join(tmpdir(), "runtask-recon-degrade-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, planText);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   gitFixture(root);
 

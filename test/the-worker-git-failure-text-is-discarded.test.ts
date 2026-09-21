@@ -293,7 +293,7 @@ async function runFixture(opts: {
   const root = mkdtempSync(join(tmpdir(), opts.prefix));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   const branch = `run-T-EVIDENCE-${opts.ts}`;

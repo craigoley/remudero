@@ -218,7 +218,7 @@ function startServe(port: number) {
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(
     join(home, ".config", "remudero", "config.json"),
-    JSON.stringify({ claudeBin: "/nonexistent/claude-not-installed", root: join(home, "Remudero") }),
+    JSON.stringify({ claudeBin: "/nonexistent/claude-not-installed", root: join(home, "Remudero"), installRoot: process.cwd() }),
   );
 
   const out = openSync(join(home, "serve.out.log"), "a", 0o600);

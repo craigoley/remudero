@@ -317,7 +317,7 @@ function buildFixtureRoot(): { root: string; planPath: string; config: Config } 
   const root = mkdtempSync(join(tmpdir(), "runtask-clockbound-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   clockBoundGitFixture(root);
   return { root, planPath, config };
 }

@@ -700,7 +700,7 @@ test("W1-T1044: an abandoned fix spawn ends the RUN with a blocked verdict namin
   const root = mkdtempSync(join(tmpdir(), "fix-abandon-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ABANDON_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   abandonGitFixture(root);
 
   const savedPath = process.env.PATH;

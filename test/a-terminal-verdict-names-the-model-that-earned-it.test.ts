@@ -101,7 +101,7 @@ test("BEHAVIORAL: a dropped containment probe (no worker ever spawns) ledgers a 
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}modelrow-containment-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   const spawn = (async () => {
     throw new Error("spawn must never run — the containment preflight must refuse first");
@@ -139,7 +139,7 @@ test("BEHAVIORAL: a real implement run's no_pr verdict carries the SERVED model,
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}modelrow-nopr-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   const spawnCalls: number[] = [];

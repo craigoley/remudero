@@ -253,6 +253,7 @@ test("runTask resolves the class-routed mount and ledgers run.start with task_cl
   const config = {
     claudeBin: join(root, "nonexistent-claude"),
     root,
+    installRoot: process.cwd(),
   } as never;
   const { runTask } = await import("../src/run-task.js");
   // The spawn boundary throws (no claude binary) — run.start must already be ledgered

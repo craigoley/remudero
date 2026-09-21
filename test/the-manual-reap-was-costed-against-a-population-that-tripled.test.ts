@@ -1,14 +1,12 @@
 /**
- * W1-T2690 — THE MANUAL-REAP RULING WAS COSTED AGAINST 51 BRANCHES AND THE POPULATION HAS TRIPLED
- * UNRE-MEASURED.
+ * W1-T2690 — THE REAP'S EXPENSIVE CLASSIFIER IS BOUNDED BY A CHEAP BRANCH-SET TRIGGER.
  *
- * W1-T448 priced the REAP itself (~8 `gh api` `state=all` pages, 6.4s) and, on that number, ruled
- * the verb stays MANUAL rather than wired into every sweep pass. This task does not re-litigate
- * that: the verb stays manual here too. What W1-T448 never priced was the CHECK for whether it is
- * TIME to run the manual verb — measured 2026-09-02, `git ls-remote --heads origin` (already
- * `remoteBranchNames`) answers that in 670ms as ONE request, no `gh api` page at all.
- * `readOrphanedHeadCount`/`countOrphanedHeads` are that cheap count, and nothing else: they report
- * a number, they delete nothing, and they change no existing verb's behaviour.
+ * W1-T448 priced the REAP itself (~8 `gh api` `state=all` pages, 6.4s) and ruled against paying
+ * that cost on every sweep poll. This task preserves that bound: the automatic full-sweep adapter
+ * checks `git ls-remote --heads origin` (already `remoteBranchNames`) as one cheap request and
+ * invokes the classifier only on first use, a branch-set change, or the six-hour bound.
+ * `readOrphanedHeadCount`/`countOrphanedHeads` remain the independent read-only count helpers: they
+ * report a number, delete nothing, and do not replace the manifest classifier.
  *
  * ANCESTRY ALONE OVERCOUNTS AS "SAFE": `main` only squash-merges, so a genuinely merged branch is
  * never `main`'s ancestor either — `git merge-base --is-ancestor` says false for a merged branch
@@ -68,7 +66,7 @@ test("ancestry-absent alone does not orphan a head — an open PR still excludes
   assert.equal(mergedByFastForward.orphanedHeads, 0, "in the base's history, and no open PR — not orphaned");
 });
 
-// ── CRITERION 4: nothing is deleted, no existing verb's behaviour changes ─────────────────────
+// ── CRITERION 4: the count remains read-only, no existing helper's behaviour changes ─────────
 
 test("the count issues no destructive git command — this reports only", () => {
   const calls: Array<{ cmd: string; args: string[] }> = [];

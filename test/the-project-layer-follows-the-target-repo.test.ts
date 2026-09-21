@@ -195,7 +195,7 @@ async function runFixture(
   const planPath = join(root, "plan", "tasks.yaml");
   mkdirSync(join(root, "plan"), { recursive: true });
   writeFileSync(planPath, fixturePlan(repo));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root, [repo]);
   seed(root);
 
