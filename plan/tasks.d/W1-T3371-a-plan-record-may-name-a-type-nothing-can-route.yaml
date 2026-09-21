@@ -10,7 +10,8 @@
     - src/lib/plan.ts
     - test/a-plan-record-may-name-a-type-nothing-can-route.test.ts
   origin: "operator-session#fleet-down-on-unroutable-task-type-2026-09-11"
-  status: merged
+  status: blocked
+  retirement: retired
   note: |
 
     RETIRED 2026-09-11 — ALREADY BUILT, BY ANOTHER PR, TWENTY MINUTES AFTER THIS WAS FILED.

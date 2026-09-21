@@ -1,0 +1,55 @@
+- id: W1-T3941
+  title: "Already-built follow-ups must carry durable retirement rulings — stop treating W1-T3371 and W1-T3696 as live work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  risk: low
+  files:
+    - plan/tasks.d/W1-T3371-a-plan-record-may-name-a-type-nothing-can-route.yaml
+    - plan/tasks.d/W1-T3696-the-implement-lane-needs-git-effects-not-a-shell.yaml
+    - plan/tasks.d/W1-T3941-durable-retirement-for-W1-T3371.yaml
+  origin: "operator-session#needs-me-review-2026-09-21"
+  plan_refs: [W1-T3371, W1-T2392, W1-T3939]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> run-W1-T3941-1789983141972
+  rationale: |
+    W1-T3371's record already says it was never dispatched and that #5089/#5099 supplied the
+    validator and its replacement test. W1-T3696's implementation is also already on
+    `origin/main` through merged PR #5817, but that unfiled branch carried no task trailer, so
+    the plan row remained queued. Both records are currently note/status-only settlements, but
+    the repository's durable retirement contract is `status: blocked` plus
+    `retirement: retired`. The missing rulings leave settled records looking like live work and
+    make automation eligible to rebuild them.
+
+    This is a plan-only state correction, not a merge-credit assertion: the validator and
+    harness implementation remain supported by their actual merged PR/source/test evidence,
+    and no source, dispatch, dependency, or PR disposition changes. W1-T3939's existing
+    blocked-task suppression then quiets any advisory without creating a new block or ceiling.
+  design: |
+    Add the existing legal retirement marker to W1-T3371 and W1-T3696: `status: blocked` and
+    `retirement: retired`. Preserve each task's existing note, acceptance, rationale, and
+    falsifier so the archaeology remains intact. Do not edit W1-T13: its manual completion is
+    an operator record and its impossible `repo: none` warning is handled separately by W1-T3940.
+
+    Verify the amendment by reading the committed shard, then run the plan linter and the
+    current status projection after merge. If the task ever needs to be reopened, a new task
+    must be filed; this marker is not a machine inference from prose.
+  acceptance:
+    - claim: "W1-T3371 carries the durable blocked status required for a retired plan record"
+      proof: "grep: status: blocked in plan/tasks.d/W1-T3371-a-plan-record-may-name-a-type-nothing-can-route.yaml"
+    - claim: "W1-T3371 carries the explicit retired ruling rather than a note-only settlement"
+      proof: "grep: retirement: retired in plan/tasks.d/W1-T3371-a-plan-record-may-name-a-type-nothing-can-route.yaml"
+    - claim: "the amendment remains plan-only and preserves the task's existing archaeology"
+      proof: "grep: THIS SHARD WAS NEVER DISPATCHED in plan/tasks.d/W1-T3371-a-plan-record-may-name-a-type-nothing-can-route.yaml"
+    - claim: "W1-T3696 carries the durable blocked status after its implementation shipped through merged PR #5817"
+      proof: "grep: status: blocked in plan/tasks.d/W1-T3696-the-implement-lane-needs-git-effects-not-a-shell.yaml"
+    - claim: "W1-T3696 carries the explicit retired ruling and names its already-shipped implementation"
+      proof: "grep: SETTLED 2026-09-21 in plan/tasks.d/W1-T3696-the-implement-lane-needs-git-effects-not-a-shell.yaml"
+  falsifier: |
+    Revert either structured field on either settled task and the durable-retirement assertions
+    must fail. Remove either settled-task edit or add any `src/`/`test/` change and the plan-only
+    scope proof must fail. Do not infer retirement from the word RETIRED in a note alone.
