@@ -717,7 +717,7 @@ The alert-fix lane: policy-decide act-vs-escalate per open security alert.
 rmd alert-fix [--repo <name>] [--dry-run]
 ```
 
-the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing
+the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci-gate, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing
 
 ### `rmd issues`
 
