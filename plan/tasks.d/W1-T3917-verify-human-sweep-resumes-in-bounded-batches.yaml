@@ -1,0 +1,69 @@
+- id: W1-T3917
+  title: "VERIFY-HUMAN JUDGING MUST YIELD AND RESUME — the provider-backed sweep writes each verdict before the next spawn, but one invocation can still consume the host's remaining transient disk and die on a later state write; let the same observed-state ledger resume a bounded batch without hiding or re-asking work"
+  repo: remudero
+  depends_on: [W1-T3916]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#verify-human-sweep-enospc-2026-09-21"
+  plan_refs: [W1-T3188, W1-T3916]
+  files: [src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-21: after W1-T3916 routed the judge to the enabled Codex provider, a live
+    `rmd verify-human-sweep` resumed against 53 due shards and wrote seven valid
+    `verify_human.judged` rows before the host fell from roughly 2.9 GiB free to 119 MiB. The
+    command was stopped before another state write could fail. The earlier interrupted pass had
+    already written 21 valid rows. The ledger's per-shard observed-state key makes this work
+    resumable, but the command has no yield control, so one invocation keeps spawning until the
+    whole population is consumed.
+
+    W1-T3916 only repairs provider selection. This follow-up intentionally overlaps its
+    production call surface to add resumable flow control after each provider call; the two tasks
+    must not be dispatched as independent implementations of the same behavior.
+
+    This is a flow defect, not a reason to turn the judge back into a permanent human queue. The
+    existing route is already fail-open, writes the verdict before staging its proposal, and skips
+    settled observed states. The missing piece is an operator/automation batch control that lets a
+    scheduled caller spend a bounded slice, return a truthful remaining count, and invoke the same
+    command again later. It must never edit the plan, cache a failed verdict, or treat a deferred
+    shard as settled.
+  design: |
+    (i) ADD AN EXPLICIT `--limit <n>` TO `verify-human-sweep`, validated before config, plan,
+    ledger, provider or proposal access. The limit applies only to currently due observed states;
+    already-settled rows remain skipped, and the unselected due rows remain due for the next pass.
+    Preserve the current unlimited behavior when the flag is omitted so existing operators and
+    callers do not change semantics without opting into batching.
+
+    (ii) REPORT THE FLOW STATE. Dry-run names the due population and the selected batch. A real
+    pass reports judged, needs-you, backlog, already-settled, and deferred-due counts, so a launchd
+    or follow-up caller can keep invoking until deferred is zero. A batch boundary is a yield, not
+    a policy decision: every emitted verdict is still ledgered before the next spawn.
+
+    (iii) KEEP THE SAFETY POLARITY. An interrupted batch is safe to resume because only a real,
+    non-failed verdict settles an observed state. A transport, malformed, or ENOSPC failure never
+    becomes backlog and never suppresses the next attempt. No PR check, merge gate, or plan edit is
+    introduced, so this flow control cannot strand an implementation PR.
+  acceptance:
+    - claim: "verify-human-sweep accepts an explicit limit that applies only to due observed states and leaves unselected due shards for a later pass"
+      proof: "grep: --limit <n> applies only to due observed states in src/run-task.ts"
+    - claim: "a bounded pass reports deferred due work separately from already-settled work"
+      proof: "grep: deferred due work remains due for the next pass in src/run-task.ts"
+    - claim: "invalid batch controls refuse before config, plan, ledger, provider, or proposal access"
+      proof: "grep: invalid batch limits refuse before any sweep side effect in src/run-task.ts"
+    - claim: "a failed verdict remains fail-open and is eligible for a later batch"
+      proof: "grep: failed verdict remains eligible for the next batch in src/run-task.ts"
+  falsifier: |
+    Remove the limit from the production command and the bounded-pass test must either route the
+    entire due population or lose its deferred count. Make a failed verdict count as settled and
+    the retry test must show the shard disappearing from the next batch. Move ledger append after
+    proposal staging and the existing route test must expose the reversed effect order.
+  note: |
+    This is intentionally a flow-control follow-up to W1-T3188/W1-T3916, not a hard spend ceiling:
+    the default remains unchanged, the caller chooses the batch size, and the ledger is the durable
+    self-improvement loop that determines what remains. The batch is also safe for automation: a
+    future cadence can keep yielding and resuming without blocking PR admission or merge checks.
