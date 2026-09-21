@@ -259,7 +259,13 @@ test("cold-read timing fixture records a measurable latency", async () => {
     }
   };
 
-  const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 60)], deps, 20);
+  // Use the same-turn cold-read shape that exposed the ordering bug: a synchronous block runs
+  // before the route's first await. The fixed implementation has already armed its deadline, so
+  // the measured sample is roughly BLOCK_MS; the old implementation starts its timer only after
+  // that block and pays BLOCK_MS + BUDGET_MS.
+  const BLOCK_MS = 300;
+  const BUDGET_MS = 100;
+  const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 1_000, BLOCK_MS)], deps, BUDGET_MS);
   await measure(() => serveRoute(route));
 
   assert.equal(samples.length, 1);
@@ -269,7 +275,7 @@ test("cold-read timing fixture records a measurable latency", async () => {
   // its budget unnoticed. Bounding the recorded sample turns that into a failing assertion here
   // rather than an anecdote discovered later against production.
   assert.ok(
-    latencyMs < CONSOLE_READ_ROUTE_BUDGET_MS + 500,
-    `cold-read latency ${latencyMs.toFixed(1)}ms should stay a bounded, regression-checkable figure`,
+    latencyMs < BLOCK_MS + BUDGET_MS * 0.5,
+    `cold-read latency ${latencyMs.toFixed(1)}ms should stay below the blocked-read budget boundary`,
   );
 });
