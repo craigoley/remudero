@@ -36,6 +36,7 @@ const FILES_A = [
   { filename: "src/lib/a.ts", status: "modified", sha: "blob1111" },
   { filename: "test/a.test.ts", status: "added", sha: "blob2222" },
 ];
+const CONTRACT_DIGEST = "contract-v1:producer-fixture";
 
 test("review-reuse-producer: the own-diff digest is stable under reordering, and blind to commit history", () => {
   // THE FALSE-NEGATIVE GUARD. The compare endpoint promises no file order. An order-sensitive
@@ -141,6 +142,7 @@ test("review-reuse-producer: END TO END — a recorded verdict plus an unchanged
   const fields = reviewLedgerLegibilityFields({
     capped: false, keywordOnly: false, planOnly: false,
     ownDiffDigest: facts.ownDiffDigest, mergeBaseSha: facts.mergeBaseSha,
+    reviewContractDigest: CONTRACT_DIGEST,
   } as never);
   const ledger = [{ step: "review.posted", task_id: "W1-T1", head_sha: "OLDHEAD", state: "success", ...fields }];
 
@@ -159,6 +161,8 @@ test("review-reuse-producer: END TO END — a recorded verdict plus an unchanged
     reviewedMergeBaseSha: prior?.mergeBaseSha,
     currentMergeBaseSha: current.mergeBaseSha,
     reviewedHeadSha: prior?.headSha,
+    reviewedContractDigest: prior?.reviewContractDigest,
+    currentContractDigest: CONTRACT_DIGEST,
   });
   assert.deepEqual(verdict, { kind: "reuse", judgedHeadSha: "OLDHEAD" });
 
@@ -170,6 +174,8 @@ test("review-reuse-producer: END TO END — a recorded verdict plus an unchanged
     reviewedMergeBaseSha: prior?.mergeBaseSha,
     currentMergeBaseSha: "base888",
     reviewedHeadSha: prior?.headSha,
+    reviewedContractDigest: prior?.reviewContractDigest,
+    currentContractDigest: CONTRACT_DIGEST,
   });
   assert.deepEqual(movedBase, { kind: "discriminate-only", judgedHeadSha: "OLDHEAD" });
 
@@ -180,6 +186,8 @@ test("review-reuse-producer: END TO END — a recorded verdict plus an unchanged
     reviewedMergeBaseSha: prior?.mergeBaseSha,
     currentMergeBaseSha: current.mergeBaseSha,
     reviewedHeadSha: prior?.headSha,
+    reviewedContractDigest: prior?.reviewContractDigest,
+    currentContractDigest: CONTRACT_DIGEST,
   });
   assert.deepEqual(realChange, { kind: "full-review" });
 });

@@ -25,6 +25,9 @@
  * dispatch.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -38,6 +41,9 @@ import {
 import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { buildSweepEffects } from "../src/run-task.js";
 
 const NOW = Date.parse("2026-09-16T19:00:00Z");
 const RECENT = "2026-09-16T18:50:00Z";
@@ -48,6 +54,7 @@ const PR_URL = "https://github.com/craigoley/remudero/pull/3704";
 const OWN_DIFF_DIGEST = "sha256:own-diff-abc123";
 const MERGE_BASE = "0ldbase00ldbase00ldbase00ldbase00ldbase0";
 const NEW_MERGE_BASE = "newbase1newbase1newbase1newbase1newbase1";
+const CONTRACT_DIGEST = "contract-v1:unchanged-contract";
 
 /** {@link ReviewReuseInputs} is declared OFF `OpenPrView` on purpose (see that type's own doc in
  *  sweep.ts) — no producer assigns any of its five keys onto a real `OpenPrView` yet, so a fixture
@@ -83,6 +90,8 @@ function unchangedInputs(): Partial<ReviewReuseInputs> {
     reviewedMergeBaseSha: MERGE_BASE,
     currentMergeBaseSha: MERGE_BASE,
     reviewedHeadSha: JUDGED_HEAD,
+    reviewedContractDigest: CONTRACT_DIGEST,
+    currentContractDigest: CONTRACT_DIGEST,
   };
 }
 
@@ -112,6 +121,108 @@ function minimalDeps(): SweepDeps & { armed: OpenPrView[]; closed: OpenPrView[];
     runId: "W1-T3704-REUSE",
   };
 }
+
+function modeDeps(): SweepDeps & { modes: string[] } {
+  const base = minimalDeps();
+  const modes: string[] = [];
+  return {
+    ...base,
+    modes,
+    postReview: async (_pr, mode) => {
+      modes.push(mode?.kind ?? "full-review");
+    },
+  };
+}
+
+test("W1-T3798 production adapter posts reuse and routes discrimination through the fallback reviewer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-adapter-"));
+  const bin = mkdtempSync(join(tmpdir(), "rmd-review-reuse-gh-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const oldPath = process.env.PATH;
+  const calls: string[] = [];
+  writeFileSync(
+    join(bin, "gh"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *"pulls/3704"*) printf \'{"state":"open","merged":false,"head":{"sha":"cafef00dcafef00dcafef00dcafef00dcafef00d"},"body":""}\\n\' ;;',
+      "  *) printf '{}\\n' ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  appendLedger(ledgerPath, {
+    run_id: "prior",
+    task_id: TASK,
+    step: "review.posted",
+    state: "success",
+    head_sha: JUDGED_HEAD,
+    decision_verdict: { state: "success", criteria: [{ proof_exec: "executed_pass" }] },
+    proof_exec: ["executed_pass"],
+  });
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "scratch",
+      config: { root } as never,
+      ledgerPath,
+      runId: "reuse-adapter",
+      plan: { tasks: [], byId: new Map() },
+      log: (step) => calls.push(step),
+      reviewRunner: async () => {
+        calls.push("fallback-review");
+        return 0;
+      },
+    });
+    await withLiveWritesAllowed(() =>
+      effects.postReview!(
+        orphanedPr({ taskId: TASK }),
+        { kind: "reuse", judgedHeadSha: JUDGED_HEAD },
+      ),
+    );
+    assert.ok(calls.includes("sweep.post_review.done"), "reuse must post a durable current-head verdict");
+
+    await effects.postReview!(orphanedPr({ taskId: TASK }), { kind: "discriminate-only", judgedHeadSha: JUDGED_HEAD });
+    assert.ok(calls.includes("fallback-review"), "base-only changes must run the existing reviewer fallback");
+
+    await effects.postReview!(orphanedPr({ taskId: undefined }), { kind: "reuse", judgedHeadSha: JUDGED_HEAD });
+    assert.equal(calls.filter((step) => step === "fallback-review").length, 2, "unreadable evidence falls back too");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3798 reuse-posts-current-head-verdict", async () => {
+  const deps = modeDeps();
+  const summary = await runSweep([orphanedPr(unchangedInputs())], deps);
+  assert.equal(summary.byDisposition["review-reused"], 1);
+  assert.deepEqual(deps.modes, ["reuse"]);
+  const disposed = readLedgerLines(deps.ledgerPath).find((line) => line.step === "sweep.disposed");
+  assert.equal(disposed?.acted, true);
+});
+
+test("W1-T3798 base-only-runs-discrimination", async () => {
+  const deps = modeDeps();
+  const summary = await runSweep([orphanedPr({ ...unchangedInputs(), currentMergeBaseSha: NEW_MERGE_BASE })], deps);
+  assert.equal(summary.byDisposition["discriminate-only"], 1);
+  assert.deepEqual(deps.modes, ["discriminate-only"]);
+});
+
+test("W1-T3798 changed-contract-forces-full-review", async () => {
+  const deps = modeDeps();
+  await runSweep([orphanedPr({ ...unchangedInputs(), currentContractDigest: "contract-v1:changed-contract" })], deps);
+  assert.deepEqual(deps.modes, ["full-review"]);
+});
+
+test("W1-T3798 unreadable-evidence-falls-back", async () => {
+  const deps = modeDeps();
+  await runSweep([orphanedPr({ ...unchangedInputs(), currentMergeBaseSha: undefined })], deps);
+  assert.deepEqual(deps.modes, ["full-review"]);
+});
 
 // ── acceptance 1: own diff same, merge base same → reuse the verdict ──────────────────────────
 
@@ -160,6 +271,42 @@ test("W1-T3704 (2, runSweep): a discriminate-only verdict likewise takes no gate
   assert.equal(disposed?.disposition, "discriminate-only");
   assert.equal(disposed?.acted, false);
   assert.match(String(disposed?.reason), /discrimination alone/);
+});
+
+test("W1-T3798 (dedup): a review-reused verdict already DELIVERED for this current head is not re-posted", async () => {
+  const deps = modeDeps();
+  deps.ledgerPath = writeLedger([
+    { step: "review.posted", task_id: TASK, head_sha: CURRENT_HEAD },
+  ]).path;
+  const pr = orphanedPr(unchangedInputs());
+  const summary = await runSweep([pr], deps);
+
+  assert.equal(summary.byDisposition["review-reused"], 1);
+  assert.equal(summary.actionsTaken, 0);
+  assert.deepEqual(deps.modes, [], "the reuse post is deduped, not sent a second time for this head");
+
+  const disposed = readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.acted, false);
+  assert.match(String(disposed?.stand_down_reason), /already DELIVERED/);
+  assert.match(String(disposed?.stand_down_reason), /the reuse post is deduped/);
+});
+
+test("W1-T3798 (dedup): a discriminate-only verdict already REFUSED for this current head is not re-run, and is never conflated with delivered", async () => {
+  const deps = modeDeps();
+  deps.ledgerPath = writeLedger([
+    { step: "review.post_refused", task_id: TASK, head_sha: CURRENT_HEAD, reason: "no acceptance criteria" },
+  ]).path;
+  const pr = orphanedPr({ ...unchangedInputs(), currentMergeBaseSha: NEW_MERGE_BASE });
+  const summary = await runSweep([pr], deps);
+
+  assert.equal(summary.byDisposition["discriminate-only"], 1);
+  assert.equal(summary.actionsTaken, 0);
+  assert.deepEqual(deps.modes, []);
+
+  const disposed = readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.acted, false);
+  assert.match(String(disposed?.stand_down_reason), /already REFUSED/);
+  assert.doesNotMatch(String(disposed?.stand_down_reason), /DELIVERED/);
 });
 
 // ── acceptance 2: own diff same, merge base moved → discrimination only ───────────────────────
