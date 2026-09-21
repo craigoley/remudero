@@ -236,8 +236,8 @@
   },
   "src/lib/operator-agent.ts": {
     "legacy": 1,
-    "dateNow": 10,
-    "newDate": 23
+    "dateNow": 18,
+    "newDate": 30
   },
   "src/lib/operator-merge-hold.ts": {
     "legacy": 1,

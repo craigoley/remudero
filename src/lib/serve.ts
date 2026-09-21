@@ -3589,6 +3589,10 @@ function assembleServeRoutes(
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
+  // Personal context governance is mounted with the existing operator-agent routes. Its context
+  // inventory is metadata-only; raw private content is consumed through the ledger-backed
+  // preflight reader, never serialized by the browser-facing console route.
+  const operatorAgentRoutes = buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath });
   const rawRoutes = [
     projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen)),
     buildRepoDashboardRoute({ root: deps.questionsRoot }),
@@ -3655,7 +3659,7 @@ function assembleServeRoutes(
     // Operator-agent proposals, settings, and experiment-v1 observations all share the daemon
     // ledger. The experiment routes are mounted through this same production assembly so the
     // console cannot approve a change without a durable baseline and rollback path.
-    ...buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath }),
+    ...operatorAgentRoutes,
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
