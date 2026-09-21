@@ -10,7 +10,7 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { ghExec, ghJsonAsync } from "./lib/github-transport.js";
+import { ghExec, ghJsonAsync, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -43000,7 +43000,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       }
       /* c8 ignore next 2 -- dispatch glue enters GitHub-backed reviewCommand; reviewCommand has injectable tests */
       await loadHeavyVerb("review");
-      return await reviewCommand(arg, rest.slice(1));
+      return await withGhTransportFloor(() => reviewCommand(arg, rest.slice(1)));
     },
   ],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],
@@ -43087,7 +43087,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     "daemon",
     async (rest) => {
       await loadHeavyVerb("daemon");
-      return await daemonCommand(rest);
+      return await withGhTransportFloor(() => daemonCommand(rest));
     },
   ],
   ["daemon-plist", async (rest) => await daemonPlistCommand(rest)],
