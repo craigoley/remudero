@@ -6135,6 +6135,7 @@ export function openPrsBehindMain(
       behindBy > 0 &&
       pr.autoMergeArmed === true &&
       pr.mergeableState === "blocked" &&
+      pr.mergeable === true &&
       pr.checksState === "green" &&
       pr.reviewState === "success" &&
       pr.isDraft !== true;

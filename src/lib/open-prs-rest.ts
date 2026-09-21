@@ -639,6 +639,45 @@ export function mergeStateFromRest(row: { mergeable_state?: string | null; merge
   return "clean";
 }
 
+/** Raw merge facts retained alongside the normalized conflict state. The exact GitHub
+ * `mergeable_state` label is needed by freshness policy: the normalized state intentionally maps
+ * `blocked` to `clean`, which would otherwise erase the stale-blocked discriminator. */
+export interface MergeStateObservation {
+  state?: MergeState;
+  mergeable?: boolean;
+  mergeableState?: string;
+}
+
+/** Bounded, best-effort single-PR hydration that preserves both raw fields and the normalized
+ * conflict state. Unknown or failed reads are omitted, never guessed. */
+export function hydrateMergeStateObservations(
+  owner: string,
+  repo: string,
+  prNumbers: readonly number[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): Map<number, MergeStateObservation> {
+  const out = new Map<number, MergeStateObservation>();
+  for (const n of prNumbers.slice(0, cap)) {
+    try {
+      const row = fetch(singlePrRestArgs(owner, repo, n)) as { mergeable_state?: string | null; mergeable?: boolean | null };
+      const state = mergeStateFromRest(row);
+      const mergeableState = typeof row.mergeable_state === "string" ? row.mergeable_state.toLowerCase() : undefined;
+      const mergeable = typeof row.mergeable === "boolean" ? row.mergeable : undefined;
+      if (state !== undefined || mergeableState !== undefined || mergeable !== undefined) {
+        out.set(n, {
+          ...(state === undefined ? {} : { state }),
+          ...(mergeableState === undefined ? {} : { mergeableState }),
+          ...(mergeable === undefined ? {} : { mergeable }),
+        });
+      }
+    } catch {
+      /* best-effort: this PR keeps the pre-existing undefined, the pass continues */
+    }
+  }
+  return out;
+}
+
 /** Fetch `mergeable_state` for up to {@link MERGE_STATE_HYDRATION_CAP} PRs, as a map from PR number to
  *  the narrowed state; absent means not known. Invariant: best-effort per PR — a throw (rate limit, a
  *  404 on a PR closed mid-pass, a network blip) skips that PR, because a degraded disposition beats a
@@ -651,14 +690,8 @@ export function hydrateMergeStates(
   cap: number = MERGE_STATE_HYDRATION_CAP,
 ): Map<number, MergeState> {
   const out = new Map<number, MergeState>();
-  for (const n of prNumbers.slice(0, cap)) {
-    try {
-      const row = fetch(singlePrRestArgs(owner, repo, n)) as { mergeable_state?: string | null; mergeable?: boolean | null };
-      const state = mergeStateFromRest(row);
-      if (state !== undefined) out.set(n, state);
-    } catch {
-      /* best-effort: this PR keeps the pre-existing undefined, the pass continues */
-    }
+  for (const [n, observation] of hydrateMergeStateObservations(owner, repo, prNumbers, fetch, cap)) {
+    if (observation.state !== undefined) out.set(n, observation.state);
   }
   return out;
 }

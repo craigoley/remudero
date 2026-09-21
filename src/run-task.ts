@@ -443,6 +443,7 @@ import {
   hydratePlanFilingFiles,
   hydrateSupersessionVerdicts,
   hydrateWorkflowRuns,
+  hydrateMergeStateObservations,
   hydrateMergeStates,
   liveStateFromRest,
   mapRestPr,
@@ -32423,11 +32424,16 @@ export function buildOpenPrViews(
   // 5,735 sweeps — and hard-capped, so the pathological case cannot run away. Best-effort by
   // construction: an exhausted budget yields an empty map and every PR keeps the `undefined` it
   // has carried since the REST migration, i.e. exactly today's behaviour.
-  const mergeStates = hydrateMergeStates(
+  const mergeStateObservations = hydrateMergeStateObservations(
     owner,
     repo,
     raw.map((p) => p.number),
     fetch,
+  );
+  const mergeStates = new Map(
+    [...mergeStateObservations]
+      .filter(([, observation]) => observation.state !== undefined)
+      .map(([number, observation]) => [number, observation.state!] as const),
   );
 
   // CONFLICT EVIDENCE (W1-T984 — the `mergeConflict` half of the row directly above's own
@@ -32767,6 +32773,10 @@ export function buildOpenPrViews(
       // value every PR has always carried — see lib/sweep.ts's DISPOSITION_RULES for how the
       // policy-gated `conflicted` row and the `blocked-ambiguous` row beneath it each read this.
       mergeConflict: mergeConflicts.get(pr.number),
+      // W1-T3920: the normalized mergeState intentionally maps raw `blocked` to `clean`; retain
+      // both raw fields so the stale-blocked refresh predicate is reachable in the real gateway.
+      mergeable: mergeStateObservations.get(pr.number)?.mergeable,
+      mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
       workflowRuns: workflowRuns.get(pr.number),
       // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
       // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that
