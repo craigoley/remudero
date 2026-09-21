@@ -109,7 +109,7 @@ function extractCheckRunField(body: unknown, field: "name" | "conclusion"): stri
   return typeof value === "string" ? value : undefined;
 }
 
-export function checkRunHeadIdentity(body: unknown): string | undefined {
+function checkRunHeadIdentity(body: unknown): string | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const checkRun = (body as Record<string, unknown>).check_run;
   if (typeof checkRun !== "object" || checkRun === null) return undefined;
@@ -195,7 +195,7 @@ export interface GithubEventWakeSemanticSummary {
   aggregate_head_sha_overflow: number;
 }
 
-export const MAX_AGGREGATE_HEAD_IDENTITIES = 64;
+const MAX_AGGREGATE_HEAD_IDENTITIES = 64;
 
 function createGithubEventWakeSemanticCounts(
   aggregateCheckNames: readonly string[],

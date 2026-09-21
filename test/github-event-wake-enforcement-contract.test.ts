@@ -8,7 +8,6 @@ import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import {
-  checkRunHeadIdentity,
   createDeliveryDedupStore,
   createGitHubEventWakeHandler,
   type GithubEventWakeSemanticSummary,
@@ -113,8 +112,6 @@ test("webhook summaries preserve bounded head identity", async () => {
     log: (_step, extra) => logs.push({ extra }),
   });
   const headSha = "a".repeat(40);
-  assert.equal(checkRunHeadIdentity(JSON.parse(checkRunBody("ci-gate", headSha))), headSha);
-  assert.equal(checkRunHeadIdentity(JSON.parse(checkRunBody("ci-gate", ""))), undefined);
   await withRoute(route, async (url) => {
     for (const [id, body] of [
       ["head", checkRunBody("ci-gate", headSha)],
