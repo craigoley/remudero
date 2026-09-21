@@ -3,6 +3,11 @@ import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams 
 import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  verifyCapabilityGrant,
+  type CapabilityGrantStore,
+  type CapabilityUseRequest,
+} from "./capability-grant.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
@@ -2625,6 +2630,29 @@ export interface OpenWeightSpawnArgs {
    *  `now` because the daily allowance keys on a UTC calendar day, which is read off the ISO
    *  instant rather than re-derived from milliseconds. */
   clock?: Pick<Clock, "now" | "iso">;
+  /**
+   * W1-T3880: when this spawn is USING a capability grant rather than a credential this lane
+   * already holds by default, the caller passes the grant store and the structured (never
+   * content-derived) use request here. Verified BEFORE `env`/the API key are even read below —
+   * "the last responsible moment" this file's own boundary can enforce. Absent for every existing
+   * caller, which is unaffected: no store, no verification, no change in behaviour.
+   */
+  capabilityGrant?: { store: CapabilityGrantStore; request: CapabilityUseRequest };
+}
+
+/**
+ * W1-T3880: thrown by {@link spawnOpenWeightWorker} when a caller-supplied `capabilityGrant` use
+ * request fails {@link verifyCapabilityGrant} — expired, revoked, replayed, wrong-audience, or an
+ * operation outside the grant's own allowlist. `kind: "usage"` follows this file's own convention
+ * for a request refused before anything is spawned (see `OpenWeightRequestTooLargeError` above),
+ * so the process boundary's exit-code lookup needs no new case.
+ */
+export class CapabilityGrantRefusedError extends RmdError {
+  readonly code: string;
+  constructor(reason: string, code: string, grantId: string) {
+    super("usage", 1, `capability grant ${grantId} refused: ${reason}`, { grantId, code });
+    this.code = code;
+  }
 }
 
 export interface OpenWeightWorkerResult {
@@ -3204,6 +3232,15 @@ export async function spawnOpenWeightWorker(
   // sends one paid request PER TURN, and each needs its own settleable row.
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${randomUUID()}`;
   try {
+    // W1-T3880: verified FIRST, before `env`/the API key below are even read — a refused grant
+    // must never reach the point where a real credential is used on its behalf. `capabilityGrant`
+    // is absent for every caller that does not opt in, so this is a no-op until one does.
+    if (args.capabilityGrant) {
+      const verification = verifyCapabilityGrant(args.capabilityGrant.store, args.capabilityGrant.request);
+      if (!verification.ok) {
+        throw new CapabilityGrantRefusedError(verification.reason, verification.code, args.capabilityGrant.request.grantId);
+      }
+    }
     const env = args.env ?? process.env;
     // Built once, before any model tool call.  The Azure key stays in `env` for the HTTPS request
     // below, but never crosses this distinct process boundary into `run_check`.
