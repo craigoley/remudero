@@ -10,6 +10,9 @@
 // PRIMARY CONTROL: this is a signal namespace, not a scheduler timeout or capacity ceiling.
 export const OPERATOR_AGENT_CAPACITY_SIGNAL = "worker-capacity" as const;
 
+/** The console-v1 consumer accepts at most this many repeated detail records per signal. */
+const MAX_OPERATOR_AGENT_DETAIL_ITEMS = 100;
+
 export type OperatorAgentCapacityRecommendation = "scale-up" | "underutilized" | "balanced";
 
 export type OperatorAgentCapacityUnavailableCause =
@@ -62,6 +65,9 @@ export interface OperatorAgentCapacityUnavailable {
 export interface OperatorAgentCapacitySignal {
   signal: typeof OPERATOR_AGENT_CAPACITY_SIGNAL;
   status: "measured" | "not-collected";
+  /** Exact counts retained when repeated measurements/unavailable rows are bounded. */
+  measurementCount: number;
+  unavailableCount: number;
   measurements: OperatorAgentCapacityMeasurement[];
   unavailable: OperatorAgentCapacityUnavailable[];
 }
@@ -182,7 +188,9 @@ export function adaptOperatorAgentCapacityRows(rows: readonly OperatorAgentCapac
   return {
     signal: OPERATOR_AGENT_CAPACITY_SIGNAL,
     status: measurements.length > 0 ? "measured" : "not-collected",
-    measurements,
-    unavailable: unavailableRows,
+    measurementCount: measurements.length,
+    unavailableCount: unavailableRows.length,
+    measurements: measurements.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
+    unavailable: unavailableRows.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
   };
 }

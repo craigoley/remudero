@@ -9,6 +9,9 @@
 
 export const OPERATOR_AGENT_DECISION_SIGNAL = "operator-decisions" as const;
 
+/** The console-v1 consumer accepts at most this many repeated detail records per signal. */
+const MAX_OPERATOR_AGENT_DETAIL_ITEMS = 100;
+
 const EXPLICIT_DECISION_STEPS = new Map<string, OperatorDecisionKind>([
   ["panel.manual_approved", "approved"],
   ["panel.proposal_accepted", "accepted"],
@@ -90,6 +93,10 @@ export interface OperatorDecisionClassSummary {
 export interface OperatorAgentDecisionSignal {
   signal: typeof OPERATOR_AGENT_DECISION_SIGNAL;
   status: "measured" | "not-collected";
+  /** Exact counts retained when repeated event/detail arrays are bounded for console-v1. */
+  explicitDecisionCount: number;
+  automaticMergeEventCount: number;
+  unmeasurableCount: number;
   explicitDecisions: OperatorDecisionEvent[];
   automaticMergeEvents: AutomaticMergeEvent[];
   classes: OperatorDecisionClassSummary[];
@@ -131,8 +138,8 @@ function classSummary(taskClass: string, events: readonly OperatorDecisionEvent[
     releasedCount: count("released"),
     approvalDenominator,
     approvalRate: approvalDenominator === 0 ? null : (approvedCount + acceptedCount) / approvalDenominator,
-    taskIds: [...new Set(forClass.map((event) => event.taskId))],
-    actorIds: [...new Set(forClass.map((event) => event.actor))],
+    taskIds: [...new Set(forClass.map((event) => event.taskId))].slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
+    actorIds: [...new Set(forClass.map((event) => event.actor))].slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
   };
 }
 
@@ -191,9 +198,12 @@ export function adaptOperatorDecisionRows(rows: readonly OperatorDecisionLedgerR
   return {
     signal: OPERATOR_AGENT_DECISION_SIGNAL,
     status: explicitDecisions.length > 0 ? "measured" : "not-collected",
-    explicitDecisions,
-    automaticMergeEvents,
+    explicitDecisionCount: explicitDecisions.length,
+    automaticMergeEventCount: automaticMergeEvents.length,
+    unmeasurableCount: unmeasurableRows.length,
+    explicitDecisions: explicitDecisions.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
+    automaticMergeEvents: automaticMergeEvents.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
     classes,
-    unmeasurable: unmeasurableRows,
+    unmeasurable: unmeasurableRows.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
   };
 }

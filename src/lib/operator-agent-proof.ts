@@ -8,6 +8,9 @@
 
 export const OPERATOR_AGENT_PROOF_SIGNAL = "proof-outcomes" as const;
 
+/** The console-v1 consumer accepts at most this many repeated detail records per signal. */
+const MAX_OPERATOR_AGENT_DETAIL_ITEMS = 100;
+
 export type OperatorAgentProofUnavailableCause = "missing-proof-exec" | "empty-proof-exec" | "unknown-proof-exec";
 
 export interface OperatorAgentProofLedgerRow {
@@ -36,6 +39,8 @@ export interface OperatorAgentProofSignal {
   denominator: number | null;
   /** null when denominator is zero, never a fabricated 0% rate. */
   passRate: number | null;
+  /** Exact count of unmeasurable rows; the detail list below is intentionally bounded. */
+  unmeasurableCount: number;
   unmeasurable: OperatorAgentProofUnmeasurable[];
   unavailableReason?: string;
 }
@@ -109,7 +114,8 @@ export function adaptOperatorAgentProofRows(rows: readonly OperatorAgentProofLed
     otherObserved,
     denominator: denominator > 0 ? denominator : null,
     passRate: denominator > 0 ? executedPass / denominator : null,
-    unmeasurable,
+    unmeasurableCount: unmeasurable.length,
+    unmeasurable: unmeasurable.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
     ...(denominator > 0 ? {} : { unavailableReason: "no executed proof pass/fail outcome is available yet" }),
   };
 }
