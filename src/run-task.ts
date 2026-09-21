@@ -38664,9 +38664,13 @@ export async function verifyHumanSweepCommand(
   });
 
   const deferred = result.deferred ?? [];
-  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.automated.length} entered self-improvement, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
-  for (const id of result.needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
-  for (const id of result.automated) console.log(`  AUTOMATE: ${id} — staged as verify-human-automate:${id} in the inbox`);
+  // Keep the reporting boundary tolerant of older/injected route seams. A missing collection
+  // means no entries, never a crash after the sweep has already written its ledger/proposals.
+  const needsOperator = result.needsOperator ?? [];
+  const automated = result.automated ?? [];
+  console.log(`verify-human-sweep: judged ${result.judged}, ${needsOperator.length} need you, ${automated.length} entered self-improvement, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
+  for (const id of needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
+  for (const id of automated) console.log(`  AUTOMATE: ${id} — staged as verify-human-automate:${id} in the inbox`);
   return 0;
 }
 
