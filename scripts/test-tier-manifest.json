@@ -500,6 +500,7 @@
     "test/codex-worker-home-cluster-declared.test.ts": 1330,
     "test/codex-worker-home-redirection.test.ts": 994,
     "test/codex-writable-resume-sandbox.test.ts": 0,
+    "test/cold-status-reads-return-within-the-client-budget.test.ts": 0,
     "test/comment-load-baseline-is-exempt.test.ts": 839,
     "test/comment-load-ratchet.test.ts": 1111,
     "test/commit-message.test.ts": 16743,
