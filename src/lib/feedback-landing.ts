@@ -1138,7 +1138,6 @@ function landContent(
   }
 }
 
-/** Land credited queued->merged rewrites through the scratch-index bridge; never dirty self-sync. */
 export function landPlanReconcileShards(
   root: string,
   inputs: readonly LandContentInput[],
