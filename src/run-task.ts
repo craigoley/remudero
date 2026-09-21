@@ -5700,6 +5700,11 @@ async function runReview(args: {
    * site and drive the Codex adapter without a live subscription call.
    */
   reviewerSpawnWorker?: typeof spawnWorker;
+  /** W1-T3960: override the advisory reviewer's quiet-stream bound. Production omits this and
+   *  uses the committed worker-abandon policy row; tests can drive the bound without reading the
+   *  install policy from the module's own checkout.
+   */
+  reviewerAbandonMs?: number;
   /** Reuses the parent run's bounded sensor so advisory review workers are visible in the same
    *  task lane instead of disappearing behind the final `review.reviewer` ledger row. */
   workerTelemetry?: WorkerStateSensor;
@@ -5933,7 +5938,7 @@ async function runReview(args: {
             // The advisory reviewer is still a real worker spawn. Give it the same
             // quiet-stream bound as every other dispatch so a dead SDK child cannot hold the
             // review-key mutex forever and leave the required status absent.
-            clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon },
+            clockBound: { boundMs: args.reviewerAbandonMs ?? loadDefaultPolicy().values.workerAbandon },
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
             // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
