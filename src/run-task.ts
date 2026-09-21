@@ -5917,6 +5917,10 @@ async function runReview(args: {
             effort: reviewerSpawnMount!.effort,
             maxTurns: reviewerSpawnMount!.maxTurns,
             maxBudgetUsd: args.budgetUsd,
+            // W1-T3969: the advisory reviewer is still a real worker spawn. Give it the same
+            // quiet-stream bound as every other dispatch so a dead SDK child cannot hold the
+            // review-key mutex forever and leave the required status absent.
+            clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon },
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
             // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
@@ -5968,6 +5972,15 @@ async function runReview(args: {
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
       reviewerSpawnFailed = true;
+      if (e instanceof WorkerAbandonedError) {
+        log("review.reviewer.abandoned", {
+          reason_class: e.reasonClass,
+          elapsed_ms: e.evidence.elapsedMs,
+          bound_ms: e.evidence.boundMs,
+          last_state: e.evidence.lastState ?? null,
+          last_state_ms: e.evidence.lastStateMs ?? null,
+        });
+      }
       if (e instanceof ReviewerSnapshotError) {
         log(`review.reviewer.${e.phase}_error`, { reason: e.reason, error: e.message });
       }
