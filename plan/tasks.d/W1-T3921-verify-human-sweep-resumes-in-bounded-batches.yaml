@@ -67,3 +67,4 @@
     the default remains unchanged, the caller chooses the batch size, and the ledger is the durable
     self-improvement loop that determines what remains. The batch is also safe for automation: a
     future cadence can keep yielding and resuming without blocking PR admission or merge checks.
+    reservation hand-off: run-W1-T3917-1789959000000 -> run-W1-T3921-1789959300000
