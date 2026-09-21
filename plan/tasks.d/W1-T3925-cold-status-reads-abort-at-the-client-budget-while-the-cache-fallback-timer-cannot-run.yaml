@@ -1,0 +1,62 @@
+- id: W1-T3925
+  title: "COLD FIRST READS OF /v1/status, /v1/recent AND /v1/daemon-health ABORT AT THE 5s CLIENT BUDGET WHILE AN IMMEDIATE RETRY RETURNS LIVE DATA — a cold status read costs ~7.5s and a same-event-loop expensive read can prevent the cache-fallback timer from ever firing, so the operator sees a hard failure instead of an honest stale answer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/status.ts, src/lib/serve.ts, test/cold-status-reads-return-within-the-client-budget.test.ts]
+  origin: "feedback#fb-1789955906700-8768c6"
+  plan_refs: ["W1-T3192", "W1-T3415", "W1-T2811"]
+  status: queued
+  attempts: 0
+  rationale: |
+    REPORTED 2026-09-21 against authenticated production. Board and Needs-you first reads abort
+    at the client's 5s budget; an immediate retry against the same server returns verified live
+    data, so the underlying work is not actually failing — it is finishing too late for the
+    client to hear about it, or not being able to hand back a fallback before the budget expires.
+    A cold status read costs roughly 7.5s. W1-T3192 already established the "bound plus honest
+    stale answer" design for the console's request path (no synchronous fs/exec on a route,
+    return-what-you-have with a stated staleness rather than an unbounded wait), but that shard's
+    own acceptance criteria measure OVERLAPPING WARM requests under client concurrency; nothing
+    in it exercises a COLD cache with no prior snapshot to fall back to, nor a case where an
+    expensive synchronous read on the SAME event loop turn prevents the cache-fallback timer
+    itself from ever being scheduled. Those are exactly the two shapes this report names: cold
+    status reads near 7.5s, and same-event-loop expensive reads blocking the fallback timer.
+  design: |
+    (i) DO NOT WIDEN THE CLIENT'S TIMEOUT. The ask is explicit: bounded reads must return within
+    the existing client budget on cold or blocked work, never by raising the budget to outlast
+    the slow path.
+    (ii) THE COLD PATH MUST HAVE ITS OWN BOUNDED ANSWER. A route with no warm snapshot yet must
+    still answer inside budget — either by racing the expensive read against a deadline and
+    returning an explicit "unavailable" / "not yet collected" status distinct from stale, or by
+    seeding a fast partial answer before the full read completes. Never silently substitute a
+    fabricated number.
+    (iii) THE FALLBACK TIMER MUST BE SCHEDULED BEFORE THE EXPENSIVE READ, NOT AFTER. If a
+    same-turn synchronous or long-running read can starve the event loop before the fallback
+    timer's callback is even registered, the timer is not a real safety net. Arm the deadline (or
+    yield the event loop) before starting the expensive work, not as an afterthought scheduled
+    behind it.
+    (iv) PRESERVE HONEST STATE. Every existing verified/stale/unavailable/unknown distinction
+    stays intact; this task adds a bounded-cold-read path, it does not blur those states into a
+    single "ok" on timeout.
+    (v) OUT OF SCOPE: re-litigating W1-T3192's warm-path census or W1-T3415's plan-object sharing;
+    this task is scoped to the cold-cache and event-loop-blocked shapes those did not measure.
+  acceptance:
+    - claim: "a cold status/recent/daemon-health read with no warm snapshot yet returns within the client's stated budget instead of hanging until the underlying read finishes"
+      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+    - claim: "a same-event-loop expensive read scheduled ahead of the cache-fallback timer does not prevent that timer from firing before the client budget expires"
+      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+    - claim: "the returned answer under a cold or blocked read states its own status (stale/unavailable) rather than presenting an unbounded wait or a silently fabricated verified value"
+      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+    - claim: "a latency measurement fixture records cold-read timing so a future regression is measurable rather than anecdotal"
+      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if a deterministic cold-cache fixture (no prior snapshot) and a
+    deterministic event-loop-blocked fixture (a synchronous read scheduled ahead of the fallback
+    timer) both already return within the client's budget on current main. Do not satisfy this by
+    raising the 5s budget, by removing the cache-fallback timer, or by warming the cache at boot
+    (already rejected for a related shape by W1-T154's own reasoning against paying warm-up cost
+    for nobody).
