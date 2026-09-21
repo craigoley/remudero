@@ -416,7 +416,7 @@ test("the claude lookup names the config path when `which` succeeds but resolves
   }
 });
 
-test("a mounts-only target renders worker settings from the daemon install root", async () => {
+test("test/config-fixture-path-parity.test.ts — a mounts-only target renders worker settings from the daemon install root", async () => {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "rmd-worker-settings-roots-"));
   const targetRoot = join(fixtureRoot, "target");
   const installRoot = join(fixtureRoot, "daemon-install");
