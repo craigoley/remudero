@@ -13,10 +13,11 @@ import {
   landCiLearningShards,
   landingIdentity,
 } from "../src/lib/feedback-landing.js";
-import { buildCiLearningCadenceRunner, ciLearningCommand } from "../src/run-task.js";
+import { buildCiLearningCadenceRunner, ciLearningCommand, ciLearningPlanOrigins } from "../src/run-task.js";
 import {
   ciLearningRecordVerdict,
   ciLearningShardYaml,
+  CI_LEARNING_LESSONS_FILE,
   type CiLearningShardDraft,
 } from "../src/lib/measurement-cadence.js";
 
@@ -159,6 +160,41 @@ test("W1-T3492 criterion 1: scheduled CI-learning stages outside the checkout an
     env: GIT_ENV,
   });
   assert.equal(onBranch, readFileSync(staged[0]!, "utf8"), "the landing branch receives the exact staged bytes");
+
+  const originsRoot = mkdtempSync(join(tmpdir(), "rmd-ci-learning-origins-"));
+  mkdirSync(join(originsRoot, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(originsRoot, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(
+    join(originsRoot, "plan", "tasks.d", "W1-T9001-existing-ci-learning.yaml"),
+    [
+      "- id: W1-T9001",
+      "  title: existing CI learning",
+      "  repo: remudero",
+      "  depends_on: []",
+      "  type: implement",
+      "  verify: human",
+      "  risk: low",
+      "  status: queued",
+      "  attempts: 0",
+      "  origin: ci-learning:4321:ci-gate",
+      `  files: [${CI_LEARNING_LESSONS_FILE}]`,
+      "  acceptance:",
+      '    - claim: "the lesson is recorded"',
+      '      proof: "grep: ci-learning:4321:ci-gate in learnings/ci.yaml"',
+      "",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    ciLearningPlanOrigins(originsRoot),
+    ["ci-learning:4321:ci-gate"],
+    "the idempotency query must see plan/tasks.d shards, not only plan/tasks.yaml",
+  );
+  assert.match(
+    ciLearningShardYaml(draft(), "W1-T9002"),
+    /learnings\/ci\.yaml/,
+    "new filings must point at the existing canonical CI learning shard",
+  );
 });
 
 test("W1-T3492 criterion 2: pending CI-learning bytes survive transport failure, retry, and acknowledge only after merge", () => {

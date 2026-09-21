@@ -19512,9 +19512,11 @@ export function ciLearningCommand(
   return 0;
 }
 
-/** Every `origin:` the plan already holds — the idempotency surface the landing bridge
- *  consults. An unreadable plan yields `[]` and the linter-validated staging write still cannot duplicate a
- *  record within one firing; it is a degraded read, and the verb says so rather than crashing. */
+/** Every `origin:` the whole plan already holds — the idempotency surface the landing bridge
+ *  consults. loadPlan merges plan/tasks.yaml with plan/tasks.d/*.yaml, so the shard-backed plan
+ *  is the source of truth rather than the monolith alone. An unreadable plan yields `[]` and
+ *  the linter-validated staging write still cannot duplicate a record within one firing; it is a
+ *  degraded read, and the verb says so rather than crashing. */
 export function ciLearningPlanOrigins(root: string): string[] {
   try {
     return loadPlan(join(root, "plan", "tasks.yaml"))
