@@ -48,6 +48,18 @@ test("W1-T3880 (5): a successful use produces an attributable, 'used' receipt na
   assert.equal(Number.isNaN(Date.parse(receipt.requestedAt)), false, "requestedAt must be a real instant");
 });
 
+test("W1-T3880 (5): a caller-supplied clock provides the deterministic receipt timestamp", () => {
+  const { store, grant } = issue();
+  const { receipt } = useCapabilityGrant(
+    store,
+    { grantId: grant.id, operation: "repo.read", target: grant.targetIdentity, audience: grant.audience, nonce: "clocked-1" },
+    { clock: { iso: () => "2030-01-02T03:04:05.000Z" } },
+  );
+
+  assert.equal(receipt.outcome, "used");
+  assert.equal(receipt.requestedAt, "2030-01-02T03:04:05.000Z");
+});
+
 test("W1-T3880 (5): a refused use produces an attributable, 'refused' receipt naming a machine-readable code and a reason", () => {
   const { store, grant } = issue();
   const { receipt } = useCapabilityGrant(store, {

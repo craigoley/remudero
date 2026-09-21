@@ -73,6 +73,7 @@ for (const [label, patch] of Object.entries({
   "blank operation entry": { operations: [""] },
   "missing audience": { audience: "" },
   "invalid expiresAt": { expiresAt: "not-a-date" },
+  "invalid approval timestamp": { approval: { approvedBy: "operator:alice", approvedAt: "not-a-date" } },
   "missing revocationLink": { revocationLink: "" },
   "useLimit zero": { useLimit: 0 },
   "useLimit fractional": { useLimit: 1.5 },
