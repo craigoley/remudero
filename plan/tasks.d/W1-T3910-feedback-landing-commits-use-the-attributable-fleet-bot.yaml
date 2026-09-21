@@ -66,7 +66,7 @@
     behavior; and direct pushes to main. Only the two declared files may change.
   acceptance:
     - claim: "the real bare-origin regression generates a feedback-landing commit whose author and committer are both exactly remudero-fleet[bot] with 318611788+remudero-fleet[bot]@users.noreply.github.com despite a different ambient identity; neither metadata pair retains rmd-feedback-bridge, scratch-tree construction stays deterministic, the caller worktree, index, local HEAD, and Git configuration stay unchanged, and only the gated landing branch is pushed rather than main"
-      proof: 'grep: const LANDING_AUTHOR_EMAIL = "318611788\[[+]\]remudero-fleet\[bot\]@users\.noreply\.github\.com"; in src/lib/feedback-landing.ts'
+      proof: 'grep: const LANDING_AUTHOR_EMAIL = "318611788[+]remudero-fleet\[bot\]@users\.noreply\.github\.com"; in src/lib/feedback-landing.ts'
     - claim: "the recognized fleet-bot email is fixed at the landing commit-tree boundary rather than inherited from ambient or personal Git configuration"
       proof: 'grep: 318611788+remudero-fleet\[bot\]@users\.noreply\.github\.com in src/lib/feedback-landing.ts'
   falsifier: |
