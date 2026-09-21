@@ -80,6 +80,18 @@ test("a workflow-manifest dependabot head is admitted — the github_actions eco
   assert.equal(result.ok, true);
 });
 
+test("deploy dependency declarations are admitted — image package and Dockerfile bumps build no task", () => {
+  for (const changedPaths of [["deploy/package.json", "deploy/package-lock.json"], ["deploy/Dockerfile"]]) {
+    const result = evaluateHeadIdentityGate({
+      headCommitMessage: `${BUMP_SUBJECT}\n`,
+      headRef: "dependabot/docker/deploy/node-26.8.2-bookworm-slim",
+      changedPaths,
+    });
+    assert.equal(result.ok, true, `${changedPaths.join(", ")} is a dependency declaration-only diff`);
+    assert.match(result.message, /dependency-bump head/);
+  }
+});
+
 test("chore(deps-dev) is admitted alongside chore(deps)", () => {
   assert.equal(
     isDependencyBumpHead({

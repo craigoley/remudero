@@ -10,6 +10,7 @@ import {
   decideDepReview,
   depReviewMigrationSubmissionKey,
   isDependabotAuthor,
+  isDependencyDeclarationPath,
   isManifestPath,
   majorMigrationBumps,
   offendingFiles,
@@ -146,6 +147,29 @@ test("isManifestPath / changedFilesInDiff / offendingFiles: PR #80/#81 diffs are
 test("isManifestPath: a grouped actions bump touching a workflow file is confined; arbitrary source is not", () => {
   assert.ok(isManifestPath(".github/workflows/ci.yml"));
   assert.equal(isManifestPath("src/lib/dep-review.ts"), false);
+});
+
+test("offendingFiles reads the real workspace declaration and deploy dependency surfaces", () => {
+  assert.equal(isDependencyDeclarationPath("apps/dashboard/package.json"), true);
+  assert.equal(isDependencyDeclarationPath("deploy/package.json"), true);
+  assert.equal(isDependencyDeclarationPath("deploy/package-lock.json"), true);
+  assert.equal(isDependencyDeclarationPath("deploy/Dockerfile"), true);
+  const diff = [
+    "diff --git a/apps/dashboard/package.json b/apps/dashboard/package.json",
+    "--- a/apps/dashboard/package.json",
+    "+++ b/apps/dashboard/package.json",
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+    "diff --git a/deploy/Dockerfile b/deploy/Dockerfile",
+    "--- a/deploy/Dockerfile",
+    "+++ b/deploy/Dockerfile",
+    "@@ -1 +1 @@",
+    "-FROM node:22",
+    "+FROM node:26",
+    "",
+  ].join("\\n");
+  assert.deepEqual(offendingFiles(diff), []);
 });
 
 // ── Regressions found in review (W1-T54): a DELETED or purely-RENAMED source

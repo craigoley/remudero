@@ -27,14 +27,17 @@
 // branch would be a lie about its origin — it can satisfy none of the three forms above, for any
 // bump, on any schedule, which made every dependabot pull request structurally unmergeable. The
 // exemption therefore requires ALL THREE of: a `dependabot/` head ref, a `chore(deps)`/
-// `chore(deps-dev)` subject, and a diff in which EVERY changed path is a dependency manifest.
+// `chore(deps-dev)` subject, and a diff in which EVERY changed path is a dependency declaration.
+// Most declarations are manifests; the deploy image's package manifests and Dockerfile are the
+// remaining declarations and are kept explicit below because `deploy/` is not an npm workspace
+// and the Dockerfile is intentionally not a manifest.
 //
 // THE PATH CONSTRAINT IS THE POINT AND MUST NOT BE DROPPED. Branch name and subject are both
 // forgeable by any pusher, so name-only matching would turn this gate into a hole: a source change
 // on a `dependabot/`-prefixed branch would merge unattributed — precisely the credit-surface
-// incident W1-T1004's comment warns against repeating. Requiring a manifest-only diff makes the
+// incident W1-T1004's comment warns against repeating. Requiring a declaration-only diff makes the
 // exemption self-limiting: a head that touches src/ is refused however it is named. An UNREADABLE
-// diff is not a manifest-only diff, so it refuses too — the exemption fails closed.
+// diff is not a declaration-only diff, so it refuses too — the exemption fails closed.
 //
 // A FIFTH ADMITTED FORM IS KEYED ON THE DIFF, NOT THE SUBJECT (W1-T3706). The first three forms
 // above enumerate a FORGEABLE, FREE-FORM subject spelling one incident at a time (plan filings,
@@ -70,7 +73,7 @@ import { extractTaskTrailerId } from "../src/lib/review.ts";
 // keep its own BASENAME matcher, which admitted test/fixtures/onboard/repo/package.json while
 // dep-review's ROOT-ANCHORED list refused apps/dashboard/package.json -- two sources of truth
 // for one concept, disagreeing in opposite directions, with #5757 stuck between them.
-import { isManifestPath } from "../src/lib/dep-review.ts";
+import { isDependencyDeclarationPath as isDependencyDeclarationPathFromReview, isManifestPath } from "../src/lib/dep-review.ts";
 
 // Re-exported so a caller/test can name these shapes without a second import of src/run-task.ts.
 export { LINT_FILING_SUBJECT_RE, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, isDispatchedRunBranch, isNonCodePath };
@@ -110,6 +113,10 @@ export function isDependencyManifestPath(path, readRootManifest = () => readFile
   return isManifestPath(String(path ?? ""), readRootManifest);
 }
 
+export function isDependencyDeclarationPath(path, readRootManifest = () => readFileSync("package.json", "utf8")) {
+  return isDependencyDeclarationPathFromReview(String(path ?? ""), readRootManifest);
+}
+
 /**
  * Is this head a dependency bump with nothing else in it? ALL THREE limbs are required — see this
  * file's header for why dropping the path constraint turns the gate into a credit hole.
@@ -123,7 +130,7 @@ export function isDependencyBumpHead({ headRef, subject, changedPaths }) {
   if (!String(headRef ?? "").startsWith("dependabot/")) return false;
   if (!/^chore\(deps(?:-dev)?\)/i.test(String(subject ?? "").trim())) return false;
   if (!Array.isArray(changedPaths) || changedPaths.length === 0) return false;
-  return changedPaths.every((path) => isDependencyManifestPath(path));
+  return changedPaths.every((path) => isDependencyDeclarationPath(path));
 }
 
 /**

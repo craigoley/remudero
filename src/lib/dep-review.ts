@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { Escalation } from "./escalate.js";
 import { REVIEW_CONTEXT } from "./review.js";
 
@@ -320,6 +321,24 @@ export function isManifestPath(path: string, readRootManifest?: () => string): b
   return dirIsDeclaredWorkspace(path.slice(0, slash), globs);
 }
 
+/** Dependency declarations outside the npm-workspace manifest predicate. The deploy image is a
+ * separately packaged surface: Dependabot edits its package manifests directly, and a Node image
+ * bump edits the Dockerfile's `FROM` declaration. Keep these three paths explicit rather than
+ * widening workspace matching (which would admit fixtures). */
+const DEPLOY_DEPENDENCY_DECLARATIONS = new Set([
+  "deploy/package.json",
+  "deploy/package-lock.json",
+  "deploy/Dockerfile",
+]);
+
+/** Is `path` safe for a dependency-only PR, using the repository's real root workspace declaration? */
+export function isDependencyDeclarationPath(
+  path: string,
+  readRootManifest: () => string = () => readFileSync("package.json", "utf8"),
+): boolean {
+  return DEPLOY_DEPENDENCY_DECLARATIONS.has(path) || isManifestPath(path, readRootManifest);
+}
+
 /**
  * Changed file paths out of a unified diff, deduped. A plain modification shows
  * up as a `+++ b/<path>` header; a DELETION shows `+++ /dev/null` with the real
@@ -337,8 +356,11 @@ export function changedFilesInDiff(diff: string): string[] {
 }
 
 /** Changed files that fall OUTSIDE the manifest/lockfile allowlist. `[]` ⇒ confined. */
-export function offendingFiles(diff: string): string[] {
-  return changedFilesInDiff(diff).filter((f) => !isManifestPath(f));
+export function offendingFiles(
+  diff: string,
+  readRootManifest: () => string = () => readFileSync("package.json", "utf8"),
+): string[] {
+  return changedFilesInDiff(diff).filter((f) => !isDependencyDeclarationPath(f, readRootManifest));
 }
 
 // ── Required-check gate ──────────────────────────────────────────────────
