@@ -158,6 +158,19 @@ test("W1-T3962 fresh reviewer dependency link control: preparation happens after
   assert.ok(events.every((event) => !event.includes("install")), "a fresh reviewer tree must link dependencies, never install them");
 });
 
+test("W1-T3962 fresh reviewer preparation refusal never spawns an incomplete tree", async () => {
+  let spawns = 0;
+  const { runner } = runnerWith({
+    prepareWorktree: () => false,
+    spawn: async () => {
+      spawns += 1;
+      return 0;
+    },
+  });
+  assert.equal(await runner("5883", [], { originMainSha: "bbbbbbbbbbbb" }), undefined);
+  assert.equal(spawns, 0, "a reviewer with no proven dependency link must not run");
+});
+
 test("W1-T3962 fresh reviewer unproven tree control: mismatched, dirty, missing, or unreadable registered trees never add or spawn", async () => {
   for (const reason of ["mismatched", "dirty", "missing", "unreadable"]) {
     let adds = 0;
