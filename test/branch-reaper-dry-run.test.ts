@@ -16,11 +16,12 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planBranchReap, type BranchFacts } from "../src/lib/status.js";
 import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const f = (name: string, over: Partial<BranchFacts> = {}): BranchFacts => ({
   name,
@@ -228,4 +229,96 @@ test("the dry run LEDGERS its answer, so a report nobody read is still on disk",
   assert.equal(row.deletable, 1, "and carry the counts, not just the fact that it ran");
   assert.equal(row.guarded, 1);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("slug-task enrichment reports an unreadable config when it cannot resolve the credit ledger", () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-config-unreadable-`));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), "not-json\n");
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  const errors: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+  const exec = (cmd: string, args: string[]): string => {
+    if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/w1t1060-instrument-declare\n";
+    if (args[0] === "merge-base") return "";
+    if (args[0] === "rev-parse") return "b2b2b2\n";
+    if (args[0] === "grep" && args.includes("-o")) {
+      return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
+    }
+    if (args[0] === "grep") throw new Error("exit 1: no source match");
+    if (cmd === "gh") return "[]";
+    return "";
+  };
+  try {
+    const code = reapBranchesCommand([], {
+      exec,
+      loadPlan: () => ({ tasks: [{ id: "W1-T1060" }] }) as never,
+    });
+    assert.equal(code, 0, "an enrichment read failure is diagnostic and cannot change the reaper result");
+  } finally {
+    console.error = realError;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+  assert.match(errors.join("\n"), /slug-task enrichment degraded: ledger path unavailable/);
+});
+
+test("slug-task enrichment reports a plan read failure and keeps scanning", () => {
+  const errors: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+  const exec = (cmd: string, args: string[]): string => {
+    if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/held\n";
+    if (args[0] === "merge-base") throw new Error("not an ancestor");
+    if (args[0] === "rev-parse") return "b2b2b2\n";
+    if (args[0] === "grep" && args.includes("-o")) {
+      return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
+    }
+    if (args[0] === "grep") throw new Error("exit 1: no source match");
+    if (cmd === "gh") return "[]";
+    return "";
+  };
+  try {
+    const code = reapBranchesCommand([], {
+      exec,
+      loadPlan: () => {
+        throw new Error("plan unavailable");
+      },
+    });
+    assert.equal(code, 0, "a plan enrichment read failure is diagnostic and cannot abort the scan");
+  } finally {
+    console.error = realError;
+  }
+  assert.match(errors.join("\n"), /slug-task enrichment degraded: plan read failed/);
+  assert.match(errors.join("\n"), /plan unavailable/);
+});
+
+test("a failed prune push is reported with every branch still on origin", () => {
+  const errors: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+  const exec = (cmd: string, args: string[]): string => {
+    if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/finished\n";
+    if (args[0] === "merge-base") return "";
+    if (args[0] === "rev-parse") return "b2b2b2\n";
+    if (args[0] === "grep" && args.includes("-o")) {
+      return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
+    }
+    if (args[0] === "grep") throw new Error("exit 1: no source match");
+    if (cmd === "gh") return "[]";
+    if (args[0] === "push") throw new Error("remote rejected");
+    return "";
+  };
+  try {
+    const code = reapBranchesCommand(["--prune"], { exec });
+    assert.equal(code, 1, "a failed delete must make the prune non-zero");
+  } finally {
+    console.error = realError;
+  }
+  assert.match(errors.join("\n"), /push failed for 1 branch\(es\), all still on origin/);
+  assert.match(errors.join("\n"), /finished/);
+  assert.match(errors.join("\n"), /remote rejected/);
 });

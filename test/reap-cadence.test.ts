@@ -1,169 +1,146 @@
 /**
- * W1-T448 — DECIDING `rmd reap-branches`'S CADENCE.
- *
- * W1-T447 shipped the dry-run classifier as a VERB and deliberately deferred the question of
- * WHEN it runs. This task answers that question: per-pass wiring into `rmd sweep` was costed
- * (design clause (i), candidate (a)) and rejected — one reap issues ~8 `gh api` `state=all`
- * pages and costs several seconds of wall time, while the daemon polls the sweep roughly every
- * `DEFAULT_POLL_INTERVAL_MS` (60s, src/lib/daemon.ts), so per-pass wiring would add on the order
- * of 480 REST requests/hour for an answer that only moves when a branch is created or merged.
- * The decision is candidate (c): `rmd reap-branches` stays a manual verb, never wired into
- * `rmd sweep`. That is explicitly a permitted outcome (design: "a task whose honest outcome is
- * `the existing verb is correct` is a real outcome").
- *
- * Three tests below, one per acceptance claim:
- *   1. the cadence decision is documented with the measured number that decided it (not merely
- *      asserted), and a falsifier proves the check can actually go RED.
- *   2. because the decision is "never wired in", a failing reap structurally CANNOT abort a
- *      sweep pass — proven by showing `sweepCommand` never calls `reapBranchesCommand`, and that
- *      the two are dispatched as separate, mutually exclusive CLI verbs (separate processes),
- *      with a falsifier proving the structural check would catch it if that ever changed.
- *   3. the reaper still deletes nothing, exercised across several back-to-back invocations to
- *      stand in for "whatever the cadence" an operator or cron chooses to run it at.
+ * Automatic branch reaping: the expensive classifier is level-triggered, while the remote branch
+ * set is checked cheaply on every full sweep. The light in-flight pass never reaches the delete.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
-import { DECLARED_BRANCH_GUARDS, HANDLERS, reapBranchesCommand } from "../src/run-task.js";
+import { join } from "node:path";
+import {
+  AUTOMATIC_BRANCH_REAP_INTERVAL_MS,
+  decideAutomaticBranchReap,
+  type AutomaticBranchReapState,
+} from "../src/lib/branch-reaper.js";
+import { runAutomaticBranchReapRung } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
 
-// ── CLAIM 1: the chosen cadence is stated with the measured number that decided it ────────────
+test("automatic branch cadence: first pass fires, an unchanged set is throttled, a changed set fires, and the time bound re-arms it", () => {
+  const state: AutomaticBranchReapState = {};
+  const first = decideAutomaticBranchReap(state, ["main", "old"], 1000);
+  assert.deepEqual(first, { fire: true, reason: "first-pass", branchFingerprint: "main\u0000old" });
+  state.lastRunAtMs = 1000;
+  state.lastBranchFingerprint = first.branchFingerprint;
 
-/**
- * Checks that a prose blob states the W1-T448 cadence decision (manual verb, not a sweep rung)
- * AND backs it with the actual measured numbers — a request cost, a poll-cadence constant name,
- * and a rate-limit reading — rather than a bare assertion like "this is fine, trust us".
- */
-export function checkCadenceDecisionIsMeasured(text: string): { ok: boolean; missing: string[] } {
-  const requirements: Array<[string, RegExp]> = [
-    ["states the decision (manual verb, not a sweep rung)", /manual verb,\s+not a sweep\s+rung/i],
-    ["names the per-reap request cost", /gh api.{0,20}requests/is],
-    ["cites the poll-cadence constant by name", /DEFAULT_POLL_INTERVAL_MS/],
-    ["cites a live rate-limit reading (n/5,000 shape)", /\d,\d{3}\/5,000/],
-    ["carries a measurement timestamp", /2026-08-12T\d{2}:\d{2}Z/],
-    ["warns the numbers must be re-measured, not quoted forward", /re-measure/i],
-  ];
-  const missing = requirements.filter(([, re]) => !re.test(text)).map(([label]) => label);
-  return { ok: missing.length === 0, missing };
-}
-
-test("reap-cadence: docs/operator-guide.md states the W1-T448 decision with the measured numbers that decided it", () => {
-  const guide = readFileSync(join(REPO_ROOT, "docs", "operator-guide.md"), "utf8");
-  const result = checkCadenceDecisionIsMeasured(guide);
-  assert.ok(result.ok, `operator-guide.md is missing: ${result.missing.join(", ")}`);
-});
-
-test("reap-cadence falsifier: prose that only ASSERTS the decision (no numbers) turns the check RED", () => {
-  const assertedOnly = "`rmd reap-branches` runs on no cadence — it is a manual verb, not a sweep rung. Trust us.";
-  const result = checkCadenceDecisionIsMeasured(assertedOnly);
-  assert.equal(result.ok, false);
-  assert.ok(result.missing.length > 0, "an unmeasured assertion must name what evidence is absent");
-});
-
-test("reap-cadence: the cited poll-cadence constant actually exists and matches the number quoted in the docs", () => {
-  const daemonSrc = readFileSync(join(REPO_ROOT, "src", "lib", "daemon.ts"), "utf8");
-  assert.match(
-    daemonSrc,
-    /export const DEFAULT_POLL_INTERVAL_MS = 60_000;/,
-    "the constant the docs cite must exist with the value the docs quote (60s) — a stale citation is worse than none",
+  assert.equal(decideAutomaticBranchReap(state, ["old", "main"], 1001).fire, false);
+  assert.equal(decideAutomaticBranchReap(state, ["main", "new"], 1001).reason, "branch-set-changed");
+  assert.equal(
+    decideAutomaticBranchReap(state, ["main", "old"], 1000 + AUTOMATIC_BRANCH_REAP_INTERVAL_MS).reason,
+    "interval-elapsed",
   );
 });
 
-// ── CLAIM 2: a reap that fails does not abort the sweep pass it runs inside ───────────────────
-
-/**
- * A reap can only abort a sweep pass if the sweep ever calls it INSIDE the pass. Extracts
- * `sweepCommand`'s own function body (up to the next top-level export) and reports whether it
- * references `reapBranchesCommand` at all.
- */
-export function checkReapNeverRunsInsideSweep(src: string): { ok: boolean; reason?: string } {
-  const start = src.indexOf("export async function sweepCommand(");
-  if (start < 0) return { ok: false, reason: "sweepCommand not found in source" };
-  const end = src.indexOf("export function buildEscalationCloser(", start);
-  if (end < 0) return { ok: false, reason: "could not bound sweepCommand's body (next export not found)" };
-  const body = src.slice(start, end);
-  if (body.includes("reapBranchesCommand")) {
-    return { ok: false, reason: "sweepCommand calls reapBranchesCommand — a reap failure could now abort a sweep pass" };
-  }
-  return { ok: true };
-}
-
-test("reap-cadence: sweepCommand never calls reapBranchesCommand — a reap cannot run, let alone fail, inside a sweep pass", () => {
-  const result = checkReapNeverRunsInsideSweep(runTaskSrc);
-  assert.ok(result.ok, result.reason);
+test("automatic branch cadence: the pure helper exposes an empty fingerprint, while the production rung owns the refusal", () => {
+  const state: AutomaticBranchReapState = {};
+  const decision = decideAutomaticBranchReap(state, [], 1000);
+  assert.equal(decision.fire, true, "the pure decision does not invent an I/O refusal");
+  assert.equal(decision.branchFingerprint, "");
 });
 
-test("reap-cadence falsifier: a sweepCommand body that DOES call reapBranchesCommand turns the check RED", () => {
-  const wired =
-    "export async function sweepCommand(rest) {\n  reapBranchesCommand([]);\n}\n" +
-    "export function buildEscalationCloser(x) {}\n";
-  const result = checkReapNeverRunsInsideSweep(wired);
-  assert.equal(result.ok, false);
-});
-
-test("reap-cadence: `reap-branches` and `sweep` are dispatched as separate, mutually exclusive CLI verbs (independent processes)", () => {
-  // W1-T2893: main() no longer picks a verb's body via its own `if (cmd === "...")` block — it
-  // resolves ONE key against src/cli/registry.ts's HANDLERS map (dispatchCommand) and invokes
-  // exactly that entry's handler. Two distinct verbs therefore structurally CANNOT share a call
-  // stack: a Map lookup by exact key returns at most one value, so dispatching "reap-branches"
-  // can never also reach `sweep`'s handler (or vice versa) in the same invocation — the same
-  // guarantee the old separate-`if`-blocks-each-ending-in-`process.exit` shape gave, now enforced
-  // by the dispatch table's own shape rather than by two independent `if` statements happening to
-  // agree.
-  assert.ok(HANDLERS.has("reap-branches"), "reap-branches must have its own HANDLERS entry");
-  assert.ok(HANDLERS.has("sweep"), "sweep must have its own HANDLERS entry");
-  assert.notEqual(
-    HANDLERS.get("reap-branches"),
-    HANDLERS.get("sweep"),
-    "reap-branches and sweep must resolve to DIFFERENT handler functions — a shared handler would let one silently run the other's body",
-  );
-});
-
-// ── CLAIM 3: the reaper still deletes nothing, whatever the cadence it is run at ──────────────
-
-test("reap-cadence: no destructive call appears across several back-to-back invocations, standing in for any operator/cron cadence", () => {
+test("automatic branch cadence: an empty remote listing is refused before the classifier or deleter", () => {
   const calls: string[][] = [];
-  const exec = (cmd: string, args: string[]): string => {
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const state: AutomaticBranchReapState = {};
+  runAutomaticBranchReapRung(
+    "other-owner",
+    "target-repo",
+    { root: REPO_ROOT, claudeBin: "/bin/true" } as Config,
+    join(REPO_ROOT, "state", "test-ledger.ndjson"),
+    "SWEEP-EMPTY",
+    (step, extra = {}) => logs.push([step, extra]),
+    state,
+    { root: REPO_ROOT, exec: fakeExec(() => [], calls), clock: { now: () => 1000 } },
+  );
+  assert.deepEqual(calls.filter((call) => call.includes("--delete")), []);
+  assert.equal(state.lastRunAtMs, undefined);
+  assert.deepEqual(logs, [["branch_reap.sweep.failed", { outcome: "unreadable", reason: "remote branch listing was empty" }]]);
+});
+
+function fakeExec(names: () => string[], calls: string[][]): (cmd: string, args: string[]) => string {
+  return (cmd, args) => {
     calls.push([cmd, ...args]);
-    if (args[0] === "ls-remote") return "abc123\trefs/heads/main\ndef456\trefs/heads/stale-one\n";
-    if (args[0] === "merge-base") return ""; // ancestor: succeeds
-    if (args[0] === "rev-parse") return "def4567890\n";
-    // The reverse-drift citation scan (W1-T2226) uses `-o`; answer it as "every declared name is
-    // cited outside the declaration block" so this test's synthetic "nothing is named in source"
-    // world stays about the cadence/destructive-call claim, not reverse drift.
-    if (args[0] === "grep" && args.includes("-o")) {
-      return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
-    }
-    if (args[0] === "grep") throw new Error("exit 1: no match");
-    if (cmd === "gh") return "[]";
+    if (args[0] === "ls-remote") return names().map((name) => `sha-${name}\trefs/heads/${name}`).join("\n");
+    if (args[0] === "merge-base") return "";
+    if (args[0] === "log") return "1\n";
+    if (args[0] === "rev-parse") return "deadbeef\n";
+    if (args[0] === "grep" && args.includes("-o")) return "";
+    if (args[0] === "grep") throw new Error("exit 1: no source match");
+    if (cmd === "gh") return "";
     return "";
   };
+}
 
-  // Run it back to back, as an operator might on a tight manual loop, a cron firing every
-  // minute, or a cron firing once a day — the cadence never changes what the verb DOES.
-  const realLog = console.log;
-  console.log = () => {};
-  const codes: number[] = [];
-  try {
-    for (let i = 0; i < 5; i++) {
-      codes.push(reapBranchesCommand([], { exec }));
+test("automatic branch cadence: the full rung prunes through the existing manifest deleter once, then suppresses an unchanged repeat", () => {
+  const calls: string[][] = [];
+  let names = ["main", "old"];
+  const state: AutomaticBranchReapState = {};
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const log = (step: string, extra: Record<string, unknown> = {}) => logs.push([step, extra]);
+  const exec = fakeExec(() => names, calls);
+  const config = { root: REPO_ROOT, claudeBin: "/bin/true" } as Config;
+
+  runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-1", log, state, {
+    exec,
+    root: REPO_ROOT,
+    clock: { now: () => 1000 },
+  });
+  assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "the first pass reaches the existing guarded deleter");
+  assert.ok(calls.some((call) => call.some((arg) => arg.includes("repos/other-owner/target-repo"))), "the automatic rung uses the supplied target owner/repo");
+  assert.ok(logs.some(([step]) => step === "branch_reap.sweep.started"));
+  assert.ok(logs.some(([step]) => step === "branch_reap.sweep.completed"));
+
+  calls.length = 0;
+  runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-2", log, state, {
+    exec,
+    root: REPO_ROOT,
+    clock: { now: () => 1001 },
+  });
+  assert.deepEqual(calls.filter((call) => call.includes("--delete")), [], "an unchanged corpus is throttled");
+
+  names = ["main", "old", "new"];
+  runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-3", log, state, {
+    exec,
+    root: REPO_ROOT,
+    clock: { now: () => 1002 },
+  });
+  assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "a changed branch set re-arms the classifier");
+});
+
+test("automatic branch cadence contains a classifier exception and records the failed pass", () => {
+  let branchReads = 0;
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const exec = (cmd: string, args: string[]): string => {
+    if (args[0] === "ls-remote") {
+      branchReads += 1;
+      if (branchReads > 1) throw new Error("classifier unavailable");
+      return "a1\trefs/heads/main\nb2\trefs/heads/old\n";
     }
-  } finally {
-    console.log = realLog;
-  }
+    return "";
+  };
+  runAutomaticBranchReapRung(
+    "other-owner",
+    "target-repo",
+    { root: REPO_ROOT, claudeBin: "/bin/true" } as Config,
+    join(REPO_ROOT, "state", "test-ledger.ndjson"),
+    "SWEEP-EXCEPTION",
+    (step, extra = {}) => logs.push([step, extra]),
+    {},
+    { root: REPO_ROOT, exec, clock: { now: () => 1000 } },
+  );
+  assert.deepEqual(logs.at(-1), [
+    "branch_reap.sweep.failed",
+    { outcome: "exception", reason: "first-pass", error: "classifier unavailable" },
+  ]);
+});
 
-  assert.deepEqual(codes, [0, 0, 0, 0, 0]);
-  const destructive = calls.filter(
-    (c) => c.includes("--delete") || c.includes("push") || c.includes("-D") || c.includes("--force"),
-  );
-  assert.deepEqual(
-    destructive,
-    [],
-    "five back-to-back reaps issued zero destructive calls — the dry run stays dry at any cadence",
-  );
+test("automatic branch cadence: the remote write is wired to the full sweep hook, never the light hook", () => {
+  const fullStart = runTaskSrc.indexOf("export function buildSweepHook(");
+  const lightStart = runTaskSrc.indexOf("export function buildSweepLightHook(");
+  const full = runTaskSrc.slice(fullStart, lightStart);
+  const light = runTaskSrc.slice(lightStart);
+  assert.match(full, /runAutomaticBranchReapRung\(/);
+  assert.doesNotMatch(light, /runAutomaticBranchReapRung\(/);
 });

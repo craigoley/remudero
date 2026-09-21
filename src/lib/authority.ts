@@ -70,7 +70,7 @@ import type { Policy } from "./policy.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
 
 /** What decides whether a row's write fires. Closed vocabulary — design note (i). */
-export type AuthorityGateKind = "policy" | "ledger-verdict" | "operator-verb" | "always";
+export type AuthorityGateKind = "policy" | "ledger-verdict" | "operator-verb" | "sweep-rung" | "always";
 
 /**
  * The kind of external write a row performs. A superset of {@link
@@ -464,13 +464,13 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     module: "src/lib/branch-reaper.ts",
     symbol: "the prune's `git push origin --delete` chunk loop (the reap-branches executing half)",
     boundary: "git-push",
-    gate: "operator-verb",
+    gate: "sweep-rung",
     ledgerSteps: ["branch_reap.pruned"],
-    verb: "rmd reap-branches --prune",
+    verb: "rmd sweep / daemon full-sweep rung / rmd reap-branches --prune",
     note:
-      "W1-T3020: operator-invoked only — no daemon rung, sweep or cadence calls this, and a census test fails if " +
-      "that ever changes. Re-derives no classification of its own; it deletes exactly the manifest planBranchReap " +
-      "(lib/status.ts) already produced.",
+      "W1-T3020 plus the automatic branch-sweep follow-up: the CLI and daemon use the same manifest " +
+      "classifier, active-head reread and SHA-preserving chunk pruner. The full-sweep cadence is " +
+      "throttled by a branch-set fingerprint and six-hour bound; the light in-flight pass cannot reach it.",
   },
   // ── src/lib/onboard/synthesize.ts ────────────────────────────────────────────────────────
   {
