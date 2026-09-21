@@ -560,6 +560,98 @@ export interface components {
       promotionId: string;
       rollback: PromotionRollback;
     };
+    FollowUpQuietHours: {
+      timezone: string;
+      start: string;
+      end: string;
+    };
+    FollowUpNotificationPolicy: {
+      enabled: boolean;
+      quietHours?: FollowUpQuietHours;
+    };
+    /** A bounded follow-up candidate. It must carry a deadline or dependency and exactly one next action or question. */
+    FollowUpCandidate: {
+      version: "follow-up-policy-v1";
+      candidateId: string;
+      sourceEvent: string;
+      workstream: string;
+      reason: string;
+      freshness: "verified" | "stale" | "unavailable";
+      deadline?: string;
+      dependency?: string;
+      quietHours?: FollowUpQuietHours;
+      deduplicationKey: string;
+      maxAttempts: number;
+      owner: string;
+      nextAction?: string;
+      nextQuestion?: string;
+      createdAt: string;
+    };
+    FollowUpEvaluation: {
+      version: "follow-up-policy-v1";
+      candidateId: string;
+      deduplicationKey: string;
+      state: "scheduled" | "eligible" | "snoozed" | "suppressed" | "asked" | "accepted" | "rejected" | "expired" | "blocked";
+      reason: string;
+      at: string;
+      attempts: number;
+      nextAction?: string;
+      nextQuestion?: string;
+    };
+    FollowUpReceipt: {
+      delivered: boolean;
+      answered?: boolean;
+      systemActed: boolean;
+      authority?: string;
+      completed: false;
+      permissionToAct: boolean;
+      at: string;
+    };
+    FollowUpHistory: {
+      version: "follow-up-policy-v1";
+      candidateId: string;
+      sourceEvent: string;
+      workstream: string;
+      reason: string;
+      freshness: "verified" | "stale" | "unavailable";
+      deadline?: string;
+      dependency?: string;
+      quietHours?: FollowUpQuietHours;
+      deduplicationKey: string;
+      maxAttempts: number;
+      owner: string;
+      nextAction?: string;
+      nextQuestion?: string;
+      createdAt: string;
+      state: "scheduled" | "eligible" | "snoozed" | "suppressed" | "asked" | "accepted" | "rejected" | "expired" | "blocked";
+      attempts: number;
+      events: (Record<string, never>)[];
+      receipt?: FollowUpReceipt;
+      notificationPolicy?: FollowUpNotificationPolicy;
+      snoozedUntil?: string;
+    };
+    FollowUpList: {
+      followUps: (FollowUpHistory)[];
+      source: "ledger";
+    };
+    FollowUpEvaluationRequest: {
+      candidate: FollowUpCandidate;
+      sourceTerminal?: boolean;
+      dependencyAvailable?: boolean;
+      notificationPolicy?: FollowUpNotificationPolicy;
+    };
+    FollowUpControlRequest: {
+      candidateId: string;
+      control: "snooze" | "reject" | "revoke" | "policy";
+      until?: string;
+      notificationPolicy?: FollowUpNotificationPolicy;
+    };
+    FollowUpDeliveryRequest: {
+      candidateId: string;
+      answered?: boolean;
+      systemActed?: boolean;
+      authority?: string;
+    };
     /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
     SkillEntry: {
       /** The skill's identity -- its filename minus `.yaml`. */
@@ -912,6 +1004,53 @@ export interface paths {
     post: {
       responses: {
           "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/follow-ups": {
+    get: {
+      responses: {
+          "200": FollowUpList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/follow-ups/evaluate": {
+    post: {
+      responses: {
+          "200": FollowUpEvaluation;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/follow-ups/control": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/follow-ups/delivery": {
+    post: {
+      responses: {
+          "200": {
+            ok: boolean;
+            state: "asked";
+            receipt: FollowUpReceipt;
+          };
           "400": Error;
           "401": Error;
           "403": Error;

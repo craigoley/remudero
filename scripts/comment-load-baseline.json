@@ -218,6 +218,7 @@
   "src/lib/fleet-control.ts": 500,
   "src/lib/flight-judge.ts": 170,
   "src/lib/flight-signals.ts": 86,
+  "src/lib/follow-up-policy.ts": 250,
   "src/lib/followup-dedup-census.ts": 172,
   "src/lib/fs-race-safe.ts": 179,
   "src/lib/gate-posture.ts": 250,
