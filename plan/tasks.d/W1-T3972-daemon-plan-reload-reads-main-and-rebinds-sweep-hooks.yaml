@@ -59,3 +59,4 @@
   note: |
     High risk is the daemon control-loop boundary, not a claim that the change is large. It is
     intentionally independent of W1-T3971's credit-projection optimization.
+    reservation hand-off: run-PLAN-create-1790016115247 -> codex/plan-daemon-recovery-followups

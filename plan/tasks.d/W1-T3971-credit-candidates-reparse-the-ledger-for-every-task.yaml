@@ -65,3 +65,4 @@
     Rule 19: high risk is intentional. The files cross status projection and the destructive
     credit-reconciliation consumer; candidate equivalence and failed-read behavior are the safety
     boundary. This is a separate concern from W1-T3972 and W1-T3973.
+    reservation hand-off: run-PLAN-create-1790016115247 -> codex/plan-daemon-recovery-followups

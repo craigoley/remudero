@@ -54,3 +54,4 @@
     High risk is required because this spans webhook admission, policy authority and evidence used
     to suppress queue wakeups. The later activation is intentionally a one-row operator-ratified
     policy PR, not part of this build.
+    reservation hand-off: run-PLAN-create-1790016115247 -> codex/plan-daemon-recovery-followups
