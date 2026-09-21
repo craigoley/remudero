@@ -639,17 +639,14 @@ export function mergeStateFromRest(row: { mergeable_state?: string | null; merge
   return "clean";
 }
 
-/** Raw merge facts retained alongside the normalized conflict state. The exact GitHub
- * `mergeable_state` label is needed by freshness policy: the normalized state intentionally maps
- * `blocked` to `clean`, which would otherwise erase the stale-blocked discriminator. */
+/** Raw merge facts retained alongside normalized conflict state; `blocked` otherwise maps to `clean`. */
 export interface MergeStateObservation {
   state?: MergeState;
   mergeable?: boolean;
   mergeableState?: string;
 }
 
-/** Bounded, best-effort single-PR hydration that preserves both raw fields and the normalized
- * conflict state. Unknown or failed reads are omitted, never guessed. */
+/** Bounded best-effort hydration; unknown or failed reads are omitted, never guessed. */
 export function hydrateMergeStateObservations(
   owner: string,
   repo: string,
@@ -678,10 +675,7 @@ export function hydrateMergeStateObservations(
   return out;
 }
 
-/** Fetch `mergeable_state` for up to {@link MERGE_STATE_HYDRATION_CAP} PRs, as a map from PR number to
- *  the narrowed state; absent means not known. Invariant: best-effort per PR — a throw (rate limit, a
- *  404 on a PR closed mid-pass, a network blip) skips that PR, because a degraded disposition beats a
- *  sweep that dispositions nothing. Exhausted, the map comes back empty and nothing changes. */
+/** Fetch bounded merge states; failed reads remain absent so a degraded pass changes nothing. */
 export function hydrateMergeStates(
   owner: string,
   repo: string,
