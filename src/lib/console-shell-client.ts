@@ -24,7 +24,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { resolveFreshness } from "./console-freshness.js";
+import { resolveFreshness, formatAge as formatAgeReal } from "./console-freshness.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import {
   escapeHtml,
@@ -99,8 +99,14 @@ import {
  * @param resolveFreshness The REAL, unit-tested freshness model (lib/console-freshness.ts) —
  *   passed in rather than imported so the SAME function object a caller uses under test is the
  *   one running here, exactly as `renderShellHtml` used to splice its `.toString()` in directly.
+ * @param formatAge The REAL, unit-tested four-tier age formatter (lib/console-freshness.ts,
+ *   W1-T3615) — defaults to the module's own import so every EXISTING direct caller (this
+ *   file's tests) keeps calling the SAME tested function without passing it explicitly; a test
+ *   that wants to prove the ticker is WIRED to this parameter (rather than a hard-coded copy)
+ *   can still inject a distinguishable fake. `consoleShellClientSource`, below, embeds the real
+ *   one's own `.toString()` for the browser, exactly as it already does for `resolveFreshness`.
  */
-export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshness) {
+export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshness, formatAge = formatAgeReal) {
   // ⟪W1-T2902-BODY-START⟫ consoleShellClientSource(), below, slices this function's own body
   // (everything from just after this comment to just before the matching END marker) out of
   // this file's own source text — see this file's header for why. Do not remove either marker.
@@ -3668,14 +3674,18 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     // raises (markStale's guard) and lowers the banner, so the two can never contradict.
     clearStale();
   }
+  // W1-T3615: renders through the SAME `formatAge` this function's own bootConsoleShellClient
+  // parameter carries (lib/console-freshness.ts) -- NEVER a second, hand-rolled seconds-only
+  // formatter. That second copy (`${secs}s ago`, uncapped) is exactly what let an hour-idle
+  // console read "updated 3600s ago" beside the tested function's own "1h ago": the two agreed
+  // below a minute and silently diverged above it, invisible in the case nobody was watching.
   function tickFreshness() {
     const el = document.getElementById("freshness");
     if (!lastLiveAt) {
       el.textContent = "";
       return;
     }
-    const secs = Math.max(0, Math.round((Date.now() - lastLiveAt) / 1000));
-    el.textContent = secs < 2 ? "updated just now" : `updated ${secs}s ago`;
+    el.textContent = `updated ${formatAge(Date.now() - lastLiveAt)}`;
   }
 
   // W1-T189 ONE TRUTH: an operator-observed contradiction -- "live · updated 8s ago" rendered
@@ -4086,10 +4096,12 @@ const CLIENT_BODY_SOURCE: string = sliceClientBody(readFileSync(fileURLToPath(im
  * {@link CLIENT_BODY_SOURCE} — `bootConsoleShellClient`'s own body, read verbatim off this
  * file — in an immediately-invoked function expression, called with the same two values
  * `renderShellHtml` used to splice into the string via `${…}`: `phaseElapsedThresholdsMs` as a
- * JSON literal, and `resolveFreshness` (lib/console-freshness.ts) as its OWN `.toString()`'d
+ * JSON literal, `resolveFreshness` (lib/console-freshness.ts) as its OWN `.toString()`'d
  * source, the technique W1-T281 has always used for it (nothing greps its shape, so nothing
- * about its embedding needed to change).
+ * about its embedding needed to change), and — W1-T3615 — `formatAge` (lib/console-freshness.ts)
+ * the SAME way, so the browser's freshness ticker renders the tested four-tier formatter rather
+ * than a third, drifting hand copy.
  */
 export function consoleShellClientSource(phaseElapsedThresholdsMs: Record<string, number>): string {
-  return `(function (phaseElapsedThresholdsMs, resolveFreshness) {\n${CLIENT_BODY_SOURCE}\n})(${JSON.stringify(phaseElapsedThresholdsMs)}, ${resolveFreshness.toString()});`;
+  return `(function (phaseElapsedThresholdsMs, resolveFreshness, formatAge) {\n${CLIENT_BODY_SOURCE}\n})(${JSON.stringify(phaseElapsedThresholdsMs)}, ${resolveFreshness.toString()}, ${formatAgeReal.toString()});`;
 }
