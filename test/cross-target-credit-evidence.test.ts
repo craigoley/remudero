@@ -233,6 +233,32 @@ test("W1-T3873 criterion 3: a checkout PROVEN to belong to the target resolves t
   assert.equal(root, targetRepo, "an origin-proven checkout is trusted, and only that one");
 });
 
+test("W1-T3873 criterion 3: origin proof accepts URL-shaped remotes only for the requested target", () => {
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
+  const candidate = join(configRoot, "repos", "target");
+  const calls: Array<{ args: string[]; cwd: string }> = [];
+  const root = creditEvidenceRootFor("o", "target", {
+    selfOwnerRepo: { owner: "o", repo: "engine" },
+    configRoot,
+    exec: (args, cwd) => {
+      calls.push({ args, cwd });
+      return "https://github.com/o/target.git\n";
+    },
+  });
+  assert.equal(root, candidate, "a proven HTTPS origin resolves to the target checkout");
+  assert.deepEqual(calls, [{ args: ["config", "--get", "remote.origin.url"], cwd: candidate }]);
+
+  assert.equal(
+    creditEvidenceRootFor("o", "other", {
+      selfOwnerRepo: { owner: "o", repo: "engine" },
+      configRoot,
+      exec: () => "https://github.com/o/target.git\n",
+    }),
+    undefined,
+    "the same checkout is rejected when its origin names a different target",
+  );
+});
+
 test("W1-T3873 criterion 3: a FOREIGN or missing target checkout leaves the existing fail-closed outcome unchanged — never a NEW refusal", () => {
   // THE SAME plan-only fixture as criterion 1, but this time the resolved root is undefined
   // (foreign/missing). Both readers then answer with an EMPTY map, which is exactly the pre-
