@@ -60,6 +60,8 @@
   attempts: 0
   origin: oper#observed-satellite-self-refusal-after-w1-t3976-2026-09-21
   note: |
+    reservation hand-off: unknown -> codex/plan-daemon-floor-recovery
+
     reservation holder: codex/plan-daemon-floor-recovery.
     risk:high — this changes the rate-limit posture of every long-lived daemon. The repair
     preserves strict direct-review enforcement and the existing per-daemon GhCallPacer; it does
