@@ -357,12 +357,11 @@ const DECLARED: readonly Declared[] = [
     kind: "platform-tool",
     file: "fleet-heartbeat.test.ts",
     key: "/usr/bin/date",
-    count: 4,
+    count: 1,
     reason:
-      "the BSD_DATE and IGNORES_D stubs emulate a foreign `date` by DELEGATING the parse to /usr/bin/date. On macOS " +
-      "that IS BSD date and rejects -d, so both tests fail on the mini and pass on a runner — two of the four " +
-      "divergences the host-parity baseline declares. Linux-only by construction; the file's own header says the " +
-      "branch has never run anywhere.",
+      "the fixture now selects the host's date binary: Linux keeps /usr/bin/date while macOS uses /bin/date, so " +
+      "the platform-dependent stubs exercise the same parser on both poles. Only the SYSTEM_DATE literal remains " +
+      "as a /usr/bin/date site in the Linux source tree; keep this count aligned with the measured corpus.",
   },
   {
     kind: "platform-tool",
