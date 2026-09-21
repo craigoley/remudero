@@ -32,6 +32,28 @@ export interface components {
         pr: string;
         reason: string;
       })[];
+      /** Current phase of an in-flight worker run, when the row is backed by a live run. */
+      phase?: "recon" | "implement" | "review" | "fix-rung";
+      /** ISO-8601 timestamp at which the current in-flight run started. */
+      startedAt?: string;
+      /** Milliseconds elapsed since startedAt, measured at snapshot derivation time. */
+      elapsedMs?: number;
+      /** Observed worker liveness state from the live stream sensor. */
+      workerState?: "working" | "tool-executing" | "quiet";
+      /** ISO-8601 timestamp at which the current quiet worker state began. */
+      workerStateSince?: string;
+      /** True when running is backed by an open PR but not current process evidence. */
+      processUnevidenced?: boolean;
+      /** True when the task has an open escalation requiring operator attention. */
+      needsHuman?: boolean;
+      /** True when an in-flight ledger trace has no current liveness evidence. */
+      orphaned?: boolean;
+      /** Accumulated spend for the current in-flight run, when observed. */
+      liveSpendUsd?: number;
+      /** Accumulated worker turns for the current in-flight run, when observed. */
+      liveTurns?: number;
+      /** True when a run is live but spend and turns have not been observed yet. */
+      liveSpendPending?: boolean;
     };
     /** GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`, plus (W1-T163, when the daemon's per-token last-seen marker store is wired) the calling token's own "since you last checked" recap. */
     StatusSnapshot: {

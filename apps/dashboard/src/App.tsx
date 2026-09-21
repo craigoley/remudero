@@ -5,6 +5,7 @@ import type { DaemonClient } from "@remudero/api-client/client";
 import { Now } from "./Now";
 import { Overview } from "./Overview";
 import { Series } from "./SeriesChart";
+import { FleetVisualizer } from "./FleetVisualizer";
 import { bucketSamples, type SeriesSpec } from "./series";
 import { useFleet } from "./useFleet";
 import { OnboardingPage } from "./pages/OnboardingPage";
@@ -151,8 +152,9 @@ export function App({ client, nowMs = Date.now }: { client: DaemonClient | null;
           )}
         </section>
         <Overview projections={fleet.projections} generatedAt={fleet.snapshot?.generated_at ?? null} />
-      <Now projections={fleet.projections} generatedAt={fleet.snapshot?.generated_at ?? null} />
-      <Series view={view} />
+        <FleetVisualizer projections={fleet.projections} generatedAt={fleet.snapshot?.generated_at ?? null} />
+        <Now projections={fleet.projections} generatedAt={fleet.snapshot?.generated_at ?? null} />
+        <Series view={view} />
       </main>
     </>
   );

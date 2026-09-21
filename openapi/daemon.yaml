@@ -173,6 +173,48 @@ components:
                 type: string
               reason:
                 type: string
+        phase:
+          type: string
+          description: Current phase of an in-flight worker run, when the row is backed by a live run.
+          enum:
+            - recon
+            - implement
+            - review
+            - fix-rung
+        startedAt:
+          type: string
+          description: ISO-8601 timestamp at which the current in-flight run started.
+        elapsedMs:
+          type: number
+          description: Milliseconds elapsed since startedAt, measured at snapshot derivation time.
+        workerState:
+          type: string
+          description: Observed worker liveness state from the live stream sensor.
+          enum:
+            - working
+            - tool-executing
+            - quiet
+        workerStateSince:
+          type: string
+          description: ISO-8601 timestamp at which the current quiet worker state began.
+        processUnevidenced:
+          type: boolean
+          description: True when running is backed by an open PR but not current process evidence.
+        needsHuman:
+          type: boolean
+          description: True when the task has an open escalation requiring operator attention.
+        orphaned:
+          type: boolean
+          description: True when an in-flight ledger trace has no current liveness evidence.
+        liveSpendUsd:
+          type: number
+          description: Accumulated spend for the current in-flight run, when observed.
+        liveTurns:
+          type: number
+          description: Accumulated worker turns for the current in-flight run, when observed.
+        liveSpendPending:
+          type: boolean
+          description: True when a run is live but spend and turns have not been observed yet.
 
     StatusSnapshot:
       type: object
