@@ -1,0 +1,44 @@
+- id: W1-T3943
+  title: "Retire W1-T484 after its unconditional daemon liveness fix shipped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  risk: low
+  files:
+    - plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml
+  origin: "operator-session#needs-me-review-2026-09-21"
+  plan_refs: [W1-T1274, W1-T3941]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> run-W1-T3943-1789988294571
+    This is a plan-only state correction. W1-T484's daemon liveness defect was already implemented
+    and merged by W1-T1274/#2675; the target record needs the durable retirement fields so automation
+    does not treat a settled finding as live work. Preserve the original finding and acceptance text.
+  rationale: |
+    W1-T484 proposed an unconditional per-iteration liveness row, while current main already ships
+    that mechanism as `log("daemon.tick", ...)` at the first statement of `runDaemon`'s loop (W1-T1274).
+    The shipped tests cover the ticker-silent-but-alive control, a genuinely stopped daemon, and
+    worker-only rows that must not keep the daemon check green. The remaining long-iteration/progress
+    question is separate and is not silently folded into this retirement.
+
+    The durable settlement contract is `status: blocked` plus `retirement: retired`; a note alone
+    leaves a shipped finding looking queued and eligible for reconstruction. This amendment changes
+    no source, dispatch rule, liveness threshold, or PR policy.
+  design: |
+    Add `status: blocked` and `retirement: retired` to W1-T484. Keep its rationale, design,
+    acceptance, and falsifier intact as historical evidence. Do not add source files to this
+    plan-only task and do not reopen the separate progress/stall investigation.
+  acceptance:
+    - claim: "W1-T484 carries the durable blocked status required for a retired plan record"
+      proof: "grep: status: blocked in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "W1-T484 carries an explicit retired ruling rather than a note-only settlement"
+      proof: "grep: retirement: retired in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "the original W1-T484 archaeology remains visibly tied to the shipped unconditional fix"
+      proof: "grep: SETTLED/RETIRED 2026-09-21 in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+  falsifier: |
+    Remove either structured field from W1-T484 and the corresponding proof must fail. Remove the
+    target plan path from this task's files or add any src/ or test/ path and the plan-only scope
+    assertion must fail. The amendment must not be represented by a note alone.
