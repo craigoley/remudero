@@ -1,4 +1,4 @@
-- id: W1-T3960
+- id: W1-T3961
   title: "A QUEUED TASK WHOSE ACCEPTANCE PROOFS ALREADY PASS AT MAIN HAS NOTHING LEFT TO BUILD, AND NOTHING DETECTS IT — W1-T3688 sat at priority 2 near the front of the dispatch order and burned two budgeted runs before a human read the refusal and understood why"
   repo: remudero
   depends_on: []
@@ -71,13 +71,13 @@
     record.
   acceptance:
     - claim: "a queued task whose discriminating proofs all pass against unmodified main is reported as having nothing left to build"
-      proof: "unit test: W1-T3960: a task whose proofs all pass at main is reported"
+      proof: "unit test: W1-T3961: a task whose proofs all pass at main is reported"
     - claim: "a task carrying a whole-file proof is not reported, because that shape is stale by construction and would flag most of the backlog"
-      proof: "unit test: W1-T3960: a whole-file proof shape is never evidence of satisfaction"
+      proof: "unit test: W1-T3961: a whole-file proof shape is never evidence of satisfaction"
     - claim: "a task with at least one proof that fails at main is not reported, so work that remains is left alone"
-      proof: "unit test: W1-T3960: a task with work remaining is not reported"
+      proof: "unit test: W1-T3961: a task with work remaining is not reported"
     - claim: "the report names the task, its proofs and their verdicts, and refuses nothing"
-      proof: "unit test: W1-T3960: the census reports and does not refuse"
+      proof: "unit test: W1-T3961: the census reports and does not refuse"
   falsifier: |
     Point the sweep at a fixture reproducing W1-T3688 -- a queued task whose name-filtered proofs
     all pass at main -- and it must be reported; delete the check and the fixture goes unreported,
@@ -89,7 +89,7 @@
     this environment's egress proxy refuses every `git-receive-pack` update outside `refs/heads/*`
     -- proven by control (a successful refs/heads push's POST carries X-Github-Request-Id and
     GitHub cache headers; the refused one carries none and returns in 29ms; the repo has no
-    rulesets). `rmd next-task-id --no-reserve` named W1-T3960, and both scope-time checks read
+    rulesets). `rmd next-task-id --no-reserve` named W1-T3961, and both scope-time checks read
     clear at filing time. AN OPERATOR MUST CONFIRM THE CLAIM before a build starts. An id filed
     this way was taken mid-write once already today, so this is not hypothetical.
 
