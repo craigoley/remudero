@@ -2895,6 +2895,19 @@ function isInsideInlineQuote(report: string, index: number): boolean {
   }
   return false;
 }
+
+/** A quoted `no <path>` token can still be this changeset's claim when its closing delimiter is
+ * immediately followed by a changeset word: `` `no code` changes were made this PR ``. A
+ * standalone mention such as ``Earlier refusal: `no code`.`` or a reported quotation followed by
+ * an explanatory dash stays a mention. This is deliberately narrower than the general quote
+ * predicate, because the absence anchor's forward-word rule is what makes the quoted token
+ * claim-shaped in the first place. */
+function quotedAbsenceIsAboutChangeset(report: string, index: number, matchLength: number): boolean {
+  const rest = report.slice(index + matchLength);
+  const next = /^[ \t`"')]*([A-Za-z][A-Za-z0-9_-]*)/.exec(rest);
+  return next !== null && CHANGESET_CONTEXT_RE.test(next[1]);
+}
+
 export function claimsChangesetContext(report: string, index: number): boolean {
   // Is the "exactly N files" match at `index` in a sentence ABOUT THE CHANGESET? Looks BACKWARD only, and only to the
   // start of the current sentence, because scanning the whole body would re-create the unanchored match this
@@ -3224,7 +3237,8 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
   const noPathRe = /\bno\s+([A-Za-z0-9_./-]+)/gi;
   for (const m of scan.matchAll(noPathRe)) {
     const token = m[1].replace(/[,.\s]+$/, "");
-    if (isInsideInlineQuote(scan, m.index ?? 0)) continue;
+    const matchIndex = m.index ?? 0;
+    if (isInsideInlineQuote(scan, matchIndex) && !quotedAbsenceIsAboutChangeset(scan, matchIndex, m[0].length)) continue;
     // ANCHOR, the sibling of the count arm's in the other direction (see noClaimIsAboutChangeset). Predicate (b) was
     // never anchored and fired six times in one day on prose whose subject was not the changeset: "This change
     // introduces no code duplication anywhere" produced `claim: "no code"` against any source-touching diff, in a
