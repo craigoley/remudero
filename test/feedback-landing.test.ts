@@ -159,6 +159,26 @@ test("W1-T243 END-TO-END: a captured entry is invisible on origin/main until lan
   assert.equal(resolved.status, "new", "landing never touches status — data-only, no triage");
 });
 
+test("W1-T3910 FLEET IDENTITY: a landing commit uses the recognized fleet bot for author and committer", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/3910");
+
+  withLiveWritesAllowed(() => captureFeedback(root, { raw: "fleet identity", origin: "cli", land: { gh } }));
+
+  const identity = execFileSync(
+    "git",
+    ["--git-dir", bareOrigin, "show", "-s", "--format=%an <%ae>%n%cn <%ce>", LANDING_BRANCH],
+    { encoding: "utf8", env: GIT_ENV },
+  ).trim();
+  assert.equal(
+    identity,
+    "remudero-fleet[bot] <318611788+remudero-fleet[bot]@users.noreply.github.com>\n" +
+      "remudero-fleet[bot] <318611788+remudero-fleet[bot]@users.noreply.github.com>",
+  );
+  assert.doesNotMatch(identity, /rmd-feedback-bridge|t <t@t>/);
+});
+
 // ── Acceptance claim 2: ONE choke point covers a caller never named in the implementation ──
 
 test("W1-T243 CHOKE POINT: captureFeedback lands ANY caller's entry — this test calls neither rmd feedback, ops, issues-intake, nor the panel routes, and it still lands", () => {

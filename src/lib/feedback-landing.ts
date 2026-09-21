@@ -97,8 +97,8 @@ export const CI_LEARNING_LANDING_BRANCH = "ci-learning-landing";
 /** The one shared PR title/head every automated CI-learning shard landing call opens or reuses. */
 export const CI_LEARNING_LANDING_PR_TITLE = "chore(ci-learning): land pending lessons";
 
-const LANDING_AUTHOR_NAME = "rmd-feedback-bridge";
-const LANDING_AUTHOR_EMAIL = "rmd-feedback-bridge@users.noreply.github.com";
+const LANDING_AUTHOR_NAME = "remudero-fleet[bot]";
+const LANDING_AUTHOR_EMAIL = "318611788+remudero-fleet[bot]@users.noreply.github.com";
 
 type GitExec = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => string;
 type GhExec = (args: string[]) => string;
