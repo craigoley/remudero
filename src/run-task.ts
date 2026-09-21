@@ -5843,15 +5843,7 @@ async function runReview(args: {
             ...cashDivertSpawnFields("review"),
             runId: args.runId,
             taskId: task.id,
-            streamObserver: args.workerTelemetry
-              ? (event) =>
-                  args.workerTelemetry!.observer({
-                    ...event,
-                    workerRole: "reviewer",
-                    provider: reviewerSpawnMount!.provider,
-                    requestedModel: reviewerSpawnMount!.model,
-                  })
-              : undefined,
+            streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
           );
