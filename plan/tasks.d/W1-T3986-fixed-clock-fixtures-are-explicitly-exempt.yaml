@@ -58,3 +58,5 @@
     repository REST surface returned 403 rate-limit errors; `rmd next-task-id`'s same atomic remote
     reservation path held this task's id on origin after earlier reservations had advanced the
     shared floor; no historical id is part of this task's acceptance surface.
+    The plan filing stays trailer-free because it adds only the task record; its implementation
+    PR will carry the task trailer after this shard is merged.
