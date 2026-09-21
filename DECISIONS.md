@@ -2832,5 +2832,54 @@ never the authoring.
 that would be evidence the write is still too expensive and a harvester is the cheaper answer after
 all. The measurement is `ls plan/feedback | wc -l` against its 204 baseline.
 
+## 2026-09-21 — RE-RECORDED OPERATOR RULINGS FROM THE FEEDBACK QUEUE
+
+These five entries are permanent authority records, not new rulings. Each fenced quotation is the
+feedback entry's `raw` field verbatim, and each provenance line says `re-recorded from plan/feedback`
+so the authority survives the draining feedback queue.
+
+**Operator-authored authority record:** these are re-recorded from the operator's accepted or
+rejected feedback rulings; no new direction is introduced here.
+
+### fb-1784894405468-a4153e
+
+**Provenance:** re-recorded from plan/feedback/fb-1784894405468-a4153e.yaml.
+
+```text
+HEADROOM GOVERNOR BECOMES A FLAG, DEFAULT OFF — OPERATOR RULING 2026-07-24, amending P34 clause (c) / W1-T249 and extending W1-T252. Rationale: runaway protection is already owned by the per-run turn limit and the budget_usd tripwire; the operator runs with overflow credits beyond the weekly subscription window (currently 75% used and deliberately willing to exceed 100%), so fleet-wide dispatch throttling on percent_used is not wanted as a default posture. RULING: (1) ALL headroom-based dispatch gating — the live W1-T197 daemon idle curve and the ratified-but-unbuilt W1-T249 reserve gate — sits behind ONE policy flag headroom.enabled: a bounded field W1-T252 adds to plan/policy.yaml; until the policy file ships, an equivalent explicit flag at the live daemon.ts curve site, initial value FALSE on this host. (2) When disabled, headroom is still READ and LEDGERED every cycle — telemetry without enforcement — so the console displays weekly burn and the operator flips the flag with data in front of him. (3) The console on/off switch and future parallelism/throughput dials ride the P38/P39/P40 lineage, whose P37 trigger is now satisfied; per-lane throughput is P42. (4) UNCHANGED: imputed dollars gate nothing; turn limit and budget_usd remain the runaway guards; unreadable headroom while disabled is absent telemetry, never a hold. (5) W1-T249's acceptance gains the flag criterion: with headroom.enabled=false, no headroom condition pauses dispatch, proven by test.
+```
+
+### fb-1784988460437-9daa9b
+
+**Provenance:** re-recorded from plan/feedback/fb-1784988460437-9daa9b.yaml.
+
+```text
+CONSOLE WRITE-ACTIONS ON UP NEXT — operator ruling 2026-07-25. Add operator write-actions to the console UP NEXT panel: a Run button per queued task row, and a Drain-now control. MARKER-FILE PATTERN ONLY — never process management inside serve. SCOPE: (1) Run on a queued row -> a write-token API endpoint writes state/KICK_REQUESTED-<taskId> (the DEPLOY_REQUESTED precedent); the daemon consumes the marker at its next poll and dispatches THAT task by id THROUGH its normal path — assertRunnable still gates, so a verify:human task refuses with its named reason rendered back to the console, never silently. (2) Drain now -> state/DRAIN_REQUESTED; the daemon treats it as run-one-cycle-immediately. (3) Both buttons use the #602 arm-then-confirm discipline on the write-token API; both markers are consumed-once and ledgered (console.kick_requested / console.drain_requested carrying the task id) so the audit trail names the console as actor — the arm-identity lesson (9652bd) applied at birth. (4) Stale marker for an already-merged task is refused via the projection (the 86793d class), the marker cleared, and the reason ledgered. NON-GOALS: no process spawning/killing in serve; no unqueued/blocked task may be Run past assertRunnable.
+```
+
+### fb-1785858048118-50fab8
+
+**Provenance:** re-recorded from plan/feedback/fb-1785858048118-50fab8.yaml.
+
+```text
+RUNTIME CONFIG BELONGS IN A CONFIG STORE WITH A DASHBOARD, NOT IN SOURCE — operator ruling 2026-08-04. Today the daily cost ceiling fired at $152.28/$150 and stopped the fleet for ~40 minutes; raising it required editing a literal in DEFAULT_SWEEP_POLICY, a PR, CI, and a deploy. That is config-as-code past the point where it serves anything: a spend ceiling is runtime configuration, not a build-time constant, and standard practice puts it in a store with a UI and an audit log. The operator wants every such value adjustable from the console without a PR. WHAT THE AUDIT TRAIL ACTUALLY REQUIRES is who/when/from/to on every change — a ledgered console write satisfies that better than git does, because it is queryable at runtime. Git is not the mechanism; the record is. THE ARCHITECTURAL OBSTACLE, which must be solved first or a dashboard write will silently do nothing: loadDefaultPolicy MEMOIZES into cachedDefaultPolicy for the process lifetime, and DEFAULT_SWEEP_POLICY is a module-level const built at module load — so a running daemon holds its boot-time values until restart, and even migrating a literal into plan/policy.yaml does not give live adjustment. THREE LAYERS: (1) get the values out of source — W1-T325 covers dispatchLanes, W1-T330 covers dailyCostCeilingUsd, pendingCeilingMinutes is uncovered; (2) make the daemon re-read config per tick or on change rather than memoizing at load, which is the load-bearing change and is not filed; (3) a console write surface with a ledgered audit line — the console already has a write token, arm-then-confirm discipline, and ledgered actions, so this is less new machinery than it appears. RECON: enumerate EVERY runtime-tunable value currently in source (start with DEFAULT_SWEEP_POLICY and the headroom curve), establish which are genuinely build-time constants and which are operator knobs, and cost the memoization fix. Then propose the store: whether plan/policy.yaml with live re-read is sufficient or whether operator knobs want a separate mutable store outside git, given that an uncommitted policy.yaml edit was silently discarded by a deploy's pull --ff-only this week. Falsifying check: if fewer than a handful of values are genuinely operator-tunable, the migration is over-engineering and per-value literals with a documented deploy are honest.
+```
+
+### fb-1784770111145-cf7c24
+
+**Provenance:** re-recorded from plan/feedback/fb-1784770111145-cf7c24.yaml.
+
+```text
+CONSOLE MUST TRANSLATE, SUMMARIZE, AND SEPARATE — operator directive 2026-07-22 with screenshot evidence: the NEEDS-ME surface renders raw triage-architect analysis as decision cards ('really wordy and hard to understand'); the operator needs (1) plain language: every decision card opens with a machine-generated summary — headline ≤15 words, what-happened in one or two sentences, the decision needed stated imperatively, and 2-3 labeled options with one-line consequences — generated at escalation/proposal creation time by a cheap summarizer rung and cached alongside the raw payload, which moves behind an expandable Details; (2) a high-level Plan view: where the workstream stands (done / in-flight / queued derived from GitHub, not yaml), what is running now (task, phase, elapsed, cost), and what is next on the frontier and why; (3) tab separation: Decisions (genuine operator decisions only, stale auto-filtered per fb-1784756088300-6a481e), Now (live runs + daemon + deploy state), Plan (progress + frontier), Feed (the raw firehose, unchanged, for archaeology). Augments fb-1784756096314-a6f58b (grouping, live resolution state, batch-close, pinned decisions). ALSO VERIFY-AND-INCLUDE: the screenshot shows Accept/Reject proposal cards for fb-1784732500436-728bc1 and fb-1784734427694-703ff7 although both were triaged AND their plan PRs merged (W1-T240-242 via #588, W1-T243 via #599) — determine from the console's data source (serve panel-graph / feedback read path, cite file:line) why consumed feedback still renders as pending, and append the finding to this entry via a follow-up rmd feedback if it is a distinct defect.
+```
+
+### fb-1785882211812-bafd8f
+
+**Provenance:** re-recorded from plan/feedback/fb-1785882211812-bafd8f.yaml.
+
+```text
+AN AGENT MAY RECOMMEND 'NO' BUT MAY NEVER RECORD IT — operator ruling from the decision-authority audit (state/remudero-decision-authority-audit-2026-08-04.md). #1302 recorded 'daemon-side dispatch stays at N=1' in DECISIONS.md with no human ruling, closing a direction the operator had explicitly asked to BUILD. The audit found one clean bucket-C member but an open corridor behind it: W1-T266 pioneered the design-scripted verify:auto ruling task four days earlier, and the licensing doctrine is written verbatim in three places — 'DECISION and DIRECTION classes are absorbed by auto-choose and idle-groom'. THE DAMNING DETAIL IS IN W1-T326'S OWN SHARD: the filing agent chose DECISIONS.md over a P-series proposal BECAUSE 'proposals are things to RATIFY... filing it as a proposal inverts its meaning and invites later ratification', and set verify:auto so 'no operator need be present to judge' — on a task its own note marked risk:high because 'this writes a BINDING RULING'. The ratification channel was identified and routed around in writing. AND THE GATE EXISTS: risk-score.ts carries GATE_ACTION {high: 'timeboxed_question'} with ZERO call sites — designed for exactly this, encoded, never wired. THE FUNNEL IS INVERTED IN BOTH DIRECTIONS: all 367 needs-human issues audited, ~94% were resolved by the machine afterwards with closures admitting 'Overtaken by the machine, via neither option', while the one genuine direction question fired nothing. So the trigger is keyed on task-blocked, not decision-shaped. THE FIX, and it must not increase escalation volume: one sentence in the record-authoring prompt layers — an agent may recommend a 'no' but may never RECORD one; a direction-closing record carries an operator line or a ratification hook. Plus a two-part lint: an unmarked DECISIONS.md entry fails review, and a ruling-shaped task must be verify:human, which isDispatchEligible already enforces for free. RECON: confirm GATE_ACTION's zero call sites at today's sha; establish what 'marked' should look like (the headroom default-off carries 'OPERATOR RULING' in its own feedback text and was correctly classified BECAUSE of it, so the convention already works where applied); and say whether the lint can distinguish a direction-closing entry from a descriptive one without false positives. Falsifying check: if every DECISIONS.md entry except #1302 already carries an operator marking, the convention needs enforcement rather than invention, and the prompt sentence alone may suffice.
+```
+
 **Rollback:** revert this entry and re-open both tasks by clearing their `retirement:` key. Entry (1)
 also describes shipped code (#5837); reverting the ruling does not revert that PR.
