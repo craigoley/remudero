@@ -112,9 +112,17 @@
   origin: recon#daemon-liveness-false-stale-2026-08-14
   plan_refs: ["W1-T312", "W1-T380", "W1-T382", "W1-T471"]
   files: [src/lib/daemon.ts, src/lib/daemon-health.ts, test/daemon.test.ts, test/daemon-health.test.ts, test/daemon-alive-liveness.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
-  note: "`verify: human` ON PURPOSE. Design (a)-(d) is a RULING, not a decidable criterion: each option
+  note: "SETTLED/RETIRED 2026-09-21 — this finding was implemented by W1-T1274 in PR #2675, merged
+    2026-08-24. `runDaemon` now writes `daemon.tick` as the first statement of every iteration;
+    `deriveLastPoll` and the doctor path continue to read the daemon-prefixed corpus, and
+    test/doctor.test.ts covers the live-but-ticker-silent control, genuine daemon death, and worker-only
+    rows. The remaining long-iteration/progress question is explicitly separate and is not reopened by
+    this record. The paragraphs below are preserved filing archaeology, not a current implementation request.
+
+    `verify: human` ON PURPOSE. Design (a)-(d) is a RULING, not a decidable criterion: each option
     trades a different kind of honesty for a different kind of blindness, and no linter can settle
     which loss the operator prefers. `isDispatchEligible` parks it until that ruling exists, which is
     the correct behaviour for this shard rather than a defect in it.

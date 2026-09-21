@@ -4,6 +4,11 @@
     "dateNow": 0,
     "newDate": 1
   },
+  "src/lib/action-reconciliation.ts": {
+    "legacy": 1,
+    "dateNow": 0,
+    "newDate": 2
+  },
   "src/lib/analytics-route.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -58,6 +63,11 @@
     "legacy": 1,
     "dateNow": 1,
     "newDate": 0
+  },
+  "src/lib/consequence-policy.ts": {
+    "legacy": 0,
+    "dateNow": 1,
+    "newDate": 4
   },
   "src/lib/console-freshness.ts": {
     "legacy": 0,
@@ -118,6 +128,11 @@
     "legacy": 0,
     "dateNow": 0,
     "newDate": 1
+  },
+  "src/lib/emergency-control.ts": {
+    "legacy": 0,
+    "dateNow": 3,
+    "newDate": 7
   },
   "src/lib/escalate.ts": {
     "legacy": 0,
@@ -236,8 +251,8 @@
   },
   "src/lib/operator-agent.ts": {
     "legacy": 1,
-    "dateNow": 18,
-    "newDate": 30
+    "dateNow": 23,
+    "newDate": 32
   },
   "src/lib/operator-merge-hold.ts": {
     "legacy": 1,

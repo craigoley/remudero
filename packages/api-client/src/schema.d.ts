@@ -631,6 +631,54 @@ export interface components {
       promotionId: string;
       rollback: PromotionRollback;
     };
+    OperatorAgentConsequenceAction: {
+      id?: string;
+      consequenceClass: "reversible" | "disruptive" | "irreversible" | "financial";
+      target: {
+        identity: string;
+        source: "trusted" | "external";
+        ambiguous?: boolean;
+      };
+      scope?: {
+        repo?: string;
+        instance?: string;
+      };
+      evidence?: ({
+        label: string;
+        observedAt: string;
+        maxAgeSeconds: number;
+      })[];
+      financial?: {
+        amount?: number;
+        currency?: string;
+        perActionCeiling?: number;
+        aggregateCeiling?: number;
+        aggregateSpentBefore?: number;
+        quoteExpiresAt?: string;
+        coolingOffSeconds?: number;
+        coolingOffStartedAt?: string;
+      };
+      irreversible?: {
+        affectedResource?: string;
+        recoveryAvailable?: boolean;
+        recoveryStatement?: string;
+        rollbackUnavailableReason?: string;
+        confirmationNonce?: string;
+        confirmationExpiresAt?: string;
+      };
+      requiredApprovers: number;
+      approvals?: ({
+        approverId: string;
+        approvedAt: string;
+        source: "trusted" | "external";
+      })[];
+      capabilityGrant?: {
+        grantId: string;
+      };
+    };
+    OperatorAgentConsequencePreflightRequest: {
+      action: OperatorAgentConsequenceAction;
+    };
     FollowUpQuietHours: {
       timezone: string;
       start: string;
@@ -754,6 +802,46 @@ export interface components {
       mode?: string;
       taskId: string;
       feedback: FeedbackEntry;
+    };
+    ExternalEffectPostcondition: {
+      path: string;
+      /** JSON value expected at the connector path. */
+      equals: Record<string, never>;
+      description?: string;
+    };
+    ExternalEffect: {
+      version: "external-effect-v1";
+      originatingActionId: string;
+      originatingReceiptId: string;
+      capabilityGrantId: string;
+      connector: string;
+      targetIdentity: string;
+      requestedOperation: string;
+      preconditionSnapshot: Record<string, never>;
+      expectedPostconditions: (ExternalEffectPostcondition)[];
+      observedState?: Record<string, never>;
+      observation: {
+        status: "fresh" | "stale" | "unavailable";
+        observedAt?: string;
+        ageMs?: number;
+        maxAgeMs: number;
+      };
+      idempotencyKey: string;
+      reconciliationState: "applied" | "refused" | "pending" | "partially-applied" | "drifted" | "stale" | "unobservable";
+      partialSuccess?: {
+        satisfied: (string)[];
+        unsatisfied: (string)[];
+      };
+      retryPath: {
+        kind: "none" | "retry" | "compensation";
+        allowed: boolean;
+        reason: string;
+        attemptNumber?: number;
+      };
+      /** Opaque digest of redacted connector evidence; raw provider output is never stored. */
+      evidenceReference: string;
+      safeToComplete: boolean;
+      reason?: string;
     };
   };
   securitySchemes: {
@@ -1122,6 +1210,17 @@ export interface paths {
           "403": Error;
           "404": Error;
           "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/consequence/preflight": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": undefined;
         };
     };
   };

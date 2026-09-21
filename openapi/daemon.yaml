@@ -1887,6 +1887,113 @@ components:
         rollback:
           $ref: "#/components/schemas/PromotionRollback"
 
+    OperatorAgentConsequenceAction:
+      type: object
+      required: [consequenceClass, target, requiredApprovers]
+      properties:
+        id:
+          type: string
+        consequenceClass:
+          type: string
+          enum: [reversible, disruptive, irreversible, financial]
+        target:
+          type: object
+          required: [identity, source]
+          properties:
+            identity:
+              type: string
+            source:
+              type: string
+              enum: [trusted, external]
+            ambiguous:
+              type: boolean
+        scope:
+          type: object
+          properties:
+            repo:
+              type: string
+            instance:
+              type: string
+        evidence:
+          type: array
+          items:
+            type: object
+            required: [label, observedAt, maxAgeSeconds]
+            properties:
+              label:
+                type: string
+              observedAt:
+                type: string
+                format: date-time
+              maxAgeSeconds:
+                type: number
+        financial:
+          type: object
+          properties:
+            amount:
+              type: number
+            currency:
+              type: string
+            perActionCeiling:
+              type: number
+            aggregateCeiling:
+              type: number
+            aggregateSpentBefore:
+              type: number
+            quoteExpiresAt:
+              type: string
+              format: date-time
+            coolingOffSeconds:
+              type: integer
+            coolingOffStartedAt:
+              type: string
+              format: date-time
+        irreversible:
+          type: object
+          properties:
+            affectedResource:
+              type: string
+            recoveryAvailable:
+              type: boolean
+            recoveryStatement:
+              type: string
+            rollbackUnavailableReason:
+              type: string
+            confirmationNonce:
+              type: string
+            confirmationExpiresAt:
+              type: string
+              format: date-time
+        requiredApprovers:
+          type: integer
+        approvals:
+          type: array
+          items:
+            type: object
+            required: [approverId, approvedAt, source]
+            properties:
+              approverId:
+                type: string
+              approvedAt:
+                type: string
+                format: date-time
+              source:
+                type: string
+                enum: [trusted, external]
+        capabilityGrant:
+          type: object
+          required: [grantId]
+          properties:
+            grantId:
+              type: string
+
+    OperatorAgentConsequencePreflightRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: "#/components/schemas/OperatorAgentConsequenceAction"
+
     FollowUpQuietHours:
       type: object
       required: [timezone, start, end]
@@ -2202,6 +2309,114 @@ components:
           type: string
         feedback:
           $ref: "#/components/schemas/FeedbackEntry"
+
+    # ── W1-T3899 (external-effect-v1) — connector truth is separate from an action receipt. ──
+    ExternalEffectPostcondition:
+      type: object
+      required: [path, equals]
+      properties:
+        path:
+          type: string
+        equals:
+          description: JSON value expected at the connector path.
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+
+    ExternalEffect:
+      type: object
+      required:
+        - version
+        - originatingActionId
+        - originatingReceiptId
+        - capabilityGrantId
+        - connector
+        - targetIdentity
+        - requestedOperation
+        - preconditionSnapshot
+        - expectedPostconditions
+        - observation
+        - idempotencyKey
+        - reconciliationState
+        - retryPath
+        - evidenceReference
+        - safeToComplete
+      properties:
+        version:
+          type: string
+          enum: [external-effect-v1]
+        originatingActionId:
+          type: string
+        originatingReceiptId:
+          type: string
+        capabilityGrantId:
+          type: string
+        connector:
+          type: string
+        targetIdentity:
+          type: string
+        requestedOperation:
+          type: string
+        preconditionSnapshot:
+          type: object
+          additionalProperties: true
+        expectedPostconditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalEffectPostcondition"
+        observedState:
+          type: object
+          additionalProperties: true
+        observation:
+          type: object
+          required: [status, maxAgeMs]
+          properties:
+            status:
+              type: string
+              enum: [fresh, stale, unavailable]
+            observedAt:
+              type: string
+              format: date-time
+            ageMs:
+              type: number
+            maxAgeMs:
+              type: number
+        idempotencyKey:
+          type: string
+        reconciliationState:
+          type: string
+          enum: [applied, refused, pending, partially-applied, drifted, stale, unobservable]
+        partialSuccess:
+          type: object
+          required: [satisfied, unsatisfied]
+          properties:
+            satisfied:
+              type: array
+              items: { type: string }
+            unsatisfied:
+              type: array
+              items: { type: string }
+        retryPath:
+          type: object
+          required: [kind, allowed, reason]
+          properties:
+            kind:
+              type: string
+              enum: [none, retry, compensation]
+            allowed:
+              type: boolean
+            reason:
+              type: string
+            attemptNumber:
+              type: integer
+        evidenceReference:
+          type: string
+          description: Opaque digest of redacted connector evidence; raw provider output is never stored.
+        safeToComplete:
+          type: boolean
+        reason:
+          type: string
 
   responses:
     Unauthorized:
@@ -3159,6 +3374,36 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/consequence/preflight:
+    post:
+      summary: Classify and evaluate a consequence-policy-v1 action before any capability it names may be used.
+      description: >
+        Every operator-agent action path that would go on to use a capability grant (see
+        `capability-grant-v1`) evaluates its consequence policy here FIRST. Refuses an ambiguous or
+        externally-sourced target, stale evidence, an expired quote/confirmation, an exceeded
+        per-action/aggregate financial ceiling, an active cooling-off window, or a shortfall of
+        distinct trusted approvers against the action's configured requirement. A `ready` response
+        is a preflight verdict only — it never itself uses a capability or reports success.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentConsequencePreflightRequest"
+      responses:
+        "200":
+          description: The action is ready — every consequence-policy check passed.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The action was refused by consequence policy; the response names the machine-readable code and reason.
 
   /v1/operator-agent/follow-ups:
     get:

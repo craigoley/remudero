@@ -117,6 +117,14 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only operator-agent settings write; route validation and durable read-back are covered in test/operator-agent.test.ts",
   ],
   [
+    "POST /v1/operator-agent/emergency/stop",
+    "W1-T3900: incident-linked emergency stop issuance and validation are covered in test/emergency-control-receipts.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/emergency/clear",
+    "W1-T3900: explicit-clear evidence, refusal, and receipt behavior are covered in test/emergency-control-receipts.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/experiments",
     "ledger-only operator-agent experiment registration; route behavior and experiment-v1 validation are covered in test/operator-agent-experiments.test.ts",
   ],
@@ -151,6 +159,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   [
     "POST /v1/operator-agent/promotions/rollback",
     "ledger-only promotion rollback; append-only rollback receipts are covered in test/operator-agent-promotions.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/consequence/preflight",
+    "ledger-only consequence-policy preflight receipt; classification, confirmation, financial, approval, and receipt behavior are covered in test/consequence-policy-*.test.ts",
   ],
   [
     "POST /v1/operator-agent/context",

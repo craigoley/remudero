@@ -195,6 +195,37 @@ test("W1-T3883 (5, wire): a fully-populated high-risk handoff with a fresh human
   });
 });
 
+test("W1-T3883 (5, wire): the handoff route rejects non-objects and missing action/envelope fields", async () => {
+  await withHandoffServer(async (baseUrl) => {
+    const scalar = await fetch(`${baseUrl}/v1/operator-agent/delegation/handoff`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${HANDOFF_WRITE_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify(null),
+    });
+    assert.equal(scalar.status, 400);
+    assert.match((await scalar.json() as { detail: string }).detail, /body must be a JSON object/);
+
+    const missingEnvelope = await postHandoff(baseUrl, { action: {} });
+    assert.equal(missingEnvelope.status, 400);
+    assert.match((await missingEnvelope.json() as { detail: string }).detail, /envelope is required/);
+
+    const missingAction = await postHandoff(baseUrl, {
+      envelope: {
+        sender: "agent:scheduler",
+        recipient: "agent:deployer",
+        principal: "operator:alice",
+        purpose: "test",
+        capabilities: ["deploy.advance"],
+        audience: "provider:cash",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      acceptedCapabilities: ["deploy.advance"],
+    });
+    assert.equal(missingAction.status, 400);
+    assert.match((await missingAction.json() as { detail: string }).detail, /action is required/);
+  });
+});
+
 test("W1-T3883 (5, wire): an envelope whose sender and recipient collide is refused before it is ever issued or stored", async () => {
   await withHandoffServer(async (baseUrl) => {
     const response = await postHandoff(baseUrl, {

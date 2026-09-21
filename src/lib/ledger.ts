@@ -18,6 +18,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -32,6 +33,33 @@ export interface LedgerLine {
   task_id: string;
   step: string;
   [k: string]: unknown;
+}
+
+export const EXTERNAL_EFFECT_RECONCILED_STEP = "external_effect.reconciled" as const;
+
+/** The durable, redacted projection of an external-effect truth read. */
+export interface ExternalEffectLedgerIdentity {
+  runId: string;
+  taskId: string;
+}
+
+/** Append reconciliation evidence without allowing a connector's raw response into the ledger. */
+export function appendExternalEffectLedger(
+  path: string,
+  identity: ExternalEffectLedgerIdentity,
+  effect: ExternalEffectResult,
+  opts: { ceilingBytes?: number; identity?: () => string; actor?: () => LedgerActor } = {},
+): void {
+  appendLedger(path, {
+    run_id: identity.runId,
+    task_id: identity.taskId,
+    step: EXTERNAL_EFFECT_RECONCILED_STEP,
+    external_effect: effect,
+    reconciliation_state: effect.reconciliationState,
+    action_id: effect.originatingActionId,
+    capability_grant_id: effect.capabilityGrantId,
+    evidence_reference: effect.evidenceReference,
+  }, opts);
 }
 
 /**
@@ -310,6 +338,12 @@ export const CONTEXT_ITEM_LEDGER_STEP = "panel.context_item";
 export const CONTEXT_REVOKED_LEDGER_STEP = "panel.context_revoked";
 export const CONTEXT_DELETED_LEDGER_STEP = "panel.context_deleted";
 
+/** W1-T3900: an emergency stop MUST survive a daemon restart mid-incident — losing one on
+ *  rotation would silently reopen the exact blast-radius an operator just closed. Only issuance
+ *  and clear are deciding rows; refusal/cancellation receipts are audit trail, not state. */
+export const EMERGENCY_STOP_ISSUED_LEDGER_STEP = "panel.emergency_stop_issued";
+export const EMERGENCY_STOP_CLEARED_LEDGER_STEP = "panel.emergency_stop_cleared";
+
 /** W1-T2244 (design vii): the two signals an override can carry, OPPOSITE for a calibrator.
  *  `judge_wrong` says the escalation was a miscalibration; `risk_accepted` says it was correct and
  *  the operator knowingly took the cost. One "overridden" flag would collapse both into judge error.
@@ -553,6 +587,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   CONTEXT_ITEM_LEDGER_STEP,
   CONTEXT_REVOKED_LEDGER_STEP,
   CONTEXT_DELETED_LEDGER_STEP,
+  EMERGENCY_STOP_ISSUED_LEDGER_STEP,
+  EMERGENCY_STOP_CLEARED_LEDGER_STEP,
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.

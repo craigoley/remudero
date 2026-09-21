@@ -1,0 +1,52 @@
+id: fb-1789990874145-2992ef
+ts: 2026-09-21T11:41:14.146Z
+raw: >-
+  Urgent plan-metadata correction for active W1-T3951 / PR #6383. Observed CI
+  failure, not a runtime failure.
+
+
+  The implementation diff and new mounts-only test are correct, but
+  acceptance-author-gate refused the PR because its auto-authored body proof
+  differs from W1-T3951. proof-discrimination also correctly refused both
+  plan-record proofs as stale:
+
+  - grep: resolveInstallRoot(config) in src/run-task.ts exists on base (4 hits)
+
+  - unit test: test/config-fixture-path-parity.test.ts passes on base too.
+
+
+  The CI-log repair worker must not edit plan/tasks.yaml because W1-T3951
+  declares only src/run-task.ts and test/config-fixture-path-parity.test.ts, so
+  it refused rather than violating ownership. File the smallest plan-only
+  correction for W1-T3951 acceptance, then make PR #6383 own Acceptance block
+  exactly agree with the corrected record:
+
+  - grep: templatePath: join(resolveInstallRoot(config), "settings",
+  "worker.json") in src/run-task.ts
+
+  - unit test: a mounts-only target renders worker settings from the daemon
+  install root
+
+
+  Both proofs name behavior added by #6383. Do not weaken proof-discrimination,
+  broaden task ownership, or change production behavior. Once the plan metadata
+  is merged, let the normal daemon repair/re-review #6383 and retain automatic
+  merge ownership.
+
+
+  Acceptance:
+
+  - grep: templatePath: join(resolveInstallRoot(config), "settings",
+  "worker.json") in src/run-task.ts
+
+  - unit test: a mounts-only target renders worker settings from the daemon
+  install root
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

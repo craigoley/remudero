@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import type { Route } from "./service.js";
 import { clockFromMillisFn } from "./clock.js";
+import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
   appendPanelLedger,
@@ -46,6 +47,12 @@ import {
   type FollowUpHistory,
 } from "./follow-up-policy.js";
 import {
+  classifyConsequenceAction,
+  evaluateConsequencePolicy,
+  recordConsequenceRefusal,
+  type ConsequenceActionInput,
+} from "./consequence-policy.js";
+import {
   acceptDelegationEnvelope,
   createDelegationEnvelope,
   executeBoundedDelegation,
@@ -55,6 +62,20 @@ import {
   type DelegationRiskTier,
   type DelegationScope,
 } from "./automation-action.js";
+import {
+  checkEmergencyStop,
+  clearEmergencyStop,
+  createEmergencyStop,
+  emergencyStopIssuedReceipt,
+  isEmergencyStopActive,
+  parseStoredEmergencyStop,
+  EMERGENCY_STOP_CLEAR_POLICIES,
+  EMERGENCY_STOP_SCOPES,
+  type EmergencyClearRequest,
+  type EmergencyStop,
+  type EmergencyStopClearPolicy,
+  type EmergencyStopScope,
+} from "./emergency-control.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -70,6 +91,7 @@ export const OPERATOR_AGENT_PROMOTION_REPLAY_STEP = "panel.operator_agent_promot
 export const OPERATOR_AGENT_PROMOTION_DECISION_STEP = "panel.operator_agent_promotion_decision";
 export const OPERATOR_AGENT_PROMOTION_ADVANCE_STEP = "panel.operator_agent_promotion_advance";
 export const OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP = "panel.operator_agent_promotion_rollback";
+export const OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP = "panel.operator_agent_consequence_preflight";
 export const CONTEXT_ITEM_VERSION = "context-item-v1" as const;
 export const CONTEXT_ITEM_STEP = "panel.context_item";
 export const CONTEXT_REVOKED_STEP = "panel.context_revoked";
@@ -78,6 +100,11 @@ export const CONTEXT_DELETED_STEP = "panel.context_deleted";
  *  executeBoundedDelegation( before this ledgers — never a raw prompt or secret, only the
  *  resulting {@link DelegationReceipt}. */
 export const OPERATOR_AGENT_DELEGATION_HANDOFF_STEP = "panel.operator_agent_delegation_handoff";
+/** W1-T3900: audit trail only (never re-read to decide anything), so — unlike
+ *  EMERGENCY_STOP_ISSUED_LEDGER_STEP/EMERGENCY_STOP_CLEARED_LEDGER_STEP (ledger.ts) — these stay
+ *  local, matching OPERATOR_AGENT_PROPOSAL_STEP's precedent just above. */
+export const EMERGENCY_STOP_REFUSAL_STEP = "panel.emergency_stop_refusal";
+export const EMERGENCY_STOP_CANCELLATION_STEP = "panel.emergency_stop_cancellation";
 export const OPERATOR_AGENT_DEFAULT_SETTINGS = { enabled: true, confidenceThreshold: 0.9 } as const;
 
 export const OPERATOR_AGENT_CATEGORIES = ["optimize", "fix", "scale"] as const;
@@ -886,6 +913,19 @@ function validatePromotionRollbackInput(body: unknown): { error: string } | Prom
   return { promotionId: body.promotionId.trim(), rollback };
 }
 
+interface ConsequencePreflightInput {
+  action: ConsequenceActionInput;
+}
+
+/** The body's `action` is handed to {@link classifyConsequenceAction} unvalidated beyond shape —
+ *  that function is itself the authoritative validator and throws a human-readable `Error` the
+ *  route below turns into a 400, exactly the split `createCapabilityGrant` already uses. */
+function validateConsequencePreflightInput(body: unknown): { error: string } | ConsequencePreflightInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!isRecord(body.action)) return { error: "action is required" };
+  return { action: body.action as unknown as ConsequenceActionInput };
+}
+
 function readRows(ledgerPath: string): Array<Record<string, unknown>> {
   // The agent's history is a durable read, so it must include the live ledger and both supported
   // rotation forms. The live reader is intentionally not substituted here: a compacted decision
@@ -1306,6 +1346,15 @@ export function buildOperatorAgentProposalRegisterRoute(deps: OperatorAgentRoute
         sendJson(res, 200, { ok: true, existing: true, proposal: existing });
         return;
       }
+      // W1-T3900: a new proposal IS the "new action admission" surface this task's design
+      // names — refused BY NAME before any ledger write when an active emergency stop covers
+      // this proposal's repo.
+      const admission = checkEmergencyStop(activeEmergencyStops(deps), { actionKind: "action-admission", repo: input.proposal.repo }, deps.now?.() ?? Date.now());
+      if (!admission.ok) {
+        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.proposal.proposalId, bearerTokenId(req), { receipt: admission.receipt });
+        sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
+        return;
+      }
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROPOSAL_STEP, input.proposal.proposalId, bearerTokenId(req), { proposal: input.proposal });
       sendJson(res, 201, { ok: true, existing: false, proposal: input.proposal });
     }),
@@ -1643,6 +1692,15 @@ export function buildOperatorAgentPromotionAdvanceRoute(deps: OperatorAgentRoute
         sendJson(res, 409, { error: "conflict", detail: result.reason ?? `promotion ${input.promotionId} cannot advance to ${input.target} from ${existing.state}` });
         return;
       }
+      // W1-T3900: advancing a promotion IS the "follow-up promotion" surface this task's design
+      // names — refused BY NAME before any ledger write when an active emergency stop covers
+      // this promotion's repo.
+      const admission = checkEmergencyStop(activeEmergencyStops(deps), { actionKind: "follow-up-promotion", repo: existing.scope.repo }, deps.now?.() ?? Date.now());
+      if (!admission.ok) {
+        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.promotionId, bearerTokenId(req), { receipt: admission.receipt });
+        sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
+        return;
+      }
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_ADVANCE_STEP, input.promotionId, bearerTokenId(req), {
         promotion_id: input.promotionId,
         target: input.target,
@@ -1682,6 +1740,48 @@ export function buildOperatorAgentPromotionRollbackRoute(deps: OperatorAgentRout
         at,
       });
       sendJson(res, 200, { ok: true, promotionId: input.promotionId, state: "rolled_back", rollback: input.rollback, at });
+    }),
+  };
+}
+
+/**
+ * POST /v1/operator-agent/consequence/preflight — the action path's own gate: every operator-agent
+ * action that would go on to use a capability grant (capability-grant.ts, W1-T3880) classifies and
+ * evaluates its `consequence-policy-v1` HERE first. Refuses (409, never a manufactured `ready`) an
+ * ambiguous or externally-sourced target, stale evidence, an expired quote/confirmation, an
+ * exceeded financial ceiling, an active cooling-off window, or a shortfall of approvers — see
+ * {@link evaluateConsequencePolicy}. This route never itself uses a capability grant and never
+ * reports success before an action; it only records the preflight verdict.
+ */
+export function buildOperatorAgentConsequencePreflightRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/consequence/preflight",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateConsequencePreflightInput, (input, req, res) => {
+      let action;
+      try {
+        action = classifyConsequenceAction(input.action);
+      } catch (err) {
+        sendJson(res, 400, { error: "invalid_action", detail: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      const nowIso = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const result = evaluateConsequencePolicy(action, { now: nowIso });
+      const refusal = result.ok ? undefined : recordConsequenceRefusal(result, { now: nowIso });
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, action.id, bearerTokenId(req), {
+        action_id: action.id,
+        consequence_class: action.consequenceClass,
+        ready: result.ok,
+        at: nowIso,
+        ...(refusal ? { code: refusal.code, reason: refusal.reason } : {}),
+      });
+      if (!result.ok) {
+        sendJson(res, 409, { ok: false, actionId: action.id, code: result.code, reason: result.reason, at: nowIso });
+        return;
+      }
+      sendJson(res, 200, { ok: true, actionId: action.id, consequenceClass: action.consequenceClass, at: nowIso });
     }),
   };
 }
@@ -1738,6 +1838,199 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
       });
       sendJson(res, 200, { settings: input.settings, source: "ledger", ...(input.scope ? { scope: input.scope } : {}), updatedAt });
     }),
+  };
+}
+
+// ── W1-T3900: emergency-stop circuit ────────────────────────────────────────────────────────
+// Ledger-backed, UNLIKE the delegation store just below: an emergency stop must survive a daemon
+// restart mid-incident (ledger.ts's EMERGENCY_STOP_ISSUED_LEDGER_STEP doc explains why it is
+// decision-relevant), so state is reconstructed from the ledger on every check rather than held
+// in a per-process Map.
+
+const MAX_EMERGENCY_ID = 160;
+const MAX_EMERGENCY_TEXT = 500;
+const MAX_EMERGENCY_CLASS_LIST = 50;
+
+function validEmergencyClassList(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= MAX_EMERGENCY_CLASS_LIST && value.every((v) => boundedString(v, MAX_ID));
+}
+
+/** `undefined` = field omitted (caller defaults it); `{ error }` = present but malformed. */
+function validateEmergencyClassField(value: unknown): { error: string } | { value?: readonly string[] | "*" } {
+  if (value === undefined) return {};
+  if (value === "*") return { value: "*" };
+  if (!validEmergencyClassList(value)) return { error: 'must be "*" or a bounded, non-empty array of strings' };
+  return { value };
+}
+
+interface EmergencyStopIssueInput {
+  scope: EmergencyStopScope;
+  scopeTarget?: string;
+  reason: string;
+  issuedBy: string;
+  clearPolicy: EmergencyStopClearPolicy;
+  expiresAt?: string;
+  affectedCapabilities?: readonly string[] | "*";
+  affectedDelegationClasses?: readonly string[] | "*";
+  incidentReceiptId: string;
+  id?: string;
+}
+
+function validateEmergencyStopIssue(body: unknown): { error: string } | EmergencyStopIssueInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.scope !== "string" || !EMERGENCY_STOP_SCOPES.includes(body.scope as EmergencyStopScope)) {
+    return { error: `scope must be one of ${EMERGENCY_STOP_SCOPES.join(", ")}` };
+  }
+  if (body.scopeTarget !== undefined && !boundedString(body.scopeTarget, MAX_EMERGENCY_ID)) return { error: "scopeTarget must be a bounded string" };
+  if (!boundedString(body.reason, MAX_EMERGENCY_TEXT)) return { error: "reason is required" };
+  if (!boundedString(body.issuedBy, MAX_EMERGENCY_ID)) return { error: "issuedBy is required" };
+  if (typeof body.clearPolicy !== "string" || !EMERGENCY_STOP_CLEAR_POLICIES.includes(body.clearPolicy as EmergencyStopClearPolicy)) {
+    return { error: `clearPolicy must be one of ${EMERGENCY_STOP_CLEAR_POLICIES.join(", ")}` };
+  }
+  if (body.expiresAt !== undefined && !iso(body.expiresAt)) return { error: "expiresAt must be a valid ISO-8601 instant" };
+  if (!boundedString(body.incidentReceiptId, MAX_EMERGENCY_ID)) return { error: "incidentReceiptId is required" };
+  const capabilities = validateEmergencyClassField(body.affectedCapabilities);
+  if ("error" in capabilities) return { error: `affectedCapabilities ${capabilities.error}` };
+  const delegationClasses = validateEmergencyClassField(body.affectedDelegationClasses);
+  if ("error" in delegationClasses) return { error: `affectedDelegationClasses ${delegationClasses.error}` };
+  if (body.id !== undefined && !boundedString(body.id, MAX_EMERGENCY_ID)) return { error: "id must be a bounded string" };
+  return {
+    scope: body.scope as EmergencyStopScope,
+    ...(body.scopeTarget ? { scopeTarget: (body.scopeTarget as string).trim() } : {}),
+    reason: (body.reason as string).trim(),
+    issuedBy: (body.issuedBy as string).trim(),
+    clearPolicy: body.clearPolicy as EmergencyStopClearPolicy,
+    ...(body.expiresAt ? { expiresAt: new Date(body.expiresAt as string).toISOString() } : {}),
+    ...("value" in capabilities && capabilities.value !== undefined ? { affectedCapabilities: capabilities.value } : {}),
+    ...("value" in delegationClasses && delegationClasses.value !== undefined ? { affectedDelegationClasses: delegationClasses.value } : {}),
+    incidentReceiptId: (body.incidentReceiptId as string).trim(),
+    ...(body.id ? { id: (body.id as string).trim() } : {}),
+  };
+}
+
+function validateEmergencyStopClear(body: unknown): { error: string } | { stopId: string; request: EmergencyClearRequest } {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!boundedString(body.stopId, MAX_EMERGENCY_ID)) return { error: "stopId is required" };
+  const confirmation = body.confirmation;
+  if (!isRecord(confirmation) || !boundedString(confirmation.confirmedBy, MAX_EMERGENCY_ID) || !iso(confirmation.confirmedAt)) {
+    return { error: "confirmation requires a bounded confirmedBy and a valid ISO confirmedAt" };
+  }
+  const health = body.health;
+  if (!isRecord(health) || !boundedString(health.source, MAX_EMERGENCY_ID) || !iso(health.checkedAt)) {
+    return { error: "health requires a bounded source and a valid ISO checkedAt" };
+  }
+  if (health.status !== "healthy" && health.status !== "degraded" && health.status !== "unavailable") {
+    return { error: "health.status must be healthy, degraded, or unavailable" };
+  }
+  const revocation = body.revocation;
+  if (!isRecord(revocation) || (revocation.coverage !== "complete" && revocation.coverage !== "partial" && revocation.coverage !== "unavailable")) {
+    return { error: "revocation.coverage must be complete, partial, or unavailable" };
+  }
+  const stopId = (body.stopId as string).trim();
+  return {
+    stopId,
+    request: {
+      stopId,
+      confirmation: { confirmedBy: (confirmation.confirmedBy as string).trim(), confirmedAt: confirmation.confirmedAt as string },
+      health: { source: (health.source as string).trim(), status: health.status, checkedAt: health.checkedAt as string },
+      revocation: { coverage: revocation.coverage },
+    },
+  };
+}
+
+function emergencyStopRows(ledgerPath: string): Array<Record<string, unknown>> {
+  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEARED_LEDGER_STEP],
+  }).rows;
+}
+
+interface EmergencyControlState {
+  stops: Map<string, EmergencyStop>;
+  clearedIds: Set<string>;
+}
+
+function readEmergencyControlState(ledgerPath: string): EmergencyControlState {
+  const stops = new Map<string, EmergencyStop>();
+  const clearedIds = new Set<string>();
+  for (const row of emergencyStopRows(ledgerPath)) {
+    if (row.step === EMERGENCY_STOP_ISSUED_LEDGER_STEP) {
+      const stop = parseStoredEmergencyStop(row.stop);
+      if (stop && !stops.has(stop.id)) stops.set(stop.id, stop);
+      continue;
+    }
+    if (row.step === EMERGENCY_STOP_CLEARED_LEDGER_STEP && boundedString(row.stop_id, MAX_EMERGENCY_ID)) {
+      clearedIds.add(row.stop_id);
+    }
+  }
+  return { stops, clearedIds };
+}
+
+/** The currently ACTIVE stops — already filtered by {@link isEmergencyStopActive} — this task's
+ *  admission call sites pass straight to {@link checkEmergencyStop}. */
+function activeEmergencyStops(deps: OperatorAgentRouteDependencies): EmergencyStop[] {
+  const { stops, clearedIds } = readEmergencyControlState(deps.ledgerPath);
+  const now = deps.now?.() ?? Date.now();
+  return [...stops.values()].filter((stop) => isEmergencyStopActive(stop, clearedIds, now));
+}
+
+/** POST /v1/operator-agent/emergency/stop — issue a bounded, incident-linked emergency stop. */
+export function buildEmergencyStopIssueRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/emergency/stop",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateEmergencyStopIssue, (input, req, res) => {
+      let stop: EmergencyStop;
+      try {
+        stop = createEmergencyStop(input);
+      } catch (e) {
+        sendJson(res, 400, { error: "invalid_request", detail: (e as Error).message });
+        return;
+      }
+      const receipt = emergencyStopIssuedReceipt(stop, { now: deps.now?.() });
+      appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_ISSUED_LEDGER_STEP, stop.id, bearerTokenId(req), { stop, receipt });
+      sendJson(res, 201, { ok: true, stop, receipt });
+    }),
+  };
+}
+
+/**
+ * POST /v1/operator-agent/emergency/clear — the only path that lifts a stop. Requires explicit
+ * human confirmation, a fresh healthy authoritative health read, and complete revocation-source
+ * coverage (see clearEmergencyStop( in src/lib/emergency-control.ts); a `409` here writes nothing.
+ */
+export function buildEmergencyStopClearRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/emergency/clear",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateEmergencyStopClear, (input, req, res) => {
+      const { stops, clearedIds } = readEmergencyControlState(deps.ledgerPath);
+      const stop = stops.get(input.stopId);
+      if (!stop) {
+        sendJson(res, 404, { error: "not_found", detail: `no emergency stop ${JSON.stringify(input.stopId)}` });
+        return;
+      }
+      const result = clearEmergencyStop(stop, clearedIds.has(stop.id), input.request, { now: deps.now?.() });
+      if (!result.ok) {
+        sendJson(res, 409, { ok: false, code: result.code, receipt: result.receipt });
+        return;
+      }
+      appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_CLEARED_LEDGER_STEP, stop.id, bearerTokenId(req), { stop_id: stop.id, receipt: result.receipt });
+      sendJson(res, 200, { ok: true, receipt: result.receipt });
+    }),
+  };
+}
+
+/** GET /v1/operator-agent/emergency/status — the currently active stops, for panel visibility. */
+export function buildEmergencyStopStatusRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/emergency/status",
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, { active: activeEmergencyStops(deps), source: "ledger" }),
   };
 }
 
@@ -1864,6 +2157,25 @@ export function buildOperatorAgentDelegationHandoffRoute(deps: OperatorAgentRout
         sendJson(res, 400, { error: "invalid_request", detail: (e as Error).message });
         return;
       }
+      // W1-T3900: THE "agent handoff" surface this task's design names — refused BY NAME before
+      // the envelope is even issued when an active emergency stop covers this handoff's repo,
+      // instance, principal, or the specific capability requested.
+      const admission = checkEmergencyStop(
+        activeEmergencyStops(deps),
+        {
+          actionKind: "agent-handoff",
+          repo: envelope.scope.repo,
+          instance: envelope.scope.instance,
+          principal: envelope.principal,
+          delegationClass: input.action.capability,
+        },
+        deps.now?.() ?? Date.now(),
+      );
+      if (!admission.ok) {
+        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, envelope.id, bearerTokenId(req), { receipt: admission.receipt });
+        sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
+        return;
+      }
       operatorAgentDelegationStore.issue(envelope);
 
       const acceptance = acceptDelegationEnvelope(operatorAgentDelegationStore, {
@@ -1913,9 +2225,13 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentPromotionDecisionRoute(deps),
     buildOperatorAgentPromotionAdvanceRoute(deps),
     buildOperatorAgentPromotionRollbackRoute(deps),
+    buildOperatorAgentConsequencePreflightRoute(deps),
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
     buildOperatorAgentDelegationHandoffRoute(deps),
+    buildEmergencyStopIssueRoute(deps),
+    buildEmergencyStopClearRoute(deps),
+    buildEmergencyStopStatusRoute(deps),
   ];
 }
