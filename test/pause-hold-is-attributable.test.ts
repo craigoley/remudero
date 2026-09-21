@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   checkSharedPause,
+  realSharedPauseGitDeps,
   readSharedPauseAnchor,
+  readSharedPause,
+  SHARED_PAUSE_GIT_TIMEOUT_MS,
   sharedPauseRef,
   writeSharedPause,
   type SharedPauseGitDeps,
@@ -55,6 +61,29 @@ test("deny-floor: leaves an unrelated refs/ push (e.g. rmd-triage/rmd-id namespa
   assert.equal(triage.status, 0);
   const id = runDenyFloor("git push origin abc123:refs/rmd-id/W1-T1");
   assert.equal(id.status, 0);
+});
+
+test("real shared-pause git reads are bounded and convert git failures into unreachable", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-shared-pause-git-bound-"));
+  const bin = mkdtempSync(join(tmpdir(), "rmd-shared-pause-git-bin-"));
+  const fakeGit = join(bin, "git");
+  const oldPath = process.env.PATH;
+  try {
+    writeFileSync(fakeGit, "#!/bin/sh\nif [ \"$3\" = \"ls-remote\" ]; then echo 'abc123\\trefs/rmd-pause/hold'; else exit 7; fi\n", "utf8");
+    chmodSync(fakeGit, 0o755);
+    process.env.PATH = `${bin}:${oldPath ?? ""}`;
+    const deps = realSharedPauseGitDeps(root);
+    assert.equal(readSharedPause(deps), "held");
+    assert.equal(SHARED_PAUSE_GIT_TIMEOUT_MS, 10_000);
+
+    writeFileSync(fakeGit, "#!/bin/sh\nexit 7\n", "utf8");
+    assert.equal(readSharedPause(realSharedPauseGitDeps(root)), "unreachable");
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 // acceptance 2: "a refspec assembled indirectly still reaches the remote, and that limitation is
