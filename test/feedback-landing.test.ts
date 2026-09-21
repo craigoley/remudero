@@ -159,6 +159,64 @@ test("W1-T243 END-TO-END: a captured entry is invisible on origin/main until lan
   assert.equal(resolved.status, "new", "landing never touches status — data-only, no triage");
 });
 
+function withLandingAuthor<T>(name: string | undefined, email: string | undefined, action: () => T): T {
+  const priorName = process.env.RMD_GIT_AUTHOR_NAME;
+  const priorEmail = process.env.RMD_GIT_AUTHOR_EMAIL;
+  try {
+    if (name === undefined) delete process.env.RMD_GIT_AUTHOR_NAME;
+    else process.env.RMD_GIT_AUTHOR_NAME = name;
+    if (email === undefined) delete process.env.RMD_GIT_AUTHOR_EMAIL;
+    else process.env.RMD_GIT_AUTHOR_EMAIL = email;
+    return action();
+  } finally {
+    if (priorName === undefined) delete process.env.RMD_GIT_AUTHOR_NAME;
+    else process.env.RMD_GIT_AUTHOR_NAME = priorName;
+    if (priorEmail === undefined) delete process.env.RMD_GIT_AUTHOR_EMAIL;
+    else process.env.RMD_GIT_AUTHOR_EMAIL = priorEmail;
+  }
+}
+
+test("unit test: W1-T3915 configured landing commit identity", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  withLandingAuthor("Vercel Operator", "operator@example.com", () => {
+    const configured = withLiveWritesAllowed(() =>
+      captureFeedback(root, {
+        raw: "configured landing identity",
+        origin: "cli",
+        land: { gh: fakeGh("https://github.com/o/r/pull/3915").gh },
+      }),
+    );
+    const configuredAuthor = execFileSync(
+      "git",
+      ["--git-dir", bareOrigin, "show", "-s", "--format=%an <%ae>", LANDING_BRANCH],
+      { encoding: "utf8", env: GIT_ENV },
+    ).trim();
+    assert.equal(configuredAuthor, "Vercel Operator <operator@example.com>");
+    assert.ok(configured.id);
+  });
+});
+
+test("unit test: W1-T3915 default landing commit identity", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  withLandingAuthor(undefined, undefined, () => {
+    withLiveWritesAllowed(() =>
+      captureFeedback(root, {
+        raw: "default landing identity",
+        origin: "cli",
+        land: { gh: fakeGh("https://github.com/o/r/pull/3916").gh },
+      }),
+    );
+    const defaultAuthor = execFileSync(
+      "git",
+      ["--git-dir", bareOrigin, "show", "-s", "--format=%an <%ae>", LANDING_BRANCH],
+      { encoding: "utf8", env: GIT_ENV },
+    ).trim();
+    assert.equal(defaultAuthor, "rmd-feedback-bridge <rmd-feedback-bridge@users.noreply.github.com>");
+  });
+});
+
 // ── Acceptance claim 2: ONE choke point covers a caller never named in the implementation ──
 
 test("W1-T243 CHOKE POINT: captureFeedback lands ANY caller's entry — this test calls neither rmd feedback, ops, issues-intake, nor the panel routes, and it still lands", () => {

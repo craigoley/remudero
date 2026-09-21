@@ -97,8 +97,15 @@ export const CI_LEARNING_LANDING_BRANCH = "ci-learning-landing";
 /** The one shared PR title/head every automated CI-learning shard landing call opens or reuses. */
 export const CI_LEARNING_LANDING_PR_TITLE = "chore(ci-learning): land pending lessons";
 
-const LANDING_AUTHOR_NAME = "rmd-feedback-bridge";
-const LANDING_AUTHOR_EMAIL = "rmd-feedback-bridge@users.noreply.github.com";
+const DEFAULT_LANDING_AUTHOR_NAME = "rmd-feedback-bridge";
+const DEFAULT_LANDING_AUTHOR_EMAIL = "rmd-feedback-bridge@users.noreply.github.com";
+
+function landingAuthorIdentity(): { name: string; email: string } {
+  return {
+    name: process.env.RMD_GIT_AUTHOR_NAME?.trim() || DEFAULT_LANDING_AUTHOR_NAME,
+    email: process.env.RMD_GIT_AUTHOR_EMAIL?.trim() || DEFAULT_LANDING_AUTHOR_EMAIL,
+  };
+}
 
 type GitExec = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => string;
 type GhExec = (args: string[]) => string;
@@ -768,12 +775,13 @@ function finishLanding(
 
   const pushOnce = (b: LandingTreeBuild): void => {
     const message = kind.commitMessage(b.unlanded);
+    const author = landingAuthorIdentity();
     const commitSha = git(
       [
         "-c",
-        `user.name=${LANDING_AUTHOR_NAME}`,
+        `user.name=${author.name}`,
         "-c",
-        `user.email=${LANDING_AUTHOR_EMAIL}`,
+        `user.email=${author.email}`,
         "commit-tree",
         b.treeSha,
         "-p",
