@@ -11,7 +11,11 @@
   files: [src/lib/plan.ts, src/lib/task-linter.ts, src/lib/relint.ts, src/run-task.ts, test/machine-filed-task-admission.test.ts, scripts/test-tier-manifest.json]
   origin: "2026-09-20 census of plan/tasks.d during a five-PR unblocking session"
   plan_refs: ["W1-T3206", "W1-T3748"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-20 by operator authorization: PR #6248 shipped the admission guard and its
+  # machine-filed-task-admission suite. The historical 33 shards remain separate records for
+  # judge-driven disposition; this closure retires the shipped diagnosis, not those lessons.
   attempts: 0
   rationale: |
     THE LOOP IS BUILT, IT HAS RUN, AND ITS LAST STEP HAS NEVER EXECUTED ONCE.
