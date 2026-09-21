@@ -14,6 +14,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { pruneDeletableBranches, type BranchManifestEntry } from "../src/lib/branch-reaper.js";
 
 function entries(...names: string[]): BranchManifestEntry[] {
@@ -101,7 +102,7 @@ test("W1-T3020: an empty manifest is a no-op that pushes nothing at all", () => 
   assert.equal(rec.calls.length, 0, "nothing to delete must mean no push, not an empty --delete");
 });
 
-test("W1-T3020: the prune is operator-invoked — no daemon, sweep or cadence rung calls it", async () => {
+test("W1-T3020: the prune has one shared automatic full-sweep adapter and stays off the light pass", async () => {
   const { execFileSync } = await import("node:child_process");
   const hits = execFileSync("git", ["grep", "-l", "pruneDeletableBranches", "--", "src/"], { encoding: "utf8" })
     .split("\n")
@@ -109,9 +110,14 @@ test("W1-T3020: the prune is operator-invoked — no daemon, sweep or cadence ru
   assert.deepEqual(
     hits.sort(),
     ["src/lib/branch-reaper.ts", "src/run-task.ts"],
-    "only its own module and the CLI verb may reference the deleter — a daemon.ts or sweep.ts hit means the fleet " +
-      "gained the delete, which is the one thing W1-T447's design forbids",
+    "the CLI and daemon adapter must share the one manifest deleter; a second implementation would create a divergent delete policy",
   );
+  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const fullStart = source.indexOf("export function buildSweepHook(");
+  const lightStart = source.indexOf("export function buildSweepLightHook(");
+  assert.ok(fullStart >= 0 && lightStart > fullStart);
+  assert.match(source.slice(fullStart, lightStart), /runAutomaticBranchReapRung\(/);
+  assert.doesNotMatch(source.slice(lightStart), /runAutomaticBranchReapRung\(/);
 });
 
 // ── the fold that decides whether a REF is live (W1-T3020) ──────────────────────────────────────
