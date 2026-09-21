@@ -147,7 +147,8 @@
   origin: "oper#route-followups-to-feedback-2026-08-17"
   plan_refs: ["W1-T963", "W1-T105", "W1-T56"]
   files: [src/lib/feedback.ts, src/lib/retro.ts, src/run-task.ts, plan/policy.yaml, test/retro.test.ts, test/feedback.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
     depends_on: W1-T963 IS LOAD-BEARING AND IS ARGUED IN rationale (7), NOT ONLY DECLARED HERE.

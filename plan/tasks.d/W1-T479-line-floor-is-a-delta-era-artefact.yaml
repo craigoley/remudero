@@ -63,7 +63,8 @@
   origin: recon#line-floor-residual-2026-08-14
   plan_refs: ["W1-T467"]
   files: [scripts/coverage-baseline.json, scripts/coverage-ratchet.mjs, test/coverage-ratchet.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "`risk: high` — MEASURED, NOT PREDICTED, AND THE REFUSAL IS RECORDED HERE RATHER THAN LEFT
     FOR THE IMPLEMENTER TO REDISCOVER. This shard was first written at `medium`, reasoning that it

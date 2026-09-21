@@ -89,7 +89,8 @@
   origin: recon#triage-self-arms-2026-08-14
   plan_refs: ["W1-T469", "W1-T476", "W1-T125"]
   files: [src/run-task.ts, test/triage-arm-policy.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`; `sizingViolation`
     (`src/lib/task-linter.ts`) refuses `medium` at two subsystems. The blast radius is one call site.

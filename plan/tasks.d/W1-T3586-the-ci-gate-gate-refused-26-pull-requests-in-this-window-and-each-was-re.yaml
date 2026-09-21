@@ -5,9 +5,9 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
-  author_class: machine
   origin: "ci-learning:5431:ci-gate"
   ci_learning_prs: [5431, 5433, 5436, 5437, 5441, 5445, 5446, 5451, 5454, 5492, 5494, 5502, 5503, 5505, 5520, 5530, 5531, 5534, 5535, 5536, 5549, 5550, 5553, 5559, 5562, 5565]
   files:
