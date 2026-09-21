@@ -43,16 +43,11 @@
     is quiet, while an otherwise identical queued task still warns. Keep the existing W1-T1041
     scope regression and report-only controls intact.
 
-    acceptance anchor: W1-T3938 blocked task with an overlapping uncredited build is quiet
-    acceptance anchor: W1-T3938 queued task with an overlapping uncredited build still warns
-    acceptance anchor: W1-T3938 blocked-warning suppression moves no disposition
   acceptance:
-    - claim: "the plan records the blocked-task suppression regression"
-      proof: "grep: W1-T3938 blocked task with an overlapping uncredited build is quiet in plan/tasks.d/W1-T3938-uncredited-build-detection.yaml"
-    - claim: "the plan records the live queued-task control"
-      proof: "grep: W1-T3938 queued task with an overlapping uncredited build still warns in plan/tasks.d/W1-T3938-uncredited-build-detection.yaml"
-    - claim: "the plan preserves the report-only no-disposition contract"
-      proof: "grep: W1-T3938 blocked-warning suppression moves no disposition in plan/tasks.d/W1-T3938-uncredited-build-detection.yaml"
+    - claim: "the existing detector still reports an overlapping uncredited source build"
+      proof: "unit test: acceptance: the warn FIRES on the #3095 shape"
+    - claim: "the report-only warning does not change task disposition"
+      proof: "unit test: W1-T3934: the warning MOVES NO DISPOSITION"
   falsifier: |
     Remove the blocked-status guard and the blocked-task regression must fail. Change the guard
     to suppress queued tasks or all tasks with a declared scope and the queued/live control or
