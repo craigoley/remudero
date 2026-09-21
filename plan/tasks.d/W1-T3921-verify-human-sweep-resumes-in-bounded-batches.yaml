@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "oper#verify-human-sweep-enospc-2026-09-21"
   plan_refs: [W1-T3188, W1-T3916]
-  files: [src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts]
+  files: [src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts, docs/cli-reference.md]
   status: queued
   attempts: 0
   rationale: |
@@ -50,13 +50,13 @@
     introduced, so this flow control cannot strand an implementation PR.
   acceptance:
     - claim: "verify-human-sweep accepts an explicit limit that applies only to due observed states and leaves unselected due shards for a later pass"
-      proof: "grep: --limit <n> applies only to due observed states in src/run-task.ts"
+      proof: "grep: const toJudge = deps\\.maxJudged in src/run-task.ts"
     - claim: "a bounded pass reports deferred due work separately from already-settled work"
-      proof: "grep: deferred due work remains due for the next pass in src/run-task.ts"
+      proof: "grep: deferred: due\\.slice(toJudge\\.length)\\.map in src/run-task.ts"
     - claim: "invalid batch controls refuse before config, plan, ledger, provider, or proposal access"
-      proof: "grep: invalid batch limits refuse before any sweep side effect in src/run-task.ts"
+      proof: "grep: if (limitProvided && (limit === undefined in src/run-task.ts"
     - claim: "a failed verdict remains fail-open and is eligible for a later batch"
-      proof: "grep: failed verdict remains eligible for the next batch in src/run-task.ts"
+      proof: "grep: W1-T3921: a failed verdict remains due for the next bounded retry in test/a-verify-human-shard-is-judged.test.ts"
   falsifier: |
     Remove the limit from the production command and the bounded-pass test must either route the
     entire due population or lose its deferred count. Make a failed verdict count as settled and
