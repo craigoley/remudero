@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 25.00
-  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, src/run-task.ts, test/an-open-pr-does-not-rot-while-it-waits.test.ts, test/sweep-conflicted-disposition.test.ts]
+  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, src/lib/producer-completeness.ts, src/run-task.ts, test/an-open-pr-does-not-rot-while-it-waits.test.ts, test/sweep-conflicted-disposition.test.ts]
   origin: "operator-session#stale-blocked-automerge-2026-09-20"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T3277", "W1-T520", "W1-T2855"]
   status: queued
@@ -74,6 +74,8 @@
     bounded.
   note: |
     reservation hand-off: run-W1-T3747-1789943000000 -> plan-W1-T3920-stale-blocked-1789958000000
+    plan amendment: the raw merge facts now have a production producer, so remove their stale
+    KNOWN_UNWIRED allowlist entries in src/lib/producer-completeness.ts in the implementation PR.
     The task is high risk because it writes to contributor branches unattended, but the blast
     radius is deliberately narrow: the existing single-winner, lease-protected update effect is
     reused, and only a positively observed stale-blocked merge shape bypasses the ordinary
