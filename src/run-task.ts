@@ -941,6 +941,8 @@ import {
 } from "./lib/task-linter.js";
 import {
   readPriorRefusal,
+  terminalPreDispatchRefusalRevisions,
+  preDispatchContractRevision,
   writePriorRefusal,
   repairRefusedTask,
   type RefusalViolation,
@@ -13286,6 +13288,7 @@ async function runTask(
         (id, prior) => writePriorRefusal(refusalStateRoot, id, prior),
         dispatchRepairLaneDefault,
         escalateDefault,
+        preDispatchContractRevision(task),
       );
       if (repairAction.kind === "held") {
         log("dispatch.repair.held", {
@@ -29725,6 +29728,7 @@ export async function daemonCommand(
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env)),
+        readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
         // paths, so the reload always reads the SAME source the boot did (origin/main, never the
         // working tree). An explicit `--plan` keeps the frozen-at-boot behaviour for BOTH, because

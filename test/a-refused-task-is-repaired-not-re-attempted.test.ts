@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import { ghShim } from "./helpers/gh-shim.js";
 import {
   decideRepairDispatch,
+  preDispatchContractRevision,
   refusalVerdictText,
   repairRefusedTask,
+  terminalPreDispatchRefusalRevisions,
   type PriorRefusal,
   type RefusalViolation,
 } from "../src/lib/dispatch-repair.js";
+import { runnableCandidates, tallyDispatchFilters } from "../src/lib/drain.js";
+import { runDaemon } from "../src/lib/daemon.js";
+import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { runTask } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -219,6 +224,7 @@ test("BEHAVIORAL: a real runTask dispatch of a linter-refused task drives repair
   ) as PriorRefusal;
   assert.equal(record.attempts, 1, "the real dispatch path persisted the first repair decision");
   assert.match(record.verdict, /sizing/, "the persisted repair decision carries the real linter verdict for this task");
+  assert.match(record.preDispatchContractRevision ?? "", /^pre-dispatch-v1:/, "the real dispatch path persists the parsed contract revision");
 });
 
 test("BEHAVIORAL: the next real runTask reads that refusal and escalates without issuing a live GitHub write", async () => {
@@ -257,4 +263,235 @@ test("BEHAVIORAL: the next real runTask reads that refusal and escalates without
   assert.match(ledger, /"step":"dispatch\.repair\.held"/, "the held decision is ledgered by the run-task composition root");
   assert.match(ledger, /"reason":"unchanged pre-dispatch verdict was already escalated"/, "the held ledger row names why the decision was held");
   assert.match(ledger, /"escalation_attempts":2/, "the held ledger row preserves the original escalation attempt");
+});
+
+const DURABLE_HELD_PLAN = `- id: W1-T9010
+  title: "a terminal pre-dispatch refusal"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "test"
+  files: [src/lib/held.ts]
+- id: W1-T9011
+  title: "the eligible successor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "test"
+  files: [src/lib/successor.ts]
+`;
+
+function durableHeldPlan() {
+  return loadPlanFromYaml(DURABLE_HELD_PLAN, "durable-held-refusal");
+}
+
+function candidatesWithHeldRevision(revisions: ReadonlyMap<string, string>) {
+  const plan = durableHeldPlan();
+  const tally = tallyDispatchFilters();
+  const candidates = runnableCandidates(plan, () => false, 1, {
+    isTerminalPreDispatchRefusalHeld: (task) => revisions.get(task.id) === preDispatchContractRevision(task),
+    onFiltered: tally.onFiltered,
+  });
+  return { plan, tally: tally.snapshot(), candidates };
+}
+
+test("W1-T3959: durable held refusal state excludes the held task before candidate packing and selects its eligible successor", () => {
+  const plan = durableHeldPlan();
+  const held = plan.byId.get("W1-T9010")!;
+  const revision = preDispatchContractRevision(held);
+  const { candidates, tally } = candidatesWithHeldRevision(new Map([[held.id, revision]]));
+
+  assert.deepEqual(candidates.map((task) => task.id), ["W1-T9011"], "the held task never reaches candidate packing, so the lower eligible task is selected");
+  assert.deepEqual(tally["held-pre-dispatch-refusal"].ids, ["W1-T9010"], "the idle census names the durable refusal rather than silently calling the queue empty");
+  assert.equal(
+    runnableCandidates(plan, () => false, 1)[0]?.id,
+    "W1-T9010",
+    "falsifier control: deleting the held-refusal predicate would re-offer the malformed task",
+  );
+});
+
+test("W1-T3959: legacy refusal state fails open, and a changed contract re-enters once before its same verdict is held again", () => {
+  const plan = durableHeldPlan();
+  const original = plan.byId.get("W1-T9010")!;
+  const originalRevision = preDispatchContractRevision(original);
+  const correctedPlan = loadPlanFromYaml(
+    DURABLE_HELD_PLAN.replace(
+      'title: "a terminal pre-dispatch refusal"',
+      'title: "a corrected terminal pre-dispatch refusal"',
+    ),
+    "durable-held-corrected.yaml",
+  );
+  const corrected = correctedPlan.byId.get("W1-T9010")!;
+  const correctedRevision = preDispatchContractRevision(corrected);
+  assert.notEqual(originalRevision, correctedRevision, "control: the edited parsed contract has a distinct revision");
+  assert.equal(
+    preDispatchContractRevision({ ...corrected, sourcePath: "different-parser-label.yaml" }),
+    correctedRevision,
+    "parser provenance is not part of a task's dispatch contract",
+  );
+  assert.notEqual(
+    preDispatchContractRevision({ ...corrected, status: "blocked" }),
+    correctedRevision,
+    "an administrative status still changes selector admission, so it must re-open the durable hold",
+  );
+
+  const readableRoot = mkdtempSync(join(tmpdir(), "rmd-readable-refusal-"));
+  const readableDir = join(readableRoot, "dispatch-repair");
+  mkdirSync(readableDir, { recursive: true });
+  writeFileSync(
+    join(readableDir, "W1-T9010.json"),
+    JSON.stringify({
+      verdict: "same",
+      attempts: 2,
+      escalated: true,
+      preDispatchContractRevision: originalRevision,
+    }),
+    "utf8",
+  );
+  assert.equal(
+    terminalPreDispatchRefusalRevisions(readableRoot).get(original.id),
+    originalRevision,
+    "the production reader retains a valid terminal refusal",
+  );
+  assert.equal(
+    terminalPreDispatchRefusalRevisions(join(readableRoot, "absent")).size,
+    0,
+    "an unreadable repair directory fails open",
+  );
+
+  const staleRecord = new Map([[original.id, originalRevision]]);
+  assert.equal(
+    runnableCandidates(correctedPlan, () => false, 1, {
+      isTerminalPreDispatchRefusalHeld: (task) => staleRecord.get(task.id) === preDispatchContractRevision(task),
+    })[0]?.id,
+    "W1-T9010",
+    "a changed contract is re-admitted rather than being stranded behind its old terminal state",
+  );
+
+  let written: PriorRefusal | undefined;
+  const effects = fakeEffects({ verdict: refusalVerdictText(VIOLATIONS), attempts: 2, escalated: true, preDispatchContractRevision: originalRevision });
+  const action = repairRefusedTask(
+    original.id,
+    VIOLATIONS,
+    () => ({ verdict: refusalVerdictText(VIOLATIONS), attempts: 2, escalated: true, preDispatchContractRevision: originalRevision }),
+    (_id, record) => { written = record; },
+    effects.dispatchRepairLane,
+    effects.escalate,
+    correctedRevision,
+  );
+  assert.equal(action.kind, "held", "the same deterministic verdict remains terminal after its one corrected re-offer");
+  assert.equal(effects.dispatched.length, 0, "a terminal re-offer never launches another repair lane");
+  assert.equal(effects.escalated.length, 0, "a terminal re-offer never creates a second escalation");
+  assert.equal(written?.preDispatchContractRevision, correctedRevision, "only the durable revision advances to mark the corrected contract handled");
+  assert.deepEqual(
+    runnableCandidates(correctedPlan, () => false, 1, {
+      isTerminalPreDispatchRefusalHeld: (task) =>
+        task.id === corrected.id && written?.preDispatchContractRevision === preDispatchContractRevision(task),
+    }).map((task) => task.id),
+    ["W1-T9011"],
+    "the unchanged rejection is held again after its one corrected re-offer",
+  );
+
+  const root = mkdtempSync(join(tmpdir(), "rmd-legacy-refusal-"));
+  const refusalDir = join(root, "dispatch-repair");
+  mkdirSync(refusalDir, { recursive: true });
+  writeFileSync(join(refusalDir, "W1-T9010.json"), JSON.stringify({ verdict: "same", attempts: 2, escalated: true }), "utf8");
+  writeFileSync(join(refusalDir, "W1-T9011.json"), "{not json", "utf8");
+  const legacy = terminalPreDispatchRefusalRevisions(root);
+  assert.equal(legacy.size, 0, "legacy refusal state fails open: no revision means no suppression");
+  assert.equal(
+    candidatesWithHeldRevision(legacy).candidates[0]?.id,
+    "W1-T9010",
+    "a missing or malformed durable record cannot suppress normal admission",
+  );
+});
+
+test("W1-T3959: durable held refusal state is read by the production daemon selector, not only an in-process map", async () => {
+  const plan = durableHeldPlan();
+  const held = plan.byId.get("W1-T9010")!;
+  const revision = preDispatchContractRevision(held);
+  const ran: string[] = [];
+  const merged = new Set<string>();
+  let controls = 0;
+
+  await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    readTerminalPreDispatchRefusalRevisions: () => new Map([[held.id, revision]]),
+    runOne: async (taskId) => {
+      ran.push(taskId);
+      merged.add(taskId);
+      return { taskId, runId: `${taskId}-run`, merged: true, costUsd: 0, verdict: "merged" };
+    },
+    checkStop: () => (++controls > 2 ? "test complete" : undefined),
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(ran, ["W1-T9011"], "durable held refusal state reaches daemon selection before runTask could re-lint the held task");
+});
+
+test("W1-T3959: an unreadable durable refusal reader is ledgered and fails open instead of suppressing admission", async () => {
+  const plan = durableHeldPlan();
+  const ran: string[] = [];
+  const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+
+  await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    readTerminalPreDispatchRefusalRevisions: () => {
+      throw new Error("fixture dispatch-repair directory unreadable");
+    },
+    log: (step, extra = {}) => logged.push({ step, extra }),
+    runOne: async (taskId) => {
+      ran.push(taskId);
+      return { taskId, runId: `${taskId}-run`, merged: false, costUsd: 0, verdict: "awaiting_merge" };
+    },
+    checkStop: () => (ran.length > 0 ? "test complete" : undefined),
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(ran, ["W1-T9010"], "an unreadable durable store preserves ordinary admission rather than inventing a hold");
+  assert.deepEqual(
+    logged.find((row) => row.step === "dispatch.held_pre_dispatch_refusal_unreadable"),
+    {
+      step: "dispatch.held_pre_dispatch_refusal_unreadable",
+      extra: { error: "fixture dispatch-repair directory unreadable" },
+    },
+    "the daemon names why durable admission state was unavailable instead of silently reading it as an empty success",
+  );
+});
+
+test("W1-T3959: the production daemon re-admits a corrected contract rather than holding by task id alone", async () => {
+  const original = durableHeldPlan().byId.get("W1-T9010")!;
+  const correctedPlan = loadPlanFromYaml(
+    DURABLE_HELD_PLAN.replace(
+      'title: "a terminal pre-dispatch refusal"',
+      'title: "a corrected terminal pre-dispatch refusal"',
+    ),
+    "durable-held-daemon-corrected.yaml",
+  );
+  const ran: string[] = [];
+
+  await runDaemon(correctedPlan, {
+    refreshMerged: () => () => false,
+    readTerminalPreDispatchRefusalRevisions: () => new Map([[original.id, preDispatchContractRevision(original)]]),
+    runOne: async (taskId) => {
+      ran.push(taskId);
+      return { taskId, runId: `${taskId}-run`, merged: false, costUsd: 0, verdict: "awaiting_merge" };
+    },
+    checkStop: () => (ran.length > 0 ? "test complete" : undefined),
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(
+    ran,
+    ["W1-T9010"],
+    "the production predicate compares the recorded revision to the current parsed task, not merely whether a record exists",
+  );
 });
