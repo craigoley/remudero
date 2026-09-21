@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planBranchReap, type BranchFacts } from "../src/lib/status.js";
 import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const f = (name: string, over: Partial<BranchFacts> = {}): BranchFacts => ({
   name,
@@ -231,7 +232,7 @@ test("the dry run LEDGERS its answer, so a report nobody read is still on disk",
 });
 
 test("slug-task enrichment reports an unreadable config when it cannot resolve the credit ledger", () => {
-  const home = mkdtempSync(join(tmpdir(), "reap-config-unreadable-"));
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-config-unreadable-`));
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), "not-json\n");
   const previousHome = process.env.HOME;
