@@ -136,6 +136,9 @@ function runRecycle(opts: RunOpts = {}): Run {
   const dir = mkdtempSync(join(tmpdir(), "recycle-wait-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "recycle-wait-rec-"));
   const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
+  const cashKeyPath = join(state, "openweight-api-key");
+  writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
+  chmodSync(cashKeyPath, 0o600);
   writeStubs(dir);
   const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT], {
     encoding: "utf8",
@@ -145,6 +148,7 @@ function runRecycle(opts: RunOpts = {}): Run {
       PATH: `${dir}:${process.env.PATH ?? ""}`,
       STUB_REC: rec,
       RMD_STATE_DIR: state,
+      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       // First-boot: every fixture dir here is a fresh mkdtemp with no state/ or remudero/.git —
       // this suite drives the wait loop, not the checkout predicate (see recycle-container.test.ts).
       RMD_RECYCLE_FIRST_BOOT: "1",

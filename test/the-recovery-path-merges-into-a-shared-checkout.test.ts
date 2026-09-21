@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -152,6 +152,10 @@ interface RunOpts {
 function runRecycle(opts: RunOpts): Run {
   const stubDir = mkdtempSync(join(tmpdir(), "w1-t2588-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "w1-t2588-rec-"));
+  mkdirSync(opts.stateDir, { recursive: true });
+  const cashKeyPath = join(opts.stateDir, "openweight-api-key");
+  writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
+  chmodSync(cashKeyPath, 0o600);
   writeStubs(stubDir);
 
   const env: NodeJS.ProcessEnv = {
@@ -159,6 +163,7 @@ function runRecycle(opts: RunOpts): Run {
     PATH: `${stubDir}:${process.env.PATH ?? ""}`,
     STUB_REC: rec,
     RMD_STATE_DIR: opts.stateDir,
+    RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
     RMD_RECYCLE_WAIT_S: "1",
     RMD_RECYCLE_POLL_S: "1",
     GH_TOKEN: "fixture-token",

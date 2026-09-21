@@ -498,25 +498,27 @@ fi
 # tell the difference between that and a git that is simply absent, and refusing on undecidable
 # input would turn a network hiccup into a self-inflicted outage this guard exists to prevent.
 DAEMON_TREE="${STATE_DIR}/remudero"
+DIRTY_TRACKED_PATHS=()
+INCOMING_PATHS=()
+BLOCKING_PATHS=()
 if [ -e "${DAEMON_TREE}/.git" ]; then
   if git -C "${DAEMON_TREE}" fetch --quiet origin >/dev/null 2>&1; then
-    DIRTY_TRACKED_PATHS=()
     while IFS= read -r line || [ -n "${line}" ]; do
       DIRTY_TRACKED_PATHS+=("${line}")
     done < <(git -C "${DAEMON_TREE}" diff --name-only HEAD 2>/dev/null | sed '/^$/d')
     if [ "${#DIRTY_TRACKED_PATHS[@]}" -gt 0 ]; then
-      INCOMING_PATHS=()
       while IFS= read -r line || [ -n "${line}" ]; do
         INCOMING_PATHS+=("${line}")
       done < <(git -C "${DAEMON_TREE}" diff --name-only HEAD..origin/main 2>/dev/null | sed '/^$/d')
-      BLOCKING_PATHS=()
       for dirty_path in "${DIRTY_TRACKED_PATHS[@]}"; do
-        for incoming_path in "${INCOMING_PATHS[@]}"; do
-          if [ "${dirty_path}" = "${incoming_path}" ]; then
-            BLOCKING_PATHS+=("${dirty_path}")
-            break
-          fi
-        done
+        if [ "${#INCOMING_PATHS[@]}" -gt 0 ]; then
+          for incoming_path in "${INCOMING_PATHS[@]}"; do
+            if [ "${dirty_path}" = "${incoming_path}" ]; then
+              BLOCKING_PATHS+=("${dirty_path}")
+              break
+            fi
+          done
+        fi
       done
       if [ "${#BLOCKING_PATHS[@]}" -gt 0 ]; then
         echo "recycle-container: REFUSING — ${DAEMON_TREE} has local changes that origin/main's own" >&2
