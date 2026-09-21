@@ -2801,8 +2801,14 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
 
   // W1-T2392: reaching here already proves NOT merged, so this only asks the remaining question, "did a build
   // for this land anyway?". The index is SUPPLIED by `projectPlan` off the merged list it already fetched —
-  // W1-T257's guard counts batched calls and a second one would break it. Absent the dep, this is silent.
-  const uncredited = uncreditedBuildWarning(task.id, deps.proseNamedTaskIds, deps.github.changedFiles?.bind(deps.github));
+  // W1-T257's guard counts batched calls and a second one would break it. A declared file scope prevents prose
+  // mentions in unrelated PRs from becoming warnings; an unscoped task preserves the historical fail-open path.
+  const uncredited = uncreditedBuildWarning(
+    task.id,
+    deps.proseNamedTaskIds,
+    deps.github.changedFiles?.bind(deps.github),
+    task.files,
+  );
   if (uncredited) projection.uncreditedBuild = uncredited;
 
   const escalation = resolveEscalation(ledgerLines, task.id, deps.github, deps.ledgerIndex);
@@ -4612,20 +4618,30 @@ export function indexProseNamedTaskIds(prs: readonly PrRef[]): Map<string, Uncre
  * this is consulted only on a projection that is NOT merged, and "not merged" already means all three paths
  * came back empty. THE PLAN-ONLY REFUSAL IS LOAD-BEARING, not hygiene: the largest naming population is shard
  * FILINGS, whose titles name their own id by convention, so without it every filed task would warn about the
- * PR that filed it. It fails OPEN, exactly as rung (c)'s own plan-only refusal does (W1-T413).
+ * PR that filed it. When a task declares files, the merged diff must overlap that scope; tasks without a declared
+ * scope retain the historical fail-open warning because there is no safe way to infer ownership. It fails OPEN,
+ * exactly as rung (c)'s own plan-only refusal does (W1-T413).
  */
 export function uncreditedBuildWarning(
   taskId: string,
   named: Map<string, UncreditedBuildWarning[]> | undefined,
   changedFiles: ((prUrl: string) => string[] | undefined) | undefined,
+  declaredFiles?: readonly string[],
 ): UncreditedBuildWarning | undefined {
   const candidates = named?.get(taskId);
   if (!candidates || candidates.length === 0) return undefined;
   if (!changedFiles) return undefined; // no way to tell a build from a filing — say nothing
+  const hasDeclaredScope = declaredFiles !== undefined && declaredFiles.length > 0;
   for (const c of candidates) {
     const files = changedFiles(c.prUrl);
     if (files === undefined) continue; // unreadable — fail OPEN, never fabricate
-    if (files.some((f) => f.startsWith("src/") && !f.endsWith(".test.ts"))) return c;
+    if (files.some((f) =>
+      f.startsWith("src/") &&
+      !f.endsWith(".test.ts") &&
+      (!hasDeclaredScope || declaredFiles!.some((scope) =>
+        f === scope || f.startsWith(scope.endsWith("/") ? scope : `${scope}/`),
+      )),
+    )) return c;
   }
   return undefined;
 }
