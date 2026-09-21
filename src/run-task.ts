@@ -38498,6 +38498,8 @@ export interface VerifyHumanRouteDeps {
   judge: (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict>;
   /** Verdicts already recorded, keyed by {@link observedStateKey}. */
   priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>;
+  /** Optional caller-selected batch size; omitted preserves the historical unlimited pass. */
+  maxJudged?: number;
   /** Stages a needs_operator shard as an inbox proposal. Called ONLY on that arm. */
   stageProposal: (proposal: Proposal) => void;
   /** Writes the {@link VERIFY_HUMAN_JUDGED_STEP} row. Called on BOTH arms, always. */
@@ -38505,12 +38507,13 @@ export interface VerifyHumanRouteDeps {
   runId: string;
 }
 
-/** What one pass did. `skipped` are the shards whose observed state was already settled. */
+/** What one pass did. `skipped` are settled states; `deferred` are still due for a later pass. */
 export interface VerifyHumanRouteResult {
   judged: number;
   needsOperator: string[];
   backlog: string[];
   skipped: string[];
+  deferred: string[];
 }
 
 /**
@@ -38529,14 +38532,19 @@ export async function routeVerifyHumanBacklog(
   deps: VerifyHumanRouteDeps,
 ): Promise<VerifyHumanRouteResult> {
   const due = shardsNeedingJudgement(shards, deps.priorVerdicts);
+  // W1-T3921: failed verdict remains eligible for the next batch
   const dueIds = new Set(due.map((s) => s.id));
+  // W1-T3921: --limit <n> applies only to due observed states
+  const toJudge = deps.maxJudged === undefined ? due : due.slice(0, deps.maxJudged);
   const result: VerifyHumanRouteResult = {
     judged: 0,
     needsOperator: [],
     backlog: [],
     skipped: shards.filter((s) => !dueIds.has(s.id)).map((s) => s.id),
+    // W1-T3921: deferred due work remains due for the next pass
+    deferred: due.slice(toJudge.length).map((s) => s.id),
   };
-  for (const shard of due) {
+  for (const shard of toJudge) {
     const verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
     // UNCONDITIONAL, and BEFORE either arm: a crash between the verdict and its effect leaves
     // the verdict readable rather than leaving a silent gap.
@@ -38594,9 +38602,17 @@ export async function verifyHumanSweepCommand(
 ): Promise<number> {
   const root = deps.root ?? repoRoot;
   const dryRun = rest.includes("--dry-run");
-  const badArg = unknownArgError("verify-human-sweep", rest, ["--dry-run"], []);
+  const badArg = unknownArgError("verify-human-sweep", rest, ["--limit"], ["--dry-run"]);
   if (badArg) {
     console.error(`${badArg}\n` + USAGE);
+    return 2;
+  }
+  const limitProvided = rest.includes("--limit");
+  const limitText = flagValue(rest, "--limit");
+  const limit = limitProvided && limitText !== undefined && /^[1-9]\d*$/.test(limitText) ? Number(limitText) : undefined;
+  // W1-T3921: invalid batch limits refuse before any sweep side effect
+  if (limitProvided && (limit === undefined || !Number.isSafeInteger(limit))) {
+    console.error("rmd verify-human-sweep: --limit must be a positive safe integer");
     return 2;
   }
 
@@ -38611,8 +38627,10 @@ export async function verifyHumanSweepCommand(
 
   if (dryRun) {
     const due = shardsNeedingJudgement(shards, priorVerdicts);
-    console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${due.length} would be judged, ${shards.length - due.length} already settled. Nothing spent.`);
-    for (const d of due) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
+    const selected = limit === undefined ? due : due.slice(0, limit);
+    const deferred = due.length - selected.length;
+    console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${selected.length} would be judged, ${shards.length - due.length} already settled, ${deferred} deferred due. Nothing spent.`);
+    for (const d of selected) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
     return 0;
   }
 
@@ -38627,6 +38645,7 @@ export async function verifyHumanSweepCommand(
       settingsFile: join(root, "settings", "worker.json"),
     }),
     priorVerdicts,
+    maxJudged: limit,
     stageProposal: (proposal) =>
       void updateProposalRegistry(registryPath, (current) =>
         current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
@@ -38635,7 +38654,8 @@ export async function verifyHumanSweepCommand(
     runId: `VHSWEEP-${(deps.clock ?? systemClock).iso()}`,
   });
 
-  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled.`);
+  const deferred = result.deferred ?? [];
+  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
   for (const id of result.needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
   return 0;
 }
@@ -41841,10 +41861,10 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "verify-human-sweep",
-    syntax: "rmd verify-human-sweep [--dry-run]",
+    syntax: "rmd verify-human-sweep [--dry-run] [--limit <n>]",
     summary: "Judge the parked verify:human backlog and surface only the shards that still need you.",
     detail:
-      "the verify:human backlog, judged (W1-T3188, operator direction 2026-09-08): every queued verify:human shard is put to an LLM judge with the state a person would need — its title, rationale, acceptance, age, whether its depends_on have merged, and whether its id is cited anywhere in src/ — and asked only whether it STILL needs the operator, never whether the work is right. A needs_operator verdict stages an ordinary inbox proposal he ratifies with `rmd approve`; a backlog verdict leaves it in the visible Awaiting-verification list, off the ask count. TOUCHES NO PLAN FILE and cannot: it writes ledger rows and stages proposals, and there is no code path that edits a shard, flips a verify: field, or closes anything. FAILS OPEN — a throwing, timing-out or unparseable verdict routes to needs_operator, because the costly direction is an outage quietly deciding the operator need not see something; such a verdict is marked and NOT cached, so a transient failure is re-asked rather than pinned. Judged once per OBSERVED STATE (task id + whether deps merged + whether cited in src), never once per poll, so a dependency merging re-opens the question and a refresh does not. --dry-run judges nothing, spends nothing, and reports which shards a real pass would ask about",
+      "the verify:human backlog, judged (W1-T3188, operator direction 2026-09-08): every queued verify:human shard is put to an LLM judge with the state a person would need — its title, rationale, acceptance, age, whether its depends_on have merged, and whether its id is cited anywhere in src/ — and asked only whether it STILL needs the operator, never whether the work is right. A needs_operator verdict stages an ordinary inbox proposal he ratifies with `rmd approve`; a backlog verdict leaves it in the visible Awaiting-verification list, off the ask count. TOUCHES NO PLAN FILE and cannot: it writes ledger rows and stages proposals, and there is no code path that edits a shard, flips a verify: field, or closes anything. FAILS OPEN — a throwing, timing-out or unparseable verdict routes to needs_operator, because the costly direction is an outage quietly deciding the operator need not see something; such a verdict is marked and NOT cached, so a transient failure is re-asked rather than pinned. Judged once per OBSERVED STATE (task id + whether deps merged + whether cited in src), never once per poll, so a dependency merging re-opens the question and a refresh does not. --dry-run judges nothing, spends nothing, and reports which shards a real pass would ask about. --limit <n> yields after at most n currently due states; omitted preserves the unlimited pass, and deferred due work remains eligible for the next invocation",
   },
   {
     name: "rule",

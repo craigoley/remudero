@@ -174,6 +174,63 @@ test("W1-T3188: a FAILED verdict is never settled, so a judge outage self-heals 
   assert.equal(isSettled(NEEDS, answered), true, "a real answer IS cached — otherwise (iv) buys nothing");
 });
 
+test("W1-T3921: a bounded pass defers due shards and the next pass resumes them from the ledger", async () => {
+  const shards = [
+    NEEDS,
+    { ...NEEDS, id: "W1-T3000", title: "another due shard" },
+    { ...NEEDS, id: "W1-T3001", title: "the final due shard" },
+  ];
+  let asked = 0;
+  const first = harness({
+    maxJudged: 1,
+    judge: async (s) => {
+      asked += 1;
+      return { decision: "backlog", reason: `settled ${s.id}` };
+    },
+  });
+  const r1 = await routeVerifyHumanBacklog(shards, first.deps);
+  assert.equal(r1.judged, 1);
+  assert.deepEqual(r1.deferred, ["W1-T3000", "W1-T3001"], "unselected due work is named, not silently settled");
+
+  const second = harness({
+    maxJudged: 2,
+    priorVerdicts: priorVerifyHumanVerdicts(first.rows),
+    judge: async (s) => {
+      asked += 1;
+      return { decision: "backlog", reason: `resumed ${s.id}` };
+    },
+  });
+  const r2 = await routeVerifyHumanBacklog(shards, second.deps);
+  assert.equal(asked, 3, "the next pass judges exactly the two deferred states");
+  assert.deepEqual(r2.skipped, ["W1-T2983"], "the already-settled observed state is not re-asked");
+  assert.deepEqual(r2.deferred, [], "the deferred population drains without changing task policy");
+});
+
+test("W1-T3921: a failed verdict remains due for the next bounded retry", async () => {
+  let asked = 0;
+  const first = harness({
+    maxJudged: 1,
+    judge: async () => {
+      asked += 1;
+      throw new Error("judge unavailable");
+    },
+  });
+  const r1 = await routeVerifyHumanBacklog([NEEDS], first.deps);
+  assert.deepEqual(r1.needsOperator, [NEEDS.id]);
+  assert.equal(first.rows[0]!.judge_failed, true);
+
+  const retry = harness({
+    maxJudged: 1,
+    priorVerdicts: priorVerifyHumanVerdicts(first.rows),
+    judge: async () => {
+      asked += 1;
+      throw new Error("judge unavailable again");
+    },
+  });
+  await routeVerifyHumanBacklog([NEEDS], retry.deps);
+  assert.equal(asked, 2, "the fail-open row does not suppress the next automated batch");
+});
+
 test("W1-T3188: the observed-state key excludes AGE, which would re-ask everything daily", () => {
   assert.equal(observedStateKey(NEEDS), observedStateKey({ ...NEEDS, ageDays: NEEDS.ageDays + 30 }));
   assert.notEqual(observedStateKey(NEEDS), observedStateKey({ ...NEEDS, depsAllMerged: true }));
@@ -484,6 +541,25 @@ test("W1-T3188: --dry-run judges nothing, spends nothing, and reports what a rea
   assert.ok(said.some((l) => l.includes("would judge W1-T9001")), "and name the shard by id");
 });
 
+test("W1-T3921: --dry-run accepts a positive batch limit before reading provider state", async () => {
+  const root = sweepRoot(PARKED_PLAN);
+  const said: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  try {
+    assert.equal(
+      await verifyHumanSweepCommand(["--dry-run", "--limit", "1"], {
+        root,
+        config: { claudeBin: "/bin/true", root } as Config,
+      }),
+      0,
+    );
+  } finally {
+    console.log = realLog;
+  }
+  assert.ok(said.some((l) => l.includes("1 would be judged") && l.includes("0 deferred due")), "the limit is reflected in the dry-run flow report");
+});
+
 test("W1-T3188: an unknown flag is refused with exit 2 before any config, plan or ledger is read", async () => {
   const errs: string[] = [];
   const realError = console.error;
@@ -495,6 +571,19 @@ test("W1-T3188: an unknown flag is refused with exit 2 before any config, plan o
     console.error = realError;
   }
   assert.ok(errs.some((e) => e.includes("--no-such-flag")), "the refusal must name the argument it refused");
+});
+
+test("W1-T3921: an invalid batch limit is refused before any sweep side effect", async () => {
+  const errs: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.map(String).join(" "));
+  try {
+    // No `root` and no `config`: a bad limit must be rejected before the sweep can read anything or spawn.
+    assert.equal(await verifyHumanSweepCommand(["--limit", "0"]), 2);
+  } finally {
+    console.error = realError;
+  }
+  assert.ok(errs.some((e) => e.includes("--limit") && e.includes("positive")), "the refusal must explain the valid control");
 });
 
 test("W1-T3188: a real (non-dry-run) pass routes through the injected router, stages a proposal and reports what needs you", async () => {
