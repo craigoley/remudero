@@ -22110,6 +22110,13 @@ export interface PlanReconcileDeps {
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T3970, read only by {@link defaultPlanReconcileCadenceInput} (the cadence rung shares this
+   *  seam set rather than declaring a second one): whether the live ledger exists. */
+  ledgerExists?: (ledgerPath: string) => boolean;
+  /** W1-T3970, cadence-only: the scratch-index landing bridge. */
+  landShards?: typeof landPlanReconcileShards;
+  /** W1-T3970, cadence-only: the landing PR's target repository. */
+  ownerRepo?: () => { owner: string; repo: string };
 }
 
 /** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
@@ -22217,14 +22224,55 @@ export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementati
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
  *  now under the SAME filter too — see {@link creditIsReconcilable}. */
-function defaultCreditedMergedIds(): Set<string> {
-  const config = loadConfig();
+function defaultCreditedMergedIds(config: Config = loadConfig()): Set<string> {
   const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   return new Set(
     buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
   );
+}
+
+/**
+ * W1-T3970: `MeasurementCadenceReportOpts.planReconcile`'s ONE production supplier. Before this the
+ * pure cadence rung existed but the daemon hook never passed it its inputs, so a credited-merged
+ * shard still reading `status: queued` waited for a human to run `rmd plan-reconcile`.
+ *
+ * SAME SHARDS, SAME CREDIT PROJECTION as that verb ({@link readPlanShards},
+ * {@link defaultCreditedMergedIds}) — never a second derivation that could disagree with it. The
+ * landing goes through {@link landPlanReconcileShards}' scratch-index bridge, so this daemon's own
+ * checkout is never written (`checkCliFreshness` refuses a dirty tree).
+ *
+ * SKIPPED, NEVER GUESSED: no live ledger under `config.root` means no credit evidence exists to
+ * project, and any throw while reading the shards or the projection returns `undefined` — the
+ * verb's own "an unreadable projection is not a zero" direction — so the report never carries a
+ * drift count derived from a failed read, and a throw here cannot abort the cadence's other verbs.
+ * A `land` that finds nothing new to land (`landed: false`, no `error`) is a success: origin/main
+ * already carries those bytes.
+ */
+export function defaultPlanReconcileCadenceInput(
+  root: string,
+  config: Config,
+  deps: PlanReconcileDeps = {},
+): MeasurementCadenceReportOpts["planReconcile"] {
+  try {
+    if (!(deps.ledgerExists ?? existsSync)(ledgerPathFor(config))) return undefined;
+    return buildPlanReconcileCadenceInput({
+      checkoutRoot: root,
+      readShards: deps.readShards ?? (() => readPlanShards(join(root, "plan", "tasks.d"))),
+      creditedMergedIds: deps.creditedMergedIds ?? (() => defaultCreditedMergedIds(config)),
+      land: (inputs) => {
+        const landing = (deps.landShards ?? landPlanReconcileShards)(root, inputs, {
+          targetRepository: (deps.ownerRepo ?? resolveOwnerRepo)(),
+          landingOwner: "measurement-cadence",
+        });
+        if (landing.error) throw new Error(landing.error);
+      },
+    });
+  } catch {
+    // FAIL OPEN, per this function's doc: an unreadable plan or credit projection skips the rung.
+    return undefined;
+  }
 }
 
 /** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
@@ -24260,24 +24308,11 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       const verifyHuman = await defaultVerifyHumanCadenceResult(root, configFor(), verifyHumanRunId, cadenceClock);
       // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
-      // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
-      // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
-      // checkout. A failed landing throws so the cadence records an error and retries later; it
-      // must never report a successful reconciliation on an unlanded PR.
-      const planReconcile = buildPlanReconcileCadenceInput({
-        checkoutRoot: repoRoot,
-        readShards: () => readPlanShards(join(repoRoot, "plan", "tasks.d")),
-        creditedMergedIds: defaultCreditedMergedIds,
-        land: (inputs) => {
-          const landing = landPlanReconcileShards(repoRoot, inputs, {
-            targetRepository: resolveOwnerRepo(),
-            landingOwner: "measurement-cadence",
-          });
-          if (!landing.landed || landing.error) {
-            throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
-          }
-        },
-      });
+      // same shard bytes and credit projection as `rmd plan-reconcile` — see
+      // `defaultPlanReconcileCadenceInput`'s own doc for the population, the fail-open direction
+      // and the scratch-index landing (this daemon checkout is never written). A failed landing
+      // is reported as `status: "failed"` on the result, never as a successful reconciliation.
+      const planReconcile = defaultPlanReconcileCadenceInput(repoRoot, configFor());
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -24291,7 +24326,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
-        planReconcile: { ...planReconcile },
+        ...(planReconcile ? { planReconcile } : {}),
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),

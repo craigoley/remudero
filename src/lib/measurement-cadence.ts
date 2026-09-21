@@ -1432,8 +1432,11 @@ export interface PlanReconcileCadenceResult {
   taskIds: string[];
   /** `clear` = no drift; `reported` = drift below the threshold, nothing landed; `landed` = the
    *  writes were handed to the caller's landing seam. */
-  status: "clear" | "reported" | "landed";
+  status: "clear" | "reported" | "landed" | "failed";
   threshold: number;
+  /** Set only on `failed`: the landing seam threw. Reported rather than rethrown so one failed
+   *  landing cannot discard the other verbs' results on the same cadence fire. */
+  error?: string;
 }
 
 /** {@link planReconcileCadence}'s input. `land` is the ONLY way this function can affect the
@@ -1473,7 +1476,13 @@ export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconc
   if (taskIds.length < opts.threshold || opts.land === undefined) {
     return { drift: taskIds.length, taskIds, status: "reported", threshold: opts.threshold };
   }
-  opts.land(writes);
+  try {
+    opts.land(writes);
+  } catch (e) {
+    // A failed landing is a FINDING, never a thrown tick: the drift is still real, the marker has
+    // already advanced, and the next fire retries. Saying "landed" here would be the false success.
+    return { drift: taskIds.length, taskIds, status: "failed", threshold: opts.threshold, error: String((e as Error)?.message ?? e) };
+  }
   return { drift: taskIds.length, taskIds, status: "landed", threshold: opts.threshold };
 }
 
@@ -1486,27 +1495,27 @@ export interface PlanReconcileShardRecord {
 /** W1-T3970: adapt the production shard/credit readers to the pure cadence reducer. The caller
  * owns the landing bridge; this adapter only maps task ids back to repo-relative shard paths and
  * carries the one credit projection into the reducer. */
-export function buildPlanReconcileCadenceInput(deps: {
+export function buildPlanReconcileCadenceInput(wiring: {
   checkoutRoot: string;
   readShards: () => readonly PlanReconcileShardRecord[];
   creditedMergedIds: () => ReadonlySet<string>;
   land: (inputs: readonly { relPath: string; content: string }[]) => void;
   threshold?: number;
 }): PlanReconcileCadenceOpts {
-  const records = [...deps.readShards()];
+  const records = [...wiring.readShards()];
   const byId = new Map(records.map((record) => [record.taskId, record.path]));
-  const credited = new Set(deps.creditedMergedIds());
+  const credited = new Set(wiring.creditedMergedIds());
   return {
     shards: records.map(({ taskId, text }) => ({ taskId, text })),
     isCreditedMerged: (taskId) => credited.has(taskId),
-    threshold: deps.threshold ?? 10,
+    threshold: wiring.threshold ?? 10,
     land: (writes) => {
       const inputs = writes.map((write) => {
         const path = byId.get(write.taskId);
         if (path === undefined) throw new Error(`plan reconciliation could not resolve shard ${write.taskId}`);
-        return { relPath: relative(deps.checkoutRoot, path), content: write.text };
+        return { relPath: relative(wiring.checkoutRoot, path), content: write.text };
       });
-      deps.land(inputs);
+      wiring.land(inputs);
     },
   };
 }
