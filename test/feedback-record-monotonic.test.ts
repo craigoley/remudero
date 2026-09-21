@@ -17,7 +17,8 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
@@ -149,6 +150,7 @@ function fakeGh(prUrl: string) {
       return `Creating pull request for ${LANDING_BRANCH} into main in o/r\n${prUrl}\n`;
     }
     if (args[0] === "pr" && args[1] === "merge") return "";
+    if (args[0] === "pr" && args[1] === "edit") return "";
     throw new Error(`unexpected gh call in test fixture: ${JSON.stringify(args)}`);
   };
   return { gh, calls, createCount: () => createCount };
@@ -168,6 +170,21 @@ function writeEntry(root: string, id: string, fields: Parameters<typeof entryYam
 
 function readOnBranch(bareOrigin: string, branch: string, relPath: string): string {
   return execFileSync("git", ["--git-dir", bareOrigin, "show", `${branch}:${relPath}`], { encoding: "utf8" });
+}
+
+/** Runs the SAME command review.ts's grep dialect executes (`grep -arn -- <pattern> <path>`,
+ *  review.ts:1454) against arbitrary bytes, never a repo path — so a test can check a proof's
+ *  actual head/base hit count without spinning up `rmd check-proof`. Exit 1 (no match) is a normal
+ *  outcome here, not a failure. */
+function grepHits(pattern: string, content: string): number {
+  const tmpFile = join(mkdtempSync(join(tmpdir(), "rmd-grep-hits-test-")), "target");
+  writeFileSync(tmpFile, content);
+  try {
+    return execFileSync("grep", ["-arn", "--", pattern, tmpFile], { encoding: "utf8" }).split("\n").filter(Boolean).length;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException & { status?: number }).status === 1) return 0; // no match — not an error
+    throw e;
+  }
 }
 
 // ── Acceptance criterion 2 (and 1, 3, 4): source A at new, source B advances to grilling and ──
@@ -316,6 +333,97 @@ test("W1-T3561: landFeedbackStatusContent (the console POST /v1/feedback/decisio
   assert.equal(forward.landed, true, "a forward console write must still land normally");
   assert.equal(forward.refused, undefined);
   assert.match(readOnBranch(bareOrigin2.dir, LANDING_BRANCH, relPath2), /status: accepted/);
+});
+
+// ── W1-T243 follow-up: an UPDATE's Acceptance proof must discriminate, not just repeat the id ──
+//
+// REPRODUCED LIVE ON PR #6374: a `status: proposed -> accepted` re-land through this exact call
+// generated `- <id> lands as a durable inbox entry | grep: <id> in <path>` — a proof that matches
+// the record's unchanged `id:` line at BOTH the PR head and its merge base (the file, and that
+// line, already sat on origin/main), so `proof-discrimination-gate.mjs` graded it
+// `executed_stale` and refused the PR outright. This pins the fix: the generated proof for an
+// update must hit at head and MISS at the merge base.
+
+test("W1-T243 follow-up: an update through landFeedbackStatusContent gets a PR body proof that discriminates head from base, not the stale id line", () => {
+  const bareOrigin = gitRepo({ bare: true, kind: "discriminate-origin" });
+  const seed = gitRepo({ kind: "discriminate-seed" });
+  const id = "fb-1789900000000-discriminate";
+  const baseContent = entryYaml({ id, status: "proposed" });
+  mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "feedback", `${id}.yaml`), baseContent);
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed a proposed entry");
+  seed.addRemote("origin", bareOrigin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+
+  const root = gitRepo({ cloneFrom: bareOrigin.dir, kind: "discriminate-root" });
+  const { gh, calls } = fakeGh("https://github.com/o/r/pull/700");
+  const relPath = `plan/feedback/${id}.yaml`;
+  const headContent = entryYaml({ id, status: "accepted" });
+  const result = withLiveWritesAllowed(() => landFeedbackStatusContent(root.dir, relPath, headContent, { gh }));
+  assert.equal(result.landed, true);
+
+  const createCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
+  assert.ok(createCall, "sanity: a PR-create call happened");
+  const body = createCall![createCall!.indexOf("--body") + 1];
+  const acceptanceLine = body.split("\n").find((l) => l.startsWith(`- ${id} `));
+  assert.ok(acceptanceLine, `expected an Acceptance bullet for ${id}, got body:\n${body}`);
+  // The claim names the actual advance, not the generic wording a brand-new capture gets.
+  assert.match(acceptanceLine!, /transitions to status: accepted/);
+
+  const proofMatch = acceptanceLine!.match(/\| grep: (.+) in (\S+)$/);
+  assert.ok(proofMatch, `expected a grep: proof on the acceptance line, got: ${acceptanceLine}`);
+  const [, pattern, path] = proofMatch!;
+  assert.equal(path, relPath);
+  assert.notEqual(pattern, id, "the proof must not be the bare, always-present id line (the pre-fix defect)");
+
+  // The same head/base check proof-discrimination-gate.mjs itself runs (evaluateProofDiscrimination
+  // -> runCheckProof -> `grep -arn -- <pattern> <path>`, review.ts:1454): must HIT at head and MISS
+  // at the merge base, or this is exactly as stale as the id-only proof it replaces.
+  assert.ok(grepHits(pattern, headContent) > 0, `proof ${JSON.stringify(pattern)} must hit at PR head`);
+  assert.equal(grepHits(pattern, baseContent), 0, `proof ${JSON.stringify(pattern)} must MISS at the merge base — a hit there is exactly the staleness this fixes`);
+});
+
+// A body fix alone does not help a PR opened BEFORE the fix existed: `ensurePrOpen` used to
+// return early on an already-open PR without ever touching its body again (PR #6374 stayed
+// stuck on its stale creation-time body across every later push). This proves the reuse path
+// now refreshes it too, via `gh pr edit`, not just the create path.
+test("W1-T243 follow-up: an update lands into an ALREADY-OPEN PR — its body is refreshed via `gh pr edit`, not left at whatever `pr create` wrote", () => {
+  const bareOrigin = gitRepo({ bare: true, kind: "discriminate-reuse-origin" });
+  const seed = gitRepo({ kind: "discriminate-reuse-seed" });
+  const id = "fb-1789900000002-discriminate-reuse";
+  const baseContent = entryYaml({ id, status: "proposed" });
+  mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "feedback", `${id}.yaml`), baseContent);
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed a proposed entry");
+  seed.addRemote("origin", bareOrigin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+
+  const root = gitRepo({ cloneFrom: bareOrigin.dir, kind: "discriminate-reuse-root" });
+  const { gh, calls, createCount } = fakeGh("https://github.com/o/r/pull/702");
+
+  // Round 1: an UNRELATED brand-new capture opens the PR — its body says nothing about `id` yet.
+  const first = withLiveWritesAllowed(() =>
+    landFeedbackStatusContent(root.dir, "plan/feedback/fb-unrelated.yaml", entryYaml({ id: "fb-unrelated", status: "new" }), { gh }),
+  );
+  assert.equal(first.landed, true);
+  assert.equal(createCount(), 1, "sanity: round 1 opened the PR");
+
+  // Round 2: the SAME still-open PR (fakeGh's `pr list` now reports it) lands the status advance.
+  const relPath = `plan/feedback/${id}.yaml`;
+  const second = withLiveWritesAllowed(() =>
+    landFeedbackStatusContent(root.dir, relPath, entryYaml({ id, status: "accepted" }), { gh }),
+  );
+  assert.equal(second.landed, true);
+  assert.equal(createCount(), 1, "round 2 reused the open PR — never a second `pr create`");
+
+  const editCall = calls.find((c) => c[0] === "pr" && c[1] === "edit");
+  assert.ok(editCall, `expected round 2 to refresh the open PR's body via \`gh pr edit\`, got calls: ${JSON.stringify(calls)}`);
+  const editedBody = editCall![editCall!.indexOf("--body") + 1];
+  const acceptanceLine = editedBody.split("\n").find((l: string) => l.startsWith(`- ${id} `));
+  assert.ok(acceptanceLine, `expected the refreshed body to carry ${id}'s bullet, got:\n${editedBody}`);
+  assert.match(acceptanceLine!, /transitions to status: accepted/);
 });
 
 // ── Acceptance criterion 3, the OTHER half: the LEDGER line names the refusal too ────────────

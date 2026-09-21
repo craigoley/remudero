@@ -38,7 +38,7 @@ const STATUS_RANK = new Map<string, number>(FEEDBACK_RECORD_STATUSES.map((status
  * — it is a capture-time copy that has not caught up. Field names mirror `feedback.ts`'s
  * `FeedbackEntry` verbatim; duplicated here for the same no-import reason as the status list.
  */
-const HISTORY_FIELDS = ["answered_by", "reply_to", "thread_id", "proposal_pr", "summary", "expansion"] as const;
+export const HISTORY_FIELDS = ["answered_by", "reply_to", "thread_id", "proposal_pr", "summary", "expansion"] as const;
 
 /** The minimal shape this module reads off a parsed record — a structural subset of
  *  `feedback.ts`'s `FeedbackEntry`, never that type itself (see the module doc). */

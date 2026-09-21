@@ -17,7 +17,7 @@ raw: "Observed live on 2026-09-20: core GET /v1/analytics reads
   timeouts."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/6260
 summary:

@@ -31,12 +31,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { automergeHoldFromLedger } from "./review.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
-import { mergeFeedbackRecord } from "./feedback-record-merge.js";
+import { HISTORY_FIELDS, mergeFeedbackRecord } from "./feedback-record-merge.js";
 
 /**
  * Mirrors measurement-cadence.ts's `CiLearningShardDraft`/`CiLearningFiledShard`/
@@ -258,6 +259,14 @@ function listRelFiles(root: string, relDir: string): string[] {
   return out;
 }
 
+/** Lets {@link LandingKind.prBody} tell an UPDATE apart from a brand-new capture (W1-T243 follow-up). */
+interface PrBodyContext {
+  originBytes: (relPath: string) => string | undefined;
+  newBytes: (relPath: string) => string | undefined;
+}
+
+const EMPTY_PR_BODY_CONTEXT: PrBodyContext = { originBytes: () => undefined, newBytes: () => undefined };
+
 /** One landing target's shape — every kind shares the same commit/push/PR tail (see
  *  {@link finishLanding}); only the branch, the commit/PR text, and which directory it walks differ. */
 interface LandingKind {
@@ -272,7 +281,7 @@ interface LandingKind {
   targetRepository?: LandingRepository;
   landingOwner?: string;
   commitMessage: (unlanded: string[]) => string;
-  prBody: (unlanded: string[]) => string;
+  prBody: (unlanded: string[], ctx: PrBodyContext) => string;
 }
 
 const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; prTitle: string }> = {
@@ -342,7 +351,62 @@ function feedbackCommitMessage(unlanded: string[]): string {
   ].join("\n");
 }
 
-function feedbackPrBody(unlanded: string[]): string {
+/** BRE-escapes `s` for a literal `grep -arn -- <pattern> <path>` match (review.ts:1454). */
+function escapeGrepLiteral(s: string): string {
+  return s.replace(/[.*[\]^$\\]/g, "\\$&");
+}
+
+/** Excludes a line that could misread `parseAcceptanceBlock`'s bullet/proof-path split. */
+function isSafeAcceptanceGrepLine(line: string): boolean {
+  return line.length > 0 && line.length <= 160 && !line.includes("|") && !line.includes("`") && !/\bin\s+\S*[./]\S*$/.test(line);
+}
+
+/** The first `newBytes` line absent from `originBytes` — hits at head, misses at base (W1-T243). */
+function firstDiscriminatingLine(originBytes: string, newBytes: string): string | undefined {
+  for (const raw of newBytes.split("\n")) {
+    const line = raw.trim();
+    if (isSafeAcceptanceGrepLine(line) && !originBytes.includes(line)) return line;
+  }
+  return undefined;
+}
+
+/** Names what changed: a §7B status advance, or a {@link HISTORY_FIELDS} gain. */
+function describeFeedbackAdvance(originBytes: string, newBytes: string): string | undefined {
+  let origin: unknown;
+  let next: unknown;
+  try {
+    origin = parseYaml(originBytes);
+    next = parseYaml(newBytes);
+  } catch {
+    return undefined; // unparseable YAML — no safe field name to give the caller's fallback wording
+  }
+  const originRecord = origin && typeof origin === "object" ? (origin as Record<string, unknown>) : {};
+  const nextRecord = next && typeof next === "object" ? (next as Record<string, unknown>) : {};
+  if (typeof nextRecord.status === "string" && nextRecord.status !== originRecord.status) {
+    return `transitions to status: ${nextRecord.status}`;
+  }
+  const has = (r: Record<string, unknown>, field: string) => r[field] !== undefined && r[field] !== null;
+  for (const field of HISTORY_FIELDS) {
+    if (has(nextRecord, field) && !has(originRecord, field)) return `gains ${field}`;
+  }
+  return undefined;
+}
+
+/** One `## Acceptance` bullet — an UPDATE needs {@link firstDiscriminatingLine}'s proof. */
+function feedbackAcceptanceLine(relPath: string, id: string, ctx: PrBodyContext): string {
+  const origin = ctx.originBytes(relPath);
+  if (origin === undefined) {
+    return `- ${id} lands as a durable inbox entry | grep: ${id} in ${relPath}`;
+  }
+  const next = ctx.newBytes(relPath) ?? "";
+  const label = describeFeedbackAdvance(origin, next) ?? "lands its latest edit";
+  const discriminator = firstDiscriminatingLine(origin, next);
+  return discriminator === undefined
+    ? `- ${id} ${label} | grep: ${id} in ${relPath}`
+    : `- ${id} ${label} | grep: ${escapeGrepLiteral(discriminator)} in ${relPath}`;
+}
+
+function feedbackPrBody(unlanded: string[], ctx: PrBodyContext = EMPTY_PR_BODY_CONTEXT): string {
   const ids = unlanded
     .filter((f) => f.startsWith(`${FEEDBACK_REL_DIR}/`) && f.endsWith(".yaml"))
     .map((f) => f.slice(FEEDBACK_REL_DIR.length + 1, -".yaml".length));
@@ -355,7 +419,7 @@ function feedbackPrBody(unlanded: string[]): string {
     "",
     "## Acceptance",
     ...(ids.length > 0
-      ? ids.map((id) => `- ${id} lands as a durable inbox entry | grep: ${id} in plan/feedback/${id}.yaml`)
+      ? ids.map((id) => feedbackAcceptanceLine(`${FEEDBACK_REL_DIR}/${id}.yaml`, id, ctx))
       : unlanded.map((f) => `- ${f} lands durably on origin/main | grep: . in ${f}`)),
   ].join("\n");
 }
@@ -561,6 +625,9 @@ interface LandingTreeBuild {
    *  `ci-learning` families, which carry no status lifecycle. Never included in `unlanded`/the
    *  tree, so a refusal can never ride into an armed auto-merge PR by construction. */
   refused: FeedbackRefusal[];
+  /** {@link PrBodyContext}'s two maps, keyed like `unlanded`. */
+  originBytesByPath: Map<string, string>;
+  newBytesByPath: Map<string, string>;
 }
 
 /** One landing-time refusal (W1-T3561) — surfaced on {@link LandFeedbackResult.refused} and, for
@@ -685,12 +752,23 @@ function ensurePrOpen(
   kind: LandingKind,
   gh: GhExec,
   unlanded: string[],
+  ctx: PrBodyContext = EMPTY_PR_BODY_CONTEXT,
   ledgerLines?: () => Array<Record<string, unknown>>,
 ): { prUrl?: string; error?: string } {
   const existing = findPendingLandingPr({ gh, identity: kind });
-  if (existing) return { prUrl: existing };
+  const body = kind.prBody(unlanded, ctx);
+  if (existing) {
+    // Refresh an already-open PR's body every call (W1-T243 follow-up) — else it stays stuck
+    // with whatever `gh pr create` wrote the FIRST time this PR opened.
+    try {
+      assertLiveWriteAllowed("gh-pr-edit", `refreshing the landing PR body for ${kind.branch}`);
+      gh(["pr", "edit", existing, "--body", body, ...landingRepoArgs(kind)]);
+    } catch {
+      // best-effort — a stale body just waits for the NEXT call (or a human `gh pr edit`) to retry
+    }
+    return { prUrl: existing };
+  }
 
-  const body = kind.prBody(unlanded);
   let prUrl: string | undefined;
   try {
     assertLiveWriteAllowed("gh-pr-create", `opening the landing PR for ${kind.branch}`);
@@ -743,6 +821,13 @@ function ensurePrOpen(
  * short-circuit proved the existing head already IS this exact tree — so whatever tree gets armed
  * is always the complete union as of the ref state it was computed against, never a partial one.
  */
+function prBodyContextFor(build: LandingTreeBuild): PrBodyContext {
+  return {
+    originBytes: (relPath) => build.originBytesByPath.get(relPath),
+    newBytes: (relPath) => build.newBytesByPath.get(relPath),
+  };
+}
+
 function finishLanding(
   kind: LandingKind,
   git: GitExec,
@@ -762,7 +847,7 @@ function finishLanding(
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
-    const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, ledgerLines);
+    const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, prBodyContextFor(build), ledgerLines);
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
   }
 
@@ -808,7 +893,7 @@ function finishLanding(
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
-      const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded, ledgerLines);
+      const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded, prBodyContextFor(retried), ledgerLines);
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
     }
     try {
@@ -832,7 +917,7 @@ function finishLanding(
     build = retried;
   }
 
-  const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, ledgerLines);
+  const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, prBodyContextFor(build), ledgerLines);
   if (error) {
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
     return withRefused(
@@ -871,9 +956,16 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
     // local copy that sits at an earlier §7B lifecycle position — reported below, never dropped
     // in the caller's tree. Every other path (attachments, a stray non-yaml file, and every
     // `decisions`/`ci-learning` family) keeps the exact pre-fix inequality behaviour.
-    const scanLocalUnlanded = (): { files: string[]; refused: FeedbackRefusal[] } => {
+    const scanLocalUnlanded = (): {
+      files: string[];
+      refused: FeedbackRefusal[];
+      originBytesByPath: Map<string, string>;
+      newBytesByPath: Map<string, string>;
+    } => {
       const files: string[] = [];
       const refused: FeedbackRefusal[] = [];
+      const originBytesByPath = new Map<string, string>();
+      const newBytesByPath = new Map<string, string>();
       for (const rel of listRelFiles(root, kind.ownedDir)) {
         const localSha = git(["hash-object", join(root, rel)]).trim();
         let remoteSha: string | null;
@@ -884,16 +976,23 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
         }
         if (remoteSha === localSha) continue;
         if (remoteSha !== null && isFeedbackRecordPath(kind, rel)) {
-          const decision = decideFeedbackStage(git, remoteSha, readFileSync(join(root, rel), "utf8"));
+          const localBytes = readFileSync(join(root, rel), "utf8");
+          const decision = decideFeedbackStage(git, remoteSha, localBytes);
           if (decision.kind === "refuse") {
             refused.push({ path: rel, reason: decision.reason });
             continue;
           }
           if (decision.kind === "keep-upstream") continue;
+          try {
+            originBytesByPath.set(rel, git(["cat-file", "-p", remoteSha])); // take-local (UPDATE): feed feedbackAcceptanceLine
+            newBytesByPath.set(rel, localBytes);
+          } catch {
+            void 0; // best-effort: a miss falls back to the weaker (pre-fix) proof wording
+          }
         }
         files.push(rel);
       }
-      return { files, refused };
+      return { files, refused, originBytesByPath, newBytesByPath };
     };
     const initialScan = scanLocalUnlanded();
     if (initialScan.files.length === 0) {
@@ -919,13 +1018,13 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       if (!pending.ok) throw new Error(pending.reason);
       git(["read-tree", "origin/main"], { env });
       if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
-      const { files: unlanded, refused } = scanLocalUnlanded();
+      const { files: unlanded, refused, originBytesByPath, newBytesByPath } = scanLocalUnlanded();
       for (const rel of unlanded) {
         const blobSha = git(["hash-object", "-w", join(root, rel)], { env }).trim();
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
       }
       const treeSha = git(["write-tree"], { env }).trim();
-      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused };
+      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused, originBytesByPath, newBytesByPath };
     };
 
     const initialMainSha = git(["rev-parse", "origin/main"]).trim();
@@ -1071,6 +1170,8 @@ function landContent(
       // disk scan does, per the task's design point (v), rather than the bare
       // `remoteSha === blobSha` identity check this loop used before.
       const refused: FeedbackRefusal[] = [];
+      const originBytesByPath = new Map<string, string>();
+      const newBytesByPath = new Map<string, string>();
       let i = 0;
       for (const { relPath, content } of inputs) {
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
@@ -1091,12 +1192,18 @@ function landContent(
             continue;
           }
           if (decision.kind === "keep-upstream") continue;
+          try {
+            originBytesByPath.set(relPath, git(["cat-file", "-p", remoteSha])); // take-local (UPDATE), see scanLocalUnlanded
+            newBytesByPath.set(relPath, content);
+          } catch {
+            void 0; // best-effort: a miss falls back to the weaker (pre-fix) proof wording
+          }
         }
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${relPath}`], { env });
         unlanded.push(relPath);
       }
       const treeSha = git(["write-tree"], { env }).trim();
-      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused };
+      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused, originBytesByPath, newBytesByPath };
     };
 
     git(["fetch", "origin", "--quiet"]);
