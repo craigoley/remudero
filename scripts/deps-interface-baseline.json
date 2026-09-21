@@ -1,6 +1,6 @@
 {
   "_comment": "Deps interface/type and seam census under src/**/*.ts. The recorded populations can only fall; growth is refused, while identical member-sets are reported as the route to consolidation.",
-  "depsInterfaceCount": 158,
+  "depsInterfaceCount": 159,
   "inlineSeamCount": 112,
   "aliasedSeamCount": 1
 }
