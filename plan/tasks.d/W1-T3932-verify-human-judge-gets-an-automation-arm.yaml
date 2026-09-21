@@ -1,4 +1,4 @@
-- id: W1-T3931
+- id: W1-T3932
   title: "VERIFY-HUMAN JUDGE NEEDS AN AUTOMATION ARM — the LLM can now decide whether a parked shard needs the operator or can enter the self-improvement flow, while failures still surface to a human and no task is silently released"
   repo: remudero
   depends_on: [W1-T3921]
