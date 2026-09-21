@@ -1,0 +1,62 @@
+- id: W1-T3986
+  title: "FIXED-CLOCK FIXTURES MUST SAY SO — expiring-fixture-census is correctly blocking main on three literals whose tests compare only against injected NOW values"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 5.00
+  files:
+    - test/an-open-pr-does-not-rot-while-it-waits.test.ts
+    - test/plan-resequence-pr-invalidation.test.ts
+  origin: "recon#main-expiring-fixture-census-2026-09-21"
+  plan_refs: [W1-T3272, W1-T3655]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED on current origin/main 7ac1b30564350a849caac7595c07fe6f237830ad. The required
+    `expiring-fixture-census` blocks main because two `lastActivityAt` literals in
+    `test/an-open-pr-does-not-rot-while-it-waits.test.ts` cross the seven-day warning window on
+    2026-09-23, and one literal in `test/plan-resequence-pr-invalidation.test.ts` crosses it on
+    2026-09-28. Each suite compares those values against an explicitly injected frozen `NOW`, not
+    the wall clock. The literals therefore cannot rot in production-shaped behavior; the missing
+    exemption marker is the defect.
+
+    This is a fixture annotation repair, not a stale-days-policy change. W1-T3272 correctly keeps
+    the census and its population ratchet live, and W1-T3655 correctly makes the census visible on
+    main. Moving the dates forward would only re-arm the same wall-clock bomb.
+  design: |
+    Add an `expiring-fixture: exempt` marker with an explicit reason to the three named literals:
+    each reason must say that the comparison uses the suite's injected frozen or explicit `NOW`.
+    Keep the production-shaped fixture behavior and the census population unchanged. Do not alter
+    `DEFAULT_SWEEP_POLICY.staleDays`, the warning margin, census logic, or unrelated fixtures.
+
+    Run the focused suites and the real expiring-fixture census. The census must still report live
+    wall-clock-aged literals, but must classify these three fixed-clock literals as exempt rather
+    than silently dropping them.
+  acceptance:
+    - claim: "the open-PR frozen-clock literals carry an explicit exemption reason"
+      proof: "grep: expiring-fixture: exempt -- compared only against in test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "the plan-invalidation frozen-clock literal carries an explicit exemption reason"
+      proof: "grep: expiring-fixture: exempt -- compared only against in test/plan-resequence-pr-invalidation.test.ts"
+    - claim: "the frozen-clock production-shaped tests still exercise their original dispositions"
+      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "the plan-invalidation fixture still uses its explicit test clock"
+      proof: "unit test: test/plan-resequence-pr-invalidation.test.ts"
+  falsifier: |
+    Remove any one exemption marker and run the census against the real wall clock: the corresponding
+    line must reappear as an expiring crossing. Change a reason so it no longer identifies an
+    injected/frozen test clock: acceptance must refuse the vague marker rather than masking a live
+    fixture. Change the test clock wiring or production disposition: the focused suite must fail.
+  note: |
+    Rule 25 CHECKED: both declared files are test fixtures and no instrument, workflow, reviewer, or
+    baseline surface is in scope. `risk: high`, `band_meaning: span` is required by Rule 19 because
+    the two fixture files are separate census populations even though the repair is the same narrow
+    fixed-clock exemption. The required census and its population guard remain untouched.
+
+    Reservation evidence: the operator checkout used the GraphQL open-PR fallback after the
+    repository REST surface returned 403 rate-limit errors; `rmd next-task-id`'s same atomic remote
+    reservation path held this task's id on origin after earlier reservations had advanced the
+    shared floor; no historical id is part of this task's acceptance surface.
