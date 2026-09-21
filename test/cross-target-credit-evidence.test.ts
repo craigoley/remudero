@@ -17,7 +17,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -231,6 +231,32 @@ test("W1-T3873 criterion 3: a checkout PROVEN to belong to the target resolves t
   const targetRepo = targetCheckoutUnder(configRoot, "target", { prNumber: 1, relPath: "plan/x.yaml", subjectVerb: "chore", originSlug: "o/target" });
   const root = creditEvidenceRootFor("o", "target", { selfOwnerRepo: { owner: "o", repo: "engine" }, configRoot });
   assert.equal(root, targetRepo, "an origin-proven checkout is trusted, and only that one");
+});
+
+test("W1-T3873 round 2: an ABSENT fleet config resolves to undefined WITHOUT bootstrapping one — no `loadConfig()` create side effect", () => {
+  // learnings#lazy-config-in-ci: an EAGER `loadConfig()` shells `which claude` and fails in CI where
+  // the binary is absent — the create path also leaves a stray file on disk either way (empty if
+  // `resolveClaudeBin` throws, populated if it doesn't). `creditEvidenceRootFor`'s DEFAULT configRoot
+  // resolution must never reach `loadConfig()` at all when no fleet config exists yet: this is a
+  // read-only evidence lookup, not a fleet-bootstrapping command, and every existing caller of
+  // `buildCreditCandidates`/`buildEscalationReconcileCandidates` that predates this task's own
+  // `evidenceRootFor` seam (none of them inject it) must stay exactly as side-effect-free as before.
+  const home = mkdtempSync(join(tmpdir(), "rmd-cte-home-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = home; // configPath() (lib/config.ts) is HOME-relative
+  try {
+    // Real self resolution still short-circuits before any config lookup — same as criterion 3's
+    // own default-self test, just re-proven under a HOME with no config at all.
+    const root = creditEvidenceRootFor("o", "target"); // no opts at all: the real default path
+    assert.equal(root, undefined, "no fleet config on disk reads as a genuine absence, not a manufactured one");
+    assert.deepEqual(
+      readdirSync(home).sort(),
+      [],
+      "creditEvidenceRootFor must never create ~/.config (or anything else) just by being asked a question",
+    );
+  } finally {
+    process.env.HOME = savedHome;
+  }
 });
 
 test("W1-T3873 criterion 3: a FOREIGN or missing target checkout leaves the existing fail-closed outcome unchanged — never a NEW refusal", () => {

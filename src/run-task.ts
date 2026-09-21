@@ -32821,6 +32821,16 @@ const MERGE_SUBJECT_SCAN_LIMIT = 5000;
  * A failed `loadConfig()` (no fleet config yet) degrades the same way: `undefined`, never a throw
  * that could take out the whole credit pass over one config read.
  *
+ * NEVER `loadConfig()` ITSELF INTO EXISTENCE. `loadConfig()` is a create-on-first-run bootstrap —
+ * missing `~/.config/remudero/config.json` gets WRITTEN (and `which claude` shelled out to fill
+ * it) rather than reported absent, which is exactly right for a real fleet's own commands but
+ * wrong for a read-only evidence lookup nothing has confirmed wants a fleet config to exist yet.
+ * A non-self credit/escalation pass over a plain `owner/repo` string (every pre-W1-T3873 test
+ * fixture, and any one-off `owner`/`repo` that is not this engine's own) would otherwise CREATE
+ * that file — a real side effect on disk this function must never cause just by being asked a
+ * question. `existsSync` first, so an absent config reads as the same honest "no fleet config
+ * yet" `undefined` without ever calling the bootstrap that would manufacture one.
+ *
  * `undefined` back at the two readers means "no entry for ANY PR" — the SAME safe "no opinion"
  * a failed `git log` already yields today (both readers' own best-effort catch). It can only
  * WITHHOLD a credit that would otherwise have been answered from foreign evidence; it can never
@@ -32855,6 +32865,11 @@ export function creditEvidenceRootFor(
   }
   let configRoot = opts.configRoot;
   if (configRoot === undefined) {
+    // W1-T3873 round 2: `existsSync` BEFORE `loadConfig()`, never after — `loadConfig()` itself is
+    // what creates the file, so checking post-call already lost the race against its own bootstrap.
+    if (!existsSync(instanceConfigPath())) {
+      return undefined; // no fleet config on disk — the honest absence, never manufactured into one
+    }
     try {
       configRoot = loadConfig().root;
     } catch {
