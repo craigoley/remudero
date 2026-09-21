@@ -2310,6 +2310,114 @@ components:
         feedback:
           $ref: "#/components/schemas/FeedbackEntry"
 
+    # ── W1-T3899 (external-effect-v1) — connector truth is separate from an action receipt. ──
+    ExternalEffectPostcondition:
+      type: object
+      required: [path, equals]
+      properties:
+        path:
+          type: string
+        equals:
+          description: JSON value expected at the connector path.
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+
+    ExternalEffect:
+      type: object
+      required:
+        - version
+        - originatingActionId
+        - originatingReceiptId
+        - capabilityGrantId
+        - connector
+        - targetIdentity
+        - requestedOperation
+        - preconditionSnapshot
+        - expectedPostconditions
+        - observation
+        - idempotencyKey
+        - reconciliationState
+        - retryPath
+        - evidenceReference
+        - safeToComplete
+      properties:
+        version:
+          type: string
+          enum: [external-effect-v1]
+        originatingActionId:
+          type: string
+        originatingReceiptId:
+          type: string
+        capabilityGrantId:
+          type: string
+        connector:
+          type: string
+        targetIdentity:
+          type: string
+        requestedOperation:
+          type: string
+        preconditionSnapshot:
+          type: object
+          additionalProperties: true
+        expectedPostconditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalEffectPostcondition"
+        observedState:
+          type: object
+          additionalProperties: true
+        observation:
+          type: object
+          required: [status, maxAgeMs]
+          properties:
+            status:
+              type: string
+              enum: [fresh, stale, unavailable]
+            observedAt:
+              type: string
+              format: date-time
+            ageMs:
+              type: number
+            maxAgeMs:
+              type: number
+        idempotencyKey:
+          type: string
+        reconciliationState:
+          type: string
+          enum: [applied, refused, pending, partially-applied, drifted, stale, unobservable]
+        partialSuccess:
+          type: object
+          required: [satisfied, unsatisfied]
+          properties:
+            satisfied:
+              type: array
+              items: { type: string }
+            unsatisfied:
+              type: array
+              items: { type: string }
+        retryPath:
+          type: object
+          required: [kind, allowed, reason]
+          properties:
+            kind:
+              type: string
+              enum: [none, retry, compensation]
+            allowed:
+              type: boolean
+            reason:
+              type: string
+            attemptNumber:
+              type: integer
+        evidenceReference:
+          type: string
+          description: Opaque digest of redacted connector evidence; raw provider output is never stored.
+        safeToComplete:
+          type: boolean
+        reason:
+          type: string
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.

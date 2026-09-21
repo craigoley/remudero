@@ -8,6 +8,7 @@ import {
   type CapabilityGrantStore,
   type CapabilityUseRequest,
 } from "./capability-grant.js";
+import { reconcileExternalEffect, type ExternalEffectRequest, type ExternalEffectResult } from "./action-reconciliation.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
@@ -2638,6 +2639,11 @@ export interface OpenWeightSpawnArgs {
    * caller, which is unaffected: no store, no verification, no change in behaviour.
    */
   capabilityGrant?: { store: CapabilityGrantStore; request: CapabilityUseRequest };
+  /** Reconcile a bounded provider action against connector truth before returning the worker result. */
+  externalEffect?: {
+    request: ExternalEffectRequest;
+    onReconciled?: (result: ExternalEffectResult) => void | Promise<void>;
+  };
 }
 
 /**
@@ -2698,6 +2704,7 @@ export interface OpenWeightWorkerResult {
   budgetReservedUsd: number;
   budgetSettledUsd: number;
   budgetRefused: boolean;
+  externalEffect?: ExternalEffectResult;
 }
 
 type OpenWeightMessage = Record<string, unknown>;
@@ -3195,6 +3202,16 @@ function openWeightResult(input: {
   };
 }
 
+async function reconcileBoundedProviderAttempt(
+  result: OpenWeightWorkerResult,
+  externalEffect: OpenWeightSpawnArgs["externalEffect"],
+): Promise<OpenWeightWorkerResult> {
+  if (externalEffect === undefined) return result;
+  const reconciliation = await reconcileExternalEffect(externalEffect.request);
+  await externalEffect.onReconciled?.(reconciliation);
+  return { ...result, externalEffect: reconciliation };
+}
+
 /** Run one bounded OpenAI-compatible Azure conversation.
  *
  * `response_format` is now PER DEPLOYMENT, not forbidden outright. The original
@@ -3358,7 +3375,12 @@ export async function spawnOpenWeightWorker(
       if (typeof message.content === "string") {
         text = args.responseFormat === undefined ? message.content : openWeightUnfence(message.content);
       }
-      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd });
+      if (calls.length === 0) {
+        return reconcileBoundedProviderAttempt(
+          openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
+          args.externalEffect,
+        );
+      }
       if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
       for (const call of calls) {
@@ -3430,27 +3452,30 @@ export async function spawnOpenWeightWorker(
     }
     // Preserve the transport/tool failure in the result's stderr + error flags; a failure must not
     // collapse into an ordinary empty worker response for callers or the catch-erasure census.
-    return openWeightResult({
-      model: selection.model,
-      effort: selection.effort,
-      startedAt,
-      clock,
-      text,
-      sessionId,
-      turns,
-      promptTokens,
-      completionTokens,
-      error: error instanceof Error ? error.message : String(error),
-      budgetReservedUsd,
-      budgetSettledUsd,
-      // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
-      // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
-      budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
-      webSearchAttempted,
-      webSearchAccepted,
-      webSearchRefused,
-      webSearchUsd,
-    });
+    return reconcileBoundedProviderAttempt(
+      openWeightResult({
+        model: selection.model,
+        effort: selection.effort,
+        startedAt,
+        clock,
+        text,
+        sessionId,
+        turns,
+        promptTokens,
+        completionTokens,
+        error: error instanceof Error ? error.message : String(error),
+        budgetReservedUsd,
+        budgetSettledUsd,
+        // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
+        // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
+        budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
+        webSearchAttempted,
+        webSearchAccepted,
+        webSearchRefused,
+        webSearchUsd,
+      }),
+      args.externalEffect,
+    );
   }
 }
 

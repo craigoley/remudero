@@ -144,6 +144,7 @@
   "scripts/workflow-guard-mutation-ratchet.mjs": 250,
   "src/cli/registry.ts": 250,
   "src/lib/account-usage.ts": 180,
+  "src/lib/action-reconciliation.ts": 250,
   "src/lib/alert-lane.ts": 137,
   "src/lib/analytics-breakdowns.ts": 250,
   "src/lib/analytics-live-metrics.ts": 250,
