@@ -262,6 +262,12 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   mkdirSync(providerRuntime);
   const claudeDir = join(providerRuntime, "claude");
   mkdirSync(claudeDir);
+  const containerConfigDir = join(providerRuntime, "container-config");
+  mkdirSync(containerConfigDir);
+  writeFileSync(
+    join(containerConfigDir, "config.json"),
+    JSON.stringify({ workerProviders: { enabled: ["openweight"], cashFallbackWhenBlocked: true }, dailyCapUsd: 25 }),
+  );
   // W1-T3728: successful recycle fixtures model the host-only durable Azure key, never a
   // container-config path. The mode is material: the production recycler refuses 0644.
   const cashKeyPath = join(providerRuntime, "openweight-api-key");
@@ -280,7 +286,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       RMD_STATE_DIR: state,
       RMD_CLAUDE_DIR: claudeDir,
       RMD_CODEX_DIR: join(providerRuntime, "absent-codex"),
-      RMD_CONTAINER_CONFIG_DIR: join(providerRuntime, "absent-config"),
+      RMD_CONTAINER_CONFIG_DIR: containerConfigDir,
       RMD_RECYCLE_WAIT_S: "1",
       RMD_RECYCLE_POLL_S: "1",
       // W1-T2555: this suite drives docker orchestration (stop/rm/run, locks, drift), never the
@@ -930,8 +936,8 @@ test("W1-T3728: a durable mode-0600 host key replaces an outgoing container valu
 
 test("W1-T3728: MUTANT: removing the durable-key refusal reaches pull and docker run", () => {
   const source = readFileSync(SCRIPT, "utf8");
-  const modeAnchor = '  exit 1\nfi\nCASH_KEY_LINES="$(awk';
-  const mutated = source.replace(modeAnchor, '  :\nfi\nCASH_KEY_LINES="$(awk');
+  const modeAnchor = '    exit 1\n  fi\n  CASH_KEY_LINES="$(awk';
+  const mutated = source.replace(modeAnchor, '    :\n  fi\n  CASH_KEY_LINES="$(awk');
   assert.notEqual(mutated, source, "the durable-key refusal must be a real mutation target");
   const mutant = join(mkdtempSync(join(tmpdir(), "rmd-recycle-cash-key-mutant-")), "recycle-container.sh");
   writeFileSync(mutant, mutated, { mode: 0o755 });
