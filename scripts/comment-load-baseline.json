@@ -205,6 +205,7 @@
   "src/lib/doctor.ts": 500,
   "src/lib/drain-lock.ts": 40,
   "src/lib/drain.ts": 750,
+  "src/lib/emergency-control.ts": 250,
   "src/lib/emissions.ts": 113,
   "src/lib/env.ts": 140,
   "src/lib/errors.ts": 250,
