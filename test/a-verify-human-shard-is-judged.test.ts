@@ -29,6 +29,7 @@ import {
   verifyHumanVerdictRow,
   spawnVerifyHumanJudgeWorker,
   realVerifyHumanJudge,
+  resolveVerifyHumanJudgeMount,
 } from "../src/lib/verify-human-judge.js";
 import { resolveRiskJudgeMount } from "../src/lib/risk-judge.js";
 import type { Mount, Mounts } from "../src/lib/mounts.js";
@@ -338,6 +339,58 @@ test("W1-T3188: an unparseable worker reply still FAILS OPEN through the real ju
   // outage or a garbled reply must never quietly decide the operator need not see something.
   const spawn = (async () => fakeVerifyHumanWorkerResult("the model said something else entirely")) as typeof spawnWorker;
   const judge = realVerifyHumanJudge({ mounts: JUDGE_MOUNTS, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.deepEqual(await judge(SETTLED), FAIL_OPEN_VERIFY_HUMAN_VERDICT);
+});
+
+test("W1-T3916: disabled judge provider falls back to enabled provider routing", async () => {
+  const mounts: Mounts = {
+    ...JUDGE_MOUNTS,
+    verify_human_judge: { ...JUDGE_MOUNT, provider: "cash" },
+  };
+  const calls: Array<{ mountProvider?: string }> = [];
+  const spawn = (async (args: { mountProvider?: string }) => {
+    calls.push(args);
+    return fakeVerifyHumanWorkerResult("VERIFY_HUMAN_DECISION: backlog\nVERIFY_HUMAN_REASON: dependencies are not merged");
+  }) as unknown as typeof spawnWorker;
+
+  const judge = realVerifyHumanJudge({
+    mounts,
+    config: { workerProviders: { enabled: ["codex"] } },
+    cwd: "/tmp/x",
+    settingsFile: "/tmp/settings.json",
+    spawn,
+  });
+  await judge(NEEDS);
+
+  assert.equal(resolveVerifyHumanJudgeMount(mounts, { workerProviders: { enabled: ["codex"] } }).provider, undefined);
+  assert.equal(calls[0]?.mountProvider, undefined, "the existing provider router must choose the enabled lane");
+});
+
+test("W1-T3916: enabled judge provider remains mount-affine", () => {
+  const mounts: Mounts = {
+    ...JUDGE_MOUNTS,
+    verify_human_judge: { ...JUDGE_MOUNT, provider: "cash" },
+  };
+  assert.equal(
+    resolveVerifyHumanJudgeMount(mounts, { workerProviders: { enabled: ["cash"] } }).provider,
+    "cash",
+    "an explicitly enabled paid provider must not be silently removed or added",
+  );
+});
+
+test("W1-T3916: fallback still fails open on an unusable verdict", async () => {
+  const mounts: Mounts = {
+    ...JUDGE_MOUNTS,
+    verify_human_judge: { ...JUDGE_MOUNT, provider: "cash" },
+  };
+  const spawn = (async () => fakeVerifyHumanWorkerResult("the model said something else entirely")) as typeof spawnWorker;
+  const judge = realVerifyHumanJudge({
+    mounts,
+    config: { workerProviders: { enabled: ["codex"] } },
+    cwd: "/tmp/x",
+    settingsFile: "/tmp/settings.json",
+    spawn,
+  });
   assert.deepEqual(await judge(SETTLED), FAIL_OPEN_VERIFY_HUMAN_VERDICT);
 });
 
