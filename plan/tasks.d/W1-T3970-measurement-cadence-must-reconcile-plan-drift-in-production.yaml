@@ -1,0 +1,60 @@
+- id: W1-T3970
+  title: "THE PLAN-RECONCILE CADENCE IS PURELY A LIBRARY FEATURE — the production measurement hook omits its inputs, so credited queued shards still require a human to run rmd plan-reconcile"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 24.00
+  files: [src/run-task.ts, src/lib/measurement-cadence.ts, src/lib/feedback-landing.ts, test/measurement-cadence-production-wiring.test.ts]
+  origin: "operator-session#review-admission-and-self-improvement-2026-09-21"
+  plan_refs: [W1-T3226, W1-T3043, W1-T3961]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3226 merged the pure `planReconcileCadence` reducer and its tests, but the live daemon
+    composition root still calls `runMeasurementCadenceReport` without a `planReconcile` input.
+    The result is a green library suite and a dead production rung: the cadence can measure rule
+    efficacy, autonomy and proof debt, while the one plan-maintenance verb that keeps the queue
+    honest remains a hand-run CLI.
+
+    This is the same producer-without-a-call-site defect that has already stranded retro,
+    auto-triage and board-review rungs. It is especially costly here because `status: queued` is
+    decorative while credited merge state is derived elsewhere: a stale shard remains selectable,
+    so the daemon can spend a worker on work that already shipped.
+
+    The fix must wire the existing pure reducer through the existing measurement cadence, not
+    invent a second credit predicate or edit the daemon checkout in place. A landing seam is
+    required for above-threshold drift; below threshold remains report-only. The code and test
+    stay in the composition root and its production-wiring suite so a future refactor cannot
+    leave the reducer green and the daemon silent again.
+  design: |
+    (i) Read the same task shards and credit projection that `rmd plan-reconcile` already uses.
+         Do not derive completion from `status:` or from a second GitHub walk.
+    (ii) Pass the inputs from `buildMeasurementCadenceDaemonHooks` to the existing report host,
+         preserving its cadence marker and policy gate.
+    (iii) Keep the landing action behind the existing queue-backed plan landing bridge. The daemon
+          never writes its own checkout; a failed or unavailable bridge is reported and retried
+          by the next cadence, never treated as zero drift.
+    (iv) Prove the production call site and the no-in-place-write boundary with a focused test that
+         exercises the real hook construction, not only `planReconcileCadence` in isolation.
+  acceptance:
+    - claim: "the production measurement hook supplies plan-reconcile inputs to the cadence report"
+      proof: "grep: planReconcile: { in src/run-task.ts"
+    - claim: "the production composition root calls the plan-reconcile adapter"
+      proof: "grep: buildPlanReconcileCadenceInput( in src/run-task.ts"
+    - claim: "the production composition root calls the plan-status landing bridge"
+      proof: "grep: landPlanReconcileShards( in src/run-task.ts"
+    - claim: "the production wiring test reaches the plan-reconcile input path"
+      proof: "grep: production measurement cadence supplies plan reconciliation inputs in test/measurement-cadence-production-wiring.test.ts"
+    - claim: "plan drift is handed to an external landing bridge rather than written into the daemon checkout"
+      proof: "grep: daemon checkout remains clean in test/measurement-cadence-production-wiring.test.ts"
+  falsifier: |
+    Start from a fixture with one credited queued shard and one uncredited queued shard. The
+    production hook must report only the credited one, and the landing seam must receive the
+    rewritten bytes without a local plan write. Remove the call-site object and the wiring test
+    must fail; replace the credit supplier with status-based truth and the uncredited control must
+    fail. A report-only implementation does not satisfy this task because it leaves the cadence
+    unable to clear the queue it is measuring.
