@@ -787,6 +787,7 @@ import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
   observedStateKey,
+  automationProposalFromJudgedShard,
   proposalFromJudgedShard,
   realVerifyHumanJudge,
   shardsNeedingJudgement,
@@ -23896,6 +23897,7 @@ export async function defaultVerifyHumanCadenceResult(
       parked: 0,
       judged: 0,
       needsOperator: [],
+      automated: [],
       backlog: [],
       judgeFailed: [],
       skipped: [],
@@ -38500,7 +38502,7 @@ export interface VerifyHumanRouteDeps {
   priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>;
   /** Optional caller-selected batch size; omitted preserves the historical unlimited pass. */
   maxJudged?: number;
-  /** Stages a needs_operator shard as an inbox proposal. Called ONLY on that arm. */
+  /** Stages a needs_operator or automate shard as an inbox proposal. Called ONLY on those arms. */
   stageProposal: (proposal: Proposal) => void;
   /** Writes the {@link VERIFY_HUMAN_JUDGED_STEP} row. Called on BOTH arms, always. */
   appendRow: (row: LedgerLine) => void;
@@ -38511,6 +38513,7 @@ export interface VerifyHumanRouteDeps {
 export interface VerifyHumanRouteResult {
   judged: number;
   needsOperator: string[];
+  automated: string[];
   backlog: string[];
   skipped: string[];
   deferred: string[];
@@ -38539,6 +38542,7 @@ export async function routeVerifyHumanBacklog(
   const result: VerifyHumanRouteResult = {
     judged: 0,
     needsOperator: [],
+    automated: [],
     backlog: [],
     skipped: shards.filter((s) => !dueIds.has(s.id)).map((s) => s.id),
     // W1-T3921: deferred due work remains due for the next pass
@@ -38553,6 +38557,11 @@ export async function routeVerifyHumanBacklog(
     if (verdict.decision === "needs_operator") {
       deps.stageProposal(proposalFromJudgedShard(shard, verdict));
       result.needsOperator.push(shard.id);
+      continue;
+    }
+    if (verdict.decision === "automate") {
+      deps.stageProposal(automationProposalFromJudgedShard(shard, verdict));
+      result.automated.push(shard.id);
       continue;
     }
     result.backlog.push(shard.id);
@@ -38570,7 +38579,7 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
     const key = row.observed_state;
     const decision = row.judge_decision;
     if (typeof key !== "string" || !key) continue;
-    if (decision !== "needs_operator" && decision !== "backlog") continue;
+    if (decision !== "needs_operator" && decision !== "automate" && decision !== "backlog") continue;
     out.set(key, {
       decision,
       reason: typeof row.judge_reason === "string" ? row.judge_reason : "",
@@ -38655,8 +38664,9 @@ export async function verifyHumanSweepCommand(
   });
 
   const deferred = result.deferred ?? [];
-  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
+  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.automated.length} entered self-improvement, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
   for (const id of result.needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
+  for (const id of result.automated) console.log(`  AUTOMATE: ${id} — staged as verify-human-automate:${id} in the inbox`);
   return 0;
 }
 

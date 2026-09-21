@@ -22,9 +22,8 @@ import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type Wo
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
-/** What the judge decides for ONE parked shard. Two values, and neither is "close": the type
- *  cannot express removal, so no verdict can make a filed task disappear. */
-export type VerifyHumanDecision = "needs_operator" | "backlog";
+/** What the judge decides for ONE parked shard. None of the values edits or releases a task. */
+export type VerifyHumanDecision = "needs_operator" | "automate" | "backlog";
 
 /** The step written for EVERY judged shard, BOTH arms. W1-T3166 had to establish "has this judge
  *  ever run" from three separate reads because no such row existed; that is not repeated.
@@ -78,7 +77,7 @@ export const FAIL_OPEN_VERIFY_HUMAN_VERDICT: VerifyHumanVerdict = {
   judgeFailed: true,
 };
 
-const VALID_DECISIONS = new Set<VerifyHumanDecision>(["needs_operator", "backlog"]);
+const VALID_DECISIONS = new Set<VerifyHumanDecision>(["needs_operator", "automate", "backlog"]);
 
 /**
  * DESIGN (iv): judge once per OBSERVED STATE, never once per poll. 56 shards times every refresh
@@ -119,19 +118,20 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
     `\`verify: human\` — meaning a person, not a machine, was supposed to verify it. It has been`,
     `sitting for ${shard.ageDays} days. Decide whether it STILL needs that person.`,
     ``,
-    `WHAT YOU ARE DECIDING, and it is narrow: whether this shard should be put in front of the`,
-    `operator as something to act on, or whether it can stay in the visible backlog for now. You`,
-    `are NOT deciding whether the work is right, whether it should be done, or whether it can be`,
-    `closed. You cannot close it. Nothing you say edits the plan.`,
+    `WHAT YOU ARE DECIDING, and it is narrow: whether this shard needs the operator, can enter the`,
+    `self-improvement flow, or should stay in the visible backlog for now. You are NOT deciding`,
+    `whether the work is right, whether it should be done, or whether it can be closed.`,
+    `You cannot close it. Nothing you say edits the plan.`,
     ``,
     `SIGNALS THAT IT PROBABLY STILL NEEDS HIM: a genuine judgement call only he can make (his own`,
     `priorities, budget, risk appetite, or intent); a decision that would set policy; something`,
     `time-sensitive; an ask whose answer unblocks other work.`,
     ``,
-    `SIGNALS THAT IT PROBABLY DOES NOT, YET: its dependencies have not merged, so the question`,
-    `cannot even be asked properly; the work appears already done elsewhere; it asks for a review`,
-    `of something that has since changed; it is a preference an agent could reasonably settle and`,
-    `record itself.`,
+    `SIGNALS THAT IT PROBABLY DOES NOT NEED THE OPERATOR: its dependencies have not merged, so the`,
+    `question cannot even be asked properly; the work appears already done elsewhere; it asks for`,
+    `a review of something that has since changed; it is a preference an agent could reasonably`,
+    `settle and record itself. Choose automate only when the existing self-improvement flow can take`,
+    `the next step without a policy, budget, security, merge, or tenant-isolation decision.`,
     ``,
     `THE ASYMMETRY THAT GOVERNS THIS: a FALSE "backlog" leaves the operator unaware of something he`,
     `needed — he cannot know to look for it. A FALSE "needs_operator" costs him one skim. WHEN IN`,
@@ -153,11 +153,12 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
     ``,
     `Decide — exactly one of:`,
     `  needs_operator — put this in front of him; it is a real ask`,
-    `  backlog        — it can wait in the visible backlog; it is not an ask today`,
+    `  automate      — stage it for the existing self-improvement flow; do not release the task`,
+    `  backlog       — it can wait in the visible backlog; it is not an ask today`,
     ``,
     `MACHINE-READABLE OUTPUT (required, in addition to any prose): emit exactly one of each of`,
     `these lines, and nothing else on the line:`,
-    `  VERIFY_HUMAN_DECISION: <needs_operator|backlog>`,
+    `  VERIFY_HUMAN_DECISION: <needs_operator|automate|backlog>`,
     `  VERIFY_HUMAN_REASON: <one concrete, specific reason naming THIS shard's own facts>`,
   ].join("\n");
 }
@@ -220,6 +221,12 @@ export function verifyHumanProposalId(shard: ShardUnderJudgement): string {
   return `verify-human:${shard.id}`;
 }
 
+/** Distinct from the operator-facing proposal so a route change updates state rather than
+ *  duplicating or conflating two different next actions. */
+export function verifyHumanAutomationProposalId(shard: ShardUnderJudgement): string {
+  return `verify-human-automate:${shard.id}`;
+}
+
 /**
  * A `needs_operator` shard, as an ordinary inbox {@link Proposal} — the operator's own words were
  * "then surface them through the inbox", and this is that surface. `evidenceAnchors` is EMPTY on
@@ -236,6 +243,23 @@ export function proposalFromJudgedShard(shard: ShardUnderJudgement, verdict: Ver
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
       `Cited in src/: ${shard.citedInSrc ? "yes" : "no"}.\n\n` +
       `Nothing about the shard has been changed — this is a routing verdict, not a plan edit.`,
+    evidenceAnchors: [],
+  };
+}
+
+/** An `automate` verdict enters the existing inbox/draft self-improvement flow. It is deliberately
+ *  a proposal, not a release: the normal draft, PR, review and merge path still owns every write. */
+export function automationProposalFromJudgedShard(shard: ShardUnderJudgement, verdict: VerifyHumanVerdict): Proposal {
+  return {
+    id: verifyHumanAutomationProposalId(shard),
+    summary:
+      `${shard.id} was filed \`verify: human\` ${shard.ageDays} days ago and a judge reads it as ` +
+      `safe to enter the self-improvement flow:\n  ${verdict.reason}\n\n` +
+      `${shard.title}\n\n` +
+      `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
+      `Cited in src/: ${shard.citedInSrc ? "yes" : "no"}.\n\n` +
+      `This is an automation candidate only. The existing inbox/draft flow owns the next step; ` +
+      `the shard, plan records, release rows, and merge gates remain unchanged.`,
     evidenceAnchors: [],
   };
 }
