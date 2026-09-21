@@ -243,6 +243,16 @@ export interface SharedPauseGitDeps {
   mintAnchor(): string;
 }
 
+/** PRIMARY CONTROL: a shared-pause read is a scheduler health probe, not an unbounded dependency.
+ *
+ * A shared-pause read is a scheduler health probe, not an unbounded dependency.  The daemon calls
+ * it from its tick path, so a credential helper, DNS lookup, or GitHub transport stall must return
+ * a named `unreachable` outcome and let the loop continue rather than freezing every review lane.
+ * Keep this below the daemon's normal poll cadence while leaving enough room for one ordinary Git
+ * round trip; callers can still inject a fake `run` without paying a timer in tests.
+ */
+export const SHARED_PAUSE_GIT_TIMEOUT_MS = 10_000;
+
 /**
  * The real (non-test) {@link SharedPauseGitDeps} — a live `git`, scoped to `repoRoot` exactly
  * like `gitTriageClaimReserver`'s own calls (lib/auto-triage.ts). `mintAnchor` reuses that
@@ -253,9 +263,16 @@ export interface SharedPauseGitDeps {
 export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
   const run = (args: string[]): { status: number; stdout: string } => {
     try {
-      const stdout = execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" });
+      const stdout = execFileSync("git", ["-C", repoRoot, ...args], {
+        encoding: "utf8",
+        timeout: SHARED_PAUSE_GIT_TIMEOUT_MS,
+        killSignal: "SIGTERM",
+      });
       return { status: 0, stdout };
     } catch (e) {
+      // `execFileSync` reports a timeout with `status: null` and `code: "ETIMEDOUT"`; preserve
+      // the existing non-zero outcome contract rather than letting a timed read throw through the
+      // daemon tick.  `checkSharedPause` will hold dispatch fail-closed, but the loop remains alive.
       const status = typeof (e as { status?: number })?.status === "number" ? (e as { status: number }).status : 1;
       return { status, stdout: "" };
     }

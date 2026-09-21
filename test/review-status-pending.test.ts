@@ -70,6 +70,11 @@ test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending vi
   assert.ok(terminalPostIdx > judgeIdx, "the terminal post must still run, after judging, exactly as before this task");
 });
 
+test("semantic review worker carries an idle-activity watchdog", () => {
+  const start = runTaskSrc.indexOf("clockBound: { boundMs: args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon }");
+  assert.ok(start > -1, "the semantic reviewer spawn must use the existing worker-abandon policy");
+});
+
 // The pending-post-BEFORE-the-advisory-reviewer-spawn half of criterion 1 used to live in the
 // source-text test above as `body.indexOf("await spawnWorker(")`. That was a lock on a CALL SITE,
 // not on the behaviour: #2717 replaced that call site and red-lined on this assertion alone, and
@@ -148,6 +153,7 @@ esac
     process.env.PATH = `${binDir}:${oldPath}`;
 
     let ghCallsAtReviewerSpawn: string | undefined;
+    let reviewerSpawnArgs: SpawnWorkerArgs | undefined;
     const snapshotGhCalls = () => {
       if (ghCallsAtReviewerSpawn === undefined) ghCallsAtReviewerSpawn = readFileSync(ghLog, "utf8");
     };
@@ -182,6 +188,7 @@ esac
     }) as unknown as Parameters<typeof runReview>[0]["reviewerQueryFn"];
 
     const reviewerSpawnWorker = async (spawnArgs: SpawnWorkerArgs): Promise<WorkerResult> => {
+      reviewerSpawnArgs = spawnArgs;
       snapshotGhCalls();
       spawnArgs.streamObserver?.({ kind: "message", tsMs: Date.now() });
       return spawnWorker(spawnArgs);
@@ -255,6 +262,8 @@ esac
     assert.equal(reviewerTelemetryEvents[0]?.workerRole, "reviewer");
     assert.equal(reviewerTelemetryEvents[0]?.provider, "claude");
     assert.equal(reviewerTelemetryEvents[0]?.requestedModel, "sonnet");
+    assert.equal(typeof reviewerSpawnArgs?.clockBound?.boundMs, "number", "reviewer workers must have an idle-activity bound");
+    assert.ok((reviewerSpawnArgs?.clockBound?.boundMs ?? 0) > 0, "reviewer idle-activity bound must be positive");
   } finally {
     process.env.PATH = oldPath;
     if (oldClaudeBinOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];

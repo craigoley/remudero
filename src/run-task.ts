@@ -5694,6 +5694,10 @@ async function runReview(args: {
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
   reviewerMount?: Mount;
+  /** Resolved worker-abandon bound for the advisory reviewer. Production callers that already
+   *  resolved the run policy pass it through; the fallback keeps direct review invocations on
+   *  the same policy row without inventing a second timeout. */
+  reviewerClockBoundMs?: number;
   /**
    * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
    * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
@@ -5925,6 +5929,11 @@ async function runReview(args: {
             ...cashDivertSpawnFields("review"),
             runId: args.runId,
             taskId: task.id,
+            // Reviews are admission-gating work.  Give the advisory worker the same idle-activity
+            // watchdog as dispatch workers so a provider/SDK stall cannot hold the decision claim
+            // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
+            // a terminal verdict when this bound trips.
+            clockBound: { boundMs: args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon },
             streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
@@ -8467,6 +8476,9 @@ export async function runFixRung(opts: {
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
+  /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
+   * reviewer does not reread policy from disk on every fix strike. */
+  reviewerClockBoundMs?: number;
   /** Parent run sensor shared by implement, fix, and advisory review workers. */
   workerTelemetry?: WorkerStateSensor;
   /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
@@ -10507,6 +10519,7 @@ export async function runFixRung(opts: {
       say: deps.say,
       account: deps.account,
       reviewerMount: opts.reviewBase.reviewerMount,
+      reviewerClockBoundMs: opts.reviewerClockBoundMs,
       workerTelemetry: opts.workerTelemetry,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
       reviewerCodeFreshness: opts.reviewerCodeFreshness,
@@ -12569,6 +12582,8 @@ export interface RunTaskContext {
   spawn: typeof spawnWorker;
   task: Task;
   taskId: string;
+  /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
+  workerAbandonMs?: number;
   workerStateSensor: WorkerStateSensor;
 }
 
@@ -13513,6 +13528,7 @@ async function runTask(
       spawn,
       task,
       taskId,
+      workerAbandonMs,
       workerStateSensor,
     };
     return await runTaskBody(ctx);
@@ -13542,6 +13558,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     spawn,
     task,
     taskId,
+    workerAbandonMs,
     workerStateSensor,
   } = ctx;
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
@@ -15212,6 +15229,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say,
       account,
       reviewerMount,
+      reviewerClockBoundMs: workerAbandonMs,
       workerTelemetry: workerStateSensor,
       // A run that established the cash adapter as its containment boundary must keep this
       // reviewer on that same boundary; otherwise a recovered subscription could run after a
@@ -15266,6 +15284,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         strikeCap: fixStrikeCap(config),
         initialReview: review,
         reviewBase: { owner, repo: task.repo, headCheckoutDir: worktreePath, reviewerMount },
+        reviewerClockBoundMs: workerAbandonMs,
         workerTelemetry: workerStateSensor,
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
