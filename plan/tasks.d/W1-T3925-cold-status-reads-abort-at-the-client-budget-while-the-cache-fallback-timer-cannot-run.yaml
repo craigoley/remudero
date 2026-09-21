@@ -46,13 +46,13 @@
     this task is scoped to the cold-cache and event-loop-blocked shapes those did not measure.
   acceptance:
     - claim: "a cold status/recent/daemon-health read with no warm snapshot yet returns within the client's stated budget instead of hanging until the underlying read finishes"
-      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+      proof: "unit test: cold status read with no warm snapshot returns within the client budget"
     - claim: "a same-event-loop expensive read scheduled ahead of the cache-fallback timer does not prevent that timer from firing before the client budget expires"
-      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+      proof: "unit test: an event-loop-blocked read still fires the fallback timer before the client budget"
     - claim: "the returned answer under a cold or blocked read states its own status (stale/unavailable) rather than presenting an unbounded wait or a silently fabricated verified value"
-      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+      proof: "unit test: cold or blocked reads report unavailable or stale state instead of a fabricated verified value"
     - claim: "a latency measurement fixture records cold-read timing so a future regression is measurable rather than anecdotal"
-      proof: "unit test: test/cold-status-reads-return-within-the-client-budget.test.ts"
+      proof: "unit test: cold-read timing fixture records a measurable latency"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION if a deterministic cold-cache fixture (no prior snapshot) and a
     deterministic event-loop-blocked fixture (a synchronous read scheduled ahead of the fallback
