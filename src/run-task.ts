@@ -5925,6 +5925,11 @@ async function runReview(args: {
             ...cashDivertSpawnFields("review"),
             runId: args.runId,
             taskId: task.id,
+            // Reviews are admission-gating work.  Give the advisory worker the same idle-activity
+            // watchdog as dispatch workers so a provider/SDK stall cannot hold the decision claim
+            // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
+            // a terminal verdict when this bound trips.
+            clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon },
             streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
