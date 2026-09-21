@@ -91,6 +91,7 @@ test("W1-T2770: deploy/Dockerfile pins Node to the EXACT `.nvmrc` version — ne
     /FROM\s+node:\d+-[a-z]+-\w+$/i,
     "the floating major-only tag is the defect — a rebuild whose base slot moved shipped 22.23.2 with no file change",
   );
+  assert.match(fromLine!, /@sha256:[0-9a-f]{64}$/i, "the exact Node tag must also carry an immutable base-image digest");
 });
 
 // ── (B) MOUNT-SIDE: the informational cluster, and its self-expiry ─────────────────────────
