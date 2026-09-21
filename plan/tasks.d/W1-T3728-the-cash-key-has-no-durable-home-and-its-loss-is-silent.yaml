@@ -6,7 +6,7 @@
   verify: human
   risk: high
   budget_usd: 15.00
-  files: [deploy/runtime-env-vars.sh, deploy/recycle-container.sh, src/lib/doctor.ts, src/lib/report-commands.ts, test/recycle-container.test.ts, test/the-cash-lane-reports-whether-it-can-spend.test.ts, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts, test/nothing-reclaims-the-images-the-recycle-pulls.test.ts, scripts/test-tier-manifest.json]
+  files: [deploy/runtime-env-vars.sh, deploy/recycle-container.sh, src/lib/doctor.ts, src/lib/report-commands.ts, test/recycle-container.test.ts, test/the-cash-lane-reports-whether-it-can-spend.test.ts, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts, test/nothing-reclaims-the-images-the-recycle-pulls.test.ts, test/doctor.test.ts, scripts/test-tier-manifest.json]
   origin: oper#squeeze-readiness-audit-2026-09-17
   plan_refs: ["W1-T3575", "W1-T3692"]
   status: queued
@@ -63,3 +63,6 @@
 
     Scope amended after filing: the two established recycler fixtures exercise successful replacement
     paths and must provide the host-only secret in tests. Acceptance criteria are unchanged.
+
+    Scope amended after the first CI run: test/doctor.test.ts carries the existing-report-arm census.
+    Adding cash-spendability changes that explicit projection; the fixture must name the new arm. Acceptance criteria are unchanged.
