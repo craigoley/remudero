@@ -60,4 +60,8 @@
     wiring proof must fail. A request that advances past a strike cap is a regression, not success.
   status: queued
   attempts: 0
-  note: "Reservation: refs/rmd-id/W1-T3989 was claimed before this shard was written. High risk is intentional: this crosses authenticated spend-causing control, daemon polling and reviewer/fix ownership; the implementation is bounded to the existing command paths."
+  note: |
+    reservation hand-off: unknown -> run-W1-T3989-1790030000001
+    Reservation: refs/rmd-id/W1-T3989 was claimed before this shard was written. High risk is intentional:
+    this crosses authenticated spend-causing control, daemon polling and reviewer/fix ownership; the
+    implementation is bounded to the existing command paths.
