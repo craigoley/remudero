@@ -6,7 +6,7 @@
   verify: human
   risk: high
   budget_usd: 15.00
-  files: [deploy/runtime-env-vars.sh, deploy/recycle-container.sh, src/lib/doctor.ts, src/lib/report-commands.ts, test/recycle-container.test.ts, test/the-cash-lane-reports-whether-it-can-spend.test.ts, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts, test/nothing-reclaims-the-images-the-recycle-pulls.test.ts, test/doctor.test.ts, scripts/test-tier-manifest.json]
+  files: [deploy/runtime-env-vars.sh, deploy/recycle-container.sh, src/lib/doctor.ts, src/lib/report-commands.ts, test/recycle-container.test.ts, test/the-cash-lane-reports-whether-it-can-spend.test.ts, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts, test/nothing-reclaims-the-images-the-recycle-pulls.test.ts, test/doctor.test.ts, test/host-capability-fixtures.test.ts, test/recycle-container-bash3-portability.test.ts, test/the-recovery-path-merges-into-a-shared-checkout.test.ts, test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts, scripts/test-tier-manifest.json]
   origin: oper#squeeze-readiness-audit-2026-09-17
   plan_refs: ["W1-T3575", "W1-T3692"]
   status: queued
@@ -66,3 +66,7 @@
 
     Scope amended after the first CI run: test/doctor.test.ts carries the existing-report-arm census.
     Adding cash-spendability changes that explicit projection; the fixture must name the new arm. Acceptance criteria are unchanged.
+
+    Scope amended before merge: the recycler's Bash-3 empty-array hardening is exercised through the
+    shared host-capability and recovery fixtures. These supporting tests must declare the safe durable-key
+    fixture and are part of the same replacement path. Acceptance criteria are unchanged.
