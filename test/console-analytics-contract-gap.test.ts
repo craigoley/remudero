@@ -224,7 +224,7 @@ test("W1-T3884: matching projectionVersion=console-v1 returns the bounded consol
   assert.notDeepEqual(JSON.parse(body()), expected);
 });
 
-test("W1-T3942: projection=console-v1 alias returns the bounded console-v1 envelope", async () => {
+test("W1-T3942 alias returns the bounded console-v1 envelope", async () => {
   const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
   const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
   const { res, status, body } = fakeResponse();
@@ -236,7 +236,7 @@ test("W1-T3942: projection=console-v1 alias returns the bounded console-v1 envel
   assert.notDeepEqual(JSON.parse(body()), expected);
 });
 
-test("W1-T3942: projectionVersion remains authoritative when the alias disagrees", async () => {
+test("W1-T3942 projectionVersion wins over projection alias", async () => {
   const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
   const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
   const { res, status, body } = fakeResponse();
@@ -252,4 +252,15 @@ test("W1-T3942: projectionVersion remains authoritative when the alias disagrees
   assert.equal(parsed.ok, false);
   assert.equal(parsed.error, "unsupported_projection_version");
   assert.equal(parsed.requestedVersion, "console-v2");
+});
+
+test("W1-T3942 unversioned analytics keeps the full snapshot", async () => {
+  const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
+  const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
+  const { res, status, body } = fakeResponse();
+
+  await route.handler({ url: "/v1/analytics" } as never, res, { params: {} });
+
+  assert.equal(status(), 200);
+  assert.deepEqual(JSON.parse(body()), expected);
 });
