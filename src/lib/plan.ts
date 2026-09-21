@@ -233,6 +233,27 @@ export interface MachineFilingAdmissionContext {
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
 
+/**
+ * The CI-learning landing bridge intentionally files machine-authored, verify:human records as
+ * parked proposals. They are not runnable by the proto-runner until a person releases them, so
+ * applying the generic machine-filing admission refusal here would reject the bridge's only
+ * safe output and leave every landing PR red. Keep this exception narrow: only the canonical
+ * learnings shard, an explicit ci-learning origin, an unblocked record, and no dependencies are
+ * treated as an intentional parked proposal. Any other machine record still has to be selectable
+ * (or carries the ordinary admission refusal).
+ */
+function isParkedCiLearningProposal(task: Task): boolean {
+  return (
+    task.author_class === "machine" &&
+    task.verify === "human" &&
+    task.status !== "blocked" &&
+    (task.depends_on ?? []).length === 0 &&
+    task.origin?.startsWith("ci-learning:") === true &&
+    task.files?.length === 1 &&
+    task.files[0] === "learnings/ci.yaml"
+  );
+}
+
 function req<T>(v: T | undefined, field: string, id: string): T {
   if (v === undefined || v === null) throw new PlanError(`task ${id}: missing required field '${field}'`);
   return v;
@@ -828,7 +849,7 @@ export function machineFilingAdmissionViolations(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`,
     );
-  } else if (task.verify === "human" && !context.releasedIds.has(task.id)) {
+  } else if (task.verify === "human" && !context.releasedIds.has(task.id) && !isParkedCiLearningProposal(task)) {
     reasons.push(
       `task ${task.id} is not selectable by runnableCandidates under the current releasedIds: ` +
         `task ${task.id} is verify:human — not auto-runnable by the proto-runner`,
