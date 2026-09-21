@@ -611,6 +611,7 @@
     "test/credited-proof-visibility-seam-defaults.test.ts": 3024,
     "test/credited-task-proof-visibility.test.ts": 8639,
     "test/cross-repo-proof-suite-registry.test.ts": 0,
+    "test/credit-candidates-ride-the-plan-projection.test.ts": 0,
     "test/cross-target-credit-evidence.test.ts": 0,
     "test/cycle-ratchet.test.ts": 4071,
     "test/daemon-alive-liveness.test.ts": 760,
