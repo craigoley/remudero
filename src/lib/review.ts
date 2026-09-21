@@ -7771,9 +7771,9 @@ export function fetchPrLifecycle(prUrl: string, fetch: GhApiFetcher = ghJson): P
   };
 }
 
-// ── W1-T2419: the COMMENT channel is append-only, unlike the status row above ─────────────────
+// ── W1-T2419: the PR-review channel is append-only, unlike the status row above ────────────────
 // The `remudero-review` commit status is last-write-wins, so a repeat write is cheap and this task leaves it
-// untouched. A `gh pr comment` APPENDS (#3140 accumulated TEN byte-identical failure comments on one unmoved head,
+// untouched. A formal PR review APPENDS (#3140 accumulated TEN byte-identical failure comments on one unmoved head,
 // `reviewPostRefusedFor` in run-task.ts keying only on `review.post_refused`). The fix is ONE comparison at the single
 // site that writes the comment ({@link postReviewCommentGuarded}): refuse to append when the body is BYTE-IDENTICAL
 // to the newest comment already standing. NO ledger, NO timer, pacing or backoff — the polling-lockout class this
@@ -7806,6 +7806,24 @@ export function fetchNewestPrComment(prUrl: string, fetch: GhApiFetcher = ghJson
   return newest;
 }
 
+export function fetchNewestPrReview(prUrl: string, fetch: GhApiFetcher = ghJson): PrCommentRecord | undefined {
+  const target = prLifecycleUrlTarget(prUrl);
+  if (!target) return undefined;
+  const rows = fetch([
+    "api",
+    `repos/${target.owner}/${target.repo}/pulls/${target.number}/reviews?per_page=100`,
+  ]) as unknown;
+  if (!Array.isArray(rows)) return undefined;
+  let newest: PrCommentRecord | undefined;
+  for (const row of rows as Array<{ body?: unknown; submitted_at?: unknown }>) {
+    if (typeof row?.body !== "string" || typeof row?.submitted_at !== "string") continue;
+    if (!newest || row.submitted_at > newest.created_at) {
+      newest = { body: row.body, created_at: row.submitted_at };
+    }
+  }
+  return newest;
+}
+
 /** THE comparison this task's rationale found nowhere in `src/`: nothing compared the new verdict against the standing
  * one. This is that comparison, and its only home. Byte-exact, never fuzzy, trimmed or hashed — a verdict that changed
  * by one byte is a DIFFERENT verdict and must still post, the distinction the shard's ledger drew between #3140 (ten
@@ -7817,10 +7835,13 @@ export function isDuplicateReviewComment(newBody: string, standing: PrCommentRec
 /** Injectable seam for {@link postReviewCommentGuarded} — mirrors every other guarded-write DI
  * shape in this module: real defaults, tests override to avoid a real `gh` spawn/network. */
 export interface PostReviewCommentDeps {
-  /** Defaults to {@link fetchNewestPrComment} via {@link ghJson}. */
+  /** Compatibility seam for older callers; production reads formal reviews via {@link fetchNewestPrReview}. */
   fetchNewest?: (prUrl: string) => PrCommentRecord | undefined;
-  /** Defaults to a real `gh pr comment <prUrl> --body <body>`. */
+  /** Compatibility seam for older callers; production submits formal reviews via {@link execGhPrReview}. */
   postComment?: (prUrl: string, body: string) => void;
+  fetchNewestReview?: (prUrl: string) => PrCommentRecord | undefined;
+  postReview?: (prUrl: string, body: string, commitSha?: string) => void;
+  commitSha?: string;
 }
 
 /** Exported so a unit test can PATH-stub `gh` and drive this exact real invocation directly, mirroring {@link
@@ -7829,17 +7850,37 @@ export function execGhPrComment(prUrl: string, body: string): void {
   ghExec(["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
 }
 
-/** THE ONE POST SITE for a review-verdict PR comment (W1-T2419) — `runReview`'s only call path from here on,
- * replacing a bare `ghExec(["pr", "comment", ...])`. Refuses to append when `body` is byte-identical to
- * the newest standing comment ({@link isDuplicateReviewComment}). Otherwise it posts exactly as the old call did,
+export function execGhPrReview(prUrl: string, body: string, commitSha?: string): void {
+  const target = prLifecycleUrlTarget(prUrl);
+  if (!target) throw new Error(`execGhPrReview: cannot resolve PR URL ${JSON.stringify(prUrl)}`);
+  const args = [
+    "api",
+    "-X",
+    "POST",
+    `repos/${target.owner}/${target.repo}/pulls/${target.number}/reviews`,
+    "-f",
+    `body=${body}`,
+    "-f",
+    "event=COMMENT",
+  ];
+  if (commitSha) args.push("-f", `commit_id=${commitSha}`);
+  ghExec(args, { stdio: "pipe" });
+}
+
+/** THE ONE POST SITE for a review-verdict PR review (W1-T2419) — `runReview`'s only call path from here on.
+ * Refuses to submit when `body` is byte-identical to the newest formal review ({@link isDuplicateReviewComment}). Otherwise it posts,
  * best-effort failure contract included: a `gh` error is swallowed, status and ledger already carrying the verdict. */
 export function postReviewCommentGuarded(
   prUrl: string,
   body: string,
   deps: PostReviewCommentDeps = {},
 ): { posted: boolean; reason?: "duplicate" | "gh_error" } {
-  const fetchNewest = deps.fetchNewest ?? ((url: string) => fetchNewestPrComment(url));
-  const postComment = deps.postComment ?? execGhPrComment;
+  const fetchNewest = deps.fetchNewestReview ?? deps.fetchNewest ?? ((url: string) => fetchNewestPrReview(url));
+  const postComment =
+    deps.postReview ??
+    (deps.postComment
+      ? (url: string, value: string) => deps.postComment!(url, value)
+      : (url: string, value: string) => execGhPrReview(url, value, deps.commitSha));
   let standing: PrCommentRecord | undefined;
   try {
     standing = fetchNewest(prUrl);

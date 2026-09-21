@@ -6165,8 +6165,8 @@ async function runReview(args: {
   // W1-T359: the rubric's advisory section — present whenever `judgeRubric` found
   // something, INDEPENDENT of `verdict.state` (a rubric concern, e.g. two unrelated
   // things in one PR, can surface on an otherwise-passing review). Folded into the
-  // SAME best-effort PR comment as the unmet-criteria block below rather than a
-  // second `gh pr comment` call, so a rubric finding never gets its own separate
+  // SAME best-effort PR review as the unmet-criteria block below rather than a
+  // second review submission, so a rubric finding never gets its own separate
   // network path to fail on.
   const rubricSection = rubric ? rubricAdvisorySection(rubric) : undefined;
   // W1-T434: the declared-scope overrun's own section, folded into the SAME best-effort comment
@@ -6192,33 +6192,22 @@ async function runReview(args: {
   // otherwise-passing review — the passing case being exactly where nothing else would mention it.
   // Advisory only: blocking is W1-T323's open adjudication, not this call site's.
   const inverseScopeSection = inverseScopeAdvisorySection(verdict.unwiredAdvisories);
-  if (hasUnmet || rubricSection || scopeSection || unwiredSection || inverseScopeSection) {
-    // Post the full unmet list (+ the advisory rubric section, if any) as a PR
-    // comment so a blocked PR — or one with a rubric concern — names its gap in
-    // one place a human (or the next run) reads. Best-effort — never blocks the
-    // verdict: `rubricSection` is pure text, appended below the binding verdict's
-    // own block, never merged into or read by verdict/arm logic.
-    const parts: string[] = [];
-    if (hasUnmet) {
-      parts.push(
-        `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
-          unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
-          (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
-          `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
-      );
-    }
-    if (rubricSection) parts.push(rubricSection);
-    if (scopeSection) parts.push(scopeSection);
-    if (unwiredSection) parts.push(unwiredSection);
-    if (inverseScopeSection) parts.push(inverseScopeSection);
-    const body = parts.join("\n\n---\n\n");
-    // W1-T2419: THE ONE POST SITE — postReviewCommentGuarded (lib/review.ts) refuses to append
-    // when `body` is byte-identical to the newest comment already standing on this PR, so an
-    // unmoved head with an unchanged verdict no longer accumulates a repeat comment on every
-    // sweep pass (#3140: ten byte-identical failure comments across ten consecutive passes).
-    // Comment posting stays best-effort either way — see that function's own doc.
-    postReviewCommentGuarded(prUrl, body);
+  const parts: string[] = [];
+  if (hasUnmet) {
+    parts.push(
+      `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
+        unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
+        (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
+        `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
+    );
   }
+  if (rubricSection) parts.push(rubricSection);
+  if (scopeSection) parts.push(scopeSection);
+  if (unwiredSection) parts.push(unwiredSection);
+  if (inverseScopeSection) parts.push(inverseScopeSection);
+  if (parts.length === 0) parts.push(`**remudero-review=${verdict.state}** — ${verdict.summary}`);
+  const body = parts.join("\n\n---\n\n");
+  postReviewCommentGuarded(prUrl, body, { commitSha: headSha });
   // W1-T63/P10-a: the console summary distinguishes a completed review from a
   // floor-only one (reviewer never attempted, or attempted but walled/failed).
   // W1-T65/P15: and now names how many criteria the FLOOR itself OBSERVED

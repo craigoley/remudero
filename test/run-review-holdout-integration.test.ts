@@ -20,7 +20,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 
 /** A `gh` stub that answers the four subcommands runReview drives: pr view (headRefOid + state),
- *  pr diff, api statuses (the status post), and pr comment (the failure comment). */
+ *  pr diff, API statuses, formal API reviews (the failure review), and the review lifecycle read. */
 function writeGhStub(binDir: string): void {
   const script = `#!/bin/sh
 case "$1 $2" in
@@ -29,6 +29,8 @@ case "$1 $2" in
     # Answered in REST's own shape (mapRestPr reads head.sha), same sha as below.
     # No backticks in here: this script sits inside a JS template literal.
     case "$*" in
+      *reviews\\?*) echo '[]' ;;
+      *reviews*) echo '{}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"abc1234def5678"}}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -39,7 +41,6 @@ case "$1 $2" in
       *) echo '{}' ;;
     esac ;;
   "pr diff") echo "diff --git a/README.md b/README.md" ;;
-  "pr comment") exit 0 ;;
   *) exit 0 ;;
 esac
 `;
