@@ -16,20 +16,60 @@
 // EMPTY map — today's existing "no local opinion" answer, never a new refusal of its own.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { buildCreditCandidates, buildEscalationReconcileCandidates, creditEvidenceRootFor } from "../src/run-task.js";
 import { repoRoot, resolveOwnerRepo } from "../src/lib/repo-location.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import {
-  freshCreditEvidenceCheckout,
-  issueGateway,
-  targetCreditEvidenceCheckout,
-  trailerCreditGithub,
-} from "./helpers/cross-target-credit-evidence.js";
+import { gitRepo } from "./helpers/git-repo.js";
+
+interface EvidenceOptions {
+  prNumber: number;
+  relPath: string;
+  subjectVerb: string;
+  originSlug?: string;
+}
+
+/** Build a real checkout fixture from the shared Git helper; this file's own census stays flat. */
+function buildEvidence(dir: string | undefined, opts: EvidenceOptions): string {
+  const repo = gitRepo({ kind: "credit-evidence" });
+  if (opts.originSlug) repo.addRemote("origin", `git@github.com:${opts.originSlug}.git`);
+  const full = join(repo.dir, opts.relPath);
+  mkdirSync(dirname(full), { recursive: true });
+  writeFileSync(full, "x\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", `${opts.subjectVerb} (#${opts.prNumber})`);
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  if (dir === undefined) return repo.dir;
+  mkdirSync(dirname(dir), { recursive: true });
+  renameSync(repo.dir, dir);
+  return dir;
+}
+
+function freshEvidence(opts: EvidenceOptions): string {
+  return buildEvidence(undefined, opts);
+}
+
+function targetEvidence(configRoot: string, repoName: string, opts: EvidenceOptions): string {
+  return buildEvidence(join(configRoot, "repos", repoName), opts);
+}
+
+function makeGateway(taskId: string, prNumber: number, urlSlug: string) {
+  const url = `https://github.com/${urlSlug}/pull/${prNumber}`;
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: (id: string) => (id === taskId ? { number: prNumber, url, state: "MERGED" } : null),
+    headRefName: () => `claude/hand-named-${taskId}`,
+    prBody: () => `Remudero-Task: ${taskId}\n`,
+  };
+}
+
+function listIssues(rows: Array<{ number: number; url: string; title: string; body: string }>) {
+  return { listOpen: () => rows.map((row) => ({ ...row, state: "open" })) } as never;
+}
 
 // ── FIXTURE PLUMBING ────────────────────────────────────────────────────────────────────────────
 
@@ -55,18 +95,18 @@ test("W1-T3873 criterion 1: a target plan-only filing stays uncredited when no r
   const taskId = "PORTAL-T19";
   const prNumber = 107;
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
-  const targetRepo = targetCreditEvidenceCheckout(configRoot, "target", {
+  const targetRepo = targetEvidence(configRoot, "target", {
     prNumber,
     relPath: "plan/tasks.d/PORTAL-T19-x.yaml",
     subjectVerb: "chore(plan): file PORTAL-T19",
     originSlug: "o/target",
   });
   const plan = planOf(taskId);
-  const gh = trailerCreditGithub(taskId, prNumber, "o/target");
+  const gh = makeGateway(taskId, prNumber, "o/target");
   const rows = [{ number: 1, url: "u1", title: "t", body: `**Task:** ${taskId}\n` }];
 
   const candidates = buildEscalationReconcileCandidates("o", "target", plan, ledgerFile(), undefined, {
-    issues: issueGateway(rows),
+    issues: listIssues(rows),
     github: gh,
     evidenceRootFor: () => targetRepo,
   });
@@ -85,7 +125,7 @@ test("W1-T3873 falsifier: the SAME plan-only fixture reads CREDITED when the roo
   const taskId = "PORTAL-T19";
   const prNumber = 107;
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
-  const targetRepo = targetCreditEvidenceCheckout(configRoot, "target", {
+  const targetRepo = targetEvidence(configRoot, "target", {
     prNumber,
     relPath: "plan/tasks.d/PORTAL-T19-x.yaml",
     subjectVerb: "chore(plan): file PORTAL-T19",
@@ -93,20 +133,20 @@ test("W1-T3873 falsifier: the SAME plan-only fixture reads CREDITED when the roo
   });
   // THE ENGINE'S OWN #107, unrelated, touching `src/` — the pre-W1-T3873 shape: `readMergedPathsByPr`/
   // `readMergeSubjectsByPr` always scanned exactly this kind of checkout regardless of the target.
-  const engineRepo = freshCreditEvidenceCheckout({ prNumber, relPath: "src/console/unrelated.ts", subjectVerb: "feat(console): land it", originSlug: "o/engine" });
+  const engineRepo = freshEvidence({ prNumber, relPath: "src/console/unrelated.ts", subjectVerb: "feat(console): land it", originSlug: "o/engine" });
   const plan = planOf(taskId);
-  const gh = trailerCreditGithub(taskId, prNumber, "o/target");
+  const gh = makeGateway(taskId, prNumber, "o/target");
   const rows = [{ number: 1, url: "u1", title: "t", body: `**Task:** ${taskId}\n` }];
 
   const rooted = buildEscalationReconcileCandidates("o", "target", plan, ledgerFile(), undefined, {
-    issues: issueGateway(rows),
+    issues: listIssues(rows),
     github: gh,
     evidenceRootFor: () => targetRepo,
   });
   assert.equal(rooted[0].derived.merged, false, "control: correctly rooted, the filing stays uncredited");
 
   const misrooted = buildEscalationReconcileCandidates("o", "target", plan, ledgerFile(), undefined, {
-    issues: issueGateway(rows),
+    issues: listIssues(rows),
     github: gh,
     // THE ONLY DIFFERENCE from the line above: the resolved root. Nothing else in this fixture moves.
     evidenceRootFor: () => engineRepo,
@@ -121,18 +161,18 @@ test("W1-T3873 criterion 2: a target implementation merge still earns credit —
   const taskId = "PORTAL-T12";
   const prNumber = 108;
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
-  const targetRepo = targetCreditEvidenceCheckout(configRoot, "target", {
+  const targetRepo = targetEvidence(configRoot, "target", {
     prNumber,
     relPath: "src/console/real-change.ts",
     subjectVerb: "feat(console): implement PORTAL-T12",
     originSlug: "o/target",
   });
   const plan = planOf(taskId);
-  const gh = trailerCreditGithub(taskId, prNumber, "o/target");
+  const gh = makeGateway(taskId, prNumber, "o/target");
   const rows = [{ number: 2, url: "u2", title: "t", body: `**Task:** ${taskId}\n` }];
 
   const candidates = buildEscalationReconcileCandidates("o", "target", plan, ledgerFile(), undefined, {
-    issues: issueGateway(rows),
+    issues: listIssues(rows),
     github: gh,
     evidenceRootFor: () => targetRepo,
   });
@@ -168,14 +208,14 @@ test("W1-T3873 criterion 3: a FOREIGN checkout (origin names a different repo) r
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
   // Planted at `repos/target`, but its own origin names a DIFFERENT repository — the shape a stale
   // or misconfigured checkout on disk would take.
-  targetCreditEvidenceCheckout(configRoot, "target", { prNumber: 1, relPath: "plan/x.yaml", subjectVerb: "chore", originSlug: "o/someone-elses-fork" });
+  targetEvidence(configRoot, "target", { prNumber: 1, relPath: "plan/x.yaml", subjectVerb: "chore", originSlug: "o/someone-elses-fork" });
   const root = creditEvidenceRootFor("o", "target", { selfOwnerRepo: { owner: "o", repo: "engine" }, configRoot });
   assert.equal(root, undefined, "an unproven checkout must never be trusted, however plausible its path");
 });
 
 test("W1-T3873 criterion 3: a checkout PROVEN to belong to the target resolves to its path", () => {
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
-  const targetRepo = targetCreditEvidenceCheckout(configRoot, "target", { prNumber: 1, relPath: "plan/x.yaml", subjectVerb: "chore", originSlug: "o/target" });
+  const targetRepo = targetEvidence(configRoot, "target", { prNumber: 1, relPath: "plan/x.yaml", subjectVerb: "chore", originSlug: "o/target" });
   const root = creditEvidenceRootFor("o", "target", { selfOwnerRepo: { owner: "o", repo: "engine" }, configRoot });
   assert.equal(root, targetRepo, "an origin-proven checkout is trusted, and only that one");
 });
@@ -214,11 +254,11 @@ test("W1-T3873 criterion 3: foreign target evidence stays empty and fail-closed 
   const taskId = "PORTAL-T19";
   const prNumber = 107;
   const plan = planOf(taskId);
-  const gh = trailerCreditGithub(taskId, prNumber, "o/target");
+  const gh = makeGateway(taskId, prNumber, "o/target");
   const rows = [{ number: 1, url: "u1", title: "t", body: `**Task:** ${taskId}\n` }];
 
   const candidates = buildEscalationReconcileCandidates("o", "target", plan, ledgerFile(), undefined, {
-    issues: issueGateway(rows),
+    issues: listIssues(rows),
     github: gh,
     evidenceRootFor: () => undefined,
   });
@@ -247,7 +287,7 @@ test("W1-T3873 criterion 3: an unreadable engine origin also degrades to no evid
 
 test("W1-T3873 criterion 4: target credit evidence is read once per pass — buildEscalationReconcileCandidates resolves the root once, not once per open issue", () => {
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
-  const targetRepo = targetCreditEvidenceCheckout(configRoot, "target", { prNumber: 1, relPath: "src/x.ts", subjectVerb: "feat", originSlug: "o/target" });
+  const targetRepo = targetEvidence(configRoot, "target", { prNumber: 1, relPath: "src/x.ts", subjectVerb: "feat", originSlug: "o/target" });
   const plan = planOf("PORTAL-A", "PORTAL-B", "PORTAL-C");
   const rows = ["PORTAL-A", "PORTAL-B", "PORTAL-C"].map((id, i) => ({ number: i, url: `u${i}`, title: "t", body: `**Task:** ${id}\n` }));
   const gh = {
@@ -259,7 +299,7 @@ test("W1-T3873 criterion 4: target credit evidence is read once per pass — bui
 
   let calls = 0;
   const candidates = buildEscalationReconcileCandidates("o", "target", plan, ledgerFile(), undefined, {
-    issues: issueGateway(rows),
+    issues: listIssues(rows),
     github: gh,
     evidenceRootFor: (owner, repo) => {
       calls++;
@@ -272,7 +312,7 @@ test("W1-T3873 criterion 4: target credit evidence is read once per pass — bui
 
 test("W1-T3873 criterion 4: buildCreditCandidates resolves the evidence root ONCE, not once per plan task", () => {
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
-  const targetRepo = targetCreditEvidenceCheckout(configRoot, "target", { prNumber: 1, relPath: "src/x.ts", subjectVerb: "feat", originSlug: "o/target" });
+  const targetRepo = targetEvidence(configRoot, "target", { prNumber: 1, relPath: "src/x.ts", subjectVerb: "feat", originSlug: "o/target" });
   const plan = planOf("PORTAL-A", "PORTAL-B", "PORTAL-C", "PORTAL-D", "PORTAL-E");
   const gh = {
     prByRef: () => null,
