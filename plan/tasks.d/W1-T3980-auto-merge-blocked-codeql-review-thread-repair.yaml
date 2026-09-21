@@ -1,0 +1,82 @@
+- id: W1-T3980
+  title: "AN AUTO-MERGE-ARMED PR CAN HAVE EVERY REQUIRED STATUS GREEN YET REMAIN BLOCKED BY AN UNRESOLVED CODEQL REVIEW THREAD — observe the exact scanner blocker and route one bounded repair on the existing PR branch rather than silently waiting forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  band_meaning: blast-radius
+  plan_refs: ["W1-T77", "W1-T78", "W1-T90", "W1-T100", "W1-T150", "W1-T3920", "W1-T3696", "W1-T75", "W1-T115", "W1-T143", "W1-T147", "W1-T151", "W1-T160"]
+  files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/run-task.ts, test/auto-merge-blocked-codeql-review-thread.test.ts]
+  rationale: |
+    OBSERVED 2026-09-21 on remudero-console PR #1579: all branch-protection contexts
+    (`console-ci`, `ci-gate`, `Vercel`, and `remudero-review`) were successful, GitHub reported
+    `mergeable=true`, and the fleet had armed squash auto-merge. Yet GitHub still reported
+    `mergeable_state=blocked`. The actual blocker was one unresolved CodeQL review thread:
+    `js/unused-local-variable`, path `src/components/IntentPlanCard.tsx:40`, on the pull request's
+    merge ref. Branch protection requires conversation resolution, but the sweep currently observes
+    check-rollup state and REST merge facts only. It cannot distinguish this actionable scanner
+    blocker from a base-distance stale-blocked case or an arbitrary human discussion, so it takes no
+    action and the PR remains open despite every visible required check being green.
+
+    This is not a rationale to dismiss or resolve review threads automatically. An arbitrary human
+    review conversation is not a machine-owned code mandate. The recoverable population is narrow:
+    an auto-merge-armed, non-draft PR with successful required contexts and semantic review,
+    `mergeable === true`, raw `mergeable_state === "blocked"`, and one fresh CodeQL alert tied to
+    that PR's observed merge ref. The scanner supplies a rule id, bounded message, and file/line;
+    a normal constrained fix worker, CI, CodeQL and semantic review still decide whether code can
+    make the thread disappear. Unreadable, stale, multiple, non-CodeQL, or human-authored threads
+    must be named as blocked-ambiguous evidence rather than silently treated as a code repair.
+
+    W1-T77 is the parent sweep reconciler, W1-T78 owns human ambiguity escalation, W1-T100 owns
+    CI-red repair evidence, and W1-T150 is a broad queue wiring concern; their shared files are
+    intentional but their inputs and effects do not cover a current-head CodeQL review thread.
+    W1-T3920 already repairs the DIFFERENT positive-distance stale-blocked shape by updating the
+    branch. Reusing it here would mint an unnecessary head and discard a valid verdict while leaving
+    the same scanner thread unresolved. W1-T90's alert-fix lane starts a new branch from main, which
+    cannot repair an alert whose offending code exists only on an open PR branch. This task therefore
+    needs a bounded PR-head repair route, not a wider alert poll and not a generic thread resolver.
+  design: |
+    (1) Add one typed, bounded scanner-blocker observation to the open-PR projection. Hydrate it
+    only for the already-small candidate population described above, with a hard per-pass cap and
+    no polling loop. Match CodeQL evidence to the observed PR merge ref/head; retain only the alert
+    identity, rule id, normalized location and a size-bounded diagnostic. A failed or incomplete
+    read is explicit `unreadable`, never a green or absent blocker.
+
+    (2) Give the sweep one disposition before generic mergeable/ambiguous handling. Exactly one
+    fresh, current-head CodeQL blocker is eligible for the existing constrained fix-worker mechanics
+    on THAT PR branch. Ledger the observed identity and a dedupe key of PR, head and alert id before
+    dispatch; a second unchanged pass starts no second worker. The repair prompt names the scanner
+    fact as untrusted evidence and may edit only the existing task/PR repair fence. It never asks the
+    worker to resolve a GitHub thread or dismiss an alert.
+
+    (3) Preserve every boundary: no auto-resolution of human review threads; no branch update for
+    zero-distance blockers; no generic `mergeable_state=blocked` inference; no retry after an
+    unreadable/multiple/stale observation; and all normal CI, CodeQL, remudero-review and auto-merge
+    gates re-run on any repair head. Record a named blocked-ambiguous outcome for evidence outside
+    the exact CodeQL singleton so it cannot look like a healthy wait.
+
+    (4) Test the real producer-to-disposition wiring with a current CodeQL singleton, its dedupe,
+    and the negative arms: a resolved/non-CodeQL/human thread, a mismatched merge ref, unreadable
+    evidence, multiple alerts, and a positive-distance stale-blocked PR all refuse this new route.
+    Deleting the exact singleton guard must make the mismatched-ref or human-thread assertion fail.
+  acceptance:
+    - claim: "the open-PR gateway has the bounded merge-fact seam that will carry a named scanner blocker without inventing a successful read"
+      proof: "grep: hydrateMergeStateObservations in src/lib/open-prs-rest.ts"
+    - claim: "the sweep owns explicit raw merge-state handling rather than treating a blocked merge ref as a clean merge"
+      proof: "grep: mergeableState in src/lib/sweep.ts"
+    - claim: "the existing sweep carries a single gated update/repair effect rather than a per-PR unbounded loop"
+      proof: "grep: selectUpdateBranchTarget in src/lib/sweep.ts"
+    - claim: "the production gateway materializes OpenPrView fields in one audited object literal"
+      proof: "grep: buildOpenPrViews in src/run-task.ts"
+  status: queued
+  attempts: 0
+  origin: oper#observed-console-pr-1579-codeql-thread-2026-09-21
+  note: |
+    reservation holder: codex/plan-merge-conversation-recovery.
+    risk:high — this changes the class of a green-looking PR the autonomous queue may repair. The
+    safety case is the exact scanner/ref/head singleton plus normal downstream gates, not a broad
+    interpretation of GitHub's opaque `blocked` state. The alert-fix and stale-blocked mechanisms
+    are cited as adjacent precedents but deliberately not widened.
