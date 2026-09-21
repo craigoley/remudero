@@ -11,10 +11,11 @@ raw: "Gap in the existing W1-T3884 analytics fix: core only returns the bounded
   <=128 KiB and renders typed data rather than Unavailable."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

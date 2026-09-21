@@ -1,0 +1,49 @@
+- id: W1-T3942
+  title: "GET /v1/analytics ONLY RECOGNIZES ?projectionVersion= BUT THE HOSTED CONSOLE ASKS ?projection= — accept the console's own query parameter spelling as an alias so an authenticated console request actually resolves console-v1 instead of silently falling back to the unbounded legacy snapshot"
+  repo: remudero
+  depends_on: ["W1-T3884"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  files: [src/lib/analytics-route.ts, test/console-analytics-contract-gap.test.ts]
+  origin: "feedback#fb-1789960088703-d1ca77"
+  plan_refs: ["W1-T3623", "W1-T3884"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Observed live 2026-09-21 (feedback fb-1789960088703-d1ca77, echoing the same gap independently
+    reported by fb-1789955917142-5a97e9 and fb-1789927053247-879a03): W1-T3884 teaches
+    buildAnalyticsRoute to serve the bounded consoleV1 envelope when the REQUEST NAMES
+    ?projectionVersion=console-v1, but the hosted remudero-console (a separate private repo, not
+    this one — see W1-T3173's ruling) actually calls GET /v1/analytics?projection=console-v1. That
+    is a DIFFERENT query parameter name. Core's `new URL(...).searchParams.get("projectionVersion")`
+    finds nothing on a `?projection=` request, so `requestedVersion` resolves to `undefined`, the
+    resolver silently treats it as an unversioned legacy caller, and the FULL multi-megabyte
+    snapshot is served — the exact 128 KiB console gateway bound this whole lane exists to respect
+    is blown, and the console renders "Unavailable" for data the daemon actually has. Two
+    independent named parameters that were each incremented on their own side without the other
+    finding out is the same failure class W1-T3623's rationale already named for the version
+    STRING; this is that same failure for the parameter NAME.
+  design: |
+    Resolve `requestedVersion` from EITHER `?projectionVersion=` (existing, keep this name primary
+    and unchanged for any other caller already using it) OR `?projection=` (the console's own
+    spelling) — if both are present and disagree, prefer `projectionVersion` and log nothing
+    surprising; if only one is present, use it. This is a pure request-parsing widening: it must
+    not change `resolveConsoleV1Projection`'s version-string refusal semantics (W1-T3623 acceptance
+    iv) or W1-T3884's bounded-envelope-vs-legacy-snapshot branching, both of which stay driven off
+    the single resolved `requestedVersion` value exactly as today. Do not rename or remove
+    `projectionVersion`; existing callers using that name must keep working unchanged. Out of
+    scope: the console-side normalizer and its own timestamp/measurement/class field vocabulary
+    live in craigoley/remudero-console, a separate repository this shard cannot touch — this task
+    closes the core-side half of the mismatch (the request actually reaching the bounded envelope
+    branch at all); the console-side field vocabulary is a separate, console-repo-owned task.
+  acceptance:
+    - claim: "a request naming ?projection=console-v1 (the console's own spelling) resolves the bounded consoleV1 envelope exactly as ?projectionVersion=console-v1 already does"
+      proof: "unit test: test/console-analytics-contract-gap.test.ts"
+    - claim: "an existing ?projectionVersion=console-v1 request keeps resolving the bounded envelope unchanged, so no current caller regresses"
+      proof: "grep: searchParams.get(\"projectionVersion\") in src/lib/analytics-route.ts"
+    - claim: "an unversioned request with neither parameter still retains the full legacy snapshot for back-compat"
+      proof: "grep: dimensions: base.dimensions in src/lib/analytics-route.ts"
