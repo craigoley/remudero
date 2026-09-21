@@ -570,6 +570,42 @@ export interface components {
       reasons: (string)[];
       breachedMetrics: (string)[];
     };
+    /** One control case (W1-T3882): a `positive` control proves the corpus is visible (a known-good case the candidate must pass); a `negative` control proves a restraint failure is detectable (a known-bad case the candidate must flag, never pass silently). */
+    AssistantTrustControlResult: {
+      caseId: string;
+      metricName: "proactivity_precision" | "dropped_thread_recovery" | "clarification_burden" | "intervention_rate" | "unauthorized_side_effect_rate" | "stale_context_use" | "receipt_completeness" | "rollback_success" | "time_to_human_attention";
+      controlType: "positive" | "negative";
+      expectedOutcome: "pass" | "flagged";
+      observedOutcome: "pass" | "flagged";
+    };
+    /** Restraint and recovery evidence (W1-T3882) that gates a promotion above the base guardrail evaluation: any unauthorized side effect, stale-context use, incomplete receipt, or failed rollback blocks promotion outright. */
+    AssistantTrustEvidence: {
+      unauthorizedSideEffects: number;
+      staleContextUses: number;
+      receiptsComplete: boolean;
+      rollbackAttempted: boolean;
+      rollbackSucceeded: boolean;
+    };
+    /** Raw material an evaluation MIGHT be handed — never persisted or trained on. Only bounded counts and a secret-scrubbed, length-capped note ever leave this boundary; see `AssistantTrustEvaluation.evidence`. */
+    RawAssistantTrustContext: {
+      prompts?: (string)[];
+      transcripts?: (string)[];
+      credentials?: (string)[];
+      note?: string;
+    };
+    RedactedAssistantTrustEvidence: {
+      promptCount: number;
+      transcriptCount: number;
+      credentialCount: number;
+      note: string;
+      redacted: true;
+    };
+    /** The evaluation layer above `PromotionGuardEvaluation` (W1-T3882): a candidate may reach `ready` only when replay was deterministic and side-effect-free, the corpus carried working positive and negative controls, and no unauthorized side effect, stale-context use, incomplete receipt, or failed rollback was observed. */
+    AssistantTrustEvaluation: {
+      state: "ready" | "unmeasurable" | "blocked";
+      reasons: (string)[];
+      evidence: RedactedAssistantTrustEvidence;
+    };
     OperatorAgentPromotionHistory: {
       version: "experiment-promotion-v1";
       promotionId: string;
@@ -600,6 +636,7 @@ export interface components {
           target: "shadow" | "canary" | "observing" | "promoted";
           guard: PromotionGuardEvaluation;
           exposure?: number;
+          assistantTrust?: AssistantTrustEvaluation;
         };
         rollback?: PromotionRollback;
         note?: string;
@@ -626,6 +663,12 @@ export interface components {
       target: "shadow" | "canary" | "observing" | "promoted";
       observations?: (PromotionGuardObservation)[];
       exposure?: number;
+      /** Optional assistant-trust evidence (W1-T3882). Its absence preserves the pre-W1-T3882 base-guardrail-only advance behaviour exactly; when present, the response carries an `assistantTrust` evaluation and a `blocked`/`unmeasurable` result can demote an otherwise-ready advance to `regressed`/`unmeasurable`. */
+      assistantTrust?: {
+        controls: (AssistantTrustControlResult)[];
+        evidence: AssistantTrustEvidence;
+        rawContext?: RawAssistantTrustContext;
+      };
     };
     OperatorAgentPromotionRollbackRequest: {
       promotionId: string;
