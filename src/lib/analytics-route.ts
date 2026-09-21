@@ -1359,7 +1359,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshotReadResult> {
   const currentSource = checkpointSource(stateDir);
-  let canResume = priorCheckpoint !== undefined && currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
+  const canResume = priorCheckpoint !== undefined && currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
   let acc: AnalyticsAccumulator;
   let resumeCheckpoint: AnalyticsCheckpoint | undefined;
   let resumeSource: AnalyticsCheckpointSource | undefined;
@@ -1373,7 +1373,6 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
       // without making older readers reject the file. A structurally corrupt state must still
       // fail closed into the existing full union scan rather than strand the cache or fabricate
       // an empty aggregate.
-      canResume = false;
       acc = analyticsAccumulator();
     }
   } else {
