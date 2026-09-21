@@ -68,6 +68,7 @@
     duplicate merge arm. Change the landing branch head after the verdict: the old verdict must not
     authorize the new head.
   note: |
+    reservation hand-off: run-W1-T3986-1790029051936 -> run-W1-T3990-1790031507231
     reservation holder: run-W1-T3990-1790031507231
 
     This task is intentionally scoped to the feedback landing bridge and its daemon handoff. It
