@@ -8476,6 +8476,9 @@ export async function runFixRung(opts: {
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
+  /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
+   * reviewer does not reread policy from disk on every fix strike. */
+  reviewerClockBoundMs?: number;
   /** Parent run sensor shared by implement, fix, and advisory review workers. */
   workerTelemetry?: WorkerStateSensor;
   /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
@@ -10516,6 +10519,7 @@ export async function runFixRung(opts: {
       say: deps.say,
       account: deps.account,
       reviewerMount: opts.reviewBase.reviewerMount,
+      reviewerClockBoundMs: opts.reviewerClockBoundMs,
       workerTelemetry: opts.workerTelemetry,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
       reviewerCodeFreshness: opts.reviewerCodeFreshness,
@@ -12578,6 +12582,8 @@ export interface RunTaskContext {
   spawn: typeof spawnWorker;
   task: Task;
   taskId: string;
+  /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
+  workerAbandonMs?: number;
   workerStateSensor: WorkerStateSensor;
 }
 
@@ -13522,6 +13528,7 @@ async function runTask(
       spawn,
       task,
       taskId,
+      workerAbandonMs,
       workerStateSensor,
     };
     return await runTaskBody(ctx);
@@ -13551,6 +13558,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     spawn,
     task,
     taskId,
+    workerAbandonMs,
     workerStateSensor,
   } = ctx;
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
@@ -15221,6 +15229,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say,
       account,
       reviewerMount,
+      reviewerClockBoundMs: workerAbandonMs,
       workerTelemetry: workerStateSensor,
       // A run that established the cash adapter as its containment boundary must keep this
       // reviewer on that same boundary; otherwise a recovered subscription could run after a
@@ -15275,6 +15284,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         strikeCap: fixStrikeCap(config),
         initialReview: review,
         reviewBase: { owner, repo: task.repo, headCheckoutDir: worktreePath, reviewerMount },
+        reviewerClockBoundMs: workerAbandonMs,
         workerTelemetry: workerStateSensor,
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
