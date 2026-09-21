@@ -161,6 +161,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only promotion rollback; append-only rollback receipts are covered in test/operator-agent-promotions.test.ts",
   ],
   [
+    "POST /v1/operator-agent/consequence/preflight",
+    "ledger-only consequence-policy preflight receipt; classification, confirmation, financial, approval, and receipt behavior are covered in test/consequence-policy-*.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/context",
     "ledger-only context inventory write; governed context behavior and durable receipts are covered in test/context-governance-*.test.ts",
   ],

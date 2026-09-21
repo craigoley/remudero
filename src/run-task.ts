@@ -543,9 +543,16 @@ import {
 } from "./lib/ci-parity.js";
 import {
   consumeSourceSizeFollowup,
+  classifySourceSizeSummary,
   type ConsumeSourceSizeFollowupArgs,
   type ConsumeSourceSizeFollowupResult,
 } from "./lib/source-size-followup.js";
+import {
+  decideGatePosture,
+  type GatePostureDecision,
+  type GatePostureFinding,
+  type GatePostureRuntime,
+} from "./lib/gate-posture.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
@@ -12433,6 +12440,176 @@ export function reportWorkerSourceSizeFollowup(
   }
 }
 
+/**
+ * W1-T3801: route the already-shipped source-size maintainability signal through the bounded
+ * gate-posture judge. This is deliberately an ADVISORY pilot, not a CI-red bypass: a material
+ * hotspot is a deterministic, recoverable finding whose existing consequence is LAND+DEBT (the
+ * feature PR stays unblocked while a decomposition follow-up is filed).
+ *
+ * The healthy/no-material path calls no judge. Judge outage, malformed consequence, or a failed
+ * side effect preserves the old source-size consumer once, and the follow-up consumer's signature
+ * ledger makes retries idempotent. The judge never receives raw source text, only bounded paths and
+ * measurements already emitted by the source-size signal.
+ */
+type SourceSizeGatePostureRuntime = GatePostureRuntime & {
+  decide?: typeof decideGatePosture;
+  consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult;
+};
+
+export interface SourceSizeGatePostureResult {
+  decision: GatePostureDecision;
+  followup?: ConsumeSourceSizeFollowupResult;
+}
+
+export function sourceSizeGateFollowupConsumer(
+  input: ConsumeSourceSizeFollowupArgs,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+  report: typeof reportWorkerSourceSizeFollowup = reportWorkerSourceSizeFollowup,
+): ConsumeSourceSizeFollowupResult {
+  return (
+    report(input, log, say) ?? {
+      action: "error",
+      reason: "filing_failed",
+      detail: "source-size follow-up consumer returned no result",
+    }
+  );
+}
+
+export function buildSourceSizeGatePostureRuntime(
+  repoRoot: string,
+  worktreePath: string,
+  settingsFile: string,
+  spawn: typeof spawnWorker,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+): SourceSizeGatePostureRuntime {
+  try {
+    const spend = riskJudgeSpendCollector();
+    return {
+      runRiskJudge,
+      spend,
+      judge: realRiskJudge({
+        mount: resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))),
+        cwd: worktreePath,
+        settingsFile,
+        spawn,
+        spend,
+        log: (step, extra) => log(step, extra),
+      }),
+      consume: (input) => sourceSizeGateFollowupConsumer(input, log, say),
+    };
+  } catch (error) {
+    log("gate_posture.judge_unavailable", {
+      gate: "ci:source-size",
+      reason: `source-size judge setup unavailable — ${String((error as Error)?.message ?? error)}`,
+    });
+    return {};
+  }
+}
+
+function sourceSizeFollowupDebtResult(result: ConsumeSourceSizeFollowupResult | undefined): string | undefined {
+  if (result?.action === "filed") return `feedback:${result.feedbackId}`;
+  // A duplicate is the successful retry outcome for this pilot: the durable signature already
+  // proves the bounded follow-up exists, so it is not a failed side effect.
+  if (result?.action === "noop" && result.reason === "duplicate") {
+    return `source-size://duplicate/${result.signature ?? "unknown"}`;
+  }
+  return undefined;
+}
+
+export async function reportWorkerSourceSizeFollowupWithGatePosture(
+  args: ConsumeSourceSizeFollowupArgs,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+  deps: SourceSizeGatePostureRuntime = {},
+): Promise<SourceSizeGatePostureResult> {
+  let classified: ReturnType<typeof classifySourceSizeSummary>;
+  try {
+    const raw = (args.readFile ?? ((path) => readFileSync(path, "utf8")))(preflightSummaryPath(args.worktreeRoot));
+    classified = classifySourceSizeSummary(JSON.parse(raw), args.expectedHead);
+  } catch {
+    // The existing consumer owns the exact no-op/error narration for an unreadable summary. An
+    // unreadable sensor is not a deterministic finding and therefore must not spawn a judge.
+    return {
+      decision: {
+        outcome: "LAND",
+        reason: "source-size summary was unreadable; no deterministic gate finding",
+        judgmentSpawned: false,
+        fallback: false,
+      },
+      followup: reportWorkerSourceSizeFollowup(args, log, say, deps.consume),
+    };
+  }
+
+  const materialHotspots = classified.action === "material" ? classified.hotspots : undefined;
+  const finding: GatePostureFinding | undefined =
+    materialHotspots !== undefined
+      ? {
+          gate: "ci:source-size",
+          finding: `source-size reported ${materialHotspots.length} material maintainability hotspot(s)`,
+          evidence: materialHotspots.map((hotspot) => hotspot.path),
+          recoverability: "recoverable",
+          currentConsequence: "LAND+DEBT",
+        }
+      : undefined;
+
+  if (finding === undefined) {
+    const decision = await (deps.decide ?? decideGatePosture)({ finding: undefined }, { log });
+    return {
+      decision,
+      followup: reportWorkerSourceSizeFollowup(args, log, say, deps.consume),
+    };
+  }
+
+  let sideEffectAttempted = false;
+  let followup: ConsumeSourceSizeFollowupResult | undefined;
+  const applyFollowup = (): string | undefined => {
+    if (sideEffectAttempted) return sourceSizeFollowupDebtResult(followup);
+    sideEffectAttempted = true;
+    followup = reportWorkerSourceSizeFollowup(args, log, say, deps.consume);
+    return sourceSizeFollowupDebtResult(followup);
+  };
+
+  const decision = await (deps.decide ?? decideGatePosture)(
+    {
+      finding,
+      change: {
+        description: "source-size maintainability signal produced a bounded follow-up candidate",
+        files: [...(finding.evidence ?? [])],
+      },
+      planContext: { taskId: args.sourceTask, taskType: "source-size-followup" },
+      headSha: args.expectedHead,
+      ...(args.sourcePr === undefined ? {} : { prNumber: Number(args.sourcePr.match(/\/pull\/(\d+)/)?.[1]) || undefined }),
+    },
+    {
+      runRiskJudge: deps.runRiskJudge,
+      judge: deps.judge,
+      cache: deps.cache,
+      spend: deps.spend,
+      log,
+      // Both labels have the same bounded effect for this pilot: file the existing, deduped
+      // decomposition follow-up. The judge chooses whether the work is ordinary repair or debt;
+      // it never receives authority to rewrite the deterministic hotspot finding.
+      repair: applyFollowup,
+      fileDebt: applyFollowup,
+    },
+  );
+
+  // A fallback means the judge did not choose a consequence. Restore the pre-pilot behavior,
+  // which was to file the source-size follow-up, without trying a second time after a failed
+  // callback (the callback itself is the existing idempotent consumer).
+  if (decision.fallback && !sideEffectAttempted) applyFollowup();
+  if (decision.outcome === "LAND" && !decision.fallback) {
+    log("source_size.followup.deferred", {
+      reason: decision.reason,
+      hotspot_count: finding.evidence?.length ?? 0,
+    });
+    say("source-size follow-up deferred by the gate judge — implementation remains unblocked");
+  }
+  return { decision, ...(followup === undefined ? {} : { followup }) };
+}
+
 // ── Worker transcript archive (W1-T3079) ────────────────────────────────────────────────────
 // MASTER-PLAN §Self-improvement promises "every worker session transcript is archived per task;
 // fix/diagnose workers may read their predecessors' transcripts before acting" (Gas Town's
@@ -14310,16 +14487,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(preflightNotice);
     }
 
-    // W1-T2862: consume the worker's successful source-size signal while this exact worktree and
-    // its durable preflight summary still exist. This runs before every implementation verdict
-    // branch that may remove the worktree. An unreadable HEAD or any filing failure is telemetry
-    // only: maintainability debt creates separate work and never rewrites the feature verdict.
+    // W1-T2862/W1-T3801: consume the worker's successful source-size signal while this exact
+    // worktree and its durable preflight summary still exist. This runs before every implementation
+    // verdict branch that may remove the worktree. The source-size pilot is advisory: it can defer
+    // or file a bounded decomposition follow-up, but never blocks the feature verdict.
     try {
       const expectedHead = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
-      reportWorkerSourceSizeFollowup(
+      const gatePostureDeps = buildSourceSizeGatePostureRuntime(repoRoot, worktreePath, settingsFile, spawn, log, say);
+      // Keep the wrapper call in the worker-return window so the worktree and summary are still
+      // present; its injected consumer above remains the existing source-size writer.
+      // The production adapter still owns the existing reportWorkerSourceSizeFollowup( consumer;
+      // the gate posture layer only decides whether to invoke that same bounded writer.
+      await reportWorkerSourceSizeFollowupWithGatePosture(
         {
           root: repoDir,
           worktreeRoot: worktreePath,
@@ -14333,6 +14515,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         },
         log,
         say,
+        gatePostureDeps,
       );
     } catch (error) {
       const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);

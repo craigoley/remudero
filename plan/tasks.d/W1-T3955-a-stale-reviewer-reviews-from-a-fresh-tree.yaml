@@ -1,0 +1,53 @@
+- id: W1-T3955
+  title: "THE FRESH-TREE REVIEWER INVOKES A BASH WRAPPER THROUGH NODE AND ALWAYS SKIPS — stale reviewer code creates a correct detached tree, then passes bin/rmd as JavaScript to process.execPath, so Node raises SyntaxError and every fresh-code review falls back to the ordinary skip"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: span
+  budget_usd: 1.00
+  files: [src/run-task.ts, test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts]
+  origin: field-recon-2026-09-21
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the live core daemon at 2026-09-21T11:20:46Z. A stale reviewer correctly
+    materialized /home/node/Remudero/worktrees/reviewer-9f106c06ebb6, then Node attempted to
+    load that tree's bin/rmd and raised `SyntaxError: Invalid or unexpected token` at its bash
+    comment header. `buildFreshTreeReviewRunner` catches the child failure and records the
+    ordinary stale-review skip, so the fresh-code escape W1-T3723 introduced is unavailable
+    exactly when a stale reviewer needs it.
+
+    Source confirms the cause: `spawnRmdReviewForFreshTree` calls
+    `spawn(process.execPath, [join(worktree, "bin", "rmd"), "review", ...args])`, while
+    bin/rmd is executable mode 0755 and begins `#!/usr/bin/env bash`. The current test writes a
+    JavaScript file at bin/rmd and therefore proves the incorrect Node invocation rather than the
+    shipped wrapper contract.
+  design: |
+    Invoke the executable `join(worktree, "bin", "rmd")` directly, with `review` and the
+    existing arguments as its argv. Preserve the current environment, stdio, exit-code mapping,
+    and catch-to-undefined behavior: a fresh-tree launch failure must still refuse to judge with
+    stale code and let the recurrence ladder observe the skip.
+
+    Replace the production-wiring test fixture with an executable bash wrapper that exits with the
+    argument-derived status code. The test must prove the wrapper receives `review` and returns
+    its status; it must fail on the old `process.execPath` implementation because Node cannot parse
+    that bash file. Do not change worktree creation, freshness classification, review criteria, or
+    restart policy.
+  acceptance:
+    - claim: "a fresh-tree review invokes the executable bash rmd wrapper rather than asking Node to parse it"
+      proof: "grep: spawn(join(worktree, \"bin\", \"rmd\"), in src/run-task.ts"
+    - claim: "a stale-reviewer launch failure still falls back to the existing skip instead of judging with stale code"
+      proof: "unit test: a fresh tree that cannot be prepared falls back to the skip, never to a stale verdict"
+  falsifier: |
+    Restore `spawn(process.execPath, [join(worktree, "bin", "rmd"), ...])`; the executable-
+    wrapper fixture added to test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts must fail
+    because Node reports the bash shebang/comment as invalid JavaScript. The existing
+    preparation-failure test remains green, proving the fix does not weaken the stale-code safety
+    floor.
+  note: |
+    Reservation holder: chore/file-fresh-review-exec-1789990815000. This is a filing only. The
+    implementation will use a separate run-W1-T3955-<epochMs> branch after this task record has
+    merged, so it does not edit its own acceptance contract.
