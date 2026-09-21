@@ -1,0 +1,58 @@
+- id: W1-T3901
+  title: "BASE-ONLY REVIEW REUSE STILL PAYS FOR A FULL REVIEW — W1-T3798 wires the disposition and current-head status, but production discrimination falls back to the expensive reviewer"
+  repo: remudero
+  depends_on: [W1-T3798]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 45.00
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - src/lib/review.ts
+    - test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts
+    - test/review-reuse-discrimination-outcome.test.ts
+  origin: "operator-session#pr-6271-followup-2026-09-20"
+  plan_refs: ["W1-T3798", "W1-T3704", "W1-T3853"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #6271's production adapter: `reviewReuseRunner` correctly posts an exact reuse
+    verdict, but its `discriminate-only` branch logs `sweep.review_reuse_discrimination_fallback`
+    and invokes the ordinary full reviewer. The sweep disposition is therefore no longer inert, but
+    the base-only case still spends a semantic review and loses the throughput win W1-T3704 was filed
+    to provide. The acceptance test currently proves that fallback is called, which locks in the
+    safe-but-expensive interim rather than the task contract's "discrimination only" outcome.
+
+    This is an automation defect, not a reason to weaken reuse: the current head must still receive a
+    guarded, durable verdict and a changed own diff or unreadable evidence must still fall back to a
+    full review. The missing piece is a bounded consumer for a readable prior criterion set whose only
+    changed input is the merge base.
+  design: |
+    Extract the existing proof executor and base-discrimination classifier behind one production
+    seam. For `discriminate-only`, load the prior verdict's criterion/proof set, execute the same
+    head/base comparison used by the authoritative reviewer, preserve the prior criterion claims,
+    and post a fresh current-head verdict through the existing status guard. Do not spawn a semantic
+    reviewer or invent a second proof dialect. Missing criteria, unreadable head/base material,
+    executor errors, changed contract/own diff, or a non-replayable prior verdict must route to the
+    existing full-review path.
+
+    Ledger the requested mode, effective mode, judged head, current head, discrimination result, and
+    fallback reason. This makes W1-T3853's later experiment measurement able to compare expected
+    cheap-path savings with actual fallback frequency without storing prompts or credentials.
+  acceptance:
+    - claim: "a readable base-only change executes only the existing proof-discrimination machinery, posts one guarded current-head verdict, and does not spawn the semantic reviewer"
+      proof: "grep: W1-T3901 base-only review runs proof discrimination without semantic spawn in test/review-reuse-discrimination-outcome.test.ts"
+    - claim: "a discriminating result preserves the prior criteria while a stale or failed proof produces the reviewer's existing failure semantics"
+      proof: "grep: W1-T3901 discrimination preserves criteria and failure semantics in test/review-reuse-discrimination-outcome.test.ts"
+    - claim: "missing or unreadable reuse evidence falls back to one full review and names the effective mode and reason in the ledger"
+      proof: "grep: W1-T3901 unreadable evidence falls back with a durable reason in test/review-reuse-discrimination-outcome.test.ts"
+    - claim: "the exact reuse path and the base-only path record requested versus effective mode so the self-improvement loop can measure savings"
+      proof: "grep: W1-T3901 effective_review_mode in src/run-task.ts"
+  falsifier: |
+    If a base-only run can call the semantic reviewer, post without current-head evidence, silently
+    turn an executor error into success, or omit the fallback reason, the corresponding proof must
+    fail. Delete the extracted executor call and the no-spawn behavioral proof must go red.

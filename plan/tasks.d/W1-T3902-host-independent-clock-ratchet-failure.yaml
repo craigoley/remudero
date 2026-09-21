@@ -1,0 +1,48 @@
+- id: W1-T3902
+  title: "THE CLOCK-RATCHET WRITE-FAILURE FIXTURE DEPENDS ON UID — replace chmod-based denial with a deterministic IO seam so root cannot make CI silently vacuous"
+  repo: remudero
+  depends_on: [W1-T3364]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files:
+    - scripts/clock-signature-ratchet.mjs
+    - test/the-clock-census-records-its-own-baseline.test.ts
+    - test/host-capability-fixtures.test.ts
+  origin: "operator-session#pr-6272-followup-2026-09-20"
+  plan_refs: ["W1-T3364", "W1-T2997", "W1-T3853"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #6272: the new write-failure test uses `chmodSync` at 0o555, 0o444, and 0o644,
+    which immediately tripped the host-capability census and required three declarations. Those
+    modes are not a stable cross-host proof: uid 0 can bypass the denial, so the test either becomes
+    vacuous or fails for a host reason unrelated to the ratchet's write catch. The red was caught only
+    after the full coverage shard, although the author was testing a small deterministic error path.
+
+    The test's claim is about the ratchet reporting a failed write, not about Unix permission policy.
+    A host-independent fixture therefore shifts this failure left, removes census debt, and keeps the
+    host-capability allowlist about genuine host-dependent tests.
+  design: |
+    Add a narrow injectable filesystem boundary to the clock-signature ratchet while preserving the
+    real default used by the CLI. Keep one subprocess test over the real executable and ordinary
+    filesystem for the successful record/check paths. Drive the write-failure catch with an injected
+    writer that throws a named ENOSPC/EIO error after the baseline has been read and the source has
+    been scanned; assert code 2, an unchanged baseline, and the diagnostic. Remove the chmod calls
+    and their host-capability declarations. The seam must not accept an arbitrary environment or
+    bypass the normal scan, and the default implementation must remain the real `node:fs` functions.
+  acceptance:
+    - claim: "the real clock-signature CLI still records and checks a baseline through the default filesystem implementation"
+      proof: "grep: W1-T3902 real clock-ratchet subprocess keeps the default filesystem path in test/the-clock-census-records-its-own-baseline.test.ts"
+    - claim: "a deterministic injected write error returns code 2, names the recording failure, and leaves the baseline byte-identical"
+      proof: "grep: W1-T3902 injected write failure is host-independent in test/the-clock-census-records-its-own-baseline.test.ts"
+    - claim: "the clock-ratchet test no longer adds chmod sites to the host-capability census"
+      proof: "grep: W1-T3902 clock-ratchet failure coverage has no host-capability chmod fixture in test/host-capability-fixtures.test.ts"
+  falsifier: |
+    Run the real subprocess path on a normal fixture and delete the injected writer test: the normal
+    path must still pass while the write-failure criterion goes red. Run the suite as uid 0 and as a
+    non-root user; any difference in the write-failure assertion disproves the replacement.

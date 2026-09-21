@@ -18,6 +18,7 @@
 
 import type { Proposal } from "./inbox.js";
 import type { Mount, Mounts } from "./mounts.js";
+import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type WorkerProviderId } from "./config.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
@@ -166,6 +167,7 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
 export function parseVerifyHumanVerdict(text: string): VerifyHumanVerdict {
   const m = text.match(/VERIFY_HUMAN_DECISION:\s*(\w+)/i);
   const decision = m?.[1]?.toLowerCase() as VerifyHumanDecision | undefined;
+  // W1-T3916: judge fallback still fails open on an unusable verdict
   if (!decision || !VALID_DECISIONS.has(decision)) return { ...FAIL_OPEN_VERIFY_HUMAN_VERDICT };
   const reasonMatch = text.match(/VERIFY_HUMAN_REASON:\s*(.+)/i);
   return { decision, reason: reasonMatch?.[1]?.trim() || "(no reason stated)" };
@@ -279,16 +281,34 @@ export async function spawnVerifyHumanJudgeWorker(opts: {
   return spawn(buildVerifyHumanJudgeSpawnArgs(opts));
 }
 
+/** Resolve the read-only judge mount against the providers this host actually enables. A
+ * host-local provider mismatch is stale routing metadata, not a reason to turn an automated sweep
+ * into a permanent operator queue. Removing only the unavailable affinity lets the existing
+ * worker router choose from already-enabled providers. Explicitly enabled providers remain
+ * mount-affine, including the paid cash lane. */
+// W1-T3916: explicitly enabled cash keeps its configured mount affinity
+export function resolveVerifyHumanJudgeMount(
+  mounts: Mounts,
+  config?: Pick<Config, "workerProviders">,
+): Mount {
+  const mount = mounts.verify_human_judge ?? resolveRiskJudgeMount(mounts);
+  if (config === undefined || mount.provider === undefined) return mount;
+  const provider = canonicalWorkerProviderId(mount.provider) as WorkerProviderId;
+  if (enabledWorkerProviders(config).includes(provider)) return mount;
+  return { ...mount, provider: undefined };
+}
+
 /** A `judge` wired to a real spawn on the CHEAPEST configured mount. Reuses
  *  `resolveRiskJudgeMount` rather than re-deriving the same routing-table walk: that resolver is
  *  generic, never risk-specific, despite its name. */
 export function realVerifyHumanJudge(opts: {
   mounts: Mounts;
+  config?: Pick<Config, "workerProviders">;
   cwd: string;
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict> {
-  const mount = opts.mounts.verify_human_judge ?? resolveRiskJudgeMount(opts.mounts);
+  const mount = resolveVerifyHumanJudgeMount(opts.mounts, opts.config);
   return async (shard: ShardUnderJudgement) => {
     const result = await spawnVerifyHumanJudgeWorker({
       shard, mount, cwd: opts.cwd, settingsFile: opts.settingsFile, spawn: opts.spawn,

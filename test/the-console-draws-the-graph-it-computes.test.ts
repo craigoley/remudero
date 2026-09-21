@@ -150,13 +150,14 @@ function panelGraphDeps(root: string): PanelGraphDeps {
   };
 }
 
-test("W1-T2489: buildPanelGraphRoutes still returns exactly its pre-existing 12 routes plus the inbox decline/restore writes -- W1-T2489 itself added no route, no new computation, no second graph model", () => {
+test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the operator-activity projection and inbox writes -- W1-T2489 itself added no new computation or second graph model", () => {
   const routes = buildPanelGraphRoutes(panelGraphDeps(tmpRoot()));
   const shape = routes.map((r) => `${r.method} ${r.path}`).sort();
   assert.deepEqual(shape, [
     "GET /v1/drain/preview",
     "GET /v1/feedback",
     "GET /v1/inbox",
+    "GET /v1/operator-activity",
     "GET /v1/plan/view",
     "GET /v1/trace",
     "POST /v1/feedback",

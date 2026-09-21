@@ -1,0 +1,235 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import {
+  OPERATOR_ACTIVITY_CONTRACT_VERSION,
+  OPERATOR_ACTIVITY_MAX_ITEMS,
+  buildOperatorActivityRoute,
+  buildOperatorActivityProjection,
+  buildPanelReadRoutes,
+  type PanelGraphDeps,
+  type OperatorActivityEnvelope,
+} from "../src/lib/panel-graph.js";
+import { loadPlan, type Plan } from "../src/lib/plan.js";
+import type { StatusProjection } from "../src/lib/status.js";
+
+const PLAN_YAML = `
+- id: A
+  title: first task
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+- id: B
+  title: dependent task
+  repo: remudero
+  type: implement
+  depends_on: [A]
+  status: queued
+- id: D
+  title: independent task
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+`;
+
+function plan(): Plan {
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-`));
+  const path = join(directory, "tasks.yaml");
+  writeFileSync(path, PLAN_YAML);
+  return loadPlan(path);
+}
+
+function projection(ids: string[]): Map<string, StatusProjection> {
+  return new Map(ids.map((taskId) => [taskId, { taskId, status: "queued", merged: false, source: "none" as const }]));
+}
+
+function ledger(rows: Array<Record<string, unknown>>, present = true): Array<Record<string, unknown>> & { present: boolean; torn: number } {
+  const value = rows as Array<Record<string, unknown>> & { present: boolean; torn: number };
+  value.present = present;
+  value.torn = 0;
+  return value;
+}
+
+function verifiedInput(rows: Array<Record<string, unknown>> = [{ step: "run.start", task_id: "A", ts: "2026-09-20T10:00:00.000Z", run_id: "run-a" }]) {
+  return {
+    plan: plan(),
+    projection: projection(["A", "B", "D"]),
+    ledgerLines: ledger(rows),
+    now: () => Date.parse("2026-09-20T10:01:00.000Z"),
+  };
+}
+
+function itemsOf(result: OperatorActivityEnvelope) {
+  if (!("items" in result)) throw new Error("expected an item-bearing activity projection");
+  return result.items;
+}
+
+test("unit test: operator activity rows preserve source observed time and freshness", () => {
+  const result = buildOperatorActivityProjection(verifiedInput());
+  const items = itemsOf(result);
+  assert.equal(result.version, OPERATOR_ACTIVITY_CONTRACT_VERSION);
+  assert.ok(items.length > 0);
+  for (const item of items) {
+    assert.ok(item.id);
+    assert.ok(item.source);
+    assert.ok(item.observedAt);
+    assert.ok(item.freshness);
+  }
+  const activity = items.find((item) => item.kind === "activity");
+  assert.equal(activity?.source, "rmd:ledger:run.start");
+  assert.equal(activity?.observedAt, "2026-09-20T10:00:00.000Z");
+  assert.equal(activity?.freshness, "verified");
+});
+
+test("unit test: operator activity preserves unavailable source reasons without zero defaults", () => {
+  const result = buildOperatorActivityProjection({ ...verifiedInput(), ledgerLines: ledger([], false) });
+  assert.equal(result.state, "unavailable");
+  if (result.state !== "unavailable") throw new Error("expected unavailable activity");
+  assert.equal(result.reason, "ledger-unavailable");
+  assert.equal("items" in result, false);
+
+  const unknown = buildOperatorActivityProjection({ ...verifiedInput(), githubReadFailed: true, githubFailureReason: "transport" });
+  assert.equal(unknown.state, "unknown");
+  const workstream = itemsOf(unknown).find((item) => item.kind === "workstream");
+  assert.equal(workstream?.freshness, "unknown");
+  assert.equal(workstream?.state, "unknown");
+  assert.equal(workstream?.reason, "transport");
+});
+
+test("unit test: operator workstreams reuse dispatcher frontier order and eligibility", () => {
+  const result = buildOperatorActivityProjection(verifiedInput());
+  const workstreams = itemsOf(result).filter((item) => item.kind === "workstream");
+  assert.deepEqual(workstreams.map((item) => item.taskId), ["A", "B", "D"]);
+  assert.equal(workstreams[0]?.state, "queued");
+  assert.equal(workstreams[1]?.state, "blocked");
+  assert.equal(workstreams[2]?.state, "queued");
+  assert.match(workstreams[1]?.reason ?? "", /unmet dependency/);
+});
+
+test("unit test: operator artifacts expose bounded evidence links without raw content", () => {
+  const result = buildOperatorActivityProjection(verifiedInput());
+  const artifacts = itemsOf(result).filter((item) => item.kind === "artifact");
+  assert.ok(artifacts.length > 0);
+  for (const artifact of artifacts) {
+    assert.ok(artifact.href);
+    assert.match(artifact.href!, /^(?:\/v1\/(?:plan\/view|trace\?id=)|https:\/\/github\.com\/)/);
+    assert.doesNotMatch(JSON.stringify(artifact), /prompt|transcript|credential|account/i);
+  }
+});
+
+test("unit test: operator artifacts expose a GitHub receipt when the projection has PR evidence", () => {
+  const projected = projection(["A", "B", "D"]);
+  const task = projected.get("A");
+  if (!task) throw new Error("expected task A projection");
+  task.prNumber = 6267;
+  task.prUrl = "https://github.com/craigoley/remudero/pull/6267";
+
+  const result = buildOperatorActivityProjection({ ...verifiedInput(), projection: projected });
+  const receipt = itemsOf(result).find((item) => item.id === "artifact:receipt:A");
+
+  assert.deepEqual(receipt, {
+    id: "artifact:receipt:A",
+    kind: "artifact",
+    summary: "Authoritative change receipt for A",
+    source: "github:pull-request",
+    observedAt: "2026-09-20T10:01:00.000Z",
+    freshness: "verified",
+    taskId: "A",
+    repository: "remudero",
+    href: "https://github.com/craigoley/remudero/pull/6267",
+  });
+});
+
+test("unit test: operator activity is versioned bounded read-only and single-pass", () => {
+  const rows = Array.from({ length: OPERATOR_ACTIVITY_MAX_ITEMS + 25 }, (_, index) => ({
+    step: "worker.state",
+    task_id: `task-${index}`,
+    ts: new Date(Date.parse("2026-09-20T10:00:00.000Z") + index * 1000).toISOString(),
+  }));
+  const result = buildOperatorActivityProjection({ ...verifiedInput(rows) });
+  assert.equal(result.version, OPERATOR_ACTIVITY_CONTRACT_VERSION);
+  assert.equal(itemsOf(result).length, OPERATOR_ACTIVITY_MAX_ITEMS);
+  if (!("truncated" in result)) throw new Error("expected bounded item projection");
+  assert.equal(result.truncated, true);
+
+  const routes = buildPanelReadRoutes({
+    root: "/tmp/repo",
+    planPath: "/tmp/repo/plan/tasks.yaml",
+    ledgerPath: "/tmp/repo/state/ledger.ndjson",
+    github: {} as never,
+    statusGithub: {} as never,
+    inboxRoot: "/tmp/state",
+    ratify: {} as never,
+  });
+  const route = routes.find((candidate) => candidate.path === "/v1/operator-activity");
+  assert.ok(route);
+  assert.equal(route?.method, "GET");
+  assert.equal(route?.scope, "read");
+});
+
+function routeDeps(ledgerPath: string): PanelGraphDeps {
+  return {
+    root: "/tmp/repo",
+    planPath: "/tmp/repo/plan/tasks.yaml",
+    ledgerPath,
+    github: {} as never,
+    statusGithub: {} as never,
+    inboxRoot: "/tmp/state",
+    ratify: {} as never,
+  };
+}
+
+function responseCapture() {
+  let status = 0;
+  let body = "";
+  return {
+    response: {
+      writeHead(code: number) {
+        status = code;
+      },
+      end(value: string) {
+        body = value;
+      },
+    } as never,
+    status: () => status,
+    json: () => JSON.parse(body) as Record<string, unknown>,
+  };
+}
+
+test("unit test: operator activity route reports unavailable, serves a projection, and fails closed on projection errors", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-route-`));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(ledgerPath, JSON.stringify({ step: "run.start", task_id: "A", ts: "2026-09-20T10:00:00.000Z" }) + "\n");
+  const emptyPlan = () => ({ tasks: [], byId: new Map() }) as unknown as Plan;
+  try {
+    const missing = responseCapture();
+    buildOperatorActivityRoute(routeDeps(join(root, "missing.ndjson")), emptyPlan).handler(
+      {} as never,
+      missing.response,
+      { params: {} },
+    );
+    assert.equal(missing.status(), 200);
+    assert.equal(missing.json().state, "unavailable");
+
+    const served = responseCapture();
+    buildOperatorActivityRoute(routeDeps(ledgerPath), emptyPlan).handler({} as never, served.response, { params: {} });
+    assert.equal(served.status(), 200);
+    assert.equal(served.json().state, "verified");
+
+    const failed = responseCapture();
+    buildOperatorActivityRoute(routeDeps(ledgerPath), () => {
+      throw new Error("snapshot unavailable");
+    }).handler({} as never, failed.response, { params: {} });
+    assert.equal(failed.status(), 503);
+    assert.equal(failed.json().reason, "projection-unavailable");
+    assert.match(String(failed.json().detail), /snapshot unavailable/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

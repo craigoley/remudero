@@ -4061,9 +4061,14 @@
   origin: architect
   plan_refs: ["§10"]
   files: [src/lib/ledger.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
-  note: "INTAKE FIXTURE #1, recon §6 missing-organ 3. Filed because the recon caught a DESCRIBED-BUT-UNFILED
+  note: "RETIRED 2026-09-21 as superseded: the snapshotState/restoreState primitive is already shipped and
+    tested; W1-T3677 (plan/tasks.d/W1-T3677-filed.yaml) owns the remaining production-cadence wiring. This
+    retirement does not claim that host snapshots exist or that the restore drill has run. The original
+    intake note was stale about the primitive, so keeping this duplicate would split ownership of the same risk.
+    INTAKE FIXTURE #1, recon §6 missing-organ 3. Filed because the recon caught a DESCRIBED-BUT-UNFILED
     item in MASTER-PLAN §10 WS-7 - the audit rung's most valuable class of finding, since a plan gap is
     invisible to every code-level check the repo runs.
     RELATED to W1-T209 (rotation) - a backup and an archival policy must agree on what the full record is, or

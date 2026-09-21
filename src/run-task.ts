@@ -23893,6 +23893,7 @@ export async function defaultVerifyHumanCadenceResult(
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
       judge: realVerifyHumanJudge({
         mounts: loadMounts(mountsPath(root)),
+        config,
         cwd: root,
         settingsFile: join(root, "settings", "worker.json"),
       }),
@@ -38723,6 +38724,7 @@ export async function verifyHumanSweepCommand(
   const result = await (deps.route ?? routeVerifyHumanBacklog)(shards, {
     judge: realVerifyHumanJudge({
       mounts: loadMounts(mountsPath(root)),
+      config,
       cwd: root,
       settingsFile: join(root, "settings", "worker.json"),
     }),

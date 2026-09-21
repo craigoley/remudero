@@ -59,6 +59,7 @@ export type LintCheck =
   | "proof-scope"
   | "proof-name-resolution"
   | "proof-unit-test-unresolvable"
+  | "credited-test-path"
   | "shared-proof"
   | "unbound-criterion"
   | "post-merge-amendment"
@@ -1325,6 +1326,37 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
         "to name a path already in scope.",
     });
   });
+  return violations;
+}
+
+function proofTestPath(w: WhitelistedProof): string | undefined {
+  const path = proofScopePath(w);
+  return path?.startsWith("test/") ? path : undefined;
+}
+
+function creditedTestPathViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (opts.creditedBuild !== true || opts.planOnlyFiling === true || !opts.moduleExists) return [];
+  const paths = new Set<string>();
+  for (const path of task.files ?? []) if (path.startsWith("test/")) paths.add(path);
+  for (const criterion of task.acceptance ?? []) {
+    if (criterion.satisfied_by) continue;
+    const proof = parseWhitelistedProof(criterion.proof ?? "");
+    const path = proof ? proofTestPath(proof) : undefined;
+    if (path) paths.add(path);
+  }
+  const violations: LintViolation[] = [];
+  for (const path of paths) {
+    if (opts.moduleExists(path)) continue;
+    violations.push({
+      check: "credited-test-path",
+      severity: "block",
+      message:
+        `task ${task.id} is credited as a build, but its test path ${path} is absent from the PR head. ` +
+        "The task record's declared test suite and every path-form test proof must name a file that " +
+        "really shipped; add the file or repoint the task's proofs to the suite that did. Plan-only " +
+        "filings are exempt because their test paths are forward references.",
+    });
+  }
   return violations;
 }
 
@@ -3256,6 +3288,7 @@ export interface LintOpts {
    *  the SAME predicate Standing rule 15 uses to tell a filing from a build — never a second
    *  notion of it, which could disagree with rule 15 about what a filing is. */
   planOnlyFiling?: boolean;
+  creditedBuild?: boolean;
   /** W1-T2835 — did this repo-relative path exist at the BASE ref? The base-tree counterpart of
    *  {@link LintOpts.moduleExists}, and the only way the base fact reaches this pure module: the
    *  linter never reads disk and never shells git. ABSENT ⇒ {@link proofBaseDiscriminationViolations}
@@ -3408,6 +3441,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
+  violations.push(...creditedTestPathViolations(task, opts));
   violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
