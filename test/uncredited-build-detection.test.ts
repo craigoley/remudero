@@ -173,7 +173,7 @@ test("acceptance: the warn is SILENT on a plan-only FILING that names its own id
 
 // ── it reports and does nothing else ──────────────────────────────────────────────────────────
 
-test("the warning MOVES NO DISPOSITION — status, merged and every other field are identical with and without it", () => {
+test("W1-T3934: the warning MOVES NO DISPOSITION — status, merged and every other field are identical with and without it", () => {
   const withPr = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: gateway([PR_3095], { [PR_3095.url]: SRC }) }).get("W1-T2379")!;
   const without = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: gateway([], {}) }).get("W1-T2379")!;
   assert.ok(withPr.uncreditedBuild, "the first really did warn");
