@@ -1,0 +1,89 @@
+- id: W1-T3910
+  title: "VERCEL REFUSES FEEDBACK-LANDING PREVIEWS BECAUSE THE GENERATED COMMIT IS AUTHORED BY AN UNLINKED BRIDGE PSEUDONYM — stamp both author and committer as the recognized non-personal remudero-fleet bot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  files:
+    - src/lib/feedback-landing.ts
+    - test/feedback-landing.test.ts
+  origin: architect
+  plan_refs: ["W1-T243", "W1-T990", "§5B", "§7B"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED PLATFORM REFUSAL, THEN SOURCE CONFIRMATION. Console PR #1508 at head da0df645 was
+    blocked from a Vercel preview because its commit author,
+    `rmd-feedback-bridge <rmd-feedback-bridge@users.noreply.github.com>`, could not be matched to a
+    GitHub account. The production main control was Ready when authored by `remudero-fleet[bot]`.
+    This is an attribution failure before application build, not a failing build and not a reason
+    to change Vercel, repository membership, or credentials.
+
+    `src/lib/feedback-landing.ts` confirms the mechanism. `LANDING_AUTHOR_NAME` and
+    `LANDING_AUTHOR_EMAIL` are hard-coded to that unlinked bridge pseudonym. The shared
+    `finishLanding` path passes them as `git -c user.name=... -c user.email=... commit-tree` and
+    then pushes the resulting commit to the gated landing branch. The identity is therefore local
+    to the generated commit and can be repaired without global Git configuration, a personal
+    operator identity, or a credential change. Existing `test/feedback-landing.test.ts` fixtures
+    already create a real bare origin and inspect landing refs, but do not assert the generated
+    commit's author and committer identity.
+
+    THIS IS NOT W1-T990. That retired task investigated fleet-versus-operator PR authorship and
+    concluded that `remudero-fleet[bot]` is already the distinct fleet actor. This task applies
+    that settled non-personal identity to the one landing commit-tree site whose stale pseudonym
+    is now proven to block previews. It also does not duplicate the landing ref, union-writer,
+    monotonicity, or deleted-ref tasks; none changes commit attribution.
+  design: |
+    Replace the landing commit-tree's fixed author identity with EXACTLY
+    `remudero-fleet[bot] <318611788+remudero-fleet[bot]@users.noreply.github.com>`. Set BOTH the
+    author and committer identity for the generated commit. Do this at the existing local
+    commit-tree boundary so behavior is deterministic and independent of ambient or personal Git
+    configuration; do not introduce an environment-variable contract or read an operator's
+    identity.
+
+    Add discriminating coverage to `test/feedback-landing.test.ts` using its real bare-origin
+    fixture. Read the pushed feedback-landing head commit with Git plumbing and assert the exact
+    author name/email and exact committer name/email. The same test must explicitly reject the old
+    `rmd-feedback-bridge` name and email, so merely changing one of author/committer or retaining
+    the stale value in either field fails. Seed the caller with a different personal-looking
+    ambient Git identity so the test also proves the result comes from the landing override rather
+    than fixture defaults.
+
+    PRESERVE THE BRIDGE CONTRACT. Tree construction remains scratch-index based and deterministic;
+    the generated commit remains parented from the fetched main tip; the caller's worktree, index,
+    local HEAD, and Git configuration remain untouched. The bridge may push only its landing branch
+    and must never push directly to main. Keep PR creation and auto-merge behind the existing gated
+    landing flow.
+
+    EXPLICITLY OUT OF SCOPE: any personal operator identity; GitHub, Vercel, or other credentials;
+    repository/team membership; global Git configuration; recycler, container, deployment, or
+    runtime-environment changes; landing ref naming; union/reconciliation semantics; retry/lease
+    behavior; and direct pushes to main. Only the two declared files may change.
+  acceptance:
+    - claim: "the real bare-origin regression generates a feedback-landing commit whose author and committer are both exactly remudero-fleet[bot] with 318611788+remudero-fleet[bot]@users.noreply.github.com despite a different ambient identity; neither metadata pair retains rmd-feedback-bridge, scratch-tree construction stays deterministic, the caller worktree, index, local HEAD, and Git configuration stay unchanged, and only the gated landing branch is pushed rather than main"
+      proof: "unit test: test/feedback-landing.test.ts"
+    - claim: "the recognized fleet-bot email is fixed at the landing commit-tree boundary rather than inherited from ambient or personal Git configuration"
+      proof: 'grep: 318611788+remudero-fleet\[bot\]@users\.noreply\.github\.com in src/lib/feedback-landing.ts'
+  falsifier: |
+    CLOSE IF the generated feedback-landing head already reports the exact fleet-bot identity above
+    for BOTH author and committer. At this filing, the source constants and commit-tree invocation
+    instead force the unlinked bridge identity, and no test asserts either generated metadata pair.
+    Do not satisfy this by changing Vercel policy, provisioning or exposing credentials, selecting
+    a personal identity, inheriting ambient Git configuration, or bypassing the gated landing PR.
+  note: |
+    risk:high — deliberately higher than the single-subsystem span because this identity is stamped
+    on an autonomous commit that is pushed to a shared, merge-bound branch; a wrong name/email pair
+    blocks external previews, while an accidental plumbing change can disturb the landing tree or
+    its no-direct-main safety boundary.
+    budget_usd 60 — the change is small, but the proof must use the real bare-origin fixture and
+    inspect both Git identity pairs while retaining the existing scratch-tree and push-boundary
+    regressions.
+    verify:auto — every criterion is observable from local Git plumbing and repository state; no
+    Vercel call, credential, network access, or human judgment is required.
+    NO depends_on: the distinct non-personal fleet identity is already settled, and the adjacent
+    landing tasks do not own this attribution change.
