@@ -12451,14 +12451,10 @@ export function reportWorkerSourceSizeFollowup(
  * ledger makes retries idempotent. The judge never receives raw source text, only bounded paths and
  * measurements already emitted by the source-size signal.
  */
-export interface SourceSizeGatePostureDeps {
+type SourceSizeGatePostureRuntime = GatePostureRuntime & {
   decide?: typeof decideGatePosture;
-  runRiskJudge?: GatePostureRuntime["runRiskJudge"];
-  judge?: GatePostureRuntime["judge"];
-  cache?: GatePostureRuntime["cache"];
-  spend?: GatePostureRuntime["spend"];
   consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult;
-}
+};
 
 export interface SourceSizeGatePostureResult {
   decision: GatePostureDecision;
@@ -12479,7 +12475,7 @@ export async function reportWorkerSourceSizeFollowupWithGatePosture(
   args: ConsumeSourceSizeFollowupArgs,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (message: string) => void,
-  deps: SourceSizeGatePostureDeps = {},
+  deps: SourceSizeGatePostureRuntime = {},
 ): Promise<SourceSizeGatePostureResult> {
   let classified: ReturnType<typeof classifySourceSizeSummary>;
   try {
@@ -14453,7 +14449,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
-      let gatePostureDeps: SourceSizeGatePostureDeps = {};
+      let gatePostureDeps: SourceSizeGatePostureRuntime = {};
       try {
         const spend = riskJudgeSpendCollector();
         gatePostureDeps = {
