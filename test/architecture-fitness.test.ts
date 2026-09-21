@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
  */
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-const depcruiseBin = join(repoRoot, "node_modules", "dependency-cruiser", "bin", "dependency-cruise.mjs");
+const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 
 /** Runs the real depcruise binary over `src/` inside `fixtureRoot`. Never throws on a nonzero exit. */

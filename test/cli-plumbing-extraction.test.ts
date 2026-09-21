@@ -30,7 +30,7 @@ import { findImportReferences, importsModule } from "./helpers/import-sweep.js";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const runTaskSrc = readFileSync(join(repoRoot, "src", "run-task.ts"), "utf8");
 const libDir = join(repoRoot, "src", "lib");
-const depcruiseBin = join(repoRoot, "node_modules", "dependency-cruiser", "bin", "dependency-cruise.mjs");
+const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 
 // ── Criterion 1: the repo-location cluster relocated together, initialiser included ────────
