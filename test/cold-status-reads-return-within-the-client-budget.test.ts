@@ -198,7 +198,11 @@ test("an event-loop-blocked read still fires the fallback timer before the clien
   const deps = depsFor(tmpRoot(), planOf([task({ id: "W1-T3925-BLOCKED" })]));
   const BLOCK_MS = 300; // occupies the event loop synchronously, same shape as an in-turn execFileSync scan
   const BUDGET_MS = 100;
-  const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 5000, BLOCK_MS)], deps, BUDGET_MS);
+  // W1-T3925 round 2: only needs to comfortably outlast BLOCK_MS + BUDGET_MS (400ms worst case) so
+  // the deadline reliably wins the race; 5000ms left a real background `setTimeout` dangling for up
+  // to 5s past every assertion in this test, which a CI shard without `--test-force-exit` has to
+  // sit through before the process can exit. 1000ms keeps a >2x safety margin at a fraction of the cost.
+  const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 1000, BLOCK_MS)], deps, BUDGET_MS);
 
   const started = performance.now();
   const res = await serveRoute(route);
@@ -225,7 +229,10 @@ test("cold and blocked reads report an honest unavailable/stale state, never a f
     ["cold", 0],
     ["blocked", 150],
   ] as const) {
-    const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 5000, blockFirstMs)], deps, BUDGET_MS);
+    // W1-T3925 round 2: see the sibling "blocked" test above — 1000ms is ample margin over
+    // BUDGET_MS + the largest blockFirstMs used here (30 + 150 = 180ms) without dangling a real
+    // background timer 5x longer than any assertion in this loop needs.
+    const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 1000, blockFirstMs)], deps, BUDGET_MS);
     const res = await serveRoute(route);
     const body = (await res.json()) as {
       staleness?: { status?: string; stale?: boolean };
