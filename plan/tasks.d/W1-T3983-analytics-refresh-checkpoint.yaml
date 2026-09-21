@@ -50,4 +50,4 @@
     first refresh must again miss the safety budget or the second refresh must reopen every old
     rotation. Replace an unreadable or mismatched checkpoint with an empty aggregate: the explicit
     cold/last-good evidence test must fail because it must never read unavailable history as zero.
-  note: "This task repairs analytics refresh liveness and provenance after the operator-agent response bound shipped. It does not raise response limits, change proposal policy, or make the agent autonomous. The plan-only filing intentionally leaves implementation for a separate post-merge PR. reservation hand-off: run-W1-T3983-analytics -> run-W1-T3983-1790023859928"
+  note: "This task repairs analytics refresh liveness and provenance after the operator-agent response bound shipped. It does not raise response limits, change proposal policy, or make the agent autonomous. The plan-only filing intentionally leaves implementation for a separate post-merge PR, and its filing proof names this exact task record path. reservation hand-off: run-W1-T3983-analytics -> run-W1-T3983-1790023859928"
