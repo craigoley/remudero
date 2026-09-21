@@ -1111,6 +1111,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
+  reviewContractDigest,
   reviewInputDigest,
   cappedReason,
   reviewLedgerLegibilityFields,
@@ -1281,6 +1282,7 @@ import {
   type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type ReviewDispatchMode,
   type RollupCheckEntry,
   type PostFixReverificationSummary,
   type ProofDiscriminationEvidence,
@@ -1608,6 +1610,60 @@ export function buildSweepEffects(
       spawnReview: spawnRmdReviewForFreshTree,
     }),
   );
+  const reviewFallbackRunner =
+    deps.reviewRunner ?? ((_prNumber: number, _isPlanFiling?: boolean) => reviewCommand(String(_prNumber), ["--repo", deps.repo]));
+  const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
+    // A base move still needs fresh proof discrimination; the existing deterministic review path
+    // is the safe fallback until a proof-only runner can be exposed without duplicating review.ts.
+    if (mode.kind !== "reuse") {
+      deps.log("sweep.review_reuse_discrimination_fallback", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        ...(mode.kind === "discriminate-only" ? { judged_head_sha: mode.judgedHeadSha } : {}),
+      });
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+    }
+    const prior = readLedgerLines(deps.ledgerPath)
+      .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
+      .at(-1);
+    const verdict = prior?.decision_verdict as ReviewVerdict | undefined;
+    if (!pr.taskId || !verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
+      deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+    }
+    const reusedStatus = await postReviewStatusGuarded({
+      owner: deps.owner,
+      repo: deps.repo,
+      sha: pr.headSha,
+      state: verdict.state,
+      description: reviewPostedDescription(verdict),
+      taskId: pr.taskId,
+      evidence: reviewEvidenceStrength(verdict.criteria ?? []),
+      ledgerPath: deps.ledgerPath,
+      runId: deps.runId,
+      prUrl: pr.prUrl,
+      reviewInputDigest: pr.reviewInputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
+    });
+    if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: pr.taskId,
+      step: "review.posted",
+      context: REVIEW_CONTEXT,
+      state: verdict.state,
+      head_sha: pr.headSha,
+      pr_url: pr.prUrl,
+      decision_verdict: verdict,
+      review_reused: true,
+      reused_from_head_sha: mode.judgedHeadSha,
+      ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
+      proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
+      ...reviewLedgerLegibilityFields(verdict),
+    });
+    return 0;
+  };
   const effects = buildSweepEffectsFromLib({
     repoRoot,
     localRepoName: resolveOwnerRepo().repo,
@@ -1617,6 +1673,7 @@ export function buildSweepEffects(
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
     reviewCommandImpl: reviewerCodeGate.call,
+    reviewReuseRunner,
     reviewerCodeStaleThisPassImpl: reviewerCodeGate.staleThisPass,
     stallNotice: escalatePostReviewStall,
     registeredOwnerRecovery: {
@@ -5414,7 +5471,7 @@ async function runReview(args: {
   prUrl: string;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number };
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -5814,6 +5871,14 @@ async function runReview(args: {
     ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+  const contractDigest = reviewContractDigest({
+    taskId: task.id,
+    acceptance: task.acceptance ?? [],
+    declaredFiles: task.files,
+    risk: task.risk,
+    budgetUsd: task.budget_usd ?? args.budgetUsd,
+  });
+  verdict = { ...verdict, reviewContractDigest: contractDigest };
 
   // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
   // it instead of re-deriving a verdict that did not change. `ReviewVerdict.ownDiffDigest` and
@@ -10251,8 +10316,7 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
       reviewTask = {
-        id: opts.task.id,
-        title: opts.task.title,
+        ...opts.task,
         acceptance: resolvedContract.criteria,
         files: resolvedContract.taskDeclaredFiles,
       };
@@ -16787,7 +16851,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           prUrl: view.url,
           // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
           headRefName: view.headRefName,
-          task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, files: taskDeclaredFiles },
+          task: {
+            id: taskId ?? `PR-${view.number}`,
+            acceptance: criteria,
+            files: taskDeclaredFiles,
+            risk: taskRisk,
+            budget_usd: taskBudgetUsd,
+          },
           report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
           settingsFile,
           config,
@@ -32484,6 +32554,15 @@ export function buildOpenPrViews(
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
     const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, taskId) : undefined;
+    const currentContractDigest = taskRecord?.acceptance?.length
+      ? reviewContractDigest({
+          taskId: taskRecord.id,
+          acceptance: taskRecord.acceptance,
+          declaredFiles: taskRecord.files,
+          risk: taskRecord.risk,
+          budgetUsd: taskRecord.budget_usd,
+        })
+      : undefined;
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
@@ -32650,6 +32729,8 @@ export function buildOpenPrViews(
       reviewedOwnDiffDigest: priorReviewForReuse?.ownDiffDigest,
       reviewedMergeBaseSha: priorReviewForReuse?.mergeBaseSha,
       reviewedHeadSha: priorReviewForReuse?.headSha,
+      reviewedContractDigest: priorReviewForReuse?.reviewContractDigest,
+      currentContractDigest,
       currentOwnDiffDigest: reviewReuseCurrent.get(pr.number)?.ownDiffDigest,
       currentMergeBaseSha: reviewReuseCurrent.get(pr.number)?.mergeBaseSha,
       priorReviewAttemptsForInput: reviewAttempts.attempts,
