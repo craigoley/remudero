@@ -114,6 +114,7 @@ test("drain.ts: tallyDispatchFilters gives 'run-branch-already-pushed' its OWN b
     "continued-this-pass",
     "credit-indeterminate",
     "foreign-repo",
+    "held-pre-dispatch-refusal",
     "retired",
     "run-branch-already-pushed",
     "unmet-deps",

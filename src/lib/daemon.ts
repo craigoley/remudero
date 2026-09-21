@@ -42,6 +42,7 @@ import {
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
 } from "./drain.js";
+import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
 import {
   NO_OBSERVED_SCOPE,
@@ -802,6 +803,9 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
+  /** W1-T3959: bounded durable terminal-refusal records, read once per selection pass by the
+   * composition root. Missing/unreadable state returns an empty map and therefore fails open. */
+  readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
@@ -3063,6 +3067,12 @@ export async function runDaemon(
     // idle emitted about 390 bare idle lines and zero dispatch rows: the record could not distinguish
     // "starved of work" from "everything filtered". Nothing about what is eligible changes.
     const idleReasons = tallyDispatchFilters();
+    let terminalPreDispatchRefusalRevisions: ReadonlyMap<string, string> = new Map();
+    try {
+      terminalPreDispatchRefusalRevisions = deps.readTerminalPreDispatchRefusalRevisions?.() ?? terminalPreDispatchRefusalRevisions;
+    } catch (e) {
+      log("dispatch.held_pre_dispatch_refusal_unreadable", { error: String((e as Error)?.message ?? e) });
+    }
     // Eligibility ledgers a circuit-broken decline through its own callback, never the filter tally, so
     // it is collected here per tick and the census below can name it alongside the other buckets.
     const circuitBrokenThisTick: string[] = [];
@@ -3170,6 +3180,8 @@ export async function runDaemon(
       },
       isIndependentFailureBlocked: (taskId) =>
         independentFailureBlocksThisRun.has(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true,
+      isTerminalPreDispatchRefusalHeld: (task) =>
+        terminalPreDispatchRefusalRevisions.get(task.id) === preDispatchContractRevision(task),
     };
 
     // The dispatch set, adopting drain.ts's lane machinery rather than a second implementation. A console
