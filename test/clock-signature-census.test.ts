@@ -66,6 +66,12 @@ test("a clock token in a template literal is still code", () => {
   assert.equal(row.dateNow, 1, "the interpolation is code while the trailing comment is not");
 });
 
+test("unterminated quoted, regex and template fragments are ignored without crashing the census", () => {
+  assert.deepEqual(scanClockSignaturesFromText("' unterminated"), { legacy: 0, dateNow: 0, newDate: 0 });
+  assert.deepEqual(scanClockSignaturesFromText("/ Date.now("), { legacy: 0, dateNow: 0, newDate: 0 });
+  assert.deepEqual(scanClockSignaturesFromText("` Date.now("), { legacy: 0, dateNow: 0, newDate: 0 });
+});
+
 test("the prose-only baseline rows read zero", () => {
   const baseline = readBaseline();
   for (const file of ["src/lib/ledger-replay.ts", "src/lib/trace.ts", "src/lib/hand-run-census.ts"]) {
