@@ -1465,12 +1465,13 @@ githubEventWake:
     origin: "net-new"
     min: 1000
     max: 60000
-  # W1-T3089 — semantic check-run filtering ships observational first. In shadow mode every
-  # signed, allowlisted delivery keeps the current marker/wake behavior while the route emits
-  # bounded class counts on ordinary accepted rows. A later plan-only policy change may set this
-  # to enforce after a full UTC day proves the aggregate signals are complete.
+  # W1-T3089 — the required shadow observation window completed on 2026-09-20 UTC: 19,473
+  # classified deliveries contained 17,445 successful leaves, 1,148 failure transitions, 883
+  # aggregate transitions, and zero unknown payloads. Enforce therefore suppresses only the
+  # successful non-aggregate shape the classifier's invariant and the ordinary 60s poll already
+  # make non-decisive; aggregate, failure, status, structural, and unknown transitions still wake.
   semanticCheckMode:
-    value: shadow
+    value: enforce
     origin: "net-new"
   # W1-T3089 — only these check-run names are aggregate transitions for webhook wake semantics:
   # ci-gate is the PR governor's required aggregate, and ci is the default-branch health signal.

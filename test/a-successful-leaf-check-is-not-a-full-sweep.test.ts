@@ -271,9 +271,9 @@ test("a fork-shaped check payload with empty pull_requests is classified from na
   });
 });
 
-test("policy rejects bad semantic check rows and ships shadow with ci-gate and ci configured", () => {
+test("policy rejects bad semantic check rows and ships enforce with ci-gate and ci configured", () => {
   const shipped = loadPolicy(policyPath(REPO_ROOT));
-  assert.equal(shipped.values.githubEventWake.semanticCheckMode, "shadow");
+  assert.equal(shipped.values.githubEventWake.semanticCheckMode, "enforce");
   assert.deepEqual(shipped.values.githubEventWake.aggregateCheckNames, ["ci-gate", "ci"]);
 
   const unknownMode = shippedPolicyRaw();
@@ -307,7 +307,7 @@ test("policy rejects a semantic-check row that is not a value/origin mapping at 
 
   // CONTROL: the shipped policy IS a proper mapping and still loads, so the two refusals above are
   // about the shape and not about this field being unloadable.
-  assert.equal(loadPolicy(policyPath(REPO_ROOT)).values.githubEventWake.semanticCheckMode, "shadow");
+  assert.equal(loadPolicy(policyPath(REPO_ROOT)).values.githubEventWake.semanticCheckMode, "enforce");
 });
 
 test("production Serve threads committed semantic mode and aggregate names without moving the secret boundary or adding a GitHub client", () => {
