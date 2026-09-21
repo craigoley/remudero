@@ -494,8 +494,9 @@ test("the Dockerfile installs and executes the declared Codex pin in one layer",
   const lockfile = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package-lock.json"), "utf8")) as {
     packages?: Record<string, { version?: string }>;
   };
-  assert.match(dockerfile, /ARG CODEX_VERSION=0\.152\.0/);
-  assert.equal(lockfile.packages?.["node_modules/@openai/codex"]?.version, "0.152.0");
+  const codexVersion = lockfile.packages?.["node_modules/@openai/codex"]?.version;
+  assert.ok(codexVersion, "deploy lockfile must declare the Codex package version");
+  assert.match(dockerfile, new RegExp(`ARG CODEX_VERSION=${codexVersion.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}`));
   assert.match(dockerfile, /COPY --chown=root:root deploy\/package\.json deploy\/package-lock\.json \/opt\/remudero-image-clis\//);
   assert.match(dockerfile, /npm ci --prefix \/opt\/remudero-image-clis[\s\S]*?ln -s \/opt\/remudero-image-clis\/node_modules\/\.bin\/codex \/usr\/local\/bin\/codex[\s\S]*?codex --version/);
 });
