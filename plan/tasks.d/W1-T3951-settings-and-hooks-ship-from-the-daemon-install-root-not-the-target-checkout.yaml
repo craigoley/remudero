@@ -73,7 +73,7 @@
     - claim: "renderWorkerSettings call sites read settings/worker.json and hooks from the daemon install root, not the target checkout"
       proof: "grep: resolveInstallRoot(config) in src/run-task.ts"
     - claim: "a target repo with mounts but no settings/worker.json can still render worker settings via the install root"
-      proof: "unit test: test/config-fixture-path-parity.test.ts"
+      proof: "unit test: test/config-fixture-path-parity.test.ts — a mounts-only target renders worker settings from the daemon install root"
   falsifier: |
     CLOSE IF `join(repoRoot, "settings", "worker.json")` no longer appears anywhere in
     src/run-task.ts's `renderWorkerSettings` call sites (`grep -n 'templatePath: join(repoRoot'
