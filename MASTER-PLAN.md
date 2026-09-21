@@ -5879,7 +5879,7 @@ Layer A = W1-T20c (linter + fail-closed guard); the retro plan-health sweep = W1
 **Provisioning the gate stack (§5/§5A) is ONE-TIME; OPERATING it is CONTINUOUS.** Setting up CodeQL/OSV/
 Semgrep/Scorecard/Dependabot on a repo is done once; the alerts and dependency PRs they generate arrive
 forever and, until now, nothing responded to them. The harness owns **three intake lanes**, all
-PR/issue-shaped, all gated by the same [ci, remudero-review] gate as any task:
+PR/issue-shaped, all gated by the same [ci-gate, remudero-review] gate as any task:
 
 1. **Dependency PRs** (W1-T54) — a Dependabot PR is UNMERGEABLE today (nothing posts remudero-review on a
    non-task PR: fail-closed but frozen). A deterministic dep-review lane posts remudero-review + arms
@@ -6737,8 +6737,10 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
 2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.
 3. One concern per PR. Branch from latest origin/main. Isolated worktrees.
 3B. **The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side
-   decision that can be raced.** `ci` (typecheck+tests) AND `remudero-review` (acceptance verdict by a
-   fresh-context reviewer) must both be green; GitHub does the merging. The runner ARMS auto-merge and
+   decision that can be raced.** The two required contexts are `ci-gate` AND `remudero-review`; `ci-gate`
+   is the aggregate required context, including `ci` and `coverage-ratchet`, and `remudero-review` is
+   the acceptance verdict by a fresh-context reviewer. Both must be green; GitHub does the merging. The
+   runner ARMS auto-merge and
    observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary:
    auto-merge is safe to leave armed, because the contract, not the runner, decides.
 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
@@ -7062,6 +7064,22 @@ to the docs it falsified. Split by AUTOMATABILITY:
   `/docs`, and the website CLI page CANNOT disagree; they share a source.
 - **The API reference (§7A `packages/api-client`) is GENERATED from the OpenAPI surface.**
 - **CHANGELOG is generated from Conventional Commits** (W1-T31).
+
+### generated docs and their generators
+
+This is the inventory of generated artifacts under `docs/`; each row names the generator and the
+source of truth that must be changed before regeneration. These artifacts are never corrected by
+hand downstream of their generators.
+
+| Artifact | Generator | Source of truth |
+| --- | --- | --- |
+| `docs/ORIENTATION.md` | `src/lib/orientation.ts`, invoked by `rmd retro` | `MASTER-PLAN.md` §12, the retro gather, and the plan's next-runnable projection |
+| `docs/cli-reference.md` | `scripts/generate-cli-reference.mjs` | `COMMANDS` in `src/run-task.ts` |
+| `docs/proof-dialect.md` | `scripts/generate-proof-dialect.mjs` | live proof-parser, review, task-linter, and `check-proof` constants |
+| `docs/docs-index.json` | `scripts/generate-docs-index.mjs` | every `docs/**/*.md` file except the index itself |
+
+Other generated artifacts (for example `AGENTS.md`, `plan/plan-index.json`, and the API client) are
+outside `docs/` and remain governed by their own generator/check pairs.
 
 **TIER B — HUMAN/ARCHITECT-AUTHORED; gated by the reviewer** (the non-automatable layer — needs context
 absent from the codebase):
