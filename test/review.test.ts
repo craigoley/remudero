@@ -3038,6 +3038,20 @@ esac
     process.env.PATH = oldPath;
   }
 });
+
+test("W1-T3969: the advisory reviewer has a quiet-stream bound and ledgers abandonment", () => {
+  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /clockBound: \{ boundMs: loadDefaultPolicy\(\)\.values\.workerAbandon \}/,
+    "the real reviewer spawn must not be able to wait forever for a silent SDK stream",
+  );
+  assert.match(
+    source,
+    /log\("review\.reviewer\.abandoned", \{[\s\S]{0,700}e\.evidence\.elapsedMs/,
+    "a bounded reviewer abandonment must be visible before the deterministic floor posts",
+  );
+});
 // ── W1-T362: extend W1-T273's executed_stale downgrade to `unit test:` proofs ──
 //
 // THE GAP W1-T273 LEFT: a `grep:` proof matching the merge-base is downgraded to
