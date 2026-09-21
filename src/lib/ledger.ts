@@ -18,6 +18,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -32,6 +33,33 @@ export interface LedgerLine {
   task_id: string;
   step: string;
   [k: string]: unknown;
+}
+
+export const EXTERNAL_EFFECT_RECONCILED_STEP = "external_effect.reconciled" as const;
+
+/** The durable, redacted projection of an external-effect truth read. */
+export interface ExternalEffectLedgerIdentity {
+  runId: string;
+  taskId: string;
+}
+
+/** Append reconciliation evidence without allowing a connector's raw response into the ledger. */
+export function appendExternalEffectLedger(
+  path: string,
+  identity: ExternalEffectLedgerIdentity,
+  effect: ExternalEffectResult,
+  opts: { ceilingBytes?: number; identity?: () => string; actor?: () => LedgerActor } = {},
+): void {
+  appendLedger(path, {
+    run_id: identity.runId,
+    task_id: identity.taskId,
+    step: EXTERNAL_EFFECT_RECONCILED_STEP,
+    external_effect: effect,
+    reconciliation_state: effect.reconciliationState,
+    action_id: effect.originatingActionId,
+    capability_grant_id: effect.capabilityGrantId,
+    evidence_reference: effect.evidenceReference,
+  }, opts);
 }
 
 /**
