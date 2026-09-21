@@ -13,7 +13,7 @@
     - src/run-task.ts
     - test/feedback-landing.test.ts
   origin: "issue#5317-feedback-landing-review-2026-09-21"
-  plan_refs: [W1-T530, W1-T913, W1-T1000002]
+  plan_refs: [W1-T530, W1-T913, W1-T1000002, W1-T3754, W1-T3910]
   status: queued
   priority: 1
   rationale: |
@@ -29,7 +29,9 @@
     assertion. The review must use the repository's existing pending/terminal review producer and
     its current-head safeguards. A transient GitHub, worktree, or reviewer failure must leave the
     landing PR open for the normal retry path, never claim review success, and never strand the
-    daemon by throwing.
+    daemon by throwing. W1-T3754 owns stale CI-learning landing content reconciliation, not review
+    dispatch; W1-T3910 owns the generated commit's fleet identity, not the PR review/merge ordering.
+    This task must not overwrite either concern while repairing the shared landing flow.
   design: |
     Add one tested, idempotent review handoff at the feedback-landing arm boundary. A newly opened
     landing PR and an already-open PR that lacks a terminal review for its current head must enter
