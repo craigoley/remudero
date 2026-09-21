@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
@@ -511,7 +512,7 @@ export function writeAtomic(
   const io = opts.io ?? realWriteAtomicIo;
   io.mkdirSync(dirname(path), { recursive: true });
   const tag = opts.tmpTag ?? "tmp";
-  const tmpPath = `${path}.${tag}-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const tmpPath = `${path}.${tag}-${process.pid}-${randomUUID()}`;
   try {
     io.writeFileSync(tmpPath, content, opts.mode);
     if (opts.beforeRename && !opts.beforeRename()) {
