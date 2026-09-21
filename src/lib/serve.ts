@@ -1146,9 +1146,18 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
       // durations together instead of racing them. Arming it first keeps the deadline pinned to
       // this request's actual arrival time, so a same-turn expensive read can only ever cost the
       // client its own duration, never that duration PLUS another full budget window on top.
-      const deadline = new Promise<"budget">((resolve) => setTimeout(() => resolve("budget"), budgetMs));
+      // W1-T3925 round 2: the deadline `setTimeout` handle is captured and cleared the instant the
+      // race settles — win or lose — rather than left to fire on its own `budgetMs` later. An
+      // uncleared handle stays a live libuv timer for up to `budgetMs` after this handler has
+      // already returned a response, which is a real (if small) open handle every request leaks;
+      // clearing it here is a strict cleanup with no effect on which branch of the race wins.
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<"budget">((resolve) => {
+        deadlineTimer = setTimeout(() => resolve("budget"), budgetMs);
+      });
       const refreshDone = refresh(req);
       const outcome = await Promise.race([refreshDone.then(() => "ready" as const), deadline]);
+      clearTimeout(deadlineTimer);
       if (outcome === "ready" && cached) {
         writeBufferedResponse(res, cached, responseStaleness(systemClock.now(), cached.generatedAtMs, refreshing, budgetMs, lastError));
         return;
