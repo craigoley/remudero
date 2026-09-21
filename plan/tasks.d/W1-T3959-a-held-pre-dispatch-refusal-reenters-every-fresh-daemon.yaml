@@ -1,0 +1,90 @@
+- id: W1-T3959
+  title: "A TERMINALLY HELD PRE-DISPATCH REFUSAL RE-ENTERS EVERY FRESH DAEMON — `dispatch.repair.held` prevents a second repair lane and escalation, but only after the selector has chosen the same malformed task again; console's UI-T41 reaches `runTask` on every poll while durable state already knows its unchanged verdict was escalated"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 24.00
+  files:
+    - src/lib/dispatch-repair.ts
+    - src/lib/drain.ts
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/a-refused-task-is-repaired-not-re-attempted.test.ts
+  origin: "operator-session#three-daemon-follow-up-2026-09-21"
+  plan_refs: ["W1-T3657", "W1-T3565", "W1-T2397", "W1-T3820"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON remudero-console, 2026-09-21. UI-T41 has a persisted
+    `state/dispatch-repair/UI-T41.json` record with `escalated:true`, `attempts:2`, and
+    the same sizing verdict. Its later passes correctly write `dispatch.repair.held`: no worker
+    starts, no second repair lane dispatches, and no further GitHub escalation occurs. That is
+    W1-T3657 working, but it works too late. The daemon's candidate selector has already admitted
+    UI-T41 and called `runTask`, which re-lints it and emits the repeated refusal before the held
+    decision can stand down.
+
+    SOURCE CONFIRMED AT origin/main 02d1c226. `daemon.ts` has the right PROCESS-LOCAL behavior:
+    `illformedAdmissionBlocksThisRun` stores `JSON.stringify(task)` and excludes that exact
+    contract on later ticks; a plan reload with a changed contract deliberately re-admits it.
+    That map disappears at restart. The durable `PriorRefusal` in `dispatch-repair.ts` records
+    only verdict, attempts and escalation, while `runnableCandidates` never receives a durable
+    held-refusal predicate. Thus every fresh daemon repeats a zero-cost but queue-crowding lint
+    attempt before it can discover the unchanged terminal refusal.
+
+    This is not W1-T3820: that task correctly prevents repeated repair dispatches and GitHub
+    escalations *after* `runTask` observes the linter refusal. This task owns the prior selector
+    admission that lets a persisted terminal refusal consume a daemon candidate at all.
+
+    This does NOT weaken the linter, hide the refusal, erase an escalation, or suppress an
+    explicit `rmd run-task --rerun`. It makes normal daemon admission consult the durable fact it
+    already has, so a lower eligible task can be selected. The historical refusal and its
+    escalation remain observable. A malformed or unreadable record must admit rather than skip:
+    unreadable state is not evidence that a task was handled.
+  design: |
+    (i) Define one deterministic pre-dispatch contract revision in `dispatch-repair.ts`. It
+    covers the parsed task fields that can affect dispatch admission or the deterministic linter,
+    but excludes parser-local `sourcePath` and decorative runtime fields. Reuse that exact helper
+    for durable state and selection; no second JSON spelling may decide whether a correction is
+    real.
+
+    (ii) Extend newly written refusal records with that revision. A legacy record with no revision
+    is deliberately re-offered once. If its linter verdict remains terminally held, update only
+    the durable revision -- no worker, repair lane or second escalation. A changed verdict retains
+    W1-T3657's existing progress behavior.
+
+    (iii) At the daemon composition root, read the bounded per-task refusal state once for the
+    selection pass and offer `runnableCandidates` an optional read-only predicate. `drain.ts`
+    applies it in the shared eligibility chain after target/dependency admission and before
+    breaker/in-flight checks, reports a distinct `held-pre-dispatch-refusal` idle reason, and
+    continues searching for another candidate. Direct `runTask` and an explicit rerun never use
+    this selector predicate.
+
+    (iv) A task whose current contract revision differs from the durable one is admitted exactly
+    once, including after daemon restart. If it is still ill-formed with the same verdict, its
+    stored revision advances and later unchanged ticks skip it; if it is fixed, ordinary dispatch
+    proceeds. Any absent, corrupt or unreadable state record is never treated as held.
+  acceptance:
+    - claim: "an unchanged terminal refusal is excluded before daemon candidate packing, so a later eligible task is selected without a `runTask` call for the held task"
+      proof: "grep: held-pre-dispatch-refusal in src/lib/drain.ts"
+    - claim: "a changed pre-dispatch contract is re-admitted once, while a same-verdict re-refusal records the new revision without a second worker, repair lane or escalation"
+      proof: "grep: preDispatchContractRevision in src/lib/dispatch-repair.ts"
+    - claim: "a missing, malformed or legacy refusal record cannot suppress normal admission"
+      proof: "grep: legacy refusal state fails open in test/a-refused-task-is-repaired-not-re-attempted.test.ts"
+    - claim: "the production daemon wires the durable held-refusal reader into its shared candidate selector rather than only the in-process map"
+      proof: "grep: durable held refusal state in test/a-refused-task-is-repaired-not-re-attempted.test.ts"
+  falsifier: |
+    Delete the held-refusal predicate from the shared eligibility chain and the first focused test
+    must choose the formerly held task rather than its lower eligible successor. Ignore the
+    contract revision and the second test must keep the corrected task excluded. Treat an
+    unreadable record as held and the third test must fail. If any mutation leaves every proof
+    green, the new predicate is decorative and this task is incomplete.
+  note: |
+    reservation hand-off: run-W1-T3955-1789991927486 -> chore/file-held-pre-dispatch-refusal-admission-1790001000000
+
+    `rmd next-task-id --reserve` created refs/rmd-id/W1-T3959 while the prior W1-T3955 build
+    branch was checked out. This plan-only filing branch owns the hand-off; a future implementation
+    must use run-W1-T3959-<epochMs> and must not co-credit this filing.
