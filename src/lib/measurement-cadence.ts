@@ -62,6 +62,7 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 import {
   judgeVerifyHumanShard,
   observedStateKey,
+  automationProposalFromJudgedShard,
   proposalFromJudgedShard,
   verifyHumanVerdictRow,
   type ShardUnderJudgement,
@@ -1485,6 +1486,7 @@ export interface VerifyHumanCadenceResult {
   parked: number;
   judged: number;
   needsOperator: string[];
+  automated: string[];
   backlog: string[];
   judgeFailed: string[];
   skipped: string[];
@@ -1554,6 +1556,7 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
     parked: opts.shards.length,
     judged: 0,
     needsOperator: [],
+    automated: [],
     backlog: [],
     judgeFailed: [],
     skipped: opts.shards.filter((shard) => !dueIds.has(shard.id)).map((shard) => shard.id),
@@ -1575,6 +1578,11 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
     if (verdict.decision === "needs_operator") {
       opts.stageProposal(proposalFromJudgedShard(shard, verdict));
       result.needsOperator.push(shard.id);
+      continue;
+    }
+    if (verdict.decision === "automate") {
+      opts.stageProposal(automationProposalFromJudgedShard(shard, verdict));
+      result.automated.push(shard.id);
       continue;
     }
     result.backlog.push(shard.id);

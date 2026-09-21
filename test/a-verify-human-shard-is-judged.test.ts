@@ -20,6 +20,7 @@ import {
   type VerifyHumanVerdict,
   buildVerifyHumanJudgePrompt,
   buildVerifyHumanJudgeSpawnArgs,
+  automationProposalFromJudgedShard,
   isSettled,
   judgeVerifyHumanShard,
   observedStateKey,
@@ -38,6 +39,7 @@ import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import {
   priorVerifyHumanVerdicts,
   routeVerifyHumanBacklog,
+  stageInboxProposalOnce,
   verifyHumanSweepCommand,
   parkedVerifyHumanShards,
   type VerifyHumanRouteDeps,
@@ -47,6 +49,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan } from "../src/lib/plan.js";
+import { loadProposalRegistry } from "../src/lib/inbox.js";
 import type { Config } from "../src/lib/config.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -141,6 +144,7 @@ test("W1-T3188: an UNPARSEABLE verdict fails open too, and is marked as a defaul
   assert.equal(v.judgeFailed, true);
   assert.equal(FAIL_OPEN_VERIFY_HUMAN_VERDICT.decision, "needs_operator");
   assert.equal(parseVerifyHumanVerdict("VERIFY_HUMAN_DECISION: backlog").decision, "backlog", "and the quiet arm is still REACHABLE — the fail default is not the only outcome");
+  assert.equal(parseVerifyHumanVerdict("VERIFY_HUMAN_DECISION: automate\nVERIFY_HUMAN_REASON: mechanical").decision, "automate");
   assert.equal(parseVerifyHumanVerdict("VERIFY_HUMAN_DECISION: close").decision, "needs_operator", "an unrecognised word is not a permissive one");
 });
 
@@ -294,6 +298,60 @@ test("W1-T3188: a staged proposal's id is derived, so asking twice asks once", (
   const b = proposalFromJudgedShard(NEEDS, { decision: "needs_operator", reason: "y" });
   assert.equal(a.id, b.id);
   assert.deepEqual(a.evidenceAnchors, [], "a routing ask depends on nothing landing on main — anchors would tier it not-ready forever");
+});
+
+test("an automate verdict stages one idempotent proposal and preserves the judge reason", async () => {
+  const registryPath = join(mkdtempSync(join(tmpdir(), "rmd-vh-automate-")), "inbox-proposals.json");
+  const h = harness({ judge: async () => ({ decision: "automate", reason: "the dependency is merged and the repair is mechanical" }) });
+  const r = await routeVerifyHumanBacklog([SETTLED], {
+    ...h.deps,
+    stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
+  });
+  assert.deepEqual(r.automated, [SETTLED.id]);
+  assert.deepEqual(r.needsOperator, []);
+  const staged = loadProposalRegistry(registryPath) as Array<{ id: string; summary: string }>;
+  assert.equal(staged.length, 1);
+  assert.equal(staged[0]!.id, `verify-human-automate:${SETTLED.id}`);
+  assert.match(staged[0]!.summary, /the dependency is merged and the repair is mechanical/);
+  stageInboxProposalOnce(registryPath, automationProposalFromJudgedShard(SETTLED, {
+    decision: "automate",
+    reason: "a second observed pass",
+  }));
+  const again = loadProposalRegistry(registryPath) as Array<{ id: string }>;
+  assert.deepEqual(again.map((proposal) => proposal.id), [`verify-human-automate:${SETTLED.id}`]);
+});
+
+test("malformed verify-human output fails open to needs_operator and remains due", async () => {
+  const h = harness({ judge: async () => parseVerifyHumanVerdict("not machine readable") });
+  const first = await routeVerifyHumanBacklog([NEEDS], h.deps);
+  assert.deepEqual(first.needsOperator, [NEEDS.id]);
+  assert.deepEqual(first.automated, []);
+  assert.equal(h.rows[0]!.judge_failed, true);
+  const retry = harness({
+    priorVerdicts: priorVerifyHumanVerdicts(h.rows),
+    judge: async () => ({ decision: "backlog", reason: "the retry can now answer" }),
+  });
+  const second = await routeVerifyHumanBacklog([NEEDS], retry.deps);
+  assert.deepEqual(second.skipped, [], "a failed judge row must not settle the shard");
+  assert.deepEqual(second.backlog, [NEEDS.id]);
+});
+
+test("an automate verdict never writes plan files or a ratify release row", async () => {
+  const effects: string[] = [];
+  const h = harness({
+    judge: async () => ({ decision: "automate", reason: "mechanical self-improvement candidate" }),
+    stageProposal: (proposal) => {
+      effects.push(`proposal:${proposal.id}`);
+      assert.doesNotMatch(proposal.summary, /ratify\.approved|releasedIds/);
+    },
+    appendRow: (row) => {
+      effects.push("ledger");
+      assert.equal(row.judge_decision, "automate");
+    },
+  });
+  const r = await routeVerifyHumanBacklog([NEEDS], h.deps);
+  assert.deepEqual(r.automated, [NEEDS.id]);
+  assert.deepEqual(effects, ["ledger", `proposal:verify-human-automate:${NEEDS.id}`]);
 });
 
 // ── THE REAL-SPAWN WIRING, INJECTED ────────────────────────────────────────────────────────────
@@ -526,7 +584,7 @@ test("W1-T3188: --dry-run judges nothing, spends nothing, and reports what a rea
       config: { claudeBin: "/bin/true", root } as Config,
       route: (async () => {
         routed += 1;
-        return { judged: 0, needsOperator: [], backlog: [], skipped: [] };
+        return { judged: 0, needsOperator: [], automated: [], backlog: [], skipped: [] };
       }) as unknown as typeof routeVerifyHumanBacklog,
     });
     assert.equal(code, 0);
@@ -603,7 +661,7 @@ test("W1-T3188: a real (non-dry-run) pass routes through the injected router, st
         const v: VerifyHumanVerdict = { decision: "needs_operator", reason: "asks for a preference" };
         routeDeps.stageProposal(proposalFromJudgedShard(NEEDS, v));
         routeDeps.appendRow(verifyHumanVerdictRow(NEEDS, v, routeDeps.runId) as never);
-        return { judged: 1, needsOperator: [NEEDS.id], backlog: [], skipped: [] };
+        return { judged: 1, needsOperator: [NEEDS.id], automated: [], backlog: [], skipped: [] };
       }) as unknown as typeof routeVerifyHumanBacklog,
     });
     assert.equal(code, 0);

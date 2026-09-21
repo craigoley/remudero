@@ -116,6 +116,25 @@ test("W1-T3271: an unchanged observed state is skipped, but a dependency merge r
   assert.equal(rows[0]!.verify_human_cadence_reason, "state_changed");
 });
 
+test("W1-T3932: an automate verdict from the daemon cadence enters the existing proposal flow", async () => {
+  const rows: Record<string, unknown>[] = [];
+  const staged: Array<{ id: string; summary: string }> = [];
+  const result = await verifyHumanCadence({
+    shards: [ASK],
+    priorVerdicts: new Map(),
+    judge: async () => ({ decision: "automate", reason: "the next step is a mechanical repair" }),
+    stageProposal: (proposal) => staged.push({ id: proposal.id, summary: proposal.summary }),
+    appendRow: (row) => void rows.push(row),
+    runId: "VERIFY-HUMAN-CADENCE-automate",
+  });
+  assert.deepEqual(result.automated, [ASK.id]);
+  assert.deepEqual(result.needsOperator, []);
+  assert.deepEqual(result.backlog, []);
+  assert.equal(staged[0]!.id, `verify-human-automate:${ASK.id}`);
+  assert.match(staged[0]!.summary, /the next step is a mechanical repair/);
+  assert.equal(rows[0]!.judge_decision, "automate");
+});
+
 test("W1-T3271: age-band re-asks happen exactly once per coarse band", async () => {
   const day14 = { ...ASK, ageDays: 14 };
   const day15 = { ...ASK, ageDays: 15 };
