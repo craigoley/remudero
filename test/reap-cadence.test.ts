@@ -52,7 +52,7 @@ test("automatic branch cadence: an empty remote listing is refused before the cl
     "SWEEP-EMPTY",
     (step, extra = {}) => logs.push([step, extra]),
     state,
-    { root: REPO_ROOT, exec: fakeExec(() => [], calls), now: () => 1000 },
+    { root: REPO_ROOT, exec: fakeExec(() => [], calls), clock: { now: () => 1000 } },
   );
   assert.deepEqual(calls.filter((call) => call.includes("--delete")), []);
   assert.equal(state.lastRunAtMs, undefined);
@@ -85,7 +85,7 @@ test("automatic branch cadence: the full rung prunes through the existing manife
   runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-1", log, state, {
     exec,
     root: REPO_ROOT,
-    now: () => 1000,
+    clock: { now: () => 1000 },
   });
   assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "the first pass reaches the existing guarded deleter");
   assert.ok(calls.some((call) => call.some((arg) => arg.includes("repos/other-owner/target-repo"))), "the automatic rung uses the supplied target owner/repo");
@@ -96,7 +96,7 @@ test("automatic branch cadence: the full rung prunes through the existing manife
   runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-2", log, state, {
     exec,
     root: REPO_ROOT,
-    now: () => 1001,
+    clock: { now: () => 1001 },
   });
   assert.deepEqual(calls.filter((call) => call.includes("--delete")), [], "an unchanged corpus is throttled");
 
@@ -104,7 +104,7 @@ test("automatic branch cadence: the full rung prunes through the existing manife
   runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-3", log, state, {
     exec,
     root: REPO_ROOT,
-    now: () => 1002,
+    clock: { now: () => 1002 },
   });
   assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "a changed branch set re-arms the classifier");
 });

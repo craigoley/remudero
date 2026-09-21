@@ -35170,7 +35170,7 @@ export function runAutomaticBranchReapRung(
   opts: {
     prune?: boolean;
     root?: string;
-    now?: () => number;
+    clock?: Pick<Clock, "now">;
     intervalMs?: number;
     exec?: (cmd: string, args: string[]) => string;
   } = {},
@@ -35196,7 +35196,7 @@ export function runAutomaticBranchReapRung(
     return;
   }
 
-  const nowMs = opts.now?.() ?? Date.now();
+  const nowMs = (opts.clock ?? systemClock).now();
   const decision = decideAutomaticBranchReap(state, names, nowMs, opts.intervalMs);
   state.lastBranchFingerprint = decision.branchFingerprint;
   if (!decision.fire) return;
