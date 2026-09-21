@@ -185,7 +185,7 @@ async function withFreshnessBoot(
   }
 }
 
-test("W1-T3615: the console header's freshness ticker renders the tested four-tier formatAge, never a one-tier seconds-only copy", async () => {
+test("the console header renders the tested four-tier age, never a second one-tier copy", async () => {
   await withFreshnessBoot(undefined, (freshnessEl, setElapsedMs) => {
     // MEASURED 2026-09-15 (this task's own rationale): the tested formatAge against what the
     // browser used to render, at these exact elapsed times.
@@ -200,7 +200,7 @@ test("W1-T3615: the console header's freshness ticker renders the tested four-ti
   });
 });
 
-test("W1-T3615: the freshness ticker calls the INJECTED formatAge, never a second hard-coded copy", async () => {
+test("a seconds-only age formatter in the shell client is refused", async () => {
   const sentinel = (ms: number) => `SENTINEL(${ms})`;
   await withFreshnessBoot(sentinel, (freshnessEl, setElapsedMs) => {
     setElapsedMs(7_000);
