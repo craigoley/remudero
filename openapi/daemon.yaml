@@ -1307,6 +1307,383 @@ components:
         rollback:
           $ref: "#/components/schemas/OperatorAgentExperimentRollback"
 
+    # ── W1-T3856 -- experiment-promotion-v1: the guarded flow from a candidate policy to measured
+    # production exposure (deterministic replay, shadow observation, canary promotion, stop
+    # conditions, automatic rollback) that a later-approved experiment-v1 record may take.
+    PromotionScope:
+      type: object
+      required: [repo, policyScope]
+      properties:
+        repo:
+          type: string
+          minLength: 1
+        policyScope:
+          type: string
+          minLength: 1
+          description: The unit canary exposure is serialized against; at most one active promotion may hold a given (repo, policyScope) pair.
+        taskType:
+          type: string
+        lane:
+          type: string
+
+    PromotionGuardMetric:
+      type: object
+      required: [metricName, unit, direction, abortThreshold]
+      properties:
+        metricName:
+          type: string
+        unit:
+          type: string
+        direction:
+          type: string
+          enum: [max, min]
+        abortThreshold:
+          type: number
+
+    PromotionRollback:
+      type: object
+      required: [plan, reason]
+      properties:
+        plan:
+          type: string
+        reason:
+          type: string
+        receipt:
+          type: string
+
+    PromotionRecord:
+      type: object
+      required:
+        - version
+        - promotionId
+        - candidate
+        - baseline
+        - scope
+        - comparisonPopulation
+        - denominatorFloor
+        - observationWindow
+        - guardMetrics
+        - maxExposure
+        - owner
+        - expiresAt
+        - rollback
+        - createdAt
+        - state
+      properties:
+        version:
+          type: string
+          enum: [experiment-promotion-v1]
+        promotionId:
+          type: string
+        experimentId:
+          type: string
+          description: Links to the experiment-v1 record (W1-T3853) this promotion progresses.
+        candidate:
+          type: string
+        baseline:
+          type: string
+        scope:
+          $ref: "#/components/schemas/PromotionScope"
+        comparisonPopulation:
+          type: string
+        denominatorFloor:
+          type: integer
+          minimum: 5
+        observationWindow:
+          type: object
+          required: [start, end]
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        guardMetrics:
+          type: array
+          minItems: 1
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/PromotionGuardMetric"
+        maxExposure:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: The bounded maximum fraction of traffic the canary may take.
+        owner:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        rollback:
+          $ref: "#/components/schemas/PromotionRollback"
+        createdAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum: [proposed]
+
+    PromotionReplayResult:
+      type: object
+      required: [caseId, matched]
+      description: >
+        The bounded per-case receipt submitted and persisted: whether the candidate and baseline
+        agreed. The raw candidate/baseline outputs replayPromotion() computes are not part of the
+        durable wire contract -- they may be arbitrarily large or unbounded -- so only the
+        comparison result is recorded.
+      properties:
+        caseId:
+          type: string
+        matched:
+          type: boolean
+
+    PromotionReplaySummary:
+      type: object
+      required: [version, corpusSize, matched, mismatched, deterministic, sideEffectFree, results]
+      properties:
+        version:
+          type: string
+          enum: [experiment-promotion-v1]
+        corpusSize:
+          type: integer
+          minimum: 1
+        matched:
+          type: integer
+          minimum: 0
+        mismatched:
+          type: integer
+          minimum: 0
+        deterministic:
+          type: boolean
+        sideEffectFree:
+          type: boolean
+          enum: [true]
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/PromotionReplayResult"
+
+    PromotionGuardObservation:
+      type: object
+      required: [metricName, value, denominator, freshness, comparisonPopulation, observedAt]
+      properties:
+        metricName:
+          type: string
+        value:
+          type: number
+        denominator:
+          type: integer
+          minimum: 0
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+        comparisonPopulation:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+
+    PromotionGuardEvaluation:
+      type: object
+      required: [state, reasons, breachedMetrics]
+      properties:
+        state:
+          type: string
+          enum: [ready, unmeasurable, regressed]
+        reasons:
+          type: array
+          items:
+            type: string
+        breachedMetrics:
+          type: array
+          items:
+            type: string
+
+    OperatorAgentPromotionHistory:
+      type: object
+      required:
+        - version
+        - promotionId
+        - candidate
+        - baseline
+        - scope
+        - comparisonPopulation
+        - denominatorFloor
+        - observationWindow
+        - guardMetrics
+        - maxExposure
+        - owner
+        - expiresAt
+        - rollback
+        - createdAt
+        - state
+        - events
+      properties:
+        version:
+          type: string
+          enum: [experiment-promotion-v1]
+        promotionId:
+          type: string
+        experimentId:
+          type: string
+        candidate:
+          type: string
+        baseline:
+          type: string
+        scope:
+          $ref: "#/components/schemas/PromotionScope"
+        comparisonPopulation:
+          type: string
+        denominatorFloor:
+          type: integer
+          minimum: 5
+        observationWindow:
+          type: object
+          required: [start, end]
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        guardMetrics:
+          type: array
+          minItems: 1
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/PromotionGuardMetric"
+        maxExposure:
+          type: number
+          minimum: 0
+          maximum: 1
+        owner:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        rollback:
+          $ref: "#/components/schemas/PromotionRollback"
+        createdAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum:
+            - proposed
+            - replayed
+            - approved
+            - shadow
+            - canary
+            - observing
+            - promoted
+            - neutral
+            - regressed
+            - rolled_back
+            - expired
+            - unmeasurable
+        events:
+          type: array
+          items:
+            type: object
+            required: [kind, at, state]
+            properties:
+              kind:
+                type: string
+                enum: [replay, decision, advance, rollback]
+              at:
+                type: string
+                format: date-time
+              state:
+                type: string
+              replay:
+                $ref: "#/components/schemas/PromotionReplaySummary"
+              decision:
+                type: string
+                enum: [approved]
+              advance:
+                type: object
+                required: [target, guard]
+                properties:
+                  target:
+                    type: string
+                    enum: [shadow, canary, observing, promoted]
+                  guard:
+                    $ref: "#/components/schemas/PromotionGuardEvaluation"
+                  exposure:
+                    type: number
+              rollback:
+                $ref: "#/components/schemas/PromotionRollback"
+              note:
+                type: string
+
+    OperatorAgentPromotionList:
+      type: object
+      required: [promotions, source]
+      properties:
+        promotions:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorAgentPromotionHistory"
+        source:
+          type: string
+          enum: [ledger]
+
+    OperatorAgentPromotionRegistration:
+      type: object
+      required: [promotion]
+      properties:
+        promotion:
+          $ref: "#/components/schemas/PromotionRecord"
+
+    OperatorAgentPromotionReplayRequest:
+      type: object
+      required: [promotionId, replay]
+      properties:
+        promotionId:
+          type: string
+        replay:
+          $ref: "#/components/schemas/PromotionReplaySummary"
+
+    OperatorAgentPromotionDecisionRequest:
+      type: object
+      required: [promotionId, decision]
+      properties:
+        promotionId:
+          type: string
+        decision:
+          type: string
+          enum: [approved]
+        note:
+          type: string
+
+    OperatorAgentPromotionAdvanceRequest:
+      type: object
+      required: [promotionId, target]
+      properties:
+        promotionId:
+          type: string
+        target:
+          type: string
+          enum: [shadow, canary, observing, promoted]
+        observations:
+          type: array
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/PromotionGuardObservation"
+        exposure:
+          type: number
+
+    OperatorAgentPromotionRollbackRequest:
+      type: object
+      required: [promotionId, rollback]
+      properties:
+        promotionId:
+          type: string
+        rollback:
+          $ref: "#/components/schemas/PromotionRollback"
+
     # ── W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) -- the button set
     # src/lib/panel-skills.ts's ONE route returns, resolved from
     # `.remudero/skills/<name>.yaml` (lib/skill.ts's `Skill`, W1-T44) the SAME
@@ -2075,6 +2452,167 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/OperatorAgentExperimentRollbackRequest"
+      responses:
+        "200":
+          description: Rollback recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/promotions:
+    get:
+      summary: Read durable experiment-promotion-v1 replay/shadow/canary history.
+      description: >
+        Returns the append-only promotion record and its replay, decision, advance, and rollback
+        events across the live ledger and supported rotated ledger files. The current state is
+        the last event's resulting state, adjusted for expiry.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable promotion history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorAgentPromotionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Register a bounded promotion; canary exposure is serialized per policy scope.
+      description: >
+        Records the candidate, baseline, comparable population, denominator floor, observation
+        window, guard metrics, maximum exposure, owner, expiry, and rollback path before any
+        replay or approval. At most one active (non-terminal) promotion may hold a given
+        (repo, policyScope) pair at a time.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentPromotionRegistration"
+      responses:
+        "201":
+          description: Promotion registered.
+        "200":
+          description: Identical promotion already registered.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/promotions/replay:
+    post:
+      summary: Attach a deterministic, side-effect-free replay summary to a proposed promotion.
+      description: >
+        The submitted summary is a bounded receipt of a replay pass already run over a historical
+        corpus by the caller; this route validates and persists it rather than re-executing
+        anything, moving the promotion from proposed to replayed.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentPromotionReplayRequest"
+      responses:
+        "200":
+          description: Replay summary recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/promotions/decision:
+    post:
+      summary: Approve a replayed promotion candidate.
+      description: Approval records intent only; only later guard-evaluated evidence can advance the promotion further.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentPromotionDecisionRequest"
+      responses:
+        "200":
+          description: Promotion decision recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/promotions/advance:
+    post:
+      summary: Advance a promotion one guarded step (shadow, canary, observing, or promoted).
+      description: >
+        `shadow` entry follows approval alone. Every later step evaluates freshly submitted guard
+        observations against the promotion's declared metrics, denominator floor, comparison
+        population, and window: a breach becomes `regressed`, insufficient evidence becomes
+        `unmeasurable`, and only a fully-ready evaluation reaches the requested target. Requesting
+        exposure above the promotion's declared maximum is refused.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentPromotionAdvanceRequest"
+      responses:
+        "200":
+          description: Promotion advanced (or explicitly aborted to regressed/unmeasurable).
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/promotions/rollback:
+    post:
+      summary: Record a rollback for an approved, shadow, canary, observing, regressed, or unmeasurable promotion.
+      description: Rollback appends a linked event and leaves the registration, replay, approval, and advance history intact.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentPromotionRollbackRequest"
       responses:
         "200":
           description: Rollback recorded.

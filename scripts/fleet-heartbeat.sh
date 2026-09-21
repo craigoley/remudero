@@ -124,6 +124,15 @@ BRANCH="${RMD_HEARTBEAT_BRANCH:-heartbeat}"
 REMOTE="${RMD_HEARTBEAT_REMOTE:-origin}"
 PAYLOAD_FILE="heartbeat.txt"
 
+# heartbeat-mini is retired. Keep the historical branch readable for incident evidence, but make
+# every stale cron/launchd installation a hard no-op before it reads state or invokes git. This is
+# intentionally here, rather than only in the installer or watcher: the scheduler is the defect
+# surface, and an old scheduler must not be able to publish again after a code update.
+if [ "$BRANCH" = "heartbeat-mini" ]; then
+  echo "fleet-heartbeat: heartbeat-mini is retired; no write performed." >&2
+  exit 0
+fi
+
 # ── config.root ───────────────────────────────────────────────────────────────────────────────
 # `configPath()` (src/lib/config.ts) is ~/.config/remudero/config.json and `root` defaults to
 # ~/Remudero there; `ledgerPathFor(config)` (src/run-task.ts) is join(root, "state",

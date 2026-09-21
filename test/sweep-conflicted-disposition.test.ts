@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SWEEP_POLICY, conflictRefusalCause, deriveDisposition, hasCapturedMergeConflictEvidence, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "../src/lib/sweep.js";
-import { hydrateMergeStates, mergeStateFromRest, MERGE_STATE_HYDRATION_CAP } from "../src/lib/open-prs-rest.js";
+import { hydrateMergeStateObservations, hydrateMergeStates, mergeStateFromRest, MERGE_STATE_HYDRATION_CAP } from "../src/lib/open-prs-rest.js";
 
 /**
  * PR #1074, 2026-08-01 16:01–16:05Z: dispositioned `mergeable` FIVE CONSECUTIVE TIMES while
@@ -156,6 +156,14 @@ test("hydrateMergeStates records only DEFINITE states and skips a PR whose own f
   assert.equal(states.get(4), "clean");
 });
 
+test("W1-T3920 criterion 6: REST hydration retains raw mergeable and mergeable_state evidence for the OpenPrView producer", () => {
+  const observations = hydrateMergeStateObservations("craigoley", "remudero", [3920], (args) => {
+    assert.equal(args[1], "repos/craigoley/remudero/pulls/3920");
+    return { mergeable: true, mergeable_state: "blocked" };
+  });
+  assert.deepEqual(observations.get(3920), { mergeable: true, mergeableState: "blocked", state: "clean" });
+});
+
 test("buildOpenPrViews WIRES the hydrator: a dirty PR arrives at the sweep carrying mergeState dirty", async () => {
   // THE SEAM ITSELF. Every other sweep test hand-builds `OpenPrView` fixtures, so the wiring that
   // connects the gateway to the disposition table was never executed — which is exactly how the
@@ -193,6 +201,8 @@ test("buildOpenPrViews WIRES the hydrator: a dirty PR arrives at the sweep carry
 
   assert.equal(views.length, 1);
   assert.equal(views[0].mergeState, "dirty", "the LIST-omitted field is populated by the follow-up fetch");
+  assert.equal(views[0].mergeable, false, "raw mergeable is retained for downstream freshness policy");
+  assert.equal(views[0].mergeableState, "dirty", "raw mergeable_state is retained alongside normalized mergeState");
   assert.ok(
     seen.some((a) => a.some((x) => /\/pulls\/1074$/.test(x))),
     "it actually issued the single-PR GET — the whole point",

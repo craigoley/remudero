@@ -189,7 +189,7 @@ test("writeAtomic: tmpTag names the stage, so a directory scanner can tell a sta
 
   writeAtomic(p, "x", { io, tmpTag: "rotate-tmp" });
 
-  assert.match(writes[0]!, /\/ledger\.ndjson\.rotate-tmp-\d+-[a-z0-9]+$/);
+  assert.match(writes[0]!, /\/ledger\.ndjson\.rotate-tmp-\d+-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 });
 
 // ── writeAtomicIoFrom: the injected-seam adapter ─────────────────────────────────────────────

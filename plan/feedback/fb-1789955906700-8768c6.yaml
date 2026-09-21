@@ -1,0 +1,33 @@
+id: fb-1789955906700-8768c6
+ts: 2026-09-21T01:58:26.700Z
+raw: "Console first-read reliability defect observed in authenticated production
+  2026-09-21: Board and Needs-you first reads abort at the 5s client budget,
+  while an immediate retry returns verified live data. Core documents cold
+  status reads around 7.5s and same-event-loop expensive reads can prevent the
+  cache fallback timer from running. Make status, recent, and daemon-health
+  bounded reads return within the client budget on cold or blocked work without
+  blindly increasing timeouts; preserve honest stale and unavailable states. Add
+  deterministic cold and event-loop-blocked tests plus latency measurements."
+attachments: []
+origin: cli
+status: proposed
+reply_to: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6326
+summary:
+  headline: "Console read timeouts: implement fix or workaround"
+  what_happened: Board and Needs-you first-reads timeout at 5s client budget but
+    pass on retry. Core status reads take ~7.5s on cold start and block cache
+    fallback.
+  decision: Implement read optimization and testing; do not simply extend timeout
+  options:
+    - label: Optimize reads + tests
+      consequence: Fixes root cause, preserves honest state reporting, prevents future
+        regressions
+    - label: Extend client timeout
+      consequence: Stops errors immediately but masks problem; risks hiding real failures
+    - label: Revert changes
+      consequence: Restores prior stability but delays root-cause fix and loses improvements
+expansion: null
+submission_key: null
+thread_id: null
+answered_by: null

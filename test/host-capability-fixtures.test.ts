@@ -303,17 +303,65 @@ const DECLARED: readonly Declared[] = [
       "depends on the absent execute bit; these exist so rmSync can remove the fixture tree afterwards. They " +
       "disappear if and when the 0o000 sites do.",
   },
+  {
+    kind: "chmod",
+    file: "a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the durable cash-key fixture must be mode 0600; the recycler refuses weaker permissions.",
+  },
+  {
+    kind: "chmod",
+    file: "nothing-reclaims-the-images-the-recycle-pulls.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the durable cash-key fixture must be mode 0600; the recycler refuses weaker permissions.",
+  },
+  {
+    kind: "chmod",
+    file: "recycle-container.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the durable cash-key fixture must be mode 0600; the recycler refuses weaker permissions.",
+  },
+  {
+    kind: "chmod",
+    file: "recycle-container.test.ts",
+    key: "0o644",
+    count: 2,
+    reason: "W1-T3728: teardown restores the temporary durable cash-key fixture to a conventional file mode.",
+  },
+  {
+    kind: "chmod",
+    file: "recycle-container-bash3-portability.test.ts",
+    key: "0o600",
+    count: 2,
+    reason: "W1-T3728: the portability fixture provides a mode-0600 durable cash-key file.",
+  },
+  {
+    kind: "chmod",
+    file: "the-recovery-path-merges-into-a-shared-checkout.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the recovery fixture provides a mode-0600 durable cash-key file.",
+  },
+  {
+    kind: "chmod",
+    file: "the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the wait fixture provides a mode-0600 durable cash-key file.",
+  },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
   {
     kind: "platform-tool",
     file: "fleet-heartbeat.test.ts",
     key: "/usr/bin/date",
-    count: 4,
+    count: 1,
     reason:
-      "the BSD_DATE and IGNORES_D stubs emulate a foreign `date` by DELEGATING the parse to /usr/bin/date. On macOS " +
-      "that IS BSD date and rejects -d, so both tests fail on the mini and pass on a runner — two of the four " +
-      "divergences the host-parity baseline declares. Linux-only by construction; the file's own header says the " +
-      "branch has never run anywhere.",
+      "the fixture now selects the host's date binary: Linux keeps /usr/bin/date while macOS uses /bin/date, so " +
+      "the platform-dependent stubs exercise the same parser on both poles. Only the SYSTEM_DATE literal remains " +
+      "as a /usr/bin/date site in the Linux source tree; keep this count aligned with the measured corpus.",
   },
   {
     kind: "platform-tool",

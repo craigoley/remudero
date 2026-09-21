@@ -16,7 +16,7 @@
 # after the GH_TOKEN-survives-a-recycle rule was written (#2190) — the list was never a declared
 # rule, it was one script's local knowledge of what existed the day it was written.
 #
-# THIS IS A NAME LIST, NEVER A VALUE. Nothing declared here may hold a token, a key, or a path to
+# THIS IS A NAME LIST, NEVER A VALUE. Nothing in that list may hold a token, a key, or a path to
 # one — see deploy/recycle-container.sh's own header on why GH_TOKEN is never written to disk
 # (deliberately; deploy/entrypoint.sh). Adding a name here means only "a recycle must carry this
 # variable across a container replacement, not retype it"; it says nothing about the value, and
@@ -43,6 +43,8 @@ RMD_DAEMON_RUNTIME_ENV_VARS=(
   NODE_OPTIONS
   RMD_OPENWEIGHT_API_KEY
 )
+
+RMD_OPENWEIGHT_API_KEY_PATH="${RMD_OPENWEIGHT_API_KEY_PATH:-${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
 
 # W1-T1222: the console's own runtime names, read by `resolveServeHosts` in src/lib/serve.ts, NOT
 # by the daemon — a separate list rather than folded into the one above because

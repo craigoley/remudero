@@ -32,7 +32,7 @@ import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.j
  * tool list at all, the same structural guarantee isolation.ts's preflight probe
  * and flight-judge.ts's judge use: not a rule the model is trusted to follow, a
  * capability it does not have). Specialists ADVISE by posting a PR review
- * comment ({@link buildSpecialistCommentArgs} — `gh pr comment`, never a commit
+ * comment ({@link buildSpecialistCommentArgs} — `gh pr review --comment`, never a commit
  * status and never a merge); the GitHub-enforced gate DECIDES (Standing rule 3B).
  * This module never itself posts a commit status and never merges.
  */
@@ -360,7 +360,7 @@ export function buildSpecialistPrompt(input: SpecialistPromptInput): string {
     reasons || "  (triggered explicitly)",
     ``,
     `You are READ-ONLY: you may inspect the repo and the PR diff and use \`gh\` to`,
-    `post a PR review comment, but you must NEVER edit, modify, or write any code`,
+    `submit a PR review with a comment, but you must NEVER edit, modify, or write any code`,
     `or file. You NEVER post a commit status and you NEVER merge — you ADVISE; the`,
     `GitHub-enforced merge gate DECIDES (Standing rule 3B/12).`,
     ``,
@@ -372,8 +372,8 @@ export function buildSpecialistPrompt(input: SpecialistPromptInput): string {
     ``,
     `Read the PR diff (\`gh pr diff ${input.prUrl}\`), judge ONLY your rubric above`,
     `(other specialists, if any, cover the rest — do not restate their concerns),`,
-    `and post ONE PR review comment with your finding:`,
-    `  gh pr comment ${input.prUrl} --body "<your finding>"`,
+    `and submit ONE PR review with your finding:`,
+    `  gh pr review ${input.prUrl} --comment --body "<your finding>"`,
     ``,
     `MACHINE-READABLE OUTPUT (required, in addition to posting the comment): emit`,
     `exactly one line and nothing else on it:`,
@@ -388,7 +388,7 @@ export function buildSpecialistPrompt(input: SpecialistPromptInput): string {
 
 /**
  * The specialist's SDK tool allowlist. Read/Grep/Glob to inspect the repo,
- * Bash for `gh pr diff` / `gh pr comment` — and NOTHING that writes. This is
+ * Bash for `gh pr diff` / `gh pr review --comment` — and NOTHING that writes. This is
  * the SAME structural guarantee as isolation.ts's preflight probe and
  * flight-judge.ts's empty `JUDGE_TOOLS`: Write/Edit/NotebookEdit/MultiEdit are
  * never in the model's context, so a specialist cannot use one even if asked.
@@ -469,15 +469,15 @@ export function anySpecialistConcern(verdicts: SpecialistVerdict[]): boolean {
 // ── Posting the PR review comment (advisory only — NEVER a commit status) ──
 
 /**
- * Build the exact `gh` argv for posting a specialist's PR review comment.
+ * Build the exact `gh` argv for submitting a specialist's PR review comment.
  * Extracted as a pure builder (mirrors review.ts's `postReviewStatus` shape)
  * so "a specialist never posts a commit status and never merges" is
- * unit-testable without shelling out: this argv is `pr comment`, never
+ * unit-testable without shelling out: this argv is `pr review --comment`, never
  * `api ... statuses` (review.ts's REVIEW_CONTEXT path) and never touches
  * branch protection or a merge.
  */
 export function buildSpecialistCommentArgs(prUrl: string, body: string): string[] {
-  return ["pr", "comment", prUrl, "--body", body];
+  return ["pr", "review", prUrl, "--comment", "--body", body];
 }
 
 /** Render one combined PR-comment body from a panel's verdicts (used when a
@@ -493,7 +493,7 @@ export function renderSpecialistPanelComment(verdicts: SpecialistVerdict[]): str
 
 /**
  * Post one specialist's (or the panel's combined) review comment. Thin
- * wrapper over `gh pr comment` (runs outside the sandbox; TLS fails under
+ * wrapper over `gh pr review --comment` (runs outside the sandbox; TLS fails under
  * Seatbelt, same as review.ts's `postReviewStatus`) — WRITE-scoped to a PR
  * COMMENT only; it can never post a commit status and can never merge.
  * Untested by unit — it shells out; {@link buildSpecialistCommentArgs} carries

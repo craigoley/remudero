@@ -115,6 +115,9 @@ if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; the
   # shellcheck source=./runtime-env-vars.sh
   source "${RUNTIME_ENV_VARS_FILE}"
 fi
+# The isolated-script fixtures intentionally have no sibling runtime-env-vars.sh. Keep
+# their host-only key path deterministic without making it a container runtime name.
+: "${RMD_OPENWEIGHT_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
@@ -495,25 +498,27 @@ fi
 # tell the difference between that and a git that is simply absent, and refusing on undecidable
 # input would turn a network hiccup into a self-inflicted outage this guard exists to prevent.
 DAEMON_TREE="${STATE_DIR}/remudero"
+DIRTY_TRACKED_PATHS=()
+INCOMING_PATHS=()
+BLOCKING_PATHS=()
 if [ -e "${DAEMON_TREE}/.git" ]; then
   if git -C "${DAEMON_TREE}" fetch --quiet origin >/dev/null 2>&1; then
-    DIRTY_TRACKED_PATHS=()
     while IFS= read -r line || [ -n "${line}" ]; do
       DIRTY_TRACKED_PATHS+=("${line}")
     done < <(git -C "${DAEMON_TREE}" diff --name-only HEAD 2>/dev/null | sed '/^$/d')
     if [ "${#DIRTY_TRACKED_PATHS[@]}" -gt 0 ]; then
-      INCOMING_PATHS=()
       while IFS= read -r line || [ -n "${line}" ]; do
         INCOMING_PATHS+=("${line}")
       done < <(git -C "${DAEMON_TREE}" diff --name-only HEAD..origin/main 2>/dev/null | sed '/^$/d')
-      BLOCKING_PATHS=()
       for dirty_path in "${DIRTY_TRACKED_PATHS[@]}"; do
-        for incoming_path in "${INCOMING_PATHS[@]}"; do
-          if [ "${dirty_path}" = "${incoming_path}" ]; then
-            BLOCKING_PATHS+=("${dirty_path}")
-            break
-          fi
-        done
+        if [ "${#INCOMING_PATHS[@]}" -gt 0 ]; then
+          for incoming_path in "${INCOMING_PATHS[@]}"; do
+            if [ "${dirty_path}" = "${incoming_path}" ]; then
+              BLOCKING_PATHS+=("${dirty_path}")
+              break
+            fi
+          done
+        fi
       done
       if [ "${#BLOCKING_PATHS[@]}" -gt 0 ]; then
         echo "recycle-container: REFUSING — ${DAEMON_TREE} has local changes that origin/main's own" >&2
@@ -710,6 +715,66 @@ else
 fi
 
 CAPTURED_TOKEN="$(CAPTURED_get GH_TOKEN)"
+
+# ── 3.5. THE CASH CREDENTIAL MUST HAVE A DURABLE, SAFE HOST HOME ──────────────────────────────
+# W1-T3728: an outgoing container is not a credential store. The cash adapter needs a key after a
+# replacement, so take it from a host-only file rather than trusting a possibly absent (or stale)
+# container value. The requirement is conditional on the configuration which actually enables the
+# blocked-auction cash fallback: old Claude-only installations deliberately have no provider config
+# mount, and manufacturing a secret requirement for them would turn a backwards-compatible recycle
+# into an unrelated outage. A configured cash fallback, by contrast, always refuses before even an
+# image pull. The value never appears in output or a path mounted into the replacement container.
+CASH_KEY_REQUIRED=0
+CASH_CONFIG_PATH="${CONTAINER_CONFIG_DIR}/config.json"
+if [ -f "${CASH_CONFIG_PATH}" ]; then
+  if CASH_KEY_CONFIG_STATE="$(node -e '
+const fs = require("node:fs");
+const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const workers = config.workerProviders ?? {};
+const enabled = Array.isArray(workers.enabled) ? workers.enabled : [];
+const cashEnabled = enabled.includes("cash") || enabled.includes("openweight");
+process.stdout.write(workers.cashFallbackWhenBlocked === true && cashEnabled ? "required" : "not-required");
+' "${CASH_CONFIG_PATH}" 2>/dev/null)"; then :
+  else
+    echo "recycle-container: REFUSING — could not read the mounted provider configuration." >&2
+    echo "  ${CASH_CONFIG_PATH} is present but not parseable; ${CONTAINER_NAME} is untouched." >&2
+    exit 1
+  fi
+  if [ "${CASH_KEY_CONFIG_STATE}" = "required" ]; then
+    CASH_KEY_REQUIRED=1
+  fi
+fi
+
+if [ "${CASH_KEY_REQUIRED}" -eq 1 ]; then
+  CASH_KEY_PATH="${RMD_OPENWEIGHT_API_KEY_PATH}"
+  CASH_KEY_MODE=""
+  if [ -L "${CASH_KEY_PATH}" ] || [ ! -f "${CASH_KEY_PATH}" ] || [ ! -r "${CASH_KEY_PATH}" ]; then
+    echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+    echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
+    exit 1
+  fi
+  if CASH_KEY_MODE="$(stat -c '%a' "${CASH_KEY_PATH}" 2>/dev/null)"; then :
+  elif CASH_KEY_MODE="$(stat -f '%Lp' "${CASH_KEY_PATH}" 2>/dev/null)"; then :
+  else
+    CASH_KEY_MODE=""
+  fi
+  if [ "${CASH_KEY_MODE}" != "600" ]; then
+    echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+    echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
+    exit 1
+  fi
+  CASH_KEY_LINES="$(awk 'NF { count++; last=$0 } END { if (count == 1) print last; else exit 1 }' "${CASH_KEY_PATH}" 2>/dev/null || true)"
+  if [ -z "${CASH_KEY_LINES}" ]; then
+    echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+    echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
+    exit 1
+  fi
+  # CRLF is an on-disk representation detail; the container receives the key without its record
+  # delimiter. Do not trim any other byte -- API keys are opaque values.
+  CASH_KEY_LINES="${CASH_KEY_LINES%$'\r'}"
+  CAPTURED_set RMD_OPENWEIGHT_API_KEY "${CASH_KEY_LINES}"
+  CAPTURED_SOURCE_set RMD_OPENWEIGHT_API_KEY "durable-host-secret"
+fi
 
 # ── APP AUTH IS A DURABLE CREDENTIAL, SO THE GH_TOKEN REFUSAL DOES NOT APPLY TO IT ──────────────
 # The refusal below exists for exactly ONE reason, stated in its own text: GH_TOKEN lives only in

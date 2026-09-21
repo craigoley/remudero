@@ -171,6 +171,118 @@ test("distance refresh is still bounded to one oldest PR per pass", async () => 
   assert.deepEqual(calls.map((candidate) => candidate.prNumber), [4804]);
 });
 
+test("W1-T3920 criterion 1: stale-blocked green auto-merge PR refreshes below the ordinary threshold", async () => {
+  const target = pr({
+    prNumber: 4830,
+    prUrl: "https://github.com/craigoley/remudero/pull/4830",
+    headSha: "stale-blocked-head",
+    autoMergeArmed: true,
+    mergeState: "clean", // the REST hydrator normalizes raw `blocked` to non-conflict `clean`
+    mergeable: true,
+    mergeableState: "blocked",
+    checksState: "green",
+    reviewState: "success",
+  });
+  const behindMainByPr = new Map([[4830, 1]]);
+  const candidates = openPrsBehindMain([target], behindMainByPr, POLICY);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.updateReason, "stale-blocked");
+  assert.equal(selectUpdateBranchTarget([target], NOW, new Set(), new Map(), new Set(), behindMainByPr, POLICY)?.prNumber, 4830);
+
+  const calls: ArmedStalledPr[] = [];
+  await runSweep(
+    [target],
+    deps({
+      behindMainByPr,
+      updateBranch: (candidate) => {
+        calls.push(candidate);
+        return "updated";
+      },
+    }),
+    POLICY,
+  );
+  assert.equal(calls[0]?.prNumber, 4830);
+});
+
+test("W1-T3920 criterion 2: stale-blocked PR with non-green checks stays untouched", () => {
+  const pending = pr({
+    prNumber: 4831,
+    autoMergeArmed: true,
+    mergeState: "clean",
+    mergeable: true,
+    mergeableState: "blocked",
+    checksState: "pending",
+    reviewState: "success",
+  });
+  const red = pr({
+    prNumber: 4832,
+    autoMergeArmed: true,
+    mergeState: "clean",
+    mergeable: true,
+    mergeableState: "blocked",
+    checksState: "red",
+    reviewState: "success",
+  });
+  const behind = new Map([[4831, 1], [4832, 1]]);
+  assert.deepEqual(openPrsBehindMain([pending, red], behind, POLICY), []);
+});
+
+test("W1-T3920 criterion 3: stale-blocked refresh requires an armed non-conflicting PR", () => {
+  const unarmed = pr({
+    prNumber: 4833,
+    autoMergeArmed: false,
+    mergeState: "clean",
+    mergeable: true,
+    mergeableState: "blocked",
+    checksState: "green",
+    reviewState: "success",
+  });
+  const conflicting = pr({
+    prNumber: 4834,
+    autoMergeArmed: true,
+    mergeState: "dirty",
+    mergeable: false,
+    mergeableState: "blocked",
+    checksState: "green",
+    reviewState: "success",
+  });
+  const behind = new Map([[4833, 1], [4834, 1]]);
+  assert.deepEqual(openPrsBehindMain([unarmed, conflicting], behind, POLICY), []);
+});
+
+test("W1-T3920 criterion 4: ordinary distance refresh retains its threshold and bound", () => {
+  const inside = pr({ prNumber: 4835, headSha: "inside" });
+  const older = pr({ prNumber: 4836, headSha: "older", lastActivityAt: "2026-09-09T08:00:00Z" });
+  const younger = pr({ prNumber: 4837, headSha: "younger", lastActivityAt: "2026-09-09T10:00:00Z" });
+  const distances = new Map([[4835, 10], [4836, 11], [4837, 12]]);
+  assert.deepEqual(openPrsBehindMain([inside], distances, POLICY), []);
+  assert.equal(selectUpdateBranchTarget([younger, older], NOW, new Set(), new Map(), new Set(), distances, POLICY)?.prNumber, 4836);
+});
+
+test("W1-T3920 criterion 5: stale-blocked selection carries an explicit update reason", async () => {
+  const target = pr({
+    prNumber: 4838,
+    autoMergeArmed: true,
+    mergeState: "clean",
+    mergeable: true,
+    mergeableState: "blocked",
+    checksState: "green",
+    reviewState: "success",
+  });
+  const rows: Array<Record<string, unknown>> = [];
+  await runSweep(
+    [target],
+    deps({
+      behindMainByPr: new Map([[4838, 2]]),
+      appendLine: (_path, row) => rows.push(row),
+      updateBranch: () => "updated",
+    }),
+    POLICY,
+  );
+  assert.equal(rows.find((row) => row.step === "sweep.update_branch.attempted")?.update_reason, "stale-blocked");
+  assert.equal(rows.find((row) => row.step === "sweep.update_branch.updated")?.update_reason, "stale-blocked");
+});
+
 test("the update-branch REST call carries an expected head sha lease", () => {
   const argv = ghUpdateBranchArgv("craigoley", "remudero", 4806, "head-before-refresh");
 

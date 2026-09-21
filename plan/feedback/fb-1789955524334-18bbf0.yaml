@@ -1,0 +1,20 @@
+id: fb-1789955524334-18bbf0
+ts: 2026-09-21T01:52:04.334Z
+raw: "Dedicated-repo Architect bootstrap defect observed 2026-09-21: triage
+  against remudero-console resolves the target policy correctly, then
+  renderWorkerSettings reads target settings/worker.json and fails ENOENT.
+  Normal console daemon task workers use the executor root settings and hooks
+  successfully. Split target root from executor root: target owns plan,
+  feedback, git identity, and mounts; executor owns validated sandbox settings
+  and hooks, with no silent weakening. Prove a target with mounts but no
+  settings can triage, review, and fix while retaining target mount policy."
+attachments: []
+origin: cli
+status: grilling
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
+answered_by: null

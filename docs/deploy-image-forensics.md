@@ -31,7 +31,7 @@ could spawn. That is fixed below. UNVERIFIED until the next build runs and someo
 FIVE REQUIREMENTS, each established rather than assumed — see the report in
 state/recon-container-build.md for the execution evidence behind each one.
 
-## `FROM node:22.22.3-bookworm-slim` — the exact-version pin
+## `FROM node:22.22.3-bookworm-slim@sha256:…` — the exact-version and digest pin
 
 W1-T2770: PINNED TO THE EXACT `.nvmrc` VERSION, NOT THE FLOATING `node:22-bookworm-slim` TAG.
 `scripts/coverage-merge-ratchet.mjs` reaches into `internal/test_runner/coverage` (Node's own
@@ -42,16 +42,17 @@ either side (MEASURED against `# tests 13224 # pass 13217 # fail 6`, W1-T2769's 
 The tag arrived through an unrelated rebuild, silently — the floating `22` slot moved and no
 file in this repo did — which is the whole reason this pin exists.
 
-WHY NOT A DIGEST. A digest is stronger (it pins every apt-layer patch too) but this repo has
-no digest-renewal process today; an unrenewed digest quietly rots the base's security-patch
-surface, trading a loud version mismatch for a quiet unpatched-base failure. The exact version
-tag still floats within patch-level rebuilds of `node:22.22.3-bookworm-slim`, which is the
-residual risk — smaller than a digest's unmaintained-freeze risk, and made loud by W1-T2770's
-`ci-parity.ts` cluster whenever it happens (the `appliesTo` fires on any drift from
-`.nvmrc`, not only the specific 22.22.3 -> 22.23.2 direction that caused today's outage).
+THE DIGEST NOW CLOSES THAT RESIDUAL RISK. The `FROM` line carries both the exact `.nvmrc` tag and
+the verified multi-platform manifest digest. `.github/dependabot.yml` watches the `/deploy`
+Dockerfile and opens the renewal PR when the base image changes, so the digest is immutable during
+builds without becoming a silently unmaintained freeze. W1-T2770's `ci-parity.ts` cluster still
+fires on any runtime drift from `.nvmrc`, including the specific 22.22.3 -> 22.23.2 direction that
+caused the outage.
 
-UPDATING THE PIN. Bump both this tag AND `.nvmrc` in the same commit; the cluster's
-self-expiry then re-arms itself around the new pin the moment the image lands.
+UPDATING THE PIN. Bump `.nvmrc`, the `FROM` tag, and its digest in the same reviewed change; the
+Docker Dependabot lane handles routine digest refreshes, while a Node version bump remains a
+coordinated change. The cluster's self-expiry then re-arms itself around the new pin the moment
+the image lands.
 
 ## `RUN apt-get install … tini ca-certificates curl git` — REQ 1, an init that reaps
 
@@ -216,7 +217,7 @@ cannot do better from here, because at this point in the file there is no `/app`
 to pin against. Installing browsers is now downstream of the lockfile COPY for exactly that
 reason; nothing is installed at this layer.
 
-## `ARG CLAUDE_CODE_VERSION`, `ENV DISABLE_AUTOUPDATER=1` and the global `claude` install — REQ 7
+## The image-local CLI lockfile, `ENV DISABLE_AUTOUPDATER=1` and REQ 7
 
 ── REQ 7: THE CLAUDE CODE CLI — WITHOUT IT NO WORKER CAN SPAWN ──────────────────────────────
 MEASURED on the first real image built from this file and run on an Azure VM: `./bin/rmd --help`
@@ -238,9 +239,11 @@ PINNED, and to THIS version for two independent reasons that agree:
   2. The CLI and `@anthropic-ai/claude-agent-sdk` ship in LOCKSTEP — 2.1.N alongside 0.3.N for
      every recent N. package-lock.json resolves the SDK to 0.3.220, so 2.1.220 is the CLI half of
      the pair this repo already depends on.
-An unpinned `@latest` would let the image change under us between builds — the same class of
-failure as an auto-updater rewriting a binary mid-run, which src/lib/env.ts's DISABLE_AUTOUPDATER
-grant records having been observed on this fleet.
+The committed `deploy/package-lock.json` records the registry tarball integrity for this CLI and
+the opt-in Codex CLI beside it. The Dockerfile runs `npm ci` against that lockfile and checks both
+resolved versions against their operator-visible ARGs, so an unpinned `@latest` cannot change the
+image between builds — the same class of failure as an auto-updater rewriting a binary mid-run,
+which src/lib/env.ts's DISABLE_AUTOUPDATER grant records having been observed on this fleet.
 
 DISABLE_AUTOUPDATER=1 IS SET IMAGE-WIDE, deliberately wider than the runtime's own grant.
 `buildWorkerEnv` (src/lib/env.ts) adds it to every WORKER child, but a `claude` invoked any other
@@ -255,9 +258,10 @@ possible. In a container with a pinned install and no autoupdater those two read
 identical for the life of the image — so a drift report from inside this image is a real signal
 that something rewrote the binary, not the routine occurrence it is on the shared-install host.
 
-The `claude --version` below is not decoration. It is the build-time PROOF that npm's global bin
-directory is on PATH in this base. If it is not, the build fails HERE — loudly, on the build fleet
-— rather than shipping an image whose only symptom is that no worker can ever spawn.
+The `claude --version` and `codex --version` calls below are not decoration. They are the build-time
+PROOF that the lockfile-installed bin directory is on PATH in this base. If either is not, the
+build fails HERE — loudly, on the build fleet — rather than shipping an image whose only symptom is
+that no worker can ever spawn.
 
 `npm_config_cache` + `rm -rf` in the same RUN is REQ 14. This layer is the one the earlier note in
 REQ 11 blamed for the shipped root-owned cache; it does create one, but the chown below repairs it,

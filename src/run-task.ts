@@ -443,6 +443,7 @@ import {
   hydratePlanFilingFiles,
   hydrateSupersessionVerdicts,
   hydrateWorkflowRuns,
+  hydrateMergeStateObservations,
   hydrateMergeStates,
   liveStateFromRest,
   mapRestPr,
@@ -6165,8 +6166,8 @@ async function runReview(args: {
   // W1-T359: the rubric's advisory section — present whenever `judgeRubric` found
   // something, INDEPENDENT of `verdict.state` (a rubric concern, e.g. two unrelated
   // things in one PR, can surface on an otherwise-passing review). Folded into the
-  // SAME best-effort PR comment as the unmet-criteria block below rather than a
-  // second `gh pr comment` call, so a rubric finding never gets its own separate
+  // SAME best-effort PR review as the unmet-criteria block below rather than a
+  // second review submission, so a rubric finding never gets its own separate
   // network path to fail on.
   const rubricSection = rubric ? rubricAdvisorySection(rubric) : undefined;
   // W1-T434: the declared-scope overrun's own section, folded into the SAME best-effort comment
@@ -6192,33 +6193,22 @@ async function runReview(args: {
   // otherwise-passing review — the passing case being exactly where nothing else would mention it.
   // Advisory only: blocking is W1-T323's open adjudication, not this call site's.
   const inverseScopeSection = inverseScopeAdvisorySection(verdict.unwiredAdvisories);
-  if (hasUnmet || rubricSection || scopeSection || unwiredSection || inverseScopeSection) {
-    // Post the full unmet list (+ the advisory rubric section, if any) as a PR
-    // comment so a blocked PR — or one with a rubric concern — names its gap in
-    // one place a human (or the next run) reads. Best-effort — never blocks the
-    // verdict: `rubricSection` is pure text, appended below the binding verdict's
-    // own block, never merged into or read by verdict/arm logic.
-    const parts: string[] = [];
-    if (hasUnmet) {
-      parts.push(
-        `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
-          unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
-          (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
-          `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
-      );
-    }
-    if (rubricSection) parts.push(rubricSection);
-    if (scopeSection) parts.push(scopeSection);
-    if (unwiredSection) parts.push(unwiredSection);
-    if (inverseScopeSection) parts.push(inverseScopeSection);
-    const body = parts.join("\n\n---\n\n");
-    // W1-T2419: THE ONE POST SITE — postReviewCommentGuarded (lib/review.ts) refuses to append
-    // when `body` is byte-identical to the newest comment already standing on this PR, so an
-    // unmoved head with an unchanged verdict no longer accumulates a repeat comment on every
-    // sweep pass (#3140: ten byte-identical failure comments across ten consecutive passes).
-    // Comment posting stays best-effort either way — see that function's own doc.
-    postReviewCommentGuarded(prUrl, body);
+  const parts: string[] = [];
+  if (hasUnmet) {
+    parts.push(
+      `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
+        unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
+        (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
+        `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
+    );
   }
+  if (rubricSection) parts.push(rubricSection);
+  if (scopeSection) parts.push(scopeSection);
+  if (unwiredSection) parts.push(unwiredSection);
+  if (inverseScopeSection) parts.push(inverseScopeSection);
+  if (parts.length === 0) parts.push(`**remudero-review=${verdict.state}** — ${verdict.summary}`);
+  const body = parts.join("\n\n---\n\n");
+  postReviewCommentGuarded(prUrl, body, { commitSha: headSha });
   // W1-T63/P10-a: the console summary distinguishes a completed review from a
   // floor-only one (reviewer never attempted, or attempted but walled/failed).
   // W1-T65/P15: and now names how many criteria the FLOOR itself OBSERVED
@@ -32423,11 +32413,16 @@ export function buildOpenPrViews(
   // 5,735 sweeps — and hard-capped, so the pathological case cannot run away. Best-effort by
   // construction: an exhausted budget yields an empty map and every PR keeps the `undefined` it
   // has carried since the REST migration, i.e. exactly today's behaviour.
-  const mergeStates = hydrateMergeStates(
+  const mergeStateObservations = hydrateMergeStateObservations(
     owner,
     repo,
     raw.map((p) => p.number),
     fetch,
+  );
+  const mergeStates = new Map(
+    [...mergeStateObservations]
+      .filter(([, observation]) => observation.state !== undefined)
+      .map(([number, observation]) => [number, observation.state!] as const),
   );
 
   // CONFLICT EVIDENCE (W1-T984 — the `mergeConflict` half of the row directly above's own
@@ -32767,6 +32762,10 @@ export function buildOpenPrViews(
       // value every PR has always carried — see lib/sweep.ts's DISPOSITION_RULES for how the
       // policy-gated `conflicted` row and the `blocked-ambiguous` row beneath it each read this.
       mergeConflict: mergeConflicts.get(pr.number),
+      // W1-T3920: the normalized mergeState intentionally maps raw `blocked` to `clean`; retain
+      // both raw fields so the stale-blocked refresh predicate is reachable in the real gateway.
+      mergeable: mergeStateObservations.get(pr.number)?.mergeable,
+      mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
       workflowRuns: workflowRuns.get(pr.number),
       // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
       // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that
@@ -38604,6 +38603,8 @@ export interface VerifyHumanRouteDeps {
   judge: (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict>;
   /** Verdicts already recorded, keyed by {@link observedStateKey}. */
   priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>;
+  /** Optional caller-selected batch size; omitted preserves the historical unlimited pass. */
+  maxJudged?: number;
   /** Stages a needs_operator shard as an inbox proposal. Called ONLY on that arm. */
   stageProposal: (proposal: Proposal) => void;
   /** Writes the {@link VERIFY_HUMAN_JUDGED_STEP} row. Called on BOTH arms, always. */
@@ -38611,12 +38612,13 @@ export interface VerifyHumanRouteDeps {
   runId: string;
 }
 
-/** What one pass did. `skipped` are the shards whose observed state was already settled. */
+/** What one pass did. `skipped` are settled states; `deferred` are still due for a later pass. */
 export interface VerifyHumanRouteResult {
   judged: number;
   needsOperator: string[];
   backlog: string[];
   skipped: string[];
+  deferred: string[];
 }
 
 /**
@@ -38635,14 +38637,19 @@ export async function routeVerifyHumanBacklog(
   deps: VerifyHumanRouteDeps,
 ): Promise<VerifyHumanRouteResult> {
   const due = shardsNeedingJudgement(shards, deps.priorVerdicts);
+  // W1-T3921: failed verdict remains eligible for the next batch
   const dueIds = new Set(due.map((s) => s.id));
+  // W1-T3921: --limit <n> applies only to due observed states
+  const toJudge = deps.maxJudged === undefined ? due : due.slice(0, deps.maxJudged);
   const result: VerifyHumanRouteResult = {
     judged: 0,
     needsOperator: [],
     backlog: [],
     skipped: shards.filter((s) => !dueIds.has(s.id)).map((s) => s.id),
+    // W1-T3921: deferred due work remains due for the next pass
+    deferred: due.slice(toJudge.length).map((s) => s.id),
   };
-  for (const shard of due) {
+  for (const shard of toJudge) {
     const verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
     // UNCONDITIONAL, and BEFORE either arm: a crash between the verdict and its effect leaves
     // the verdict readable rather than leaving a silent gap.
@@ -38700,9 +38707,17 @@ export async function verifyHumanSweepCommand(
 ): Promise<number> {
   const root = deps.root ?? repoRoot;
   const dryRun = rest.includes("--dry-run");
-  const badArg = unknownArgError("verify-human-sweep", rest, ["--dry-run"], []);
+  const badArg = unknownArgError("verify-human-sweep", rest, ["--limit"], ["--dry-run"]);
   if (badArg) {
     console.error(`${badArg}\n` + USAGE);
+    return 2;
+  }
+  const limitProvided = rest.includes("--limit");
+  const limitText = flagValue(rest, "--limit");
+  const limit = limitProvided && limitText !== undefined && /^[1-9]\d*$/.test(limitText) ? Number(limitText) : undefined;
+  // W1-T3921: invalid batch limits refuse before any sweep side effect
+  if (limitProvided && (limit === undefined || !Number.isSafeInteger(limit))) {
+    console.error("rmd verify-human-sweep: --limit must be a positive safe integer");
     return 2;
   }
 
@@ -38717,8 +38732,10 @@ export async function verifyHumanSweepCommand(
 
   if (dryRun) {
     const due = shardsNeedingJudgement(shards, priorVerdicts);
-    console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${due.length} would be judged, ${shards.length - due.length} already settled. Nothing spent.`);
-    for (const d of due) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
+    const selected = limit === undefined ? due : due.slice(0, limit);
+    const deferred = due.length - selected.length;
+    console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${selected.length} would be judged, ${shards.length - due.length} already settled, ${deferred} deferred due. Nothing spent.`);
+    for (const d of selected) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
     return 0;
   }
 
@@ -38733,6 +38750,7 @@ export async function verifyHumanSweepCommand(
       settingsFile: join(root, "settings", "worker.json"),
     }),
     priorVerdicts,
+    maxJudged: limit,
     stageProposal: (proposal) =>
       void updateProposalRegistry(registryPath, (current) =>
         current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
@@ -38741,7 +38759,8 @@ export async function verifyHumanSweepCommand(
     runId: `VHSWEEP-${(deps.clock ?? systemClock).iso()}`,
   });
 
-  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled.`);
+  const deferred = result.deferred ?? [];
+  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
   for (const id of result.needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
   return 0;
 }
@@ -41947,10 +41966,10 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "verify-human-sweep",
-    syntax: "rmd verify-human-sweep [--dry-run]",
+    syntax: "rmd verify-human-sweep [--dry-run] [--limit <n>]",
     summary: "Judge the parked verify:human backlog and surface only the shards that still need you.",
     detail:
-      "the verify:human backlog, judged (W1-T3188, operator direction 2026-09-08): every queued verify:human shard is put to an LLM judge with the state a person would need — its title, rationale, acceptance, age, whether its depends_on have merged, and whether its id is cited anywhere in src/ — and asked only whether it STILL needs the operator, never whether the work is right. A needs_operator verdict stages an ordinary inbox proposal he ratifies with `rmd approve`; a backlog verdict leaves it in the visible Awaiting-verification list, off the ask count. TOUCHES NO PLAN FILE and cannot: it writes ledger rows and stages proposals, and there is no code path that edits a shard, flips a verify: field, or closes anything. FAILS OPEN — a throwing, timing-out or unparseable verdict routes to needs_operator, because the costly direction is an outage quietly deciding the operator need not see something; such a verdict is marked and NOT cached, so a transient failure is re-asked rather than pinned. Judged once per OBSERVED STATE (task id + whether deps merged + whether cited in src), never once per poll, so a dependency merging re-opens the question and a refresh does not. --dry-run judges nothing, spends nothing, and reports which shards a real pass would ask about",
+      "the verify:human backlog, judged (W1-T3188, operator direction 2026-09-08): every queued verify:human shard is put to an LLM judge with the state a person would need — its title, rationale, acceptance, age, whether its depends_on have merged, and whether its id is cited anywhere in src/ — and asked only whether it STILL needs the operator, never whether the work is right. A needs_operator verdict stages an ordinary inbox proposal he ratifies with `rmd approve`; a backlog verdict leaves it in the visible Awaiting-verification list, off the ask count. TOUCHES NO PLAN FILE and cannot: it writes ledger rows and stages proposals, and there is no code path that edits a shard, flips a verify: field, or closes anything. FAILS OPEN — a throwing, timing-out or unparseable verdict routes to needs_operator, because the costly direction is an outage quietly deciding the operator need not see something; such a verdict is marked and NOT cached, so a transient failure is re-asked rather than pinned. Judged once per OBSERVED STATE (task id + whether deps merged + whether cited in src), never once per poll, so a dependency merging re-opens the question and a refresh does not. --dry-run judges nothing, spends nothing, and reports which shards a real pass would ask about. --limit <n> yields after at most n currently due states; omitted preserves the unlimited pass, and deferred due work remains eligible for the next invocation",
   },
   {
     name: "rule",

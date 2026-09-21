@@ -639,10 +639,43 @@ export function mergeStateFromRest(row: { mergeable_state?: string | null; merge
   return "clean";
 }
 
-/** Fetch `mergeable_state` for up to {@link MERGE_STATE_HYDRATION_CAP} PRs, as a map from PR number to
- *  the narrowed state; absent means not known. Invariant: best-effort per PR — a throw (rate limit, a
- *  404 on a PR closed mid-pass, a network blip) skips that PR, because a degraded disposition beats a
- *  sweep that dispositions nothing. Exhausted, the map comes back empty and nothing changes. */
+/** Raw merge facts retained alongside normalized conflict state; `blocked` otherwise maps to `clean`. */
+export interface MergeStateObservation {
+  state?: MergeState;
+  mergeable?: boolean;
+  mergeableState?: string;
+}
+
+/** Bounded best-effort hydration; unknown or failed reads are omitted, never guessed. */
+export function hydrateMergeStateObservations(
+  owner: string,
+  repo: string,
+  prNumbers: readonly number[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): Map<number, MergeStateObservation> {
+  const out = new Map<number, MergeStateObservation>();
+  for (const n of prNumbers.slice(0, cap)) {
+    try {
+      const row = fetch(singlePrRestArgs(owner, repo, n)) as { mergeable_state?: string | null; mergeable?: boolean | null };
+      const state = mergeStateFromRest(row);
+      const mergeableState = typeof row.mergeable_state === "string" ? row.mergeable_state.toLowerCase() : undefined;
+      const mergeable = typeof row.mergeable === "boolean" ? row.mergeable : undefined;
+      if (state !== undefined || mergeableState !== undefined || mergeable !== undefined) {
+        out.set(n, {
+          ...(state === undefined ? {} : { state }),
+          ...(mergeableState === undefined ? {} : { mergeableState }),
+          ...(mergeable === undefined ? {} : { mergeable }),
+        });
+      }
+    } catch {
+      /* best-effort: this PR keeps the pre-existing undefined, the pass continues */
+    }
+  }
+  return out;
+}
+
+/** Fetch bounded merge states; failed reads remain absent so a degraded pass changes nothing. */
 export function hydrateMergeStates(
   owner: string,
   repo: string,
@@ -651,14 +684,8 @@ export function hydrateMergeStates(
   cap: number = MERGE_STATE_HYDRATION_CAP,
 ): Map<number, MergeState> {
   const out = new Map<number, MergeState>();
-  for (const n of prNumbers.slice(0, cap)) {
-    try {
-      const row = fetch(singlePrRestArgs(owner, repo, n)) as { mergeable_state?: string | null; mergeable?: boolean | null };
-      const state = mergeStateFromRest(row);
-      if (state !== undefined) out.set(n, state);
-    } catch {
-      /* best-effort: this PR keeps the pre-existing undefined, the pass continues */
-    }
+  for (const [n, observation] of hydrateMergeStateObservations(owner, repo, prNumbers, fetch, cap)) {
+    if (observation.state !== undefined) out.set(n, observation.state);
   }
   return out;
 }
