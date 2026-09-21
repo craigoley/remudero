@@ -504,6 +504,83 @@ export function isSafeRepoName(repo: unknown): repo is string {
 
 const KICK_PREFIX = "KICK_REQUESTED-";
 
+// ── CONSOLE PR-ACTION MARKERS ──────────────────────────────────────────────
+//
+// A selected-repository console never starts a host process. It writes one bounded request the
+// repository's daemon consumes at its next normal poll, mirroring `KICK_REQUESTED-*` above. The
+// marker contains no command, URL, token, or transcript: only the fixed action, the positive PR
+// number and the hashed caller identity that panel-actions.ts captured at birth.
+
+export type PrActionName = "fix" | "review";
+
+export interface PrActionRequest {
+  action: PrActionName;
+  prNumber: number;
+  origin: string;
+  requestedAt: string;
+}
+
+const PR_ACTION_PREFIX = "PR_ACTION_REQUESTED-";
+
+export function isPrActionName(value: unknown): value is PrActionName {
+  return value === "fix" || value === "review";
+}
+
+function isSafePrNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/** The one marker identity for one operator action against one pull request. */
+export function prActionFilePath(root: string, action: PrActionName, prNumber: number): string {
+  if (!isPrActionName(action)) throw new Error(`prActionFilePath: unsafe action ${JSON.stringify(action)}`);
+  if (!isSafePrNumber(prNumber)) throw new Error(`prActionFilePath: unsafe PR number ${JSON.stringify(prNumber)}`);
+  return join(root, "state", `${PR_ACTION_PREFIX}${action}-${prNumber}`);
+}
+
+/**
+ * Record one idempotent PR action request. Re-requesting the exact action for the exact PR updates
+ * its observed request time but cannot create a second concurrent daemon action.
+ */
+export function requestPrAction(root: string, action: PrActionName, prNumber: number, origin: string): PrActionRequest {
+  const request: PrActionRequest = { action, prNumber, origin, requestedAt: new Date().toISOString() };
+  const path = prActionFilePath(root, action, prNumber);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(request, null, 2));
+  return request;
+}
+
+/**
+ * Read action requests oldest first without consuming them. The daemon keeps a marker while an
+ * established fix/review command is running, so a duplicate click cannot start a parallel worker.
+ * Malformed markers are withheld rather than reinterpreted as a host command.
+ */
+export function pendingPrActions(root: string): PrActionRequest[] {
+  const dir = join(root, "state");
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((name) => name.startsWith(PR_ACTION_PREFIX));
+  } catch {
+    return [];
+  }
+  const requests: PrActionRequest[] = [];
+  for (const name of names) {
+    try {
+      const value = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      if (isPrActionName(value?.action) && isSafePrNumber(value?.prNumber) && typeof value?.origin === "string" && typeof value?.requestedAt === "string") {
+        requests.push({ action: value.action, prNumber: value.prNumber, origin: value.origin, requestedAt: value.requestedAt });
+      }
+    } catch {
+      // A corrupt state marker is not actionable. Leave it in place for forensic inspection.
+    }
+  }
+  return requests.sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
+}
+
+/** Clear the one marker the daemon just reached a terminal outcome for. */
+export function clearPrAction(root: string, action: PrActionName, prNumber: number): boolean {
+  return clearFlag(prActionFilePath(root, action, prNumber));
+}
+
 /**
  * W1-T429: `repo` is OPTIONAL and, when supplied, folds into the marker filename via
  * {@link repoScopedTaskKey} — `KICK_REQUESTED-<repo>:<taskId>` instead of the legacy

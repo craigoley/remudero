@@ -1951,10 +1951,12 @@ import {
   checkSharedPause,
   clearKick,
   consumeDrainNow,
+  clearPrAction,
   consumeStop,
   isQuietHours,
   pauseDetail,
   pendingKicks,
+  pendingPrActions,
   requestPause,
   requestStop,
   resumeFleet,
@@ -29937,6 +29939,21 @@ export async function daemonCommand(
         pendingKicks: () => pendingKicks(config.root),
         clearKick: (taskId) => clearKick(config.root, taskId),
         consumeDrainNow: () => consumeDrainNow(config.root),
+        // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
+        // marker; this is the sole point that reaches the established selected-repository CLI
+        // commands. Their own disposition, strike, worktree and review-lock gates remain the
+        // authority -- an action request is never a bypass.
+        pendingPrActions: () => pendingPrActions(config.root),
+        clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
+        runPrAction: async (request) => {
+          const args = [String(request.prNumber), "--repo", target.repo];
+          const exitCode = request.action === "fix"
+            ? await fixCommand(args)
+            : await reviewCommand(String(request.prNumber), ["--repo", target.repo]);
+          return exitCode === 0
+            ? { outcome: "completed", detail: `${request.action} command accepted PR #${request.prNumber}` }
+            : { outcome: "refused", detail: `${request.action} command refused PR #${request.prNumber} (exit ${exitCode})` };
+        },
         // W1-T2568: keep the existing sleep clock for nested in-flight tickers, and interrupt
         // ONLY the top-level poll waits that return to the ordinary full-sweep gate. Sharing the
         // interruptible clock with a heartbeat ticker could consume a wake without reconciling.

@@ -20,6 +20,7 @@ import {
   isQuietHours,
   isStopped,
   kickFilePath,
+  pendingPrActions,
   pauseDetail,
   pendingKicks,
   requestPause,
@@ -253,6 +254,7 @@ test("every panel-actions.ts write route carries its design-(i)-ruled tier", () 
   assert.equal(tierOf("/v1/manual/approve"), "high");
   assert.equal(tierOf("/v1/drain/kick"), "high");
   assert.equal(tierOf("/v1/drain/run"), "high");
+  assert.equal(tierOf("/v1/pr-actions"), "high");
 });
 
 test("no bearer token at all -> 401", async () => {
@@ -893,14 +895,61 @@ test("both /v1/drain/kick and /v1/drain/run are write-scoped: a read token gets 
   assert.equal(consumeDrainNow(root), null);
 });
 
+// ── Selected-repository PR repair controls (W1-T3989) ────────────────────────
+
+test("confirmed PR actions write durable attributed requests for the daemon, without running a worker in the HTTP process", async () => {
+  const root = mkdtempSync(join(tmpdir(), "panel-pr-action-"));
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await postHigh(base, "/v1/pr-actions", WRITE_TOKEN, { action: "fix", prNumber: 259 });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { armed: boolean; action: string; prNumber: number; requestedAt: string };
+    assert.equal(body.armed, true);
+    assert.equal(body.action, "fix");
+    assert.equal(body.prNumber, 259);
+    assert.ok(Number.isFinite(Date.parse(body.requestedAt)), "receipt carries the durable request time");
+  });
+
+  const pending = pendingPrActions(root);
+  assert.deepEqual(pending.map((request) => [request.action, request.prNumber]), [["fix", 259]]);
+  assert.equal(pending[0].origin, bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN}` } } as any));
+
+  const request = readLedgerLines(deps.ledgerPath).find((line) => line.step === "console.pr_action_requested");
+  assert.ok(request, "the request is attributable in the ledger before the daemon acts");
+  assert.equal(request!.task_id, "PR-259");
+  assert.equal(request!.action, "fix");
+  assert.equal(request!.pr_number, 259);
+  assert.equal(request!.origin, pending[0].origin);
+});
+
+test("POST /v1/pr-actions rejects malformed or unconfirmed bodies before any request marker is written", async () => {
+  const root = mkdtempSync(join(tmpdir(), "panel-pr-action-bad-"));
+  await withService(depsFor(root), async (base) => {
+    for (const body of [
+      {},
+      { action: "restart", prNumber: 259 },
+      { action: "fix", prNumber: 0 },
+      { action: "fix", prNumber: 2.5 },
+      { action: "fix", prNumber: 259, extra: true },
+    ]) {
+      const res = await postHigh(base, "/v1/pr-actions", WRITE_TOKEN, body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+    }
+    const unconfirmed = await post(base, "/v1/pr-actions", WRITE_TOKEN, { action: "review", prNumber: 259 });
+    assert.equal(unconfirmed.status, 403, "the HIGH-tier confirmation gate runs before the writer");
+  });
+  assert.deepEqual(pendingPrActions(root), [], "no malformed or unconfirmed body becomes daemon work");
+});
+
 // The console MOUNTS the UP NEXT Run + Drain-now routes (fb-…9daa9b). This used to read
 // `buildPanelActionRoutes(deps)` — the aggregator comparing itself to itself, which is true of a
 // list `serve.ts` never imports and says nothing about what an operator can reach. Asserting it
 // against `buildServeRoutes` keeps the original regression (those two routes must exist) and makes
 // it mean what its title always claimed.
-test("the console's real route table registers the UP NEXT Run + Drain-now routes (fb-…9daa9b)", () => {
+test("the console's real route table registers the UP NEXT and PR action routes (fb-…9daa9b, W1-T3989)", () => {
   const deps = depsFor(mkdtempSync(join(tmpdir(), "panel-routes-")));
   const paths = buildServeRoutes(serveDepsFor(deps)).map((r) => `${r.method} ${r.path}`);
   assert.ok(paths.includes("POST /v1/drain/kick"), "the per-row Run kick route is mounted on the console");
   assert.ok(paths.includes("POST /v1/drain/run"), "the Drain-now route is mounted on the console");
+  assert.ok(paths.includes("POST /v1/pr-actions"), "the selected-repository PR action route is mounted on the console");
 });
