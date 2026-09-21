@@ -1,0 +1,66 @@
+- id: W1-T3954
+  title: "W1-T3801 follow-up — ship the approved source-size gate-posture pilot with an executable proof contract and no human approval on the normal path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/gate-posture.ts
+    - src/run-task.ts
+    - test/gate-posture-production-adapter.test.ts
+    - scripts/test-tier-manifest.json
+  origin: "operator-session#W1-T3801-follow-up-2026-09-21"
+  plan_refs: ["W1-T3801", "W1-T3330", "W1-T3318", "W1-T3321"]
+  rationale: |
+    W1-T3801 was filed by PR #6122 on the reserved branch name run-W1-T3801-1789843200000,
+    so its plan-filing merge already credits that task through the independent branch-credit
+    path even though it did not implement the adapter. Its verify:human record must remain
+    terminally unchanged; this follow-up owns the implementation and carries the operator's
+    completed policy decision into an executable task.
+
+    The implementation target is current main's existing gate-posture seam. The first pilot is
+    ci:source-size: a deterministic, recoverable repository-hygiene finding with an existing
+    idempotent follow-up consumer. The judge chooses only LAND, REPAIR, LAND+DEBT or STOP. A
+    recoverable STOP becomes LAND+DEBT, judge outage and malformed output restore the old
+    follow-up behavior, and no outcome blocks the feature PR. Credentials, destructive changes,
+    tenant isolation, CI-red and merge-authority gates remain excluded.
+  design: |
+    (i) Preserve the deterministic source-size finding and pass only bounded paths and the
+    existing consequence to the judge; the model never argues that the finding is false.
+    (ii) Keep the feature flow autonomous: healthy source-size output does not spawn a judge,
+    and a material hotspot produces at most one idempotent follow-up side effect.
+    (iii) Ledger intent before the side effect and the final decision after it, with privacy-safe
+    evidence. On outage, malformed consequence, or side-effect failure, restore the old behavior
+    once rather than trapping the worker or retrying a failed write in a loop.
+    (iv) Do not replace the existing candidate-change judge path or introduce a CI-red,
+    merge-authority or human-approval gate.
+    (v) Verify every decision arm with focused tests and retain the test-tier manifest entry so
+    coverage shards cannot refuse the new test file as unclassified.
+  acceptance:
+    - claim: "the approved source-size pilot supplies a deterministic finding, remains recoverable and advisory, and lets the judge choose only bounded LAND+DEBT follow-up debt"
+      proof: "unit test: W1-T3954: material source-size facts reach the judge, which can file exactly one bounded follow-up"
+    - claim: "a healthy path and the non-selected gate path do not spawn the risk judge"
+      proof: "unit test: W1-T3954: healthy and non-selected source-size paths do not spawn a judge"
+    - claim: "judge outage and malformed output restore the old follow-up behavior"
+      proof: "unit test: W1-T3954: judge outage and malformed output restore the old follow-up behavior"
+    - claim: "recoverable STOP cannot stop solely because the model is conservative, while unrecoverable STOP cannot land"
+      proof: "unit test: W1-T3954: recoverable STOP is routed to debt, but an unrecoverable STOP remains STOP"
+    - claim: "the bounded side effect is failure-safe, retry-safe, and represented in a privacy-safe ledger decision"
+      proof: "unit test: W1-T3954: side-effect failure falls back without retrying, while duplicate retry is successful"
+    - claim: "one bounded production-shaped run demonstrates the selected adapter's observed outcome without adding routine human approval"
+      proof: "unit test: W1-T3954: a bounded production-shaped run records the operator ruling before the side effect"
+  falsifier: |
+    Close this follow-up without implementation if current main already routes a real production
+    source-size finding through decideGatePosture and the focused proof suite demonstrates the
+    selected outage, recoverability, side-effect, retry and ledger contracts at that head.
+  notes: |
+    OPERATOR RULING (2026-09-21): approved ci:source-size as the first bounded pilot. It is
+    recoverable, non-security and advisory; its current consequence is LAND+DEBT and its only
+    permitted side effect is one idempotent source-size follow-up. Normal feature PR flow stays
+    autonomous. This follow-up is verify:auto because the policy checkpoint is complete and its
+    acceptance is executable. W1-T3801 remains the historical filing record and is not amended.
