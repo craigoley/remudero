@@ -153,6 +153,7 @@
   "src/lib/ask-classification.ts": 250,
   "src/lib/authority.ts": 250,
   "src/lib/auto-triage.ts": 150,
+  "src/lib/automation-action.ts": 250,
   "src/lib/autonomy.ts": 90,
   "src/lib/block-reason.ts": 103,
   "src/lib/board-review.ts": 244,
