@@ -124,6 +124,11 @@
     "dateNow": 0,
     "newDate": 1
   },
+  "src/lib/emergency-control.ts": {
+    "legacy": 0,
+    "dateNow": 3,
+    "newDate": 7
+  },
   "src/lib/escalate.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -241,8 +246,8 @@
   },
   "src/lib/operator-agent.ts": {
     "legacy": 1,
-    "dateNow": 19,
-    "newDate": 31
+    "dateNow": 23,
+    "newDate": 32
   },
   "src/lib/operator-merge-hold.ts": {
     "legacy": 1,
