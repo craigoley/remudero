@@ -1174,6 +1174,8 @@
     "test/property-parsers.test.ts": 1563,
     "test/protection-read-failure-is-named.test.ts": 1531,
     "test/provenance.test.ts": 247,
+    "test/provider-auth-console.test.ts": 0,
+    "test/provider-auth-sessions.test.ts": 0,
     "test/provider-routing-console-controls.test.ts": 4403,
     "test/provider-routing-console.test.ts": 4932,
     "test/prune-liveness.test.ts": 5214,

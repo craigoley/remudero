@@ -2618,6 +2618,49 @@ components:
         reason:
           type: string
 
+    ProviderAuthProjection:
+      type: object
+      description: >
+        The bounded provider-auth-v1 browser projection. Provider credentials, credential homes,
+        raw app-server payloads, and transcripts never cross this boundary.
+      required: [version, sessionId, provider, profileId, label, state, authUrl, expiresAt]
+      properties:
+        version:
+          type: string
+          enum: [provider-auth-v1]
+        sessionId:
+          type: string
+        provider:
+          type: string
+          enum: [claude, codex]
+        profileId:
+          type: [string, "null"]
+        label:
+          type: [string, "null"]
+        state:
+          type: string
+          enum: [unavailable, unsupported, awaiting_browser, complete, failed, expired, cancelled]
+        authUrl:
+          type: [string, "null"]
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+
+    ProviderAuthStartRequest:
+      type: object
+      required: [provider, profileId]
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          enum: [claude, codex]
+        profileId:
+          type: string
+          description: Opaque server-configured provider profile id; never a credential or path.
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -2657,6 +2700,87 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/provider-auth:
+    post:
+      summary: Start a server-owned provider browser-auth handoff.
+      description: >
+        Starts provider-auth-v1 for an opaque server-configured account profile. Codex uses the
+        daemon-side app-server login flow and returns only an allowlisted browser authorization URL;
+        Claude remains explicitly unsupported until a stable machine-facing handoff exists.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderAuthStartRequest"
+      responses:
+        "200":
+          description: The initial bounded session projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderAuthProjection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    get:
+      summary: Read a provider-auth-v1 session projection.
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema:
+            type: string
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The current bounded session projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderAuthProjection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Cancel a provider-auth-v1 session.
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema:
+            type: string
+      security:
+        - bearerWrite: []
+      responses:
+        "200":
+          description: The cancelled session projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderAuthProjection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/repos:
     get:
       summary: The read-only managed-repo portfolio for the console dashboard.

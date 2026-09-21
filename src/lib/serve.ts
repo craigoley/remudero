@@ -139,6 +139,13 @@ import {
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import {
+  buildProviderAuthRoutes,
+  ProviderAuthSessionStore,
+  readProviderAuthProfiles,
+  startProviderAuthSession,
+  type ProviderAuthProfile,
+} from "./provider-auth-sessions.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -298,6 +305,13 @@ export interface ServeDeps {
   providerRouting?: {
     now?: () => number;
     read?: (root: string, deps?: { now?: () => number }) => ProviderRoutingStatus;
+  };
+  /** Server-owned provider browser-auth profiles and session store. Credential homes remain on the
+   * daemon; the browser receives only provider-auth-v1 projections. */
+  providerAuth?: {
+    profiles?: readonly ProviderAuthProfile[];
+    store?: ProviderAuthSessionStore;
+    env?: NodeJS.ProcessEnv;
   };
   /**
    * W1-T3352: process-owned analytics refresh deps. OPTIONAL and defaults to the real streaming
@@ -3589,6 +3603,9 @@ function assembleServeRoutes(
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
+  const providerAuthStore = deps.providerAuth?.store ?? new ProviderAuthSessionStore({
+    profiles: deps.providerAuth?.profiles ?? readProviderAuthProfiles(deps.providerAuth?.env),
+  });
   // Personal context governance is mounted with the existing operator-agent routes. Its context
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
@@ -3600,6 +3617,7 @@ function assembleServeRoutes(
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     buildDaemonHealthRoute(daemonHealthDeps),
     buildAccountUsageRoute(accountUsageDeps),
+    ...buildProviderAuthRoutes(providerAuthStore, undefined, (input) => startProviderAuthSession(providerAuthStore, input)),
     buildProviderRoutingRoute({ root: deps.fleetControlRoot, ...deps.providerRouting }),
     buildSetProviderRoutingPolicyRoute({
       root: deps.fleetControlRoot,

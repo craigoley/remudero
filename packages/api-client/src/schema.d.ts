@@ -911,6 +911,23 @@ export interface components {
       safeToComplete: boolean;
       reason?: string;
     };
+    /** The bounded provider-auth-v1 browser projection. Provider credentials, credential homes, raw app-server payloads, and transcripts never cross this boundary. */
+    ProviderAuthProjection: {
+      version: "provider-auth-v1";
+      sessionId: string;
+      provider: "claude" | "codex";
+      profileId: string | null;
+      label: string | null;
+      state: "unavailable" | "unsupported" | "awaiting_browser" | "complete" | "failed" | "expired" | "cancelled";
+      authUrl: string | null;
+      expiresAt: string;
+      reason?: string;
+    };
+    ProviderAuthStartRequest: {
+      provider: "claude" | "codex";
+      /** Opaque server-configured provider profile id; never a credential or path. */
+      profileId: string;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
@@ -921,6 +938,34 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/provider-auth": {
+    get: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    delete: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
   "/v1/repos": {
     get: {
       responses: {
