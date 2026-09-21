@@ -20,6 +20,37 @@
     then filed from plan/dup-dispatch-1789576000. Same operator, same session; the holder anchor simply
     recorded the lane the mint ran in rather than the lane the filing landed on.
 
+    2026-09-21 -- TWO BUILD ATTEMPTS HAVE NOW CLOSED UNMERGED ON THE SAME WALL. Read this before
+    opening a third.
+
+    Nothing is left to implement in `src/lib/drain.ts`. The hold this task asks for has existed
+    since 2026-07-17 (#159, `opts.isOpenPr`), with a live-state re-confirmation from W1-T177; the
+    diagnosis above was corrected by #5851; and the real defect -- a narrow mid-cycle snapshot
+    window, which is NOT what the design section below describes -- was closed under W1-T3722 in
+    #6096, merged 2026-09-19.
+
+    So the four acceptance criteria below now describe behaviour that ALREADY WORKS, and that is
+    what defeats every build attempt: a proof for them passes at the merge base as well as at
+    head, so `proof-discrimination` grades all four `executed_stale` and refuses. MEASURED
+    2026-09-21 on main 02d1c226, with only the suite's file added and NO src change:
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts
+    test/an-open-run-branch-pr-holds-its-task.test.ts` -> # tests 4, # pass 4, # fail 0.
+
+    PR #5843 wrote that suite and closed unmerged. PR #6389 wrote it again and closed unmerged on
+    the identical refusal. Neither was a bad diff; the task has no discriminating work left in it.
+
+    DO NOT try to clear this by adding a `W1-T3688` row to
+    scripts/proof-discrimination-baseline.json. It would work and nothing enforces otherwise, but
+    that table's own comment reads "A RATCHET, NOT AN EXEMPTION ... NEVER raise one". Nor repoint a
+    proof at the scripts/test-tier-manifest.json line: it discriminates, and it establishes
+    nothing about the hold.
+
+    WHAT THIS RECORD CANNOT DO FOR ITSELF. Crediting the criteria means `satisfied_by`, which
+    plan.ts marks Architect-only -- a worker setting it fails Standing rule 15, and
+    `checkSatisfiedByGuard` admits a criterion edit only from a plan-only AND human-authored PR.
+    So an Architect must either credit these criteria to #159/#6096 or withdraw them. Until then
+    the record stays `queued` and will keep attracting lanes that cannot finish it.
+
     MEASURED 2026-09-16 on remudero-site. Timestamps are from the run-branch epochs and the REST
     record, not inferred:
 
