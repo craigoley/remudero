@@ -1684,6 +1684,225 @@ components:
         rollback:
           $ref: "#/components/schemas/PromotionRollback"
 
+    FollowUpQuietHours:
+      type: object
+      required: [timezone, start, end]
+      properties:
+        timezone:
+          type: string
+        start:
+          type: string
+          pattern: '^([01]\\d|2[0-3]):[0-5]\\d$'
+        end:
+          type: string
+          pattern: '^([01]\\d|2[0-3]):[0-5]\\d$'
+
+    FollowUpNotificationPolicy:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        quietHours:
+          $ref: "#/components/schemas/FollowUpQuietHours"
+
+    FollowUpCandidate:
+      type: object
+      required: [version, candidateId, sourceEvent, workstream, reason, freshness, deduplicationKey, maxAttempts, owner, createdAt]
+      description: A bounded follow-up candidate. It must carry a deadline or dependency and exactly one next action or question.
+      properties:
+        version:
+          type: string
+          enum: [follow-up-policy-v1]
+        candidateId:
+          type: string
+        sourceEvent:
+          type: string
+        workstream:
+          type: string
+        reason:
+          type: string
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+        deadline:
+          type: string
+          format: date-time
+        dependency:
+          type: string
+        quietHours:
+          $ref: "#/components/schemas/FollowUpQuietHours"
+        deduplicationKey:
+          type: string
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 20
+        owner:
+          type: string
+        nextAction:
+          type: string
+        nextQuestion:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    FollowUpEvaluation:
+      type: object
+      required: [version, candidateId, deduplicationKey, state, reason, at, attempts]
+      properties:
+        version:
+          type: string
+          enum: [follow-up-policy-v1]
+        candidateId:
+          type: string
+        deduplicationKey:
+          type: string
+        state:
+          type: string
+          enum: [scheduled, eligible, snoozed, suppressed, asked, accepted, rejected, expired, blocked]
+        reason:
+          type: string
+        at:
+          type: string
+          format: date-time
+        attempts:
+          type: integer
+        nextAction:
+          type: string
+        nextQuestion:
+          type: string
+
+    FollowUpReceipt:
+      type: object
+      required: [delivered, systemActed, completed, permissionToAct, at]
+      properties:
+        delivered:
+          type: boolean
+        answered:
+          type: boolean
+        systemActed:
+          type: boolean
+        authority:
+          type: string
+        completed:
+          type: boolean
+          enum: [false]
+        permissionToAct:
+          type: boolean
+        at:
+          type: string
+          format: date-time
+
+    FollowUpHistory:
+      type: object
+      required: [version, candidateId, sourceEvent, workstream, reason, freshness, deduplicationKey, maxAttempts, owner, createdAt, state, attempts, events]
+      properties:
+        version:
+          type: string
+          enum: [follow-up-policy-v1]
+        candidateId:
+          type: string
+        sourceEvent:
+          type: string
+        workstream:
+          type: string
+        reason:
+          type: string
+        freshness:
+          type: string
+          enum: [verified, stale, unavailable]
+        deadline:
+          type: string
+          format: date-time
+        dependency:
+          type: string
+        quietHours:
+          $ref: "#/components/schemas/FollowUpQuietHours"
+        deduplicationKey:
+          type: string
+        maxAttempts:
+          type: integer
+        owner:
+          type: string
+        nextAction:
+          type: string
+        nextQuestion:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum: [scheduled, eligible, snoozed, suppressed, asked, accepted, rejected, expired, blocked]
+        attempts:
+          type: integer
+        events:
+          type: array
+          items:
+            type: object
+        receipt:
+          $ref: "#/components/schemas/FollowUpReceipt"
+        notificationPolicy:
+          $ref: "#/components/schemas/FollowUpNotificationPolicy"
+        snoozedUntil:
+          type: string
+          format: date-time
+
+    FollowUpList:
+      type: object
+      required: [followUps, source]
+      properties:
+        followUps:
+          type: array
+          items:
+            $ref: "#/components/schemas/FollowUpHistory"
+        source:
+          type: string
+          enum: [ledger]
+
+    FollowUpEvaluationRequest:
+      type: object
+      required: [candidate]
+      properties:
+        candidate:
+          $ref: "#/components/schemas/FollowUpCandidate"
+        sourceTerminal:
+          type: boolean
+        dependencyAvailable:
+          type: boolean
+        notificationPolicy:
+          $ref: "#/components/schemas/FollowUpNotificationPolicy"
+
+    FollowUpControlRequest:
+      type: object
+      required: [candidateId, control]
+      properties:
+        candidateId:
+          type: string
+        control:
+          type: string
+          enum: [snooze, reject, revoke, policy]
+        until:
+          type: string
+          format: date-time
+        notificationPolicy:
+          $ref: "#/components/schemas/FollowUpNotificationPolicy"
+
+    FollowUpDeliveryRequest:
+      type: object
+      required: [candidateId]
+      properties:
+        candidateId:
+          type: string
+        answered:
+          type: boolean
+        systemActed:
+          type: boolean
+        authority:
+          type: string
+
     # ── W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) -- the button set
     # src/lib/panel-skills.ts's ONE route returns, resolved from
     # `.remudero/skills/<name>.yaml` (lib/skill.ts's `Skill`, W1-T44) the SAME
@@ -2616,6 +2835,115 @@ paths:
       responses:
         "200":
           description: Rollback recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/follow-ups:
+    get:
+      summary: Read durable proactive follow-up candidates and receipts.
+      description: Returns ledgered follow-up state after freshness, quiet-hours, deduplication, and human-stop evaluation.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Durable follow-up history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowUpList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/follow-ups/evaluate:
+    post:
+      summary: Evaluate and ledger a proactive follow-up candidate.
+      description: Refuses stale, unavailable, expired, terminal, blocked, quiet-hour, disabled, or duplicate candidates.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowUpEvaluationRequest"
+      responses:
+        "200":
+          description: Follow-up policy decision recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowUpEvaluation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/follow-ups/control:
+    post:
+      summary: Apply a durable human follow-up stop or notification-policy change.
+      description: Snooze, reject, revoke, and notification-policy changes are append-only and survive restart.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowUpControlRequest"
+      responses:
+        "200":
+          description: Follow-up control recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/follow-ups/delivery:
+    post:
+      summary: Record a delivered follow-up receipt.
+      description: Delivery records an asked receipt and never implies completion or permission to act.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowUpDeliveryRequest"
+      responses:
+        "200":
+          description: Delivery receipt recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, state, receipt]
+                properties:
+                  ok:
+                    type: boolean
+                  state:
+                    type: string
+                    enum: [asked]
+                  receipt:
+                    $ref: "#/components/schemas/FollowUpReceipt"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":
