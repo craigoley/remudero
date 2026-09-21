@@ -1,0 +1,53 @@
+- id: W1-T3982
+  title: "ASYNC GITHUB READS BYPASS THE SHARED CADENCE FLOOR — the daemon and review handlers enforce it, but ghJsonAsync never invokes the guard, so CI polling can still emit a secondary-limit burst"
+  repo: remudero
+  depends_on: [W1-T3976, W1-T3297]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 18.00
+  files: [src/lib/github-transport.ts, test/the-transport-paces-its-own-reads.test.ts]
+  origin: "operator-session#github-secondary-limit-2026-09-21"
+  note: "reservation hand-off: unknown -> run-W1-T3982-1790030000000"
+  plan_refs: [W1-T3976, W1-T3297, W1-T468, W1-T2896]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3976 added the correct production boundary: unattended daemon and review handlers set
+    RMD_GH_TRANSPORT_FLOOR=enforce for their lifetime while the shared stamp remains the one
+    cadence source. The boundary was still incomplete. `ghJson` and `ghExec` call
+    `applyGhReadCadence`, but `ghJsonAsync` — the default reader for `pollToGate`, `waitForCiGreen`
+    and the sweep's asynchronous check polling — went straight to `execFile` without that call.
+
+    The observed consequence is exactly the failure the floor was meant to prevent: a green PR can
+    wait for review while the async loop emits repeated REST reads, GitHub returns a secondary-limit
+    403 even though the primary quota probe remains healthy, and the required review status never
+    posts. The handler wrapper is present but ineffective for this path because the async helper
+    never consults the environment or the shared stamp.
+
+    This is a transport wiring defect, not a new retry policy. The fix must reuse the existing
+    `applyGhReadCadence` decision, keep injected test readers network-free, and preserve the current
+    fail-open behavior when the stamp cannot be read or written. Writes and `gh api rate_limit`
+    remain exempt exactly as the synchronous transport defines them.
+  design: |
+    (i) In `ghJsonAsync`, call `applyGhReadCadence(args)` only when the real default exec seam is
+        used. An injected exec never reaches GitHub and must not consume the shared stamp.
+    (ii) Keep the call before the child spawn so an enforced refusal spends no request and does not
+         enter a retry loop. Do not add a second stamp, timer, or budget probe.
+    (iii) Add a regression that uses a recent shared stamp and enforced mode, calls the real async
+         default with no network fixture, and proves it rejects with `GhReadCadenceRefusal`. Keep
+         the existing injected-async timeout test as the control that the test seam remains usable.
+  acceptance:
+    - claim: "the real async GitHub transport consults the shared cadence floor before spawning"
+      proof: "unit test: ghJsonAsync is paced BEFORE the real async transport spawns"
+    - claim: "the async transport reuses the existing decision rather than creating a second stamp or timer"
+      proof: "grep: if (execAsync === execFileAsync) applyGhReadCadence(args); in src/lib/github-transport.ts"
+    - claim: "an injected async reader remains network-free and keeps its existing timeout contract"
+      proof: "unit test: ghJsonAsync adds the default timeout to the single async transport spawn"
+  falsifier: |
+    Run the new test with the `applyGhReadCadence` call removed: it must reach the real `gh` spawn
+    and fail instead of passing. Run it with an injected `execAsync`: it must still parse the fake
+    JSON without consulting the stamp. A refusal must leave the stamp's mtime unchanged, proving
+    that a burst of refused polls cannot extend its own stand-down window.
