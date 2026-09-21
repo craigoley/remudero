@@ -343,7 +343,7 @@ export interface OperatorAgentPromotionHistory extends PromotionRecord {
   events: OperatorAgentPromotionEvent[];
 }
 
-type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { now?: () => number };
+export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { now?: () => number };
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
 type ProposalDecisionInput = { proposalId: string; decision: OperatorAgentDecision; note?: string };
@@ -441,7 +441,10 @@ function validateContextItem(value: unknown): ContextItem | null {
   };
 }
 
-function validateContextAction(value: unknown): { error: string } | { contextId: string; authorityRef: string; reason?: string } {
+/** W1-T3893: exported so context-controls.ts's forget/revoke routes accept the SAME bounded
+ *  {contextId, authorityRef, reason?} shape as the governance routes below, rather than a second,
+ *  driftable copy of these bounds. */
+export function validateContextAction(value: unknown): { error: string } | { contextId: string; authorityRef: string; reason?: string } {
   if (!isRecord(value)) return { error: "body must be a JSON object" };
   if (!boundedString(value.contextId, MAX_CONTEXT_ID)) return { error: "contextId is required" };
   if (!boundedString(value.authorityRef, MAX_CONTEXT_FIELD)) return { error: "authorityRef is required" };
@@ -465,13 +468,16 @@ function contextRows(ledgerPath: string): Array<Record<string, unknown>> {
   }).rows;
 }
 
-interface ContextLedgerState {
+/** W1-T3893: exported so `context-controls.ts` composes self-service inventory, forget, revoke,
+ *  and export directly on this restart-safe, ledger-backed engine rather than re-reading rows
+ *  itself — a second reader would drift the moment a rotation shape or receipt field changed. */
+export interface ContextLedgerState {
   items: Map<string, ContextItem>;
   revocations: Map<string, { at: string; reason?: string; receipt?: ContextDeletionReceipt }>;
   deletions: Map<string, ContextDeletionReceipt>;
 }
 
-function readContextLedgerState(ledgerPath: string): ContextLedgerState {
+export function readContextLedgerState(ledgerPath: string): ContextLedgerState {
   const items = new Map<string, ContextItem>();
   const revocations = new Map<string, { at: string; reason?: string }>();
   const deletions = new Map<string, ContextDeletionReceipt>();
@@ -515,7 +521,10 @@ function validateContextReceipt(value: unknown): ContextDeletionReceipt | null {
   };
 }
 
-function contextStatus(id: string, state: ContextLedgerState, now: number, stack = new Set<string>()): ContextAvailability {
+/** W1-T3893: exported — self-service export (context-controls.ts) needs the SAME recursive
+ *  derivation-availability check the inventory uses, not a second copy that could disagree about
+ *  what "complete source coverage" means. */
+export function contextStatus(id: string, state: ContextLedgerState, now: number, stack = new Set<string>()): ContextAvailability {
   if (state.deletions.has(id)) return "deleted";
   if (state.revocations.has(id)) return "revoked";
   const item = state.items.get(id);
@@ -557,18 +566,22 @@ export function filterContextItems(items: readonly ContextItem[], query: Context
   return { items: usable, stale, absent: matching.length === 0 };
 }
 
+/** W1-T3893: the name the planning path calls through — see {@link readGovernedContext} below.
+ *  Same function as {@link filterContextItems}; the alias is the one the acceptance proof greps
+ *  for, so the call site (not just an unused export) must read `filterContextForPurpose(`. */
+export const filterContextForPurpose = filterContextItems;
+
 export function readGovernedContext(deps: OperatorAgentRouteDependencies, query: ContextReadQuery): ContextReadResult {
   const state = readContextLedgerState(deps.ledgerPath);
   const now = query.now ?? deps.now?.() ?? Date.now();
   const all = [...state.items.values()].filter((item) => contextStatus(item.contextId, state, now) === "available");
-  const result = filterContextItems(all, { ...query, now });
+  const result = filterContextForPurpose(all, { ...query, now });
   const matching = [...state.items.values()].filter((item) => item.purpose === query.purpose && item.authorityRef === query.authorityRef);
   const unavailableStale = matching.filter((item) => contextStatus(item.contextId, state, now) === "stale").map((item) => item.contextId);
   return { ...result, stale: [...new Set([...result.stale, ...unavailableStale])], absent: matching.length === 0 };
 }
 
 export const readPersonalContext = readGovernedContext;
-export const filterContextForPurpose = filterContextItems;
 
 function publicContext(item: ContextItem, state: ContextLedgerState, now: number): ContextInventoryItem {
   return contextInventoryItem(item, state, now);
@@ -1230,7 +1243,9 @@ export function buildContextRegisterRoute(deps: OperatorAgentRouteDependencies):
   };
 }
 
-function makeContextReceipt(contextId: string, operation: ContextOperation, authorityRef: string, state: ContextLedgerState, at: string): ContextDeletionReceipt {
+/** W1-T3893: exported for the same reason as {@link readContextLedgerState} — the one place a
+ *  receipt's id and affected-derivation count are computed. */
+export function makeContextReceipt(contextId: string, operation: ContextOperation, authorityRef: string, state: ContextLedgerState, at: string): ContextDeletionReceipt {
   const affectedDerivations = [...state.items.values()].filter((item) => item.derivationLinks.includes(contextId)).length;
   return {
     receiptId: contextReceiptId(contextId, operation, at, affectedDerivations),
@@ -1242,6 +1257,63 @@ function makeContextReceipt(contextId: string, operation: ContextOperation, auth
   };
 }
 
+export type ContextActionResult =
+  | { status: 200; body: { ok: true; existing: boolean; receipt: ContextDeletionReceipt } }
+  | { status: 403 | 404 | 409; body: { error: string; detail: string } };
+
+/** The revoke engine, exported (W1-T3893) so `context-controls.ts`'s self-service revoke route
+ *  goes through EXACTLY this receipt/idempotency/authority logic instead of a second copy that
+ *  could drift from it. `buildContextRevokeRoute` below is now a thin HTTP wrapper over this. */
+export function performContextRevoke(
+  deps: OperatorAgentRouteDependencies,
+  input: { contextId: string; authorityRef: string; reason?: string },
+  actorId: string,
+): ContextActionResult {
+  const state = readContextLedgerState(deps.ledgerPath);
+  const item = state.items.get(input.contextId);
+  if (!item) return { status: 404, body: { error: "not_found", detail: `no context item "${input.contextId}"` } };
+  if (item.authorityRef !== input.authorityRef) return { status: 403, body: { error: "forbidden", detail: "authorityRef does not match the context item" } };
+  if (state.deletions.has(input.contextId)) return { status: 409, body: { error: "conflict", detail: `context ${input.contextId} is deleted` } };
+  const existing = state.revocations.get(input.contextId)?.receipt;
+  if (existing) return { status: 200, body: { ok: true, existing: true, receipt: existing } };
+  const at = new Date(deps.now?.() ?? Date.now()).toISOString();
+  const receipt = makeContextReceipt(input.contextId, "revoke", input.authorityRef, state, at);
+  appendPanelLedger(deps.ledgerPath, CONTEXT_REVOKED_STEP, input.contextId, actorId, {
+    context_id: input.contextId,
+    authority_ref: input.authorityRef,
+    at,
+    ...(input.reason ? { reason: input.reason } : {}),
+    receipt,
+  });
+  return { status: 200, body: { ok: true, existing: false, receipt } };
+}
+
+/** The delete ("forget") engine, exported (W1-T3893) for the same reason as
+ *  {@link performContextRevoke} — `context-controls.ts`'s self-service forget route delegates
+ *  here rather than re-implementing deletion. `buildContextDeleteRoute` below is now a thin HTTP
+ *  wrapper over this. */
+export function performContextDelete(
+  deps: OperatorAgentRouteDependencies,
+  input: { contextId: string; authorityRef: string; reason?: string },
+  actorId: string,
+): ContextActionResult {
+  const state = readContextLedgerState(deps.ledgerPath);
+  const item = state.items.get(input.contextId);
+  if (!item) return { status: 404, body: { error: "not_found", detail: `no context item "${input.contextId}"` } };
+  if (item.authorityRef !== input.authorityRef) return { status: 403, body: { error: "forbidden", detail: "authorityRef does not match the context item" } };
+  const existing = state.deletions.get(input.contextId);
+  if (existing) return { status: 200, body: { ok: true, existing: true, receipt: existing } };
+  const at = new Date(deps.now?.() ?? Date.now()).toISOString();
+  const receipt = makeContextReceipt(input.contextId, "delete", input.authorityRef, state, at);
+  appendPanelLedger(deps.ledgerPath, CONTEXT_DELETED_STEP, input.contextId, actorId, {
+    context_id: input.contextId,
+    authority_ref: input.authorityRef,
+    at,
+    receipt,
+  });
+  return { status: 200, body: { ok: true, existing: false, receipt } };
+}
+
 /** POST /v1/operator-agent/context/revoke — append a durable, idempotent revocation receipt. */
 export function buildContextRevokeRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
@@ -1250,35 +1322,8 @@ export function buildContextRevokeRoute(deps: OperatorAgentRouteDependencies): R
     scope: "write",
     tier: "low",
     handler: jsonAction(validateContextAction, (input, req, res) => {
-      const state = readContextLedgerState(deps.ledgerPath);
-      const item = state.items.get(input.contextId);
-      if (!item) {
-        sendJson(res, 404, { error: "not_found", detail: `no context item "${input.contextId}"` });
-        return;
-      }
-      if (item.authorityRef !== input.authorityRef) {
-        sendJson(res, 403, { error: "forbidden", detail: "authorityRef does not match the context item" });
-        return;
-      }
-      if (state.deletions.has(input.contextId)) {
-        sendJson(res, 409, { error: "conflict", detail: `context ${input.contextId} is deleted` });
-        return;
-      }
-      const existing = state.revocations.get(input.contextId)?.receipt;
-      if (existing) {
-        sendJson(res, 200, { ok: true, existing: true, receipt: existing });
-        return;
-      }
-      const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      const receipt = makeContextReceipt(input.contextId, "revoke", input.authorityRef, state, at);
-      appendPanelLedger(deps.ledgerPath, CONTEXT_REVOKED_STEP, input.contextId, bearerTokenId(req), {
-        context_id: input.contextId,
-        authority_ref: input.authorityRef,
-        at,
-        ...(input.reason ? { reason: input.reason } : {}),
-        receipt,
-      });
-      sendJson(res, 200, { ok: true, existing: false, receipt });
+      const result = performContextRevoke(deps, input, bearerTokenId(req));
+      sendJson(res, result.status, result.body);
     }),
   };
 }
@@ -1291,30 +1336,8 @@ export function buildContextDeleteRoute(deps: OperatorAgentRouteDependencies): R
     scope: "write",
     tier: "middle",
     handler: jsonAction(validateContextAction, (input, req, res) => {
-      const state = readContextLedgerState(deps.ledgerPath);
-      const item = state.items.get(input.contextId);
-      if (!item) {
-        sendJson(res, 404, { error: "not_found", detail: `no context item "${input.contextId}"` });
-        return;
-      }
-      if (item.authorityRef !== input.authorityRef) {
-        sendJson(res, 403, { error: "forbidden", detail: "authorityRef does not match the context item" });
-        return;
-      }
-      const existing = state.deletions.get(input.contextId);
-      if (existing) {
-        sendJson(res, 200, { ok: true, existing: true, receipt: existing });
-        return;
-      }
-      const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      const receipt = makeContextReceipt(input.contextId, "delete", input.authorityRef, state, at);
-      appendPanelLedger(deps.ledgerPath, CONTEXT_DELETED_STEP, input.contextId, bearerTokenId(req), {
-        context_id: input.contextId,
-        authority_ref: input.authorityRef,
-        at,
-        receipt,
-      });
-      sendJson(res, 200, { ok: true, existing: false, receipt });
+      const result = performContextDelete(deps, input, bearerTokenId(req));
+      sendJson(res, result.status, result.body);
     }),
   };
 }

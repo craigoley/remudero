@@ -92,6 +92,7 @@ import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { buildOperatorAgentRoutes } from "./operator-agent.js";
+import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -3593,6 +3594,12 @@ function assembleServeRoutes(
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
   const operatorAgentRoutes = buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath });
+  // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
+  // ledger-backed context-governance engine above — same ledgerPath, so a self-service forget and
+  // a governance delete are the identical durable receipt, never a second memory store. Raw
+  // private content never crosses these routes either: inventory strips it structurally and
+  // export returns only a bounded, secret-scrubbed preview (see context-controls.ts's header).
+  const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
   const rawRoutes = [
     projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen)),
     buildRepoDashboardRoute({ root: deps.questionsRoot }),
@@ -3660,6 +3667,7 @@ function assembleServeRoutes(
     // ledger. The experiment routes are mounted through this same production assembly so the
     // console cannot approve a change without a durable baseline and rollback path.
     ...operatorAgentRoutes,
+    ...contextControlsRoutes,
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
