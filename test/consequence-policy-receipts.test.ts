@@ -1,7 +1,14 @@
 // test/consequence-policy-receipts.test.ts — W1-T3894 acceptance (5):
 //   "approval, execution, refusal, and recovery limits produce linked bounded receipts"
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import type { AddressInfo } from "node:net";
+
+import { createService } from "../src/lib/service.js";
+import { buildOperatorAgentRoutes } from "../src/lib/operator-agent.js";
 
 import {
   CONSEQUENCE_RECEIPT_REASON_MAX_CHARS,
@@ -164,4 +171,42 @@ test("W1-T3894 (5): every receipt's reason text is bounded at CONSEQUENCE_RECEIP
   const recoveryReceipt = recordConsequenceRecovery(action, { requestedBy: "operator:alice" }, executionReceipt.id, { now: NOW });
   assert.ok(recoveryReceipt.reason.length <= CONSEQUENCE_RECEIPT_REASON_MAX_CHARS + 1);
   assert.notEqual(recoveryReceipt.reason, longReason);
+});
+
+test("W1-T3894 (wire): consequence preflight validates, records refusals, and returns ready actions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-consequence-preflight-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const token = "consequence-preflight-write-token";
+  const server = createService({ tokens: { read: token, write: token }, routes: buildOperatorAgentRoutes({ ledgerPath }) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const post = (action: unknown) => fetch(`http://127.0.0.1:${port}/v1/operator-agent/consequence/preflight`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  try {
+    const invalid = await post({ consequenceClass: "reversible", target: { identity: "" }, requiredApprovers: 0 });
+    assert.equal(invalid.status, 400);
+
+    const refused = await post({
+      consequenceClass: "reversible",
+      target: { identity: "service:prod", source: "trusted", ambiguous: true },
+      requiredApprovers: 0,
+    });
+    assert.equal(refused.status, 409);
+    assert.equal((await refused.json() as { code: string }).code, "ambiguous-target");
+
+    const ready = await post({
+      id: "cq-wire-ready",
+      consequenceClass: "reversible",
+      target: { identity: "service:prod", source: "trusted" },
+      requiredApprovers: 0,
+    });
+    assert.equal(ready.status, 200);
+    assert.equal((await ready.json() as { actionId: string }).actionId, "cq-wire-ready");
+  } finally {
+    server.close();
+  }
 });

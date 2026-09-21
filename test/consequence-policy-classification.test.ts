@@ -98,6 +98,20 @@ test("W1-T3894 (1): a non-financial class carrying financial details is refused"
   assert.throws(() => classifyConsequenceAction(input));
 });
 
+test("W1-T3894 (1): classification refuses malformed target, approver, financial, and recovery fields", () => {
+  assert.throws(() => classifyConsequenceAction(reversibleInput({ target: undefined as unknown as ConsequenceActionInput["target"] })), /target\.identity/);
+  assert.throws(() => classifyConsequenceAction(reversibleInput({ requiredApprovers: -1 })), /requiredApprovers/);
+  assert.throws(() => classifyConsequenceAction(financialInput({ financial: { ...financialInput().financial!, aggregateSpentBefore: -1 } })), /aggregateSpentBefore/);
+  assert.throws(() => classifyConsequenceAction(financialInput({ financial: { ...financialInput().financial!, coolingOffStartedAt: "not-a-date" } })), /coolingOffStartedAt/);
+
+  assert.throws(() => classifyConsequenceAction(irreversibleInput({ irreversible: { ...irreversibleInput().irreversible!, affectedResource: "" } })), /affectedResource/);
+  assert.throws(() => classifyConsequenceAction(irreversibleInput({ irreversible: { ...irreversibleInput().irreversible!, recoveryStatement: "" } })), /recoveryStatement/);
+  assert.throws(() => classifyConsequenceAction(irreversibleInput({ irreversible: { ...irreversibleInput().irreversible!, confirmationNonce: "" } })), /confirmationNonce/);
+  assert.throws(() => classifyConsequenceAction(irreversibleInput({ irreversible: { ...irreversibleInput().irreversible!, confirmationExpiresAt: "not-a-date" } })), /confirmationExpiresAt/);
+  assert.throws(() => classifyConsequenceAction(irreversibleInput({ irreversible: { ...irreversibleInput().irreversible!, recoveryAvailable: "yes" as unknown as boolean } })), /recoveryAvailable/);
+  assert.throws(() => classifyConsequenceAction(reversibleInput({ irreversible: irreversibleInput().irreversible })), /must not carry irreversible/);
+});
+
 test("W1-T3894 (1): an irreversible action preserves the exact recovery boundary — resource, statement, availability, and reason", () => {
   const action = classifyConsequenceAction(irreversibleInput());
   assert.ok(action.irreversible);
