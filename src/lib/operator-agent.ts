@@ -44,6 +44,16 @@ import {
   type FollowUpCandidate,
   type FollowUpHistory,
 } from "./follow-up-policy.js";
+import {
+  acceptDelegationEnvelope,
+  createDelegationEnvelope,
+  executeBoundedDelegation,
+  InMemoryDelegationEnvelopeStore,
+  type DelegationCapabilityRef,
+  type DelegationHumanApproval,
+  type DelegationRiskTier,
+  type DelegationScope,
+} from "./automation-action.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -59,6 +69,10 @@ export const OPERATOR_AGENT_PROMOTION_REPLAY_STEP = "panel.operator_agent_promot
 export const OPERATOR_AGENT_PROMOTION_DECISION_STEP = "panel.operator_agent_promotion_decision";
 export const OPERATOR_AGENT_PROMOTION_ADVANCE_STEP = "panel.operator_agent_promotion_advance";
 export const OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP = "panel.operator_agent_promotion_rollback";
+/** W1-T3883: one bounded handoff — issue, accept, and act all verified through
+ *  executeBoundedDelegation( before this ledgers — never a raw prompt or secret, only the
+ *  resulting {@link DelegationReceipt}. */
+export const OPERATOR_AGENT_DELEGATION_HANDOFF_STEP = "panel.operator_agent_delegation_handoff";
 export const OPERATOR_AGENT_DEFAULT_SETTINGS = { enabled: true, confidenceThreshold: 0.9 } as const;
 
 export const OPERATOR_AGENT_CATEGORIES = ["optimize", "fix", "scale"] as const;
@@ -1339,6 +1353,157 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
   };
 }
 
+// W1-T3883: the operator-agent handoff path's envelope state. In-memory, per-process — a
+// durable/ledger-backed store is a follow-on concern, mirroring capability-grant.ts's own
+// precedent (W1-T3880) of shipping the boundary before a persistence layer.
+const operatorAgentDelegationStore = new InMemoryDelegationEnvelopeStore();
+
+interface DelegationHandoffInput {
+  envelope: {
+    id?: string;
+    sender: string;
+    recipient: string;
+    principal: string;
+    purpose: string;
+    capabilities: DelegationCapabilityRef[];
+    scope?: DelegationScope;
+    audience: string;
+    expiresAt: string;
+    nonce?: string;
+  };
+  acceptedCapabilities: DelegationCapabilityRef[];
+  action: {
+    capability: string;
+    nonce: string;
+    risk: DelegationRiskTier;
+    humanApproval?: DelegationHumanApproval;
+  };
+}
+
+const DELEGATION_RISK_TIERS: readonly DelegationRiskTier[] = ["low", "medium", "high", "production", "financial", "credential", "destructive"];
+
+function validateDelegationCapabilities(value: unknown): value is DelegationCapabilityRef[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 20 && value.every((cap) => boundedString(cap, MAX_ID));
+}
+
+function validateDelegationScope(value: unknown): DelegationScope | undefined {
+  if (value === undefined || !isRecord(value)) return undefined;
+  const scope: DelegationScope = {
+    ...(typeof value.repo === "string" ? { repo: value.repo } : {}),
+    ...(typeof value.instance === "string" ? { instance: value.instance } : {}),
+  };
+  return scope;
+}
+
+function validateHumanApproval(value: unknown): { error: string } | DelegationHumanApproval | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || !boundedString(value.approvedBy, MAX_ID) || !iso(value.approvedAt)) {
+    return { error: "action.humanApproval requires a bounded approvedBy and a valid ISO approvedAt" };
+  }
+  return { approvedBy: value.approvedBy.trim(), approvedAt: value.approvedAt };
+}
+
+function validateDelegationHandoff(body: unknown): { error: string } | DelegationHandoffInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const envelope = body.envelope;
+  if (!isRecord(envelope)) return { error: "envelope is required" };
+  if (!boundedString(envelope.sender, MAX_ID)) return { error: "envelope.sender is required" };
+  if (!boundedString(envelope.recipient, MAX_ID)) return { error: "envelope.recipient is required" };
+  if (!boundedString(envelope.principal, MAX_ID)) return { error: "envelope.principal is required" };
+  if (!boundedString(envelope.purpose, MAX_TEXT)) return { error: "envelope.purpose is required" };
+  if (!validateDelegationCapabilities(envelope.capabilities)) return { error: "envelope.capabilities must be a bounded, non-empty array of strings" };
+  if (!boundedString(envelope.audience, MAX_ID)) return { error: "envelope.audience is required" };
+  if (!iso(envelope.expiresAt)) return { error: "envelope.expiresAt must be a valid ISO-8601 instant" };
+  if (envelope.id !== undefined && !boundedString(envelope.id, MAX_ID)) return { error: "envelope.id must be a bounded string" };
+  if (envelope.nonce !== undefined && !boundedString(envelope.nonce, MAX_ID)) return { error: "envelope.nonce must be a bounded string" };
+
+  const acceptedCapabilities = body.acceptedCapabilities;
+  if (!validateDelegationCapabilities(acceptedCapabilities)) return { error: "acceptedCapabilities must be a bounded, non-empty array of strings" };
+
+  const action = body.action;
+  if (!isRecord(action)) return { error: "action is required" };
+  if (!boundedString(action.capability, MAX_ID)) return { error: "action.capability is required" };
+  if (!boundedString(action.nonce, MAX_ID)) return { error: "action.nonce is required" };
+  if (typeof action.risk !== "string" || !DELEGATION_RISK_TIERS.includes(action.risk as DelegationRiskTier)) {
+    return { error: `action.risk must be one of ${DELEGATION_RISK_TIERS.join(", ")}` };
+  }
+  const humanApproval = validateHumanApproval(action.humanApproval);
+  if (humanApproval && "error" in humanApproval) return humanApproval;
+
+  return {
+    envelope: {
+      ...(envelope.id ? { id: envelope.id } : {}),
+      sender: envelope.sender.trim(),
+      recipient: envelope.recipient.trim(),
+      principal: envelope.principal.trim(),
+      purpose: envelope.purpose.trim(),
+      capabilities: [...(envelope.capabilities as string[])],
+      scope: validateDelegationScope(envelope.scope),
+      audience: envelope.audience.trim(),
+      expiresAt: new Date(envelope.expiresAt).toISOString(),
+      ...(envelope.nonce ? { nonce: envelope.nonce } : {}),
+    },
+    acceptedCapabilities: [...acceptedCapabilities],
+    action: {
+      capability: action.capability.trim(),
+      nonce: action.nonce.trim(),
+      risk: action.risk as DelegationRiskTier,
+      ...(humanApproval ? { humanApproval } : {}),
+    },
+  };
+}
+
+/**
+ * POST /v1/operator-agent/delegation/handoff — the operator-agent handoff path: issues a bounded
+ * delegation envelope (W1-T3883), requires the recipient's explicit acceptance (narrow-only), and
+ * then verifies and executes the requested capability through executeBoundedDelegation( — the
+ * single call site every check (acceptance, replay, expiry, revocation, identity mismatch, audit
+ * availability, and the human gate for high-risk/production/financial/credential/destructive
+ * actions) runs through before any delegated side effect proceeds. Ledgers only the bounded
+ * receipt, never the raw envelope purpose or capability text a second time.
+ */
+export function buildOperatorAgentDelegationHandoffRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/delegation/handoff",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateDelegationHandoff, (input, req, res) => {
+      let envelope;
+      try {
+        envelope = createDelegationEnvelope(input.envelope);
+      } catch (e) {
+        sendJson(res, 400, { error: "invalid_request", detail: (e as Error).message });
+        return;
+      }
+      operatorAgentDelegationStore.issue(envelope);
+
+      const acceptance = acceptDelegationEnvelope(operatorAgentDelegationStore, {
+        envelopeId: envelope.id,
+        recipient: envelope.recipient,
+        acceptedCapabilities: input.acceptedCapabilities,
+      });
+      if (!acceptance.ok) {
+        sendJson(res, 409, { ok: false, stage: "accept", code: acceptance.code, detail: acceptance.reason });
+        return;
+      }
+
+      const { verification, receipt } = executeBoundedDelegation(operatorAgentDelegationStore, {
+        envelopeId: envelope.id,
+        actorIdentity: envelope.recipient,
+        capability: input.action.capability,
+        audience: envelope.audience,
+        nonce: input.action.nonce,
+        risk: input.action.risk,
+        ...(input.action.humanApproval ? { humanApproval: input.action.humanApproval } : {}),
+      }, { now: deps.now?.() });
+
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_DELEGATION_HANDOFF_STEP, envelope.id, bearerTokenId(req), { receipt });
+      sendJson(res, verification.ok ? 200 : 409, { ok: verification.ok, receipt });
+    }),
+  };
+}
+
 export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
     buildOperatorAgentProposalReadRoute(deps),
@@ -1359,5 +1524,6 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
+    buildOperatorAgentDelegationHandoffRoute(deps),
   ];
 }
