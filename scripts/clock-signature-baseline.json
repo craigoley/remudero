@@ -84,6 +84,11 @@
     "dateNow": 2,
     "newDate": 5
   },
+  "src/lib/context-controls.ts": {
+    "legacy": 0,
+    "dateNow": 2,
+    "newDate": 2
+  },
   "src/lib/containment.ts": {
     "legacy": 0,
     "dateNow": 1,

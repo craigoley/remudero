@@ -395,6 +395,38 @@ export interface components {
       authorityRef: string;
       reason?: string;
     };
+    /** W1-T3893 self-service inventory — the same metadata-only shape as ContextList, scoped to exactly one principal. */
+    ContextControlsInventoryList: {
+      items: (ContextInventoryItem)[];
+      count: number;
+      absent: boolean;
+      asOf: string;
+    };
+    /** A bounded, redacted export projection. `redactedContent` is a truncated, secret-scrubbed preview — never the raw context-item-v1 `content` field. */
+    ContextExportItem: {
+      contextId: string;
+      source: string;
+      principal: string;
+      purpose: string;
+      sensitivity: "low" | "moderate" | "high" | "restricted";
+      authorityRef: string;
+      observedAt: string;
+      freshness: "fresh" | "stale" | "unavailable";
+      retention: ContextRetention;
+      visibility: "private" | "operator" | "shared";
+      derivationLinks: (string)[];
+      redactedContent: string;
+    };
+    /** `status: completed` is returned ONLY when every selected item, and everything it derives from, is "available" — an incomplete derivation chain, an absent match, or a request past the bounded item limit is `status: refused` with a `reason`, never a partial "completed". */
+    ContextExportResult: {
+      status: "completed" | "refused";
+      exportId?: string;
+      asOf?: string;
+      items?: (ContextExportItem)[];
+      reason?: "absent" | "incomplete_coverage" | "bounded_exceeded";
+      detail?: string;
+      incompleteContextIds?: (string)[];
+    };
     OperatorAgentProposalRegistration: {
       proposal: OperatorAgentProposal;
     };
@@ -1141,6 +1173,50 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/context-controls/inventory": {
+    get: {
+      responses: {
+          "200": ContextControlsInventoryList;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/context-controls/forget": {
+    post: {
+      responses: {
+          "200": ContextReceiptResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/context-controls/revoke": {
+    post: {
+      responses: {
+          "200": ContextReceiptResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/context-controls/export": {
+    get: {
+      responses: {
+          "200": ContextExportResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": ContextExportResult;
         };
     };
   };

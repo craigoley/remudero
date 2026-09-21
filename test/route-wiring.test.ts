@@ -181,6 +181,14 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only delegation handoff receipt; envelope, replay, human-gate, and receipt behavior are covered in test/agent-delegation-*.test.ts",
   ],
   [
+    "POST /v1/context-controls/forget",
+    "W1-T3893: production route is mounted; durable forget receipt and restart-safe behavior are covered in test/context-controls-forget.test.ts",
+  ],
+  [
+    "POST /v1/context-controls/revoke",
+    "W1-T3893: production route is mounted; durable revoke receipt and derivation behavior are covered in test/context-controls-forget.test.ts and test/context-controls-derivation.test.ts",
+  ],
+  [
     "POST /v1/provider-auth",
     "W1-T3960: server-owned provider-auth session lifecycle; projection and request validation are covered in test/provider-auth-sessions.test.ts and test/provider-auth-console.test.ts",
   ],
