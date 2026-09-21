@@ -254,6 +254,29 @@ test("unit test: submitted clean assistant-trust evidence reaches canary exactly
   });
 });
 
+test("unit test: the promotion route accepts bounded raw assistant context and persists only redacted evidence", async () => {
+  const { ledgerPath, promotion } = fixture("promotion:trust:raw-context");
+  await withService(ledgerPath, async (base) => {
+    await registerReplayApproveShadow(base, promotion);
+    const advance = await post(base, "/v1/operator-agent/promotions/advance", {
+      promotionId: promotion.promotionId,
+      target: "canary",
+      observations: [readyObservation()],
+      assistantTrust: {
+        controls: passingControls(),
+        evidence: cleanEvidence(),
+        rawContext: { prompts: ["private prompt"], transcripts: ["private transcript"], credentials: ["Bearer sk-secret"], note: "password=hunter2" },
+      },
+    });
+    assert.equal(advance.status, 200);
+    const body = (await advance.json()) as { state: string; assistantTrust: { evidence: Record<string, unknown> } };
+    assert.equal(body.state, "canary");
+    assert.deepEqual(body.assistantTrust.evidence, { promptCount: 1, transcriptCount: 1, credentialCount: 1, note: "[redacted]", redacted: true });
+    assert.ok(!JSON.stringify(body).includes("private prompt"));
+    assert.ok(!JSON.stringify(body).includes("hunter2"));
+  });
+});
+
 test("unit test: omitting assistantTrust entirely preserves the pre-existing base-guardrail-only advance behaviour", async () => {
   const { ledgerPath, promotion } = fixture("promotion:trust:omitted");
   await withService(ledgerPath, async (base) => {
