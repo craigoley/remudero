@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { buildPromptManifest, type PromptManifestInput } from "../src/lib/prompt-manifest.js";
-import { implementPromptParts, renderImplementPrompt } from "../src/run-task.js";
+import { implementPromptParts, renderImplementPrompt, renderImplementPromptWithParts } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
 
 function task(over: Partial<Task> = {}): Task {
@@ -78,6 +78,16 @@ test("the rendered worker prompt is byte-identical with the manifest wired and w
   );
 
   assert.equal(promptWithManifestComputed, promptAlone);
+});
+
+test("renderImplementPromptWithParts keeps the same default prompt as renderImplementPrompt", () => {
+  const t = task();
+  const args = [t, "recon text", "W1-T2297-1700000000000", "learnings text", "notes text"] as const;
+  const withParts = renderImplementPromptWithParts(...args);
+  const prompt = renderImplementPrompt(...args);
+
+  assert.equal(withParts.prompt, prompt);
+  assert.equal(withParts.parts.find((part) => part.name === "capability_context")?.value, "");
 });
 
 test("no manifest row ever carries prompt text", () => {
