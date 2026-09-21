@@ -10,6 +10,7 @@
   budget_usd: 24.00
   files: [src/run-task.ts, src/lib/measurement-cadence.ts, src/lib/feedback-landing.ts, test/measurement-cadence-production-wiring.test.ts]
   origin: "operator-session#review-admission-and-self-improvement-2026-09-21"
+  note: "reservation hand-off: run-W1-T3961-1790018200000 -> file-W1-T3970-1790019000000"
   plan_refs: [W1-T3226, W1-T3043, W1-T3961]
   status: queued
   attempts: 0
