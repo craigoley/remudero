@@ -10,7 +10,7 @@ raw: "Console first-read reliability defect observed in authenticated production
   deterministic cold and event-loop-blocked tests plus latency measurements."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/6326
 summary:
