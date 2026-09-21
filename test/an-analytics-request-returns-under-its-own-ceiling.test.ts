@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -13,8 +13,10 @@ import {
   buildAnalyticsRoute,
   createAnalyticsSnapshotCache,
   deriveAnalyticsSnapshot,
+  deriveAnalyticsSnapshotFromCheckpointedLedger,
   deriveAnalyticsSnapshotFromLedger,
   deriveAnalyticsSnapshotFromStream,
+  writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
   type AnalyticsTimer,
 } from "../src/lib/analytics-route.js";
@@ -466,6 +468,87 @@ test("abort is not a corrupt archive and corrupt archives remain best effort", a
     );
     const result = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(0));
     assert.deepEqual(result.invocationsByVerb, { status: 1 }, "ordinary corruption still costs one archive, not the union");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("analytics checkpoint resumes at the live cursor and preserves the full snapshot", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-analytics-checkpoint-"));
+  const live = join(dir, "ledger.ndjson");
+  const initial = [
+    { ts: "2026-09-21T20:00:00.000Z", step: "run.start", run_id: "run-1", task_id: "T1", type: "implement" },
+    { ts: "2026-09-21T20:00:10.000Z", step: "verdict", run_id: "run-1", task_id: "T1", verdict: "merged", success: true },
+    { ts: "2026-09-21T20:00:11.000Z", step: "worker.done", run_id: "run-1", model: "gpt", lane: "implement", total_cost_usd: 0.5, tokens: { input: 10, output: 5 } },
+  ];
+  try {
+    writeFileSync(live, `${initial.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse("2026-09-21T20:01:00.000Z")));
+    writeAnalyticsCheckpoint(dir, first.checkpoint);
+    const checkpointBytes = readFileSync(join(dir, ".analytics-console-v1.checkpoint.json"), "utf8");
+    assert.doesNotMatch(checkpointBytes, /raw prompt that must never persist/);
+
+    appendFileSync(live, `${JSON.stringify({ ts: "2026-09-21T20:02:00.000Z", step: "run.start", run_id: "run-2", task_id: "T2", type: "implement" })}\n`);
+    appendFileSync(live, `${JSON.stringify({ ts: "2026-09-21T20:02:12.000Z", step: "verdict", run_id: "run-2", task_id: "T2", verdict: "merged", success: true })}\n`);
+
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-09-21T20:03:00.000Z")),
+      undefined,
+      first.checkpoint,
+    );
+    const full = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-09-21T20:03:00.000Z")));
+    assert.deepEqual(resumed.snapshot, full, "incremental state is equivalent to a fresh union scan");
+    assert.equal(resumed.checkpoint.source.liveOffset, statSync(live).size);
+    assert.equal(resumed.snapshot.taskDurationsMs.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("analytics checkpoint follows a rotation and resets the live cursor without duplicating rows", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-analytics-checkpoint-rotation-"));
+  const live = join(dir, "ledger.ndjson");
+  const firstLine = { ts: "2026-09-21T20:00:00.000Z", step: "run.start", run_id: "run-1", task_id: "T1", type: "implement" };
+  const terminal = { ts: "2026-09-21T20:00:10.000Z", step: "verdict", run_id: "run-1", task_id: "T1", verdict: "merged", success: true };
+  try {
+    writeFileSync(live, `${JSON.stringify(firstLine)}\n${JSON.stringify(terminal)}\n`);
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse("2026-09-21T20:01:00.000Z")));
+    writeAnalyticsCheckpoint(dir, first.checkpoint);
+    writeFileSync(join(dir, "ledger.2026-09-21T20-02-00-000Z.ndjson"), `${JSON.stringify(firstLine)}\n${JSON.stringify(terminal)}\n`);
+    writeFileSync(live, `${JSON.stringify({ ts: "2026-09-21T20:02:01.000Z", step: "run.start", run_id: "run-2", task_id: "T2", type: "implement" })}\n`);
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-09-21T20:03:00.000Z")),
+      undefined,
+      first.checkpoint,
+    );
+    assert.equal(resumed.snapshot.taskDurationsMs.length, 1, "the rotated run is not counted twice");
+    assert.equal(resumed.snapshot.noTerminalTaskCount, 1, "the new live run is retained after reset");
+    assert.equal(resumed.snapshot.invocationsUnmeasuredBefore, "2026-08-14");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("structurally corrupt analytics checkpoint state falls back to the full union", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-analytics-checkpoint-corrupt-"));
+  const live = join(dir, "ledger.ndjson");
+  try {
+    writeFileSync(
+      live,
+      `${JSON.stringify({ ts: "2026-09-21T20:00:00.000Z", step: "run.start", run_id: "run-1", task_id: "T1", type: "implement" })}\n`,
+    );
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse("2026-09-21T20:01:00.000Z")));
+    const malformed = { ...first.checkpoint, state: {} as never };
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-09-21T20:02:00.000Z")),
+      undefined,
+      malformed,
+    );
+    const full = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-09-21T20:02:00.000Z")));
+    assert.deepEqual(resumed.snapshot, full, "corrupt checkpoint state cannot manufacture an empty aggregate");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
