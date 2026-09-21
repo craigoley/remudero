@@ -50,6 +50,17 @@ function writeGhScript(binDir: string, opts: { sha: string; diff: string; commen
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *pulls/*/reviews*)
+        if [ "$2" = "-X" ] && [ "$3" = "POST" ]; then
+          for arg in "$@"; do
+            case "$arg" in
+              body=*) printf '%s' "\${arg#body=}" > ${opts.commentFile} ;;
+            esac
+          done
+        else
+          echo '[]'
+        fi
+        ;;
       *statuses/*) ${orderLog ? `echo "GH $*" >> ${orderLog}; ` : ""}echo '{}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${opts.sha}"}}' ;;
       *) echo '{}' ;;
