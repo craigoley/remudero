@@ -1,0 +1,19 @@
+id: fb-1789955906700-8768c6
+ts: 2026-09-21T01:58:26.700Z
+raw: "Console first-read reliability defect observed in authenticated production
+  2026-09-21: Board and Needs-you first reads abort at the 5s client budget,
+  while an immediate retry returns verified live data. Core documents cold
+  status reads around 7.5s and same-event-loop expensive reads can prevent the
+  cache fallback timer from running. Make status, recent, and daemon-health
+  bounded reads return within the client budget on cold or blocked work without
+  blindly increasing timeouts; preserve honest stale and unavailable states. Add
+  deterministic cold and event-loop-blocked tests plus latency measurements."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

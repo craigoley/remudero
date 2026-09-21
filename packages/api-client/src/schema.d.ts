@@ -181,6 +181,32 @@ export interface components {
       ok: boolean;
       entry: FeedbackEntry;
     };
+    /** One bounded activity, workstream, or authoritative artifact row. */
+    OperatorActivityItem: {
+      id: string;
+      kind: "activity" | "workstream" | "artifact";
+      summary: string;
+      source: string;
+      observedAt: string;
+      freshness: "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
+      taskId?: string;
+      repository?: string;
+      state?: "active" | "blocked" | "queued" | "completed" | "unknown";
+      reason?: string;
+      href?: string;
+    };
+    /** GET /v1/operator-activity's bounded, source-labeled read projection. */
+    OperatorActivityResult: {
+      version: "operator-activity-v1";
+      state: "verified" | "stale" | "unavailable" | "unknown" | "not-collected";
+      source: string;
+      observedAt: string;
+      cursor?: string;
+      items?: (OperatorActivityItem)[];
+      truncated?: boolean;
+      reason?: string;
+      detail?: string;
+    };
     /** One run named on a task's ledger lines (src/lib/trace.ts's `TraceRun`). */
     TraceRun: {
       runId: string;
@@ -689,6 +715,15 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/operator-activity": {
+    get: {
+      responses: {
+          "200": OperatorActivityResult;
+          "401": Error;
+          "403": Error;
         };
     };
   };

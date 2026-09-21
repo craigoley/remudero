@@ -1,0 +1,43 @@
+- id: W1-T3916
+  title: "VERIFY-HUMAN SWEEP FAILS OPEN 78 TIMES WHEN ITS CASH MOUNT IS NOT ENABLED — preserve the judge's safety polarity, but let an enabled provider carry the read-only classification instead of turning automation into a permanent operator queue"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: oper#verify-human-provider-fallback-2026-09-21
+  plan_refs: [W1-T3188]
+  files: [src/lib/verify-human-judge.ts, src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-20/21: `rmd verify-human-sweep` judged 78 parked shards, but every call failed
+    before transport because `.remudero/mounts.yaml` pins `verify_human_judge` to the cash lane while
+    the host config enables only Codex. The command correctly failed open to `needs_operator`, so no
+    work was hidden, but the result was 78 defaults rather than 78 LLM judgements and the operator inbox
+    could not be reduced by automation.
+
+    THE SAFE REPAIR IS PROVIDER-AVAILABILITY FALLBACK, NOT A NEW SPEND ARM. When a judge mount names a
+    provider the committed host config does not enable, remove only that unavailable mount affinity and
+    let the existing provider router choose among already-enabled providers. This makes the current
+    Codex subscription carry the read-only judge without enabling cash, inventing a cash cap, or changing
+    the judge's fail-open polarity. If cash is explicitly enabled and bounded, its configured mount still
+    wins; an enabled provider is never silently replaced. The judge has no tools and cannot edit the plan.
+
+    This is automation-flow repair, not an approval to widen provider authority. A transport failure or
+    malformed response still becomes `needs_operator` with `judge_failed: true` and is not cached.
+  acceptance:
+    - claim: "a verify-human judge whose configured provider is disabled removes only that affinity and lets an enabled provider route the read-only spawn"
+      proof: "grep: export function resolveVerifyHumanJudgeMount in src/lib/verify-human-judge.ts"
+    - claim: "an explicitly enabled cash judge keeps its configured cash affinity, so the fallback cannot silently create or remove paid-provider authority"
+      proof: "grep: W1-T3916: explicitly enabled cash keeps its configured mount affinity in src/lib/verify-human-judge.ts"
+    - claim: "provider fallback does not change the judge's fail-open handling of an unavailable or malformed worker result"
+      proof: "grep: W1-T3916: judge fallback still fails open on an unusable verdict in src/lib/verify-human-judge.ts"
+  falsifier: |
+    Remove the disabled-provider fallback and the first test must fail while the existing sweep suite
+    still passes. Make the resolver strip an enabled cash provider and the second test must fail. Change
+    the fallback to cache a transport failure as backlog and the third test must fail.
+  note: "reservation hand-off: run-W1-T3906-1789949479635 -> run-W1-T3916-1789951800000"
