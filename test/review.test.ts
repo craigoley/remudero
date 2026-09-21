@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { reviewCommand } from "../src/run-task.js";
+import { reviewCommand, runReview } from "../src/run-task.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { loadDefaultPolicy } from "../src/lib/policy.js";
+import { WorkerAbandonedError } from "../src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
@@ -3039,18 +3043,88 @@ esac
   }
 });
 
-test("the advisory reviewer has a quiet-stream bound and ledgers abandonment", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(
-    source,
-    /clockBound: \{ boundMs: loadDefaultPolicy\(\)\.values\.workerAbandon \}/,
-    "the real reviewer spawn must not be able to wait forever for a silent SDK stream",
-  );
-  assert.match(
-    source,
-    /log\("review\.reviewer\.abandoned", \{[\s\S]{0,700}e\.evidence\.elapsedMs/,
-    "a bounded reviewer abandonment must be visible before the deterministic floor posts",
-  );
+test("the advisory reviewer's clock-bound abandonment is ledgered, with the deterministic floor still posting", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-abandon-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-review-abandon-gh-"));
+  const oldPath = process.env.PATH;
+  try {
+    const ledgerPath = join(root, "ledger.ndjson");
+    const settingsFile = join(root, "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), encoding: "utf8" }).trim();
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":4242,"html_url":"https://github.com/acme/remudero/pull/4242","updated_at":"t","body":"","head":{"ref":"b","sha":"${headSha}"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") printf '%s\n' 'diff --git a/src/example.ts b/src/example.ts' '+export const fixed = true;' ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    let observedClockBound: unknown;
+    const evidence = { elapsedMs: 1_500_000, boundMs: 1_200_000, lastState: "tool-executing" as const, lastStateMs: 12_000 };
+    const reviewerSpawnWorker = async (spawnArgs: SpawnWorkerArgs): Promise<WorkerResult> => {
+      observedClockBound = spawnArgs.clockBound;
+      // Exactly the shape the real spawnWorker throws once its own quiet-stream watchdog trips
+      // (src/lib/worker.ts) -- this fixture skips waiting out the real bound and injects the same
+      // error directly at this call-site seam, the pattern test/worker-clock-bound.test.ts's
+      // `abandoningSpawn` already uses one layer up for the IMPLEMENT spawn.
+      throw new WorkerAbandonedError(evidence, new Error("simulated: SDK transport error on abort"));
+    };
+
+    const verdict = await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/4242",
+      task: {
+        id: "W1-T4242",
+        acceptance: [{ claim: "the deterministic verdict posts", proof: "the deterministic verdict posts" }],
+      },
+      report: "The deterministic verdict posts.",
+      settingsFile,
+      config: { root, claudeBin: "/unused" } as never,
+      log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }),
+      say: () => {},
+      account: (r: WorkerResult) => r,
+      spawnReviewer: true,
+      reviewerSpawnWorker,
+      reviewerMount: { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 120000 },
+      headCheckoutDir: process.cwd(),
+      ledgerPath,
+      runId: "REVIEW-ABANDON-1",
+      arm: () => "armed",
+      disarm: () => "not-armed" as const,
+    } as never);
+
+    assert.deepEqual(
+      observedClockBound,
+      { boundMs: loadDefaultPolicy().values.workerAbandon },
+      "the real reviewer spawn must not be able to wait forever for a silent SDK stream",
+    );
+    const abandoned = rows.find((r) => r.step === "review.reviewer.abandoned");
+    assert.ok(abandoned, "a bounded reviewer abandonment must be visible before the deterministic floor posts");
+    assert.equal(abandoned!.extra?.reason_class, "worker_abandoned");
+    assert.equal(abandoned!.extra?.elapsed_ms, evidence.elapsedMs);
+    assert.equal(abandoned!.extra?.bound_ms, evidence.boundMs);
+    assert.equal(abandoned!.extra?.last_state, evidence.lastState);
+    assert.equal(abandoned!.extra?.last_state_ms, evidence.lastStateMs);
+    assert.ok(
+      rows.some((r) => r.step === "review.reviewer.error"),
+      "abandonment still falls through to the generic spawn-failure ledger row",
+    );
+    assert.equal(verdict.headSha, headSha);
+  } finally {
+    process.env.PATH = oldPath;
+  }
 });
 // ── W1-T362: extend W1-T273's executed_stale downgrade to `unit test:` proofs ──
 //

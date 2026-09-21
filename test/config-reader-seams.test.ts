@@ -347,7 +347,16 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
   // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
   // needed no edit.
-  assert.equal(readers.length, 30, `expected 30 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-ONE since the advisory reviewer spawn's own clock-bound ceiling (run-task.ts, `runReview`)
+  // landed — a TWENTY-FOURTH consumer, also SEAMED (`args.reviewerAbandonMs ?? loadDefaultPolicy()`),
+  // resolving the SAME `workerAbandon` row `workerAbandonMs` above already reads, now also consulted
+  // at the reviewer's own spawn site so a dead SDK child cannot hold the review-key mutex forever. IT
+  // PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the seam was
+  // written from the start (mirroring `workerAbandonMs`'s own shape), not added afterwards to quiet a
+  // red. So it is NOT allowlisted; adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test
+  // 5. The file set is UNCHANGED (`src/run-task.ts` already carried the other reads above), so the
+  // `files` assertion below needed no edit.
+  assert.equal(readers.length, 31, `expected 31 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
