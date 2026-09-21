@@ -1,0 +1,76 @@
+- id: W1-T3990
+  title: "FEEDBACK LANDING MUST POST remudero-review BEFORE ARMING AUTO-MERGE — landing PR creation currently arms GitHub auto-merge with the required review context absent, so a healthy data-only landing can sit blocked until an operator runs rmd review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/feedback-landing.test.ts
+  origin: "issue#5317-feedback-landing-review-2026-09-21"
+  plan_refs: [W1-T530, W1-T913, W1-T1000002]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED on current origin/main d3287942e92ac852d9dfcc3b4cbacb4b1e877a97 and in issue #5317.
+    `src/lib/feedback-landing.ts` creates or reuses the shared landing PR, then the create path
+    calls `gh pr merge --auto --squash` without producing the required `remudero-review` context.
+    The incident was reproduced on feedback landing PR #5315: CI became green, branch protection
+    remained blocked because `remudero-review` was absent, and an operator had to invoke `rmd review`
+    before the already-armed PR could merge. The existing daemon post-review lane is not a durable
+    creation-time handoff, so the first landing can be stranded between those two mechanisms.
+
+    This is a flow/wiring defect, not a request to weaken branch protection or to make a raw status
+    assertion. The review must use the repository's existing pending/terminal review producer and
+    its current-head safeguards. A transient GitHub, worktree, or reviewer failure must leave the
+    landing PR open for the normal retry path, never claim review success, and never strand the
+    daemon by throwing.
+  design: |
+    Add one tested, idempotent review handoff at the feedback-landing arm boundary. A newly opened
+    landing PR and an already-open PR that lacks a terminal review for its current head must enter
+    the same durable review path before `gh pr merge --auto --squash` is attempted. Route through
+    the existing `reviewCommand`/`postReviewPending` machinery (or a narrow durable request seam
+    that invokes it), never a second raw GitHub status writer and never a synthetic success.
+
+    Preserve the landing bridge's best-effort/never-throw contract and operator merge-hold behavior.
+    Keep quiet polls idempotent: do not re-arm auto-merge or re-run a terminal review for the same
+    PR head, and do not force a new landing commit merely to retry review. If review cannot yet be
+    completed, record the named retryable condition and leave the PR open; the next daemon pass must
+    be able to continue the review-to-merge flow without human intervention. The implementation may
+    use a durable queue/request if the synchronous landing API cannot safely await review, but the
+    queue must be consumed by the existing daemon review lane and must be keyed by PR URL plus head.
+
+    Add a regression that creates a fresh landing PR and proves the ordering: review handoff is
+    requested/posted for that exact head before auto-merge is armed; a review failure does not arm
+    merge and does not throw; a later successful retry arms exactly once. Cover the already-open PR
+    recovery path as well, so a successful push followed by a failed `gh pr create` cannot recreate
+    the same stuck-PR gap.
+  acceptance:
+    - claim: "a feedback landing review handoff precedes auto-merge for the exact PR head"
+      proof: "unit test: feedback landing requests review before arming auto-merge"
+    - claim: "review failure leaves the landing PR open and retryable without throwing or synthetic success"
+      proof: "unit test: feedback landing review failure is retryable and never arms merge"
+    - claim: "an already-open landing PR converges through review to one auto-merge arm"
+      proof: "unit test: an existing landing PR missing review is repaired before merge"
+    - claim: "the production landing path reaches the shared review producer rather than a second raw status writer"
+      proof: "grep: reviewCommand in src/run-task.ts"
+  falsifier: |
+    Remove the review handoff or move auto-merge ahead of it: the fresh-landing ordering test must
+    fail because `gh pr merge --auto` is observed without the current-head review event. Make the
+    review producer return a transient failure: the landing call must still return its normal
+    best-effort result, must not post a passing status, and must not issue `gh pr merge`. Run a
+    second quiet poll after a successful review: it must issue neither a duplicate review nor a
+    duplicate merge arm. Change the landing branch head after the verdict: the old verdict must not
+    authorize the new head.
+  note: |
+    reservation holder: run-W1-T3990-1790031507231
+
+    This task is intentionally scoped to the feedback landing bridge and its daemon handoff. It
+    does not alter required branch protection, review semantics, operator holds, or the separate
+    decisions/ci-learning landing families unless the shared producer is the proven common seam.
+    The implementation PR must carry `Remudero-Task: W1-T3990`; this plan filing stays trailer-free.
