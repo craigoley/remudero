@@ -109,6 +109,33 @@ test("automatic branch cadence: the full rung prunes through the existing manife
   assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "a changed branch set re-arms the classifier");
 });
 
+test("automatic branch cadence contains a classifier exception and records the failed pass", () => {
+  let branchReads = 0;
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const exec = (cmd: string, args: string[]): string => {
+    if (args[0] === "ls-remote") {
+      branchReads += 1;
+      if (branchReads > 1) throw new Error("classifier unavailable");
+      return "a1\trefs/heads/main\nb2\trefs/heads/old\n";
+    }
+    return "";
+  };
+  runAutomaticBranchReapRung(
+    "other-owner",
+    "target-repo",
+    { root: REPO_ROOT, claudeBin: "/bin/true" } as Config,
+    join(REPO_ROOT, "state", "test-ledger.ndjson"),
+    "SWEEP-EXCEPTION",
+    (step, extra = {}) => logs.push([step, extra]),
+    {},
+    { root: REPO_ROOT, exec, clock: { now: () => 1000 } },
+  );
+  assert.deepEqual(logs.at(-1), [
+    "branch_reap.sweep.failed",
+    { outcome: "exception", reason: "first-pass", error: "classifier unavailable" },
+  ]);
+});
+
 test("automatic branch cadence: the remote write is wired to the full sweep hook, never the light hook", () => {
   const fullStart = runTaskSrc.indexOf("export function buildSweepHook(");
   const lightStart = runTaskSrc.indexOf("export function buildSweepLightHook(");
