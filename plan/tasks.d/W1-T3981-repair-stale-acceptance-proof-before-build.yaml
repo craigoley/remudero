@@ -32,3 +32,4 @@
   files: [plan/tasks.d/W1-T3973-webhook-check-filter-enforcement-needs-a-ratified-contract.yaml]
   status: queued
   attempts: 0
+  note: "reservation hand-off: codex/plan-satellite-alert-policy -> run-W1-T3981-1790026200000"
