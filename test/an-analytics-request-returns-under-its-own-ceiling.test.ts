@@ -186,6 +186,23 @@ test("analytics request returns from cache while refresh is blocked", async () =
   cache.stop();
   blocked.reject(new Error("stopped fixture"));
   await cache.refresh();
+
+  const dir = mkdtempSync(join(tmpdir(), "rmd-analytics-blocked-checkpoint-"));
+  try {
+    writeFileSync(join(dir, "ledger.ndjson"), '{"step":"cli.invoked","verb":"status"}\n');
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse("2026-09-21T20:01:00.000Z")));
+    writeAnalyticsCheckpoint(dir, first.checkpoint);
+    appendFileSync(join(dir, "ledger.ndjson"), '{"step":"cli.invoked","verb":"worker"}\n');
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-09-21T20:02:00.000Z")),
+      undefined,
+      first.checkpoint,
+    );
+    assert.deepEqual(resumed.snapshot, await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-09-21T20:02:00.000Z"))));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("cold and failed refreshes never manufacture analytics evidence", async () => {
@@ -326,6 +343,22 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
     ],
     "start, completion, failure and timeout are distinct observation-only telemetry",
   );
+
+  const dir = mkdtempSync(join(tmpdir(), "rmd-analytics-failed-checkpoint-"));
+  try {
+    writeFileSync(join(dir, "ledger.ndjson"), '{"step":"cli.invoked","verb":"status"}\n');
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse("2026-09-21T20:01:00.000Z")));
+    const malformed = { ...first.checkpoint, state: {} as never };
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-09-21T20:02:00.000Z")),
+      undefined,
+      malformed,
+    );
+    assert.deepEqual(resumed.snapshot, await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-09-21T20:02:00.000Z"))));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("analytics refresh is single-flight and schedules only after settlement", async () => {
