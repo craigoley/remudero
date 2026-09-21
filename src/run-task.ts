@@ -5917,7 +5917,7 @@ async function runReview(args: {
             effort: reviewerSpawnMount!.effort,
             maxTurns: reviewerSpawnMount!.maxTurns,
             maxBudgetUsd: args.budgetUsd,
-            // W1-T3969: the advisory reviewer is still a real worker spawn. Give it the same
+            // The advisory reviewer is still a real worker spawn. Give it the same
             // quiet-stream bound as every other dispatch so a dead SDK child cannot hold the
             // review-key mutex forever and leave the required status absent.
             clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon },
