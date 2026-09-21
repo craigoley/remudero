@@ -1,0 +1,68 @@
+- id: W1-T3984
+  title: "THE WHOLE-DAEMON GITHUB READ FLOOR MAKES NORMAL SATELLITE SWEEPS SELF-REFUSE — W1-T3976's 180-second terminal-read guard spans an orchestrator that legitimately performs several reads, so main-health stamps the window and the following sweep aborts before queue work"
+  repo: remudero
+  depends_on: [W1-T3976]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  plan_refs: [W1-T3976, W1-T3297, W1-T468, W1-T1005, W1-T999]
+  files: [src/lib/github-transport.ts, src/run-task.ts, test/the-transport-paces-its-own-reads.test.ts]
+  rationale: |
+    OBSERVED 2026-09-21 after W1-T3976 merged as e97634ce: both satellite daemon processes are
+    alive and running that revision, but their ordinary sweeps are not completing. On console, a
+    `main.health` read is followed by `sweep.error` with `GhReadCadenceRefusal` at ages 0--158s;
+    the scheduler then records `daemon.orphan_sweep` and `dispatch.value.refused` rather than an
+    actionable queue pass. Site shows the same sequence. The exact floor is 180 seconds, while
+    their regular daemon cadence is roughly 75 seconds. The caller is a normal multi-read
+    control-plane pass, not a terminal loop or a worker retry.
+
+    W1-T3976 correctly preserved the transport library's advisory default and correctly hardened
+    the standalone review command, but its daemon-lifetime wrapper treats every legitimate read in
+    the entire orchestrator as a forbidden second terminal read. It therefore turns the daemon's
+    own main-health/read/sweep composition into a permanent refusal loop. This is worse than a
+    secondary-limit backoff: no GitHub read is made after the first one and no worker can reach
+    admission. The source already has the appropriate daemon-side control: W1-T468/W1-T1005's
+    process-lifetime GhCallPacer, with a 1.5-second ordinary gap, rate-limit widening and bounded
+    retry at the actual gateway. A static terminal floor must not replace that daemon control.
+  design: |
+    (1) Keep `withGhTransportFloor`'s existing default for the standalone `rmd review` command:
+    a direct unattended review remains protected by the strict 180-second terminal-read floor.
+    Do not change the stamp format, the 180-second constant, write exemptions, or an operator's
+    explicit `RMD_GH_TRANSPORT_FLOOR=enforce` choice.
+
+    (2) Add one named daemon transport-mode boundary. With no operator override it selects the
+    existing advisory transport mode for the long-lived multi-read daemon, so the real per-daemon
+    GhCallPacer remains the production rate controller. An explicit environment mode is still
+    authoritative, and the wrapper restores the caller environment in `finally` exactly as the
+    existing helper does. Wire only the `daemon` CLI handler through this named boundary; leave
+    the `review` handler on strict enforcement.
+
+    (3) Prove the three states through the real wrapper: standalone review default is enforce;
+    daemon default is advisory and restores its caller; an explicit enforce value stays enforce.
+    Prove the production daemon handler reaches the daemon-specific boundary. This is an
+    immediate regression repair, not a new timer, a per-repository stamp, a retry loop, or a
+    relaxation of the actual GhCallPacer's primary/secondary-limit behavior.
+  acceptance:
+    - claim: "daemon transport mode has a named boundary that can select advisory without changing strict review defaults"
+      proof: "grep: withDaemonGhTransportFloor in src/lib/github-transport.ts"
+    - claim: "the daemon CLI handler reaches the named daemon transport boundary"
+      proof: "grep: withDaemonGhTransportFloor in src/run-task.ts"
+  falsifier: |
+    Delete the daemon-specific wrapper or make its absent-environment default `enforce`: the
+    daemon-mode test must fail while the standalone-review enforce test remains green. Replace the
+    daemon handler call with the generic strict wrapper: the run-task grep proof must fail. Set an
+    explicit `enforce` environment in the fixture and it must still be observed inside the daemon
+    boundary; a fix that silently overrides an operator choice is invalid.
+  status: queued
+  attempts: 0
+  origin: oper#observed-satellite-self-refusal-after-w1-t3976-2026-09-21
+  note: |
+    reservation hand-off: unknown -> codex/plan-daemon-floor-recovery
+
+    reservation holder: codex/plan-daemon-floor-recovery.
+    risk:high — this changes the rate-limit posture of every long-lived daemon. The repair
+    preserves strict direct-review enforcement and the existing per-daemon GhCallPacer; it does
+    not manufacture a new budget or weaken an explicit operator-selected mode.
