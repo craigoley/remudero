@@ -1,0 +1,20 @@
+- id: W1-T3768
+  title: "THE coverage-shard (3/4) GATE REFUSED 12 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:5861:coverage-shard (3/4)"
+  ci_learning_prs: [5861, 5907, 5911, 5911, 5926, 5927, 5938, 5941, 6002, 6006, 6007, 6029]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the coverage-shard (3/4) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:5861:coverage-shard (3/4) in learnings/ci.yaml"
+  note: |
+    reservation hand-off: unknown -> ci-learning-landing
+    Filed by the ci-learning rung from ci-learning:5861:coverage-shard (3/4). The coverage-shard (3/4) gate went red on #5861 and was repaired; the repair touched src/run-task.ts, docs/cli-reference.md, scripts/comment-load-baseline.json, test/recon-degrade.test.ts, docs/docs-index.json, docs/operator-guide.md, docs/recon/per-tool-approval.md, plan/tasks.d/W1-T3659-a-retired-surface-keeps-no-dispatchable-task.yaml, plan/tasks.d/W1-T3685-no-verb-surveys-the-fleets-three-pull-request-queues.yaml, plan/tasks.d/W1-T3730-a-filing-cannot-declare-its-own-test-file.yaml, scripts/console-parity-baseline.json, scripts/console-parity-ratchet.mjs, scripts/learnings-budget-baseline.json, scripts/learnings-budget-ratchet.mjs, scripts/test-tier-manifest.json, src/lib/deployer.ts, src/lib/review.ts, src/lib/self-sync.ts, src/lib/sweep.ts, src/lib/worker-provider.ts, src/lib/worker.ts, test/a-blocked-auction-falls-back-to-cash.test.ts, test/a-failed-openweight-request-settles-its-reservation.test.ts, test/a-prerequisite-is-not-a-supersession.test.ts, test/a-proof-can-name-an-extensionless-file.test.ts, test/a-retired-surface-keeps-no-dispatchable-task.test.ts, test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts, test/an-open-weight-provider-rides-the-capability-ladder.test.ts, test/containment-wiring.test.ts, test/cost-governor.test.ts, test/fixtures/learnings-budget-ratchet/multi-shard-baseline-over.json, test/fixtures/learnings-budget-ratchet/over-baseline.json, test/fixtures/learnings-budget-ratchet/tight-baseline.json, test/fixtures/learnings-citation-loop/over-baseline.json, test/help-renders-a-summary-not-a-paragraph.test.ts, test/learnings-budget-ratchet.test.ts, test/merged-task-open-pr-supersession.test.ts, test/operator-gated-default-reachability.test.ts, test/queue-governor.test.ts, test/run-task.test.ts, test/sweep-repair-filing.test.ts, test/sweep-superseded-evidence.test.ts, test/sweep.test.ts, test/the-fix-rung-survives-an-exhausted-subscription.test.ts, test/the-supervisor-names-the-daemon-it-is-restarting.test.ts, test/the-supervisor-reads-its-own-daemons-image.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.

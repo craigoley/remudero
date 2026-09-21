@@ -1,0 +1,18 @@
+- id: W1-T3918
+  title: "THE coverage-shard (4/4) GATE REFUSED 21 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:6185:coverage-shard (4/4)"
+  ci_learning_prs: [6185, 6205, 6208, 6208, 6213, 6221, 6222, 6234, 6236, 6237, 6243, 6245, 6264, 6270, 6271, 6271, 6272, 6272, 6273, 6273, 6282]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the coverage-shard (4/4) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:6185:coverage-shard (4/4) in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:6185:coverage-shard (4/4). The coverage-shard (4/4) gate went red on #6185 and was repaired; the repair touched src/run-task.ts, plan/tasks.d/W1-T3364-the-clock-census-records-its-own-baseline.yaml, scripts/comment-load-baseline.json, test/a-reservation-records-the-branch-that-files-it.test.ts, test/feedback-landing-deleted-ref.test.ts, hooks/pre-push, plan/feedback/fb-1789846824506-93a418.yaml, plan/feedback/fb-1789874581744-a3f4d4.yaml, plan/feedback/fb-1789927004402-c46c80.yaml, plan/feedback/fb-1789927053247-879a03.yaml, plan/feedback/fb-1789927110598-97bf90.yaml, plan/feedback/fb-1789927308301-29a363.yaml, plan/feedback/fb-1789934060521-61b072.yaml, plan/feedback/fb-1789935292646-eff0ac.yaml, plan/feedback/fb-1789937186992-270de8.yaml, plan/feedback/fb-1789939053466-98cfc5.yaml, plan/feedback/fb-1789939342172-971cbe.yaml, plan/feedback/fb-1789940771418-47d093.yaml, plan/feedback/fb-1789941312564-ef433c.yaml, plan/tasks.d/W1-T3728-the-cash-key-has-no-durable-home-and-its-loss-is-silent.yaml, plan/tasks.d/W1-T3893-context-self-service.yaml, plan/tasks.d/W1-T3894-financial-and-irreversible-actions.yaml, plan/tasks.d/W1-T3895-scoped-operator-preferences.yaml, plan/tasks.d/W1-T3896-versioned-cross-repo-contract-manifest.yaml, plan/tasks.d/W1-T3897-human-handoff-operations.yaml, plan/tasks.d/W1-T3898-outcome-to-bounded-plan.yaml, plan/tasks.d/W1-T3899-external-effect-reconciliation.yaml, plan/tasks.d/W1-T3900-emergency-revocation-and-stop.yaml, scripts/ci-control-plane-precheck.mjs, scripts/deps-interface-baseline.json, scripts/test-tier-manifest.json, src/lib/ci-control-plane.ts, src/lib/ci-failure-corpus.ts, src/lib/ci-parity.ts, src/lib/feedback-landing.ts, src/lib/sweep.ts, src/lib/task-id-reservation.ts, test/ci-control-plane-precheck-refuses-before-push.test.ts, test/commit-worker-edits-new-directory.test.ts, test/could-we-have-caught-it-at-home.test.ts, test/deps-interface-census.test.ts, test/every-pr-check-is-required-or-advisory.test.ts, test/operator-agent.test.ts, test/plan-reconcile-diff-ceiling.test.ts, docs/cli-reference.md, docs/forensics/fleet-heartbeat-watch-yml.md, plan/tasks.d/W1-T3844-a-policy-refused-reservation-reads-as-an-unknown-push-failure.yaml, scripts/clock-signature-baseline.json, scripts/expiring-fixture-census.mjs, scripts/fixture-copy-baseline.json, src/lib/analytics-timeseries.ts, src/lib/ledger.ts, src/lib/review.ts, test/a-commit-refused-fix-round-is-not-a-success.test.ts, test/an-analytics-request-returns-under-its-own-ceiling.test.ts, test/expiring-fixture-census.test.ts, test/fix-branch-checkout-serialization.test.ts, test/recycle-container-bash3-portability.test.ts, test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts, test/worker.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
