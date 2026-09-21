@@ -29,6 +29,8 @@
     decorative, but `blocked` is the existing semantic refusal used by isDispatchEligible and
     currentPlanIneligibilityReason; it covers both ordinary dependency blocks and retirement
     records without inventing a new terminal state.
+
+    reservation hand-off: run-W1-T3878-1789934131000 -> run-W1-T3938-1789977307000
   design: |
     (i) Keep the W1-T3934 declared-scope predicate, source-file discriminator, and fail-open
     behavior unchanged for tasks that can still enter the dispatch path.
