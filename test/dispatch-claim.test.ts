@@ -597,7 +597,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_inflight when th
   const TASK_ID = "T-DISPATCH-CLAIM-TAKEN";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   claimGitFixture(root);
 
   const reserver = scriptedClaimReserver({ attempt: () => "taken", holder: () => "some-other-anchor" });
@@ -642,7 +642,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_git_fetch when t
   const TASK_ID = "T-DISPATCH-CLAIM-UNREACHABLE";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   claimGitFixture(root);
 
   const reserver = scriptedClaimReserver({ attempt: () => "unreachable" });
@@ -688,7 +688,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own dispatch claim when th
   const TASK_ID = "T-DISPATCH-CLAIM-STALE";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   claimGitFixture(root);
 
   const reserver = scriptedClaimReserver(); // attempt() -> "created": this run wins the claim
@@ -735,7 +735,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() ledgers dispatch.claim_release_error
   const TASK_ID = "T-DISPATCH-CLAIM-RELEASE-ERROR";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   claimGitFixture(root);
 
   const reserver = scriptedClaimReserver({
@@ -783,7 +783,7 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own claim (holder arm) in 
   const TASK_ID = "T-DISPATCH-CLAIM-HOLDER-RELEASE";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   claimGitFixture(root);
 
   // No overrides: attempt() -> "created" (this run wins), drop() -> true (the release

@@ -179,7 +179,7 @@ async function dispatchOnce(
 ): Promise<{ res: Awaited<ReturnType<typeof runTask>>; ledger: Array<Record<string, unknown>> }> {
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   const fakeBinDir = fakeGh();
   const savedPath = process.env.PATH;
