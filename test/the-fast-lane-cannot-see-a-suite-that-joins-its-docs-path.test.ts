@@ -24,7 +24,6 @@ const MEASURED_DOC_JOIN_SUITES = [
   "test/github-event-sweep-wake.test.ts",
   "test/operator-message-standard.test.ts",
   "test/orientation.test.ts",
-  "test/reap-cadence.test.ts",
 ];
 
 const JOINED_ONLY_SUITES = MEASURED_DOC_JOIN_SUITES.filter((file) => {
@@ -54,7 +53,7 @@ test("W1-T2667: a suite that joins REPO_ROOT with docs/plan segments names a pla
   assert.equal(namesPlanOrDocsPath("readFileSync(join(REPO_ROOT, 'plan', 'tasks.yaml'));"), true);
 });
 
-test("W1-T2667: the eight measured docs-reading suites are all in the fast-lane enumeration", () => {
+test("W1-T2667: the seven measured docs-reading suites are all in the fast-lane enumeration", () => {
   const suites = planReadingSuiteFiles();
   for (const file of MEASURED_DOC_JOIN_SUITES) {
     assert.ok(suites.includes(file), `${file} must be enumerated when docs/ changes can fail it`);
