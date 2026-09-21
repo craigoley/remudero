@@ -986,6 +986,208 @@ components:
           type: string
           enum: [ledger]
 
+    ContextRetention:
+      type: object
+      required: [policy, expiresAt]
+      properties:
+        policy:
+          type: string
+          maxLength: 320
+        expiresAt:
+          type: string
+          format: date-time
+
+    ContextRevocation:
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [active, revoked]
+        revokedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          maxLength: 500
+
+    ContextItem:
+      type: object
+      description: >
+        Bounded context-item-v1 memory. Content is accepted only for the assistant's internal
+        reader and is never returned by the metadata inventory route.
+      required: [version, contextId, source, principal, purpose, sensitivity, authorityRef, observedAt, freshness, retention, visibility, derivationLinks, revocation, content]
+      properties:
+        version:
+          type: string
+          enum: [context-item-v1]
+        contextId:
+          type: string
+          maxLength: 160
+        source:
+          type: string
+          maxLength: 320
+        principal:
+          type: string
+          maxLength: 320
+        purpose:
+          type: string
+          maxLength: 320
+        sensitivity:
+          type: string
+          enum: [low, moderate, high, restricted]
+        authorityRef:
+          type: string
+          maxLength: 320
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum: [fresh, stale, unavailable]
+        retention:
+          $ref: "#/components/schemas/ContextRetention"
+        visibility:
+          type: string
+          enum: [private, operator, shared]
+        derivationLinks:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 160
+        revocation:
+          $ref: "#/components/schemas/ContextRevocation"
+        content:
+          type: string
+          maxLength: 4000
+
+    ContextInventoryItem:
+      type: object
+      required: [version, contextId, source, principal, purpose, sensitivity, authorityRef, observedAt, freshness, retention, visibility, derivationLinks, revocation, availability]
+      properties:
+        version:
+          type: string
+          enum: [context-item-v1]
+        contextId:
+          type: string
+          maxLength: 160
+        source:
+          type: string
+          maxLength: 320
+        principal:
+          type: string
+          maxLength: 320
+        purpose:
+          type: string
+          maxLength: 320
+        sensitivity:
+          type: string
+          enum: [low, moderate, high, restricted]
+        authorityRef:
+          type: string
+          maxLength: 320
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum: [fresh, stale, unavailable]
+        retention:
+          $ref: "#/components/schemas/ContextRetention"
+        visibility:
+          type: string
+          enum: [private, operator, shared]
+        derivationLinks:
+          type: array
+          items:
+            type: string
+            maxLength: 160
+        revocation:
+          $ref: "#/components/schemas/ContextRevocation"
+        availability:
+          type: string
+          enum: [available, stale, unavailable, revoked, deleted]
+        deletionReceipt:
+          $ref: "#/components/schemas/ContextReceipt"
+
+    ContextReceipt:
+      type: object
+      required: [receiptId, contextId, operation, at, authorityRef, affectedDerivations]
+      properties:
+        receiptId:
+          type: string
+          maxLength: 160
+        contextId:
+          type: string
+          maxLength: 160
+        operation:
+          type: string
+          enum: [revoke, delete]
+        at:
+          type: string
+          format: date-time
+        authorityRef:
+          type: string
+          maxLength: 320
+        affectedDerivations:
+          type: integer
+          minimum: 0
+
+    ContextReceiptResult:
+      type: object
+      required: [ok, existing, receipt]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        existing:
+          type: boolean
+        receipt:
+          $ref: "#/components/schemas/ContextReceipt"
+
+    ContextList:
+      type: object
+      required: [items, stale, absent, source, asOf]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContextInventoryItem"
+        stale:
+          type: array
+          items:
+            type: string
+        absent:
+          type: boolean
+        source:
+          type: string
+          enum: [ledger]
+        asOf:
+          type: string
+          format: date-time
+
+    ContextRegistration:
+      type: object
+      required: [context]
+      properties:
+        context:
+          $ref: "#/components/schemas/ContextItem"
+
+    ContextActionRequest:
+      type: object
+      required: [contextId, authorityRef]
+      properties:
+        contextId:
+          type: string
+          maxLength: 160
+        authorityRef:
+          type: string
+          maxLength: 320
+        reason:
+          type: string
+          maxLength: 500
+
     OperatorAgentProposalRegistration:
       type: object
       required: [proposal]
@@ -2402,6 +2604,117 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProposalDecisionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator-agent/context:
+    get:
+      summary: Read the metadata-only personal context inventory.
+      description: >
+        Reads context-item-v1 envelopes from the ledger union, including rotated records. The
+        response excludes raw private content and reports stale or unavailable derived context.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: purpose
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: authorityRef
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Metadata-only context inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Register one bounded context-item-v1 envelope.
+      description: Records provenance, purpose, authority, retention, visibility, and derivation links before use.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextRegistration"
+      responses:
+        "201":
+          description: Context item registered; the response is metadata-only.
+        "200":
+          description: Identical context item already registered.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/context/revoke:
+    post:
+      summary: Revoke a context item and its derived dependants.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextActionRequest"
+      responses:
+        "200":
+          description: Bounded revocation receipt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextReceiptResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/context/delete:
+    post:
+      summary: Delete a context item and retain its bounded deletion receipt.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextActionRequest"
+      responses:
+        "200":
+          description: Bounded deletion receipt; raw private content is not returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextReceiptResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

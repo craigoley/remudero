@@ -304,6 +304,12 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *  (design viii). RECORDING ONLY: nothing here decides dispatch or merge. */
 export const RISK_OVERRIDE_RECORDED_STEP = "panel.risk_override_recorded";
 
+/** Personal-context governance rows are deciding state, not display telemetry. Losing a context
+ * item, revocation, or deletion receipt during rotation would restore memory after restart. */
+export const CONTEXT_ITEM_LEDGER_STEP = "panel.context_item";
+export const CONTEXT_REVOKED_LEDGER_STEP = "panel.context_revoked";
+export const CONTEXT_DELETED_LEDGER_STEP = "panel.context_deleted";
+
 /** W1-T2244 (design vii): the two signals an override can carry, OPPOSITE for a calibrator.
  *  `judge_wrong` says the escalation was a miscalibration; `risk_accepted` says it was correct and
  *  the operator knowingly took the cost. One "overridden" flag would collapse both into judge error.
@@ -538,6 +544,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   FOLLOW_UP_CONTROL_STEP,
   FOLLOW_UP_RECEIPT_STEP,
   FOLLOW_UP_POLICY_STEP,
+  CONTEXT_ITEM_LEDGER_STEP,
+  CONTEXT_REVOKED_LEDGER_STEP,
+  CONTEXT_DELETED_LEDGER_STEP,
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.
