@@ -109,6 +109,20 @@ function extractCheckRunField(body: unknown, field: "name" | "conclusion"): stri
   return typeof value === "string" ? value : undefined;
 }
 
+/** Extract the check-run head identity used to prove that an accepted aggregate event belongs
+ * to the PR head being reconciled. GitHub calls the field `head_sha`; malformed or absent
+ * identity is deliberately returned as undefined so the classifier can keep the event
+ * actionable rather than inventing coverage. */
+export function checkRunHeadIdentity(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const checkRun = (body as Record<string, unknown>).check_run;
+  if (typeof checkRun !== "object" || checkRun === null) return undefined;
+  const headSha = (checkRun as Record<string, unknown>).head_sha;
+  if (typeof headSha !== "string") return undefined;
+  const trimmed = headSha.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
@@ -180,7 +194,17 @@ export interface GithubEventWakeSemanticSummary {
   successful_leaf: number;
   unknown: number;
   aggregate_names: Record<string, number>;
+  /** Bounded identities observed on accepted aggregate check-run events in this flush. */
+  aggregate_head_shas: string[];
+  /** Aggregate events whose check-run payload did not carry a usable `head_sha`. */
+  aggregate_head_sha_missing: number;
+  /** Aggregate identities beyond the bounded evidence set. */
+  aggregate_head_sha_overflow: number;
 }
+
+/** A single summary cannot grow with a high-fanout webhook burst. The count remains actionable
+ * even when the bounded identity evidence overflows. */
+export const MAX_AGGREGATE_HEAD_IDENTITIES = 64;
 
 function createGithubEventWakeSemanticCounts(
   aggregateCheckNames: readonly string[],
@@ -192,6 +216,9 @@ function createGithubEventWakeSemanticCounts(
     successful_leaf: 0,
     unknown: 0,
     aggregate_names: Object.fromEntries(aggregateCheckNames.map((name) => [name, 0])),
+    aggregate_head_shas: [],
+    aggregate_head_sha_missing: 0,
+    aggregate_head_sha_overflow: 0,
   };
 }
 
@@ -370,7 +397,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     opts.aggregateCheckNames ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES;
   let semanticCounts = createGithubEventWakeSemanticCounts(aggregateCheckNames);
 
-  const recordClassification = (classification: GithubEventWakeClassification) => {
+  const recordClassification = (classification: GithubEventWakeClassification, body: unknown) => {
     semanticCounts.mode = semanticCheckMode;
     if (classification.class === "actionable_failure") semanticCounts.actionable_failure++;
     if (classification.class === "actionable_aggregate") {
@@ -378,6 +405,17 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       if (classification.aggregateName !== undefined) {
         semanticCounts.aggregate_names[classification.aggregateName] =
           (semanticCounts.aggregate_names[classification.aggregateName] ?? 0) + 1;
+      }
+      const headSha = checkRunHeadIdentity(body);
+      if (headSha === undefined) {
+        semanticCounts.aggregate_head_sha_missing++;
+      } else if (semanticCounts.aggregate_head_shas.includes(headSha)) {
+        // A repeated aggregate completion for the same head is evidence for the same identity,
+        // not a reason to spend another slot in the bounded set.
+      } else if (semanticCounts.aggregate_head_shas.length < MAX_AGGREGATE_HEAD_IDENTITIES) {
+        semanticCounts.aggregate_head_shas.push(headSha);
+      } else {
+        semanticCounts.aggregate_head_sha_overflow++;
       }
     }
     if (classification.class === "successful_leaf") semanticCounts.successful_leaf++;
@@ -471,7 +509,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       }
 
       const classification = classifyGithubEventWake(event, action, body, aggregateCheckNames);
-      recordClassification(classification);
+      recordClassification(classification, body);
       if (semanticCheckMode === "enforce" && !classification.actionable) {
         opts.dedup.record(deliveryId);
         sendJson(res, 202, { accepted: false, reason: "successful_leaf" });
