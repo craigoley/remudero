@@ -509,6 +509,7 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
+  landPlanReconcileShards,
   recordDecision,
   recordRuling,
   sweepFeedbackLanding,
@@ -861,6 +862,7 @@ import {
   verifyHumanCadence,
   wipeTestCadenceCheck,
   type MeasurementCadenceDecision,
+  buildPlanReconcileCadenceInput,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
   type VerifyHumanCadenceResult,
@@ -24356,6 +24358,25 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       const verifyHuman = await defaultVerifyHumanCadenceResult(root, configFor(), verifyHumanRunId, cadenceClock);
+      // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
+      // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
+      // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
+      // checkout. A failed landing throws so the cadence records an error and retries later; it
+      // must never report a successful reconciliation on an unlanded PR.
+      const planReconcile = buildPlanReconcileCadenceInput({
+        checkoutRoot: repoRoot,
+        readShards: () => readPlanShards(join(repoRoot, "plan", "tasks.d")),
+        creditedMergedIds: defaultCreditedMergedIds,
+        land: (inputs) => {
+          const landing = landPlanReconcileShards(repoRoot, inputs, {
+            targetRepository: resolveOwnerRepo(),
+            landingOwner: "measurement-cadence",
+          });
+          if (!landing.landed || landing.error) {
+            throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+          }
+        },
+      });
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -24369,6 +24390,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
+        planReconcile,
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),
