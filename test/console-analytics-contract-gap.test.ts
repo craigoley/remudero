@@ -223,3 +223,33 @@ test("W1-T3884: matching projectionVersion=console-v1 returns the bounded consol
   assert.deepEqual(JSON.parse(body()), expected.consoleV1);
   assert.notDeepEqual(JSON.parse(body()), expected);
 });
+
+test("W1-T3942: projection=console-v1 alias returns the bounded console-v1 envelope", async () => {
+  const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
+  const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
+  const { res, status, body } = fakeResponse();
+
+  await route.handler({ url: "/v1/analytics?projection=console-v1" } as never, res, { params: {} });
+
+  assert.equal(status(), 200);
+  assert.deepEqual(JSON.parse(body()), expected.consoleV1);
+  assert.notDeepEqual(JSON.parse(body()), expected);
+});
+
+test("W1-T3942: projectionVersion remains authoritative when the alias disagrees", async () => {
+  const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
+  const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
+  const { res, status, body } = fakeResponse();
+
+  await route.handler(
+    { url: "/v1/analytics?projectionVersion=console-v2&projection=console-v1" } as never,
+    res,
+    { params: {} },
+  );
+
+  assert.equal(status(), 409);
+  const parsed = JSON.parse(body()) as { ok: boolean; error: string; requestedVersion: string };
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.error, "unsupported_projection_version");
+  assert.equal(parsed.requestedVersion, "console-v2");
+});
