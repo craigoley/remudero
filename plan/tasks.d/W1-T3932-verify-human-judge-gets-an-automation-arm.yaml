@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator-follow-up#verify-human-automation-2026-09-21"
   plan_refs: [W1-T3188, W1-T3921, W1-T3906]
-  files: [src/lib/verify-human-judge.ts, src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts]
+  files: [src/lib/verify-human-judge.ts, src/lib/measurement-cadence.ts, src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts, test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -73,6 +73,8 @@
       proof: "unit test: malformed verify-human output fails open to needs_operator and remains due"
     - claim: "the automation route cannot edit plan records or manufacture an operator release"
       proof: "unit test: an automate verdict never writes plan files or a ratify release row"
+    - claim: "the daemon cadence sends an automate verdict through the same existing proposal flow"
+      proof: "unit test: W1-T3932: an automate verdict from the daemon cadence enters the existing proposal flow"
   falsifier: |
     Remove `automate` from the parser or prompt and the positive automation fixture must stop routing
     through the proposal seam. Replace the proposal handoff with a `verify:` edit, a
