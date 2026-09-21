@@ -73,7 +73,7 @@ import { extractTaskTrailerId } from "../src/lib/review.ts";
 // keep its own BASENAME matcher, which admitted test/fixtures/onboard/repo/package.json while
 // dep-review's ROOT-ANCHORED list refused apps/dashboard/package.json -- two sources of truth
 // for one concept, disagreeing in opposite directions, with #5757 stuck between them.
-import { isManifestPath } from "../src/lib/dep-review.ts";
+import { isDependencyDeclarationPath as isDependencyDeclarationPathFromReview, isManifestPath } from "../src/lib/dep-review.ts";
 
 // Re-exported so a caller/test can name these shapes without a second import of src/run-task.ts.
 export { LINT_FILING_SUBJECT_RE, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, isDispatchedRunBranch, isNonCodePath };
@@ -113,20 +113,8 @@ export function isDependencyManifestPath(path, readRootManifest = () => readFile
   return isManifestPath(String(path ?? ""), readRootManifest);
 }
 
-// `deploy/` is a separately packaged image surface, not a declared npm workspace. Dependabot
-// therefore edits its package manifests directly, and its Node image bump edits the Dockerfile's
-// `FROM` declaration. These paths carry dependency identity without being npm manifests, so keep
-// them as a tiny explicit extension of the shared manifest predicate rather than widening nested
-// workspace matching (which would admit fixtures).
-const DEPLOY_DEPENDENCY_DECLARATIONS = new Set([
-  "deploy/package.json",
-  "deploy/package-lock.json",
-  "deploy/Dockerfile",
-]);
-
 export function isDependencyDeclarationPath(path, readRootManifest = () => readFileSync("package.json", "utf8")) {
-  const value = String(path ?? "");
-  return DEPLOY_DEPENDENCY_DECLARATIONS.has(value) || isDependencyManifestPath(value, readRootManifest);
+  return isDependencyDeclarationPathFromReview(String(path ?? ""), readRootManifest);
 }
 
 /**
