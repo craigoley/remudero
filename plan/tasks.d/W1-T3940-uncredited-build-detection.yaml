@@ -1,0 +1,63 @@
+- id: W1-T3940
+  title: "A non-repository manual record cannot have an uncredited Remudero build — ignore unrelated prose mentions instead of surfacing a false NEEDS-ME warning"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  files:
+    - src/lib/status.ts
+    - test/uncredited-build-detection.test.ts
+  origin: "operator-session#needs-me-review-2026-09-21"
+  plan_refs: [W1-T2392, W1-T3934, W1-T3939, W1-T13]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> run-W1-T3940-1789982932584
+    W1-T13 is an explicit `repo: none`, `type: manual`, `verify: human` record marked done
+    with operator-attested completion. It has no durable `manual.completed` ledger row, but it
+    cannot have a Remudero source build: there is no target repository. The current
+    `uncreditedBuildWarning` still indexes unrelated merged PR prose mentioning W1-T13 and
+    reports a source diff as NEEDS-ME. This is false attribution, not missing implementation.
+
+    Keep the existing warning for repository-backed queued tasks, including tasks with no
+    declared file scope. This task is only the narrow impossible-population carve-out for
+    `repo: none`; it does not infer completion, grant merge credit, alter dispatch eligibility,
+    retire a task, or block a PR. A missing/unreadable GitHub read remains silent, as today.
+  rationale: |
+    The warning is deliberately report-only, but a false human prompt still consumes the same
+    operator attention as a real uncredited build. W1-T13 demonstrates the failure: PR #3005
+    mentions the old manual task in explanatory prose, changes Remudero source, and therefore
+    looks like an uncredited build even though the task names no repository and could not have
+    produced that diff. The task's manual completion remains a separate plan/ledger concern;
+    this fix only prevents a repository attribution algorithm from acting on an impossible
+    repository population.
+
+    This is distinct from W1-T3934's declared-scope repair: that task filters prose by the
+    changed-file scope of a repository-backed task. It is distinct from W1-T3939's blocked-task
+    quieting: this task handles a non-repository manual record that is not dispatchable for a
+    different reason and must remain a report-only attribution carve-out.
+  design: |
+    At the existing report-only call site in `projectPlan`/`deriveStatus`, skip the
+    `uncreditedBuildWarning` probe when the task's repository is the explicit non-repository
+    sentinel `none`. Preserve the current blocked-task suppression from W1-T3939 and preserve
+    the fail-open warning for a queued Remudero task. Test through the real `projectPlan` path
+    using a merged PR whose prose names W1-T13 and whose changed files include `src/`.
+
+    Do not use `status: done`, `verify: human`, or absence of a manual ledger row as a general
+    suppression rule: those fields are not merge truth, and a human task may still need a
+    durable operator decision. Do not broaden this into task retirement or credit repair.
+  acceptance:
+    - claim: "a repo:none manual record is silent when unrelated merged prose names its id and the diff touches Remudero source"
+      proof: "unit test: W1-T3940 criterion 1"
+    - claim: "a queued Remudero task keeps the existing uncredited-build warning on the same prose-and-source shape"
+      proof: "unit test: W1-T3940 criterion 2"
+    - claim: "the carve-out remains report-only and does not change merge credit, status, or dispatch evidence"
+      proof: "unit test: W1-T3940 criterion 3"
+  falsifier: |
+    Delete the `repo: none` guard: the W1-T13-shaped regression must report an uncredited build
+    again. Change the guard to suppress all manual/human/done tasks: the queued Remudero control
+    must still warn. Change the warning path to set merged or status: the report-only control
+    must fail. A GitHub enumeration or changed-file read failure remains silent rather than
+    becoming a guessed warning.
