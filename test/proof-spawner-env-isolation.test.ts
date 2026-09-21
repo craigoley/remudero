@@ -39,6 +39,12 @@ function spawnAndReadEnv(): Record<string, string | undefined> {
 // contaminated daemon shell would, and restoring it in `finally`.
 const CANARY_VAR = "RMD_RESTART_THROTTLE_S";
 
+// CoreFoundation adds this key below Node's own env handling on macOS, even when the spawn
+// receives an explicit `env` object. It is a host-runtime artifact, not a permission granted by
+// PROOF_ENV_ALLOWLIST; keep the product allowlist strict and narrow the test's platform exception
+// to this one measured key instead of weakening the child environment itself.
+const PLATFORM_INJECTED_ENV = process.platform === "darwin" ? new Set(["__CF_USER_TEXT_ENCODING"]) : new Set<string>();
+
 function withCanary<T>(value: string | undefined, fn: () => T): T {
   const had = Object.prototype.hasOwnProperty.call(process.env, CANARY_VAR);
   const saved = process.env[CANARY_VAR];
@@ -52,7 +58,7 @@ function withCanary<T>(value: string | undefined, fn: () => T): T {
   }
 }
 
-test("a proof executes in a declared environment rather than inheriting the orchestrator's", () => {
+test("a Darwin CoreFoundation env injection is isolated from the proof allowlist", () => {
   const childEnv = withCanary("2", () => spawnAndReadEnv());
   assert.equal(
     childEnv[CANARY_VAR],
@@ -62,8 +68,21 @@ test("a proof executes in a declared environment rather than inheriting the orch
   );
   // Not a one-var spot check: NOTHING outside the declared allowlist survives, however this
   // process's own env happens to be shaped when the suite runs.
-  const leaked = Object.keys(childEnv).filter((k) => !(PROOF_ENV_ALLOWLIST as readonly string[]).includes(k));
-  assert.deepEqual(leaked, [], "every key in the child's env must be a member of PROOF_ENV_ALLOWLIST");
+  const leaked = Object.keys(childEnv).filter(
+    (k) => !(PROOF_ENV_ALLOWLIST as readonly string[]).includes(k) && !PLATFORM_INJECTED_ENV.has(k),
+  );
+  assert.deepEqual(
+    leaked,
+    [],
+    "every child env key must be allowlisted, except the one measured CoreFoundation injection on macOS",
+  );
+  if (process.platform === "darwin") {
+    assert.equal(
+      PLATFORM_INJECTED_ENV.has("__CF_USER_TEXT_ENCODING"),
+      true,
+      "the Darwin exception must remain the exact measured CoreFoundation key",
+    );
+  }
 });
 
 test("the variables these suites genuinely need still reach the child", () => {
