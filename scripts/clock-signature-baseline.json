@@ -14,6 +14,11 @@
     "dateNow": 0,
     "newDate": 1
   },
+  "src/lib/automation-action.ts": {
+    "legacy": 0,
+    "dateNow": 1,
+    "newDate": 2
+  },
   "src/lib/board-review.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -237,7 +242,7 @@
   "src/lib/operator-agent.ts": {
     "legacy": 1,
     "dateNow": 11,
-    "newDate": 23
+    "newDate": 24
   },
   "src/lib/operator-merge-hold.ts": {
     "legacy": 1,
