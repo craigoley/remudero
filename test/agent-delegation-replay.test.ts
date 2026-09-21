@@ -106,6 +106,14 @@ test("W1-T3883 (3): acting after the PARENT of a forwarded envelope is revoked i
   if (!verification.ok) assert.equal(verification.code, "parent-revoked");
 });
 
+test("W1-T3883 (3): an action requesting an audience other than the envelope's own is refused", () => {
+  const store = new InMemoryDelegationEnvelopeStore();
+  const envelope = issueAndAccept(store);
+  const { verification } = executeBoundedDelegation(store, actionFor(envelope, { audience: "provider:someone-else" }));
+  assert.equal(verification.ok, false);
+  if (!verification.ok) assert.equal(verification.code, "wrong-audience");
+});
+
 test("W1-T3883 (3): an identity other than the envelope's own recipient is refused", () => {
   const store = new InMemoryDelegationEnvelopeStore();
   const envelope = issueAndAccept(store);
@@ -192,6 +200,26 @@ test("W1-T3883 (3): forwarding can never outlive the parent's own expiry", () =>
   });
   assert.equal(forward.ok, false);
   if (!forward.ok) assert.equal(forward.code, "expiry-widened");
+});
+
+test("W1-T3883 (3): forwarding an already-expired parent envelope is refused", () => {
+  const store = new InMemoryDelegationEnvelopeStore();
+  const parent = issueAndAccept(store, { expiresAt: new Date(Date.now() + 1_000).toISOString() });
+  const forward = forwardDelegation(
+    store,
+    {
+      parentEnvelopeId: parent.id,
+      forwarder: parent.recipient,
+      newRecipient: "agent:sub-deployer",
+      capabilities: ["deploy.advance"],
+      purpose: "attempt to forward after the parent expired",
+      audience: parent.audience,
+      expiresAt: parent.expiresAt,
+    },
+    { now: Date.now() + 5_000 },
+  );
+  assert.equal(forward.ok, false);
+  if (!forward.ok) assert.equal(forward.code, "expired");
 });
 
 test("W1-T3883 (3): only the envelope's own recipient may forward it", () => {

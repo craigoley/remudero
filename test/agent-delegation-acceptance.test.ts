@@ -9,6 +9,7 @@ import {
   createDelegationEnvelope,
   executeBoundedDelegation,
   InMemoryDelegationEnvelopeStore,
+  revokeDelegationEnvelope,
 } from "../src/lib/automation-action.js";
 
 function issue(store: InMemoryDelegationEnvelopeStore, overrides: Partial<Parameters<typeof createDelegationEnvelope>[0]> = {}) {
@@ -122,4 +123,28 @@ test("W1-T3883 (2): an empty acceptance is refused", () => {
   const accept = acceptDelegationEnvelope(store, { envelopeId: envelope.id, recipient: envelope.recipient, acceptedCapabilities: [] });
   assert.equal(accept.ok, false);
   if (!accept.ok) assert.equal(accept.code, "empty-acceptance");
+});
+
+test("W1-T3883 (2): acceptance of an unknown envelope id is refused", () => {
+  const store = new InMemoryDelegationEnvelopeStore();
+  const accept = acceptDelegationEnvelope(store, { envelopeId: "dlg-never-issued", recipient: "agent:deployer", acceptedCapabilities: ["deploy.advance"] });
+  assert.equal(accept.ok, false);
+  if (!accept.ok) assert.equal(accept.code, "unknown-envelope");
+});
+
+test("W1-T3883 (2): acceptance of a revoked envelope is refused even before it was ever accepted", () => {
+  const store = new InMemoryDelegationEnvelopeStore();
+  const envelope = issue(store);
+  revokeDelegationEnvelope(store, envelope.id);
+  const accept = acceptDelegationEnvelope(store, { envelopeId: envelope.id, recipient: envelope.recipient, acceptedCapabilities: ["deploy.advance"] });
+  assert.equal(accept.ok, false);
+  if (!accept.ok) assert.equal(accept.code, "revoked");
+});
+
+test("W1-T3883 (2): acceptance of an already-expired envelope is refused", () => {
+  const store = new InMemoryDelegationEnvelopeStore();
+  const envelope = issue(store, { expiresAt: new Date(Date.now() + 1_000).toISOString() });
+  const accept = acceptDelegationEnvelope(store, { envelopeId: envelope.id, recipient: envelope.recipient, acceptedCapabilities: ["deploy.advance"] }, { now: Date.now() + 5_000 });
+  assert.equal(accept.ok, false);
+  if (!accept.ok) assert.equal(accept.code, "expired");
 });

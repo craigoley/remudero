@@ -81,3 +81,14 @@ test("W1-T3883 (1): an empty capability allowlist is refused at issuance", () =>
 test("W1-T3883 (1): a malformed expiresAt is refused at issuance", () => {
   assert.throws(() => createDelegationEnvelope(baseInput({ expiresAt: "not-a-date" })), /expiresAt/);
 });
+
+test("W1-T3883 (1): a capability allowlist containing a non-string or empty entry is refused at issuance", () => {
+  assert.throws(
+    () => createDelegationEnvelope(baseInput({ capabilities: ["deploy.advance", ""] })),
+    /capabilities must be non-empty strings/,
+  );
+  assert.throws(
+    () => createDelegationEnvelope(baseInput({ capabilities: ["deploy.advance", 7 as unknown as string] })),
+    /capabilities must be non-empty strings/,
+  );
+});
