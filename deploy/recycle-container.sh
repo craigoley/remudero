@@ -369,6 +369,44 @@ HUNG_WORKER_AGE_S="${RMD_RECYCLE_HUNG_AGE_S:-7200}"
 # rewritten — this script does not read it back and does not depend on it existing.
 LEDGER_FILE="${STATE_DIR}/state/ledger.ndjson"
 
+# Docker control calls are outside the worker wait bound and can otherwise leave the fleet paused
+# forever after the old container is already dead. Keep the safe default conservative, but make the
+# bound explicit and operator-tunable for a host whose runtime needs longer; on timeout this helper
+# leaves PAUSE engaged because no replacement has started yet.
+DOCKER_CONTROL_TIMEOUT_S="${RMD_RECYCLE_DOCKER_TIMEOUT_S:-120}"
+case "${DOCKER_CONTROL_TIMEOUT_S}" in
+  ''|*[!0-9]*)
+    echo "recycle-container: REFUSING — RMD_RECYCLE_DOCKER_TIMEOUT_S must be a non-negative integer." >&2
+    exit 2
+    ;;
+esac
+
+run_docker_control() {
+  local operation="$1"
+  shift
+  local child_pid waited=0 child_status=0
+
+  "$@" >/dev/null &
+  child_pid=$!
+  while kill -0 "${child_pid}" 2>/dev/null; do
+    if [ "${waited}" -ge "${DOCKER_CONTROL_TIMEOUT_S}" ]; then
+      kill "${child_pid}" 2>/dev/null || true
+      wait "${child_pid}" 2>/dev/null || true
+      if [ -d "$(dirname "${LEDGER_FILE}")" ]; then
+        printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.control_timeout","lane":"deploy","operation":"%s","timeout_s":%s,"container":"%s","pause":"retained — no replacement started"}\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${operation}" "${DOCKER_CONTROL_TIMEOUT_S}" "${CONTAINER_NAME}" >> "${LEDGER_FILE}" || true
+      fi
+      echo "recycle-container: REFUSING — docker ${operation} did not finish within ${DOCKER_CONTROL_TIMEOUT_S}s." >&2
+      echo "  ${CONTAINER_NAME} may be stopped but is not confirmed removed; PAUSE remains engaged and no replacement was started." >&2
+      exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "${child_pid}" || child_status=$?
+  return "${child_status}"
+}
+
 # W1-T2555: THE OPERATOR'S OWN WORD THAT THIS IS A FRESH HOST, NEVER INFERRED. Defaults from the
 # env var so a fleet-automation caller can pass it without editing an argv list; --first-boot is the
 # same opt-in for an interactive operator. Either form is read identically below — see section 1.5.
@@ -1304,9 +1342,9 @@ done
 # file in shared state, not process state, and the new container has no memory of who set it.
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
-  docker stop "${CONTAINER_NAME}" >/dev/null
+  run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
-  docker rm "${CONTAINER_NAME}" >/dev/null
+  run_docker_control rm docker rm "${CONTAINER_NAME}"
 else
   echo "recycle-container: no existing ${CONTAINER_NAME} to stop or remove"
 fi

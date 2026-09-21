@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 import {
@@ -9,6 +10,7 @@ import {
   spawnRmdReviewForFreshTree,
 } from "../src/run-task.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // ── W1-T3723 — A STALE REVIEWER REVIEWS FROM A FRESH TREE INSTEAD OF WAITING FOR A RESTART ────
 //
@@ -82,7 +84,13 @@ test("the stale pass is still reported, so a fresh-tree review does not hide the
 
 // ── The runner ───────────────────────────────────────────────────────────────────────────────
 
-function runnerWith(over: { git?: (a: string[]) => string; spawn?: (w: string, a: string[]) => Promise<number>; addWorktree?: (d: string, p: string, r: string) => void } = {}) {
+function runnerWith(over: {
+  git?: (a: string[]) => string;
+  spawn?: (w: string, a: string[]) => Promise<number>;
+  addWorktree?: (d: string, p: string, r: string) => void;
+  inspectExistingWorktree?: (d: string, p: string, r: string) => "absent" | "reusable" | "unsafe";
+  prepareWorktree?: (d: string, p: string) => boolean;
+} = {}) {
   const gitCalls: string[][] = [];
   const spawns: Array<{ worktree: string; args: string[] }> = [];
   const runner = buildFreshTreeReviewRunner("/repo", {
@@ -91,6 +99,8 @@ function runnerWith(over: { git?: (a: string[]) => string; spawn?: (w: string, a
     // the worktree creation too rather than going blind to it.
     addWorktree: over.addWorktree ?? ((d, p, r) => { gitCalls.push(["-C", d, "worktree", "add", "--detach", p, r]); }),
     spawnReview: over.spawn ?? (async (worktree, args) => { spawns.push({ worktree, args }); return 0; }),
+    inspectExistingWorktree: over.inspectExistingWorktree ?? (() => "absent"),
+    prepareWorktree: over.prepareWorktree ?? (() => true),
     worktreeRoot: "/wt",
   });
   return { runner, gitCalls, spawns };
@@ -134,6 +144,105 @@ test("a spawn failure is undefined too, so the caller falls back rather than inv
 test("the child's exit code is returned verbatim, so a real review failure still fails", async () => {
   const { runner } = runnerWith({ spawn: async () => 1 });
   assert.equal(await runner("5883", [], { originMainSha: "bbbbbbbbbbbb" }), 1);
+});
+
+test("W1-T3962 fresh reviewer dependency link control: preparation happens after adding and before the review child, without an install", async () => {
+  const events: string[] = [];
+  const { runner } = runnerWith({
+    addWorktree: () => { events.push("add"); },
+    prepareWorktree: () => { events.push("link-and-exclude"); return true; },
+    spawn: async () => { events.push("spawn"); return 0; },
+  });
+  assert.equal(await runner("5883", [], { originMainSha: "bbbbbbbbbbbb" }), 0);
+  assert.deepEqual(events, ["add", "link-and-exclude", "spawn"], "a reviewer may spawn only after its canonical dependencies are ready");
+  assert.ok(events.every((event) => !event.includes("install")), "a fresh reviewer tree must link dependencies, never install them");
+});
+
+test("W1-T3962 fresh reviewer preparation refusal never spawns an incomplete tree", async () => {
+  let spawns = 0;
+  const { runner } = runnerWith({
+    prepareWorktree: () => false,
+    spawn: async () => {
+      spawns += 1;
+      return 0;
+    },
+  });
+  assert.equal(await runner("5883", [], { originMainSha: "bbbbbbbbbbbb" }), undefined);
+  assert.equal(spawns, 0, "a reviewer with no proven dependency link must not run");
+});
+
+test("W1-T3962 fresh reviewer unproven tree control: mismatched, dirty, missing, or unreadable registered trees never add or spawn", async () => {
+  for (const reason of ["mismatched", "dirty", "missing", "unreadable"]) {
+    let adds = 0;
+    let spawns = 0;
+    const revision = "bbbbbbbbbbbb";
+    const worktree = `/wt/reviewer-${revision}`;
+    const runner = buildFreshTreeReviewRunner("/repo", {
+      git: (args) => {
+        if (args.includes("fetch")) return "";
+        if (args.includes("worktree") && args.includes("list")) {
+          if (reason === "unreadable") throw new Error("registry unreadable");
+          return `worktree ${worktree}\nHEAD ${reason === "mismatched" ? "aaaaaaaaaaaa" : revision}\ndetached\n\n`;
+        }
+        if (args.includes("rev-parse")) {
+          if (reason === "missing") throw new Error("registered checkout missing");
+          return `${revision}\n`;
+        }
+        if (args.includes("status")) return reason === "dirty" ? " M tracked.ts\n" : "";
+        throw new Error(`unexpected git read: ${args.join(" ")}`);
+      },
+      addWorktree: () => { adds += 1; },
+      // This control isolates the trust boundary: the unsafe-tree guard, not an unrelated
+      // dependency-source absence, must be what prevents mismatched/dirty trees reaching a child.
+      prepareWorktree: () => true,
+      spawnReview: async () => { spawns += 1; return 0; },
+      worktreeRoot: "/wt",
+    });
+    assert.equal(await runner("5883", [], { originMainSha: "bbbbbbbbbbbb" }), undefined, reason);
+    assert.equal(adds, 0, `${reason}: an unproven collision must not be replaced`);
+    assert.equal(spawns, 0, `${reason}: an unproven checkout must not judge`);
+  }
+});
+
+test("W1-T3962 fresh reviewer restart reuse control: the production defaults reuse an exact clean detached tree and link its canonical dependencies", async () => {
+  const root = makeTempDir("t3962-fresh-reviewer-restart");
+  const worktreeRoot = join(root, "worktrees");
+  mkdirSync(worktreeRoot, { recursive: true });
+  const sourceStore = gitRepo({ kind: "t3962-source" });
+  const remoteStore = gitRepo({ bare: true, kind: "t3962-remote" });
+  const repo = sourceStore.dir;
+  const remote = remoteStore.dir;
+  writeFileSync(join(repo, "tracked.txt"), "base\n");
+  mkdirSync(join(repo, "node_modules"));
+  sourceStore.git("add", "tracked.txt");
+  sourceStore.git("commit", "--quiet", "-m", "base");
+  sourceStore.addRemote("origin", remote);
+  sourceStore.git("push", "--quiet", "-u", "origin", "HEAD:main");
+  const sha = sourceStore.git("rev-parse", "origin/main");
+  let adds = 0;
+  const spawns: string[] = [];
+  const git = (args: string[]) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString();
+  const addTree = (dir: string, path: string, revision: string) => {
+    adds += 1;
+    execFileSync("git", ["-C", dir, "worktree", "add", "--detach", path, revision], { stdio: "pipe" });
+  };
+  const build = () => buildFreshTreeReviewRunner(repo, {
+    git,
+    addWorktree: addTree,
+    spawnReview: async (worktree) => { spawns.push(worktree); return 0; },
+    worktreeRoot,
+  });
+  const first = build();
+  assert.equal(await first("5883", [], { originMainSha: sha }), 0);
+  const reviewerTree = join(worktreeRoot, `reviewer-${sha.slice(0, 12)}`);
+  assert.ok(lstatSync(join(reviewerTree, "node_modules")).isSymbolicLink(), "the canonical dependency source must be linked into a new reviewer tree");
+  assert.doesNotThrow(() => execFileSync("git", ["-C", reviewerTree, "check-ignore", "-q", "node_modules"]), "the generated dependency link must be excluded from git status");
+  // A new runner is the restart boundary: its in-memory map is empty, so only the real worktree
+  // registry, detached SHA, and clean porcelain proof can authorize reuse.
+  const afterRestart = build();
+  assert.equal(await afterRestart("5884", [], { originMainSha: sha }), 0);
+  assert.equal(adds, 1, "the stable path must be reused after restart instead of colliding on git worktree add");
+  assert.deepEqual(spawns, [reviewerTree, reviewerTree]);
 });
 
 // ── The real spawnReview seam (W1-T3723) — the fake above stands in for this in every test up to

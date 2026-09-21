@@ -84,6 +84,11 @@
     "dateNow": 2,
     "newDate": 5
   },
+  "src/lib/context-controls.ts": {
+    "legacy": 0,
+    "dateNow": 2,
+    "newDate": 2
+  },
   "src/lib/containment.ts": {
     "legacy": 0,
     "dateNow": 1,
@@ -291,6 +296,11 @@
   },
   "src/lib/project-init.ts": {
     "legacy": 2,
+    "dateNow": 0,
+    "newDate": 1
+  },
+  "src/lib/provider-auth-sessions.ts": {
+    "legacy": 3,
     "dateNow": 0,
     "newDate": 1
   },

@@ -1,0 +1,68 @@
+- id: W1-T3971
+  title: "buildCreditCandidates re-derives every plan task through bare deriveStatus instead of the existing one-ledger-read, one-index projectPlan pass, making a full sweep slow enough for its warm board gateway cache to expire mid-walk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 80.00
+  origin: operator-session#daemon-continuity-2026-09-21
+  plan_refs: ["W1-T75", "W1-T187", "W1-T2794", "W1-T3063", "W1-T3067", "W1-T3084", "W1-T3873", "W1-T951"]
+  files: [src/run-task.ts, src/lib/status.ts, test/credit-candidates-ride-the-plan-projection.test.ts]
+  rationale: |
+    OBSERVED at origin/main ab7649fa. buildCreditCandidates (src/run-task.ts near :33278) builds
+    bare DeriveDeps and loops over every plan task with deriveStatus(task, deps). Without a
+    readLedger override or ledgerIndex, every task parses the full ledger and performs its own
+    helper scans. projectPlan (src/lib/status.ts near :3212) already has the correct established
+    shape: one ledger read, one LedgerIndex, one credit-store lifecycle and one batched board
+    snapshot for a whole plan. The credit reconciler is a whole-plan consumer that bypasses it.
+
+    A live core sweep observed on 2026-09-21 ran for minutes, but it also posted and awaited real
+    reviews; that duration does NOT attribute the delay to this loop. The proven defect is the
+    repeated full-ledger parsing at the whole-plan call site. The existing projection already
+    supplies the bounded alternative, and the one-read fixture below is the measurement that must
+    carry the performance claim before this task changes production behavior.
+
+    OVERLAP RULING: W1-T75 names the same status and run-task files because it establishes
+    correction precedence in deriveStatus. This task neither changes correction provenance nor the
+    order of any deriveStatus rung; it changes only the whole-plan caller from N bare derivations to
+    the already-established projection. The explicit reference makes the scheduling overlap visible
+    instead of concealing it by narrowing the files list.
+  design: |
+    Make buildCreditCandidates consume projectPlan(plan, deps) once, with no cachePath so this
+    reconciliation path never writes state/status.json. Preserve its current gateway argument,
+    evidence-root resolution, mergedPathsByPr evidence and one readMergeSubjectsByPr call. Map the
+    returned projections through a named pure creditCandidatesFromProjection helper that keeps the
+    exact current merged/prNumber/prUrl filter and creditIsImplementation result.
+
+    This must not quietly add board reads. projectPlan has other whole-plan observations; prove
+    the credit path makes no more gateway requests than the current loop, or add a narrow opt-out
+    whose default preserves every existing projectPlan caller. A failed batched merged read must
+    still decline all candidates rather than falling back to N direct probes. Existing plan-only
+    credit refusal, creditIsReconcilable, the one-call-per-sweep composition and warm-gateway
+    wiring remain unchanged.
+  acceptance:
+    - claim: "one credit-candidate build over an N-task plan reads the ledger exactly once"
+      proof: "grep: credit candidates read the ledger once in test/credit-candidates-ride-the-plan-projection.test.ts"
+    - claim: "the projected candidate set is equivalent to the existing per-task derivation across merged, plan-only, trailer-only, open and unreadable cases"
+      proof: "grep: credit candidates preserve projected candidate equivalence in test/credit-candidates-ride-the-plan-projection.test.ts"
+    - claim: "a failed batched merged read yields no credit candidate and no direct per-task fallback"
+      proof: "grep: credit candidates fail closed on an unreadable merged batch in test/credit-candidates-ride-the-plan-projection.test.ts"
+    - claim: "the credit path neither writes status.json nor adds gateway requests"
+      proof: "grep: credit candidates do not add projection side effects in test/credit-candidates-ride-the-plan-projection.test.ts"
+    - claim: "the mapping from a plan projection to a credit candidate is named and used by the builder"
+      proof: "grep: creditCandidatesFromProjection in src/run-task.ts"
+  falsifier: |
+    Close without implementation if a 50-task fixture proves deriveStatus memoizes a parsed ledger
+    across bare calls, or if buildCreditCandidates already delegates once to projectPlan. Restore
+    the per-task loop after the implementation: the one-read assertion must fail while the
+    equivalence assertion remains green. If the candidate sets differ, stop rather than hiding a
+    credit-semantic difference inside a performance refactor.
+  status: queued
+  attempts: 0
+  note: |
+    Rule 19: high risk is intentional. The files cross status projection and the destructive
+    credit-reconciliation consumer; candidate equivalence and failed-read behavior are the safety
+    boundary. This is a separate concern from W1-T3972 and W1-T3973.
+    reservation hand-off: run-PLAN-create-1790016115247 -> codex/plan-daemon-recovery-followups

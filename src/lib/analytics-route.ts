@@ -1211,9 +1211,12 @@ export function buildAnalyticsRoute(deps: {
     handler: (req, res) => {
       // `?projectionVersion=` is OPTIONAL (design note, W1-T3623 acceptance iv): omitted, it
       // resolves to this instance's own version and the full snapshot is served exactly as
-      // before. Named and unrecognised, the request is REFUSED (409) rather than answered with
-      // today's shape under a version string the caller never asked for.
-      const requestedVersion = new URL(req.url ?? "/", "http://local").searchParams.get("projectionVersion") ?? undefined;
+      // before. The hosted console historically called the same field `?projection=`, so accept
+      // that spelling as an alias while keeping projectionVersion authoritative when both exist.
+      // Named and unrecognised versions are REFUSED (409) rather than answered with today's shape
+      // under a version string the caller never asked for.
+      const params = new URL(req.url ?? "/", "http://local").searchParams;
+      const requestedVersion = params.get("projectionVersion") ?? params.get("projection") ?? undefined;
       const base = deps.currentSnapshot();
       // The analytics cache owns historical refreshes. Live metrics are a separate, already
       // captured process-owned value, so this handler never starts a refresh or provider read.

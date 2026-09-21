@@ -21,6 +21,11 @@
     - test/context-controls-export.test.ts
     - test/context-controls-derivation.test.ts
     - test/context-controls-restart.test.ts
+    # These are coupled integration artifacts emitted or required by the declared API and
+    # HTTP-route work.  They are not new behavior and do not relax an acceptance criterion.
+    - packages/api-client/src/schema.d.ts
+    - scripts/test-tier-manifest.json
+    - test/route-wiring.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -58,4 +63,11 @@
   falsifier: |
     Return raw context, forget only the index while leaving a derived item usable, export another scope,
     recreate revoked context after restart, or call incomplete coverage complete. The proof must fail.
-  note: "W1-T3881 owns context governance; this task makes deletion and inspection usable and honest."
+  note: |
+    W1-T3881 owns context governance; this task makes deletion and inspection usable and honest.
+
+    Scope amended after #6414's two repair rounds proved the original list omitted the generated
+    API type and the two existing test-integration artifacts required for the declared routes and
+    five declared test files.  This amendment adds no behavior and changes no acceptance claim or
+    proof: it makes the task's declared integration boundary match its already-declared OpenAPI and
+    HTTP-route work, so a repair worker can lawfully produce a green, reviewable PR.

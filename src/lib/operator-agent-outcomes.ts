@@ -11,6 +11,9 @@ import type { AttributionPolicy, ClassOutcome, UnmeasurableCause, UnmeasurableRo
 
 export const OPERATOR_AGENT_TASK_OUTCOME_SIGNAL = "task-outcomes" as const;
 
+/** The console-v1 consumer accepts at most this many repeated detail records per signal. */
+const MAX_OPERATOR_AGENT_DETAIL_ITEMS = 100;
+
 /* c8 ignore next 8 -- exported type declarations have no runtime statements to execute */
 export type OperatorAgentTaskOutcomeStatus = "measured" | "not-collected";
 
@@ -38,6 +41,8 @@ export interface OperatorAgentTaskOutcomeSignal {
   policy: AttributionPolicy;
   minPopulationFloor: number;
   classes: OperatorAgentOutcomeClass[];
+  /** Exact count of unmeasurable rows; the detail list below is intentionally bounded. */
+  unmeasurableCount?: number;
   unmeasurable: UnmeasurableRow[];
   unmeasurableByCause: Record<UnmeasurableCause, number>;
   armsSeen: number;
@@ -79,9 +84,10 @@ export function adaptVerdictCalibrationReport(report: VerdictCalibrationReport):
       followupFixRate: item.followupFixRate,
       lanes: item.lanes,
       ...(item.rateRefusedReason ? { rateRefusedReason: item.rateRefusedReason } : {}),
-      taskIds: [...item.taskIds],
+      taskIds: item.taskIds.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
     })),
-    unmeasurable: report.unmeasurable.map((item) => ({ ...item })),
+    unmeasurableCount: report.unmeasurable.length,
+    unmeasurable: report.unmeasurable.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS).map((item) => ({ ...item })),
     unmeasurableByCause: { ...report.unmeasurableByCause },
     armsSeen: report.armsSeen,
     armsClassified: report.armsClassified,

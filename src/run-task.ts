@@ -1387,7 +1387,8 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  *  exactly what it exists to discourage. This is a seam, not a wiring root. */
 export type FreshTreeReviewSeams = {
   /** `git -C <repoDir> …`, returning stdout. Throws on a non-zero exit, like `execFileSync`.
-   *  Used for the FETCH only — the worktree itself is cut by {@link addWorktree} below. */
+   *  Used for the FETCH and for proving a prior detached reviewer tree is safe to reuse — the
+   *  worktree itself is still cut by {@link addWorktree} below. */
   git: (args: string[]) => string;
   /** THE REVIEW PATH'S OWN DETACHED-WORKTREE HELPER (`ReviewWorktreeDeps.addWorktree`,
    *  composition-root.ts), reused rather than re-spelled. `worktree-sites.ts` pins EXACTLY four
@@ -1397,8 +1398,79 @@ export type FreshTreeReviewSeams = {
   addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code. */
   spawnReview: (worktree: string, args: string[]) => Promise<number>;
+  /**
+   * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
+   * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
+   * none proves a child would judge from the requested source revision. Optional only so the
+   * production implementation remains one small, real git-backed default while focused tests can
+   * name each preparation state without making a repository.
+   */
+  inspectExistingWorktree?: (
+    repoDir: string,
+    worktreePath: string,
+    revision: string,
+  ) => "absent" | "reusable" | "unsafe";
+  /**
+   * Make a new or safely reused tree runnable. The production default links the canonical
+   * dependency install and records its generated link in git's common exclude. `false` is a
+   * preparation refusal, never permission to run an incomplete reviewer tree.
+   */
+  prepareWorktree?: (repoDir: string, worktreePath: string) => boolean;
   /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
   worktreeRoot: string;
+}
+
+/** Parse only the facts a restart must prove before it reuses W1-T3723's stable reviewer path.
+ * `git worktree list --porcelain` is intentionally read directly rather than through
+ * `listRegisteredWorktrees`: that helper is correctly fail-soft for the reaper, but it turns an
+ * unreadable registry into `[]`. Here an unreadable registry must be a fail-closed skip, not an
+ * invitation to repeat `git worktree add` at a path whose ownership we cannot see. */
+function inspectFreshReviewerWorktree(
+  repoDir: string,
+  worktreePath: string,
+  revision: string,
+  git: (args: string[]) => string,
+): "absent" | "reusable" | "unsafe" {
+  // `git worktree list` canonicalizes its path through a mount/symlink; the configured worktree
+  // root need not. Canonicalize the parent when the leaf is absent (the first-run case), otherwise
+  // the second process sees its own registered `/private/...` tree as different from `/var/...`
+  // and repeats the very collision this recovery exists to prevent.
+  const canonicalPath = (path: string) => {
+    const leafExists = existsSync(path);
+    const resolvable = leafExists ? path : dirname(path);
+    // A missing parent is the normal first-run shape. A present-but-unreadable path lets
+    // realpath throw into the runner's named fail-closed preparation refusal; it must not be
+    // silently treated as a different, absent registration.
+    if (!existsSync(resolvable)) return path;
+    const canonical = realpathSync(resolvable);
+    return leafExists ? canonical : join(canonical, basename(path));
+  };
+  const expectedPath = canonicalPath(worktreePath);
+  const blocks = git(["-C", repoDir, "worktree", "list", "--porcelain"])
+    .split("\n\n")
+    .map((block) => block.split("\n"));
+  const block = blocks.find((lines) => lines.some((line) => line.startsWith("worktree ") && canonicalPath(line.slice("worktree ".length)) === expectedPath));
+  if (!block) return "absent";
+  const listedHead = block.find((line) => line.startsWith("HEAD "))?.slice("HEAD ".length);
+  // A `branch` line says it is not detached. A stale reviewer must never make an existing ref its
+  // recovery surface even when the ref happens to resolve to the requested commit today.
+  if (block.some((line) => line.startsWith("branch ")) || listedHead !== revision) return "unsafe";
+  const actualHead = git(["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+  const porcelain = git(["-C", worktreePath, "status", "--porcelain", "-uno"]);
+  return actualHead === revision && porcelain.trim() === "" ? "reusable" : "unsafe";
+}
+
+/** Attach the worker worktree's established dependency discipline to the reviewer recovery tree.
+ * `linked-lockfile-mismatch` remains the helper's diagnostic-only observation: it says the tree
+ * is runnable but may explain a later module resolution result. Missing source or a failed link
+ * means `bin/rmd` cannot be proven runnable, so this path refuses before spawning it. */
+function prepareFreshReviewerWorktree(repoDir: string, worktreePath: string): boolean {
+  const linked = linkWorktreeNodeModules(repoDir, worktreePath);
+  // This is deliberately the existing common-dir helper rather than a reviewer-local ignore file.
+  // Its best-effort contract is retained; it may report a permission diagnostic but cannot turn a
+  // proven symlink into a different code revision.
+  excludeNodeModulesFromGit(worktreePath);
+  return linked !== "no-source" && linked !== "failed";
 }
 
 /**
@@ -1433,7 +1505,15 @@ export function buildFreshTreeReviewRunner(
         // The fetch is what makes origin/main resolvable here at all; the daemon's own freshness
         // read already fetched, but this must not DEPEND on that having happened.
         deps.git(["-C", repoDir, "fetch", "--quiet", "origin", "main"]);
-        deps.addWorktree(repoDir, worktree, sha);
+        const existing = (deps.inspectExistingWorktree ?? ((dir, path, revision) =>
+          inspectFreshReviewerWorktree(dir, path, revision, deps.git)))(repoDir, worktree, sha);
+        if (existing === "unsafe") {
+          throw new Error(`reviewer worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
+        }
+        if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
+        if (!(deps.prepareWorktree ?? prepareFreshReviewerWorktree)(repoDir, worktree)) {
+          throw new Error(`reviewer worktree at ${worktree} has no runnable canonical node_modules link`);
+        }
         prepared.set(sha, worktree);
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is

@@ -35,3 +35,18 @@ test("proof adapter keeps unknown and absent proof outcomes unmeasurable rather 
     "unknown-proof-exec",
   ]);
 });
+
+test("unit test: bounded operator-agent details retain explicit unavailable states", () => {
+  const signal = adaptOperatorAgentProofRows(
+    Array.from({ length: 150 }, (_, index) => ({
+      step: "review.posted",
+      task_id: `W1-T-missing-${index}`,
+    })),
+  );
+
+  assert.equal(signal.status, "not-collected");
+  assert.equal(signal.unmeasurableCount, 150);
+  assert.equal(signal.unmeasurable.length, 100);
+  assert.equal(signal.unmeasurable[0]?.cause, "missing-proof-exec");
+  assert.match(signal.unmeasurable[0]?.why ?? "", /no proof_exec field/);
+});
