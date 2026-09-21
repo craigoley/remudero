@@ -125,6 +125,9 @@ function runRecycle(opts: RunOpts = {}): Run {
   const rec = mkdtempSync(join(tmpdir(), "rmd-reclaim-rec-"));
   const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
   writeStubs(dir);
+  const cashKeyPath = join(rec, "openweight-api-key");
+  writeFileSync(cashKeyPath, "fixture-cash-key\n", { mode: 0o600 });
+  chmodSync(cashKeyPath, 0o600);
   const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT], {
     encoding: "utf8",
     cwd: REPO_ROOT,
@@ -141,6 +144,7 @@ function runRecycle(opts: RunOpts = {}): Run {
       // predicate (test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts owns that).
       RMD_RECYCLE_FIRST_BOOT: "1",
       GH_TOKEN: "",
+      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       // A path that (almost certainly) does not exist, so the "never run inside a container" guard
       // does not fire merely because THIS test runner is itself sandboxed inside one.
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "reclaim-test-no-such-dockerenv-marker"),

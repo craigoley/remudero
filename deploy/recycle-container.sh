@@ -115,6 +115,9 @@ if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; the
   # shellcheck source=./runtime-env-vars.sh
   source "${RUNTIME_ENV_VARS_FILE}"
 fi
+# The isolated-script fixtures intentionally have no sibling runtime-env-vars.sh. Keep
+# their host-only key path deterministic without making it a container runtime name.
+: "${RMD_OPENWEIGHT_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
@@ -710,6 +713,41 @@ else
 fi
 
 CAPTURED_TOKEN="$(CAPTURED_get GH_TOKEN)"
+
+# ── 3.5. THE CASH CREDENTIAL MUST HAVE A DURABLE, SAFE HOST HOME ──────────────────────────────
+# W1-T3728: an outgoing container is not a credential store. The cash adapter needs a key after a
+# replacement, so take it from a host-only file rather than trusting a possibly absent (or stale)
+# container value. Refuse before even the image pull: each later action is reversible except losing
+# the old container's only working cash path. The value never appears in output or a path mounted
+# into the replacement container.
+CASH_KEY_PATH="${RMD_OPENWEIGHT_API_KEY_PATH}"
+CASH_KEY_MODE=""
+if [ -L "${CASH_KEY_PATH}" ] || [ ! -f "${CASH_KEY_PATH}" ] || [ ! -r "${CASH_KEY_PATH}" ]; then
+  echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+  echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
+  exit 1
+fi
+if CASH_KEY_MODE="$(stat -c '%a' "${CASH_KEY_PATH}" 2>/dev/null)"; then :
+elif CASH_KEY_MODE="$(stat -f '%Lp' "${CASH_KEY_PATH}" 2>/dev/null)"; then :
+else
+  CASH_KEY_MODE=""
+fi
+if [ "${CASH_KEY_MODE}" != "600" ]; then
+  echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+  echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
+  exit 1
+fi
+CASH_KEY_LINES="$(awk 'NF { count++; last=$0 } END { if (count == 1) print last; else exit 1 }' "${CASH_KEY_PATH}" 2>/dev/null || true)"
+if [ -z "${CASH_KEY_LINES}" ]; then
+  echo "recycle-container: REFUSING — the durable Azure cash key is absent or unsafe." >&2
+  echo "  Expected one readable, regular, mode-0600 line at ${CASH_KEY_PATH}; ${CONTAINER_NAME} is untouched." >&2
+  exit 1
+fi
+# CRLF is an on-disk representation detail; the container receives the key without its record
+# delimiter. Do not trim any other byte -- API keys are opaque values.
+CASH_KEY_LINES="${CASH_KEY_LINES%$'\r'}"
+CAPTURED_set RMD_OPENWEIGHT_API_KEY "${CASH_KEY_LINES}"
+CAPTURED_SOURCE_set RMD_OPENWEIGHT_API_KEY "durable-host-secret"
 
 # ── APP AUTH IS A DURABLE CREDENTIAL, SO THE GH_TOKEN REFUSAL DOES NOT APPLY TO IT ──────────────
 # The refusal below exists for exactly ONE reason, stated in its own text: GH_TOKEN lives only in

@@ -925,6 +925,35 @@ export interface DoctorInputs {
    *  to `[]`, which {@link judgeProviderCapacityReadable} reads as "no provider capacity read
    *  observed" — never a finding. */
   providerCapacity?: readonly ProviderCapacityReading[];
+  /** W1-T3728: a configured cash fallback is useful only if its host credential is readable. */
+  cashSpendability?: CashSpendabilityReading;
+}
+
+/** A capability reading, deliberately separate from a judgement outcome: fail-open judges retain
+ * their safety contract even when the cash provider itself cannot spend. */
+export interface CashSpendabilityReading {
+  configured: boolean;
+  keyPresent: boolean;
+}
+
+/** Report a configured-but-unspendable cash lane explicitly; never infer a key from a provider
+ * setting, and never emit the key or its path. */
+export function judgeCashSpendability(reading: CashSpendabilityReading | undefined): Check {
+  const name = "cash-spendability";
+  const threshold = "configured cash fallback requires a readable key";
+  if (reading === undefined || reading.configured === false) {
+    return { name, verdict: "OK", measured: "cash fallback is not configured", threshold };
+  }
+  if (!reading.keyPresent) {
+    return {
+      name,
+      verdict: "FAIL",
+      measured: "cash fallback configured but unspendable: key is absent",
+      threshold,
+      detail: "The provider capability is unavailable; semantic judges remain fail-open by their own contract.",
+    };
+  }
+  return { name, verdict: "OK", measured: "cash fallback configured and spendable; key present", threshold };
 }
 
 
@@ -1181,6 +1210,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeNodeVersionPin(inputs.runningNodeVersion, inputs.nvmrcVersion),
     judgeCaptureSurfaceLiveness(inputs.captureSurfaceFires ?? inputs.ledgerLines),
     judgeProviderCapacityReadable(inputs.providerCapacity ?? []),
+    judgeCashSpendability(inputs.cashSpendability),
   ];
   const worst = worstVerdict(checks);
   return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };

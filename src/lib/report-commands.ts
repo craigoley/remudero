@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import {
   consoleUrl,
+  enabledWorkerProviders,
   globalArtifactPath,
   globalLearningsHome,
   loadConfig,
@@ -84,6 +85,7 @@ import {
   type ProviderCapacityReading,
   type WorktreeBaseRow,
 } from "./doctor.js";
+import { OPENWEIGHT_API_KEY_ENV } from "./worker-provider.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import { readInflightLock } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -509,6 +511,8 @@ export interface DoctorDeps extends ReportRepoContext {
    *  legacy shape out here would be a NEW site in a file the census baselines at zero, not a
    *  repeat of the one already recorded against provider-routing-status.ts itself). */
   readProviderRoutingStatus?: typeof readProviderRoutingStatus;
+  /** W1-T3728: presence only. Doctor never prints or persists the Azure Foundry key. */
+  readCashKey?: () => string | undefined;
 }
 
 export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
@@ -624,6 +628,10 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
         ...(p.reason ? { reason: p.reason } : {}),
       }),
     ),
+    cashSpendability: {
+      configured: config.workerProviders?.cashFallbackWhenBlocked === true && enabledWorkerProviders(config).includes("cash"),
+      keyPresent: Boolean((deps.readCashKey ?? (() => process.env[OPENWEIGHT_API_KEY_ENV]))()),
+    },
   });
 
   if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));

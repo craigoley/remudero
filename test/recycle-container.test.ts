@@ -262,6 +262,12 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   mkdirSync(providerRuntime);
   const claudeDir = join(providerRuntime, "claude");
   mkdirSync(claudeDir);
+  // W1-T3728: successful recycle fixtures model the host-only durable Azure key, never a
+  // container-config path. The mode is material: the production recycler refuses 0644.
+  const cashKeyPath = join(providerRuntime, "openweight-api-key");
+  const durableCashKey = "durable-openweight-key-fixture-5c82a1";
+  writeFileSync(cashKeyPath, `${durableCashKey}\n`, { mode: 0o600 });
+  chmodSync(cashKeyPath, 0o600);
   writeStubs(dir);
   const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT], {
     encoding: "utf8",
@@ -296,6 +302,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       GH_APP_ID: "",
       GH_APP_INSTALLATION_ID: "",
       GH_APP_PRIVATE_KEY_PATH: "",
+      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
       // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about
       // this suite's own environment, not about the script under test. The dedicated guard test below
@@ -890,10 +897,9 @@ test("the openweight API key is declared on every recycle surface", () => {
 });
 
 test("the openweight API key value never reaches recycle output", () => {
-  // W1-T3603. The capture loop must carry the credential into the replacement container while
-  // never printing it: a recycle runs in an operator's scrollback and in journald. The fixture
-  // value is distinctive (DECLARED_RUNTIME_FIXTURE) so this searches for it verbatim.
-  const secret = DECLARED_RUNTIME_FIXTURE.RMD_OPENWEIGHT_API_KEY;
+  // W1-T3728. The durable host key must reach the replacement without ever entering an
+  // operator's scrollback or journald. The fixture value is distinctive for a verbatim check.
+  const secret = "durable-openweight-key-fixture-5c82a1";
   const run = runRecycle("happy");
 
   assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
@@ -903,6 +909,39 @@ test("the openweight API key value never reaches recycle output", () => {
 
   assert.doesNotMatch(run.stdout, new RegExp(secret), "the key value must never reach stdout");
   assert.doesNotMatch(run.stderr, new RegExp(secret), "the key value must never reach stderr");
+});
+
+test("W1-T3728: a durable mode-0600 host key replaces an outgoing container value, while a missing or broad key refuses before mutation", () => {
+  const missing = runRecycle("good", { extraEnv: { RMD_OPENWEIGHT_API_KEY_PATH: join(tmpdir(), "no-such-cash-key") } });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /durable Azure cash key is absent or unsafe/);
+  assert.equal(missing.calls.filter(isPull).length, 0, "key refusal must happen before pull");
+  assert.equal(missing.calls.filter(isStop).length, 0, "key refusal must happen before stop");
+  assert.equal(missing.calls.filter(isRun).length, 0, "key refusal must happen before run");
+
+  const broadPath = join(mkdtempSync(join(tmpdir(), "rmd-cash-key-broad-")), "key");
+  writeFileSync(broadPath, "broad-key\n", { mode: 0o644 });
+  chmodSync(broadPath, 0o644);
+  const broad = runRecycle("good", { extraEnv: { RMD_OPENWEIGHT_API_KEY_PATH: broadPath } });
+  assert.notEqual(broad.status, 0);
+  assert.match(broad.stderr, /durable Azure cash key is absent or unsafe/);
+  assert.equal(broad.calls.filter(isPull).length, 0, "unsafe mode must refuse before pull");
+});
+
+test("W1-T3728: MUTANT: removing the durable-key refusal reaches pull and docker run", () => {
+  const source = readFileSync(SCRIPT, "utf8");
+  const modeAnchor = '  exit 1\nfi\nCASH_KEY_LINES="$(awk';
+  const mutated = source.replace(modeAnchor, '  :\nfi\nCASH_KEY_LINES="$(awk');
+  assert.notEqual(mutated, source, "the durable-key refusal must be a real mutation target");
+  const mutant = join(mkdtempSync(join(tmpdir(), "rmd-recycle-cash-key-mutant-")), "recycle-container.sh");
+  writeFileSync(mutant, mutated, { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+  const broadPath = join(mkdtempSync(join(tmpdir(), "rmd-cash-key-mutant-")), "key");
+  writeFileSync(broadPath, "mutant-key\n", { mode: 0o644 });
+  chmodSync(broadPath, 0o644);
+  const run = runRecycle("good", { scriptPath: mutant, extraEnv: { RMD_OPENWEIGHT_API_KEY_PATH: broadPath } });
+  assert.ok(run.calls.filter(isPull).length > 0, "the mutant must reach pull or the refusal is not load-bearing");
+  assert.ok(run.calls.filter(isRun).length > 0, "the mutant must reach run or the refusal is not load-bearing");
 });
 
 test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-env-vars.sh is caught", () => {
