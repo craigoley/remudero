@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,7 +9,10 @@ import { test } from "node:test";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(ROOT, "scripts", "clock-signature-ratchet.mjs");
 const clockRatchet = (await import(pathToFileURL(SCRIPT).href)) as {
-  main: (argv: string[]) => number;
+  main: (
+    argv: string[],
+    deps?: { writeFileSync?: (path: string, data: string, encoding?: string) => void },
+  ) => number;
   readBaseline: (text: string, path?: string) => Record<string, unknown>;
 };
 const { main, readBaseline } = clockRatchet;
@@ -29,7 +32,7 @@ function run(root: string, baseline: string, ...flags: string[]) {
   });
 }
 
-test("the generator writes a measured row into the clock-signature baseline", () => {
+test("W1-T3902 real clock-ratchet subprocess keeps the default filesystem path in test/the-clock-census-records-its-own-baseline.test.ts", () => {
   const { root, baseline } = fixture();
   try {
     writeFileSync(join(root, "src", "clock.ts"), "export const now = () => Date.now();\n");
@@ -80,21 +83,32 @@ test("baseline parsing refuses malformed JSON and non-object values", () => {
   assert.throws(() => readBaseline("[]"), /must be a JSON object/);
 });
 
-test("a baseline that becomes unwritable is reported as a recording failure", () => {
+test("W1-T3902 injected write failure is host-independent in test/the-clock-census-records-its-own-baseline.test.ts", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-clock-signature-write-failure-"));
-  const baselineDir = join(root, "readonly");
   mkdirSync(join(root, "src"), { recursive: true });
-  mkdirSync(baselineDir);
-  const baseline = join(baselineDir, "baseline.json");
+  const baseline = join(root, "baseline.json");
   writeFileSync(baseline, "{}\n");
   writeFileSync(join(root, "src", "clock.ts"), "export const now = () => Date.now();\n");
+  const before = readFileSync(baseline, "utf8");
+  const diskFull = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+  let diagnostic = "";
+  const originalError = console.error;
   try {
-    chmodSync(baselineDir, 0o555);
-    chmodSync(baseline, 0o444);
-    assert.equal(main(["--root", root, "--baseline", baseline]), 2);
+    console.error = (...args: unknown[]) => {
+      diagnostic += `${args.join(" ")}\n`;
+    };
+    assert.equal(
+      main(["--root", root, "--baseline", baseline], {
+        writeFileSync: () => {
+          throw diskFull;
+        },
+      }),
+      2,
+    );
+    assert.match(diagnostic, /could not write .*ENOSPC/);
+    assert.equal(readFileSync(baseline, "utf8"), before);
   } finally {
-    chmodSync(baseline, 0o644);
-    chmodSync(baselineDir, 0o755);
+    console.error = originalError;
     rmSync(root, { recursive: true, force: true });
   }
 });
