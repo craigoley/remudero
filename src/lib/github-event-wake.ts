@@ -109,10 +109,6 @@ function extractCheckRunField(body: unknown, field: "name" | "conclusion"): stri
   return typeof value === "string" ? value : undefined;
 }
 
-/** Extract the check-run head identity used to prove that an accepted aggregate event belongs
- * to the PR head being reconciled. GitHub calls the field `head_sha`; malformed or absent
- * identity is deliberately returned as undefined so the classifier can keep the event
- * actionable rather than inventing coverage. */
 export function checkRunHeadIdentity(body: unknown): string | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const checkRun = (body as Record<string, unknown>).check_run;
@@ -194,16 +190,11 @@ export interface GithubEventWakeSemanticSummary {
   successful_leaf: number;
   unknown: number;
   aggregate_names: Record<string, number>;
-  /** Bounded identities observed on accepted aggregate check-run events in this flush. */
   aggregate_head_shas: string[];
-  /** Aggregate events whose check-run payload did not carry a usable `head_sha`. */
   aggregate_head_sha_missing: number;
-  /** Aggregate identities beyond the bounded evidence set. */
   aggregate_head_sha_overflow: number;
 }
 
-/** A single summary cannot grow with a high-fanout webhook burst. The count remains actionable
- * even when the bounded identity evidence overflows. */
 export const MAX_AGGREGATE_HEAD_IDENTITIES = 64;
 
 function createGithubEventWakeSemanticCounts(
@@ -410,8 +401,6 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       if (headSha === undefined) {
         semanticCounts.aggregate_head_sha_missing++;
       } else if (semanticCounts.aggregate_head_shas.includes(headSha)) {
-        // A repeated aggregate completion for the same head is evidence for the same identity,
-        // not a reason to spend another slot in the bounded set.
       } else if (semanticCounts.aggregate_head_shas.length < MAX_AGGREGATE_HEAD_IDENTITIES) {
         semanticCounts.aggregate_head_shas.push(headSha);
       } else {
