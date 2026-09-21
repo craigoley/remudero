@@ -1,0 +1,20 @@
+id: fb-1789961623033-1a6238
+ts: 2026-09-21T03:33:43.033Z
+raw: "Observed Azure console control-plane source split: remudero-serve resolves
+  feedback from /home/node/Remudero/remudero where fb-1789955524334-18bbf0
+  remains status:new, while the managed core target
+  /home/node/Remudero/repos/remudero and origin/main correctly hold
+  status:grilling. The live POST reply path therefore rejects the valid grill
+  answer. Make deployed serve/executor root canonical and explicitly distinct
+  from target roots; remove or prevent stale shadow checkout reads. Prove the
+  live service reads the current managed target feedback status and a valid
+  grill reply succeeds and lands without copying target settings/hooks."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
