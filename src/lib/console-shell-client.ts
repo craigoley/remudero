@@ -24,7 +24,8 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { resolveFreshness, formatAge as formatAgeReal } from "./console-freshness.js";
+import { resolveFreshness } from "./console-freshness.js";
+import { formatAge as formatAgeReal } from "./console-freshness.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import {
   escapeHtml,
