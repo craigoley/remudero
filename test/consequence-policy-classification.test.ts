@@ -102,6 +102,7 @@ test("W1-T3894 (1): classification refuses malformed target, approver, financial
   assert.throws(() => classifyConsequenceAction(reversibleInput({ target: undefined as unknown as ConsequenceActionInput["target"] })), /target\.identity/);
   assert.throws(() => classifyConsequenceAction(reversibleInput({ requiredApprovers: -1 })), /requiredApprovers/);
   assert.throws(() => classifyConsequenceAction(financialInput({ financial: { ...financialInput().financial!, aggregateSpentBefore: -1 } })), /aggregateSpentBefore/);
+  assert.throws(() => classifyConsequenceAction(financialInput({ financial: { ...financialInput().financial!, perActionCeiling: 0 } })), /perActionCeiling/);
   assert.throws(() => classifyConsequenceAction(financialInput({ financial: { ...financialInput().financial!, coolingOffStartedAt: "not-a-date" } })), /coolingOffStartedAt/);
 
   assert.throws(() => classifyConsequenceAction(irreversibleInput({ irreversible: { ...irreversibleInput().irreversible!, affectedResource: "" } })), /affectedResource/);
