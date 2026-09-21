@@ -212,7 +212,7 @@ test("GET /v1/analytics: no ?projectionVersion= still answers 200 with the full 
   assert.deepEqual(JSON.parse(body()), expected);
 });
 
-test("GET /v1/analytics: a matching ?projectionVersion=console-v1 answers 200 with the full snapshot", async () => {
+test("GET /v1/analytics: a matching ?projectionVersion=console-v1 answers 200 with the bounded console-v1 projection", async () => {
   const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
   const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
   const { res, status, body } = fakeResponse();
@@ -220,5 +220,6 @@ test("GET /v1/analytics: a matching ?projectionVersion=console-v1 answers 200 wi
   await route.handler({ url: "/v1/analytics?projectionVersion=console-v1" } as never, res, { params: {} });
 
   assert.equal(status(), 200);
-  assert.deepEqual(JSON.parse(body()), expected);
+  assert.deepEqual(JSON.parse(body()), expected.consoleV1);
+  assert.notDeepEqual(JSON.parse(body()), expected);
 });

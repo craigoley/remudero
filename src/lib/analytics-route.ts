@@ -1224,7 +1224,7 @@ export function buildAnalyticsRoute(deps: {
         sendJson(res, 409, resolution);
         return;
       }
-      sendJson(res, 200, snapshot);
+      sendJson(res, 200, requestedVersion === undefined ? snapshot : resolution.projection);
     },
   };
 }
