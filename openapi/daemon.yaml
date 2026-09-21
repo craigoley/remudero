@@ -1100,6 +1100,7 @@ components:
           enum: [private, operator, shared]
         derivationLinks:
           type: array
+          maxItems: 20
           items:
             type: string
             maxLength: 160
