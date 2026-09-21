@@ -303,6 +303,55 @@ const DECLARED: readonly Declared[] = [
       "depends on the absent execute bit; these exist so rmSync can remove the fixture tree afterwards. They " +
       "disappear if and when the 0o000 sites do.",
   },
+  {
+    kind: "chmod",
+    file: "a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the durable cash-key fixture must be mode 0600; the recycler refuses weaker permissions.",
+  },
+  {
+    kind: "chmod",
+    file: "nothing-reclaims-the-images-the-recycle-pulls.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the durable cash-key fixture must be mode 0600; the recycler refuses weaker permissions.",
+  },
+  {
+    kind: "chmod",
+    file: "recycle-container.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the durable cash-key fixture must be mode 0600; the recycler refuses weaker permissions.",
+  },
+  {
+    kind: "chmod",
+    file: "recycle-container.test.ts",
+    key: "0o644",
+    count: 2,
+    reason: "W1-T3728: teardown restores the temporary durable cash-key fixture to a conventional file mode.",
+  },
+  {
+    kind: "chmod",
+    file: "recycle-container-bash3-portability.test.ts",
+    key: "0o600",
+    count: 2,
+    reason: "W1-T3728: the portability fixture provides a mode-0600 durable cash-key file.",
+  },
+  {
+    kind: "chmod",
+    file: "the-recovery-path-merges-into-a-shared-checkout.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the recovery fixture provides a mode-0600 durable cash-key file.",
+  },
+  {
+    kind: "chmod",
+    file: "the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts",
+    key: "0o600",
+    count: 1,
+    reason: "W1-T3728: the wait fixture provides a mode-0600 durable cash-key file.",
+  },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
   {
     kind: "platform-tool",

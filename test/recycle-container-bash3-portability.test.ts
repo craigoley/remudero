@@ -205,6 +205,9 @@ function publish(origin: ReturnType<typeof gitRepo>, relPath: string, content: s
 }
 
 function runRecycleOnStateDir(stateDir: string): { status: number; stdout: string; stderr: string } {
+ const cashKeyPath = join(stateDir, "openweight-api-key");
+ writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
+ chmodSync(cashKeyPath, 0o600);
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf8",
     timeout: 60000,
@@ -212,6 +215,7 @@ function runRecycleOnStateDir(stateDir: string): { status: number; stdout: strin
       ...process.env,
       HOME: process.env.HOME ?? "/tmp",
       RMD_STATE_DIR: stateDir,
+      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       RMD_RECYCLE_DOCKERENV_PATH: noDockerenvMarker(),
       ...NEUTRAL_CREDENTIAL_ENV,
     },
@@ -325,6 +329,9 @@ function runRecycleForCapture(opts: {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-bash3-capture-stub-`));
   writeCaptureDockerStub(dir, opts);
   const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-bash3-capture-state-`));
+  const cashKeyPath = join(state, "openweight-api-key");
+  writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
+  chmodSync(cashKeyPath, 0o600);
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf8",
     timeout: 60000,
@@ -332,6 +339,7 @@ function runRecycleForCapture(opts: {
       PATH: `${dir}:${process.env.PATH ?? ""}`,
       HOME: process.env.HOME ?? "/tmp",
       RMD_STATE_DIR: state,
+      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       RMD_RECYCLE_FIRST_BOOT: "1",
       RMD_RECYCLE_DOCKERENV_PATH: noDockerenvMarker(),
       ...NEUTRAL_CREDENTIAL_ENV,

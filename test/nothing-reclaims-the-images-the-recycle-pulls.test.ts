@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -115,6 +115,9 @@ function recycle(scenario: string, extraEnv: Record<string, string> = {}): Outco
   const recDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reclaim-rec-`));
   writeFileSync(join(binDir, "docker"), dockerStub(scenario), { mode: 0o755 });
   writeFileSync(join(binDir, "az"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+  const cashKeyPath = join(recDir, "openweight-api-key");
+  writeFileSync(cashKeyPath, "fixture-cash-key\n", { mode: 0o600 });
+  chmodSync(cashKeyPath, 0o600);
 
   const r = spawnSync(BASH_BIN, [SCRIPT], {
     encoding: "utf8",
@@ -136,6 +139,7 @@ function recycle(scenario: string, extraEnv: Record<string, string> = {}): Outco
       GH_APP_ID: "",
       GH_APP_INSTALLATION_ID: "",
       GH_APP_PRIVATE_KEY_PATH: "",
+      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "reclaim-no-such-dockerenv-marker"),
       ...extraEnv,
     },
