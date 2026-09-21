@@ -53,7 +53,7 @@
     - claim: "a semantic review worker carries a positive idle-activity watchdog while the deterministic floor remains available"
       proof: "unit test: semantic review worker carries an idle-activity watchdog"
     - claim: "the review spawn uses the existing worker-abandon policy rather than a second hard-coded budget"
-      proof: "grep: clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon } in src/run-task.ts"
+      proof: "grep: clockBound: { boundMs: args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon } in src/run-task.ts"
   falsifier: |
     Replace the fake git helper with a sleep longer than the bound: the test must fail if the read
     waits past ten seconds. Remove the `clockBound` field from the reviewer spawn: the behavioural
