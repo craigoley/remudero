@@ -1,0 +1,16 @@
+id: fb-1789961451233-8554de
+ts: 2026-09-21T03:30:51.233Z
+raw: "Operator answer to grill fb-1789955524334-18bbf0: choose
+  bundle-with-daemon. Settings/worker.json and hooks ship from the fixed daemon
+  install root, never a target checkout. Target root retains plan, feedback, Git
+  identity, and mount policy. Implement and prove a mounts-only target with no
+  settings can triage, review, and fix without policy weakening."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
