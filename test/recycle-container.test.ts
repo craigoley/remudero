@@ -228,7 +228,7 @@ function writeStubs(dir: string): void {
     "        exit 0 ;;",
     "    esac",
     "    exit 0 ;;",
-    "  stop|rm|run) exit 0 ;;",
+    '  stop|rm|run) [ "$1" = "rm" ] && [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
     "esac",
     "exit 0",
     "",
@@ -399,6 +399,17 @@ test("W1-T1010: with no in-flight workers the wait clears immediately and the re
   assert.ok(run.calls.filter(isStop).length > 0, "the old container must be stopped");
   assert.ok(run.calls.filter(isRm).length > 0, "the old container must be removed");
   assert.ok(run.calls.filter(isRun).length > 0, "a replacement must start");
+});
+
+test("a hung docker removal refuses with the pause retained and no replacement", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const run = runRecycle("rm-hang", { stateDir: state, extraEnv: { RMD_RECYCLE_DOCKER_TIMEOUT_S: "1" } });
+  assert.notEqual(run.status, 0, "a docker rm that exceeds its bound must refuse");
+  assert.match(run.stderr, /docker rm did not finish within 1s/);
+  assert.equal(run.calls.filter(isRm).length, 1, "the removal was attempted exactly once");
+  assert.equal(run.calls.filter(isRun).length, 0, "a replacement must not start after an unconfirmed removal");
+  assert.ok(existsSync(join(state, "state", "PAUSE")), "the pause must remain while no replacement is running");
+  assert.match(readFileSync(join(state, "state", "ledger.ndjson"), "utf8"), /recycle\.control_timeout/);
 });
 
 // ── ACCEPTANCE 3: a failed image pull refuses instead of starting the cached image ──────────────
