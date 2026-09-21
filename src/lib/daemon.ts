@@ -99,6 +99,13 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 
+/** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
+ * the shared RunResult union used by every other dispatch lane. */
+type HarnessCommitRefusalResult = RunResult & {
+  harnessCommitRefused?: true;
+  harnessCommitRefusalReason?: string;
+};
+
 /** Reason the scheduler loop returned. Every terminal state is one of these. `headroom_exhausted` and `paused` are
  * deliberately absent: both are awaiting-states whose exit the supervisor would relaunch straight back into, so both
  * idle in process instead (W1-T197; 2026-07-22). `stale` has the opposite polarity — it is a request to exit, because
@@ -2170,14 +2177,33 @@ export async function runDaemon(
         // Independent failure: nothing in the plan transitively depends on this task, so skipping it cannot
         // leave a dependent building on a gap. Record the block in the ledger, so a plan reload or daemon
         // restart derives the same skip instead of trusting this tick's Task object.
-        independentFailureBlocksThisRun.add(task.id);
+        const refusal = result as HarnessCommitRefusalResult;
+        const harnessCommitRefused = refusal.harnessCommitRefused === true && result.verdict === "no_pr";
+        if (!harnessCommitRefused) independentFailureBlocksThisRun.add(task.id);
         log("dispatch.blocked_independent", {
           task_id: task.id,
           task: task.id,
           verdict: result.verdict,
           pr_url: result.prUrl,
           run_id: result.runId,
+          ...(harnessCommitRefused
+            ? {
+                harness_commit_refused: true,
+                terminal_class: "harness_commit_refused",
+                reason: refusal.harnessCommitRefusalReason,
+              }
+            : {}),
         });
+        if (harnessCommitRefused) {
+          log("dispatch.harness_commit_retry", {
+            task_id: task.id,
+            task: task.id,
+            original_run_id: result.runId,
+            original_verdict: result.verdict,
+            original_refusal: "harness_commit_refused",
+            harness_commit_refused: true,
+          });
+        }
         log("daemon.block.independent_failure", {
           task: task.id,
           verdict: result.verdict,

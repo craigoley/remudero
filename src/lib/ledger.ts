@@ -388,6 +388,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
   // as if it had never failed — the exact "derived from consumers, not hardcoded" case this set exists for.
   "dispatch.blocked_independent",
+  // W1-T3978: the status projection pairs the producer-owned implement refusal with this one-time
+  // re-offer marker. Both survive rotation so a restart cannot turn the retry into a loop.
+  "implement.harness_commit_refused",
+  "dispatch.harness_commit_retry",
   // W1-T3758: lifetime dispatch eligibility subtracts these capacity refusals from the
   // historical start count. Rotating one away would make an infrastructure outage spend task
   // lifetime budget after the next daemon boot.
