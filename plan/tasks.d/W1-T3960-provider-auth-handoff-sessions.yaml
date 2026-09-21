@@ -58,6 +58,8 @@
       proof: "unit test: provider auth refusal leaves effective account and queued admission unchanged"
     - claim: "provider auth routes never trust a browser-supplied upstream URL or credential store"
       proof: "unit test: provider auth gateway uses configured provider targets only"
+    - claim: "the daemon's public route table calls the provider-auth session module rather than leaving it test-only"
+      proof: "grep: startProviderAuthSession( in src/lib/serve.ts"
   falsifier: |
     Return a provider token or credential path, accept a browser-open event as completion, parse
     terminal text as a successful Claude login, let an expired session select an account, or route a
