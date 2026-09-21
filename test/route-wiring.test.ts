@@ -164,6 +164,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "POST /v1/operator-agent/context/delete",
     "ledger-only context deletion write; deletion behavior and bounded receipts are covered in test/context-governance-*.test.ts",
   ],
+  [
+    "POST /v1/operator-agent/delegation/handoff",
+    "ledger-only delegation handoff receipt; envelope, replay, human-gate, and receipt behavior are covered in test/agent-delegation-*.test.ts",
+  ],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
