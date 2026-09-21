@@ -1684,6 +1684,113 @@ components:
         rollback:
           $ref: "#/components/schemas/PromotionRollback"
 
+    OperatorAgentConsequenceAction:
+      type: object
+      required: [consequenceClass, target, requiredApprovers]
+      properties:
+        id:
+          type: string
+        consequenceClass:
+          type: string
+          enum: [reversible, disruptive, irreversible, financial]
+        target:
+          type: object
+          required: [identity, source]
+          properties:
+            identity:
+              type: string
+            source:
+              type: string
+              enum: [trusted, external]
+            ambiguous:
+              type: boolean
+        scope:
+          type: object
+          properties:
+            repo:
+              type: string
+            instance:
+              type: string
+        evidence:
+          type: array
+          items:
+            type: object
+            required: [label, observedAt, maxAgeSeconds]
+            properties:
+              label:
+                type: string
+              observedAt:
+                type: string
+                format: date-time
+              maxAgeSeconds:
+                type: number
+        financial:
+          type: object
+          properties:
+            amount:
+              type: number
+            currency:
+              type: string
+            perActionCeiling:
+              type: number
+            aggregateCeiling:
+              type: number
+            aggregateSpentBefore:
+              type: number
+            quoteExpiresAt:
+              type: string
+              format: date-time
+            coolingOffSeconds:
+              type: integer
+            coolingOffStartedAt:
+              type: string
+              format: date-time
+        irreversible:
+          type: object
+          properties:
+            affectedResource:
+              type: string
+            recoveryAvailable:
+              type: boolean
+            recoveryStatement:
+              type: string
+            rollbackUnavailableReason:
+              type: string
+            confirmationNonce:
+              type: string
+            confirmationExpiresAt:
+              type: string
+              format: date-time
+        requiredApprovers:
+          type: integer
+        approvals:
+          type: array
+          items:
+            type: object
+            required: [approverId, approvedAt, source]
+            properties:
+              approverId:
+                type: string
+              approvedAt:
+                type: string
+                format: date-time
+              source:
+                type: string
+                enum: [trusted, external]
+        capabilityGrant:
+          type: object
+          required: [grantId]
+          properties:
+            grantId:
+              type: string
+
+    OperatorAgentConsequencePreflightRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: "#/components/schemas/OperatorAgentConsequenceAction"
+
     FollowUpQuietHours:
       type: object
       required: [timezone, start, end]
@@ -2845,6 +2952,36 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+
+  /v1/operator-agent/consequence/preflight:
+    post:
+      summary: Classify and evaluate a consequence-policy-v1 action before any capability it names may be used.
+      description: >
+        Every operator-agent action path that would go on to use a capability grant (see
+        `capability-grant-v1`) evaluates its consequence policy here FIRST. Refuses an ambiguous or
+        externally-sourced target, stale evidence, an expired quote/confirmation, an exceeded
+        per-action/aggregate financial ceiling, an active cooling-off window, or a shortfall of
+        distinct trusted approvers against the action's configured requirement. A `ready` response
+        is a preflight verdict only — it never itself uses a capability or reports success.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorAgentConsequencePreflightRequest"
+      responses:
+        "200":
+          description: The action is ready — every consequence-policy check passed.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The action was refused by consequence policy; the response names the machine-readable code and reason.
 
   /v1/operator-agent/follow-ups:
     get:

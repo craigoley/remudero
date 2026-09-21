@@ -44,6 +44,12 @@ import {
   type FollowUpCandidate,
   type FollowUpHistory,
 } from "./follow-up-policy.js";
+import {
+  classifyConsequenceAction,
+  evaluateConsequencePolicy,
+  recordConsequenceRefusal,
+  type ConsequenceActionInput,
+} from "./consequence-policy.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -59,6 +65,7 @@ export const OPERATOR_AGENT_PROMOTION_REPLAY_STEP = "panel.operator_agent_promot
 export const OPERATOR_AGENT_PROMOTION_DECISION_STEP = "panel.operator_agent_promotion_decision";
 export const OPERATOR_AGENT_PROMOTION_ADVANCE_STEP = "panel.operator_agent_promotion_advance";
 export const OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP = "panel.operator_agent_promotion_rollback";
+export const OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP = "panel.operator_agent_consequence_preflight";
 export const OPERATOR_AGENT_DEFAULT_SETTINGS = { enabled: true, confidenceThreshold: 0.9 } as const;
 
 export const OPERATOR_AGENT_CATEGORIES = ["optimize", "fix", "scale"] as const;
@@ -622,6 +629,19 @@ function validatePromotionRollbackInput(body: unknown): { error: string } | Prom
   const rollback = validatePromotionRollback(body.rollback);
   if (!rollback) return { error: "rollback requires a bounded plan and reason" };
   return { promotionId: body.promotionId.trim(), rollback };
+}
+
+interface ConsequencePreflightInput {
+  action: ConsequenceActionInput;
+}
+
+/** The body's `action` is handed to {@link classifyConsequenceAction} unvalidated beyond shape —
+ *  that function is itself the authoritative validator and throws a human-readable `Error` the
+ *  route below turns into a 400, exactly the split `createCapabilityGrant` already uses. */
+function validateConsequencePreflightInput(body: unknown): { error: string } | ConsequencePreflightInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!isRecord(body.action)) return { error: "action is required" };
+  return { action: body.action as unknown as ConsequenceActionInput };
 }
 
 function readRows(ledgerPath: string): Array<Record<string, unknown>> {
@@ -1284,6 +1304,48 @@ export function buildOperatorAgentPromotionRollbackRoute(deps: OperatorAgentRout
   };
 }
 
+/**
+ * POST /v1/operator-agent/consequence/preflight — the action path's own gate: every operator-agent
+ * action that would go on to use a capability grant (capability-grant.ts, W1-T3880) classifies and
+ * evaluates its `consequence-policy-v1` HERE first. Refuses (409, never a manufactured `ready`) an
+ * ambiguous or externally-sourced target, stale evidence, an expired quote/confirmation, an
+ * exceeded financial ceiling, an active cooling-off window, or a shortfall of approvers — see
+ * {@link evaluateConsequencePolicy}. This route never itself uses a capability grant and never
+ * reports success before an action; it only records the preflight verdict.
+ */
+export function buildOperatorAgentConsequencePreflightRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/consequence/preflight",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateConsequencePreflightInput, (input, req, res) => {
+      let action;
+      try {
+        action = classifyConsequenceAction(input.action);
+      } catch (err) {
+        sendJson(res, 400, { error: "invalid_action", detail: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      const nowIso = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const result = evaluateConsequencePolicy(action, { now: nowIso });
+      const refusal = result.ok ? undefined : recordConsequenceRefusal(result, { now: nowIso });
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, action.id, bearerTokenId(req), {
+        action_id: action.id,
+        consequence_class: action.consequenceClass,
+        ready: result.ok,
+        at: nowIso,
+        ...(refusal ? { code: refusal.code, reason: refusal.reason } : {}),
+      });
+      if (!result.ok) {
+        sendJson(res, 409, { ok: false, actionId: action.id, code: result.code, reason: result.reason, at: nowIso });
+        return;
+      }
+      sendJson(res, 200, { ok: true, actionId: action.id, consequenceClass: action.consequenceClass, at: nowIso });
+    }),
+  };
+}
+
 function followUpHistory(deps: OperatorAgentRouteDependencies): FollowUpHistory[] {
   return readFollowUpHistory(deps.ledgerPath, clockFromMillisFn(deps.now).now());
 }
@@ -1356,6 +1418,7 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentPromotionDecisionRoute(deps),
     buildOperatorAgentPromotionAdvanceRoute(deps),
     buildOperatorAgentPromotionRollbackRoute(deps),
+    buildOperatorAgentConsequencePreflightRoute(deps),
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
