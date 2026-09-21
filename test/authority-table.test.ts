@@ -49,8 +49,8 @@ test("AUTHORITY_TABLE rows are non-empty and ids are unique", () => {
     assert.ok(row.note.length > 0, `${row.id}: note must not be empty`);
     assert.ok(Array.isArray(row.ledgerSteps), `${row.id}: ledgerSteps must be an array (possibly empty)`);
     assert.ok(
-      ["policy", "ledger-verdict", "operator-verb", "always"].includes(row.gate),
-      `${row.id}: gate must be one of the four closed kinds, got ${row.gate}`,
+      ["policy", "ledger-verdict", "operator-verb", "sweep-rung", "always"].includes(row.gate),
+      `${row.id}: gate must be one of the five closed kinds, got ${row.gate}`,
     );
   }
 });

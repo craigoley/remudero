@@ -543,9 +543,16 @@ import {
 } from "./lib/ci-parity.js";
 import {
   consumeSourceSizeFollowup,
+  classifySourceSizeSummary,
   type ConsumeSourceSizeFollowupArgs,
   type ConsumeSourceSizeFollowupResult,
 } from "./lib/source-size-followup.js";
+import {
+  decideGatePosture,
+  type GatePostureDecision,
+  type GatePostureFinding,
+  type GatePostureRuntime,
+} from "./lib/gate-posture.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
@@ -1442,7 +1449,7 @@ export function buildFreshTreeReviewRunner(
 
 export function spawnRmdReviewForFreshTree(worktree: string, args: string[]): Promise<number> {
   return new Promise<number>((resolve, reject) => {
-    const child = spawn(process.execPath, [join(worktree, "bin", "rmd"), "review", ...args], {
+    const child = spawn(join(worktree, "bin", "rmd"), ["review", ...args], {
       cwd: worktree,
       stdio: "inherit",
       // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
@@ -1883,12 +1890,15 @@ import {
 } from "./lib/github-app.js";
 import {
   branchCitationPattern,
+  branchNamesFingerprint,
+  decideAutomaticBranchReap,
   DECLARED_BRANCH_GUARDS,
   declaredGuardsBlockSpan,
   parseBranchCitationHits,
   planReverseBranchDrift,
   pruneDeletableBranches,
   remoteBranchNames,
+  type AutomaticBranchReapState,
   withholdActiveBranches,
   type BranchManifestEntry,
 } from "./lib/branch-reaper.js";
@@ -12523,6 +12533,176 @@ export function reportWorkerSourceSizeFollowup(
   }
 }
 
+/**
+ * W1-T3801: route the already-shipped source-size maintainability signal through the bounded
+ * gate-posture judge. This is deliberately an ADVISORY pilot, not a CI-red bypass: a material
+ * hotspot is a deterministic, recoverable finding whose existing consequence is LAND+DEBT (the
+ * feature PR stays unblocked while a decomposition follow-up is filed).
+ *
+ * The healthy/no-material path calls no judge. Judge outage, malformed consequence, or a failed
+ * side effect preserves the old source-size consumer once, and the follow-up consumer's signature
+ * ledger makes retries idempotent. The judge never receives raw source text, only bounded paths and
+ * measurements already emitted by the source-size signal.
+ */
+type SourceSizeGatePostureRuntime = GatePostureRuntime & {
+  decide?: typeof decideGatePosture;
+  consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult;
+};
+
+export interface SourceSizeGatePostureResult {
+  decision: GatePostureDecision;
+  followup?: ConsumeSourceSizeFollowupResult;
+}
+
+export function sourceSizeGateFollowupConsumer(
+  input: ConsumeSourceSizeFollowupArgs,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+  report: typeof reportWorkerSourceSizeFollowup = reportWorkerSourceSizeFollowup,
+): ConsumeSourceSizeFollowupResult {
+  return (
+    report(input, log, say) ?? {
+      action: "error",
+      reason: "filing_failed",
+      detail: "source-size follow-up consumer returned no result",
+    }
+  );
+}
+
+export function buildSourceSizeGatePostureRuntime(
+  repoRoot: string,
+  worktreePath: string,
+  settingsFile: string,
+  spawn: typeof spawnWorker,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+): SourceSizeGatePostureRuntime {
+  try {
+    const spend = riskJudgeSpendCollector();
+    return {
+      runRiskJudge,
+      spend,
+      judge: realRiskJudge({
+        mount: resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))),
+        cwd: worktreePath,
+        settingsFile,
+        spawn,
+        spend,
+        log: (step, extra) => log(step, extra),
+      }),
+      consume: (input) => sourceSizeGateFollowupConsumer(input, log, say),
+    };
+  } catch (error) {
+    log("gate_posture.judge_unavailable", {
+      gate: "ci:source-size",
+      reason: `source-size judge setup unavailable — ${String((error as Error)?.message ?? error)}`,
+    });
+    return {};
+  }
+}
+
+function sourceSizeFollowupDebtResult(result: ConsumeSourceSizeFollowupResult | undefined): string | undefined {
+  if (result?.action === "filed") return `feedback:${result.feedbackId}`;
+  // A duplicate is the successful retry outcome for this pilot: the durable signature already
+  // proves the bounded follow-up exists, so it is not a failed side effect.
+  if (result?.action === "noop" && result.reason === "duplicate") {
+    return `source-size://duplicate/${result.signature ?? "unknown"}`;
+  }
+  return undefined;
+}
+
+export async function reportWorkerSourceSizeFollowupWithGatePosture(
+  args: ConsumeSourceSizeFollowupArgs,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+  deps: SourceSizeGatePostureRuntime = {},
+): Promise<SourceSizeGatePostureResult> {
+  let classified: ReturnType<typeof classifySourceSizeSummary>;
+  try {
+    const raw = (args.readFile ?? ((path) => readFileSync(path, "utf8")))(preflightSummaryPath(args.worktreeRoot));
+    classified = classifySourceSizeSummary(JSON.parse(raw), args.expectedHead);
+  } catch {
+    // The existing consumer owns the exact no-op/error narration for an unreadable summary. An
+    // unreadable sensor is not a deterministic finding and therefore must not spawn a judge.
+    return {
+      decision: {
+        outcome: "LAND",
+        reason: "source-size summary was unreadable; no deterministic gate finding",
+        judgmentSpawned: false,
+        fallback: false,
+      },
+      followup: reportWorkerSourceSizeFollowup(args, log, say, deps.consume),
+    };
+  }
+
+  const materialHotspots = classified.action === "material" ? classified.hotspots : undefined;
+  const finding: GatePostureFinding | undefined =
+    materialHotspots !== undefined
+      ? {
+          gate: "ci:source-size",
+          finding: `source-size reported ${materialHotspots.length} material maintainability hotspot(s)`,
+          evidence: materialHotspots.map((hotspot) => hotspot.path),
+          recoverability: "recoverable",
+          currentConsequence: "LAND+DEBT",
+        }
+      : undefined;
+
+  if (finding === undefined) {
+    const decision = await (deps.decide ?? decideGatePosture)({ finding: undefined }, { log });
+    return {
+      decision,
+      followup: reportWorkerSourceSizeFollowup(args, log, say, deps.consume),
+    };
+  }
+
+  let sideEffectAttempted = false;
+  let followup: ConsumeSourceSizeFollowupResult | undefined;
+  const applyFollowup = (): string | undefined => {
+    if (sideEffectAttempted) return sourceSizeFollowupDebtResult(followup);
+    sideEffectAttempted = true;
+    followup = reportWorkerSourceSizeFollowup(args, log, say, deps.consume);
+    return sourceSizeFollowupDebtResult(followup);
+  };
+
+  const decision = await (deps.decide ?? decideGatePosture)(
+    {
+      finding,
+      change: {
+        description: "source-size maintainability signal produced a bounded follow-up candidate",
+        files: [...(finding.evidence ?? [])],
+      },
+      planContext: { taskId: args.sourceTask, taskType: "source-size-followup" },
+      headSha: args.expectedHead,
+      ...(args.sourcePr === undefined ? {} : { prNumber: Number(args.sourcePr.match(/\/pull\/(\d+)/)?.[1]) || undefined }),
+    },
+    {
+      runRiskJudge: deps.runRiskJudge,
+      judge: deps.judge,
+      cache: deps.cache,
+      spend: deps.spend,
+      log,
+      // Both labels have the same bounded effect for this pilot: file the existing, deduped
+      // decomposition follow-up. The judge chooses whether the work is ordinary repair or debt;
+      // it never receives authority to rewrite the deterministic hotspot finding.
+      repair: applyFollowup,
+      fileDebt: applyFollowup,
+    },
+  );
+
+  // A fallback means the judge did not choose a consequence. Restore the pre-pilot behavior,
+  // which was to file the source-size follow-up, without trying a second time after a failed
+  // callback (the callback itself is the existing idempotent consumer).
+  if (decision.fallback && !sideEffectAttempted) applyFollowup();
+  if (decision.outcome === "LAND" && !decision.fallback) {
+    log("source_size.followup.deferred", {
+      reason: decision.reason,
+      hotspot_count: finding.evidence?.length ?? 0,
+    });
+    say("source-size follow-up deferred by the gate judge — implementation remains unblocked");
+  }
+  return { decision, ...(followup === undefined ? {} : { followup }) };
+}
+
 // ── Worker transcript archive (W1-T3079) ────────────────────────────────────────────────────
 // MASTER-PLAN §Self-improvement promises "every worker session transcript is archived per task;
 // fix/diagnose workers may read their predecessors' transcripts before acting" (Gas Town's
@@ -14402,16 +14582,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say(preflightNotice);
     }
 
-    // W1-T2862: consume the worker's successful source-size signal while this exact worktree and
-    // its durable preflight summary still exist. This runs before every implementation verdict
-    // branch that may remove the worktree. An unreadable HEAD or any filing failure is telemetry
-    // only: maintainability debt creates separate work and never rewrites the feature verdict.
+    // W1-T2862/W1-T3801: consume the worker's successful source-size signal while this exact
+    // worktree and its durable preflight summary still exist. This runs before every implementation
+    // verdict branch that may remove the worktree. The source-size pilot is advisory: it can defer
+    // or file a bounded decomposition follow-up, but never blocks the feature verdict.
     try {
       const expectedHead = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
-      reportWorkerSourceSizeFollowup(
+      const gatePostureDeps = buildSourceSizeGatePostureRuntime(repoRoot, worktreePath, settingsFile, spawn, log, say);
+      // Keep the wrapper call in the worker-return window so the worktree and summary are still
+      // present; its injected consumer above remains the existing source-size writer.
+      // The production adapter still owns the existing reportWorkerSourceSizeFollowup( consumer;
+      // the gate posture layer only decides whether to invoke that same bounded writer.
+      await reportWorkerSourceSizeFollowupWithGatePosture(
         {
           root: repoDir,
           worktreeRoot: worktreePath,
@@ -14425,6 +14610,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         },
         log,
         say,
+        gatePostureDeps,
       );
     } catch (error) {
       const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);
@@ -18745,7 +18931,15 @@ export function reapBranchesCommand(
   rest: string[],
   opts: {
     exec?: (cmd: string, args: string[]) => string;
+    /** Checkout whose `origin`, plan and source guard scan are being reaped. */
+    root?: string;
+    /** Explicit target for daemon sweeps; the CLI keeps resolving its current checkout by default. */
+    ownerRepo?: { owner: string; repo: string };
     ledgerPath?: string;
+    /** Keep automatic daemon passes out of the terminal while retaining ledger evidence. */
+    quiet?: boolean;
+    /** Carry the daemon's run identity into the reaper's durable rows. */
+    runId?: string;
     readFile?: (path: string) => string;
     loadPlan?: (path: string) => Plan;
     readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
@@ -18753,21 +18947,25 @@ export function reapBranchesCommand(
     creditLedgerPath?: string;
   } = {},
 ): number {
+  const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
+  const printError = opts.quiet ? (..._args: unknown[]) => {} : console.error;
   const badArg = unknownArgError("reap-branches", rest, [], ["--prune"]);
   if (badArg) {
-    console.error(badArg);
-    console.error(`usage: ${commandSyntax("reap-branches")}`);
+    printError(badArg);
+    printError(`usage: ${commandSyntax("reap-branches")}`);
     return 2;
   }
   const prune = rest.includes("--prune");
+  const checkoutRoot = opts.root ?? repoRoot;
+  const target = opts.ownerRepo ?? resolveOwnerRepo();
   const exec =
-    opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
+    opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
 
   const names = remoteBranchNames(exec);
   // A POSITIVE CONTROL, not a formality: an empty listing and a repo with only `main` are
   // indistinguishable in the answer, and every bucket would read empty either way.
   if (names.length === 0) {
-    console.error("rmd reap-branches: `git ls-remote --heads origin` returned NO branches — refusing to report on a corpus it could not read");
+    printError("rmd reap-branches: `git ls-remote --heads origin` returned NO branches — refusing to report on a corpus it could not read");
     return 1;
   }
 
@@ -18779,7 +18977,7 @@ export function reapBranchesCommand(
   let creditedTaskIds = new Set<string>();
   let creditReadSucceeded = false;
   try {
-    const taskPlan = (opts.loadPlan ?? loadPlan)(join(repoRoot, "plan", "tasks.yaml"));
+    const taskPlan = (opts.loadPlan ?? loadPlan)(join(checkoutRoot, "plan", "tasks.yaml"));
     const candidates = taskPlan.tasks.map((task) => task.id);
     for (const name of names) {
       const taskId = taskIdFromSlugBranch(name, candidates);
@@ -18793,7 +18991,7 @@ export function reapBranchesCommand(
         try {
           creditPath = ledgerPathFor(loadConfig());
         } catch (err) {
-          console.error(`rmd reap-branches: slug-task enrichment degraded: ledger path unavailable (${String(err)})`);
+          if (!opts.quiet) console.error(`rmd reap-branches: slug-task enrichment degraded: ledger path unavailable (${String(err)})`);
         }
       }
       if (creditPath !== undefined) {
@@ -18802,12 +19000,12 @@ export function reapBranchesCommand(
           creditedTaskIds = creditRead.credited;
           creditReadSucceeded = true;
         } catch (err) {
-          console.error(`rmd reap-branches: slug-task enrichment degraded: merge-credit read failed (${String(err)})`);
+          if (!opts.quiet) console.error(`rmd reap-branches: slug-task enrichment degraded: merge-credit read failed (${String(err)})`);
         }
       }
     }
   } catch (err) {
-    console.error(`rmd reap-branches: slug-task enrichment degraded: plan read failed (${String(err)})`);
+    if (!opts.quiet) console.error(`rmd reap-branches: slug-task enrichment degraded: plan read failed (${String(err)})`);
   }
 
   // ONE batched PR fetch for the whole corpus, never one call per branch. The per-branch shape
@@ -18815,7 +19013,7 @@ export function reapBranchesCommand(
   // pages, and the sweep already reads PR state this way.
   // NEVER a hardcoded "remudero": run-task.ts already records an incident where a hardcoded
   // gateway made an unattended run drain its own source.
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = target;
   const prState = new Map<string, BranchFacts["prState"]>();
   let prReadFailed = false;
   for (let page = 1; page <= 8; page++) {
@@ -18911,7 +19109,7 @@ export function reapBranchesCommand(
   const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   let declarationBlock: { file: string; start: number; end: number } | undefined;
   try {
-    const span = declaredGuardsBlockSpan(readFile(join(repoRoot, "src/run-task.ts")));
+    const span = declaredGuardsBlockSpan(readFile(join(checkoutRoot, "src/run-task.ts")));
     if (span) declarationBlock = { file: "src/run-task.ts", ...span };
   } catch {
     // A repoRoot resolved to something unreadable (or an injected `readFile` standing in for
@@ -18936,9 +19134,9 @@ export function reapBranchesCommand(
   // cited via `LANDING_BRANCH`, so it never lands in `orphanDeclarations` and never reaches here.
   const deadDeclaredGuards = plan.missingBranches.filter((n) => orphanDeclarations.includes(n));
 
-  console.log(`branches:  ${names.length} on origin`);
-  console.log(`guarded:   ${plan.guarded.length}  ${plan.guarded.join(", ")}`);
-  console.log(`deletable: ${plan.deletable.length}`);
+  print(`branches:  ${names.length} on origin`);
+  print(`guarded:   ${plan.guarded.length}  ${plan.guarded.join(", ")}`);
+  print(`deletable: ${plan.deletable.length}`);
   const manifest: BranchManifestEntry[] = [];
   for (const b of plan.deletable) {
     let sha = "unknown";
@@ -18949,19 +19147,19 @@ export function reapBranchesCommand(
     }
     const reason = plan.reasons[b] ?? "unknown";
     manifest.push({ name: b, sha, reason });
-    console.log(`  ${sha}\t${b}\t${reason}`);
+    print(`  ${sha}\t${b}\t${reason}`);
   }
   // W1-T2246: "no PR" and "could not tell" are different reasons for the same disposition — a
   // single "(no PR, commits not in main)" string asserted BOTH about the whole bucket, which is
   // exactly the mislabel this task ends. `plan.undetermined` is a SUBSET of `plan.hold`, so the
   // confirmed count below is never negative and the two lines always sum to `plan.hold.length`.
   const confirmedHold = plan.hold.length - plan.undetermined.length;
-  console.log(
+  print(
     `hold:      ${plan.hold.length}  (${confirmedHold} confirmed no PR + commits not in main, ` +
       `${plan.undetermined.length} state undetermined)`,
   );
   if (plan.undetermined.length > 0) {
-    console.log(`  undetermined: ${plan.undetermined.join(", ")}`);
+    print(`  undetermined: ${plan.undetermined.join(", ")}`);
   }
   /*
    * DRIFT DOES NOT BLOCK THE PRUNE, and that is a decision rather than an oversight. Every drift
@@ -18975,12 +19173,12 @@ export function reapBranchesCommand(
    * Drift still fails the exit code below; it just does not veto the deletions.
    */
   if (!prune) {
-    console.log("DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
+    print("DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
   }
 
   if (opts.ledgerPath) {
     appendLedger(opts.ledgerPath, {
-      run_id: `REAP-${Date.now()}`,
+      run_id: opts.runId ?? `REAP-${Date.now()}`,
       task_id: "REAP",
       step: "branch_reap.dry_run",
       branches: names.length,
@@ -19016,13 +19214,13 @@ export function reapBranchesCommand(
   } catch (err) {
     const why = String((err as Error)?.message ?? err);
     if (prune) {
-      console.error(
+      if (!opts.quiet) console.error(
         `rmd reap-branches: --prune refused — could not re-read the open pull requests, and an ` +
           `unread list is indistinguishable from "none open": ${why}`,
       );
       return 1;
     }
-    console.error(`rmd reap-branches: the active-branch screen could not read the open pull requests (${why}) — ` +
+    if (!opts.quiet) console.error(`rmd reap-branches: the active-branch screen could not read the open pull requests (${why}) — ` +
       `the deletable set below is NOT screened, and --prune would refuse until this read succeeds`);
   }
 
@@ -19037,33 +19235,33 @@ export function reapBranchesCommand(
 
   const screen = openHeads ? withholdActiveBranches(manifest, openHeads, tipAgeMs) : undefined;
   if (screen && screen.withheld.length > 0) {
-    console.log(`withheld:  ${screen.withheld.length} branch(es) look ACTIVE and will not be deleted`);
-    for (const w of screen.withheld) console.log(`  ${w.name} — ${w.reason}`);
+    print(`withheld:  ${screen.withheld.length} branch(es) look ACTIVE and will not be deleted`);
+    for (const w of screen.withheld) print(`  ${w.name} — ${w.reason}`);
   }
   // `deletable` is the CLASSIFICATION's answer and `prunable` is what --prune would actually touch.
   // Printing only the first would let an operator read 140 and get 139, which is the kind of gap
   // that makes a dry run stop being trusted.
-  if (screen) console.log(`prunable:  ${screen.proceed.length}  (deletable minus the active-branch screen)`);
+  if (screen) print(`prunable:  ${screen.proceed.length}  (deletable minus the active-branch screen)`);
 
   if (prune) {
     const outcome = pruneDeletableBranches(screen!.proceed, exec);
-    console.log(`pruned:    ${outcome.deleted.length} deleted, ${outcome.skipped.length} skipped, ` +
+    print(`pruned:    ${outcome.deleted.length} deleted, ${outcome.skipped.length} skipped, ` +
       `${outcome.failed.reduce((n, f) => n + f.names.length, 0)} failed`);
     // THE RESTORE LINES ARE THE POINT OF PRINTING A MANIFEST AT ALL (see this verb's own doc): a
     // deletion nobody can undo is the thing W1-T447 declined to ship, and one line per branch is
     // what converts this from irreversible to merely inconvenient. STDOUT, never `state/`.
     for (const name of outcome.deleted) {
       const sha = manifest.find((e) => e.name === name)?.sha ?? "unknown";
-      console.log(`  restore: git push origin ${sha}:refs/heads/${name}`);
+      print(`  restore: git push origin ${sha}:refs/heads/${name}`);
     }
-    for (const s of outcome.skipped) console.error(`rmd reap-branches: skipped ${s.name} — ${s.reason}`);
+    for (const s of outcome.skipped) printError(`rmd reap-branches: skipped ${s.name} — ${s.reason}`);
     for (const f of outcome.failed) {
-      console.error(`rmd reap-branches: push failed for ${f.names.length} branch(es), all still on origin ` +
+      printError(`rmd reap-branches: push failed for ${f.names.length} branch(es), all still on origin ` +
         `(${f.names.join(", ")}): ${f.error}`);
     }
     if (opts.ledgerPath) {
       appendLedger(opts.ledgerPath, {
-        run_id: `REAP-${Date.now()}`,
+        run_id: opts.runId ?? `REAP-${Date.now()}`,
         task_id: "REAP",
         step: "branch_reap.pruned",
         withheld: screen!.withheld.length,
@@ -19080,21 +19278,21 @@ export function reapBranchesCommand(
   let drift = false;
   if (plan.undeclaredGuards.length > 0) {
     drift = true;
-    console.error(
+    printError(
       `rmd reap-branches: ${plan.undeclaredGuards.length} branch(es) are named in source but MISSING from ` +
         `DECLARED_BRANCH_GUARDS — declare them or remove the reference: ${plan.undeclaredGuards.join(", ")}`,
     );
   }
   if (danglingCitations.length > 0) {
     drift = true;
-    console.error(
+    printError(
       `rmd reap-branches: ${danglingCitations.length} citation(s) name a branch absent from origin and ` +
         `undeclared — remove the reference or add it to DECLARED_BRANCH_GUARDS: ${danglingCitations.join(", ")}`,
     );
   }
   if (orphanDeclarations.length > 0) {
     drift = true;
-    console.error(
+    printError(
       `rmd reap-branches: ${orphanDeclarations.length} declared guard(s) are no longer cited anywhere outside ` +
         `their own declaration — remove from DECLARED_BRANCH_GUARDS or restore the citation: ` +
         `${orphanDeclarations.join(", ")}`,
@@ -19102,7 +19300,7 @@ export function reapBranchesCommand(
   }
   if (deadDeclaredGuards.length > 0) {
     drift = true;
-    console.error(
+    printError(
       `rmd reap-branches: ${deadDeclaredGuards.length} declared guard(s) name a branch absent from origin AND ` +
         `are not cited anywhere else — the branch is gone, remove the declaration: ${deadDeclaredGuards.join(", ")}`,
     );
@@ -29693,6 +29891,7 @@ export async function daemonCommand(
           // fresh dispatch projection.
           (t: Task) => lastProj?.get(t.id)?.merged ?? false,
           undefined,
+          targetCheckoutRoot,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -34547,19 +34746,14 @@ export async function sweepCommand(rest: string[]): Promise<number> {
     reapSummary = runWorktreeReapRung(config, log, { configLockRepoDir: join(config.root, "repos", repo) });
   }
 
-  // W1-T448 — `rmd reap-branches` is deliberately NOT a rung here, unlike the worktree reaper
-  // just above. That rung is free at this cadence (local filesystem only); the BRANCH reaper is
-  // not: one reap issues ~8 `gh api` `state=all` pages (not shared with `buildOpenPrViews`
-  // above, which is open-PRs-only) and costs several seconds of wall time, while this pass fires
-  // roughly every `DEFAULT_POLL_INTERVAL_MS` (60s, src/lib/daemon.ts). Wiring it in would add on
-  // the order of 480 REST requests/hour for an answer that only moves when a branch is created
-  // or merged — a low-frequency signal against a high-frequency loop. See docs/operator-guide.md
-  // for the measured numbers that decided this, and test/reap-cadence.test.ts for the proof.
-  // (The precedent this leans on, per design clause (iv): `deps.sweep()` itself is already
-  // wrapped in try/catch by the daemon's poll loop — `daemon.sweep.failed` is logged and never
-  // propagated, src/lib/daemon.ts — so a failing sub-step inside a sweep pass is an established,
-  // non-fatal shape; `reap-branches` staying an unwired, standalone verb sidesteps that surface
-  // entirely rather than needing a new instance of it.)
+  // W1-T448 successor: automatic branch cleanup rides the full sweep. The rung performs a cheap
+  // branch-set fingerprint every tick and only pays for the existing REST classifier on first use,
+  // branch-set change, or the six-hour bound. It is deliberately absent from buildSweepLightHook:
+  // the delete is a remote git write and must not run beside an active worker.
+  runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, {}, {
+    prune: !dryRun,
+    root: repo === self.repo ? repoRoot : join(config.root, "repos", repo),
+  });
 
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
@@ -35232,6 +35426,100 @@ export function runTmpSweepRung(
   }
 }
 
+/**
+ * Automatic remote-branch cleanup for one target repository. The cheap branch-set read happens on
+ * every full sweep, while the existing expensive classifier/pruner runs only on first use, a branch
+ * set change, or the six-hour bound. This is deliberately on the full sweep path: the write is a
+ * remote `git push --delete`, so the light in-flight pass must never reach it.
+ *
+ * The command remains the one classification authority. This adapter supplies the target checkout,
+ * target GitHub owner/repo, daemon run id and quiet output; it never constructs a second delete
+ * predicate. An unreadable or empty branch listing is a named refusal, never a healthy zero.
+ */
+export function runAutomaticBranchReapRung(
+  owner: string,
+  repo: string,
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  state: AutomaticBranchReapState,
+  opts: {
+    prune?: boolean;
+    root?: string;
+    clock?: Pick<Clock, "now">;
+    intervalMs?: number;
+    exec?: (cmd: string, args: string[]) => string;
+  } = {},
+): void {
+  const checkoutRoot = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
+  const exec = opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
+  let names: string[];
+  try {
+    names = remoteBranchNames(exec);
+  } catch (e) {
+    log("branch_reap.sweep.failed", {
+      outcome: "unreadable",
+      reason: "remote branch listing failed",
+      error: String((e as Error)?.message ?? e),
+    });
+    return;
+  }
+  if (names.length === 0) {
+    log("branch_reap.sweep.failed", {
+      outcome: "unreadable",
+      reason: "remote branch listing was empty",
+    });
+    return;
+  }
+
+  const nowMs = (opts.clock ?? systemClock).now();
+  const decision = decideAutomaticBranchReap(state, names, nowMs, opts.intervalMs);
+  state.lastBranchFingerprint = decision.branchFingerprint;
+  if (!decision.fire) return;
+  state.lastRunAtMs = nowMs;
+
+  log("branch_reap.sweep.started", {
+    mode: opts.prune === false ? "dry-run" : "prune",
+    reason: decision.reason,
+    branch_count: names.length,
+    repository: `${owner}/${repo}`,
+  });
+  let code = 1;
+  try {
+    code = reapBranchesCommand(opts.prune === false ? [] : ["--prune"], {
+      root: checkoutRoot,
+      ownerRepo: { owner, repo },
+      exec,
+      ledgerPath,
+      quiet: true,
+      runId,
+      creditLedgerPath: ledgerPath,
+    });
+  } catch (e) {
+    log("branch_reap.sweep.failed", {
+      outcome: "exception",
+      reason: decision.reason,
+      error: String((e as Error)?.message ?? e),
+    });
+    return;
+  } finally {
+    // The prune changed the remote branch set. Refresh the cheap fingerprint so the next ordinary
+    // poll does not immediately spend another full REST classification on our own deletion.
+    try {
+      state.lastBranchFingerprint = branchNamesFingerprint(remoteBranchNames(exec));
+    } catch {
+      // Keep the pre-pass fingerprint; a later poll will retry because the remote cannot be proved current.
+    }
+  }
+  log("branch_reap.sweep.completed", {
+    outcome: code === 0 ? "ok" : "completed_with_drift_or_failure",
+    code,
+    reason: decision.reason,
+    repository: `${owner}/${repo}`,
+  });
+}
+
 // ── WORKER STALL DETECTOR (W1-T943) ─────────────────────────────────────────────────────────
 //
 // W1-T942 produces `worker.state`; nothing judged it until now — the exact shape W1-T316/
@@ -35477,6 +35765,10 @@ export function buildSweepHook(
   reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
+  // W1-T448: the daemon already resolved the managed checkout for this exact owner/repo. Keep
+  // that path explicit so same-named repositories under different owners cannot reap this repo's
+  // origin by accident.
+  targetCheckoutRoot?: string,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -35526,6 +35818,7 @@ export function buildSweepHook(
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
+  const branchReapState: AutomaticBranchReapState = {};
   return async (continueReviewAdmissions = () => true) => {
     try {
       await mainHealthRung?.();
@@ -35614,6 +35907,15 @@ export function buildSweepHook(
       // try/catch, folded into runWorktreeReapRung (distinct from the shared "sweep.error"
       // below) so a reap hiccup never masks — or is masked by — the rungs above it.
       runWorktreeReapRung(config, log, { configLockRepoDir: join(config.root, "repos", repo) });
+      // W1-T448 successor: remote branch cleanup is a FULL-sweep rung. The cheap branch-set
+      // fingerprint runs each tick; the REST classifier/pruner is bounded by its cadence decision.
+      // Existing direct/test callers predate the resolved target-checkout seam and must remain
+      // offline. The real daemon always supplies it from targetCheckoutRoot above.
+      if (targetCheckoutRoot) {
+        runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, branchReapState, {
+          root: targetCheckoutRoot,
+        });
+      }
       // W1-T320 — the tmp-dir backstop's PER-POLL rung (design clause ii): rides this SAME
       // composite so it re-fires on a long-running healthy daemon, not only at boot. Own
       // try/catch (folded into runTmpSweepRung), same discipline as the reap rung above.
@@ -41747,7 +42049,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "reap-branches",
     syntax: "rmd reap-branches [--prune]",
     summary: "Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.",
-    detail: "W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Without --prune it deletes nothing, pushes nothing and writes no state file. --prune (W1-T3020) deletes EXACTLY the branches the dry run just listed and nothing else: it re-derives no classification, so it cannot disagree with the report the operator read, and every guard/hold/undetermined decision stays where planBranchReap made it. It prints `git push origin <sha>:refs/heads/<name>` for each deletion, which is what makes the removal reversible, and SKIPS any branch whose sha would not resolve, since that is the one case no restore line exists for. Pushes in chunks so one stale ref cannot fail every deletion, and exits non-zero if any chunk failed. Drift does NOT veto the prune: every drift class concerns the declared guard list and can only widen the guarded set or name an already-absent branch, so refusing on it would be a bound firing on a healthy condition. An ACTIVE-BRANCH SCREEN runs in BOTH modes, so the dry run's `prunable` line is what --prune would actually delete: it withholds any head carrying an open pull request RE-READ at that moment (independent of the classification's own folded prState, which ranked merged above open until W1-T3020), and any branch classified on no-pull-request evidence (tip_in_main, patch_id_equivalent) whose tip is newer than 24h or whose age cannot be read -- a worker that has just cut run-<taskId>-<epochMs> from main and pushed it looks exactly like an abandoned probe ref, and only time separates them. A merged or closed PR is not age-gated: that PR is decisive evidence about the work. If the open-PR read FAILS, --prune REFUSES (an unread list is indistinguishable from 'none open') while the dry run reports the gap and screens nothing. OPERATOR-INVOKED ONLY -- no daemon rung, sweep or automatic caller reaches this verb; the fleet never holds the delete.",
+    detail: "W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set.",
   },
   {
     name: "ledger-grep",

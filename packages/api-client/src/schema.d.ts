@@ -828,6 +828,46 @@ export interface components {
       taskId: string;
       feedback: FeedbackEntry;
     };
+    ExternalEffectPostcondition: {
+      path: string;
+      /** JSON value expected at the connector path. */
+      equals: Record<string, never>;
+      description?: string;
+    };
+    ExternalEffect: {
+      version: "external-effect-v1";
+      originatingActionId: string;
+      originatingReceiptId: string;
+      capabilityGrantId: string;
+      connector: string;
+      targetIdentity: string;
+      requestedOperation: string;
+      preconditionSnapshot: Record<string, never>;
+      expectedPostconditions: (ExternalEffectPostcondition)[];
+      observedState?: Record<string, never>;
+      observation: {
+        status: "fresh" | "stale" | "unavailable";
+        observedAt?: string;
+        ageMs?: number;
+        maxAgeMs: number;
+      };
+      idempotencyKey: string;
+      reconciliationState: "applied" | "refused" | "pending" | "partially-applied" | "drifted" | "stale" | "unobservable";
+      partialSuccess?: {
+        satisfied: (string)[];
+        unsatisfied: (string)[];
+      };
+      retryPath: {
+        kind: "none" | "retry" | "compensation";
+        allowed: boolean;
+        reason: string;
+        attemptNumber?: number;
+      };
+      /** Opaque digest of redacted connector evidence; raw provider output is never stored. */
+      evidenceReference: string;
+      safeToComplete: boolean;
+      reason?: string;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */

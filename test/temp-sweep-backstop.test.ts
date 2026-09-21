@@ -13,6 +13,7 @@
 //   4. daemon.tmp_sweep carries the oldest-kept age, distinguishing health from a quiet leak
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
@@ -102,6 +103,12 @@ test("a population minting faster than the OLD 24h ceiling — every dir older t
 test("buildSweepHook's per-poll composite (the daemon's REAL deps.sweep() wiring) reaches the tmp-sweep rung every tick — not only daemonBoot", async () => {
   const bin = mkdtempSync(join(tmpdir(), "gh-backstop-"));
   writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  writeFileSync(
+    join(bin, "git"),
+    `#!/bin/sh\nif [ "$1" = "ls-remote" ]; then printf "deadbeef\\trefs/heads/main\\n"; else exec ${realGit} "$@"; fi\n`,
+    { mode: 0o755 },
+  );
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
   const root = mkdtempSync(join(tmpdir(), "rmd-backstop-hook-"));
@@ -119,6 +126,15 @@ test("buildSweepHook's per-poll composite (the daemon's REAL deps.sweep() wiring
       // The exact value the real daemonCommand threads: policy.values.sweep.tmpMaxAgeMs off
       // the SHIPPED plan/policy.yaml — never an invented fixture number.
       SHIPPED_TMP_MAX_AGE_MS,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      root,
     );
     await hook();
 
