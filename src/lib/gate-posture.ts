@@ -115,15 +115,22 @@ async function applyConsequence(
 ): Promise<GatePostureDecision> {
   if (consequence === "REPAIR") {
     const repairResult = await deps.repair?.(finding, judgment);
+    if (repairResult === undefined) {
+      return fallbackDecision(
+        finding,
+        "REPAIR could not apply its bounded side effect, so the gate's current behaviour is restored",
+        judgment,
+      );
+    }
     return {
       outcome: "REPAIR",
-      reason: repairResult === undefined ? judgment.action.reason : repairResult,
+      reason: repairResult,
       judgmentSpawned: true,
       fallback: false,
       finding,
       verdict: judgment.verdict,
       action: judgment.action,
-      ...(repairResult === undefined ? {} : { repairResult }),
+      repairResult,
     };
   }
 
@@ -197,6 +204,22 @@ export async function decideGatePosture(input: GatePostureInput, deps: GatePostu
 
   const effectiveConsequence =
     consequence === "STOP" && finding.recoverability !== "unrecoverable" ? "LAND+DEBT" : consequence;
+  // Emit the deterministic finding and the selected consequence BEFORE any repair/debt callback
+  // can write. The final decision row below adds the callback result; this intent row makes the
+  // causal order auditable even when the side effect itself fails or lands asynchronously.
+  deps.log?.("gate_posture.intent", {
+    gate: finding.gate,
+    finding: finding.finding,
+    consequence: effectiveConsequence,
+    recoverability: finding.recoverability,
+    ...(judgment.verdict === undefined
+      ? {}
+      : {
+          verdict: judgment.verdict.verdict,
+          reasons: judgment.verdict.reasons,
+          confidence: judgment.verdict.confidence,
+        }),
+  });
   const decision = await applyConsequence(effectiveConsequence, finding, judgment, deps);
   const reason =
     consequence === "STOP" && effectiveConsequence === "LAND+DEBT"
