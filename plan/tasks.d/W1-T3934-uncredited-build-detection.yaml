@@ -50,7 +50,7 @@
     - claim: "a task without declared files remains fail-open rather than silently suppressing an uncredited build"
       proof: "unit test: an unscoped task preserves the uncredited-build warning"
     - claim: "the warning remains report-only and does not change task disposition"
-      proof: "unit test: the warning MOVES NO DISPOSITION"
+      proof: "unit test: W1-T3934: the warning MOVES NO DISPOSITION"
   falsifier: |
     Remove the declared-scope overlap check and the W1-T1041/#4746 regression must fail. Change
     the check to require scope for every task and the unscoped fail-open control must fail. Any
