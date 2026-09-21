@@ -84,8 +84,8 @@ import {
  * renderer, the command palette, fleet-control wiring, drain/feedback/inbox actions — everything
  * that used to sit directly inside `renderShellHtml`'s `<script type="module">` tag below the
  * pure helpers. Runs in the browser ONLY (`document`/`window`/`fetch` are all browser globals);
- * `phaseElapsedThresholdsMs` and `resolveFreshness` are its only two inputs from outside the
- * script, exactly the two `renderShellHtml` used to splice into the string via `${…}`.
+ * `phaseElapsedThresholdsMs`, `resolveFreshness`, and `formatAge` are its three inputs from
+ * outside the script, exactly the values `renderShellHtml` splices into the browser source.
  *
  * DELIBERATELY UNTYPED SIGNATURE (no `: Record<string, number>` etc.) — see this file's header:
  * everything between the BODY START/END markers below must already be valid, unannotated
@@ -4094,8 +4094,8 @@ const CLIENT_BODY_SOURCE: string = sliceClientBody(readFileSync(fileURLToPath(im
  * `renderShellHtml`'s ONE named seam for this module (grepped by W1-T2902's own acceptance
  * criteria, exactly as `renderConsoleShellScript` is for the pure helpers). Wraps
  * {@link CLIENT_BODY_SOURCE} — `bootConsoleShellClient`'s own body, read verbatim off this
- * file — in an immediately-invoked function expression, called with the same two values
- * `renderShellHtml` used to splice into the string via `${…}`: `phaseElapsedThresholdsMs` as a
+ * file — in an immediately-invoked function expression, called with the three values
+ * `renderShellHtml` splices into the browser source: `phaseElapsedThresholdsMs` as a
  * JSON literal, `resolveFreshness` (lib/console-freshness.ts) as its OWN `.toString()`'d
  * source, the technique W1-T281 has always used for it (nothing greps its shape, so nothing
  * about its embedding needed to change), and — W1-T3615 — `formatAge` (lib/console-freshness.ts)
