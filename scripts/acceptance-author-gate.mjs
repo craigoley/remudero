@@ -40,7 +40,7 @@
 // the defect and message (from `acceptanceAuthorTimeCheck`/`acceptanceBlockDiagnostics`, verbatim
 // — design item (ii), W1-T1060) printed to stderr.
 
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
@@ -57,6 +57,8 @@ import {
 import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
 import { loadPlan } from "../src/lib/plan.ts";
 import { isInPlanScope } from "../src/lib/plan-scope.ts";
+import { lintTask } from "../src/lib/task-linter.ts";
+import { taskIdFromRunBranch } from "../src/lib/status.ts";
 import { execFileSync } from "node:child_process";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 
@@ -109,7 +111,8 @@ export function readEventPayload(eventPath) {
   // because the checks this gate already runs do not need them.
   const baseSha = typeof pr.base?.sha === "string" ? pr.base.sha : undefined;
   const headSha = typeof pr.head?.sha === "string" ? pr.head.sha : undefined;
-  return { readable: true, body: typeof pr.body === "string" ? pr.body : "", authorLogin, baseSha, headSha };
+  const headRefName = typeof pr.head?.ref === "string" ? pr.head.ref : undefined;
+  return { readable: true, body: typeof pr.body === "string" ? pr.body : "", authorLogin, baseSha, headSha, headRefName };
 }
 
 /**
@@ -490,9 +493,9 @@ export function evaluateCommitTrailerGate({ trailerCommits, changedPaths, taskFi
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
  * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
- * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
+ * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
  */
-export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict }) {
+export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -517,13 +520,34 @@ export function evaluateGate({ body, authorLogin, trailerResolves, introducedTas
   if (followupRefusal !== undefined) return followupRefusal;
   const proofDivergence = trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId });
   if (proofDivergence !== undefined) return proofDivergence;
+  // W1-T3747: reconcile only a credited implementation; filings/body-only PRs stay silent.
+  const planOnly = changedPaths !== undefined && changedPaths.length > 0 && changedPaths.every(isInPlanScope);
+  const trailerId = extractTaskTrailerId(body ?? "");
+  const creditedTaskId = planOnly ? undefined : (trailerId ?? taskIdFromRunBranch(headRefName));
+  if (creditedTaskId !== undefined && taskFilesForId !== undefined) {
+    let declaredFiles;
+    let declaredAcceptance;
+    try {
+      declaredFiles = taskFilesForId(creditedTaskId);
+      declaredAcceptance = taskAcceptanceForId?.(creditedTaskId);
+    } catch {
+      declaredFiles = undefined;
+      declaredAcceptance = undefined;
+    }
+    if (Array.isArray(declaredFiles)) {
+      const violations = lintTask(
+        { id: creditedTaskId, files: declaredFiles, acceptance: Array.isArray(declaredAcceptance) ? declaredAcceptance : [] },
+        { creditedBuild: true, moduleExists: (path) => existsSync(join(REPO_ROOT, path)) },
+      ).violations.filter((violation) => violation.check === "credited-test-path");
+      if (violations.length > 0) return { ok: false, defect: "credited-test-path", message: violations.map((v) => v.message).join(" ") };
+    }
+  }
   const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
   // JUDGE THE SOURCE THE CRITERIA ACTUALLY CAME FROM. The predicate above returns OK early on the
   // trailer arm precisely because "criteria come from the plan record rather than the body" — and
   // the proof-shape check below then re-parsed the BODY anyway, undoing the exemption the same
   // call had just granted one line earlier. Recomputed here with the predicate's OWN condition, not
   // by string-matching its message, so the two cannot disagree about which arm fired.
-  const trailerId = extractTaskTrailerId(body);
   const criteriaCameFromPlan = trailerId !== undefined && (trailerResolves === undefined || trailerResolves(trailerId));
   return result.ok ? authorTimeProofShapeRefusal(body, result, criteriaCameFromPlan) : result;
 }
@@ -630,6 +654,7 @@ export function main(argv) {
     : evaluateGate({
       body: payload.body,
       authorLogin: payload.authorLogin,
+      headRefName: payload.headRefName,
       trailerResolves: planTrailerResolver(),
       introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
       trailerCommits,

@@ -126,6 +126,8 @@ async function structuralPredicateMutant(): Promise<{ evaluateGate: (input: Gate
     ["../src/lib/ci-parity.ts", join(REPO_ROOT, "src", "lib", "ci-parity.ts")],
     ["../src/lib/plan.ts", join(REPO_ROOT, "src", "lib", "plan.ts")],
     ["../src/lib/plan-scope.ts", join(REPO_ROOT, "src", "lib", "plan-scope.ts")],
+    ["../src/lib/task-linter.ts", join(REPO_ROOT, "src", "lib", "task-linter.ts")],
+    ["../src/lib/status.ts", join(REPO_ROOT, "src", "lib", "status.ts")],
     ["./lib/repo-root.mjs", join(REPO_ROOT, "scripts", "lib", "repo-root.mjs")],
   ] as const;
   const rewrittenImports = imports.reduce(
