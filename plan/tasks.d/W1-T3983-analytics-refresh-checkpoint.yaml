@@ -15,7 +15,8 @@
     - test/analytics-route.test.ts
   origin: "feedback#fb-1790023306998-analytics-refresh-timeout"
   plan_refs: ["W1-T477", "W1-T3977", "CONSOLE-T34"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     OBSERVED live 2026-09-21 after W1-T3977/#6443 and the console parser fix shipped: the serve
@@ -50,4 +51,4 @@
     first refresh must again miss the safety budget or the second refresh must reopen every old
     rotation. Replace an unreadable or mismatched checkpoint with an empty aggregate: the explicit
     cold/last-good evidence test must fail because it must never read unavailable history as zero.
-  note: "This task repairs analytics refresh liveness and provenance after the operator-agent response bound shipped. It does not raise response limits, change proposal policy, or make the agent autonomous. The plan-only filing intentionally leaves implementation for a separate post-merge PR, and its filing proof names this exact task record path. reservation hand-off: run-W1-T3983-analytics -> run-W1-T3983-1790023859928"
+  note: "This task's original implementation plan is superseded by W1-T3985, which carries the checkpoint-specific implementation proofs and the same measured scope. Preserve this record as historical provenance; W1-T3985 is the dispatchable follow-up. reservation hand-off: run-W1-T3983-analytics -> run-W1-T3983-1790023859928"
