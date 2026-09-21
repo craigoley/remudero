@@ -491,8 +491,13 @@ test("the Codex version check passes the pinned CLI value", () => {
 
 test("the Dockerfile installs and executes the declared Codex pin in one layer", () => {
   const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  const lockfile = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package-lock.json"), "utf8")) as {
+    packages?: Record<string, { version?: string }>;
+  };
   assert.match(dockerfile, /ARG CODEX_VERSION=0\.152\.0/);
-  assert.match(dockerfile, /npm install -g "@openai\/codex@\$\{CODEX_VERSION\}"[\s\S]*?codex --version/);
+  assert.equal(lockfile.packages?.["node_modules/@openai/codex"]?.version, "0.152.0");
+  assert.match(dockerfile, /COPY --chown=root:root deploy\/package\.json deploy\/package-lock\.json \/opt\/remudero-image-clis\//);
+  assert.match(dockerfile, /npm ci --prefix \/opt\/remudero-image-clis[\s\S]*?ln -s \/opt\/remudero-image-clis\/node_modules\/\.bin\/codex \/usr\/local\/bin\/codex[\s\S]*?codex --version/);
 });
 
 test("the image installs an immutable Codex deny-read boundary for every mounted credential and state path", () => {

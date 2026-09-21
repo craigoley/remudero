@@ -1,7 +1,7 @@
 # 0002. Pin Node to an exact version, everywhere, no floating tags
 
 Status: Accepted
-Date: 2026-09-03
+Date: 2026-09-03; digest hardening updated 2026-09-21
 
 ## Context
 
@@ -31,20 +31,15 @@ across patch releases.
 
 Node's version is pinned **exactly**, in lockstep, in every place a Node
 runtime is chosen for this project: `.nvmrc` (source of truth),
-`package.json#engines.node`, and `deploy/Dockerfile`'s `FROM` tag — no
-floating major/minor tag anywhere in the deploy path. `assertPinnedNodeVersion`
-enforces the `.nvmrc` half of this at the coverage-merge seam; PR #3809 closed
-the image half by changing `FROM node:22-bookworm-slim` to
-`FROM node:22.22.3-bookworm-slim` and adding a `HostFacts`-driven
-`node-version-drift-from-pin` cluster (`src/lib/ci-parity.ts`) that fires loud
-the moment the pin and the running Node disagree again.
-
-PR #3809's Dockerfile comment also records the exact-tag-over-digest
-trade-off made at the same time: an exact tag was chosen over a digest pin
-because this repo has no digest-renewal process, and an unrenewed digest
-would quietly rot the base image's security-patch surface — judged a worse
-failure mode than the bounded residual float within patch-level rebuilds of
-a fixed tag.
+`package.json#engines.node`, and `deploy/Dockerfile`'s `FROM` tag. The
+Dockerfile now adds the verified multi-platform manifest digest, and the
+`/deploy` Docker and npm Dependabot entries renew the image digest and the
+image-local CLI lockfile. `assertPinnedNodeVersion` enforces the `.nvmrc`
+half of this at the coverage-merge seam; PR #3809 closed the version-tag
+half by changing `FROM node:22-bookworm-slim` to the exact 22.22.3 tag and
+adding a `HostFacts`-driven `node-version-drift-from-pin` cluster
+(`src/lib/ci-parity.ts`) that fires loud the moment the pin and the running
+Node disagree again.
 
 ## Consequences
 
@@ -57,10 +52,10 @@ a fixed tag.
   `acr-build.yml` (see ADR 0003) — a version bump is not "live" the instant
   it merges, which is easy to forget and was part of what let the drift
   happen unnoticed the first time.
-- The image still floats within patch-level rebuilds of the *same* pinned
-  tag (Docker Hub can rebuild `node:22.22.3-bookworm-slim` itself); this is
-  accepted as a smaller, and now loudly-detected, residual risk rather than
-  eliminated outright.
+- Dependabot owns routine digest renewal, so the image no longer floats
+  during a build while still receiving reviewed base-image updates. A Node
+  version bump remains a coordinated change to `.nvmrc`, the tag, and the
+  digest, followed by the operator-triggered image rebuild.
 
 **How to reverse:** reverting to a floating tag is a one-line Dockerfile
 edit, but it reopens exactly the outage this ADR records, silently, since

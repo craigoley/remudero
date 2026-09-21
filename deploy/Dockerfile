@@ -12,10 +12,10 @@
 # Pin Node to the exact `.nvmrc` version, never the floating `node:22-bookworm-slim` tag.
 # `assertPinnedNodeVersion` (scripts/coverage-merge-ratchet.mjs) throws on any string mismatch, so
 # a moved floating tag reddened six merge-lcov tests with no change in this repo (W1-T2770).
-# Bump this tag and `.nvmrc` in one commit. Falsifier:
+# Bump this tag, its digest, and `.nvmrc` in one reviewed change. Falsifier:
 # test/merge-lcov-node-drift-cluster-and-image-pin.test.ts reads this line against `.nvmrc`.
-# Why, and why not a digest: docs/deploy-image-forensics.md, "FROM node:22.22.3-bookworm-slim".
-FROM node:22.22.3-bookworm-slim
+# Why the tag AND digest: docs/deploy-image-forensics.md, "FROM node:22.22.3-bookworm-slim".
+FROM node:22.22.3-bookworm-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
 
 # ── REQ 1: an init that reaps ────────────────────────────────────────────────────────────────
 # tini must be PID 1. `spawnDetachedGroup` (src/lib/worker-containment.ts) spawns detached, so each
@@ -67,31 +67,33 @@ ENV HOME=/home/node
 # (src/lib/review.ts) falls back to `$HOME/.cache/ms-playwright` inside every worker.
 # Why: docs/deploy-image-forensics.md, "The browser layer — installed, and still unreachable".
 
-# ── REQ 7: the Claude Code CLI — without it no worker can spawn ──────────────────────────────
+# ── REQ 7: the worker CLIs — lockfile-installed and baked ─────────────────────────────────────
 # `claude` must be on PATH. `resolveClaudeExecutable` (src/lib/worker.ts) throws
 # `ClaudeToolchainBlockedError` when it finds none, so every worker spawn fails before it starts.
 # Baked, not mounted: a container depending on a binary it does not carry is not self-sufficient.
-# Pinned to the CLI half of the `@anthropic-ai/claude-agent-sdk` pair package-lock.json resolves.
+# The image-local package lock carries registry tarball integrity for both CLIs; `npm ci` is the
+# only install command here, so the build cannot silently resolve a different package tree. The
+# ARGs remain the operator-visible version contract and are checked against that lock below.
 # `DISABLE_AUTOUPDATER=1` is image-wide, wider than `buildWorkerEnv`'s per-worker grant, so no
-# operator exec can rewrite the pinned binary. Falsifier: `claude --version` below proves npm's
-# global bin is on PATH, in-layer. deploy/verify-image.sh and `checkBinaryPin` read the ARG below.
-# Why: docs/deploy-image-forensics.md, "ARG CLAUDE_CODE_VERSION … and the global claude install".
+# operator exec can rewrite the pinned binaries. Falsifier: both `--version` calls below prove the
+# lockfile-installed bins are on PATH, in-layer. deploy/verify-image.sh and `checkBinaryPin` read
+# the Claude ARG below.
+# Why: docs/deploy-image-forensics.md, "The image-local CLI lockfile".
 ARG CLAUDE_CODE_VERSION=2.1.220
-ENV DISABLE_AUTOUPDATER=1
-# The throwaway `npm_config_cache` below is REQ 14; REQ 11's chown no longer has to repair it.
-RUN npm_config_cache=/tmp/npm-build-cache \
-      npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
- && rm -rf /tmp/npm-build-cache \
- && claude --version
-
-# ── The Codex CLI — an opt-in second subscription, baked but dormant ─────────────────────────
-# Installing this binary reroutes nothing: `workerProviders.enabled` defaults to [`claude`]. A host
-# opts in by mounting an authenticated CODEX_HOME and adding `codex` to that list.
 ARG CODEX_VERSION=0.152.0
-RUN npm_config_cache=/tmp/npm-build-cache \
-      npm install -g "@openai/codex@${CODEX_VERSION}" \
- && rm -rf /tmp/npm-build-cache \
- && codex --version
+ENV DISABLE_AUTOUPDATER=1
+COPY --chown=root:root deploy/package.json deploy/package-lock.json /opt/remudero-image-clis/
+# The throwaway `npm_config_cache` below is REQ 14; REQ 11's chown no longer has to repair it.
+RUN set -eu; \
+    test "$(node -p "require('/opt/remudero-image-clis/package-lock.json').packages['node_modules/@anthropic-ai/claude-code'].version")" = "${CLAUDE_CODE_VERSION}"; \
+    test "$(node -p "require('/opt/remudero-image-clis/package-lock.json').packages['node_modules/@openai/codex'].version")" = "${CODEX_VERSION}"; \
+    export npm_config_cache=/tmp/npm-build-cache; \
+    npm ci --prefix /opt/remudero-image-clis --omit=dev --no-audit --no-fund; \
+    ln -s /opt/remudero-image-clis/node_modules/.bin/claude /usr/local/bin/claude; \
+    ln -s /opt/remudero-image-clis/node_modules/.bin/codex /usr/local/bin/codex; \
+    rm -rf /tmp/npm-build-cache; \
+    claude --version; \
+    codex --version
 
 # Codex's workspace-write sandbox permits reads outside the checkout, and this container mounts two
 # subscriptions plus operator state. Root ownership and mode 0444 keep uid 1000 from weakening the
@@ -140,17 +142,21 @@ COPY --chown=node:node package.json package-lock.json ./
 
 # ── REQ 15: the browser build number must follow the lockfile, not the build date ────────────
 # Resolve the Playwright version from `/app/package-lock.json`, COPYed above, and install browsers
-# for that version. A bare `npx --yes playwright` resolves whatever the registry serves at build
-# time; that shipped build 1194 against the pinned 1234 and produced 51 failures. Nothing hardcodes
-# a revision — `requiredChromiumDirs` (src/lib/review.ts) derives the names from the installed
-# browsers.json. The chown targets `/home/node/.cache`, not its `ms-playwright` child, because root
-# creates both here. Falsifier: the node assertion ending this layer refuses an incomplete install.
+# for that version. The throwaway prefix runs `npm ci` against that same lockfile; a mutable
+# `npm install playwright@...` cannot silently replace the package before the browser download.
+# That old shape shipped build 1194 against the pinned 1234 and produced 51 failures. Nothing
+# hardcodes a browser revision — `requiredChromiumDirs` (src/lib/review.ts) derives the names from
+# the installed browsers.json. The chown targets `/home/node/.cache`, not its `ms-playwright`
+# child, because root creates both here. Falsifier: the node assertion ending this layer refuses
+# an incomplete install.
 # Why: docs/deploy-image-forensics.md, "The pinned Playwright browser install — REQ 15".
 RUN set -eu; \
     PW_VERSION="$(node -p "require('/app/package-lock.json').packages['node_modules/playwright-core'].version")"; \
     echo "REQ 15: package-lock.json pins playwright-core@${PW_VERSION} — installing browsers for THAT version"; \
+    mkdir -p /tmp/pw-pin; \
+    cp /app/package.json /app/package-lock.json /tmp/pw-pin/; \
     export npm_config_cache=/tmp/npm-build-cache; \
-    npm install --no-save --no-audit --no-fund --prefix /tmp/pw-pin "playwright@${PW_VERSION}"; \
+    npm ci --omit=dev --no-audit --no-fund --prefix /tmp/pw-pin; \
     mkdir -p /opt/pw-pin; \
     cp /tmp/pw-pin/node_modules/playwright-core/browsers.json /opt/pw-pin/browsers.json; \
     printf '%s\n' "${PW_VERSION}" > /opt/pw-pin/version; \
