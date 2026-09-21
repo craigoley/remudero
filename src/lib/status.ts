@@ -130,6 +130,32 @@ export interface PrRef {
  *  invented vocabulary; each maps 1:1 onto a real run-task.ts step. */
 export type Phase = "recon" | "implement" | "review" | "fix-rung";
 
+/** A bounded operator-facing description of the worker currently attached to a task. Raw
+ *  prompts, tool arguments, and tool output deliberately do not cross this contract. */
+export type WorkerRole = "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+export type WorkerActivityKind = "working" | "tool-executing" | "message";
+export interface WorkerTelemetry {
+  role?: WorkerRole;
+  provider?: string;
+  requestedModel?: string;
+  servedModel?: string;
+  currentTool?: string;
+  currentToolReason?: string;
+  currentToolStartedAt?: string;
+  lastTool?: {
+    name: string;
+    durationMs: number;
+    completedAt: string;
+    outcome?: "success" | "error";
+  };
+  lastEventAt?: string;
+  lastEventKind?: WorkerActivityKind;
+  /** Dispatch start to the first observed stream event; this is a measured startup signal, not
+   *  an invented queue duration. */
+  firstSignalAt?: string;
+  firstSignalLatencyMs?: number;
+}
+
 /** One task's projected merge-state, derived from GitHub (never from yaml). */
 export interface StatusProjection {
   taskId: string;
@@ -162,6 +188,9 @@ export interface StatusProjection {
   workerState?: WorkerState;
   /** `ts` of the row that moved the run INTO its current `workerState`. Present ONLY while that state is quiet. */
   workerStateSince?: string;
+  /** Structured worker telemetry from the bounded `worker.activity` ledger rows. Present only
+   *  while the current run is in flight, just like `phase` and `workerState`. */
+  workerTelemetry?: WorkerTelemetry;
   /** PROCESS-UNEVIDENCED (W1-T1240): the running decoration rests ONLY on an open PR — no ledger heartbeat, no
    *  live lock. Marks "NOT EVIDENCED", never "dead". Why: W1-T314 rendered `running, 10h25m, $27.75` ten hours
    *  after its run was refused */
@@ -2512,6 +2541,7 @@ interface RunState {
   /** `ts` of the ledger row that set {@link workerState}. Such a row is only ever appended ON a transition
    *  (run-task.ts's `buildWorkerStateSensor`), so the row's own `ts` IS the transition time. */
   workerStateSince?: string;
+  workerTelemetry?: WorkerTelemetry;
 }
 
 /** The ledger step a `worker.state` transition rides — run-task.ts's own constant, mirrored here as a literal
@@ -2523,6 +2553,31 @@ const WORKER_STATE_STEP = "worker.state";
  *  run's `workerState` stays whatever it was rather than becoming a garbage fourth value. */
 function isWorkerState(value: unknown): value is WorkerState {
   return value === "working" || value === "tool-executing" || value === "quiet";
+}
+
+function isWorkerRole(value: unknown): value is WorkerRole {
+  return value === "recon" || value === "implementer" || value === "reviewer" || value === "fixer" || value === "triage" || value === "retro" || value === "unknown";
+}
+
+function isWorkerActivityKind(value: unknown): value is WorkerActivityKind {
+  return value === "working" || value === "tool-executing" || value === "message";
+}
+
+function roleForPhase(phase: Phase): WorkerRole {
+  switch (phase) {
+    case "recon": return "recon";
+    case "implement": return "implementer";
+    case "review": return "reviewer";
+    case "fix-rung": return "fixer";
+  }
+}
+
+function roleForRunStart(line: Record<string, unknown>): WorkerRole | undefined {
+  if (isWorkerRole(line.worker_role)) return line.worker_role;
+  if (line.type === "triage") return "triage";
+  if (line.type === "retro") return "retro";
+  if (line.type === "implement") return "implementer";
+  return undefined;
 }
 
 /** Every REAL ledger step that OPENS a fresh in-flight run, ONE ENTRY PER LANE (W1-T282), generalised off the
@@ -2570,6 +2625,7 @@ function deriveRunState(
   let lastActivityTs: string | undefined;
   let workerState: WorkerState | undefined;
   let workerStateSince: string | undefined;
+  let workerTelemetry: WorkerTelemetry | undefined;
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId) continue;
     if (typeof line.ts === "string") lastActivityTs = line.ts;
@@ -2587,6 +2643,14 @@ function deriveRunState(
       // last-observed liveness must never leak into a later run's row.
       workerState = undefined;
       workerStateSince = undefined;
+      const mount = line.mount;
+      const mountRecord = mount && typeof mount === "object" ? (mount as Record<string, unknown>) : undefined;
+      const role = roleForRunStart(line);
+      workerTelemetry = {
+        ...(role ? { role } : {}),
+        ...(typeof line.provider === "string" ? { provider: line.provider } : {}),
+        ...(typeof mountRecord?.model === "string" ? { requestedModel: mountRecord.model } : {}),
+      };
       continue;
     }
     if (step !== undefined && LANE_TERMINAL_STEPS.has(step)) {
@@ -2603,25 +2667,89 @@ function deriveRunState(
       }
       continue;
     }
+    if (step === "worker.activity") {
+      const eventAt = typeof line.event_at === "string" ? line.event_at : typeof line.ts === "string" ? line.ts : undefined;
+      const eventKind = isWorkerActivityKind(line.event_kind) ? line.event_kind : undefined;
+      if (eventAt && eventKind) {
+        const current = workerTelemetry ?? {};
+        const next: WorkerTelemetry = {
+          ...current,
+          lastEventAt: eventAt,
+          lastEventKind: eventKind,
+          ...(current.firstSignalAt
+            ? {}
+            : {
+                firstSignalAt: eventAt,
+                ...(startedAt && Number.isFinite(Date.parse(startedAt)) && Number.isFinite(Date.parse(eventAt))
+                  ? { firstSignalLatencyMs: Math.max(0, Date.parse(eventAt) - Date.parse(startedAt)) }
+                  : {}),
+              }),
+          ...(isWorkerRole(line.worker_role) ? { role: line.worker_role } : {}),
+          ...(typeof line.provider === "string" ? { provider: line.provider } : {}),
+          ...(typeof line.requested_model === "string" ? { requestedModel: line.requested_model } : {}),
+          ...(typeof line.served_model === "string" ? { servedModel: line.served_model } : {}),
+        };
+        if (eventKind === "tool-executing") {
+          workerTelemetry = {
+            ...next,
+            currentTool: typeof line.tool_name === "string" && line.tool_name !== "" ? line.tool_name : "unknown",
+            ...(typeof line.tool_reason === "string" ? { currentToolReason: line.tool_reason } : {}),
+            ...(typeof line.tool_started_at === "string" ? { currentToolStartedAt: line.tool_started_at } : {}),
+          };
+        } else if (typeof line.tool_completed_at === "string" && typeof line.tool_duration_ms === "number") {
+          workerTelemetry = {
+            ...next,
+            lastTool: {
+              name: typeof line.tool_name === "string" && line.tool_name !== "" ? line.tool_name : "unknown",
+              durationMs: Math.max(0, line.tool_duration_ms),
+              completedAt: line.tool_completed_at,
+              ...(line.tool_outcome === "success" || line.tool_outcome === "error" ? { outcome: line.tool_outcome } : {}),
+            },
+          };
+          delete workerTelemetry.currentTool;
+          delete workerTelemetry.currentToolReason;
+          delete workerTelemetry.currentToolStartedAt;
+        } else {
+          delete next.currentTool;
+          delete next.currentToolReason;
+          delete next.currentToolStartedAt;
+          workerTelemetry = next;
+        }
+      }
+      continue;
+    }
     switch (step) {
       case "recon.done":
       case "implement.resumed":
-        if (inFlight) phase = "implement";
+        if (inFlight) {
+          phase = "implement";
+          if (workerTelemetry) workerTelemetry = { ...workerTelemetry, role: roleForPhase(phase) };
+        }
         break;
       case "implement.done":
       case "pr.opened":
-        if (inFlight) phase = "review";
+        if (inFlight) {
+          phase = "review";
+          if (workerTelemetry) workerTelemetry = { ...workerTelemetry, role: roleForPhase(phase) };
+        }
         break;
       case "fix.dispatch":
       case "fix.review":
-        if (inFlight) phase = "fix-rung";
+        if (inFlight) {
+          phase = "fix-rung";
+          if (workerTelemetry) workerTelemetry = { ...workerTelemetry, role: roleForPhase(phase) };
+        }
         break;
       case "fix.resolved":
-        if (inFlight) phase = "review";
+        if (inFlight) {
+          phase = "review";
+          if (workerTelemetry) workerTelemetry = { ...workerTelemetry, role: roleForPhase(phase) };
+        }
         break;
     }
   }
-  return { inFlight, phase, startedAt, lastActivityTs, workerState, workerStateSince };
+  if (inFlight && phase && workerTelemetry) workerTelemetry = { ...workerTelemetry, role: roleForPhase(phase) };
+  return { inFlight, phase, startedAt, lastActivityTs, workerState, workerStateSince, workerTelemetry };
 }
 
 /** The task's most recent escalation line, IF `escalation.issue_opened` is the LATEST signal among it and a
@@ -2792,6 +2920,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
             projection.workerStateSince = runState.workerStateSince;
           }
         }
+        if (runState.workerTelemetry) projection.workerTelemetry = runState.workerTelemetry;
       } else {
         // Dispatched, no terminal verdict, no open PR, no recent activity and no live lock: orphaned, never
         // running — the falsifier being an orphaned dispatch rendered as running. A lock held by a DEAD pid
