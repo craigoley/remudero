@@ -11,27 +11,10 @@ raw: "Gap in the existing W1-T3884 analytics fix: core only returns the bounded
   <=128 KiB and renders typed data rather than Unavailable."
 attachments: []
 origin: cli
-status: proposed
+status: new
 reply_to: null
-proposal_pr: https://github.com/craigoley/remudero/pull/6375
-summary:
-  headline: Analytics envelope incompatibility between core and console
-  what_happened: Core returns data for projectionVersion=console-v1 but hosted
-    console sends projection=console-v1 and expects different field names and
-    format. This mismatch causes analytics requests to fail.
-  decision: File paired core+console task to align parameters, define unified
-    envelope contract, and map field names
-  options:
-    - label: File paired compatibility task as outlined
-      consequence: Resolves parameter and format mismatch, validates response size and
-        field rendering
-    - label: Scope to core-only parameter fix
-      consequence: Fixes parameter name but leaves format and field name
-        incompatibility unaddressed
-    - label: Schedule investigation phase first
-      consequence: Delays implementation until root causes and full compatibility
-        requirements are documented
+proposal_pr: null
+summary: null
 expansion: null
 submission_key: null
 thread_id: null
-answered_by: null
