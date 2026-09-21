@@ -48,6 +48,7 @@
     the real async transport reaches its child-spawn seam. Keep the injected-executor path network-free
     and verify that writes, budget probes, and advisory mode retain W1-T3297's existing behavior.
   note: |
+    reservation hand-off: run-W1-T3986-1790029051936 -> run-W1-T3991-1790034800000.
     reservation holder: run-W1-T3991-1790034800000.
     The implementation PR already exists as #6470; it will be retargeted to this task after this
     plan record lands. No new implementation branch or duplicate code is needed.
