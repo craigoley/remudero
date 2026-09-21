@@ -599,7 +599,7 @@ test("retroCommand: --dry-run's printed report carries the plan-health sweep sec
   process.env.HOME = fakeHome;
   const cfgPath = configPath();
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root, installRoot: process.cwd() }, null, 2) + "\n");
 
   const logSpy = t.mock.method(console, "log", () => {});
   // OFFLINE GATEWAY. Without it this test's single retroCommand call ran projectPlan twice over

@@ -42,8 +42,8 @@
     branch at all); the console-side field vocabulary is a separate, console-repo-owned task.
   acceptance:
     - claim: "a request naming ?projection=console-v1 (the console's own spelling) resolves the bounded consoleV1 envelope exactly as ?projectionVersion=console-v1 already does"
-      proof: "unit test: test/console-analytics-contract-gap.test.ts"
+      proof: "unit test: W1-T3942 alias returns the bounded console-v1 envelope"
     - claim: "an existing ?projectionVersion=console-v1 request keeps resolving the bounded envelope unchanged, so no current caller regresses"
-      proof: "grep: searchParams.get(\"projectionVersion\") in src/lib/analytics-route.ts"
+      proof: "unit test: W1-T3942 projectionVersion wins over projection alias"
     - claim: "an unversioned request with neither parameter still retains the full legacy snapshot for back-compat"
-      proof: "grep: dimensions: base.dimensions in src/lib/analytics-route.ts"
+      proof: "unit test: W1-T3942 unversioned analytics keeps the full snapshot"

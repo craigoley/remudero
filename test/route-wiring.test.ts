@@ -180,6 +180,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "POST /v1/operator-agent/delegation/handoff",
     "ledger-only delegation handoff receipt; envelope, replay, human-gate, and receipt behavior are covered in test/agent-delegation-*.test.ts",
   ],
+  [
+    "POST /v1/provider-auth",
+    "W1-T3960: server-owned provider-auth session lifecycle; projection and request validation are covered in test/provider-auth-sessions.test.ts and test/provider-auth-console.test.ts",
+  ],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([

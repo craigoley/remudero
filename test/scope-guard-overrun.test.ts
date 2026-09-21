@@ -290,7 +290,7 @@ async function runFixture(opts: {
   const root = mkdtempSync(join(tmpdir(), opts.prefix));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN); // declares files: [src/lib/daemon.ts]
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   const branch = `run-T-SCOPE-${opts.ts}`;

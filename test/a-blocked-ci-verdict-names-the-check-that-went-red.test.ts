@@ -202,7 +202,7 @@ test("BEHAVIORAL: runTask writes the enriched blocked_ci reason to its terminal 
   };
 
   try {
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
     const result = await withLiveWritesAllowed(() =>
       runTask("T-CI-EVIDENCE", {
         skipGitSync: true,

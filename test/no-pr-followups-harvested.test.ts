@@ -187,7 +187,7 @@ async function runFixture(
   const root = mkdtempSync(join(tmpdir(), `nopr-followup-${label}-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   t.mock.method(Date, "now", () => FIXED_TS);

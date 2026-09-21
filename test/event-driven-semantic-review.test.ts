@@ -47,7 +47,7 @@ async function captureReview(
               number: 9999,
             },
       fetchHead: () => {},
-      loadConfig: () => ({ root, claudeBin: "/bin/true" }) as Config,
+      loadConfig: () => ({ root, installRoot: REPO_ROOT, claudeBin: "/bin/true" }) as Config,
       postReviewPending: async () => ({ posted: true }),
       materialize: () => ({
         worktreePath: undefined,

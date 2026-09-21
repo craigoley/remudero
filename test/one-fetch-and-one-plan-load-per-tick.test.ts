@@ -60,7 +60,7 @@ function publishNewCommit(originDir: string, title: string): void {
 function brokenOriginFixture(): { planPath: string; config: Config } {
   const { localDir } = gitFixture();
   execFileSync("git", ["-C", localDir, "remote", "set-url", "origin", "/no/such/path"]);
-  const config: Config = { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-tick-sync-root-")) };
+  const config: Config = { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-tick-sync-root-")), installRoot: process.cwd() };
   return { planPath: join(localDir, "plan", "tasks.yaml"), config };
 }
 
@@ -265,7 +265,7 @@ function mergedGithubFixture(): GitHub {
 
 test("runTask: opts.planSnapshot, when supplied, answers the sync directly -- the real git path (which would throw against this nonexistent repoDir) is never touched", async () => {
   const root = mkdtempSync(join(tmpdir(), "runtask-snapshot-seam-root-"));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   // A planPath under a repoDir that doesn't exist at all -- syncPlanFromOrigin against it would
   // throw immediately (no such git repo). If opts.planSnapshot truly replaces that call, this
   // must never matter.

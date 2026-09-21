@@ -313,7 +313,7 @@ test("retroCommand: a corrupt state/last-retro.json fails CLOSED (exit 1, ledger
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
   // claudeBin PRE-POPULATED so loadConfig's read path never calls resolveClaudeBin
   // (which shells `which claude` -- absent/wrong in CI, see LEARNINGS.md).
-  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
 
   const errorSpy = t.mock.method(console, "error", () => {});
   const logSpy = t.mock.method(console, "log", () => {});
@@ -348,7 +348,7 @@ test("retroCommand: --dry-run builds the gather and returns 0 without ever touch
   process.env.HOME = fakeHome;
   const cfgPath = configPath();
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
 
   const logSpy = t.mock.method(console, "log", () => {});
   try {
@@ -387,7 +387,7 @@ test("retroCommand: a follow-up dedup 'tasks' read that THROWS degrades to an em
   process.env.HOME = fakeHome;
   const cfgPath = configPath();
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
 
   // repoRoot's real plan/tasks.yaml exists (existsSync is untouched, real) — only ITS
   // OWN readFileSync (loadPlan's own read) is forced to throw; every other target path
@@ -428,7 +428,7 @@ test("retroCommand: a non-trivial MASTER-PLAN.md yielding ZERO proposal-bullet m
   process.env.HOME = fakeHome;
   const cfgPath = configPath();
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
 
   const masterPlanPath = join(REPO_ROOT_FOR_FIXTURES, "MASTER-PLAN.md");
   const realReadFileSync = fsDefault.readFileSync.bind(fsDefault);
@@ -758,7 +758,7 @@ function setupFakeRetroFixture(
     process.env.PATH = `${fakeBinDir}:${savedPath}`;
     const cfgPath = configPath();
     mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-    writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+    writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
     try {
       return await body();
     } finally {
@@ -1327,7 +1327,7 @@ test("the injected offline gateway is consulted by retroCommand, so no real one 
   const savedHome = process.env.HOME;
   process.env.HOME = fakeHome;
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+    writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
   t.mock.method(console, "log", () => {});
   const github = offlineGithub();
   try {

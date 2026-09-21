@@ -192,7 +192,7 @@ test(
     const root = mkdtempSync(join(tmpdir(), "owner-threading-root-"));
     const planPath = join(root, "tasks.yaml");
     writeFileSync(planPath, OWNER_THREADING_PLAN);
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
     const { originBare } = ownerThreadingOriginFixture();
     const cloneLogPath = join(root, "clone.log");
@@ -260,7 +260,7 @@ test(
     const root = mkdtempSync(join(tmpdir(), "owner-threading-default-root-"));
     const planPath = join(root, "tasks.yaml");
     writeFileSync(planPath, OWNER_THREADING_PLAN);
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
     const { originBare } = ownerThreadingOriginFixture();
     const cloneLogPath = join(root, "clone.log");
