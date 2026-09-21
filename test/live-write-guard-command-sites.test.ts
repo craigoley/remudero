@@ -225,7 +225,7 @@ async function withHarness(
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: REPO_ROOT }, null, 2),
     );
     process.env.HOME = home;
 
@@ -342,7 +342,7 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT }, null, 2),
       "utf8",
     );
     process.env.HOME = home;
@@ -383,7 +383,7 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
     );
 
     // Real gateway (no `gateway:`), and the push/PR-create land in the TMPDIR origin.
-    await withLiveWritesAllowed(() => approveCommand(["P-GUARD"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+    await withLiveWritesAllowed(() => approveCommand(["P-GUARD"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never })).catch(
       () => undefined,
     );
 
@@ -436,7 +436,7 @@ test("GUARDED SITE approve fresh-clone + full drive: ensureRepoDir clones, and t
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT }, null, 2),
       "utf8",
     );
     process.env.HOME = home;
@@ -467,7 +467,7 @@ test("GUARDED SITE approve fresh-clone + full drive: ensureRepoDir clones, and t
       "utf8",
     );
 
-    const code = await withLiveWritesAllowed(() => approveCommand(["P-FULL"], { config: { claudeBin: "/usr/bin/true", root } as never }));
+    const code = await withLiveWritesAllowed(() => approveCommand(["P-FULL"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never }));
 
     // ensureRepoDir really cloned it (never pre-created by this test).
     const repoDir = join(root, "repos", "remudero");
@@ -519,7 +519,7 @@ test("GUARDED SITE approve resume: findPushedBranch/completeRatificationBranch d
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT }, null, 2),
       "utf8",
     );
     process.env.HOME = home;
@@ -586,7 +586,7 @@ test("GUARDED SITE approve resume: findPushedBranch/completeRatificationBranch d
       "utf8",
     );
 
-    await withLiveWritesAllowed(() => approveCommand(["P-RESUME"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+    await withLiveWritesAllowed(() => approveCommand(["P-RESUME"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never })).catch(
       () => undefined,
     );
 
@@ -626,7 +626,7 @@ async function withApproveFullHarness(
   const savedPath = process.env.PATH;
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2), "utf8");
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT }, null, 2), "utf8");
     process.env.HOME = home;
     writeGhShim(shimDir, bare, { matchRealBranch: true, ...shimOpts });
     process.env.PATH = `${shimDir}:${savedPath}`;
@@ -680,7 +680,7 @@ async function withApproveFullHarness(
 test("GUARDED SITE approve ci-red: the REAL gateway reaches the ci!==green cleanup branch", async () => {
   let code: number | undefined;
   const ledgerLines = await withApproveFullHarness("P-CIRED", { ciConclusion: "FAILURE" }, async (root) => {
-    code = await withLiveWritesAllowed(() => approveCommand(["P-CIRED"], { config: { claudeBin: "/usr/bin/true", root } as never }));
+    code = await withLiveWritesAllowed(() => approveCommand(["P-CIRED"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never }));
     return code;
   });
   assert.equal(code, 1, "a red ci must exit 1 (the PR is left open for inspection, never armed)");
@@ -697,7 +697,7 @@ test("GUARDED SITE approve ci-red: the REAL gateway reaches the ci!==green clean
 test("GUARDED SITE approve review-throws: the REAL gateway reaches the catch-cleanup-and-rethrow branch", async () => {
   let threw: unknown;
   const ledgerLines = await withApproveFullHarness("P-REVTHROW", { failPrDiff: true }, async (root) => {
-    await withLiveWritesAllowed(() => approveCommand(["P-REVTHROW"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+    await withLiveWritesAllowed(() => approveCommand(["P-REVTHROW"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never })).catch(
       (e) => {
         threw = e;
       },
@@ -728,7 +728,7 @@ test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT }, null, 2),
       "utf8",
     );
     process.env.HOME = home;
@@ -766,7 +766,7 @@ test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before
     );
 
     let threw: unknown;
-    await withLiveWritesAllowed(() => approveCommand(["P-DEGRADE"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+    await withLiveWritesAllowed(() => approveCommand(["P-DEGRADE"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never })).catch(
       (e) => {
         threw = e;
       },
@@ -847,7 +847,7 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
     const effects = buildSweepEffects({
       owner: "acme",
       repo: "sandboxrepo",
-      config: { claudeBin: "/usr/bin/true", root } as never,
+      config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never,
       ledgerPath: join(root, "ledger.ndjson"),
       runId: "SWEEP-FIX-1",
       plan: { tasks: [{ id: TASK, title: "sweep fixture", repo: "sandboxrepo", type: "implement", risk: "low", verify: "auto", status: "queued", attempts: 0, depends_on: [] }] } as never,
@@ -920,7 +920,7 @@ test("W1-T921: a sweep close does not delete the head branch", () => {
     const effects = buildSweepEffects({
       owner: "acme",
       repo: "sandboxrepo",
-      config: { claudeBin: "/usr/bin/true", root } as never,
+      config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never,
       ledgerPath: join(root, "ledger.ndjson"),
       runId: "SWEEP-CLOSE-1",
       plan: { tasks: [] } as never,
@@ -1250,7 +1250,7 @@ test("W1-T921: the close argv is pinned against silent reinstatement", () => {
     const effects = buildSweepEffects({
       owner: "acme",
       repo: "sandboxrepo",
-      config: { claudeBin: "/usr/bin/true", root } as never,
+      config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never,
       ledgerPath: join(root, "ledger.ndjson"),
       runId: "SWEEP-CLOSE-2",
       plan: { tasks: [] } as never,
@@ -1299,7 +1299,7 @@ test("W1-T921: the default close runner really shells out and still omits the fl
     const effects = buildSweepEffects({
       owner: "acme",
       repo: "sandboxrepo",
-      config: { claudeBin: "/usr/bin/true", root } as never,
+      config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never,
       ledgerPath: join(root, "ledger.ndjson"),
       runId: "SWEEP-CLOSE-3",
       plan: { tasks: [] } as never,

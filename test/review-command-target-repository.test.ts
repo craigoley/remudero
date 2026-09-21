@@ -96,7 +96,7 @@ test("target review uses only the target checkout", async () => {
     await reviewCommand("8", ["--repo", "acme/portal"], {
       enforceReviewSubjectCheckout: true,
       fetchView: () => restPull("Remudero-Task: W1-TARGET", target.head),
-      loadConfig: () => ({ root }) as Config,
+      loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
       fetchHead: (repoDir) => {
         calls.fetchHead.push(repoDir);
         throw new Error("best-effort fetch is retried by materialization");
@@ -125,7 +125,7 @@ test("target checkout resolver names local validation failures", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-target-resolver-"));
   try {
     const base = {
-      config: { root } as Config,
+      config: { root, installRoot: REPO_ROOT } as Config,
       rest: ["--repo", "acme/portal"],
       self: { owner: "acme", repo: "remudero" },
       target: { owner: "acme", repo: "portal" },
@@ -184,7 +184,7 @@ test("target proof worktrees use and clean only the target checkout", async () =
     await reviewCommand("8", ["--repo", "acme/portal"], {
       enforceReviewSubjectCheckout: true,
       fetchView: () => restPull("Remudero-Task: W1-TARGET", target.head),
-      loadConfig: () => ({ root }) as Config,
+      loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
       fetchHead: () => {},
       postReviewPending: async () => ({ posted: true }) as never,
       materialize: (_config, repoDir) => {
@@ -228,7 +228,7 @@ test("self review retains the controller checkout", async () => {
     await reviewCommand("8", [], {
       enforceReviewSubjectCheckout: true,
       fetchView: () => restPull("## Acceptance\n- self body criteria | grep: self in src/run-task.ts", CONTROLLER_HEAD, "remudero"),
-      loadConfig: () => ({ root }) as Config,
+      loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
       fetchHead: (repoDir) => subjectDirs.push(repoDir),
       postReviewPending: async () => ({ posted: true }) as never,
       materialize: (_config, repoDir) => {
@@ -272,7 +272,7 @@ test("invalid explicit target refuses before controller access", async () => {
       const code = await reviewCommand("8", ["--repo", "acme/portal"], {
         enforceReviewSubjectCheckout: true,
         fetchView: () => restPull("Remudero-Task: W1-TARGET", "target-head-sha"),
-        loadConfig: () => ({ root }) as Config,
+        loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
         postStatus: (async (opts: Parameters<typeof postReviewStatusGuarded>[0]) => {
           posted.push({ state: opts.state, description: opts.description });
           return { posted: true };
@@ -311,7 +311,7 @@ test("target policy stays controller-owned", async () => {
       enforceReviewSubjectCheckout: true,
       executionMode: "semantic",
       fetchView: () => restPull("Remudero-Task: W1-TARGET", target.head),
-      loadConfig: () => ({ root }) as Config,
+      loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
       fetchHead: () => {},
       postReviewPending: async () => ({ posted: true }) as never,
       materialize: () => ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip worktree" } }) as never,
