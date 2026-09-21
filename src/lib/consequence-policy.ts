@@ -1,32 +1,28 @@
 /**
  * src/lib/consequence-policy.ts — W1-T3894: MAKE IRREVERSIBLE ACTIONS EXPLICIT.
  *
- * W1-T3878/W1-T3880 keep a generic risk label and a capability grant reference authoritative but
- * deliberately do not say what an OPERATOR needs to see before approving a specific consequential
- * action: exactly which target it hits, how much money moves, how long the quote/confirmation is
- * good for, and whether recovery exists at all. `consequence-policy-v1` is that product contract.
+ * `consequence-policy-v1`: what an OPERATOR must see before approving a consequential action —
+ * exact target, amount moved, quote/confirmation lifetime, and whether recovery exists at all.
+ * W1-T3878/W1-T3880's generic risk label and capability grant reference stay authoritative but
+ * say none of that.
  *
- * Every action is classified into one of {@link CONSEQUENCE_CLASSES}. `financial` and
- * `irreversible` actions carry their own bounded sub-record ({@link ConsequenceFinancialDetails},
- * {@link ConsequenceIrreversibleDetails}) that {@link classifyConsequenceAction} refuses to
- * construct incompletely. {@link evaluateConsequencePolicy} is the runtime preflight: it never
- * upgrades an ambiguous target, a stale evidence read, an expired quote/confirmation, an exceeded
- * ceiling, or a missing approver into readiness. A capability grant REFERENCE may ride alongside an
- * action for provenance, but nothing in this module reads it to widen a ceiling or approval count —
- * there is no such code path to bypass. Text sourced from outside the operator (an email, a page, a
- * tool result) is tagged `source: "external"` on {@link ConsequenceTarget}/{@link
- * ConsequenceApproval} and is refused wherever this module reads a target or an approval, exactly
- * once, in {@link evaluateConsequencePolicy} and {@link recordConsequenceApproval}.
+ * Every action classifies into one of {@link CONSEQUENCE_CLASSES}; `financial`/`irreversible`
+ * carry a bounded sub-record ({@link ConsequenceFinancialDetails}, {@link
+ * ConsequenceIrreversibleDetails}) that {@link classifyConsequenceAction} refuses incomplete.
+ * {@link evaluateConsequencePolicy} is the runtime preflight: it never upgrades an ambiguous
+ * target, stale evidence, an expired quote/confirmation, an exceeded ceiling, or a missing
+ * approver into readiness. A capability grant REFERENCE may ride along for provenance only —
+ * nothing here reads it to widen a ceiling or approval count. External-sourced text (`source:
+ * "external"` on {@link ConsequenceTarget}/{@link ConsequenceApproval}) is refused wherever a
+ * target or approval is read.
  *
- * Receipts ({@link ConsequenceReceipt}) are the only durable record of approval, execution,
- * refusal, and recovery; `execution` NEVER manufactures an "executed" outcome without a caller
- * passing evidence — an `externalEffectReceiptId` — that the real-world effect already happened,
- * and `recovery` never claims a recovery that {@link ConsequenceIrreversibleDetails.recoveryAvailable}
- * says does not exist, nor one that exceeds the original amount it is recovering.
+ * {@link ConsequenceReceipt}s are the only durable record of approval/execution/refusal/recovery;
+ * `execution` never manufactures "executed" without an `externalEffectReceiptId`, and `recovery`
+ * never claims one {@link ConsequenceIrreversibleDetails.recoveryAvailable} forbids or that
+ * exceeds the amount recovered.
  *
- * FALSIFIER: approve an ambiguous target, spend beyond a ceiling, accept a stale quote/evidence or
- * an expired confirmation, let a capability grant or external content stand in for an approval, or
- * claim recovery where none exists / beyond what was spent. See
+ * FALSIFIER: approve an ambiguous target, exceed a ceiling, accept stale/expired evidence, let a
+ * grant or external content stand in for approval, or claim impossible recovery. See
  * test/consequence-policy-{classification,financial,confirmation,approval,receipts}.test.ts.
  */
 
