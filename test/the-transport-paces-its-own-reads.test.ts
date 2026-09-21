@@ -26,6 +26,7 @@ import {
   readGhReadCadenceStampMs,
   resolveGhTransportFloorMode,
   stampGhRead,
+  withDaemonGhTransportFloor,
   withGhTransportFloor,
 } from "../src/lib/github-transport.js";
 
@@ -168,6 +169,23 @@ test("unattended automation enforces the floor for its lifetime and restores the
   }, env);
   assert.equal(inside, "advisory", "an explicit operator mode remains authoritative");
   assert.equal(env.RMD_GH_TRANSPORT_FLOOR, "advisory");
+});
+
+test("the long-lived daemon defaults to advisory, restores its caller, and preserves explicit enforcement", async () => {
+  const env = {} as NodeJS.ProcessEnv;
+  let inside: string | undefined;
+  await withDaemonGhTransportFloor(() => {
+    inside = env.RMD_GH_TRANSPORT_FLOOR;
+  }, env);
+  assert.equal(inside, "advisory");
+  assert.equal(env.RMD_GH_TRANSPORT_FLOOR, undefined);
+
+  env.RMD_GH_TRANSPORT_FLOOR = "enforce";
+  await withDaemonGhTransportFloor(() => {
+    inside = env.RMD_GH_TRANSPORT_FLOOR;
+  }, env);
+  assert.equal(inside, "enforce", "an explicit operator mode remains authoritative");
+  assert.equal(env.RMD_GH_TRANSPORT_FLOOR, "enforce");
 });
 
 // ── (5) FAIL OPEN ON EVERY INTERNAL ERROR ───────────────────────────────────────────────────
