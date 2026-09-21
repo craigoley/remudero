@@ -1,0 +1,64 @@
+- id: W1-T3959
+  title: "Expose server-owned provider browser-auth handoff sessions without crossing the console boundary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 120.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "decision:browser-driven-provider-switching-2026-09-21"
+  plan_refs: ["API-T55", "UI-T39", "W1-T2704"]
+  files:
+    - src/lib/provider-auth-sessions.ts
+    - src/lib/serve.ts
+    - src/lib/worker-provider.ts
+    - openapi/daemon.yaml
+    - test/provider-auth-sessions.test.ts
+    - test/provider-auth-console.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The console needs browser-driven switching between the operator's Claude and Codex subscription
+    accounts, but the browser must never receive provider credentials or choose a credential store.
+    Codex documents a managed app-server login flow with account/login/start, a browser authorization
+    URL, and completion notifications. Claude Code documents browser login through its own CLI and
+    secure credential store, but does not expose a stable third-party web callback contract that
+    Remudero can safely scrape or impersonate.
+
+    The core daemon must therefore own the provider-auth lifecycle and expose only a bounded,
+    versioned projection. A provider that lacks a supported machine-facing handoff remains explicitly
+    unsupported; it must not be represented as connected merely because a browser opened.
+  design: |
+    Add provider-auth-v1 as a server-owned capability with these states: unavailable, unsupported,
+    awaiting_browser, complete, failed, and expired. Start, read, and cancel operations use an
+    opaque single-use session id with a short expiry and an authenticated caller scope. The read
+    projection may include a bounded, allowlisted authorization URL and redacted provider/account
+    labels, but never a token, credential path, raw provider payload, transcript, or daemon URL.
+
+    The Codex adapter uses the documented app-server managed ChatGPT flow and keeps the app-server
+    process and provider-managed credential home on the daemon side until completion or expiry. The
+    Claude adapter is capability-gated: it may report unsupported until a documented, stable
+    machine-facing handoff exists; it must not parse terminal UI or ask the browser to paste a token.
+
+    Account profiles remain organization-owned and independently addressable. A repository may point
+    at one of the measured profiles, but may not supply a credential, provider URL, or account token.
+    Every completion re-reads and validates the effective account projection before queued work can
+    use it. Active work retains its admission-time profile. Restart, expiry, cancellation, malformed
+    notifications, and provider disconnects all resolve to explicit non-operative states.
+  acceptance:
+    - claim: "provider auth start, read, and cancel expose only bounded opaque session projections"
+      proof: "unit test: provider auth projection redacts tokens paths transcripts and raw provider payloads"
+    - claim: "Codex managed browser login reaches completion only from the documented app-server notification"
+      proof: "unit test: Codex auth completion requires the matching app-server login notification"
+    - claim: "unsupported Claude handoff remains unsupported and cannot be activated by opening a browser"
+      proof: "unit test: unsupported provider auth cannot become complete from browser-open state"
+    - claim: "expired, cancelled, failed, or malformed sessions cannot change the effective account"
+      proof: "unit test: provider auth refusal leaves effective account and queued admission unchanged"
+    - claim: "provider auth routes never trust a browser-supplied upstream URL or credential store"
+      proof: "unit test: provider auth gateway uses configured provider targets only"
+  falsifier: |
+    Return a provider token or credential path, accept a browser-open event as completion, parse
+    terminal text as a successful Claude login, let an expired session select an account, or route a
+    browser-supplied upstream target; the corresponding security and state-transition tests must fail.
