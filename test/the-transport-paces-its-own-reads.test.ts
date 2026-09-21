@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, utimesSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync, utimesSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -378,6 +378,54 @@ test("ghJsonAsync is paced BEFORE the real async transport spawns", async () => 
     else process.env.XDG_CACHE_HOME = saved.xdg;
     if (saved.floor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
     else process.env.RMD_GH_TRANSPORT_FLOOR = saved.floor;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("identical real async reads are single-flight and spawn gh once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-single-flight-`));
+  const bin = join(dir, "gh");
+  const calls = join(dir, "calls");
+  writeFileSync(
+    bin,
+    `#!/bin/sh\nprintf '%s\\n' call >> "$RMD_GH_TEST_CALLS"\nsleep 0.1\nprintf '%s\\n' '{"ok":true}'\n`,
+    "utf8",
+  );
+  chmodSync(bin, 0o755);
+  const saved = {
+    xdg: process.env.XDG_CACHE_HOME,
+    floor: process.env.RMD_GH_TRANSPORT_FLOOR,
+    path: process.env.PATH,
+    calls: process.env.RMD_GH_TEST_CALLS,
+  };
+  try {
+    process.env.XDG_CACHE_HOME = dir;
+    process.env.RMD_GH_TRANSPORT_FLOOR = "enforce";
+    process.env.PATH = `${dir}:${saved.path ?? ""}`;
+    process.env.RMD_GH_TEST_CALLS = calls;
+    const [one, two] = await Promise.all([
+      ghJsonAsync(["api", "repos/o/r/pulls/42"]),
+      ghJsonAsync(["api", "repos/o/r/pulls/42"]),
+    ]);
+    assert.deepEqual(one, { ok: true });
+    assert.deepEqual(two, { ok: true });
+    assert.equal(readFileSync(calls, "utf8").trim().split("\n").length, 1, "one in-flight key must spawn one gh");
+    // Settlement removes the key; make the cadence window old before proving a later request is
+    // eligible to run again rather than joining a stale promise.
+    const stamp = ghReadCadenceStampPath(process.env) as string;
+    const past = Math.floor(Date.now() / 1000) - 5_000;
+    utimesSync(stamp, past, past);
+    await ghJsonAsync(["api", "repos/o/r/pulls/42"]);
+    assert.equal(readFileSync(calls, "utf8").trim().split("\n").length, 2, "a later settled read must spawn again");
+  } finally {
+    if (saved.xdg === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = saved.xdg;
+    if (saved.floor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
+    else process.env.RMD_GH_TRANSPORT_FLOOR = saved.floor;
+    if (saved.path === undefined) delete process.env.PATH;
+    else process.env.PATH = saved.path;
+    if (saved.calls === undefined) delete process.env.RMD_GH_TEST_CALLS;
+    else process.env.RMD_GH_TEST_CALLS = saved.calls;
     rmSync(dir, { recursive: true, force: true });
   }
 });
