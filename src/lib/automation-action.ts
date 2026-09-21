@@ -369,7 +369,12 @@ export interface DelegationReceipt {
   readonly reason: string;
 }
 
+/** PRIMARY CONTROL: the only place `envelopeId`/`capability`/`audience`/`actorIdentity` are capped
+ *  before they enter a {@link DelegationReceipt} — so a receipt stays small regardless of how long
+ *  an attacker-influenced field happens to be. */
 export const DELEGATION_RECEIPT_FIELD_MAX_CHARS = 200;
+/** PRIMARY CONTROL: the only place a refusal's derived `reason` text is capped before it enters a
+ *  {@link DelegationReceipt}. Named, not inlined, so a test can assert against this SAME bound. */
 export const DELEGATION_RECEIPT_REASON_MAX_CHARS = 240;
 
 function boundedText(value: string, max: number): string {
