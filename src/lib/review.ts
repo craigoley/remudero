@@ -3224,6 +3224,7 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
   const noPathRe = /\bno\s+([A-Za-z0-9_./-]+)/gi;
   for (const m of scan.matchAll(noPathRe)) {
     const token = m[1].replace(/[,.\s]+$/, "");
+    if (isInsideInlineQuote(scan, m.index ?? 0)) continue;
     // ANCHOR, the sibling of the count arm's in the other direction (see noClaimIsAboutChangeset). Predicate (b) was
     // never anchored and fired six times in one day on prose whose subject was not the changeset: "This change
     // introduces no code duplication anywhere" produced `claim: "no code"` against any source-touching diff, in a

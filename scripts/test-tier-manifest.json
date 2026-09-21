@@ -322,6 +322,7 @@
     "test/an-inbox-draft-grounds-depends-on-without-the-whole-plan.test.ts": 0,
     "test/an-inherited-red-is-not-the-authors.test.ts": 256,
     "test/an-injected-clock-stamp-is-exempt-and-stays-exempt.test.ts": 0,
+    "test/an-inline-quoted-absence-claim-is-a-mention.test.ts": 0,
     "test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts": 0,
     "test/an-onboarded-repo-has-a-learnings-home.test.ts": 1500,
     "test/an-open-pr-does-not-rot-while-it-waits.test.ts": 0,
