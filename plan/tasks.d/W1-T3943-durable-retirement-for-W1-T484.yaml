@@ -13,7 +13,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: run-TRIAGE-fb-1789960088703-d1ca77-1789985870837 -> run-W1-T3943-1789988294571
+    reservation hand-off: run-TRIAGE-fb-1789960088703-d1ca77-1789985870837 -> run-W1-T484-1789988294571
     This is a plan-only state correction. W1-T484's daemon liveness defect was already implemented
     and merged by W1-T1274/#2675; the target record needs the durable retirement fields so automation
     does not treat a settled finding as live work. Preserve the original finding and acceptance text.
