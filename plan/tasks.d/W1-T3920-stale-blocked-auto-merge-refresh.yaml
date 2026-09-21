@@ -1,0 +1,84 @@
+- id: W1-T3920
+  title: "A GREEN AUTO-MERGE PR BECOMES STALE-BLOCKED WHEN MAIN MOVES, BUT THE REFRESH RUNG WAITS FOR ELEVEN COMMITS — preserve the ordinary storm guard while refreshing this exact blocked shape immediately"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 25.00
+  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, src/run-task.ts, test/an-open-pr-does-not-rot-while-it-waits.test.ts, test/sweep-conflicted-disposition.test.ts]
+  origin: "operator-session#stale-blocked-automerge-2026-09-20"
+  plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T3277", "W1-T520", "W1-T2855"]
+  status: queued
+  attempts: 0
+  priority: 1
+  rationale: |
+    OBSERVED ON PR #6286. GitHub's merged record shows the implementation head was `a4939955`,
+    the checks were successful, auto-merge was armed, and the PR later merged at `a71a9f97` after
+    its base had moved from `83317eb0` to the then-current `main`. During that interval GitHub
+    reported `mergeable: true` and `mergeable_state: blocked`, which is the exact stale-blocked
+    symptom the operator saw. The current fleet code still explains why this can happen: the
+    distance refresh only fires when `behindBy > 10` (`src/lib/sweep.ts`), while a single base
+    movement is enough for required checks to be absent from the latest merge ref. GitHub's own
+    documentation says required checks must succeed on the latest commit and that updating the
+    branch is the remedy when the base moves; an old green head is not evidence for the new merge.
+
+    THIS IS NOT A REASON TO REBASE EVERY OPEN PR. The existing W1-T3277 threshold is a measured
+    storm guard for ordinary review-waiting PRs. The missing discriminator is narrower: an armed
+    PR whose required checks and remudero review are green, whose raw GitHub `mergeable_state` is
+    `blocked`, and whose compare read proves `main` is ahead. That shape has already met the
+    fleet's merge criteria and then lost freshness; leaving it in the generic threshold bucket
+    makes it look terminal while waiting for an arbitrary eleven-commit boundary.
+  design: |
+    (i) Add one pure predicate beside `openPrsBehindMain` that recognizes only the
+    `autoMergeArmed === true`, raw `mergeableState === "blocked"`, `checksState === "green"`,
+    `reviewState === "success"`, raw `mergeable === true`, non-draft shape with a positive
+    `behindBy`. Do not infer this from a missing state or from distance alone. The REST hydration
+    must retain those raw fields through the existing `OpenPrView` producer; otherwise the pure
+    predicate would be correctly written but permanently unreachable in production.
+
+    (ii) Keep the existing `reviewWaitingBranchRefreshThreshold` for ordinary open PRs. The
+    stale-blocked predicate is a bounded exception, not a global threshold change: it is still
+    selected at most once per pass, still skips a live in-flight run, still refuses conflicts,
+    and still uses the existing lease-protected update-branch effect.
+
+    (iii) Carry an explicit `updateReason: "stale-blocked"` into the existing ledger rows so an
+    operator can distinguish this freshness repair from the ordinary distance rung. Do not alter
+    review verdicts, auto-merge policy, or conflict resolution.
+
+    (iv) Test the positive shape and controls in the existing W1-T3277 suite: a stale-blocked
+    green/armed PR below the ordinary threshold is selected; a raw-blocked PR whose checks or review
+    is not green is not selected; an unarmed or clean PR is not selected; and the ordinary
+    threshold and one-per-pass bound remain unchanged.
+  acceptance:
+    - claim: "a green auto-merge-armed PR whose raw GitHub mergeable state is blocked and whose base distance is positive is refreshed even below the ordinary distance threshold"
+      proof: "grep: W1-T3920 criterion 1 in test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "a raw-blocked PR with pending or red checks is not refreshed by the stale-blocked exception"
+      proof: "grep: W1-T3920 criterion 2 in test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "an unarmed or conflict-shaped PR is not admitted by the stale-blocked exception"
+      proof: "grep: W1-T3920 criterion 3 in test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "ordinary distance refreshes still honor the measured threshold and the one-update-per-pass bound"
+      proof: "grep: W1-T3920 criterion 4 in test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "the selected candidate records stale-blocked as its update reason without changing the existing update effect"
+      proof: "grep: W1-T3920 criterion 5 in test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "the REST single-PR hydration retains raw mergeable and mergeable_state evidence and the OpenPrView producer carries it to the sweep"
+      proof: "grep: W1-T3920 criterion 6 in test/sweep-conflicted-disposition.test.ts"
+  falsifier: |
+    CLOSE if the live PR record proves that a `mergeable_state: blocked` green, auto-merge-armed
+    head cannot be caused by base movement, or if the current update selector already admits that
+    exact shape below `reviewWaitingBranchRefreshThreshold`. The source predicate and PR #6286's
+    observed head/base movement are the discriminating checks. A test that merely lowers the
+    threshold is insufficient: it would reintroduce the board-wide refresh storm that W1-T3277
+    bounded.
+  note: |
+    reservation hand-off: run-W1-T3747-1789943000000 -> plan-W1-T3920-stale-blocked-1789958000000
+    The task is high risk because it writes to contributor branches unattended, but the blast
+    radius is deliberately narrow: the existing single-winner, lease-protected update effect is
+    reused, and only a positively observed stale-blocked merge shape bypasses the ordinary
+    distance threshold. The overlap with W1-T77/W1-T78/W1-T100/W1-T150/W1-T168 is intentional:
+    those shards own the existing sweep orchestration and fix lanes; W1-T3920 only supplies the
+    missing raw merge-state producer and a narrower refresh admission, and does not duplicate any
+    of their effects. Plan-only filing is separate from the implementation PR so Rule 15 cannot
+    mix metadata with source changes.
