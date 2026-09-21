@@ -193,12 +193,27 @@ test("promotion registration refuses a malformed record and routes refuse unknow
     const duplicate = await post(base, "/v1/operator-agent/promotions", { promotion });
     assert.equal(duplicate.status, 200);
     assert.equal((await duplicate.json()).existing, true);
+    const conflictingDuplicate = await post(base, "/v1/operator-agent/promotions", {
+      promotion: { ...promotion, candidate: "worker-pool-v3" },
+    });
+    assert.equal(conflictingDuplicate.status, 409);
     // Cannot advance to canary before shadow, and cannot decide before replay.
     assert.equal((await post(base, "/v1/operator-agent/promotions/decision", { promotionId: promotion.promotionId, decision: "approved" })).status, 409);
     assert.equal(
       (await post(base, "/v1/operator-agent/promotions/advance", { promotionId: promotion.promotionId, target: "canary" })).status,
       409,
     );
+
+    // Once replayed, a second replay is refused; unknown decision/advance/rollback
+    // requests and rollback from the proposed state exercise their explicit guards.
+    assert.equal((await post(base, "/v1/operator-agent/promotions/replay", { promotionId: promotion.promotionId, replay: readySummary() })).status, 200);
+    assert.equal((await post(base, "/v1/operator-agent/promotions/replay", { promotionId: promotion.promotionId, replay: readySummary() })).status, 409);
+    assert.equal((await post(base, "/v1/operator-agent/promotions/decision", { promotionId: "promotion:repo:missing", decision: "approved" })).status, 404);
+    assert.equal((await post(base, "/v1/operator-agent/promotions/advance", { promotionId: "promotion:repo:missing", target: "shadow" })).status, 404);
+    assert.equal((await post(base, "/v1/operator-agent/promotions/rollback", { promotionId: "promotion:repo:missing", rollback: promotion.rollback })).status, 404);
+    const proposedRollback = fixture("promotion:repo:proposed-rollback", "proposed-rollback-scope").promotion;
+    assert.equal((await post(base, "/v1/operator-agent/promotions", { promotion: proposedRollback })).status, 201);
+    assert.equal((await post(base, "/v1/operator-agent/promotions/rollback", { promotionId: proposedRollback.promotionId, rollback: proposedRollback.rollback })).status, 409);
   });
   assert.equal(existsSync(ledgerPath), true);
 });
