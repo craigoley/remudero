@@ -68,6 +68,18 @@ export const AGED_FIELDS = [
     // `deriveDisposition` parses this field and compares the resulting ageDays to policy.staleDays.
     evidence: ["Date.parse(pr.lastActivityAt)", "policy.staleDays"],
   },
+  {
+    field: "deadline",
+    threshold: "follow-up policy evaluation time",
+    source: "src/lib/follow-up-policy.ts",
+    evidence: ["Date.parse(candidate.deadline)", "<= now"],
+  },
+  {
+    field: "snoozedUntil",
+    threshold: "follow-up policy evaluation time",
+    source: "src/lib/follow-up-policy.ts",
+    evidence: ["Date.parse(current.snoozedUntil)", "> now"],
+  },
 ];
 
 /** The population ratchet: each file's measured fixture count as captured on W1-T3334.
