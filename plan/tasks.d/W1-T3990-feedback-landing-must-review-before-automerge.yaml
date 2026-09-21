@@ -17,7 +17,7 @@
   status: queued
   priority: 1
   rationale: |
-    OBSERVED on current origin/main d3287942e92ac852d9dfcc3b4cbacb4b1e877a97 and in issue #5317.
+    OBSERVED on current origin/main a9eef4714572d91628c1e27d1a0553afe3510393 and in issue #5317.
     `src/lib/feedback-landing.ts` creates or reuses the shared landing PR, then the create path
     calls `gh pr merge --auto --squash` without producing the required `remudero-review` context.
     The incident was reproduced on feedback landing PR #5315: CI became green, branch protection
