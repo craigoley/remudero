@@ -494,9 +494,13 @@ test("the Dockerfile installs and executes the declared Codex pin in one layer",
   const lockfile = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package-lock.json"), "utf8")) as {
     packages?: Record<string, { version?: string }>;
   };
+  const claudeVersion = lockfile.packages?.["node_modules/@anthropic-ai/claude-code"]?.version;
   const codexVersion = lockfile.packages?.["node_modules/@openai/codex"]?.version;
+  assert.ok(claudeVersion, "deploy lockfile must declare the Claude package version");
   assert.ok(codexVersion, "deploy lockfile must declare the Codex package version");
-  assert.match(dockerfile, new RegExp(`ARG CODEX_VERSION=${codexVersion.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}`));
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+  assert.match(dockerfile, new RegExp(`ARG CLAUDE_CODE_VERSION=${escapeRegExp(claudeVersion)}`));
+  assert.match(dockerfile, new RegExp(`ARG CODEX_VERSION=${escapeRegExp(codexVersion)}`));
   assert.match(dockerfile, /COPY --chown=root:root deploy\/package\.json deploy\/package-lock\.json \/opt\/remudero-image-clis\//);
   assert.match(dockerfile, /npm ci --prefix \/opt\/remudero-image-clis[\s\S]*?ln -s \/opt\/remudero-image-clis\/node_modules\/\.bin\/codex \/usr\/local\/bin\/codex[\s\S]*?codex --version/);
 });
