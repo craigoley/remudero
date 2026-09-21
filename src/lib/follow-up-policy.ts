@@ -145,6 +145,8 @@ function validQuietHours(value: unknown): FollowUpQuietHours | null {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: policy.timezone }).format();
   } catch {
+    // deliberate: an unrecognised IANA zone name is indistinguishable from "not configured" to
+    // every caller here, so validation folds it into the same refusal as a missing timezone.
     return null;
   }
   return { timezone: policy.timezone.trim(), start: policy.start, end: policy.end };
