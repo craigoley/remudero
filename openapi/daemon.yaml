@@ -173,6 +173,70 @@ components:
                 type: string
               reason:
                 type: string
+        phase:
+          type: string
+          enum: [recon, implement, review, fix-rung]
+        startedAt:
+          type: string
+          format: date-time
+        elapsedMs:
+          type: number
+          minimum: 0
+        workerState:
+          type: string
+          enum: [working, tool-executing, quiet]
+        workerStateSince:
+          type: string
+          format: date-time
+        workerTelemetry:
+          type: object
+          description: >
+            Bounded worker observability. It names the active role/provider/model and the
+            current or last tool, but never carries prompts, tool arguments, or tool output.
+          properties:
+            role:
+              type: string
+              enum: [recon, implementer, reviewer, fixer, triage, retro, unknown]
+            provider:
+              type: string
+            requestedModel:
+              type: string
+            servedModel:
+              type: string
+            currentTool:
+              type: string
+            currentToolReason:
+              type: string
+            currentToolStartedAt:
+              type: string
+              format: date-time
+            lastTool:
+              type: object
+              required: [name, durationMs, completedAt]
+              properties:
+                name:
+                  type: string
+                durationMs:
+                  type: number
+                  minimum: 0
+                completedAt:
+                  type: string
+                  format: date-time
+                outcome:
+                  type: string
+                  enum: [success, error]
+            lastEventAt:
+              type: string
+              format: date-time
+            lastEventKind:
+              type: string
+              enum: [working, tool-executing, message]
+            firstSignalAt:
+              type: string
+              format: date-time
+            firstSignalLatencyMs:
+              type: number
+              minimum: 0
 
     StatusSnapshot:
       type: object

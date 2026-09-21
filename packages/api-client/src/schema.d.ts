@@ -32,6 +32,31 @@ export interface components {
         pr: string;
         reason: string;
       })[];
+      phase?: "recon" | "implement" | "review" | "fix-rung";
+      startedAt?: string;
+      elapsedMs?: number;
+      workerState?: "working" | "tool-executing" | "quiet";
+      workerStateSince?: string;
+      /** Bounded worker observability. It names the active role/provider/model and the current or last tool, but never carries prompts, tool arguments, or tool output. */
+      workerTelemetry?: {
+        role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+        provider?: string;
+        requestedModel?: string;
+        servedModel?: string;
+        currentTool?: string;
+        currentToolReason?: string;
+        currentToolStartedAt?: string;
+        lastTool?: {
+          name: string;
+          durationMs: number;
+          completedAt: string;
+          outcome?: "success" | "error";
+        };
+        lastEventAt?: string;
+        lastEventKind?: "working" | "tool-executing" | "message";
+        firstSignalAt?: string;
+        firstSignalLatencyMs?: number;
+      };
     };
     /** GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`, plus (W1-T163, when the daemon's per-token last-seen marker store is wired) the calling token's own "since you last checked" recap. */
     StatusSnapshot: {
