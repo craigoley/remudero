@@ -348,7 +348,6 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "githubEventWake.checkSettleMs": "net-new",
   "githubEventWake.semanticCheckMode": "net-new",
   "githubEventWake.aggregateCheckNames": "net-new",
-  "githubEventWake.enforceRatification": "net-new",
   "workerRuleHeadlines.enabled": "net-new",
 };
 
@@ -569,7 +568,9 @@ function githubEventWakeEnforceRatificationField(
       `policy.yaml: '${path}' evidence must cover every observed aggregate head (covered=${counts.aggregateHeadsCovered}, total=${counts.aggregateHeadsTotal}).`,
     );
   }
-  origins[path] = parseOrigin(path, origin);
+  if (origin !== "net-new") {
+    throw new PolicyError(`policy.yaml: '${path}.origin' must be exactly "net-new" for operator evidence.`);
+  }
   return {
     observedFrom: value.observedFrom as string,
     observedThrough: value.observedThrough as string,
