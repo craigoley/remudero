@@ -10,6 +10,7 @@
   files:
     - src/lib/fleet-control.ts
     - src/run-task.ts
+    - test/config-reader-seams.test.ts
     - test/pause-hold-is-attributable.test.ts
     - test/review-status-pending.test.ts
   origin: "operator-session#review-posting-root-cause-2026-09-21"
