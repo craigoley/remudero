@@ -395,6 +395,38 @@ export interface components {
       authorityRef: string;
       reason?: string;
     };
+    /** W1-T3893 self-service inventory — the same metadata-only shape as ContextList, scoped to exactly one principal. */
+    ContextControlsInventoryList: {
+      items: (ContextInventoryItem)[];
+      count: number;
+      absent: boolean;
+      asOf: string;
+    };
+    /** A bounded, redacted export projection. `redactedContent` is a truncated, secret-scrubbed preview — never the raw context-item-v1 `content` field. */
+    ContextExportItem: {
+      contextId: string;
+      source: string;
+      principal: string;
+      purpose: string;
+      sensitivity: "low" | "moderate" | "high" | "restricted";
+      authorityRef: string;
+      observedAt: string;
+      freshness: "fresh" | "stale" | "unavailable";
+      retention: ContextRetention;
+      visibility: "private" | "operator" | "shared";
+      derivationLinks: (string)[];
+      redactedContent: string;
+    };
+    /** `status: completed` is returned ONLY when every selected item, and everything it derives from, is "available" — an incomplete derivation chain, an absent match, or a request past the bounded item limit is `status: refused` with a `reason`, never a partial "completed". */
+    ContextExportResult: {
+      status: "completed" | "refused";
+      exportId?: string;
+      asOf?: string;
+      items?: (ContextExportItem)[];
+      reason?: "absent" | "incomplete_coverage" | "bounded_exceeded";
+      detail?: string;
+      incompleteContextIds?: (string)[];
+    };
     OperatorAgentProposalRegistration: {
       proposal: OperatorAgentProposal;
     };
@@ -911,6 +943,23 @@ export interface components {
       safeToComplete: boolean;
       reason?: string;
     };
+    /** The bounded provider-auth-v1 browser projection. Provider credentials, credential homes, raw app-server payloads, and transcripts never cross this boundary. */
+    ProviderAuthProjection: {
+      version: "provider-auth-v1";
+      sessionId: string;
+      provider: "claude" | "codex";
+      profileId: string | null;
+      label: string | null;
+      state: "unavailable" | "unsupported" | "awaiting_browser" | "complete" | "failed" | "expired" | "cancelled";
+      authUrl: string | null;
+      expiresAt: string;
+      reason?: string;
+    };
+    ProviderAuthStartRequest: {
+      provider: "claude" | "codex";
+      /** Opaque server-configured provider profile id; never a credential or path. */
+      profileId: string;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
@@ -921,6 +970,34 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/provider-auth": {
+    get: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    delete: {
+      responses: {
+          "200": ProviderAuthProjection;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
   "/v1/repos": {
     get: {
       responses: {
@@ -1096,6 +1173,50 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/context-controls/inventory": {
+    get: {
+      responses: {
+          "200": ContextControlsInventoryList;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/context-controls/forget": {
+    post: {
+      responses: {
+          "200": ContextReceiptResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/context-controls/revoke": {
+    post: {
+      responses: {
+          "200": ContextReceiptResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/context-controls/export": {
+    get: {
+      responses: {
+          "200": ContextExportResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": ContextExportResult;
         };
     };
   };

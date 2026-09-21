@@ -330,6 +330,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/plan-index.ts": 2,
   "src/lib/plan-pr-emitter.ts": 1,
   "src/lib/plan.ts": 3,
+  "src/lib/provider-auth-sessions.ts": 7,
   "src/lib/reachability.ts": 1,
   "src/lib/relint.ts": 2,
   "src/lib/retro.ts": 2,

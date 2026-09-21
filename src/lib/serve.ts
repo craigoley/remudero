@@ -92,6 +92,7 @@ import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { buildOperatorAgentRoutes } from "./operator-agent.js";
+import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -139,6 +140,13 @@ import {
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import {
+  buildProviderAuthRoutes,
+  ProviderAuthSessionStore,
+  readProviderAuthProfiles,
+  startProviderAuthSession,
+  type ProviderAuthProfile,
+} from "./provider-auth-sessions.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -298,6 +306,13 @@ export interface ServeDeps {
   providerRouting?: {
     now?: () => number;
     read?: (root: string, deps?: { now?: () => number }) => ProviderRoutingStatus;
+  };
+  /** Server-owned provider browser-auth profiles and session store. Credential homes remain on the
+   * daemon; the browser receives only provider-auth-v1 projections. */
+  providerAuth?: {
+    profiles?: readonly ProviderAuthProfile[];
+    store?: ProviderAuthSessionStore;
+    env?: NodeJS.ProcessEnv;
   };
   /**
    * W1-T3352: process-owned analytics refresh deps. OPTIONAL and defaults to the real streaming
@@ -3589,10 +3604,19 @@ function assembleServeRoutes(
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
+  const providerAuthStore = deps.providerAuth?.store ?? new ProviderAuthSessionStore({
+    profiles: deps.providerAuth?.profiles ?? readProviderAuthProfiles(deps.providerAuth?.env),
+  });
   // Personal context governance is mounted with the existing operator-agent routes. Its context
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
   const operatorAgentRoutes = buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath });
+  // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
+  // ledger-backed context-governance engine above — same ledgerPath, so a self-service forget and
+  // a governance delete are the identical durable receipt, never a second memory store. Raw
+  // private content never crosses these routes either: inventory strips it structurally and
+  // export returns only a bounded, secret-scrubbed preview (see context-controls.ts's header).
+  const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
   const rawRoutes = [
     projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen)),
     buildRepoDashboardRoute({ root: deps.questionsRoot }),
@@ -3600,6 +3624,7 @@ function assembleServeRoutes(
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     buildDaemonHealthRoute(daemonHealthDeps),
     buildAccountUsageRoute(accountUsageDeps),
+    ...buildProviderAuthRoutes(providerAuthStore, undefined, (input) => startProviderAuthSession(providerAuthStore, input)),
     buildProviderRoutingRoute({ root: deps.fleetControlRoot, ...deps.providerRouting }),
     buildSetProviderRoutingPolicyRoute({
       root: deps.fleetControlRoot,
@@ -3660,6 +3685,7 @@ function assembleServeRoutes(
     // ledger. The experiment routes are mounted through this same production assembly so the
     // console cannot approve a change without a durable baseline and rollback path.
     ...operatorAgentRoutes,
+    ...contextControlsRoutes,
     ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every

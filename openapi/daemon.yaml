@@ -1253,6 +1253,105 @@ components:
           type: string
           maxLength: 500
 
+    ContextControlsInventoryList:
+      type: object
+      description: >
+        W1-T3893 self-service inventory — the same metadata-only shape as ContextList, scoped to
+        exactly one principal.
+      required: [items, count, absent, asOf]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContextInventoryItem"
+        count:
+          type: integer
+          minimum: 0
+        absent:
+          type: boolean
+        asOf:
+          type: string
+          format: date-time
+
+    ContextExportItem:
+      type: object
+      description: >
+        A bounded, redacted export projection. `redactedContent` is a truncated, secret-scrubbed
+        preview — never the raw context-item-v1 `content` field.
+      required: [contextId, source, principal, purpose, sensitivity, authorityRef, observedAt, freshness, retention, visibility, derivationLinks, redactedContent]
+      properties:
+        contextId:
+          type: string
+          maxLength: 160
+        source:
+          type: string
+          maxLength: 320
+        principal:
+          type: string
+          maxLength: 320
+        purpose:
+          type: string
+          maxLength: 320
+        sensitivity:
+          type: string
+          enum: [low, moderate, high, restricted]
+        authorityRef:
+          type: string
+          maxLength: 320
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum: [fresh, stale, unavailable]
+        retention:
+          $ref: "#/components/schemas/ContextRetention"
+        visibility:
+          type: string
+          enum: [private, operator, shared]
+        derivationLinks:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 160
+        redactedContent:
+          type: string
+          maxLength: 241
+
+    ContextExportResult:
+      type: object
+      description: >
+        `status: completed` is returned ONLY when every selected item, and everything it derives
+        from, is "available" — an incomplete derivation chain, an absent match, or a request past
+        the bounded item limit is `status: refused` with a `reason`, never a partial "completed".
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [completed, refused]
+        exportId:
+          type: string
+          maxLength: 40
+        asOf:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContextExportItem"
+        reason:
+          type: string
+          enum: [absent, incomplete_coverage, bounded_exceeded]
+        detail:
+          type: string
+          maxLength: 320
+        incompleteContextIds:
+          type: array
+          items:
+            type: string
+            maxLength: 160
+
     OperatorAgentProposalRegistration:
       type: object
       required: [proposal]
@@ -2618,6 +2717,49 @@ components:
         reason:
           type: string
 
+    ProviderAuthProjection:
+      type: object
+      description: >
+        The bounded provider-auth-v1 browser projection. Provider credentials, credential homes,
+        raw app-server payloads, and transcripts never cross this boundary.
+      required: [version, sessionId, provider, profileId, label, state, authUrl, expiresAt]
+      properties:
+        version:
+          type: string
+          enum: [provider-auth-v1]
+        sessionId:
+          type: string
+        provider:
+          type: string
+          enum: [claude, codex]
+        profileId:
+          type: [string, "null"]
+        label:
+          type: [string, "null"]
+        state:
+          type: string
+          enum: [unavailable, unsupported, awaiting_browser, complete, failed, expired, cancelled]
+        authUrl:
+          type: [string, "null"]
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+
+    ProviderAuthStartRequest:
+      type: object
+      required: [provider, profileId]
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          enum: [claude, codex]
+        profileId:
+          type: string
+          description: Opaque server-configured provider profile id; never a credential or path.
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -2657,6 +2799,87 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/provider-auth:
+    post:
+      summary: Start a server-owned provider browser-auth handoff.
+      description: >
+        Starts provider-auth-v1 for an opaque server-configured account profile. Codex uses the
+        daemon-side app-server login flow and returns only an allowlisted browser authorization URL;
+        Claude remains explicitly unsupported until a stable machine-facing handoff exists.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderAuthStartRequest"
+      responses:
+        "200":
+          description: The initial bounded session projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderAuthProjection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    get:
+      summary: Read a provider-auth-v1 session projection.
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema:
+            type: string
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The current bounded session projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderAuthProjection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Cancel a provider-auth-v1 session.
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema:
+            type: string
+      security:
+        - bearerWrite: []
+      responses:
+        "200":
+          description: The cancelled session projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderAuthProjection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/repos:
     get:
       summary: The read-only managed-repo portfolio for the console dashboard.
@@ -3139,6 +3362,149 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/context-controls/inventory:
+    get:
+      summary: W1-T3893 self-service context inventory, scoped to one principal.
+      description: >
+        Metadata-only, like GET /v1/operator-agent/context, but requires a `principal` and
+        narrows the result to that principal's context alone — the operator self-service framing
+        the underlying context-governance inventory does not itself provide.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: principal
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: purpose
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: authorityRef
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Metadata-only, principal-scoped context inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextControlsInventoryList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/context-controls/forget:
+    post:
+      summary: W1-T3893 self-service "forget" — permanently delete a context item.
+      description: >
+        A thin, operator-facing named wrapper over POST /v1/operator-agent/context/delete: the
+        SAME receipt engine, idempotency, and restart-safe ledger step.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextActionRequest"
+      responses:
+        "200":
+          description: Bounded deletion receipt; raw private content is not returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextReceiptResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/context-controls/revoke:
+    post:
+      summary: W1-T3893 self-service revoke — a thin named wrapper over POST /v1/operator-agent/context/revoke.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextActionRequest"
+      responses:
+        "200":
+          description: Bounded revocation receipt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextReceiptResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/context-controls/export:
+    get:
+      summary: W1-T3893 user-authorized export — bounded, redacted, scoped, coverage-checked.
+      description: >
+        Scoped to exactly one principal AND purpose AND authority. Returns `status: completed`
+        ONLY when every selected item's full derivation chain is available; otherwise refuses
+        (HTTP 409, `status: refused`) with a `reason` — never a partial "completed" response.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: principal
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: purpose
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: authorityRef
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Completed export — bounded, redacted items for the requested scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextExportResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Refused — absent, incomplete source coverage, or past the bounded item limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextExportResult"
 
   /v1/operator-agent/proposals:
     get:

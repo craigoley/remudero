@@ -1,0 +1,55 @@
+- id: W1-T3977
+  title: "BOUND THE CONSOLE-V1 OPERATOR-AGENT DETAIL ARRAYS — repeated unavailable capacity rows expand the hosted projection to 9 MB and exceed the console's 128 KiB response contract"
+  repo: remudero
+  depends_on: ["W1-T3794", "W1-T3796", "W1-T3797"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: blast-radius
+  files:
+    - src/lib/operator-agent-proof.ts
+    - src/lib/operator-agent-outcomes.ts
+    - src/lib/operator-agent-decisions.ts
+    - src/lib/operator-agent-capacity.ts
+    - test/operator-agent-proof.test.ts
+    - test/operator-agent-outcomes.test.ts
+    - test/operator-agent-decisions.test.ts
+    - test/operator-agent-capacity.test.ts
+  origin: "feedback#fb-1790020740000-console-v1-response-bound"
+  plan_refs: ["W1-T3794", "W1-T3796", "W1-T3797", "W1-T3942", "CONSOLE-T34"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED live 2026-09-21 after W1-T3942/#6426 and console API-T56/#1571 shipped: an
+    authenticated request to the daemon's named `console-v1` projection succeeds through the
+    Cloudflare Access service token but returns 8,992,268 bytes. The response contains only six
+    metrics, yet `operatorAgent.capacity.unavailable` carries 17,560 repeated rows and
+    `operatorAgent.decisions.automaticMergeEvents` carries 5,134 detail rows. The hosted console
+    intentionally rejects a response over 128 KiB before parsing it, and the Vercel request then
+    times out while Cloudflare cancels the origin stream. This is a producer-side bounded-projection
+    failure, not an Access policy failure or permission to raise the consumer limit.
+  design: |
+    Keep the aggregate counts, rates, statuses, classes, and explicit unavailable reasons derived
+    from the full ledger corpus, but cap every repeated operator-agent detail array at the existing
+    consumer contract of 100 items: proof unmeasurable rows, outcome classes/task ids and
+    unmeasurable rows, decision events/classes/task ids/actor ids/unmeasurable rows, and capacity
+    measurements/unavailable rows. Apply the bound inside the four signal adapters so both the
+    named console-v1 route and any future producer share it. Preserve ordering, explicit
+    `not-collected`/unavailable states, and the full scalar denominators; do not turn truncation into
+    a healthy zero or remove the detail fields from the contract. Add a deterministic fixture that
+    serializes a large operator-agent projection and proves it remains below the console's 128 KiB
+    response ceiling.
+  acceptance:
+    - claim: "each operator-agent signal keeps full aggregate scalar evidence while bounding every repeated detail array to the 100-item console contract"
+      proof: "unit test: operator-agent adapters preserve aggregate evidence while bounding repeated detail arrays"
+    - claim: "a large ledger-derived operator-agent projection serializes below the hosted console's 128 KiB response ceiling"
+      proof: "unit test: console-v1 operator-agent projection stays below the 128 KiB response bound"
+    - claim: "truncation never changes measured versus not-collected or unavailable status and never manufactures a healthy zero"
+      proof: "unit test: bounded operator-agent details retain explicit unavailable states"
+  falsifier: |
+    Remove the adapter bounds and rerun the large-corpus serialization test: it must exceed 128 KiB
+    again. Replace a missing field with zero or mark a truncated signal measured without full
+    evidence: the explicit-state test must fail.
+  note: "This task repairs the core producer's response-size contract only. It does not raise the console limit, expose raw ledger rows, change operator-agent proposal policy, or change Cloudflare Access credentials."
