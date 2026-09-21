@@ -184,6 +184,45 @@ test("W1-T3934: the warning MOVES NO DISPOSITION — status, merged and every ot
     "every other field is byte-identical — this is a report, not a credit and not an action");
 });
 
+test("W1-T3939: blocked uncredited build is suppressed", () => {
+  const g = gateway([PR_3095], { [PR_3095.url]: SRC });
+  const blocked = project(
+    ["W1-T2379"],
+    { ledgerPath: ledgerFile([]), github: g },
+    [{ ...task("W1-T2379", ["src/lib/sweep.ts"]), status: "blocked" } as Task],
+  ).get("W1-T2379")!;
+  assert.equal(blocked.uncreditedBuild, undefined, "a blocked task is not dispatchable, so its advisory warning is quiet");
+  assert.equal(blocked.merged, false, "suppressing the advisory does not grant merge credit");
+  assert.equal(blocked.source, "none", "suppressing the advisory does not change the status source");
+});
+
+test("W1-T3939: queued uncredited build still warns", () => {
+  const g = gateway([PR_3095], { [PR_3095.url]: SRC });
+  const queued = project(
+    ["W1-T2379"],
+    { ledgerPath: ledgerFile([]), github: g },
+    [task("W1-T2379", ["src/lib/sweep.ts"])],
+  ).get("W1-T2379")!;
+  assert.equal(queued.uncreditedBuild?.prNumber, 3095, "a live queued task keeps the fail-open warning");
+});
+
+test("W1-T3939: warning remains report only", () => {
+  const withPr = project(
+    ["W1-T2379"],
+    { ledgerPath: ledgerFile([]), github: gateway([PR_3095], { [PR_3095.url]: SRC }) },
+    [task("W1-T2379", ["src/lib/sweep.ts"])],
+  ).get("W1-T2379")!;
+  const without = project(
+    ["W1-T2379"],
+    { ledgerPath: ledgerFile([]), github: gateway([], {}) },
+    [task("W1-T2379", ["src/lib/sweep.ts"])],
+  ).get("W1-T2379")!;
+  assert.ok(withPr.uncreditedBuild, "the scoped merged source really did warn");
+  assert.equal(withPr.status, without.status, "the warning does not move task status");
+  assert.equal(withPr.merged, without.merged, "the warning does not grant merge credit");
+  assert.equal(withPr.source, without.source, "the warning does not change credit source");
+});
+
 test("acceptance: a gateway that cannot enumerate merged PRs, or cannot read changed files, stays silent rather than guessing", () => {
   const noList = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: gateway([PR_3095], { [PR_3095.url]: SRC }, { omitList: true }) }).get("W1-T2379")!;
   assert.equal(noList.uncreditedBuild, undefined, "no enumeration ⇒ prior behaviour exactly");
