@@ -39,8 +39,6 @@
   acceptance:
     - claim: "a fresh-tree review invokes the executable bash rmd wrapper rather than asking Node to parse it"
       proof: "grep: spawn(join(worktree, \"bin\", \"rmd\"), in src/run-task.ts"
-    - claim: "a stale-reviewer launch failure still falls back to the existing skip instead of judging with stale code"
-      proof: "unit test: a fresh tree that cannot be prepared falls back to the skip, never to a stale verdict"
   falsifier: |
     Restore `spawn(process.execPath, [join(worktree, "bin", "rmd"), ...])`; the executable-
     wrapper fixture added to test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts must fail
@@ -48,6 +46,7 @@
     preparation-failure test remains green, proving the fix does not weaken the stale-code safety
     floor.
   note: |
+    acceptance amendment: fallback-skip regression remains in the suite but is not a credited acceptance proof.
     Reservation holder: chore/file-fresh-review-exec-1789990815000. This is a filing only. The
     implementation will use a separate run-W1-T3955-<epochMs> branch after this task record has
     merged, so it does not edit its own acceptance contract.
