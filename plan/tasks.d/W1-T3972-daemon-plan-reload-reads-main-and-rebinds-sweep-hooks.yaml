@@ -1,0 +1,61 @@
+- id: W1-T3972
+  title: "The self-target plan reloader detects origin/main:plan drift but re-parses the stale local working tree, while sweep hooks retain the boot plan forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 100.00
+  origin: operator-session#daemon-continuity-2026-09-21
+  plan_refs: ["W1-T12a", "W1-T143", "W1-T147", "W1-T151", "W1-T160", "W1-T245", "W1-T340", "W1-T3554", "W1-T404", "W1-T936", "W1-T3585", "W1-T2794", "W1-T3793"]
+  files: [src/run-task.ts, src/lib/daemon.ts, src/lib/plan.ts, test/daemon-plan-freshness.test.ts, test/daemon-plan-rebinds-from-main.test.ts]
+  rationale: |
+    OBSERVED at origin/main ab7649fa. planReloader compares origin/main:plan but on change calls
+    load(target.planPath), which reads the daemon's local working tree. If the checkout was not
+    restarted or fast-forwarded, it logs a changed plan while returning stale content.
+    Independently, daemonCommand gives buildSweepHook and buildSweepLightHook the boot Plan object;
+    runDaemon can reassign its own plan binding, but those hooks retain their captured object.
+    Therefore a plan update can be detected yet remain invisible to the credit, review and sweep
+    decisions that need it.
+
+    OVERLAP RULING: W1-T245 materializes an origin plan subtree for synced dispatch, while this task
+    reads the observed ref only after a self daemon has detected drift. W1-T12a owns the scheduler;
+    W1-T143 observability; W1-T147 a human chaos drill; W1-T151 dependency freshness; and W1-T160
+    retro cadence. W1-T3793 alone also concerns freshness, but yields a safe external CI wait to
+    the existing restart path rather than correcting a stale in-process plan snapshot. This task
+    changes none of those mechanisms or their policies. Every reference is retained so the
+    dispatcher sees the real shared orchestration surface rather than producing conflicting PRs.
+  design: |
+    On a detected main-tree change, load the exact observed committed ref with the existing
+    loadPlanAtRef primitive; never reset, checkout, merge, pull, stash or otherwise mutate the
+    self checkout. A load/integrity failure keeps the prior plan and does not advance the observed
+    sha, so the next tick retries. Explicit --plan remains frozen-at-boot and the non-self reloader
+    stays unchanged.
+
+    Pass a plan accessor or per-batch plan snapshot to both sweep-hook paths. Every rung in one
+    sweep pass must observe the same plan, while the following pass sees the successful reload.
+    Offline and CLI callers that supply a direct Plan retain current behavior. This is an in-process
+    plan refresh, not a new restart trigger; existing PAUSE/STOP and freshness ownership remain
+    untouched.
+  acceptance:
+    - claim: "a self reloader returns the exact observed main-ref plan even when its working tree remains old"
+      proof: "grep: daemon plan reload reads the observed main ref in test/daemon-plan-rebinds-from-main.test.ts"
+    - claim: "the reload path performs no checkout-mutating git command and requests no process exit"
+      proof: "grep: daemon plan reload leaves the checkout untouched in test/daemon-plan-rebinds-from-main.test.ts"
+    - claim: "the next sweep after reload uses the new plan while one sweep pass uses one consistent snapshot"
+      proof: "grep: daemon sweep hooks rebind to a reloaded plan in test/daemon-plan-rebinds-from-main.test.ts"
+    - claim: "a failed ref load keeps the old plan and retries rather than recording stale content as seen"
+      proof: "grep: daemon plan reload retries an unreadable main ref in test/daemon-plan-rebinds-from-main.test.ts"
+    - claim: "the self reloader uses the committed-ref loader"
+      proof: "grep: loadPlanAtRef( in src/run-task.ts"
+  falsifier: |
+    Close the loading half if the self working tree is proven fast-forwarded before every reload and
+    the hook half if hooks already read a reassignable plan binding. After implementation, restore
+    local-path loading and then boot-plan capture separately; their respective acceptance tests
+    must fail. Do not substitute a restart for either proof.
+  status: queued
+  attempts: 0
+  note: |
+    High risk is the daemon control-loop boundary, not a claim that the change is large. It is
+    intentionally independent of W1-T3971's credit-projection optimization.
