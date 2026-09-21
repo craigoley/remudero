@@ -8,6 +8,8 @@ import {
   FOLLOW_UP_POLICY_VERSION,
   appendFollowUpCandidate,
   appendFollowUpControl,
+  appendFollowUpReceipt,
+  appendFollowUpState,
   applyFollowUpControl,
   evaluateFollowUpPolicy,
   readFollowUpHistory,
@@ -56,6 +58,26 @@ test("snooze, reject, revoke, quiet hours, and attempts are durable stop control
     const restarted = readFollowUpHistory(ledgerPath, deps.now.now());
     assert.equal(restarted[0]?.state, "rejected");
     assert.equal(evaluateFollowUpPolicy(candidate, { now: deps.now.now(), existing: restarted }).state, "suppressed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("state and receipt events are written to the durable follow-up ledger", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-follow-up-events-"));
+  try {
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    const deps = { ledgerPath, now: fixedClock(Date.parse("2026-09-21T11:00:00.000Z")) };
+    appendFollowUpCandidate(deps, candidate);
+    appendFollowUpState(deps, evaluateFollowUpPolicy(candidate, { now: deps.now.now() }));
+    appendFollowUpReceipt(
+      deps,
+      { delivered: true, systemActed: false, completed: false, permissionToAct: false, at: deps.now.iso() },
+      candidate.candidateId,
+    );
+    const history = readFollowUpHistory(ledgerPath, deps.now.now());
+    assert.equal(history[0]?.candidateId, candidate.candidateId);
+    assert.equal(history[0]?.receipt?.delivered, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
