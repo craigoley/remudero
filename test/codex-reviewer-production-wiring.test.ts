@@ -8,6 +8,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { loadDefaultPolicy } from "../src/lib/policy.js";
 import { runReview } from "../src/run-task.js";
 
 test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox", async () => {
@@ -162,6 +163,11 @@ esac
     assert.equal(observedSpawn?.model, "gpt-5.5");
     assert.equal(observedSpawn?.effort, "high");
     assert.equal(observedSpawn?.maxTurns, 10);
+    assert.deepEqual(
+      observedSpawn?.clockBound,
+      { boundMs: loadDefaultPolicy().values.workerAbandon },
+      "the advisory reviewer must inherit the worker quiet-stream policy instead of waiting forever",
+    );
     assert.match(observedSpawn?.prompt ?? "", /TASK UNDER REVIEW: W1-T2829/);
     assert.match(observedSpawn?.prompt ?? "", /DECLARED PATHS: \["src\/example\.ts"\]/);
     assert.match(observedSpawn?.prompt ?? "", /CHANGED PATHS: \["src\/example\.ts","src\/extra\.ts"\]/);
