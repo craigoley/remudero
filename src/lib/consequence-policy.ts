@@ -3,23 +3,20 @@
  *
  * `consequence-policy-v1`: what an OPERATOR must see before approving a consequential action —
  * exact target, amount moved, quote/confirmation lifetime, and whether recovery exists at all.
- * W1-T3878/W1-T3880's generic risk label and capability grant reference stay authoritative but
- * say none of that.
- *
- * Every action classifies into one of {@link CONSEQUENCE_CLASSES}; `financial`/`irreversible`
- * carry a bounded sub-record ({@link ConsequenceFinancialDetails}, {@link
+ * W1-T3878/W1-T3880's generic risk label and grant reference stay authoritative but say none of
+ * that. Every action classifies into one of {@link CONSEQUENCE_CLASSES}; `financial`/
+ * `irreversible` carry a bounded sub-record ({@link ConsequenceFinancialDetails}, {@link
  * ConsequenceIrreversibleDetails}) that {@link classifyConsequenceAction} refuses incomplete.
- * {@link evaluateConsequencePolicy} is the runtime preflight: it never upgrades an ambiguous
- * target, stale evidence, an expired quote/confirmation, an exceeded ceiling, or a missing
- * approver into readiness. A capability grant REFERENCE may ride along for provenance only —
- * nothing here reads it to widen a ceiling or approval count. External-sourced text (`source:
- * "external"` on {@link ConsequenceTarget}/{@link ConsequenceApproval}) is refused wherever a
- * target or approval is read.
+ *
+ * {@link evaluateConsequencePolicy} never upgrades an ambiguous target, stale evidence, an
+ * expired quote/confirmation, an exceeded ceiling, or a missing approver into readiness. A
+ * capability grant REFERENCE may ride along for provenance only — nothing here reads it to widen
+ * a ceiling or approval count. External-sourced text (`source: "external"` on {@link
+ * ConsequenceTarget}/{@link ConsequenceApproval}) is refused wherever a target or approval is read.
  *
  * {@link ConsequenceReceipt}s are the only durable record of approval/execution/refusal/recovery;
  * `execution` never manufactures "executed" without an `externalEffectReceiptId`, and `recovery`
- * never claims one {@link ConsequenceIrreversibleDetails.recoveryAvailable} forbids or that
- * exceeds the amount recovered.
+ * never claims more than {@link ConsequenceIrreversibleDetails.recoveryAvailable} allows.
  *
  * FALSIFIER: approve an ambiguous target, exceed a ceiling, accept stale/expired evidence, let a
  * grant or external content stand in for approval, or claim impossible recovery. See
