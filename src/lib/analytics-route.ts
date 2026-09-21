@@ -574,7 +574,11 @@ function analyticsAccumulator(): AnalyticsAccumulator {
 function checkpointDay(value: unknown): string | undefined {
   const raw = str(value);
   const parsed = raw === undefined ? NaN : Date.parse(raw);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : undefined;
+  return Number.isFinite(parsed) ? utcDayFromTimestamp(parsed) : undefined;
+}
+
+function utcDayFromTimestamp(timestamp: number): string {
+  return new Date(timestamp).toISOString().slice(0, 10);
 }
 
 function checkpointHistoryBucket(state: CheckpointHistoryState, day: string): CheckpointHistoryBucket {
@@ -677,7 +681,7 @@ function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string | nu
   }
   const end = Date.parse(`${checkpointDay(nowIso) ?? "1970-01-01"}T00:00:00.000Z`);
   const days = Array.from({ length: CHECKPOINT_HISTORY_BUCKETS }, (_, index) =>
-    new Date(end - (CHECKPOINT_HISTORY_BUCKETS - index - 1) * CHECKPOINT_DAY_MS).toISOString().slice(0, 10),
+    utcDayFromTimestamp(end - (CHECKPOINT_HISTORY_BUCKETS - index - 1) * CHECKPOINT_DAY_MS),
   );
   const pointFor = (day: string, id: string) => {
     const bucket = state.days.get(day);
@@ -915,7 +919,7 @@ function routingTerminalReceipt(line: Record<string, unknown>): RoutingTerminalR
     costUsd: num(line.total_cost_usd) ?? 0,
     ...(str(line.served_model) ? { servedModel: str(line.served_model) } : {}),
     capabilityFallback: Boolean(line.codex_capability_fallback && typeof line.codex_capability_fallback === "object"),
-    ...(ts && Number.isFinite(Date.parse(ts)) ? { day: new Date(ts).toISOString().slice(0, 10) } : {}),
+    ...(ts && Number.isFinite(Date.parse(ts)) ? { day: utcDayFromTimestamp(Date.parse(ts)) } : {}),
   };
 }
 
@@ -1211,6 +1215,8 @@ function checkpointSource(stateDir: string): AnalyticsCheckpointSource | undefin
     const live = existsSync(livePath) ? statSync(livePath) : null;
     return { archives, live: live ? { size: live.size, mtimeMs: live.mtimeMs } : null, lastArchive: archives.at(-1)?.name ?? null, liveOffset: live?.size ?? 0 };
   } catch {
+    // A missing or unreadable source manifest is an explicit non-resumable state; callers must
+    // fall back to the full union rather than treating it as a healthy empty source.
     return undefined;
   }
 }
@@ -1317,6 +1323,8 @@ export function readAnalyticsCheckpoint(stateDir: string): AnalyticsCheckpoint |
     const parsed: unknown = JSON.parse(readFileSync(checkpointPath(stateDir), "utf8"));
     return validCheckpoint(parsed) ? parsed : undefined;
   } catch {
+    // A missing or malformed checkpoint is intentionally indistinguishable from no prior cache;
+    // the next refresh performs the full union and publishes fresh evidence when available.
     return undefined;
   }
 }
@@ -1647,7 +1655,9 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
         const next = "snapshot" in result ? result.snapshot : result;
         if ("snapshot" in result) {
           checkpoint = result.checkpoint;
-          writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
+          const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
+            (result.checkpoint.source.live?.size ?? 0) > 0;
+          if (hasRetainedEvidence) writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
         }
         value = freezeAnalyticsSnapshot(next);
         log("serve.analytics_refresh.completed", {
