@@ -1,0 +1,34 @@
+- id: W1-T3981
+  title: "repair the stale W1-T3973 acceptance proof before its implementation PR is judged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 5.00
+  origin: operator-session#daemon-continuity-2026-09-21
+  plan_refs: ["W1-T3973", "W1-T912", "W1-T1071"]
+  rationale: |
+    The implementation PR for W1-T3973 exposed a packaging defect before any code judgment: its
+    fourth proof named a test title that already passes on main, so proof-discrimination correctly
+    refused it as executed_stale. The acceptance claim is about the new bounded aggregate evidence,
+    so its proof must name the new test that proves that behavior. This is a plan-only repair; no
+    source, policy, or test code belongs in this PR.
+  design: |
+    Change only W1-T3973's fourth acceptance proof from the old enforce-mode test title to the new
+    `webhook summaries preserve bounded head identity` test title. Preserve the claim, all other
+    acceptance lines, and W1-T3973's declared source/test files byte-for-byte. The implementation
+    PR then rebases after this plan record lands and carries the corrected proof set.
+  acceptance:
+    - claim: "W1-T3973's fourth proof names the new head-identity behavior rather than a test already present on main"
+      proof: "grep: webhook summaries preserve bounded head identity in plan/tasks.d/W1-T3973-webhook-check-filter-enforcement-needs-a-ratified-contract.yaml"
+    - claim: "the plan-only repair changes no implementation path and leaves W1-T3973's claim text intact"
+      proof: "grep: all existing shadow, enforce, fork-payload and serve-wiring controls remain valid in plan/tasks.d/W1-T3973-webhook-check-filter-enforcement-needs-a-ratified-contract.yaml"
+  falsifier: |
+    This task is wrong if the named head-identity test title already resolves and passes on origin/main,
+    or if the implementation PR can pass proof-discrimination without changing W1-T3973's record.
+    It must not edit source, tests, policy, status, or any other task record.
+  files: [plan/tasks.d/W1-T3973-webhook-check-filter-enforcement-needs-a-ratified-contract.yaml]
+  status: queued
+  attempts: 0
