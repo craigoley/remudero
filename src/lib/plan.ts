@@ -233,15 +233,6 @@ export interface MachineFilingAdmissionContext {
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
 
-/**
- * The CI-learning landing bridge intentionally files machine-authored, verify:human records as
- * parked proposals. They are not runnable by the proto-runner until a person releases them, so
- * applying the generic machine-filing admission refusal here would reject the bridge's only
- * safe output and leave every landing PR red. Keep this exception narrow: only the canonical
- * learnings shard, an explicit ci-learning origin, an unblocked record, and no dependencies are
- * treated as an intentional parked proposal. Any other machine record still has to be selectable
- * (or carries the ordinary admission refusal).
- */
 function isParkedCiLearningProposal(task: Task): boolean {
   return (
     task.author_class === "machine" &&
