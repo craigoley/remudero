@@ -13,10 +13,17 @@
     - src/lib/worker.ts
   origin: "operator-session#implement-on-cash-2026-09-16"
   plan_refs: ["W1-T3572", "W1-T3692", "W1-T3656", "W1-T2591"]
-  status: queued
-  priority: 1
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
+    SETTLED 2026-09-21 — the implementation described here is already on `origin/main` through
+    merged PR #5817 (the unfiled run branch did not carry W1-T3696's trailer). The shipped
+    surface includes the harness-side commit, the provider-specific implement bounds, the
+    shell-free cash fallback, the anchored `COMMIT_MESSAGE` contract, and focused behavioral
+    tests. This record is now a durable retirement marker so the dispatcher does not spend a
+    second run rebuilding an existing capability; the original evidence below is preserved.
+
     OPERATOR QUESTION, 2026-09-16: can Azure AI models run the implement lane, given they have no
     command line, by having the daemon run commands on their behalf?
 
