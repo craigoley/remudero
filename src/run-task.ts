@@ -33372,6 +33372,26 @@ export function creditEvidenceRootFor(
   return slug.toLowerCase() === `${owner}/${repo}`.toLowerCase() ? candidate : undefined;
 }
 
+/** Map one whole-plan projection to the credit consumer's narrow candidate shape. Keeping this
+ * pure makes the performance refactor unable to change the merged/pr/url ownership filter. */
+export function creditCandidatesFromProjection(
+  projections: Iterable<StatusProjection>,
+  mergeSubjects: ReadonlyMap<number, string>,
+): CreditCandidate[] {
+  const candidates: CreditCandidate[] = [];
+  for (const projection of projections) {
+    if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
+    candidates.push({
+      taskId: projection.taskId,
+      prNumber: projection.prNumber,
+      prUrl: projection.prUrl,
+      merged: true,
+      creditIsImplementation: creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber)),
+    });
+  }
+  return candidates;
+}
+
 // W1-T3873: exported (was module-private) so test/cross-target-credit-evidence.test.ts can drive
 // it directly, the same way buildEscalationReconcileCandidates already was — no behaviour change.
 export function buildCreditCandidates(
@@ -33391,6 +33411,8 @@ export function buildCreditCandidates(
   // caller omits this and gets that function's live git/config resolution; a test injects a fake
   // to drive a self/target/foreign checkout without a real one on disk.
   evidenceRootFor: (owner: string, repo: string) => string | undefined = creditEvidenceRootFor,
+  // Injectable only for the one-read regression; production uses projectPlan's normal reader.
+  readLedger: DeriveDeps["readLedger"] = readLedgerLines,
 ): CreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
@@ -33398,31 +33420,26 @@ export function buildCreditCandidates(
   // walk below rather than per task — `deriveStatus` runs once per plan task (~1,400 a pass).
   // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's.
   const evidenceRoot = evidenceRootFor(owner, repo);
+  const baseGithub = github ?? buildBatchedGithub(owner, repo, { log });
+  // This consumer already owns a whole-plan credit pass. Keep the merged batch (the projection's
+  // fail-closed corroboration) but disable the unrelated open-board batch and taskless surface.
+  const projectionGithub: GitHub = {
+    ...baseGithub,
+    listOpenHeadBranches: undefined,
+  };
   const deps: DeriveDeps = {
     ledgerPath,
-    github: github ?? buildBatchedGithub(owner, repo, { log }),
+    github: projectionGithub,
     mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
+    readLedger,
+    skipTasklessEscalations: true,
   };
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
   const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
-  const candidates: CreditCandidate[] = [];
-  for (const task of plan.tasks) {
-    const proj = deriveStatus(task, deps);
-    if (proj.merged && proj.prNumber !== undefined && proj.prUrl !== undefined) {
-      candidates.push({
-        taskId: task.id,
-        prNumber: proj.prNumber,
-        prUrl: proj.prUrl,
-        merged: true,
-        // W1-T3063: what EARNED the credit, not merely that one exists. Undefined when the subject
-        // is outside the scanned window — and undefined declines, by design.
-        creditIsImplementation: creditSubjectIsImplementation(mergeSubjects.get(proj.prNumber)),
-      });
-    }
-  }
-  return candidates;
+  const projection = projectPlan(plan, deps);
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects);
 }
 
 /**
