@@ -21,6 +21,7 @@ import {
   applyGhReadCadence,
   ghExec,
   ghJson,
+  ghJsonAsync,
   ghSecondaryLimitRefusal,
   resetGhCadenceAdvisoryForTest,
   readGhReadCadenceStampMs,
@@ -327,6 +328,33 @@ test("ghExec is paced BEFORE it spawns, and an injected exec in ghJson is paced 
     // AND THE GUARD: an injected exec reaches no network, so it is not paced even inside the window.
     const out = ghJson(["api", "repos/o/r/pulls/1"], undefined, () => '{"ok":true}');
     assert.deepEqual(out, { ok: true });
+  } finally {
+    if (saved.xdg === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = saved.xdg;
+    if (saved.floor === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR;
+    else process.env.RMD_GH_TRANSPORT_FLOOR = saved.floor;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ghJsonAsync is paced BEFORE the real async transport spawns", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-wire-async-`));
+  const saved = { xdg: process.env.XDG_CACHE_HOME, floor: process.env.RMD_GH_TRANSPORT_FLOOR };
+  try {
+    process.env.XDG_CACHE_HOME = dir;
+    process.env.RMD_GH_TRANSPORT_FLOOR = "enforce";
+    const stamp = ghReadCadenceStampPath(process.env) as string;
+    stampGhRead(stamp);
+    const when = Math.floor(Date.now() / 1000) - 5;
+    utimesSync(stamp, when, when);
+
+    // The real default transport must refuse before it can reach GitHub. If this accidentally
+    // uses the injected seam, the promise would try to spawn a command and this regression would
+    // go green without proving the async production path is protected.
+    await assert.rejects(
+      () => ghJsonAsync(["api", "repos/o/r/pulls/1"]),
+      (error: unknown) => error instanceof GhReadCadenceRefusal,
+    );
   } finally {
     if (saved.xdg === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = saved.xdg;

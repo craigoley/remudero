@@ -150,6 +150,10 @@ function parseGhJsonBody(args: string[], body: string): unknown {
 }
 
 export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsync = execFileAsync): Promise<unknown> {
+  // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
+  // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
+  // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
+  if (execAsync === execFileAsync) applyGhReadCadence(args);
   const { stdout } = await execAsync("gh", args, {
     encoding: "utf8",
     maxBuffer: DEFAULT_GH_MAX_BUFFER,
