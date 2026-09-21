@@ -153,12 +153,13 @@ test("a cold status read with no warm snapshot returns within the client budget 
   const started = performance.now();
   const res = await serveRoute(route);
   const elapsedMs = performance.now() - started;
-  const body = (await res.json()) as { tasks?: Array<{ unavailableReason?: string }>; staleness?: { stale?: boolean } };
+  const body = (await res.json()) as { tasks?: Array<{ unavailableReason?: string }>; staleness?: { status?: string; stale?: boolean } };
 
   assert.equal(res.status, 200);
   assert.ok(elapsedMs < COLD_READ_MS, `a cold read must not wait for the full underlying read (took ${elapsedMs.toFixed(1)}ms)`);
   assert.ok(elapsedMs < BUDGET_MS * 3, `cold read took ${elapsedMs.toFixed(1)}ms, well past its ${BUDGET_MS}ms budget`);
   assert.equal(body.staleness?.stale, true);
+  assert.equal(body.staleness?.status, "unavailable");
   assert.equal(body.tasks?.[0]?.unavailableReason, "not_yet_collected");
 });
 
@@ -227,11 +228,12 @@ test("cold and blocked reads report an honest unavailable/stale state, never a f
     const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 5000, blockFirstMs)], deps, BUDGET_MS);
     const res = await serveRoute(route);
     const body = (await res.json()) as {
-      staleness?: { stale?: boolean };
+      staleness?: { status?: string; stale?: boolean };
       tasks?: Array<{ source?: string; indeterminate?: boolean; unavailableReason?: string }>;
     };
     assert.equal(res.headers.get("x-rmd-cache-state"), "stale", `${label} read must report stale, never fresh, on a fallback`);
     assert.equal(body.staleness?.stale, true, `${label} read must flag stale`);
+    assert.equal(body.staleness?.status, "unavailable", `${label} fallback must state that data is unavailable`);
     assert.equal(body.tasks?.[0]?.source, "throttled", `${label} fallback task must not present as a verified source`);
     assert.equal(body.tasks?.[0]?.indeterminate, true, `${label} fallback task must be marked indeterminate, not verified`);
     assert.equal(body.tasks?.[0]?.unavailableReason, "not_yet_collected", `${label} fallback must name an honest, non-fabricated unavailable reason`);

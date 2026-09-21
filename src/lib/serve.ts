@@ -847,6 +847,8 @@ export function renderConsoleTimeSeriesHtml(snapshot: ConsoleTimeSeriesSnapshot)
 }
 
 export interface ConsoleResponseStaleness {
+  /** The response's own data-status, distinct from the transport/cache headers. */
+  status: "fresh" | "stale" | "unavailable";
   stale: boolean;
   ageMs: number | null;
   generatedAt: string | null;
@@ -879,8 +881,10 @@ const BLOCKING_REQUEST_PATH_SYMBOLS = [
 ] as const;
 
 function responseStaleness(nowMs: number, generatedAtMs: number | undefined, refreshing: boolean, budgetMs: number, reason?: string): ConsoleResponseStaleness {
+  const stale = generatedAtMs === undefined || nowMs - generatedAtMs > budgetMs;
   return {
-    stale: generatedAtMs === undefined || nowMs - generatedAtMs > budgetMs,
+    status: generatedAtMs === undefined ? "unavailable" : stale ? "stale" : "fresh",
+    stale,
     ageMs: generatedAtMs === undefined ? null : Math.max(0, nowMs - generatedAtMs),
     generatedAt: generatedAtMs === undefined ? null : fixedClock(generatedAtMs).iso(),
     refreshing,
@@ -1154,6 +1158,7 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
       // deriving only from age made the boundary millisecond nondeterministically report `fresh`.
       const staleness = {
         ...responseStaleness(systemClock.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError),
+        status: cached ? ("stale" as const) : ("unavailable" as const),
         stale: true,
       };
       if (cached) {
