@@ -21,6 +21,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { buildCreditCandidates, buildEscalationReconcileCandidates, creditEvidenceRootFor } from "../src/run-task.js";
 import { repoRoot, resolveOwnerRepo } from "../src/lib/repo-location.js";
@@ -250,6 +251,20 @@ test("W1-T3873 criterion 3: a FOREIGN or missing target checkout leaves the exis
     evidenceRootFor: () => undefined,
   });
   assert.equal(candidates[0].derived.merged, true, "no local opinion is available, so today's trailer-only answer stands — never a manufactured refusal");
+});
+
+test("W1-T3873 criterion 3: an unreadable engine origin also degrades to no evidence", () => {
+  // Exercise the default self-identity read in a fresh process whose explicit repo root is not
+  // a checkout. This is the real failure arm in creditEvidenceRootFor, not the injected foreign-
+  // checkout path above: a broken engine origin must never turn a credit pass into a throw.
+  const moduleUrl = pathToFileURL(join(repoRoot, "src", "run-task.ts")).href;
+  const probe = `import { creditEvidenceRootFor } from ${JSON.stringify(moduleUrl)};\nprocess.stdout.write(String(creditEvidenceRootFor("o", "target")));`;
+  const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe, "--", "--repo-root", "/definitely/not/a/checkout"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(output, "undefined", "an unreadable engine origin is a safe no-evidence answer");
 });
 
 // ── CRITERION 4 — the credit pass reads evidence ONCE per pass, never once per task ──────────────
