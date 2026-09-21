@@ -419,7 +419,7 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
       runTask("W1-T3337", {
         skipGitSync: true,
         planPath,
-        config: { root, claudeBin: "/bin/true" } as Config,
+        config: { root, claudeBin: "/bin/true", installRoot: process.cwd() } as Config,
         github,
         spawn,
         containmentExec: (token) =>

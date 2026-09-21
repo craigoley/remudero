@@ -32,6 +32,7 @@ import {
   ledgerPathFor,
   runWorkerTailSweepRung,
   sweepStaleWorkerTails,
+  WORKER_ACTIVITY_LEDGER_STEP,
   WORKER_STATE_LEDGER_STEP,
   WORKER_TAIL_MAX_BYTES,
   WORKER_TAIL_MAX_LINES,
@@ -93,6 +94,39 @@ test("collectWorkerResult's streamObserver classifies assistant text as working 
   assert.equal(events[3].text, "[tool_use: Bash]");
   // Every event carries the INJECTED clock's own reading, never a second independent read.
   assert.ok(events.every((e) => typeof e.tsMs === "number"));
+});
+
+test("collectWorkerResult carries structured tool identity and tool-result outcome without exposing tool payloads", async () => {
+  const events: WorkerStreamEvent[] = [];
+  async function* stream(): AsyncGenerator<unknown> {
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { secret: "omit" } }] } };
+    yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "raw output", is_error: false }] } };
+    yield {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "done",
+      session_id: "s",
+      total_cost_usd: 0,
+      num_turns: 1,
+      permission_denials: [],
+    };
+  }
+  await collectWorkerResult(stream(), { childEnvKeys: [], streamObserver: (event) => events.push(event) });
+  assert.equal(events[0]?.toolName, "Bash");
+  assert.equal(events[1]?.toolOutcome, "success");
+  assert.equal((events[1] as { text?: string }).text, undefined, "tool output must never be forwarded as telemetry text");
+});
+
+test("collectWorkerResult preserves a failed tool-result outcome as error telemetry", async () => {
+  const events: WorkerStreamEvent[] = [];
+  async function* stream(): AsyncGenerator<unknown> {
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } };
+    yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "failure", is_error: true }] } };
+    yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "s", total_cost_usd: 0, num_turns: 1, permission_denials: [] };
+  }
+  await collectWorkerResult(stream(), { childEnvKeys: [], streamObserver: (event) => events.push(event) });
+  assert.equal(events[1]?.toolOutcome, "error");
 });
 
 test("an assistant message with neither text nor tool_use is still a heartbeat (kind: message) — never silently dropped", async () => {
@@ -178,6 +212,22 @@ test("buildWorkerStateSensor appends a worker.state ledger row ONLY when the sta
     assert.equal(l.run_id, runId);
     assert.equal(l.task_id, taskId);
   }
+});
+
+test("buildWorkerStateSensor appends bounded structured activity with tool timing and outcome, while the live state remains transition-only", () => {
+  const root = tmpRoot("worker-activity");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-activity", taskId: "task-activity", root });
+  sensor.observer({ kind: "working", tsMs: 1, text: "I will inspect the changed files before running the test suite." });
+  sensor.observer({ kind: "tool-executing", tsMs: 101, toolName: "Bash", text: "[tool_use: Bash]" });
+  sensor.observer({ kind: "message", tsMs: 2_601, toolOutcome: "success" });
+  const activity = readLedgerLines(ledgerPath).filter((line) => line.step === WORKER_ACTIVITY_LEDGER_STEP);
+  assert.equal(activity.length, 3);
+  assert.equal(activity[1]?.tool_name, "Bash");
+  assert.equal(activity[1]?.tool_reason, "I will inspect the changed files before running the test suite.");
+  assert.equal(activity[2]?.tool_duration_ms, 2_500);
+  assert.equal(activity[2]?.tool_outcome, "success");
+  assert.equal(activity[2]?.event_kind, "message");
 });
 
 // ── acceptance 3: no row / observer never fired ⇒ UNKNOWN, never `working` (W1-T130) ────────

@@ -83,6 +83,7 @@ function cashContainmentConfig(root: string): Config {
   return {
     claudeBin: "/bin/true",
     root,
+    installRoot: process.cwd(),
     dailyCapUsd: 5,
     workerProviders: {
       enabled: ["claude", "codex", "cash"],
@@ -98,7 +99,7 @@ test("BEHAVIORAL: a dropped containment probe drives the REAL runTask to a block
   const root = mkdtempSync(join(tmpdir(), "runtask-containment-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   const spawn = (async () => {
     throw new Error("spawn must never run — the containment preflight must refuse first");

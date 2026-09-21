@@ -547,7 +547,7 @@ async function reconReuseDispatchOnce(
 ): Promise<Array<{ step: string } & Record<string, unknown>>> {
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, RECON_REUSE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   const fakeBinDir = reconReuseFakeGh();
   const savedPath = process.env.PATH;

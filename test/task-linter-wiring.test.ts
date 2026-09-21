@@ -137,7 +137,7 @@ function fixturePlanPath(): string {
 test("CRITERION 5 (behavioral): a linter-failing task -> verdict=blocked_illformed, costUsd 0, and the injected worker-spawn is NEVER called", async () => {
   const planPath = fixturePlanPath();
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-lint-root-"));
-  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+  const config: Config = { claudeBin: "/bin/true", root: configRoot, installRoot: process.cwd() };
 
   let spawnCalls = 0;
   // A spawn stub that COUNTS calls and hard-fails if ever reached — a linter-failing
@@ -176,7 +176,7 @@ test("CRITERION 5 (behavioral): a CLEAN task PASSES the pre-dispatch guard (asse
 test("CRITERION 5 (behavioral): a proof-resolvability-only violation WARNS (never refuses) at pre-dispatch, and the warning is ledgered", async () => {
   const planPath = fixturePlanPath();
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-lint-root-"));
-  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+  const config: Config = { claudeBin: "/bin/true", root: configRoot, installRoot: process.cwd() };
 
   // Pre-seed a LIVE (this process' own pid) in-flight lock for TST-WARN so runTask refuses
   // with blocked_inflight right after the lint gate — proving the lint guard (and its warn
@@ -239,7 +239,7 @@ test("blocked_illformed is a recognized terminal verdict on RunResult", () => {
 async function dispatchProbe(taskId: string, opts: { seedInflight: boolean }) {
   const planPath = fixturePlanPath();
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-implak-root-"));
-  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+  const config: Config = { claudeBin: "/bin/true", root: configRoot, installRoot: process.cwd() };
 
   if (opts.seedInflight) {
     const inflightDir = join(configRoot, "state", "inflight");

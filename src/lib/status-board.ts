@@ -2381,7 +2381,8 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   // W1-T2675 — a BLIND SPOT, never a verdict: the merge credit could not be read, so the task is held rather than
   // rebuilt. The entry follows the comma directly, because the exhaustiveness test matches a key only after a brace or
   // a comma.
-  "credit-indeterminate": () => "merge credit could not be read — held rather than rebuilt" };
+  "credit-indeterminate": () => "merge credit could not be read — held rather than rebuilt",
+  "held-pre-dispatch-refusal": () => "same pre-dispatch refusal was already escalated — awaiting a changed task contract" };
 
 /** EXPORTED for test only, the visibility `deriveCircuitBrokenBlockers` already carries, so a test can assert what an
  *  operator actually READS. `enabled` defaults to `false`, so colour is opt-in and only `renderStatusBoardText` passes

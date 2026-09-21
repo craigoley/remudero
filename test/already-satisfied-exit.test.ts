@@ -253,7 +253,7 @@ test("BEHAVIORAL: a real runTask() run whose worker claims a VERIFIED ALREADY_SA
   const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   const spawnCalls: SpawnWorkerArgs[] = [];
@@ -299,7 +299,7 @@ test("BEHAVIORAL: a real runTask() run whose ALREADY_SATISFIED claim does NOT ve
   const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-refused-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   const spawnCalls: SpawnWorkerArgs[] = [];
@@ -355,7 +355,7 @@ test("BEHAVIORAL: a real runTask() run whose worktree teardown fails on the alre
   const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-teardown-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   const { repoDir } = gitFixture(root);
 
   const spawnCalls: SpawnWorkerArgs[] = [];
@@ -413,7 +413,7 @@ test("BEHAVIORAL: a real runTask() run whose board gateway READ FAILS records al
   const root = mkdtempSync(join(tmpdir(), "rmd-already-satisfied-unverifiable-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   // A gateway whose read genuinely FAILS, classified the way the production one does.

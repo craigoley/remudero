@@ -240,7 +240,7 @@ async function runFixture(
   const root = mkdtempSync(join(tmpdir(), "runtask-wipe-recon-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   gitFixture(root);
 
@@ -308,7 +308,7 @@ test("BEHAVIORAL: maskRecon:true never reads or writes the recon artifact store 
   const root = mkdtempSync(join(tmpdir(), "runtask-wipe-recon-artifact-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
 
   // Seed a prior artifact — whatever its content, a maskRecon:true run must neither read it

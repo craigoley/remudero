@@ -197,7 +197,7 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
   const savedPath = process.env.PATH;
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: REPO_ROOT }, null, 2));
     process.env.HOME = home;
 
     const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();

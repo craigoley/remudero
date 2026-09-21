@@ -196,7 +196,7 @@ function serveFixture(): { home: string; repo: string; target: string } {
   // the field only needs to exist so loadConfig takes its READ path.
   writeFileSync(
     join(home, ".config", "remudero", "config.json"),
-    JSON.stringify({ claudeBin: "/nonexistent/claude-not-installed", root: join(home, "Remudero") }),
+    JSON.stringify({ claudeBin: "/nonexistent/claude-not-installed", root: join(home, "Remudero"), installRoot: process.cwd() }),
   );
   const repo = mkdtempSync(join(tmpdir(), "rmd-refusal-repo-"));
   const bare = mkdtempSync(join(tmpdir(), "rmd-refusal-origin-"));

@@ -184,7 +184,7 @@ test("daemonCommand --dry-run with repoDir absent reaches the real ghExec `repo 
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: repoRoot }, null, 2),
     );
     process.env.HOME = home;
     writeCloneGhShim(shimDir, origin);
@@ -217,7 +217,7 @@ test("planCommand with repoDir absent reaches the real ghExec `repo clone` defau
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: repoRoot }, null, 2),
     );
     process.env.HOME = home;
     writeCloneGhShim(shimDir, origin);
@@ -251,7 +251,7 @@ test("approveBatchCommand (via approveCommand with 2+ bare ids) with repoDir abs
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: repoRoot }, null, 2),
     );
     process.env.HOME = home;
     writeCloneGhShim(shimDir, origin);
@@ -408,7 +408,7 @@ test("the spike reaches both GitHub CLI calls through ghExec", () => {
   const modules = {
     config: dataModuleUrl(`
       export function loadConfig() {
-        return { claudeBin: "/tmp/fake-claude", root: ${fakeRoot}, workerProviders: { enabled: ["claude"] } };
+        return { claudeBin: "/tmp/fake-claude", root: ${fakeRoot}, installRoot: ${JSON.stringify(repoRoot)}, workerProviders: { enabled: ["claude"] } };
       }
     `),
     fs: dataModuleUrl(`

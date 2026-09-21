@@ -104,7 +104,7 @@ async function runTriage(heldIds: string[], fileAs: (promptedId: string) => stri
   const prompts: string[] = [];
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }));
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: REPO_ROOT }));
     process.env.HOME = home;
 
     const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();

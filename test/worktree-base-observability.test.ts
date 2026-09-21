@@ -484,7 +484,7 @@ test("BEHAVIORAL: a REAL runTask() ledgers worktree.add with the three-way base 
   const TASK_ID = "T-WORKTREE-OBS-HEALTHY";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, behavioralPlan(TASK_ID));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   behavioralGitFixture(root);
 
   const CREDIT_PR: PrRef = { number: 7, url: "https://github.com/acme/remudero/pull/7", state: "MERGED" };
@@ -529,7 +529,7 @@ test("BEHAVIORAL: a REAL runTask() refusal ledgers worktree.stale_base WITH a be
   const TASK_ID = "T-WORKTREE-OBS-STALE";
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, behavioralPlan(TASK_ID));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   behavioralGitFixture(root);
 
   const spawn: typeof spawnWorker = async () => {
@@ -567,7 +567,7 @@ test("BEHAVIORAL: a REAL runTask(), dispatched for 3 DIFFERENT tasks sharing one
   const TASK_IDS = ["T-WORKTREE-OBS-DEGRADED-1", "T-WORKTREE-OBS-DEGRADED-2", "T-WORKTREE-OBS-DEGRADED-3"];
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, TASK_IDS.map(behavioralPlan).join(""));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   behavioralGitFixture(root);
 
   const CREDIT_PR: PrRef = { number: 7, url: "https://github.com/acme/remudero/pull/7", state: "MERGED" };

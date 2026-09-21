@@ -180,7 +180,7 @@ async function driveRun(binaryPinDeps: Parameters<typeof readBinaryPin>[0]) {
   const root = mkdtempSync(join(tmpdir(), "runtask-binary-pin-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   const spawn = (async () => {
     throw new Error("spawn must never run — the containment preflight refuses first");
   }) as typeof spawnWorker;

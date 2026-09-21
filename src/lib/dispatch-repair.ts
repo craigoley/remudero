@@ -1,6 +1,8 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
+import type { Task } from "./plan.js";
 
 /**
  * A TASK THE PRE-DISPATCH LINTER REFUSES IS REPAIRED, NOT RE-ATTEMPTED FOREVER (W1-T3657).
@@ -53,6 +55,39 @@ export interface PriorRefusal {
   verdict: string;
   attempts: number;
   escalated?: boolean;
+  /** W1-T3959: the parsed admission/linter contract that earned a terminal hold. Absent is a
+   * legacy record, never evidence that the current task was already handled. */
+  preDispatchContractRevision?: string;
+}
+
+/** BACKSTOP: bounds one selection pass's state materialization, never normal admission. Entries
+ * beyond this ceiling fail open: a missing observation can spend a zero-cost lint attempt, while
+ * a fabricated held state could silently suppress real work. */
+export const MAX_TERMINAL_PRE_DISPATCH_REFUSALS = 256;
+
+/** Stable JSON for the small, parsed contract below. Object keys sort; array order remains part of
+ * the revision because linter inputs such as acceptance criteria are ordered. */
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
+}
+
+/**
+ * The one durable identity for "has this task's deterministic admission contract changed?".
+ * `sourcePath` varies between the daemon's parsed plan and a temporary `runTask` copy. Every
+ * other parsed field is deliberately included: even a field that looks administrative can affect
+ * selector admission today or become a deterministic-linter input later. That conservative shape
+ * makes a corrected contract earn exactly one re-offer instead of silently inheriting an old hold.
+ */
+export function preDispatchContractRevision(task: Task): string {
+  const { sourcePath: _sourcePath, ...contract } = task;
+  return `pre-dispatch-v1:${createHash("sha256").update(stableJson(contract)).digest("hex")}`;
 }
 
 export type RepairDispatchAction =
@@ -108,18 +143,51 @@ export function readPriorRefusal(stateRoot: string, taskId: string): PriorRefusa
       typeof (raw as { verdict?: unknown }).verdict === "string" &&
       typeof (raw as { attempts?: unknown }).attempts === "number" &&
       (typeof (raw as { escalated?: unknown }).escalated === "undefined" ||
-        typeof (raw as { escalated?: unknown }).escalated === "boolean")
+        typeof (raw as { escalated?: unknown }).escalated === "boolean") &&
+      (typeof (raw as { preDispatchContractRevision?: unknown }).preDispatchContractRevision === "undefined" ||
+        (typeof (raw as { preDispatchContractRevision?: unknown }).preDispatchContractRevision === "string" &&
+          (raw as { preDispatchContractRevision: string }).preDispatchContractRevision.length > 0))
     ) {
       return {
         verdict: (raw as { verdict: string }).verdict,
         attempts: (raw as { attempts: number }).attempts,
         escalated: (raw as { escalated?: boolean }).escalated === true,
+        ...(typeof (raw as { preDispatchContractRevision?: unknown }).preDispatchContractRevision === "string"
+          ? { preDispatchContractRevision: (raw as { preDispatchContractRevision: string }).preDispatchContractRevision }
+          : {}),
       };
     }
     return undefined; // present but not this shape: read as "never refused before".
   } catch {
     return undefined; // absent or corrupt: read as "never refused before", per this file's own doc.
   }
+}
+
+/**
+ * Read terminal records once per daemon selection pass. The directory itself is the bounded index:
+ * no ledger scan and no failed open per plan task. A missing, unreadable, corrupt, legacy or
+ * over-cap record is absent from the result, deliberately re-offering work rather than suppressing
+ * it on an assumption.
+ */
+export function terminalPreDispatchRefusalRevisions(stateRoot: string): ReadonlyMap<string, string> {
+  let entries: string[];
+  try {
+    entries = readdirSync(join(stateRoot, "dispatch-repair"))
+      .filter((entry) => entry.endsWith(".json"))
+      .sort()
+      .slice(0, MAX_TERMINAL_PRE_DISPATCH_REFUSALS);
+  } catch {
+    // Deliberate: a missing or unreadable state directory is not evidence that any task was held,
+    // so this reader returns no suppressions rather than manufacturing a terminal refusal.
+    return new Map();
+  }
+  const out = new Map<string, string>();
+  for (const entry of entries) {
+    const taskId = entry.slice(0, -".json".length);
+    const prior = readPriorRefusal(stateRoot, taskId);
+    if (prior?.escalated === true && prior.preDispatchContractRevision) out.set(taskId, prior.preDispatchContractRevision);
+  }
+  return out;
 }
 
 /** Durable, atomic write of the ONE refusal record this module reads back on the next tick. */
@@ -144,16 +212,21 @@ export function repairRefusedTask(
   writePrior: (taskId: string, prior: PriorRefusal) => void,
   dispatchRepairLane: (input: { taskId: string; verdict: string; progress: boolean }) => void,
   escalate: (input: { taskId: string; verdict: string; attempts: number }) => void,
+  currentPreDispatchContractRevision?: string,
 ): RepairDispatchAction {
   const verdict = refusalVerdictText(violations);
   const prior = readPrior(taskId);
   const action = decideRepairDispatch(taskId, verdict, prior);
   if (action.kind === "dispatch_repair") {
     dispatchRepairLane({ taskId, verdict, progress: action.progress });
-    writePrior(taskId, { verdict, attempts: 1, escalated: false });
+    writePrior(taskId, { verdict, attempts: 1, escalated: false, ...(currentPreDispatchContractRevision ? { preDispatchContractRevision: currentPreDispatchContractRevision } : {}) });
   } else if (action.kind === "escalate") {
     escalate({ taskId, verdict, attempts: action.attempts });
-    writePrior(taskId, { verdict, attempts: action.attempts, escalated: true });
+    writePrior(taskId, { verdict, attempts: action.attempts, escalated: true, ...(currentPreDispatchContractRevision ? { preDispatchContractRevision: currentPreDispatchContractRevision } : {}) });
+  } else if (prior && currentPreDispatchContractRevision && prior.preDispatchContractRevision !== currentPreDispatchContractRevision) {
+    // A legacy record or a corrected task earns exactly one re-offer. If the re-offer reaches this
+    // terminal same-verdict hold, advance only the identity; never dispatch, repair or escalate again.
+    writePrior(taskId, { ...prior, preDispatchContractRevision: currentPreDispatchContractRevision });
   }
   return action;
 }
