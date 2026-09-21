@@ -22316,11 +22316,11 @@ export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementati
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
  *  now under the SAME filter too — see {@link creditIsReconcilable}. */
-function defaultCreditedMergedIds(): Set<string> {
-  const config = loadConfig();
+function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot): Set<string> {
+  const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   return new Set(
     buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
   );
@@ -24321,6 +24321,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
    *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
   ratifications?: Ratifications;
   coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
+  /** W1-T3970: keep the production credit read injectable so offline cadence fixtures do not
+   * accidentally shell out to the live GitHub projection. */
+  creditedMergedIds?: () => ReadonlySet<string>;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -24366,7 +24369,10 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       const planReconcile = buildPlanReconcileCadenceInput({
         checkoutRoot: repoRoot,
         readShards: () => readPlanShards(join(repoRoot, "plan", "tasks.d")),
-        creditedMergedIds: defaultCreditedMergedIds,
+        // Keep the cadence's explicit config/root boundary. The hook is testable with an
+        // injected Config, and an unattended target must never fall back to the operator's HOME
+        // config just because the credit projection is evaluated lazily.
+        creditedMergedIds: deps.creditedMergedIds ?? (() => defaultCreditedMergedIds(configFor(), repoRoot)),
         land: (inputs) => {
           const landing = landPlanReconcileShards(repoRoot, inputs, {
             targetRepository: resolveOwnerRepo(),
