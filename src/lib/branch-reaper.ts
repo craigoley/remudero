@@ -183,34 +183,22 @@ export function planReverseBranchDrift(
 }
 
 /**
- * `rmd reap-branches` — the DRY RUN. Reports which remote branches WOULD be deletable, which are
- * guarded and why, and which are held; ledgers the answer; and DELETES NOTHING.
+ * `rmd reap-branches` — the report/prune command. Reports which remote branches are deletable,
+ * guarded and why, and which are held; ledgers the answer; and deletes only with `--prune`.
  *
- * IT DELETES NOTHING ON PURPOSE, and that is the deliverable rather than a staging step. Deletion
- * is irreversible from the fleet's side — restoring needs the sha — and this repo has four bounds
- * that fired on healthy conditions; a fifth that removed branches would be the worst of them. The
- * operator gets the one command that replaces a hand sweep, which is the actual goal, without the
- * fleet ever holding the delete.
- *
- * THE MANIFEST IS PRINTED, sha and name together, because that is the only thing that makes a
- * future deleting version reversible (`git push origin <sha>:refs/heads/<name>`). It goes to
- * STDOUT, never `state/` — that path is gitignored and is where 29 cited reports went to die.
- *
- * EXITS NON-ZERO ON DRIFT: a branch the name grep guards that `DECLARED_BRANCH_GUARDS` omits fails
- * the run rather than being reported in passing, the `ci-parity:drift` shape.
+ * The CLI defaults to dry run; the automatic full-sweep adapter invokes this same classifier and
+ * active-head screen with `--prune`. Its printed sha/name manifest makes each delete reversible,
+ * and unknown SHAs are never deleted. Guard drift still exits non-zero without vetoing the prune.
  */
 
 // ── the orphaned-head COUNT (W1-T2690) ────────────────────────────────────────────────────────
 
 /**
- * W1-T448 priced the REAP (~8 `gh api` `state=all` pages, 6.4s) and ruled — correctly, and this
- * does not re-litigate it — that wiring it into every sweep pass costs too much for an answer
- * that "only changes when a branch is created or merged." IT NEVER PRICED THE CHECK FOR WHETHER
- * IT IS TIME TO RUN THE MANUAL VERB. Measured 2026-09-02: `remoteBranchNames`'s own
- * `git ls-remote --heads origin` answers that in 670ms as ONE request, no `gh api` page at all.
- * The count below is that cheap question, kept deliberately separate from `planBranchReap`
- * (`lib/status.ts`): it counts, it classifies no guard, and it deletes nothing — same "reports
- * only" position as `reapBranchesCommand` two doc-comments up.
+ * W1-T448's cost finding still shapes the automatic rung: a full reap is expensive, while
+ * `remoteBranchNames`'s own `git ls-remote --heads origin` is the cheap one-request trigger. The
+ * automatic adapter runs that cheap check every full sweep and calls the full classifier only on
+ * first use, a branch-set change, or the six-hour bound. The count below remains a read-only
+ * helper, kept separate from `planBranchReap` (`lib/status.ts`) and the executing adapter.
  *
  * ANCESTRY ALONE OVERCOUNTS AS "SAFE" HERE, which is why it is a conjunct and never the whole
  * test: `main` only squash-merges (measured: eight consecutive single-parent commits on it), so a
@@ -317,6 +305,48 @@ export interface BranchManifestEntry {
  * whatever the branch's age, and gating it would withhold branches that are genuinely finished.
  */
 export const NO_PR_EVIDENCE_REASONS: readonly string[] = ["tip_in_main", "patch_id_equivalent"];
+
+/** Cheap `git ls-remote` fingerprints trigger the expensive classifier on first use, branch-set
+ * change, or this bound; keeping the policy here gives every repo target one tested cadence. */
+export const AUTOMATIC_BRANCH_REAP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+export interface AutomaticBranchReapState {
+  lastRunAtMs?: number;
+  lastBranchFingerprint?: string;
+}
+
+export interface AutomaticBranchReapDecision {
+  fire: boolean;
+  reason: "first-pass" | "branch-set-changed" | "interval-elapsed" | "unchanged";
+  branchFingerprint: string;
+}
+
+/** Stable, order-independent identity for the remote branch corpus. */
+export function branchNamesFingerprint(names: readonly string[]): string {
+  return [...new Set(names)].sort().join("\u0000");
+}
+
+/**
+ * Decide whether the expensive automatic reaper should run. An empty listing is deliberately not
+ * accepted here: callers must refuse an unreadable/empty corpus before invoking this function,
+ * because an empty fingerprint would otherwise look like a legitimate branch deletion event.
+ */
+export function decideAutomaticBranchReap(
+  state: AutomaticBranchReapState,
+  names: readonly string[],
+  nowMs: number,
+  intervalMs: number = AUTOMATIC_BRANCH_REAP_INTERVAL_MS,
+): AutomaticBranchReapDecision {
+  const branchFingerprint = branchNamesFingerprint(names);
+  if (state.lastRunAtMs === undefined) return { fire: true, reason: "first-pass", branchFingerprint };
+  if (state.lastBranchFingerprint !== branchFingerprint) {
+    return { fire: true, reason: "branch-set-changed", branchFingerprint };
+  }
+  if (nowMs - state.lastRunAtMs >= intervalMs) {
+    return { fire: true, reason: "interval-elapsed", branchFingerprint };
+  }
+  return { fire: false, reason: "unchanged", branchFingerprint };
+}
 
 export interface BranchPruneOutcome {
   readonly deleted: readonly string[];
