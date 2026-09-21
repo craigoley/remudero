@@ -41,10 +41,6 @@
       proof: "grep: expiring-fixture: exempt -- compared only against in test/an-open-pr-does-not-rot-while-it-waits.test.ts"
     - claim: "the plan-invalidation frozen-clock literal carries an explicit exemption reason"
       proof: "grep: expiring-fixture: exempt -- compared only against in test/plan-resequence-pr-invalidation.test.ts"
-    - claim: "the frozen-clock production-shaped tests still exercise their original dispositions"
-      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
-    - claim: "the plan-invalidation fixture still uses its explicit test clock"
-      proof: "unit test: test/plan-resequence-pr-invalidation.test.ts"
   falsifier: |
     Remove any one exemption marker and run the census against the real wall clock: the corresponding
     line must reappear as an expiring crossing. Change a reason so it no longer identifies an
