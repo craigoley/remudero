@@ -309,7 +309,7 @@ function listedChangedFiles(body: string): string[] | undefined {
 }
 
 /**
- * W1-T3362 — does this diff CONTRIBUTE the plan record (`plan/tasks.d/<taskId>-*.yaml`) for `taskId`?
+ * W1-T3362 — does this diff CONTRIBUTE the task's own plan shard for `taskId`?
  * That is exactly the refusal condition of the shipped `files-and-credits-the-same-task` gate
  * (`filingSelfCreditCheck`, lib/review.ts): a PR that introduces a task's record cannot be that task's
  * implementation, so a `Remudero-Task: <taskId>` trailer on it is a self-credit. Path-only, like
