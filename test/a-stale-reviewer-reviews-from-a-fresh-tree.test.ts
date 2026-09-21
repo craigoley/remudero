@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -140,11 +140,14 @@ test("the child's exit code is returned verbatim, so a real review failure still
 // here; this drives the PRODUCTION wiring itself so it is not left an uncalled construction-only
 // closure (the shape diff-coverage.mjs flags on an added line lcov never sees hit).
 
-test("spawnRmdReviewForFreshTree runs a real child process and resolves to its exit code", async () => {
+test("spawnRmdReviewForFreshTree executes the fresh tree's bash rmd wrapper and resolves to its exit code", async () => {
   const dir = makeTempDir("t3723-fresh-tree-spawn");
   mkdirSync(join(dir, "bin"), { recursive: true });
-  // argv: [node, <bin/rmd>, "review", "5883", "7"] — "review" is fixed by spawnRmdReviewForFreshTree.
-  writeFileSync(join(dir, "bin", "rmd"), "process.exit(Number(process.argv[4]));\n");
+  const wrapper = join(dir, "bin", "rmd");
+  // The shell grammar deliberately makes the old `process.execPath <bin/rmd>` form fail:
+  // the real wrapper must be executed directly and receive the fixed `review` subcommand.
+  writeFileSync(wrapper, '#!/usr/bin/env bash\nif [ "$1" != "review" ]; then exit 41; fi\nif [ "$2" != "5883" ]; then exit 42; fi\nexit "$3"\n');
+  chmodSync(wrapper, 0o755);
   const code = await spawnRmdReviewForFreshTree(dir, ["5883", "7"]);
-  assert.equal(code, 7, "the child's own exit code must come back verbatim");
+  assert.equal(code, 7, "the executable wrapper's own exit code must come back verbatim");
 });

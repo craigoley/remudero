@@ -1449,7 +1449,7 @@ export function buildFreshTreeReviewRunner(
 
 export function spawnRmdReviewForFreshTree(worktree: string, args: string[]): Promise<number> {
   return new Promise<number>((resolve, reject) => {
-    const child = spawn(process.execPath, [join(worktree, "bin", "rmd"), "review", ...args], {
+    const child = spawn(join(worktree, "bin", "rmd"), ["review", ...args], {
       cwd: worktree,
       stdio: "inherit",
       // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
