@@ -3615,7 +3615,10 @@ export const REQUIRED_CHECK_FAIL = new Set([
 export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
   const latest = new Map<string, T>();
   for (const c of rollup) {
-    const key = c.name ?? c.context ?? "";
+    // An empty `name` is the transport's "not a check run" placeholder, not a check identity.
+    // Fall through to `context` so a status-context attempt and a check-run attempt with the same
+    // logical name cannot leave a superseded failure in the repair reader's input.
+    const key = c.name || c.context || "";
     const prior = latest.get(key);
     if (!prior || (c.startedAt ?? "") >= (prior.startedAt ?? "")) latest.set(key, c);
   }

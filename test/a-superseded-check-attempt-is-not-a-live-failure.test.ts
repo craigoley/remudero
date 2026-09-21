@@ -55,6 +55,24 @@ test("the reported attempt is the most recent for its check name", () => {
   assert.deepEqual(readJobs, ["102"], "only the latest attempt's job log is actionable");
 });
 
+test("an empty check-run name does not hide the later attempt's shared status-context name", () => {
+  const readJobs: string[] = [];
+  const failures = readFailures(
+    [
+      {
+        ...attempt("2026-09-04T13:49:20Z", "101", "FAILURE"),
+        name: "",
+        context: "acceptance-author-gate",
+      },
+      attempt("2026-09-04T13:50:02Z", "102", "SUCCESS"),
+    ],
+    readJobs,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(readJobs, [], "the superseded failure must not trigger a job-log read");
+});
+
 test("a single failed attempt with no later run is still actionable", () => {
   const readJobs: string[] = [];
   const failures = readFailures([attempt("2026-09-04T13:49:20Z", "103", "FAILURE")], readJobs);
