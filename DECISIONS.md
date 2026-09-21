@@ -2838,6 +2838,9 @@ These five entries are permanent authority records, not new rulings. Each fenced
 feedback entry's `raw` field verbatim, and each provenance line says `re-recorded from plan/feedback`
 so the authority survives the draining feedback queue.
 
+**Operator-authored authority record:** these are re-recorded from the operator's accepted or
+rejected feedback rulings; no new direction is introduced here.
+
 ### fb-1784894405468-a4153e
 
 **Provenance:** re-recorded from plan/feedback/fb-1784894405468-a4153e.yaml.
