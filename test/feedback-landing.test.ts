@@ -411,7 +411,7 @@ function setupTriageWiringFixture(): { home: string; configRoot: string; savedHo
   // "EEXIST fallback READS the existing config" test.
   const configDir = join(home, ".config", "remudero");
   mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: REPO_ROOT }, null, 2));
   process.env.HOME = home;
 
   // `triageCommand` resolves `repo` from THIS actual checkout's real origin url

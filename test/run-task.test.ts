@@ -127,6 +127,7 @@ import {
   type OpenPrView,
   type RepairFilingCapture,
 } from "../src/lib/sweep.js";
+
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
@@ -136,6 +137,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 import { changedTaskIds } from "../src/lib/task-linter.js";
 
+const FIXTURE_INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 /** An injected {@link PrHeadGateway} fixture — no `gh` exec, a fixed answer per PR url. */
@@ -282,7 +284,7 @@ test(
     const root = mkdtempSync(join(tmpdir(), "runtask-followup-root-"));
     const planPath = join(root, "tasks.yaml");
     writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
 
     const { repoDir } = followupGitFixture(root);
     void repoDir; // runTask derives the identical path itself from config.root + task.repo
@@ -551,7 +553,7 @@ test("W1-T191: runTask's DECISION_REQUEST branch calls the injectable recordDeci
   const root = mkdtempSync(join(tmpdir(), "runtask-decision-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000001;
@@ -631,7 +633,7 @@ test("W1-T191: runTask's DECISION_REQUEST branch never calls recordDecision for 
   const root = mkdtempSync(join(tmpdir(), "runtask-decision-lowrisk-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000002;
@@ -1166,7 +1168,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run that transients across every retr
   const root = mkdtempSync(join(tmpdir(), "runtask-transient-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000010;
@@ -1226,7 +1228,7 @@ test("run-task's spawn wrapper appends the wrapped spawnWorker's pre-execution w
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-assignment-root-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000011;
@@ -1309,7 +1311,7 @@ test("BEHAVIORAL (W1-T7B): two real implement strikes dispatch a DIAGNOSE worker
   const root = mkdtempSync(join(tmpdir(), "runtask-diagnose-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000020;
@@ -1407,7 +1409,7 @@ test("BEHAVIORAL (W1-T7B): a run that never strikes twice (a clean first attempt
   const root = mkdtempSync(join(tmpdir(), "runtask-diagnose-clean-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000021;
@@ -1461,7 +1463,7 @@ test("BEHAVIORAL (W1-T7B): error_max_budget_usd is NEVER retried — dollars are
   const root = mkdtempSync(join(tmpdir(), "runtask-diagnose-budget-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000022;
@@ -1521,7 +1523,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run whose implement worker commits IN
   const root = mkdtempSync(join(tmpdir(), "runtask-noprurl-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN); // declares files: [src/lib/daemon.ts]
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000011;
@@ -1604,7 +1606,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run whose fix rung burns every strike
   const root = mkdtempSync(join(tmpdir(), "runtask-fixrung-exhausted-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000012;
@@ -1682,7 +1684,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run whose PR goes MERGED before the f
   const root = mkdtempSync(join(tmpdir(), "runtask-fixrung-stooddown-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000013;
@@ -1750,7 +1752,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
   const root = mkdtempSync(join(tmpdir(), "runtask-merged-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000014;
@@ -1830,7 +1832,7 @@ test("BEHAVIORAL (W1-T382): a real runTask run whose merge poll never moves reac
   const root = mkdtempSync(join(tmpdir(), "runtask-pollgate-stall-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000015;
@@ -1919,7 +1921,7 @@ test("BEHAVIORAL (recon-GK): a real runTask run whose fetchPrBody THROWS falls b
   const root = mkdtempSync(join(tmpdir(), "runtask-bodyfetcherr-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000016;
@@ -2002,7 +2004,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run past the risk judge whose FINAL p
   const root = mkdtempSync(join(tmpdir(), "runtask-blockedci-final-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: FIXTURE_INSTALL_ROOT };
   followupGitFixture(root);
 
   const FIXED_TS = 1785000000015;
@@ -2355,7 +2357,7 @@ test("W1-T70 (end-to-end): reviewCommand resolves the LAST-LINE trailer id (not 
   let seenTaskId: string | undefined;
   const exitCode = await reviewCommand("999", ["--override-capped-by", "op", "--override-capped-reason", "manual"], {
     fetchView: () => view,
-    loadConfig: () => ({ claudeBin: "/bin/true", root: configRoot }) as Config,
+    loadConfig: () => ({ claudeBin: "/bin/true", root: configRoot, installRoot: FIXTURE_INSTALL_ROOT }) as Config,
     materialize: () => ({
       worktreePath: undefined,
       failure: { errorClass: "fetch-failure", message: "e2e fixture: never actually attempted" },
@@ -2658,7 +2660,7 @@ const OFFLINE_GITHUB: GitHub = {
 };
 
 function drainFixtureConfig(): Config {
-  return { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-drain-gw-root-")) };
+  return { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-drain-gw-root-")), installRoot: FIXTURE_INSTALL_ROOT };
 }
 
 function drainFixturePlanPath(): string {
@@ -6724,7 +6726,7 @@ test("reconCommand: a bad --phase value (not \"recon\") or missing target dir fa
 // touches `loadConfig()` (unavailable in CI) or shells a real Agent SDK spawn, same DI shape
 // as `runTask`'s own `opts.spawn ?? spawnWorker` / `opts.config ?? loadConfig()`. ────────────
 
-const RECON_LENS_FAKE_CONFIG: Config = { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-recon-lens-config-")) };
+const RECON_LENS_FAKE_CONFIG: Config = { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-recon-lens-config-")), installRoot: FIXTURE_INSTALL_ROOT };
 
 /** A probeContainment `exec` that always reports the outside write OS-denied — matches
  *  test/containment.test.ts's own `denyingExec` fixture shape. */

@@ -432,7 +432,7 @@ async function withGrillFailHarness(
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
-      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: REPO_ROOT }, null, 2),
     );
     process.env.HOME = home;
 

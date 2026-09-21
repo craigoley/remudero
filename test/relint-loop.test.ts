@@ -407,7 +407,7 @@ async function withLane(seedExtra: ((seed: string) => void) | undefined, body: (
   const savedPath = process.env.PATH;
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot, installRoot: REPO_ROOT }, null, 2));
     process.env.HOME = home;
     const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
     const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];

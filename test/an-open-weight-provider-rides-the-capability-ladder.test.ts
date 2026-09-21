@@ -427,7 +427,7 @@ test("draftProposalBatch reaches the mount-derived inbox args through an offline
 
     const outcomes = await draftProposalBatch(
       [{ id: "mount-affinity:offline", summary: "exercise the wiring", evidenceAnchors: [] }] as never,
-      { claudeBin: "/bin/true", root },
+      { claudeBin: "/bin/true", root, installRoot: REPO_ROOT },
       "owner",
       "repo",
       "MOUNT-AFFINITY-DRAFT",
