@@ -520,6 +520,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T1212: run-task.ts derives `updatedForWorkflow` from this row's `stale_workflow` field;
   // dropping it re-selects the same stale-gate PR every pass, spending the head for nothing.
   "sweep.update_branch.updated",
+  // W1-T1015: reviewOrphansFor joins the successful update row to the reviewed old head. The
+  // attempted/conflict/error siblings are retained with it so rotation cannot erase the evidence
+  // that an update was attempted but did not mint a new head; only `.updated` suppresses an orphan.
+  "sweep.update_branch.attempted",
+  "sweep.update_branch.conflict",
+  "sweep.update_branch.error",
   // W1-T1235: `latestGhRateLimitRefusalsFromLedger` (run-task.ts) reads the newest row per bucket
   // for `rmd status`'s GITHUB BUCKETS section. Kept here, not in the render set, because GitHub's
   // resets outlast RENDER_STEP_RETENTION_WINDOW_MS and an operator needs the LAST refusal however
