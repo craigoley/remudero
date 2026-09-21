@@ -7,6 +7,7 @@
  * cannot turn a browser-local decision into apparent learning.
  */
 
+import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import type { Route } from "./service.js";
 import { clockFromMillisFn } from "./clock.js";
@@ -76,6 +77,10 @@ export const OPERATOR_AGENT_PROMOTION_DECISION_STEP = "panel.operator_agent_prom
 export const OPERATOR_AGENT_PROMOTION_ADVANCE_STEP = "panel.operator_agent_promotion_advance";
 export const OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP = "panel.operator_agent_promotion_rollback";
 export const OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP = "panel.operator_agent_consequence_preflight";
+export const CONTEXT_ITEM_VERSION = "context-item-v1" as const;
+export const CONTEXT_ITEM_STEP = "panel.context_item";
+export const CONTEXT_REVOKED_STEP = "panel.context_revoked";
+export const CONTEXT_DELETED_STEP = "panel.context_deleted";
 /** W1-T3883: one bounded handoff — issue, accept, and act all verified through
  *  executeBoundedDelegation( before this ledgers — never a raw prompt or secret, only the
  *  resulting {@link DelegationReceipt}. */
@@ -89,6 +94,64 @@ export const OPERATOR_AGENT_DECISIONS = ["accepted", "rejected", "more-info"] as
 export type OperatorAgentDecision = (typeof OPERATOR_AGENT_DECISIONS)[number];
 
 export type OperatorAgentFreshness = "verified" | "stale" | "unavailable";
+
+export type ContextFreshness = "fresh" | "stale" | "unavailable";
+export type ContextSensitivity = "low" | "moderate" | "high" | "restricted";
+export type ContextVisibility = "private" | "operator" | "shared";
+export type ContextRevocationState = "active" | "revoked";
+export type ContextAvailability = "available" | "stale" | "unavailable" | "revoked" | "deleted";
+
+export interface ContextRetention {
+  policy: string;
+  expiresAt: string;
+}
+
+/** The durable, bounded envelope for assistant memory. `content` is deliberately an internal
+ * field: HTTP projections use {@link contextInventoryItem} and never return it to a browser. */
+export interface ContextItem {
+  version: typeof CONTEXT_ITEM_VERSION;
+  contextId: string;
+  source: string;
+  principal: string;
+  purpose: string;
+  sensitivity: ContextSensitivity;
+  authorityRef: string;
+  observedAt: string;
+  freshness: ContextFreshness;
+  retention: ContextRetention;
+  visibility: ContextVisibility;
+  derivationLinks: string[];
+  revocation: { state: ContextRevocationState; revokedAt?: string; reason?: string };
+  content: string;
+}
+
+export interface ContextInventoryItem extends Omit<ContextItem, "content"> {
+  availability: ContextAvailability;
+  deletionReceipt?: ContextDeletionReceipt;
+}
+
+export type ContextOperation = "revoke" | "delete";
+
+export interface ContextDeletionReceipt {
+  receiptId: string;
+  contextId: string;
+  operation: ContextOperation;
+  at: string;
+  authorityRef: string;
+  affectedDerivations: number;
+}
+
+export interface ContextReadQuery {
+  purpose: string;
+  authorityRef: string;
+  now?: number;
+}
+
+export interface ContextReadResult {
+  items: ContextItem[];
+  stale: string[];
+  absent: boolean;
+}
 
 export interface OperatorAgentEvidence {
   label: string;
@@ -308,6 +371,191 @@ function validFreshness(value: unknown): value is OperatorAgentFreshness {
 
 function safeExperimentText(value: unknown, max: number): value is string {
   return boundedString(value, max) && !/(?:bearer|token|secret|password|api[_-]?key|sk-[A-Za-z0-9])/i.test(value);
+}
+
+const MAX_CONTEXT_ID = 160;
+const MAX_CONTEXT_FIELD = 320;
+const MAX_CONTEXT_CONTENT = 4_000;
+const MAX_CONTEXT_LINKS = 20;
+const MAX_CONTEXT_REASON = 500;
+
+function validContextFreshness(value: unknown): value is ContextFreshness {
+  return value === "fresh" || value === "stale" || value === "unavailable";
+}
+
+function validContextSensitivity(value: unknown): value is ContextSensitivity {
+  return value === "low" || value === "moderate" || value === "high" || value === "restricted";
+}
+
+function validContextVisibility(value: unknown): value is ContextVisibility {
+  return value === "private" || value === "operator" || value === "shared";
+}
+
+function validateContextItem(value: unknown): ContextItem | null {
+  if (!isRecord(value) || value.version !== CONTEXT_ITEM_VERSION) return null;
+  if (!boundedString(value.contextId, MAX_CONTEXT_ID)) return null;
+  if (!boundedString(value.source, MAX_CONTEXT_FIELD) || !boundedString(value.principal, MAX_CONTEXT_FIELD)) return null;
+  if (!boundedString(value.purpose, MAX_CONTEXT_FIELD) || !validContextSensitivity(value.sensitivity)) return null;
+  if (!boundedString(value.authorityRef, MAX_CONTEXT_FIELD) || !iso(value.observedAt)) return null;
+  if (!validContextFreshness(value.freshness) || !validContextVisibility(value.visibility)) return null;
+  if (!isRecord(value.retention) || !boundedString(value.retention.policy, MAX_CONTEXT_FIELD) || !iso(value.retention.expiresAt)) return null;
+  if (!Array.isArray(value.derivationLinks) || value.derivationLinks.length > MAX_CONTEXT_LINKS) return null;
+  if (!value.derivationLinks.every((link) => boundedString(link, MAX_CONTEXT_ID))) return null;
+  if (!isRecord(value.revocation) || value.revocation.state !== "active") return null;
+  if (!boundedString(value.content, MAX_CONTEXT_CONTENT)) return null;
+  return {
+    version: CONTEXT_ITEM_VERSION,
+    contextId: value.contextId.trim(),
+    source: value.source.trim(),
+    principal: value.principal.trim(),
+    purpose: value.purpose.trim(),
+    sensitivity: value.sensitivity,
+    authorityRef: value.authorityRef.trim(),
+    observedAt: new Date(value.observedAt).toISOString(),
+    freshness: value.freshness,
+    retention: { policy: value.retention.policy.trim(), expiresAt: new Date(value.retention.expiresAt).toISOString() },
+    visibility: value.visibility,
+    derivationLinks: value.derivationLinks.map((link) => link.trim()),
+    revocation: { state: "active" },
+    content: value.content.trim(),
+  };
+}
+
+function validateContextAction(value: unknown): { error: string } | { contextId: string; authorityRef: string; reason?: string } {
+  if (!isRecord(value)) return { error: "body must be a JSON object" };
+  if (!boundedString(value.contextId, MAX_CONTEXT_ID)) return { error: "contextId is required" };
+  if (!boundedString(value.authorityRef, MAX_CONTEXT_FIELD)) return { error: "authorityRef is required" };
+  if (value.reason !== undefined && !boundedString(value.reason, MAX_CONTEXT_REASON)) return { error: "reason must be a bounded string" };
+  return {
+    contextId: value.contextId.trim(),
+    authorityRef: value.authorityRef.trim(),
+    ...(value.reason ? { reason: value.reason.trim() } : {}),
+  };
+}
+
+function validateContextRegistration(value: unknown): { error: string } | { context: ContextItem } {
+  if (!isRecord(value)) return { error: "body must be a JSON object" };
+  const context = validateContextItem(value.context);
+  return context ? { context } : { error: "context must be a complete bounded context-item-v1 envelope" };
+}
+
+function contextRows(ledgerPath: string): Array<Record<string, unknown>> {
+  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: [CONTEXT_ITEM_STEP, CONTEXT_REVOKED_STEP, CONTEXT_DELETED_STEP],
+  }).rows;
+}
+
+interface ContextLedgerState {
+  items: Map<string, ContextItem>;
+  revocations: Map<string, { at: string; reason?: string; receipt?: ContextDeletionReceipt }>;
+  deletions: Map<string, ContextDeletionReceipt>;
+}
+
+function readContextLedgerState(ledgerPath: string): ContextLedgerState {
+  const items = new Map<string, ContextItem>();
+  const revocations = new Map<string, { at: string; reason?: string }>();
+  const deletions = new Map<string, ContextDeletionReceipt>();
+  for (const row of contextRows(ledgerPath)) {
+    if (row.step === CONTEXT_ITEM_STEP) {
+      const context = validateContextItem(row.context);
+      if (context && !items.has(context.contextId)) items.set(context.contextId, context);
+      continue;
+    }
+    if (!boundedString(row.context_id, MAX_CONTEXT_ID)) continue;
+    if (row.step === CONTEXT_REVOKED_STEP && iso(row.at)) {
+      const receipt = validateContextReceipt(row.receipt);
+      revocations.set(row.context_id, {
+        at: new Date(row.at).toISOString(),
+        ...(boundedString(row.reason, MAX_CONTEXT_REASON) ? { reason: row.reason.trim() } : {}),
+        ...(receipt ? { receipt } : {}),
+      });
+      continue;
+    }
+    if (row.step === CONTEXT_DELETED_STEP && isRecord(row.receipt)) {
+      const receipt = validateContextReceipt(row.receipt);
+      if (receipt) deletions.set(receipt.contextId, receipt);
+    }
+  }
+  return { items, revocations, deletions };
+}
+
+function validateContextReceipt(value: unknown): ContextDeletionReceipt | null {
+  if (!isRecord(value)) return null;
+  if (!boundedString(value.receiptId, MAX_CONTEXT_ID) || !boundedString(value.contextId, MAX_CONTEXT_ID)) return null;
+  if (value.operation !== "revoke" && value.operation !== "delete") return null;
+  if (!iso(value.at) || !boundedString(value.authorityRef, MAX_CONTEXT_FIELD)) return null;
+  if (typeof value.affectedDerivations !== "number" || !Number.isInteger(value.affectedDerivations) || value.affectedDerivations < 0) return null;
+  return {
+    receiptId: value.receiptId.trim(),
+    contextId: value.contextId.trim(),
+    operation: value.operation,
+    at: new Date(value.at).toISOString(),
+    authorityRef: value.authorityRef.trim(),
+    affectedDerivations: value.affectedDerivations,
+  };
+}
+
+function contextStatus(id: string, state: ContextLedgerState, now: number, stack = new Set<string>()): ContextAvailability {
+  if (state.deletions.has(id)) return "deleted";
+  if (state.revocations.has(id)) return "revoked";
+  const item = state.items.get(id);
+  if (!item) return "unavailable";
+  if (Date.parse(item.retention.expiresAt) <= now || item.freshness !== "fresh") return "stale";
+  if (stack.has(id)) return "unavailable";
+  stack.add(id);
+  const derivedUnavailable = item.derivationLinks.some((link) => contextStatus(link, state, now, new Set(stack)) !== "available");
+  return derivedUnavailable ? "unavailable" : "available";
+}
+
+function contextInventoryItem(item: ContextItem, state: ContextLedgerState, now: number): ContextInventoryItem {
+  const { content: _privateContent, ...metadata } = item;
+  const revoked = state.revocations.get(item.contextId);
+  const deletionReceipt = state.deletions.get(item.contextId);
+  return {
+    ...metadata,
+    revocation: revoked
+      ? { state: "revoked", revokedAt: revoked.at, ...(revoked.reason ? { reason: revoked.reason } : {}) }
+      : item.revocation,
+    availability: contextStatus(item.contextId, state, now),
+    ...(deletionReceipt ? { deletionReceipt } : revoked?.receipt ? { deletionReceipt: revoked.receipt } : {}),
+  };
+}
+
+export function readContextInventory(deps: OperatorAgentRouteDependencies): ContextInventoryItem[] {
+  const state = readContextLedgerState(deps.ledgerPath);
+  const now = deps.now?.() ?? Date.now();
+  return [...state.items.values()].map((item) => contextInventoryItem(item, state, now)).sort((a, b) => a.contextId.localeCompare(b.contextId));
+}
+
+/** Shared planning/action preflight. A context item is usable only with the current authority,
+ * exact declared purpose, fresh retention, and available derivation inputs. */
+export function filterContextItems(items: readonly ContextItem[], query: ContextReadQuery): ContextReadResult {
+  const now = query.now ?? Date.now();
+  const matching = items.filter((item) => item.purpose === query.purpose && item.authorityRef === query.authorityRef);
+  const stale = matching.filter((item) => Date.parse(item.retention.expiresAt) <= now || item.freshness !== "fresh").map((item) => item.contextId);
+  const usable = matching.filter((item) => item.revocation.state === "active" && !stale.includes(item.contextId));
+  return { items: usable, stale, absent: matching.length === 0 };
+}
+
+export function readGovernedContext(deps: OperatorAgentRouteDependencies, query: ContextReadQuery): ContextReadResult {
+  const state = readContextLedgerState(deps.ledgerPath);
+  const now = query.now ?? deps.now?.() ?? Date.now();
+  const all = [...state.items.values()].filter((item) => contextStatus(item.contextId, state, now) === "available");
+  const result = filterContextItems(all, { ...query, now });
+  const matching = [...state.items.values()].filter((item) => item.purpose === query.purpose && item.authorityRef === query.authorityRef);
+  const unavailableStale = matching.filter((item) => contextStatus(item.contextId, state, now) === "stale").map((item) => item.contextId);
+  return { ...result, stale: [...new Set([...result.stale, ...unavailableStale])], absent: matching.length === 0 };
+}
+
+export const readPersonalContext = readGovernedContext;
+export const filterContextForPurpose = filterContextItems;
+
+function publicContext(item: ContextItem, state: ContextLedgerState, now: number): ContextInventoryItem {
+  return contextInventoryItem(item, state, now);
+}
+
+function contextReceiptId(contextId: string, operation: ContextOperation, at: string, count: number): string {
+  return `ctxr_${createHash("sha256").update(`${contextId}:${operation}:${at}:${count}`).digest("hex").slice(0, 24)}`;
 }
 
 function validExperimentOutcomeState(value: unknown): value is OperatorAgentExperimentOutcomeState {
@@ -909,6 +1157,146 @@ export function readOperatorAgentPromotions(deps: OperatorAgentRouteDependencies
 
 function findPromotion(deps: OperatorAgentRouteDependencies, promotionId: string): OperatorAgentPromotionHistory | undefined {
   return readOperatorAgentPromotions(deps).find((promotion) => promotion.promotionId === promotionId);
+}
+
+/** GET /v1/operator-agent/context — metadata-only inventory. Raw personal content never crosses
+ * this route; planning and action callers use {@link readGovernedContext} instead. */
+export function buildContextReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/context",
+    scope: "read",
+    sensitivity: "sensitive",
+    handler: (req, res) => {
+      const url = new URL(req.url ?? "/", "http://rmd.local");
+      const purpose = url.searchParams.get("purpose");
+      const authorityRef = url.searchParams.get("authorityRef");
+      const now = deps.now?.() ?? Date.now();
+      const items = readContextInventory(deps).filter((item) =>
+        (purpose === null || item.purpose === purpose) && (authorityRef === null || item.authorityRef === authorityRef),
+      );
+      const stale = items.filter((item) => item.availability === "stale").map((item) => item.contextId);
+      sendJson(res, 200, { items, stale, absent: items.length === 0, source: "ledger", asOf: new Date(now).toISOString() });
+    },
+  };
+}
+
+/** POST /v1/operator-agent/context — register one bounded memory envelope. */
+export function buildContextRegisterRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/context",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateContextRegistration, (input, req, res) => {
+      const state = readContextLedgerState(deps.ledgerPath);
+      const existing = state.items.get(input.context.contextId);
+      if (existing) {
+        if (state.deletions.has(input.context.contextId) || state.revocations.has(input.context.contextId)) {
+          sendJson(res, 409, { error: "conflict", detail: `context ${input.context.contextId} is no longer active and cannot be recreated` });
+          return;
+        }
+        if (JSON.stringify(existing) !== JSON.stringify(input.context)) {
+          sendJson(res, 409, { error: "conflict", detail: `contextId ${input.context.contextId} already names different context` });
+          return;
+        }
+        sendJson(res, 200, { ok: true, existing: true, context: publicContext(existing, state, deps.now?.() ?? Date.now()) });
+        return;
+      }
+      appendPanelLedger(deps.ledgerPath, CONTEXT_ITEM_STEP, input.context.contextId, bearerTokenId(req), { context: input.context });
+      state.items.set(input.context.contextId, input.context);
+      sendJson(res, 201, { ok: true, existing: false, context: publicContext(input.context, state, deps.now?.() ?? Date.now()) });
+    }),
+  };
+}
+
+function makeContextReceipt(contextId: string, operation: ContextOperation, authorityRef: string, state: ContextLedgerState, at: string): ContextDeletionReceipt {
+  const affectedDerivations = [...state.items.values()].filter((item) => item.derivationLinks.includes(contextId)).length;
+  return {
+    receiptId: contextReceiptId(contextId, operation, at, affectedDerivations),
+    contextId,
+    operation,
+    at,
+    authorityRef,
+    affectedDerivations,
+  };
+}
+
+/** POST /v1/operator-agent/context/revoke — append a durable, idempotent revocation receipt. */
+export function buildContextRevokeRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/context/revoke",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateContextAction, (input, req, res) => {
+      const state = readContextLedgerState(deps.ledgerPath);
+      const item = state.items.get(input.contextId);
+      if (!item) {
+        sendJson(res, 404, { error: "not_found", detail: `no context item "${input.contextId}"` });
+        return;
+      }
+      if (item.authorityRef !== input.authorityRef) {
+        sendJson(res, 403, { error: "forbidden", detail: "authorityRef does not match the context item" });
+        return;
+      }
+      if (state.deletions.has(input.contextId)) {
+        sendJson(res, 409, { error: "conflict", detail: `context ${input.contextId} is deleted` });
+        return;
+      }
+      const existing = state.revocations.get(input.contextId)?.receipt;
+      if (existing) {
+        sendJson(res, 200, { ok: true, existing: true, receipt: existing });
+        return;
+      }
+      const at = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const receipt = makeContextReceipt(input.contextId, "revoke", input.authorityRef, state, at);
+      appendPanelLedger(deps.ledgerPath, CONTEXT_REVOKED_STEP, input.contextId, bearerTokenId(req), {
+        context_id: input.contextId,
+        authority_ref: input.authorityRef,
+        at,
+        ...(input.reason ? { reason: input.reason } : {}),
+        receipt,
+      });
+      sendJson(res, 200, { ok: true, existing: false, receipt });
+    }),
+  };
+}
+
+/** POST /v1/operator-agent/context/delete — append a durable deletion receipt. */
+export function buildContextDeleteRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/context/delete",
+    scope: "write",
+    tier: "middle",
+    handler: jsonAction(validateContextAction, (input, req, res) => {
+      const state = readContextLedgerState(deps.ledgerPath);
+      const item = state.items.get(input.contextId);
+      if (!item) {
+        sendJson(res, 404, { error: "not_found", detail: `no context item "${input.contextId}"` });
+        return;
+      }
+      if (item.authorityRef !== input.authorityRef) {
+        sendJson(res, 403, { error: "forbidden", detail: "authorityRef does not match the context item" });
+        return;
+      }
+      const existing = state.deletions.get(input.contextId);
+      if (existing) {
+        sendJson(res, 200, { ok: true, existing: true, receipt: existing });
+        return;
+      }
+      const at = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const receipt = makeContextReceipt(input.contextId, "delete", input.authorityRef, state, at);
+      appendPanelLedger(deps.ledgerPath, CONTEXT_DELETED_STEP, input.contextId, bearerTokenId(req), {
+        context_id: input.contextId,
+        authority_ref: input.authorityRef,
+        at,
+        receipt,
+      });
+      sendJson(res, 200, { ok: true, existing: false, receipt });
+    }),
+  };
 }
 
 /** GET /v1/operator-agent/proposals — durable proposal and operator-decision history. */
@@ -1568,6 +1956,10 @@ export function buildOperatorAgentDelegationHandoffRoute(deps: OperatorAgentRout
 
 export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): Route[] {
   return [
+    buildContextReadRoute(deps),
+    buildContextRegisterRoute(deps),
+    buildContextRevokeRoute(deps),
+    buildContextDeleteRoute(deps),
     buildOperatorAgentProposalReadRoute(deps),
     buildOperatorAgentProposalRegisterRoute(deps),
     buildOperatorAgentDecisionRoute(deps),

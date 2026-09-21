@@ -157,6 +157,18 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only consequence-policy preflight receipt; classification, confirmation, financial, approval, and receipt behavior are covered in test/consequence-policy-*.test.ts",
   ],
   [
+    "POST /v1/operator-agent/context",
+    "ledger-only context inventory write; governed context behavior and durable receipts are covered in test/context-governance-*.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/context/revoke",
+    "ledger-only context revocation write; revocation behavior and restart persistence are covered in test/context-governance-*.test.ts",
+  ],
+  [
+    "POST /v1/operator-agent/context/delete",
+    "ledger-only context deletion write; deletion behavior and bounded receipts are covered in test/context-governance-*.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/delegation/handoff",
     "ledger-only delegation handoff receipt; envelope, replay, human-gate, and receipt behavior are covered in test/agent-delegation-*.test.ts",
   ],

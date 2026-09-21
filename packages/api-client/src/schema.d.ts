@@ -299,6 +299,77 @@ export interface components {
       proposals: (OperatorAgentHistory)[];
       source: "ledger";
     };
+    ContextRetention: {
+      policy: string;
+      expiresAt: string;
+    };
+    ContextRevocation: {
+      state: "active" | "revoked";
+      revokedAt?: string;
+      reason?: string;
+    };
+    /** Bounded context-item-v1 memory. Content is accepted only for the assistant's internal reader and is never returned by the metadata inventory route. */
+    ContextItem: {
+      version: "context-item-v1";
+      contextId: string;
+      source: string;
+      principal: string;
+      purpose: string;
+      sensitivity: "low" | "moderate" | "high" | "restricted";
+      authorityRef: string;
+      observedAt: string;
+      freshness: "fresh" | "stale" | "unavailable";
+      retention: ContextRetention;
+      visibility: "private" | "operator" | "shared";
+      derivationLinks: (string)[];
+      revocation: ContextRevocation;
+      content: string;
+    };
+    ContextInventoryItem: {
+      version: "context-item-v1";
+      contextId: string;
+      source: string;
+      principal: string;
+      purpose: string;
+      sensitivity: "low" | "moderate" | "high" | "restricted";
+      authorityRef: string;
+      observedAt: string;
+      freshness: "fresh" | "stale" | "unavailable";
+      retention: ContextRetention;
+      visibility: "private" | "operator" | "shared";
+      derivationLinks: (string)[];
+      revocation: ContextRevocation;
+      availability: "available" | "stale" | "unavailable" | "revoked" | "deleted";
+      deletionReceipt?: ContextReceipt;
+    };
+    ContextReceipt: {
+      receiptId: string;
+      contextId: string;
+      operation: "revoke" | "delete";
+      at: string;
+      authorityRef: string;
+      affectedDerivations: number;
+    };
+    ContextReceiptResult: {
+      ok: true;
+      existing: boolean;
+      receipt: ContextReceipt;
+    };
+    ContextList: {
+      items: (ContextInventoryItem)[];
+      stale: (string)[];
+      absent: boolean;
+      source: "ledger";
+      asOf: string;
+    };
+    ContextRegistration: {
+      context: ContextItem;
+    };
+    ContextActionRequest: {
+      contextId: string;
+      authorityRef: string;
+      reason?: string;
+    };
     OperatorAgentProposalRegistration: {
       proposal: OperatorAgentProposal;
     };
@@ -871,6 +942,48 @@ export interface paths {
     post: {
       responses: {
           "200": ProposalDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/context": {
+    get: {
+      responses: {
+          "200": ContextList;
+          "401": Error;
+          "403": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": undefined;
+          "201": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/context/revoke": {
+    post: {
+      responses: {
+          "200": ContextReceiptResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/context/delete": {
+    post: {
+      responses: {
+          "200": ContextReceiptResult;
           "400": Error;
           "401": Error;
           "403": Error;
