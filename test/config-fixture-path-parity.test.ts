@@ -42,7 +42,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +53,10 @@ import {
   renderFixtureConfigPathViolation,
   type FixtureConfigPathViolation,
 } from "../src/lib/config.js";
+import { defaultReconRunLens } from "../src/run-task.js";
+import type { ProbeExecResult } from "../src/lib/containment.js";
+import type { WorkerResult } from "../src/lib/worker.js";
+import type { Config } from "../src/lib/config-schema.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -410,4 +414,65 @@ test("the claude lookup names the config path when `which` succeeds but resolves
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
   }
+});
+
+test("a mounts-only target renders worker settings from the daemon install root", async () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "rmd-worker-settings-roots-"));
+  const targetRoot = join(fixtureRoot, "target");
+  const installRoot = join(fixtureRoot, "daemon-install");
+  const targetMounts = join(targetRoot, ".remudero", "mounts.yaml");
+  const installSettings = join(installRoot, "settings", "worker.json");
+  const installHooks = join(installRoot, "hooks");
+  mkdirSync(join(targetRoot, ".remudero"), { recursive: true });
+  mkdirSync(join(installRoot, "settings"), { recursive: true });
+  mkdirSync(installHooks, { recursive: true });
+  writeFileSync(targetMounts, "mounts: []\n");
+  writeFileSync(installSettings, readFileSync(join(REPO_ROOT, "settings", "worker.json"), "utf8"));
+
+  const config: Config = {
+    claudeBin: "/usr/bin/true",
+    root: join(fixtureRoot, "state"),
+    installRoot,
+  };
+  const probeExec = (token: string): Promise<ProbeExecResult> =>
+    Promise.resolve({
+      transcript: `touch ../${token}.txt: Operation not permitted`,
+      outsideWriteCreated: false,
+      insideWriteCreated: true,
+      costUsd: 0,
+    });
+  let renderedSettings = "";
+  const runLens = defaultReconRunLens(targetRoot, "acme-corp", "mounts-only", {
+    config,
+    probeExec,
+    spawn: async (opts): Promise<WorkerResult> => {
+      renderedSettings = readFileSync(opts.settingsFile, "utf8");
+      return {
+        sessionId: "mounts-only",
+        costUsd: 0,
+        numTurns: 1,
+        text: "RECON_FINDING: settings loaded",
+        blocks: [],
+        stderr: "",
+        subtype: "success",
+        isError: false,
+        apiError: false,
+        permissionDenials: [],
+        childEnvKeys: [],
+        model: "default",
+        effort: "default",
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+        modelUsage: {},
+        compactionEvents: [],
+        qualitySuspect: false,
+      };
+    },
+  });
+
+  assert.equal(await runLens("security"), "RECON_FINDING: settings loaded");
+  assert.match(renderedSettings, new RegExp(escapeRegExp(installHooks)));
+  assert.doesNotMatch(renderedSettings, new RegExp(escapeRegExp(join(REPO_ROOT, "hooks"))));
+  assert.equal(existsSync(targetMounts), true, "the target mount policy remains present");
+  assert.equal(existsSync(join(targetRoot, "settings", "worker.json")), false);
+  assert.equal(existsSync(join(targetRoot, "hooks")), false);
 });
