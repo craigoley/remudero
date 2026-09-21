@@ -7,9 +7,12 @@ import {
   type GatePostureOutcome,
 } from "../src/lib/gate-posture.js";
 import {
+  buildSourceSizeGatePostureRuntime,
   reportWorkerSourceSizeFollowupWithGatePosture,
+  sourceSizeGateFollowupConsumer,
   type SourceSizeGatePostureResult,
 } from "../src/run-task.js";
+import { spawnWorker } from "../src/lib/worker.js";
 import type { ConsumeSourceSizeFollowupArgs, ConsumeSourceSizeFollowupResult } from "../src/lib/source-size-followup.js";
 import type { RiskJudgeResult, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 
@@ -114,6 +117,26 @@ test("W1-T3954: material source-size facts reach the judge, which can file exact
   assert.deepEqual(decision.extra?.reasons, ["maintainability debt is bounded and should be filed"]);
   assert.equal(decision.extra?.confidence, 0.91);
   assert.doesNotMatch(JSON.stringify(decision.extra), /large-module|before_lines|after_lines/);
+});
+
+test("W1-T3954: LAND records a deferred follow-up without invoking the bounded writer", async () => {
+  const { rows } = baseLog();
+  const said: string[] = [];
+  const result = await reportWorkerSourceSizeFollowupWithGatePosture(
+    args(() => summary([hotspot()])),
+    (step, extra) => rows.push({ step, extra }),
+    (message) => said.push(message),
+    {
+      runRiskJudge: async () => judged("LAND", ["the maintainability follow-up can wait"]),
+      consume: () => {
+        throw new Error("LAND must not invoke the follow-up writer");
+      },
+    },
+  );
+  assert.equal(result.decision.outcome, "LAND");
+  assert.equal(result.followup, undefined);
+  assert.equal(rows.at(-1)?.step, "source_size.followup.deferred");
+  assert.match(said[0] ?? "", /implementation remains unblocked/);
 });
 
 test("W1-T3954: healthy and non-selected source-size paths do not spawn a judge", async () => {
@@ -238,6 +261,51 @@ test("W1-T3954: recoverable STOP is routed to debt, but an unrecoverable STOP re
   const stopped = await decideGatePosture({ finding: security }, { runRiskJudge: async () => judged("STOP") });
   assert.equal(stopped.outcome, "STOP");
   assert.equal(stopped.fallback, false);
+
+  const repairFallback = await decideGatePosture(
+    { finding: { ...recoverable, currentConsequence: "REPAIR" } },
+    { runRiskJudge: async () => judged("REPAIR"), repair: () => undefined },
+  );
+  assert.equal(repairFallback.outcome, "REPAIR");
+  assert.equal(repairFallback.fallback, true);
+});
+
+test("W1-T3954: production wiring reuses the runtime seam and degrades when mount setup is unavailable", () => {
+  const successRows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const runtime = buildSourceSizeGatePostureRuntime(
+    process.cwd(),
+    process.cwd(),
+    "/tmp/rmd-w1-t3954-settings.json",
+    spawnWorker,
+    (step, extra) => successRows.push({ step, extra }),
+    () => undefined,
+  );
+  assert.equal(typeof runtime.judge, "function");
+  assert.equal(typeof runtime.consume, "function");
+
+  const failureRows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const unavailable = buildSourceSizeGatePostureRuntime(
+    "/tmp/rmd-w1-t3954-missing-repo",
+    process.cwd(),
+    "/tmp/rmd-w1-t3954-settings.json",
+    spawnWorker,
+    (step, extra) => failureRows.push({ step, extra }),
+    () => undefined,
+  );
+  assert.deepEqual(unavailable, {});
+  assert.equal(failureRows.at(-1)?.step, "gate_posture.judge_unavailable");
+
+  const fallback = sourceSizeGateFollowupConsumer(
+    args(() => summary([])),
+    () => undefined,
+    () => undefined,
+    () => undefined,
+  );
+  assert.deepEqual(fallback, {
+    action: "error",
+    reason: "filing_failed",
+    detail: "source-size follow-up consumer returned no result",
+  });
 });
 
 test("W1-T3954: a bounded production-shaped run records the operator ruling before the side effect", async () => {

@@ -12461,6 +12461,53 @@ export interface SourceSizeGatePostureResult {
   followup?: ConsumeSourceSizeFollowupResult;
 }
 
+export function sourceSizeGateFollowupConsumer(
+  input: ConsumeSourceSizeFollowupArgs,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+  report: typeof reportWorkerSourceSizeFollowup = reportWorkerSourceSizeFollowup,
+): ConsumeSourceSizeFollowupResult {
+  return (
+    report(input, log, say) ?? {
+      action: "error",
+      reason: "filing_failed",
+      detail: "source-size follow-up consumer returned no result",
+    }
+  );
+}
+
+export function buildSourceSizeGatePostureRuntime(
+  repoRoot: string,
+  worktreePath: string,
+  settingsFile: string,
+  spawn: typeof spawnWorker,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+): SourceSizeGatePostureRuntime {
+  try {
+    const spend = riskJudgeSpendCollector();
+    return {
+      runRiskJudge,
+      spend,
+      judge: realRiskJudge({
+        mount: resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))),
+        cwd: worktreePath,
+        settingsFile,
+        spawn,
+        spend,
+        log: (step, extra) => log(step, extra),
+      }),
+      consume: (input) => sourceSizeGateFollowupConsumer(input, log, say),
+    };
+  } catch (error) {
+    log("gate_posture.judge_unavailable", {
+      gate: "ci:source-size",
+      reason: `source-size judge setup unavailable — ${String((error as Error)?.message ?? error)}`,
+    });
+    return {};
+  }
+}
+
 function sourceSizeFollowupDebtResult(result: ConsumeSourceSizeFollowupResult | undefined): string | undefined {
   if (result?.action === "filed") return `feedback:${result.feedbackId}`;
   // A duplicate is the successful retry outcome for this pilot: the durable signature already
@@ -14449,35 +14496,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
-      let gatePostureDeps: SourceSizeGatePostureRuntime = {};
-      try {
-        const spend = riskJudgeSpendCollector();
-        gatePostureDeps = {
-          runRiskJudge,
-          spend,
-          judge: realRiskJudge({
-            mount: resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))),
-            cwd: worktreePath,
-            settingsFile,
-            spawn,
-            spend,
-            log: (step, extra) => log(step, extra),
-          }),
-          consume: (input) =>
-            reportWorkerSourceSizeFollowup(input, log, say) ?? {
-              action: "error",
-              reason: "filing_failed",
-              detail: "source-size follow-up consumer returned no result",
-            },
-        };
-      } catch (error) {
-        log("gate_posture.judge_unavailable", {
-          gate: "ci:source-size",
-          reason: `source-size judge setup unavailable — ${String((error as Error)?.message ?? error)}`,
-        });
-      }
+      const gatePostureDeps = buildSourceSizeGatePostureRuntime(repoRoot, worktreePath, settingsFile, spawn, log, say);
       // Keep the wrapper call in the worker-return window so the worktree and summary are still
       // present; its injected consumer above remains the existing source-size writer.
+      // The production adapter still owns the existing reportWorkerSourceSizeFollowup( consumer;
+      // the gate posture layer only decides whether to invoke that same bounded writer.
       await reportWorkerSourceSizeFollowupWithGatePosture(
         {
           root: repoDir,
