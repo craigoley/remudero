@@ -61,7 +61,7 @@ import {
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
-import type { GitHub } from "./status.js";
+import type { GhFailureReason, GitHub } from "./status.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -847,6 +847,8 @@ export function renderConsoleTimeSeriesHtml(snapshot: ConsoleTimeSeriesSnapshot)
 }
 
 export interface ConsoleResponseStaleness {
+  /** The response's own data-status, distinct from the transport/cache headers. */
+  status: "fresh" | "stale" | "unavailable";
   stale: boolean;
   ageMs: number | null;
   generatedAt: string | null;
@@ -879,8 +881,10 @@ const BLOCKING_REQUEST_PATH_SYMBOLS = [
 ] as const;
 
 function responseStaleness(nowMs: number, generatedAtMs: number | undefined, refreshing: boolean, budgetMs: number, reason?: string): ConsoleResponseStaleness {
+  const stale = generatedAtMs === undefined || nowMs - generatedAtMs > budgetMs;
   return {
-    stale: generatedAtMs === undefined || nowMs - generatedAtMs > budgetMs,
+    status: generatedAtMs === undefined ? "unavailable" : stale ? "stale" : "fresh",
+    stale,
     ageMs: generatedAtMs === undefined ? null : Math.max(0, nowMs - generatedAtMs),
     generatedAt: generatedAtMs === undefined ? null : fixedClock(generatedAtMs).iso(),
     refreshing,
@@ -949,6 +953,11 @@ export function projectConsoleStatusResponse(body: unknown): unknown {
 }
 
 function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: ConsoleResponseStaleness): BoardSnapshot & { staleness: ConsoleResponseStaleness } {
+  // W1-T3925: `staleness.reason` only carries a value once `route.handler` has actually thrown
+  // (see `refresh`'s `catch` below). Its absence here means the live read is simply still
+  // running past budget — cold cache or an event-loop-blocked read, never observed to have
+  // failed — so labelling it "transport" would fabricate a cause nobody saw (design note iv).
+  const unavailableReason: GhFailureReason = staleness.reason ? "transport" : "not_yet_collected";
   const tasks: BoardRow[] = deps.plan.tasks.map((task) => ({
     taskId: task.id,
     title: task.title,
@@ -957,7 +966,7 @@ function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: Conso
     merged: false,
     source: "throttled",
     indeterminate: true,
-    unavailableReason: "transport",
+    unavailableReason,
   }));
   return {
     generated_at: fixedClock(nowMs).iso(),
@@ -1127,11 +1136,28 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
   return {
     ...route,
     handler: async (req, res) => {
+      // W1-T3925: THE DEADLINE IS ARMED BEFORE `refresh(req)` IS CALLED, never after. Calling an
+      // async function runs its body SYNCHRONOUSLY up to its first internal `await` — so a
+      // `route.handler` that is itself synchronous (or synchronous for a long stretch, e.g. a
+      // cold read with no cache to serve, or an event-loop-blocking scan) runs to completion, or
+      // to its first yield, entirely inside this call to `refresh(req)`, before returning control
+      // here at all. Registering the fallback `setTimeout` AFTER that call would silently start
+      // counting budgetMs from AFTER the expensive work already finished, adding the two
+      // durations together instead of racing them. Arming it first keeps the deadline pinned to
+      // this request's actual arrival time, so a same-turn expensive read can only ever cost the
+      // client its own duration, never that duration PLUS another full budget window on top.
+      // W1-T3925 round 2: the deadline `setTimeout` handle is captured and cleared the instant the
+      // race settles — win or lose — rather than left to fire on its own `budgetMs` later. An
+      // uncleared handle stays a live libuv timer for up to `budgetMs` after this handler has
+      // already returned a response, which is a real (if small) open handle every request leaks;
+      // clearing it here is a strict cleanup with no effect on which branch of the race wins.
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<"budget">((resolve) => {
+        deadlineTimer = setTimeout(() => resolve("budget"), budgetMs);
+      });
       const refreshDone = refresh(req);
-      const outcome = await Promise.race([
-        refreshDone.then(() => "ready" as const),
-        new Promise<"budget">((resolve) => setTimeout(() => resolve("budget"), budgetMs)),
-      ]);
+      const outcome = await Promise.race([refreshDone.then(() => "ready" as const), deadline]);
+      clearTimeout(deadlineTimer);
       if (outcome === "ready" && cached) {
         writeBufferedResponse(res, cached, responseStaleness(systemClock.now(), cached.generatedAtMs, refreshing, budgetMs, lastError));
         return;
@@ -1141,6 +1167,7 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
       // deriving only from age made the boundary millisecond nondeterministically report `fresh`.
       const staleness = {
         ...responseStaleness(systemClock.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError),
+        status: cached ? ("stale" as const) : ("unavailable" as const),
         stale: true,
       };
       if (cached) {

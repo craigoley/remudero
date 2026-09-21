@@ -63,8 +63,10 @@ export type StatusSource =
   | "throttled";
 
 /** The CLASSIFIED reason a `gh` read failed (W1-T119; buffer overflow from the error `code`, W1-T181). Unknown
- *  still counts as UNAVAILABLE — absence is the costly conclusion. */
-export type GhFailureReason = "rate_limit" | "auth" | "transport" | "buffer_overflow" | "unknown";
+ *  still counts as UNAVAILABLE — absence is the costly conclusion. `not_yet_collected` (W1-T3925) is NOT a
+ *  failure: it marks a cold console-read cache that has never finished a first live read, so a caller can tell
+ *  "still collecting" apart from "the read broke" instead of both fabricating the same "transport" cause. */
+export type GhFailureReason = "rate_limit" | "auth" | "transport" | "buffer_overflow" | "unknown" | "not_yet_collected";
 
 /** The states {@link GitHub.readFailed}/{@link GitHub.readFailureReason} cannot express (W1-T2219): a boolean
  *  plus a reason cannot tell "not attempted" or "in flight" from a confirmed-clean read. */
