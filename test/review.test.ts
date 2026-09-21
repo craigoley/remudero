@@ -3039,7 +3039,7 @@ esac
   }
 });
 
-test("W1-T3969: the advisory reviewer has a quiet-stream bound and ledgers abandonment", () => {
+test("the advisory reviewer has a quiet-stream bound and ledgers abandonment", () => {
   const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   assert.match(
     source,
