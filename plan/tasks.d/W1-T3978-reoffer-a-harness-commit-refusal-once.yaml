@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 40.00
-  files: [src/run-task.ts, src/lib/daemon.ts, src/lib/status.ts, src/lib/ledger.ts, test/harness-commit-refusal-retry.test.ts]
+  files: [src/run-task.ts, src/lib/daemon.ts, src/lib/status.ts, src/lib/ledger.ts, scripts/test-tier-manifest.json, test/harness-commit-refusal-retry.test.ts]
   origin: "operator-session#three-daemon-followup-2026-09-21"
   plan_refs: ["W1-T12a", "W1-T75", "W1-T115", "W1-T143", "W1-T147", "W1-T151", "W1-T160", "W1-T298", "W1-T3565", "W1-T3696", "W1-T3793", "W1-T3868", "W1-T465", "W1-T2910"]
   status: queued
@@ -110,7 +110,9 @@
     Rule 25 CHECKED: none of `src/run-task.ts`, `src/lib/daemon.ts`, `src/lib/status.ts`, or
     `src/lib/ledger.ts` is an instrument surface. The new test is product-path evidence; no
     baseline, workflow, review, or mutation configuration rides with it.
-    `risk: high`, `band_meaning: blast-radius` because the decision governs whether a failed
+    `scripts/test-tier-manifest.json` is included because the new regression suite must be
+    admitted to the same fast/slow test selection gate as every other test file. `risk: high`,
+    `band_meaning: blast-radius` because the decision governs whether a failed
     implementation becomes eligible for another paid worker run. The implementation must make
     the retry narrower, not cheaper-looking by silently admitting unrelated no-pr outcomes.
     Reservation evidence: `rmd-id reservation 52303@Mac-mini 2026-09-21T19:54:19.935Z` recorded
