@@ -84,6 +84,14 @@ test("bash -n: the committed script parses", () => {
   assert.equal(r.status, 0, r.stderr);
 });
 
+test("retired heartbeat-mini exits before reading state or publishing", () => {
+  const beat = runBeat({ env: { RMD_HEARTBEAT_BRANCH: "heartbeat-mini" } });
+  assert.equal(beat.status, 0);
+  assert.equal(beat.stdout, "");
+  assert.match(beat.stderr, /heartbeat-mini is retired; no write performed/);
+  assert.deepEqual(beat.calls, [], "a retired scheduler must not invoke git or any probe");
+});
+
 test("a beat publishes via git PLUMBING only — no porcelain, so a live checkout is never dirtied", () => {
   const beat = runBeat({ ledger: MIXED_LEDGER });
   assert.equal(beat.status, 0, `${beat.stdout}\n${beat.stderr}`);
@@ -232,6 +240,17 @@ test("MUTANT: a dry run that still pushes is caught", () => {
   assert.equal(beat.calls.filter((c) => sub(c) === "push").length, 1, "the mutant pushes despite the dry-run flag");
 });
 
+test("MUTANT: a retired heartbeat-mini that continues past the guard is caught", () => {
+  const beat = runBeat({
+    env: { RMD_HEARTBEAT_BRANCH: "heartbeat-mini" },
+    mutate: [
+      'if [ "$BRANCH" = "heartbeat-mini" ]; then\n  echo "fleet-heartbeat: heartbeat-mini is retired; no write performed." >&2\n  exit 0\nfi',
+      'if [ "$BRANCH" = "heartbeat-mini" ]; then\n  echo "fleet-heartbeat: heartbeat-mini is retired; no write performed." >&2\nfi',
+    ],
+  });
+  assert.notDeepEqual(beat.calls, [], "the mutant must reach the old probe/publish path");
+});
+
 // ── THE BRANCH THAT WILL ACTUALLY RUN ON THE MINI, AND HAS NEVER RUN ANYWHERE ─────────────────
 // `epoch_of` tries GNU `date -u -d` first and falls back to BSD `date -u -j -f`. Every test above
 // runs on Linux, so every one of them takes the GNU branch. The mini is macOS — it takes the OTHER
@@ -239,6 +258,11 @@ test("MUTANT: a dry run that still pushes is caught", () => {
 // exercise that branch has ever had.
 
 /** A `date` that behaves like BSD/macOS: `-d` is rejected, `-j -f` parses. */
+const SYSTEM_DATE = process.platform === "darwin" ? "/bin/date" : "/usr/bin/date";
+const BSD_PARSE =
+  process.platform === "darwin"
+    ? `exec ${SYSTEM_DATE} -u -j -f "$4" "$5" "$6"`
+    : `exec ${SYSTEM_DATE} -u -d "$5" "$6"`;
 const BSD_DATE = [
   "#!/usr/bin/env bash",
   "# BSD date: -d is not a parse flag and fails; -j -f is the parser.",
@@ -246,9 +270,9 @@ const BSD_DATE = [
   "# re-execs this stub forever. That hung the suite twice before it was caught.",
   'for a in "$@"; do [ "$a" = "-d" ] && exit 1; done',
   'if [ "$1" = "-u" ] && [ "$2" = "-j" ] && [ "$3" = "-f" ]; then',
-  '  exec /usr/bin/date -u -d "$5" "$6"',
+  `  ${BSD_PARSE}`,
   "fi",
-  'exec /usr/bin/date "$@"',
+  `exec ${SYSTEM_DATE} "$@"`,
   "",
 ].join("\n");
 
@@ -280,8 +304,8 @@ test("FINDING: a `date` that ACCEPTS -d but ignores it makes every beat report a
   const IGNORES_D = [
     "#!/usr/bin/env bash",
     "# A `date` that accepts -d and ignores it, returning NOW — the unsafe-but-plausible variant.",
-    'for a in "$@"; do if [ "$a" = "-d" ]; then exec /usr/bin/date -u +%s; fi; done',
-    'exec /usr/bin/date "$@"',
+    `for a in "$@"; do if [ "$a" = "-d" ]; then exec ${SYSTEM_DATE} -u +%s; fi; done`,
+    `exec ${SYSTEM_DATE} "$@"`,
     "",
   ].join("\n");
   const stale = [`{"ts":"${iso(72 * 3600_000)}","step":"daemon.idle","note":"three days old"}`];
