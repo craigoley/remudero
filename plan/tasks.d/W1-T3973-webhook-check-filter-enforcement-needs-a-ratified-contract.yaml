@@ -1,0 +1,57 @@
+- id: W1-T3973
+  title: "Successful-check webhook filtering cannot move from shadow to enforce compliantly because the shipped test pins shadow, the policy carries no enforce ratification, and shadow evidence has no check-run head identity"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 80.00
+  origin: operator-session#daemon-continuity-2026-09-21
+  plan_refs: ["W1-T3089", "W1-T2741", "W1-T2579", "W1-T2568"]
+  files: [src/lib/github-event-wake.ts, src/lib/policy.ts, plan/policy.yaml, test/a-successful-leaf-check-is-not-a-full-sweep.test.ts, test/github-event-wake-enforcement-contract.test.ts]
+  rationale: |
+    W1-T3089 is merged and stays closed. Its design explicitly permits a later policy-only switch
+    from shadow to enforce after a full UTC day of complete observations. Current source makes that
+    promise unfulfillable: its test asserts the committed policy value is shadow, so a one-row
+    policy switch fails CI. Worse, policy validation accepts enforce as a bare enum with no
+    operator-ratified evidence, while semantic_check_summary records class counts but not the
+    check-run head sha needed to establish that every merged PR head received an actionable
+    aggregate transition. The malformed activation PR #6429 must not be manually merged.
+  design: |
+    Replace the shipped-value test pin with a contract: shadow loads without a ratification;
+    enforce requires a complete, operator-authored ratification. Add a validated policy row with a
+    full-UTC-day evidence window ending before the ratifying commit, class counts and aggregate
+    covered-versus-total merged heads. Missing, partial, sub-day or uncovered evidence fails loud.
+    This task ships the contract and leaves semanticCheckMode at shadow; a later PR then changes
+    only plan/policy.yaml.
+
+    Extend accepted check-run classification with named head identity extraction. Keep a bounded
+    per-aggregate set of observed head shas in the semantic summary; overflow must be counted, not
+    silently dropped. A missing or malformed identity remains actionable exactly as today. Do not
+    change HMAC validation, repository validation, marker atomicity, settle behavior, STOP/PAUSE
+    ownership or add a Serve GitHub read.
+  acceptance:
+    - claim: "shadow loads without ratification and enforce loads only with a complete ratification"
+      proof: "grep: webhook enforce requires complete ratification in test/github-event-wake-enforcement-contract.test.ts"
+    - claim: "missing, partial, sub-day and uncovered enforce ratifications fail policy loading"
+      proof: "grep: webhook enforce refuses incomplete ratification in test/github-event-wake-enforcement-contract.test.ts"
+    - claim: "accepted aggregate summaries retain bounded check-run head identity while missing identity remains actionable"
+      proof: "grep: webhook summaries preserve bounded head identity in test/github-event-wake-enforcement-contract.test.ts"
+    - claim: "all existing shadow, enforce, fork-payload and serve-wiring controls remain valid"
+      proof: "unit test: enforce mode suppresses successful leaves without a marker"
+    - claim: "head extraction is named and used by the classifier"
+      proof: "grep: checkRunHeadIdentity( in src/lib/github-event-wake.ts"
+  falsifier: |
+    Close the contract half if a policy-only shadow-to-enforce change currently passes the focused
+    W1-T3089 test. Close the evidence half if accepted semantic summaries already carry check-run
+    head identity under another name. After implementation, make missing-ratification validation
+    unconditionally accept and remove the extractor separately; the corresponding tests must fail.
+    Do not activate enforce in this task, rebase #6429, or write a retrospective reader here.
+  status: queued
+  attempts: 0
+  note: |
+    High risk is required because this spans webhook admission, policy authority and evidence used
+    to suppress queue wakeups. The later activation is intentionally a one-row operator-ratified
+    policy PR, not part of this build.
+    reservation hand-off: run-PLAN-create-1790016115247 -> codex/plan-daemon-recovery-followups
