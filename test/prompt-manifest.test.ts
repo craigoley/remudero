@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { buildPromptManifest, type PromptManifestInput } from "../src/lib/prompt-manifest.js";
-import { implementPromptParts, renderImplementPrompt } from "../src/run-task.js";
+import { implementPromptParts, renderImplementPrompt, renderImplementPromptWithParts } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
 
 function task(over: Partial<Task> = {}): Task {
@@ -80,6 +80,16 @@ test("the rendered worker prompt is byte-identical with the manifest wired and w
   assert.equal(promptWithManifestComputed, promptAlone);
 });
 
+test("renderImplementPromptWithParts keeps the same default prompt as renderImplementPrompt", () => {
+  const t = task();
+  const args = [t, "recon text", "W1-T2297-1700000000000", "learnings text", "notes text"] as const;
+  const withParts = renderImplementPromptWithParts(...args);
+  const prompt = renderImplementPrompt(...args);
+
+  assert.equal(withParts.prompt, prompt);
+  assert.equal(withParts.parts.find((part) => part.name === "capability_context")?.value, "");
+});
+
 test("no manifest row ever carries prompt text", () => {
   const parts: PromptManifestInput[] = [
     { name: "recon", value: "OBSERVED: some very specific secret-looking recon text" },
@@ -131,10 +141,12 @@ test("implementPromptParts feeds the SAME five named context parts renderImpleme
   // W1-T2761: `rule_headlines` joins the array too (empty here — this call passes no
   // `ruleHeadlinesPart` argument), right after `doctrine` per design (ii)'s stable-prefix order.
   // W1-T3101: `skills` joins it on the SAME terms — empty here, and placed beside
-  // `matched_learnings` because both are injected knowledge spending one budget. This list is the
-  // manifest's contract, so a new part MUST be added here or the fingerprint stops describing what
-  // the worker received; W1-T2761's edit above set that precedent.
-  assert.deepEqual(names, ["doctrine", "rule_headlines", "task_claims", "recon", "operator_notes", "matched_learnings", "skills", "task_body"]);
+  // `matched_learnings` because both are injected knowledge spending one budget. W1-T3880:
+  // `capability_context` joins LAST, just ahead of `task_body` — a RECORD of capability grants
+  // used/refused earlier in the run, not injected knowledge. This list is the manifest's
+  // contract, so a new part MUST be added here or the fingerprint stops describing what the
+  // worker received; W1-T2761's edit above set that precedent.
+  assert.deepEqual(names, ["doctrine", "rule_headlines", "task_claims", "recon", "operator_notes", "matched_learnings", "skills", "capability_context", "task_body"]);
 
   const manifest = buildPromptManifest(parts);
   assert.equal(manifest.find((r) => r.name === "recon")?.present, true);

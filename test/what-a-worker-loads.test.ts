@@ -96,8 +96,9 @@ test("W1-T2759: the implement prompt over a fixture task carries no line from CL
   // passes no `ruleHeadlinesPart` argument (the `workerRuleHeadlines.enabled` row is absent/off
   // by default) — this test's own premise ("carries no line from CLAUDE.md's rule bullets")
   // still holds by construction below, since an empty part value contributes nothing.
-  // W1-T3101 adds `skills` before the task body; this test is about what the prompt LOADS, and
-  // its own claim (no CLAUDE.md rule-bullet text leaks in) is asserted separately below.
+  // W1-T3101 adds `skills` before the task body; W1-T3880 adds `capability_context` after it,
+  // still before the task body. This test is about what the prompt LOADS, and its own claim (no
+  // CLAUDE.md rule-bullet text leaks in) is asserted separately below.
   assert.deepEqual(names, [
     "doctrine",
     "rule_headlines",
@@ -106,6 +107,7 @@ test("W1-T2759: the implement prompt over a fixture task carries no line from CL
     "operator_notes",
     "matched_learnings",
     "skills",
+    "capability_context",
     "task_body",
   ]);
   const rendered = parts.map((p) => p.value).join("\n");

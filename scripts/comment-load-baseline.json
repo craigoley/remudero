@@ -161,6 +161,7 @@
   "src/lib/body-repair.ts": 250,
   "src/lib/branch-reaper.ts": 223,
   "src/lib/bundle.ts": 250,
+  "src/lib/capability-grant.ts": 250,
   "src/lib/cash-web-bridge.ts": 250,
   "src/lib/ci-control-plane.ts": 250,
   "src/lib/ci-failure-corpus.ts": 250,

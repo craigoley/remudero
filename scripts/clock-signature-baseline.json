@@ -24,6 +24,11 @@
     "legacy": 0,
     "newDate": 2
   },
+  "src/lib/capability-grant.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 2
+  },
   "src/lib/ci-parity.ts": {
     "dateNow": 1,
     "legacy": 1,
