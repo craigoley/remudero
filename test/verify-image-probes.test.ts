@@ -490,6 +490,7 @@ test("the Codex version check passes the pinned CLI value", () => {
 });
 
 test("the Dockerfile installs and executes the declared Claude and Codex pins in one layer", () => {
+  // Dependabot owns the deploy lockfile; this assertion keeps the baked ARGs from drifting.
   const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
   const lockfile = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package-lock.json"), "utf8")) as {
     packages?: Record<string, { version?: string }>;
