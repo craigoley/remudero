@@ -643,6 +643,22 @@ test("W1-T184: computeRecentActivity classifies every ledger event class the des
   assert.equal(fixDone.numTurns, 38);
 });
 
+test("worker.activity reaches the bounded recent feed with tool identity, rationale, timing, and outcome", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "task one" })]);
+  appendFileSync(
+    ledgerPath,
+    `${JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "worker.activity", event_at: "2026-07-20T10:00:00Z", event_kind: "tool-executing", tool_name: "Bash", tool_reason: "run focused tests", tool_started_at: "2026-07-20T10:00:00Z" })}\n` +
+      `${JSON.stringify({ ts: "2026-07-20T10:00:02Z", run_id: "r1", task_id: "W1-T1", step: "worker.activity", event_at: "2026-07-20T10:00:02Z", event_kind: "message", tool_name: "Bash", tool_completed_at: "2026-07-20T10:00:02Z", tool_duration_ms: 2_000, tool_outcome: "success" })}\n`,
+  );
+  const entries = computeRecentActivity({ plan, ledgerPath, github: fakeGitHub() }, createRecentActivityCache());
+  assert.deepEqual(entries.map((entry) => entry.verb), ["worker", "worker"]);
+  assert.equal(entries[0]?.toolDurationMs, 2_000);
+  assert.equal(entries[0]?.toolOutcome, "success");
+  assert.equal(entries[0]?.toolName, "Bash");
+  assert.equal(entries[1]?.toolReason, "run focused tests");
+});
+
 test("W1-T184: GitHub outage renders the IDENTICAL activity feed as a healthy read — GitHub decorates (PR title), it never gates the row", () => {
   const ledgerPath = tmpLedgerPath();
   const plan = planOf([task({ id: "W1-T1", title: "a task" })]);

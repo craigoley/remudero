@@ -2421,6 +2421,18 @@ export interface WorkerStreamEvent {
    * label for `"tool-executing"`, and ABSENT for `"message"`, which carries no worker-authored output worth tailing (W1-T942
    * design note iv). */
   text?: string;
+  /** Structured tool identity for telemetry consumers. The human-readable `text` label remains
+   *  available for the bounded worker tail, but status/console readers must use this field rather
+   *  than parsing that label. */
+  toolName?: string;
+  /** A later non-tool message proves the prior tool call has ended. When the SDK exposes a
+   *  `tool_result` block, this is the bounded outcome classification; otherwise it is absent. */
+  toolOutcome?: "success" | "error";
+  /** Optional spawn attribution, added by lane-specific observers for the console. */
+  workerRole?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro";
+  provider?: string;
+  requestedModel?: string;
+  servedModel?: string;
   /** The cumulative count of raw `assistant`-type SDK messages seen so far this spawn: one increment per message however many
    * blocks it carries, so a message with both fires two events reporting the SAME count, and every event kind carries it so a
    * reader never holds a stale value. DELIBERATELY NOT NAMED `numTurns` — the terminal `num_turns` does not reliably count
@@ -2701,6 +2713,7 @@ export async function collectWorkerResult(
                 kind: "tool-executing",
                 tsMs: nowFn(),
                 text: toolName ? `[tool_use: ${toolName}]` : "[tool_use]",
+                ...(toolName ? { toolName } : {}),
                 turnsSoFar,
               });
               observedThisMessage = true;
@@ -2710,6 +2723,24 @@ export async function collectWorkerResult(
         // An assistant message with neither a text nor a tool_use block (e.g. thinking-only) is still a heartbeat — never
         // silently drop the quiet clock's reset.
         if (!observedThisMessage) opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
+      } else if (msg.type === "user") {
+        // Claude represents tool results as user messages. They are a heartbeat for the
+        // activity sensor, and their bounded success/error bit lets the console close the
+        // current tool span without exposing raw tool input or output.
+        const content = (msg.message as { content?: unknown })?.content;
+        const toolResult = Array.isArray(content)
+          ? content.find((block) => block && (block as { type?: string }).type === "tool_result") as
+              | { is_error?: boolean; isError?: boolean }
+              | undefined
+          : undefined;
+        opts.streamObserver?.({
+          kind: "message",
+          tsMs: nowFn(),
+          turnsSoFar,
+          ...(toolResult
+            ? { toolOutcome: toolResult.is_error === true || toolResult.isError === true ? "error" : "success" }
+            : {}),
+        });
       } else if (msg.type === "result") {
         const r = raw as {
           subtype: string;
