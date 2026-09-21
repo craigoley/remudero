@@ -43,7 +43,7 @@ function hotspot(path = "src/lib/large-module.ts"): Record<string, unknown> {
   };
 }
 
-function args(readSummary: () => string, sourceTask = "W1-T3801"): ConsumeSourceSizeFollowupArgs {
+function args(readSummary: () => string, sourceTask = "W1-T3954"): ConsumeSourceSizeFollowupArgs {
   return {
     root: "/repo",
     worktreeRoot: "/repo/worktree",
@@ -78,7 +78,7 @@ function baseLog() {
   };
 }
 
-test("W1-T3801: material source-size facts reach the judge, which can file exactly one bounded follow-up", async () => {
+test("W1-T3954: material source-size facts reach the judge, which can file exactly one bounded follow-up", async () => {
   let seenFinding: unknown;
   let consumeCalls = 0;
   const { rows, log } = baseLog();
@@ -116,7 +116,7 @@ test("W1-T3801: material source-size facts reach the judge, which can file exact
   assert.doesNotMatch(JSON.stringify(decision.extra), /large-module|before_lines|after_lines/);
 });
 
-test("W1-T3801: healthy and non-selected source-size paths do not spawn a judge", async () => {
+test("W1-T3954: healthy and non-selected source-size paths do not spawn a judge", async () => {
   let judgeCalls = 0;
   let consumeCalls = 0;
   const { log } = baseLog();
@@ -149,7 +149,7 @@ test("W1-T3801: healthy and non-selected source-size paths do not spawn a judge"
   assert.equal(genericJudgeCalls, 0);
 });
 
-test("W1-T3801: judge outage and malformed output restore the old follow-up behavior", async () => {
+test("W1-T3954: judge outage and malformed output restore the old follow-up behavior", async () => {
   for (const runRiskJudge of [
     async () => { throw new Error("judge unavailable"); },
     async () => ({
@@ -177,7 +177,7 @@ test("W1-T3801: judge outage and malformed output restore the old follow-up beha
   }
 });
 
-test("W1-T3801: side-effect failure falls back without retrying, while duplicate retry is successful", async () => {
+test("W1-T3954: side-effect failure falls back without retrying, while duplicate retry is successful", async () => {
   let failedCalls = 0;
   const failed = await reportWorkerSourceSizeFollowupWithGatePosture(
     args(() => summary([hotspot()])),
@@ -220,7 +220,7 @@ test("W1-T3801: side-effect failure falls back without retrying, while duplicate
   assert.equal(retry, 2);
 });
 
-test("W1-T3801: recoverable STOP is routed to debt, but an unrecoverable STOP remains STOP", async () => {
+test("W1-T3954: recoverable STOP is routed to debt, but an unrecoverable STOP remains STOP", async () => {
   const recoverable: GatePostureFinding = {
     gate: "ci:source-size",
     finding: "material hotspot",
@@ -240,7 +240,7 @@ test("W1-T3801: recoverable STOP is routed to debt, but an unrecoverable STOP re
   assert.equal(stopped.fallback, false);
 });
 
-test("W1-T3801: a bounded production-shaped run records the operator ruling before the side effect", async () => {
+test("W1-T3954: a bounded production-shaped run records the operator ruling before the side effect", async () => {
   const order: string[] = [];
   const result: SourceSizeGatePostureResult = await reportWorkerSourceSizeFollowupWithGatePosture(
     args(() => summary([hotspot("src/lib/worker.ts")])),

@@ -792,6 +792,7 @@
     "test/followup-settled-question-arm.test.ts": 1155,
     "test/fs-race-alerts.test.ts": 1453,
     "test/full-sweep-fix-head-of-line.test.ts": 1180,
+    "test/gate-posture-production-adapter.test.ts": 0,
     "test/gate-properties.test.ts": 1252,
     "test/gateway-lives-across-ticks.test.ts": 4753,
     "test/generated-text-message-standard.test.ts": 1053,
