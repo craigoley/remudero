@@ -51,6 +51,28 @@
     So an Architect must either credit these criteria to #159/#6096 or withdraw them. Until then
     the record stays `queued` and will keep attracting lanes that cannot finish it.
 
+    2026-09-21 ADDENDUM -- WHY THAT LAST SENTENCE IS URGENT, AND EXACTLY WHAT AN OPERATOR MUST
+    TYPE. A note cannot stop this: `runnableCandidates` -> `isDispatchEligible` reads status, deps
+    and the merged set, never prose, and `compareDispatch` sorts `priority:` ASCENDING with absent
+    last -- so at `priority: 2` this record sits near the FRONT of the dispatch order while being
+    impossible to finish. A third attempt is queued, not hypothetical.
+
+    Taking it out of dispatch was ATTEMPTED FROM A WORKER LANE AND REFUSED, correctly. Setting
+    `status: blocked` alone fails `lint-plan`'s `[blocked-task-disposition]`: "a retirement is an
+    operator act; nothing here infers one for you." Both exits are therefore gated to a human, by
+    design:
+
+      TO RETIRE IT     set `status: blocked` AND `retirement:` to one of retired|closed|withdrawn,
+                       and delete `priority: 2` (a blocked record with a priority trips
+                       `[dispatch-priority]` as a gravestone that can no longer affect ordering).
+
+      TO CREDIT IT     set `satisfied_by:` on each of the four criteria, citing #6096 (or #159).
+                       `plan.ts` marks that field Architect-only and `checkSatisfiedByGuard`
+                       admits the edit only from a PR that is plan-only AND human-authored.
+
+    Either is one plan-only commit. Doing neither is the only option that keeps spending: two
+    budgeted runs are already gone (#5843, #6389) and the record is still first in line.
+
     MEASURED 2026-09-16 on remudero-site. Timestamps are from the run-branch epochs and the REST
     record, not inferred:
 

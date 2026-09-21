@@ -1,0 +1,100 @@
+- id: W1-T3961
+  title: "A QUEUED TASK WHOSE ACCEPTANCE PROOFS ALREADY PASS AT MAIN HAS NOTHING LEFT TO BUILD, AND NOTHING DETECTS IT — W1-T3688 sat at priority 2 near the front of the dispatch order and burned two budgeted runs before a human read the refusal and understood why"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [scripts/satisfied-task-census.mjs]
+  origin: "2026-09-21 review of #6389, the second build attempt on W1-T3688 to close unmerged on the identical refusal"
+  plan_refs: ["W1-T3688", "W1-T3722", "W1-T3843"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE PLAN CAN HOLD A TASK THAT IS ALREADY DONE, AND THE ONLY THING THAT EVER NOTICES IS A
+    DISPATCHED WORKER SPENDING ITS BUDGET TO FIND OUT.
+
+    MEASURED ON W1-T3688. Its incident was real, but its fix landed elsewhere: the hold has
+    existed since 2026-07-17 (#159), the diagnosis was corrected by #5851, and the actual defect
+    was closed under W1-T3722 in #6096 on 2026-09-19. Nothing was left in `src/lib/drain.ts`. The
+    record did not know that. It stayed `status: queued` at `priority: 2` -- and `compareDispatch`
+    sorts priority ASCENDING with absent last, so it sat near the FRONT of the dispatch order.
+
+    THE COST, TWICE, IN FULL:
+      PR #5843  wrote the suite the task's own design section names  -> closed unmerged
+      PR #6389  wrote it again, independently                        -> closed unmerged
+
+    Both hit the identical wall: with no behaviour changed, every proof passes at the merge base
+    as well as at head, `proof-discrimination` grades them `executed_stale`, and the allowance is
+    0. Neither diff was bad. Each attempt cost a budgeted run, a full CI cycle, and a human to
+    read the refusal and close it. The second lane had no way to know the first had already
+    failed the same way.
+
+    THE SIGNAL WAS AVAILABLE THE WHOLE TIME AND NOBODY WAS ASKING. Running the task's own proofs
+    against unmodified main answers "is there anything left to build here" directly. Measured
+    2026-09-21 on main 02d1c226 with only the suite's file added and no src change: 4 tests, 4
+    pass, 0 fail. That is the same measurement `proof-discrimination` makes per-PR -- but it only
+    makes it AFTER a lane has been dispatched, built the work and opened a pull request.
+
+    THIS IS W1-T3843'S DEFECT FROM THE OTHER END. That task covers 33 machine-filed records that
+    can NEVER be selected. This one covers a record that is ALWAYS selected and can never be
+    completed. Both are the same class -- the queue holding work that cannot finish -- and neither
+    end is detected today.
+  design: |
+    (i) A SWEEP, NOT A PR GATE. Executing the proofs of every open task is far too expensive for
+        the per-PR path, and the question is not about any one diff. This belongs with the
+        periodic census rungs, reading the plan and main.
+
+    (ii) ONLY SHAPES THAT CAN DISCRIMINATE ARE EVIDENCE. A whole-file `unit test: <path>` proof is
+         stale BY CONSTRUCTION -- scripts/proof-discrimination-baseline.json's own comment measures
+         5368 of them across 1214 tasks, roughly 69% of all proofs in the plan. Treating those as
+         "already satisfied" would flag most of the backlog on the first run and the check would
+         be deleted within a day. Consider ONLY tasks whose proofs are ALL name-filtered
+         `unit test:` or `grep:` -- the shapes whose passing at main means something.
+
+    (iii) REPORT, DO NOT REFUSE, AND MEASURE BEFORE DECIDING. Land it as a named report and read
+          the population it finds before anyone proposes a refusal or an auto-park. A bound that
+          fires on a healthy condition is this repo's recurring defect (CLAUDE.md, investigation
+          discipline), and this one runs over the whole backlog, where a false positive is a task
+          wrongly declared done.
+
+    (iv) THE REPORT NAMES WHAT A HUMAN NEEDS TO RULE. For each hit: the task id, its status and
+         priority, each proof and its verdict at main, and any merged PR that plausibly satisfied
+         it. Crediting is `satisfied_by`, which is Architect-only (plan.ts; `checkSatisfiedByGuard`
+         admits it from a plan-only AND human-authored PR), so the report's job is to put a ruling
+         in front of a human -- never to make one.
+
+    NOT IN SCOPE: changing `proof-discrimination`, the grandfather table, or W1-T3843's
+    never-selected half. This task must not be able to pass by parking or editing any existing
+    record.
+  acceptance:
+    - claim: "a queued task whose discriminating proofs all pass against unmodified main is reported as having nothing left to build"
+      proof: "unit test: W1-T3961: a task whose proofs all pass at main is reported"
+    - claim: "a task carrying a whole-file proof is not reported, because that shape is stale by construction and would flag most of the backlog"
+      proof: "unit test: W1-T3961: a whole-file proof shape is never evidence of satisfaction"
+    - claim: "a task with at least one proof that fails at main is not reported, so work that remains is left alone"
+      proof: "unit test: W1-T3961: a task with work remaining is not reported"
+    - claim: "the report names the task, its proofs and their verdicts, and refuses nothing"
+      proof: "unit test: W1-T3961: the census reports and does not refuse"
+  falsifier: |
+    Point the sweep at a fixture reproducing W1-T3688 -- a queued task whose name-filtered proofs
+    all pass at main -- and it must be reported; delete the check and the fixture goes unreported,
+    which is the defect. Give a fixture one failing proof and it must NOT be reported. Give one a
+    whole-file `unit test: <path>` proof and it must NOT be reported however the rest read. Make
+    the sweep exit non-zero on a hit and (iii) is violated: it reports, it does not refuse.
+  note: |
+    RESERVATION: could not be claimed. `rmd next-task-id --reserve` pushes `refs/rmd-id/<id>`, and
+    this environment's egress proxy refuses every `git-receive-pack` update outside `refs/heads/*`
+    -- proven by control (a successful refs/heads push's POST carries X-Github-Request-Id and
+    GitHub cache headers; the refused one carries none and returns in 29ms; the repo has no
+    rulesets). `rmd next-task-id --no-reserve` named W1-T3961, and both scope-time checks read
+    clear at filing time. AN OPERATOR MUST CONFIRM THE CLAIM before a build starts. An id filed
+    this way was taken mid-write once already today, so this is not hypothetical.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add. A `test/` path here
+    reads to `lint-plan`'s `proof-unit-test-unresolvable` check as "this diff ships the suite" and
+    then refuses the forward-referencing proof titles above. The build adds it and lists it then --
+    and see W1-T3844's record for the Rule 19 sizing trap that follows if the suite's filename slug
+    does not match this shard's.

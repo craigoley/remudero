@@ -23,21 +23,30 @@ import {
 } from "./panel-actions.js";
 import {
   advancePromotionState,
+  evaluateAssistantTrust,
   evaluateGuardrails,
   expirePromotionIfDue,
   findScopeConflict,
   isPromotionActive,
   rollbackPromotion,
+  validateAssistantTrustControlResults,
+  validateAssistantTrustEvidence,
   validateGuardObservations,
+  validateRawAssistantTrustContext,
   validatePromotionRecord,
   validatePromotionRollback,
   validateReplaySummary,
+  verifyAssistantTrustControls,
+  type AssistantTrustControlResult,
+  type AssistantTrustEvaluationResult,
+  type AssistantTrustEvidence,
   type ExperimentPromotionState,
   type GuardEvaluation,
   type GuardObservation,
   type PromotionAdvanceTarget,
   type PromotionRecord,
   type PromotionRollback,
+  type RawAssistantTrustContext,
   type ReplaySummary,
 } from "./experiment-promotion.js";
 import {
@@ -333,7 +342,15 @@ export interface OperatorAgentPromotionEvent {
   state: ExperimentPromotionState;
   replay?: ReplaySummary;
   decision?: "approved";
-  advance?: { target: PromotionAdvanceTarget; guard: GuardEvaluation; exposure?: number };
+  advance?: {
+    target: PromotionAdvanceTarget;
+    guard: GuardEvaluation;
+    exposure?: number;
+    /** Set only when the caller submitted assistant-trust evidence (W1-T3882) with this advance
+     *  request — see {@link buildOperatorAgentPromotionAdvanceRoute}. Absent, an advance behaves
+     *  exactly as the pre-W1-T3882 base guardrail flow always did. */
+    assistantTrust?: AssistantTrustEvaluationResult;
+  };
   rollback?: PromotionRollback;
   note?: string;
 }
@@ -356,7 +373,20 @@ type ExperimentRollbackInput = { experimentId: string; rollback: OperatorAgentEx
 type PromotionRegistrationInput = { promotion: PromotionRecord };
 type PromotionReplayInput = { promotionId: string; replay: ReplaySummary };
 type PromotionDecisionInput = { promotionId: string; decision: "approved"; note?: string };
-type PromotionAdvanceInput = { promotionId: string; target: PromotionAdvanceTarget; observations?: GuardObservation[]; exposure?: number };
+/**
+ * Assistant-trust evidence (W1-T3882) submitted alongside an advance request. Entirely optional
+ * — its absence preserves the pre-existing base-guardrail-only advance behaviour byte for byte;
+ * its presence runs {@link evaluateAssistantTrust} and can block or unmeasurable the advance
+ * ahead of the base guardrail evaluation.
+ */
+type PromotionAdvanceAssistantTrustInput = { controls: AssistantTrustControlResult[]; evidence: AssistantTrustEvidence; rawContext?: RawAssistantTrustContext };
+type PromotionAdvanceInput = {
+  promotionId: string;
+  target: PromotionAdvanceTarget;
+  observations?: GuardObservation[];
+  exposure?: number;
+  assistantTrust?: PromotionAdvanceAssistantTrustInput;
+};
 type PromotionRollbackInput = { promotionId: string; rollback: PromotionRollback };
 
 const MAX_ID = 160;
@@ -908,6 +938,19 @@ function validatePromotionDecisionInput(body: unknown): { error: string } | Prom
   return { promotionId: body.promotionId.trim(), decision: "approved", ...(body.note ? { note: body.note.trim() } : {}) };
 }
 
+function validatePromotionAdvanceAssistantTrustInput(value: unknown): PromotionAdvanceAssistantTrustInput | null {
+  if (!isRecord(value)) return null;
+  const controls = validateAssistantTrustControlResults(value.controls);
+  const evidence = validateAssistantTrustEvidence(value.evidence);
+  if (!controls || !evidence) return null;
+  if (value.rawContext !== undefined) {
+    const rawContext = validateRawAssistantTrustContext(value.rawContext);
+    if (!rawContext) return null;
+    return { controls, evidence, rawContext };
+  }
+  return { controls, evidence };
+}
+
 function validatePromotionAdvanceInput(body: unknown): { error: string } | PromotionAdvanceInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   if (!safeExperimentText(body.promotionId, MAX_EXPERIMENT_ID)) return { error: "promotionId is required" };
@@ -915,7 +958,19 @@ function validatePromotionAdvanceInput(body: unknown): { error: string } | Promo
   const observations = validateGuardObservations(body.observations);
   if (observations === null) return { error: "observations must be a bounded array of guard observations" };
   if (body.exposure !== undefined && (typeof body.exposure !== "number" || !Number.isFinite(body.exposure))) return { error: "exposure must be a finite number" };
-  return { promotionId: body.promotionId.trim(), target: body.target, observations, ...(body.exposure !== undefined ? { exposure: body.exposure } : {}) };
+  let assistantTrust: PromotionAdvanceAssistantTrustInput | undefined;
+  if (body.assistantTrust !== undefined) {
+    const parsed = validatePromotionAdvanceAssistantTrustInput(body.assistantTrust);
+    if (!parsed) return { error: "assistantTrust requires bounded controls and evidence" };
+    assistantTrust = parsed;
+  }
+  return {
+    promotionId: body.promotionId.trim(),
+    target: body.target,
+    observations,
+    ...(body.exposure !== undefined ? { exposure: body.exposure } : {}),
+    ...(assistantTrust ? { assistantTrust } : {}),
+  };
 }
 
 function validatePromotionRollbackInput(body: unknown): { error: string } | PromotionRollbackInput {
@@ -1149,7 +1204,23 @@ function promotionEventFromRow(row: Record<string, unknown>): { promotionId: str
   if (row.step === OPERATOR_AGENT_PROMOTION_ADVANCE_STEP) {
     if (!isPromotionAdvanceTarget(row.target) || !isRecord(row.guard)) return null;
     const guard = row.guard as unknown as GuardEvaluation;
-    return { promotionId, event: { kind: "advance", at, state, advance: { target: row.target, guard, ...(typeof row.exposure === "number" ? { exposure: row.exposure } : {}) } } };
+    // W1-T3882: assistant_trust is a durable receipt of an already-computed evaluation — folded
+    // back loosely (like `guard` above), never re-run at read time.
+    const assistantTrust = isRecord(row.assistant_trust) ? (row.assistant_trust as unknown as AssistantTrustEvaluationResult) : undefined;
+    return {
+      promotionId,
+      event: {
+        kind: "advance",
+        at,
+        state,
+        advance: {
+          target: row.target,
+          guard,
+          ...(typeof row.exposure === "number" ? { exposure: row.exposure } : {}),
+          ...(assistantTrust ? { assistantTrust } : {}),
+        },
+      },
+    };
   }
   if (row.step === OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP) {
     const rollback = validatePromotionRollback(row.rollback);
@@ -1710,9 +1781,33 @@ export function buildOperatorAgentPromotionAdvanceRoute(deps: OperatorAgentRoute
       const nowIso = new Date(deps.now?.() ?? Date.now()).toISOString();
       const guard: GuardEvaluation =
         input.target === "shadow" ? { state: "ready", reasons: [], breachedMetrics: [] } : evaluateGuardrails(existing, input.observations ?? [], nowIso);
-      const result = advancePromotionState({ currentState: existing.state, target: input.target, guard, maxExposure: existing.maxExposure, exposure: input.exposure });
+
+      // W1-T3882: assistant-trust evidence is optional on the wire so a caller that never submits
+      // it advances exactly as the pre-W1-T3882 base-guardrail-only flow always did. When it IS
+      // submitted, evaluateAssistantTrust runs above the base guardrail evaluation and can demote
+      // a would-be-ready advance to `regressed`/`unmeasurable` — never the reverse.
+      let assistantTrust: AssistantTrustEvaluationResult | undefined;
+      let effectiveGuard = guard;
+      if (input.target !== "shadow" && input.assistantTrust) {
+        const replayEvent = existing.events.find((event) => event.kind === "replay");
+        assistantTrust = evaluateAssistantTrust({
+          guard,
+          replay: replayEvent?.replay ?? { deterministic: false, sideEffectFree: true },
+          controls: verifyAssistantTrustControls(input.assistantTrust.controls),
+          evidence: input.assistantTrust.evidence,
+          rawContext: input.assistantTrust.rawContext,
+        });
+        if (assistantTrust.state === "blocked") effectiveGuard = { state: "regressed", reasons: assistantTrust.reasons, breachedMetrics: [] };
+        else if (assistantTrust.state === "unmeasurable") effectiveGuard = { state: "unmeasurable", reasons: assistantTrust.reasons, breachedMetrics: [] };
+      }
+
+      const result = advancePromotionState({ currentState: existing.state, target: input.target, guard: effectiveGuard, maxExposure: existing.maxExposure, exposure: input.exposure });
       if (result.state === existing.state) {
-        sendJson(res, 409, { error: "conflict", detail: result.reason ?? `promotion ${input.promotionId} cannot advance to ${input.target} from ${existing.state}` });
+        sendJson(res, 409, {
+          error: "conflict",
+          detail: result.reason ?? `promotion ${input.promotionId} cannot advance to ${input.target} from ${existing.state}`,
+          ...(assistantTrust ? { assistantTrust } : {}),
+        });
         return;
       }
       // W1-T3900: advancing a promotion IS the "follow-up promotion" surface this task's design
@@ -1731,8 +1826,16 @@ export function buildOperatorAgentPromotionAdvanceRoute(deps: OperatorAgentRoute
         state: result.state,
         at: nowIso,
         ...(input.exposure !== undefined ? { exposure: input.exposure } : {}),
+        ...(assistantTrust ? { assistant_trust: assistantTrust } : {}),
       });
-      sendJson(res, 200, { ok: true, promotionId: input.promotionId, state: result.state, ...(result.reason ? { reason: result.reason } : {}), at: nowIso });
+      sendJson(res, 200, {
+        ok: true,
+        promotionId: input.promotionId,
+        state: result.state,
+        ...(result.reason ? { reason: result.reason } : {}),
+        ...(assistantTrust ? { assistantTrust } : {}),
+        at: nowIso,
+      });
     }),
   };
 }

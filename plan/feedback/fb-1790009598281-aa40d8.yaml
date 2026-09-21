@@ -1,0 +1,17 @@
+id: fb-1790009598281-aa40d8
+ts: 2026-09-21T16:53:18.281Z
+raw: "Operator decision supplement for fb-1790008295185-f86051: Compose starts a
+  new general operator-to-daemon conversation. It must not require an existing
+  escalation, task, or PR, although it may optionally be linked to one. The
+  daemon can reply and follow up in the same durable ordered thread. Fold this
+  into the existing inbox-thread API task rather than creating a duplicate
+  conversation model."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

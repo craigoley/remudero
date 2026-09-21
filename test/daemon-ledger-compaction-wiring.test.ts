@@ -88,6 +88,48 @@ test("daemonCommand: the self-target daemon wires and runs the bounded ledger co
   }
 });
 
+test("W1-T3959: daemonCommand wires durable terminal refusal reads from the configured state root", async () => {
+  const { home, planPath, stateDir } = fixtureHome();
+  const repairDir = join(stateDir, "dispatch-repair");
+  mkdirSync(repairDir, { recursive: true });
+  writeFileSync(
+    join(repairDir, "W1-T3959.json"),
+    JSON.stringify({
+      verdict: "fixture terminal verdict",
+      attempts: 2,
+      escalated: true,
+      preDispatchContractRevision: "pre-dispatch-v1:fixture-contract",
+    }),
+  );
+
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+
+  try {
+    assert.ok(captured, "the real daemon command reached its injected loop");
+    assert.deepEqual(
+      [...captured.readTerminalPreDispatchRefusalRevisions!()],
+      [["W1-T3959", "pre-dispatch-v1:fixture-contract"]],
+      "the real composition root reads terminal refusal revisions from config.root/state, not an in-memory test map",
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("lastLedgerCompactionFiredAtMs: only a valid latest fire row throttles a later daemon tick", () => {
   const first = "2026-09-12T00:00:00.000Z";
   const latest = "2026-09-12T00:30:00.000Z";

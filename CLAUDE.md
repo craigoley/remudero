@@ -1,38 +1,36 @@
 # remudero — Claude rules
 
-Always-on **workflow** rules that prevent repeated wasted cycles. Organized by the question you're
-asking when you need one, because that — not the date you learned it — is how a rule gets found.
+Always-on **workflow** rules that prevent repeated wasted cycles, organized by the question you're
+asking — not by the date you learned it.
 
-**Where knowledge actually lives:** `learnings/*.yaml` (the machine-readable, lifecycle-managed,
-CI-budgeted store — `scripts/learnings-budget-ratchet.mjs` caps its injectable weight), `plan/` +
+**Where knowledge actually lives:** `learnings/*.yaml` (the machine-readable, lifecycle-managed
+store — `scripts/learnings-budget-ratchet.mjs` caps its injectable weight), `plan/` +
 `MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`. CLAUDE.md holds only workflow rules; it does not
 restate feature history.
 
-**Nothing in this file is a gate.** Every rule here is UNENFORCED prose: a convention that binds
-only because you read it. The gates are elsewhere and refuse you by name — `coverage-ratchet` and
-`diff-coverage` on coverage, `proof-dialect` at dispatch and `lint-plan`'s changed-tasks pass on
-proofs, `judgeReview`'s rubric on the PR, `SymlinkInstallRefusal` on a worktree install. That split
-is the point: a rule stated ONLY here can be violated silently and repeatedly, which is why several
-of these bullets exist at all. When a rule below turns out to matter, the fix is to make something
-refuse it — file the task; do not sharpen the wording and call it closed. Rules that name their own
-enforcing gate say so inline.
+**Nothing in this file is a gate.** Every rule here is UNENFORCED prose that binds only because you
+read it. The gates are elsewhere and refuse you by name — `coverage-ratchet` and `diff-coverage` on
+coverage, `proof-dialect` at dispatch and `lint-plan`'s changed-tasks pass on proofs, `judgeReview`'s
+rubric on the PR, `SymlinkInstallRefusal` on a worktree install. That split is the point: a rule
+stated ONLY here can be violated silently and repeatedly. When one turns out to matter, the fix is
+to make something refuse it — file the task; do not sharpen the wording and call it closed. Rules
+naming their own gate say so inline.
 
-**THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** Every rule is a bolded
-HEADLINE followed by `→ doctrine/<section>/<rule>.md`. **The headline is the whole rule — obey it
-without opening anything.** The file it points at holds the EVIDENCE: the measurement, the PR, the
-session that earned it. Open that file when you are about to apply the rule precisely, when you
-doubt it, or when you are about to do the thing it forbids — `cat` the path, it is plain markdown
-holding the same bullet unabridged. A headline whose pointer does not resolve is a BUG, not a rule
-you may skip; `test/the-doctrine-index-points-at-every-body.test.ts` fails on a dangling one.
+**THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** Every rule is a bolded HEADLINE
+followed by `→ doctrine/<section>/<rule>.md`. **The headline is the whole rule — obey it without
+opening anything.** The file it names holds the EVIDENCE: the measurement, the PR, the session that
+earned it. `cat` that plain-markdown path when you are about to apply the rule precisely, when you
+doubt it, or when you are about to do the thing it forbids. A pointer that does not resolve is a
+BUG, not a rule you may skip; `test/the-doctrine-index-points-at-every-body.test.ts` fails on one.
 
-**Maintaining this file:** INTERACTIVE sessions here load the index and pay that tax per
-session; a DISPATCHED WORKER never sees it — `spawnWorker` passes `settingSources: []`, the SDK's
-isolation mode, which needs `'project'` to load CLAUDE.md (only Codex reads it). Keep it
-compressed for the lane that pays. A NEW RULE IS TWO EDITS: the headline bullet with its pointer
-here, and the body file it names. Per §8A, *compression is a deliverable*: a retro adding a rule
-folds or deletes what it supersedes — and folding now means shortening the HEADLINE, because that
-is the half every session pays for. Cite **symbol names, not line numbers** — every one this file
-carried had gone stale. Each rule cites the PR that earned it.
+**Maintaining this file:** an INTERACTIVE session loads the index and pays that tax every session;
+a DISPATCHED WORKER never sees it — `spawnWorker` passes `settingSources: []`, the SDK isolation
+mode, which needs `'project'` (only Codex reads it). Keep it compressed for the lane that pays.
+A NEW RULE IS THREE EDITS: the headline bullet with its pointer here, the body file it names, and
+`npm run agents-md`. Per §8A *compression is a deliverable* — but the 56 pre-migration headlines
+and bodies are FROZEN VERBATIM by `test/fixtures/doctrine-pre-migration-W1-T3323.json`, so a fold
+shortens THIS preamble or a post-migration headline, never one of them. Cite **symbol names, not
+line numbers** — every one here had gone stale. Each rule cites the PR that earned it.
 
 ## Before you push
 
@@ -87,6 +85,7 @@ carried had gone stale. Each rule cites the PR that earned it.
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names** → doctrine/plan-and-task-hygiene/before-believing-task-x-is-next-confirm-the-frontier-with.md
 - **A contested reservation is never deleted and an unfiled one is never free — the
   LOSER of a race renumbers.** → doctrine/plan-and-task-hygiene/a-contested-reservation-is-never-deleted-and-an-unfiled.md
+- **File a plan task from the OPERATOR CHECKOUT — a session that cannot reserve mints on hope.** → doctrine/plan-and-task-hygiene/file-a-plan-task-from-the-operator-checkout-a-session.md
 - **`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —
   the record ALONE passes at `verify: auto`.** → doctrine/plan-and-task-hygiene/refuses-a-plan-record-in-only-when-an-out-of-plan-path.md
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that

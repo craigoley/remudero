@@ -154,6 +154,18 @@ test("the workflow uses all four paid shards, names fallback telemetry, and pres
   );
 });
 
+test("coverage validates the tier manifest before Playwright or an instrumented shard", () => {
+  const coverage = workflow.jobs["coverage-ratchet"]?.steps ?? [];
+  const indexOf = (pattern: RegExp) => coverage.findIndex((step) => pattern.test(step.name ?? ""));
+  const tierIndex = indexOf(/Validate the coverage test-tier manifest/);
+  const browserIndex = indexOf(/Install Playwright's Chromium/);
+  const coverageIndex = indexOf(/Test with coverage/);
+  assert.ok(tierIndex >= 0, "coverage must have an early tier-manifest admission step");
+  assert.ok(browserIndex > tierIndex, "tier admission must precede the browser install");
+  assert.ok(coverageIndex > tierIndex, "tier admission must precede the instrumented test run");
+  assert.match(coverage[tierIndex]?.run ?? "", /test-tier-manifest\.mjs --check --base HEAD\^1/);
+});
+
 test("the required slow job suppresses duplicate plan-reading execution only after exact validation", () => {
   const slow = (workflow.jobs["test-slow"].steps ?? []).map((step) => step.run ?? "").join("\n");
   assert.match(slow, /diff-class\.mjs --changed-files/);

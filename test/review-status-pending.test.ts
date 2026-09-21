@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "../src/lib/worker.js";
 import { buildOpenPrViews, runReview } from "../src/run-task.js";
 import {
   REVIEW_ENGINE_REVISION,
@@ -152,6 +152,20 @@ esac
       if (ghCallsAtReviewerSpawn === undefined) ghCallsAtReviewerSpawn = readFileSync(ghLog, "utf8");
     };
 
+    const reviewerTelemetryEvents: Array<Record<string, unknown>> = [];
+    let telemetryPollingStarts = 0;
+    let telemetryPollingStops = 0;
+    const workerTelemetry = {
+      observer: (event: Record<string, unknown>) => reviewerTelemetryEvents.push(event),
+      startPolling: () => {
+        telemetryPollingStarts += 1;
+        return () => {
+          telemetryPollingStops += 1;
+        };
+      },
+      setRunawayBound: () => {},
+    };
+
     const reviewerQueryFn = (() => {
       snapshotGhCalls();
       return (async function* () {
@@ -166,6 +180,12 @@ esac
         };
       })();
     }) as unknown as Parameters<typeof runReview>[0]["reviewerQueryFn"];
+
+    const reviewerSpawnWorker = async (spawnArgs: SpawnWorkerArgs): Promise<WorkerResult> => {
+      snapshotGhCalls();
+      spawnArgs.streamObserver?.({ kind: "message", tsMs: Date.now() });
+      return spawnWorker(spawnArgs);
+    };
 
     const reviewEvents: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const verdict = await runReview({
@@ -186,12 +206,14 @@ esac
       account: (r: never) => r,
       spawnReviewer: true,
       reviewerQueryFn,
+      reviewerSpawnWorker,
       // Injected so the post-verdict withdrawal never reaches the real `gh pr merge` boundary.
       // Without it the run trips `live-write-guard`'s REFUSED gh-pr-merge (the guard checks the
       // CALL, not the destination, so the PATH-stubbed `gh` above is deliberately not enough) —
       // nothing live happens either way, but the boundary is not this test's business at all.
       disarm: () => {},
-      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      reviewerMount: { model: "sonnet", provider: "claude", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      workerTelemetry,
       headCheckoutDir: REPO_ROOT,
       ledgerPath,
       runId: "REVIEW-PENDING-ORDER-1",
@@ -227,6 +249,12 @@ esac
       reviewInputDigest(HEAD, "The actual PR body snapshot used only for retry identity."),
     );
     assert.equal(terminal?.extra?.review_engine_revision, REVIEW_ENGINE_REVISION);
+    assert.equal(telemetryPollingStarts, 1, "reviewer spawn starts the shared telemetry poll");
+    assert.equal(telemetryPollingStops, 1, "reviewer spawn stops the shared telemetry poll");
+    assert.ok(reviewerTelemetryEvents.length > 0, "reviewer stream events reach the shared telemetry observer");
+    assert.equal(reviewerTelemetryEvents[0]?.workerRole, "reviewer");
+    assert.equal(reviewerTelemetryEvents[0]?.provider, "claude");
+    assert.equal(reviewerTelemetryEvents[0]?.requestedModel, "sonnet");
   } finally {
     process.env.PATH = oldPath;
     if (oldClaudeBinOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];

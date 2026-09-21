@@ -54,6 +54,7 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**
 - **A contested reservation is never deleted and an unfiled one is never free — the
   LOSER of a race renumbers.**
+- **File a plan task from the OPERATOR CHECKOUT — a session that cannot reserve mints on hope.**
 - **`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —
   the record ALONE passes at `verify: auto`.**
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that

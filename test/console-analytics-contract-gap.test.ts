@@ -188,7 +188,7 @@ function fakeResponse(): { res: ServerResponse; status: () => number; body: () =
   return { res, status: () => status, body: () => body };
 }
 
-test("GET /v1/analytics: an unrecognised ?projectionVersion= is refused with 409, not a 200 disjoint payload", async () => {
+test("W1-T3884: unknown projectionVersion remains a 409 refusal", async () => {
   const expected = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
   const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
   const { res, status, body } = fakeResponse();
@@ -201,7 +201,7 @@ test("GET /v1/analytics: an unrecognised ?projectionVersion= is refused with 409
   assert.equal(parsed.error, "unsupported_projection_version");
 });
 
-test("GET /v1/analytics: no ?projectionVersion= still answers 200 with the full snapshot, unchanged", async () => {
+test("W1-T3884: no projectionVersion keeps the full snapshot for back-compat", async () => {
   const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
   const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
   const { res, status, body } = fakeResponse();
@@ -212,7 +212,7 @@ test("GET /v1/analytics: no ?projectionVersion= still answers 200 with the full 
   assert.deepEqual(JSON.parse(body()), expected);
 });
 
-test("GET /v1/analytics: a matching ?projectionVersion=console-v1 answers 200 with the full snapshot", async () => {
+test("W1-T3884: matching projectionVersion=console-v1 returns the bounded console-v1 envelope", async () => {
   const expected: AnalyticsSnapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
   const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
   const { res, status, body } = fakeResponse();
@@ -220,5 +220,6 @@ test("GET /v1/analytics: a matching ?projectionVersion=console-v1 answers 200 wi
   await route.handler({ url: "/v1/analytics?projectionVersion=console-v1" } as never, res, { params: {} });
 
   assert.equal(status(), 200);
-  assert.deepEqual(JSON.parse(body()), expected);
+  assert.deepEqual(JSON.parse(body()), expected.consoleV1);
+  assert.notDeepEqual(JSON.parse(body()), expected);
 });

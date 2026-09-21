@@ -122,6 +122,10 @@ export interface NextRunnableOpts {
   /** Task ids this drain already continued past ({@link NON_HALTING_VERDICTS}) — never offered
    *  again in the same pass. Omit ⇒ no exclusion, exactly as before this existed. */
   excludeIds?: ReadonlySet<string>;
+  /** W1-T3959: a durable, terminal pre-dispatch refusal whose recorded contract still equals this
+   * task. The daemon builds this predicate once per selection pass; no direct `runTask` caller
+   * supplies it, so an explicit rerun remains an explicit retry. */
+  isTerminalPreDispatchRefusalHeld?: (task: Task) => boolean;
   /** Called once per task excluded because of an open PR — for ledger/console legibility. */
   onSkip?: (task: Task, prNumber: number) => void;
   /** W1-T119: true when this task's own GitHub read is INDETERMINATE — a genuine read failure
@@ -325,6 +329,7 @@ export type DispatchFilterReason =
   // the credit projection SAW a merge, while this one means it could not look, which is not
   // evidence of absence. TRAP: never write a semicolon inside this union — see the doc above.
   | "credit-indeterminate"
+  | "held-pre-dispatch-refusal"
   | "run-branch-already-pushed";
 
 /** How many ids each bucket names before truncating — a count tells the operator something is
@@ -361,6 +366,7 @@ export function tallyDispatchFilters(): {
     "foreign-repo": [],
     "continued-this-pass": [],
     "credit-indeterminate": [],
+    "held-pre-dispatch-refusal": [],
     "run-branch-already-pushed": [],
   };
   const snapshot = (): IdleReasonTally =>
@@ -457,6 +463,10 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   }
   if (unmetDependencies(plan, t, merged).length > 0) {
     opts.onFiltered?.(t, "unmet-deps");
+    return false;
+  }
+  if (opts.isTerminalPreDispatchRefusalHeld?.(t)) {
+    opts.onFiltered?.(t, "held-pre-dispatch-refusal");
     return false;
   }
   // INDETERMINATE (W1-T119) — checked BEFORE the breaker and the in-flight guard: an indeterminate

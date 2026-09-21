@@ -1,0 +1,21 @@
+id: fb-1790009538530-c1be01
+ts: 2026-09-21T16:52:18.530Z
+raw: "Triage close-out liveness defect observed 2026-09-21: an already-decided
+  feedback (fb-1789961451233-8554de) correctly found W1-T3951, then
+  applyPlanProposalCommit passed an Architect-generated multiline commit message
+  straight to git. A body line over commitlint’s 100-character cap caused commit
+  rejection, left the feedback at status:new, and makes future auto-triage
+  re-spend on a decision already reached. Shape or validate every
+  plan-architect/triage commit message before staging; on refusal, clean residue
+  and record a durable non-retryable outcome. Add an end-to-end long-body
+  falsifier proving the feedback reaches its intended terminal status without a
+  hand edit."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
