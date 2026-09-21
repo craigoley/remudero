@@ -43,7 +43,7 @@ test("runTaskBody can drive the containment rung from an explicit minimal contex
   const root = mkdtempSync(join(tmpdir(), "rmd-run-task-body-context-"));
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const said: string[] = [];
-  const config: Config = { root, claudeBin: "claude" };
+  const config: Config = { root, claudeBin: "claude", installRoot: REPO_ROOT };
 
   try {
     const ctx: RunTaskContext = {

@@ -24,6 +24,8 @@ import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
+const REPO_ROOT = join(import.meta.dirname, "..");
+
 async function freePort(): Promise<number> {
   const probe = createServer();
   await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
@@ -39,7 +41,7 @@ function instance(serve?: { host?: string; port?: number }): { home: string; roo
   const home = mkdtempSync(join(tmpdir(), "rmd-servecmd-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, serve }));
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT, serve }));
   return { home, root };
 }
 

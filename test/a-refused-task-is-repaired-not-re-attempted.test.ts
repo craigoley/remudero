@@ -195,7 +195,7 @@ function fixturePlanPath(): string {
 test("BEHAVIORAL: a real runTask dispatch of a linter-refused task drives repairRefusedTask's dispatch action, and never spawns", async () => {
   const planPath = fixturePlanPath();
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-repair-root-"));
-  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+  const config: Config = { claudeBin: "/bin/true", root: configRoot, installRoot: process.cwd() };
 
   let spawnCalls = 0;
   const spawn = (async () => {
@@ -224,7 +224,7 @@ test("BEHAVIORAL: a real runTask dispatch of a linter-refused task drives repair
 test("BEHAVIORAL: the next real runTask reads that refusal and escalates without issuing a live GitHub write", async () => {
   const planPath = fixturePlanPath();
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-repair-repeat-root-"));
-  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+  const config: Config = { claudeBin: "/bin/true", root: configRoot, installRoot: process.cwd() };
   const spawn = (async () => {
     throw new Error("spawn must never run for a linter-failing task, including its repeated refusal");
   }) as typeof spawnWorker;

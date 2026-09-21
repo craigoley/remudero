@@ -238,7 +238,7 @@ test("W1-T3793: external wait handoff releases claims with freshness evidence", 
   };
 
   try {
-    const config: Config = { claudeBin: "/bin/true", root };
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
     const result = await withLiveWritesAllowed(() =>
       runTask("T-FRESHNESS-HANDOFF", {
         skipGitSync: true,

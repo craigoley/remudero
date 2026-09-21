@@ -779,8 +779,8 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // to :6064/:6125 — the SEVENTH re-derivation, and the same lesson each time: these numbers
   // are a QUERY over the current tree, not a constant, so any diff inserting above the
   // witnesses moves them and the list must be re-derived rather than the test weakened.
-    "armIfVerdictPermits:test/run-task.test.ts:6064:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6125:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6066:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6127:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

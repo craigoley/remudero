@@ -13562,8 +13562,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
   // ── Validate-before-spawn guard (FF10a): reject a bad settings file BY NAME.
   const settingsFile = renderWorkerSettings({
-    templatePath: join(repoRoot, "settings", "worker.json"),
-    hooksDir: join(repoRoot, "hooks"),
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
     outPath: join(config.root, "tmp", `worker-settings-${runId}.json`),
   });
   validateWorkerSettingsFile(settingsFile); // throws WorkerSettingsError if invalid
@@ -16926,8 +16926,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       try {
         reviewerMount = resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", taskRisk);
         settingsFile = renderWorkerSettings({
-          templatePath: join(repoRoot, "settings", "worker.json"),
-          hooksDir: join(repoRoot, "hooks"),
+          templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+          hooksDir: join(resolveInstallRoot(config), "hooks"),
           outPath: join(config.root, "tmp", `reviewer-settings-${runId}.json`),
         });
         validateWorkerSettingsFile(settingsFile);
@@ -25782,8 +25782,8 @@ async function retroCommand(
   say(`retro ${runId} — architect ${arch} over worker ${wrk}; ${gather.totalRuns} runs in scope`);
 
   const settingsFile = renderWorkerSettings({
-    templatePath: join(repoRoot, "settings", "worker.json"),
-    hooksDir: join(repoRoot, "hooks"),
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
     outPath: join(config.root, "tmp", `retro-settings-${runId}.json`),
   });
   validateWorkerSettingsFile(settingsFile);
@@ -31153,7 +31153,7 @@ export async function serveCommand(
   //     touches no files.
   //   - settingsFile: rendered ONCE here, at boot, from the SAME template/hooksDir every other
   //     spawn renders from (`settings/worker.json`, `hooks/` — both real, absolute,
-  //     repoRoot-anchored paths regardless of which worktree a per-run spawn happens to use) —
+  //     install-root-anchored paths regardless of which target/worktree a per-run spawn uses) —
   //     never re-rendered per preview request. `buildFeedbackExpansionSpawnArgs` (feedback.ts)
   //     already pins `tools: []` on this rung, so no tool this settings file's hooks/permissions
   //     govern can ever fire for it — the rendered file's only remaining job is to be valid JSON
@@ -31168,8 +31168,8 @@ export async function serveCommand(
     const mountsTable = (deps.loadMounts ?? loadMounts)(mountsPath(repoRoot));
     const feedbackExpansionMount = resolveFeedbackExpansionMount(mountsTable);
     const feedbackExpanderSettingsFile = renderWorkerSettings({
-      templatePath: join(repoRoot, "settings", "worker.json"),
-      hooksDir: join(repoRoot, "hooks"),
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
       outPath: join(config.root, "tmp", `serve-settings-${runId}.json`),
     });
     validateWorkerSettingsFile(feedbackExpanderSettingsFile);
@@ -37233,8 +37233,8 @@ async function triageCommandLocked(
   say(`triage ${runId} — architect ${arch} over worker ${wrk} — feedback#${feedbackId}`);
 
   const settingsFile = renderWorkerSettings({
-    templatePath: join(repoRoot, "settings", "worker.json"),
-    hooksDir: join(repoRoot, "hooks"),
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
     outPath: join(config.root, "tmp", `triage-settings-${runId}.json`),
   });
   validateWorkerSettingsFile(settingsFile);
@@ -37856,8 +37856,8 @@ export async function planCommand(
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
   const settingsFile = renderWorkerSettings({
-    templatePath: join(repoRoot, "settings", "worker.json"),
-    hooksDir: join(repoRoot, "hooks"),
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
     outPath: join(config.root, "tmp", `plan-settings-${runId}.json`),
   });
   validateWorkerSettingsFile(settingsFile);
@@ -38296,8 +38296,8 @@ export async function draftProposalBatch(
   const inboxDraftMount = mountsTable.synthesis.inbox_draft;
 
   const settingsFile = renderWorkerSettings({
-    templatePath: join(repoRoot, "settings", "worker.json"),
-    hooksDir: join(repoRoot, "hooks"),
+    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+    hooksDir: join(resolveInstallRoot(config), "hooks"),
     outPath: join(config.root, "tmp", `inbox-settings-${runId}.json`),
   });
   validateWorkerSettingsFile(settingsFile);
@@ -40560,8 +40560,8 @@ export async function dispatchAlertFixRun(
   try {
     deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
     const settingsFile = deps.renderWorkerSettings({
-      templatePath: join(repoRoot, "settings", "worker.json"),
-      hooksDir: join(repoRoot, "hooks"),
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
       outPath: join(config.root, "tmp", `alert-fix-settings-${taskId}-${Date.now()}.json`),
     });
     const mountsTable = deps.loadMounts(mountsPath(repoRoot));
@@ -41042,8 +41042,8 @@ export function defaultReconRunLens(
     try {
       if (!preparedSettingsFile) {
         const settingsFile = renderWorkerSettings({
-          templatePath: join(repoRoot, "settings", "worker.json"),
-          hooksDir: join(repoRoot, "hooks"),
+          templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+          hooksDir: join(resolveInstallRoot(config), "hooks"),
           outPath: join(config.root, "tmp", `onboard-recon-settings-${Date.now()}.json`),
         });
         validateWorkerSettingsFile(settingsFile);
@@ -41328,8 +41328,8 @@ export function defaultSynthesizeDraft(
   const ensureSettingsFile = async (): Promise<string> => {
     if (!preparedSettingsFile) {
       const settingsFile = renderWorkerSettings({
-        templatePath: join(repoRoot, "settings", "worker.json"),
-        hooksDir: join(repoRoot, "hooks"),
+        templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+        hooksDir: join(resolveInstallRoot(config), "hooks"),
         outPath: join(config.root, "tmp", `onboard-synthesize-settings-${Date.now()}.json`),
       });
       validateWorkerSettingsFile(settingsFile);

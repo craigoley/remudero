@@ -184,7 +184,7 @@ async function runGenericRouteFixture(taskId: string, type: string): Promise<Spa
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-generic-route-root-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, genericRouteFixturePlan(taskId, type));
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   genericRouteGitFixture(root);
 
   const spawnCalls: SpawnWorkerArgs[] = [];

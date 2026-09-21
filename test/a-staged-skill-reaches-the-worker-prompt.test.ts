@@ -574,7 +574,7 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated a
     await withLiveWritesAllowed(() => runTask("T-SKILL-OBSERVATION", {
       skipGitSync: true,
       planPath,
-      config: { claudeBin: "/bin/true", root } as Config,
+      config: { claudeBin: "/bin/true", root, installRoot: process.cwd() } as Config,
       github: skillObservationGithub,
       spawn,
       containmentExec: skillObservationContainment,

@@ -60,7 +60,7 @@ function fixtureRoot(planYaml: string): { root: string; planPath: string; config
   const root = mkdtempSync(join(tmpdir(), "dispatch-claim-evidence-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, planYaml);
-  return { root, planPath, config: { claudeBin: "/bin/true", root } };
+  return { root, planPath, config: { claudeBin: "/bin/true", root, installRoot: process.cwd() } };
 }
 
 function readLedgerLinesFor(root: string): Array<Record<string, unknown>> {

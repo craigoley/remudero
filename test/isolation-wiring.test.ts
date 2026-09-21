@@ -117,7 +117,7 @@ test("BEHAVIORAL: a leaky isolation probe drives the REAL runTask to a blocked_i
   const root = mkdtempSync(join(tmpdir(), "runtask-isolation-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
   const spawn = (async () => {
     throw new Error("spawn must never run — the isolation preflight must refuse first");

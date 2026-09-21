@@ -157,7 +157,7 @@ async function runFixture(t: import("node:test").TestContext, spawn: typeof spaw
   const root = mkdtempSync(join(tmpdir(), "gaps-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
-  const config: Config = { claudeBin: "/bin/true", root };
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
   const FIXED_TS = 1785100000000;
   const fakeBinDir = fakeGh(`run-T-GAPS-${FIXED_TS}`);
