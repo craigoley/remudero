@@ -210,6 +210,18 @@ test("W1-T3873 criterion 3: creditEvidenceRootFor resolves a self target to repo
   );
 });
 
+test("W1-T3873 criterion 3: a self-identity resolution failure (no readable origin) degrades to undefined, not a throw", () => {
+  // `selfOwnerRepo` deliberately omitted so the internal `resolveOwnerRepo()` call — not just its
+  // RESULT — actually runs and is proven to fail closed via the injected `resolveOwnerRepo` seam.
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
+  const targetRepo = targetCheckoutUnder(configRoot, "target", { prNumber: 1, relPath: "plan/x.yaml", subjectVerb: "chore", originSlug: "o/target" });
+  const throwingResolveOwnerRepo = () => {
+    throw new Error("no readable origin remote");
+  };
+  const root = creditEvidenceRootFor("o", "target", { resolveOwnerRepo: throwingResolveOwnerRepo, configRoot });
+  assert.equal(root, targetRepo, "an unresolvable self identity never throws — it just can never MATCH self, so target resolution proceeds");
+});
+
 test("W1-T3873 criterion 3: a MISSING target checkout resolves to undefined, never the engine's own history", () => {
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
   // `configRoot/repos/target` was never created.

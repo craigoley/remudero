@@ -32916,6 +32916,11 @@ export function creditEvidenceRootFor(
     /** This checkout's own owner/repo, defaulting to {@link resolveOwnerRepo}. Injectable so a
      *  test can name a self target without a real git repo backing `repoRoot`. */
     selfOwnerRepo?: { owner: string; repo: string };
+    /** Resolves this checkout's own owner/repo when `selfOwnerRepo` isn't supplied. Defaults to
+     *  the real {@link resolveOwnerRepo} (shells `git -C repoRoot remote`). Injectable so a test
+     *  can drive the catch below — a checkout with no readable origin — without touching the
+     *  real one; production callers never set this. */
+    resolveOwnerRepo?: () => { owner: string; repo: string };
     /** Where a non-self target's checkout lives — `join(configRoot, "repos", repo)`. Defaults to
      *  `loadConfig().root`. */
     configRoot?: string;
@@ -32928,7 +32933,7 @@ export function creditEvidenceRootFor(
     opts.selfOwnerRepo ??
     (() => {
       try {
-        return resolveOwnerRepo();
+        return (opts.resolveOwnerRepo ?? resolveOwnerRepo)();
       } catch {
         return undefined; // repoRoot has no readable origin — cannot prove a self match either way
       }
