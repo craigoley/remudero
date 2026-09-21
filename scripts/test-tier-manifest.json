@@ -1339,6 +1339,7 @@
     "test/run-task.test.ts": 57771,
     "test/runbook-coverage.test.ts": 378,
     "test/runtime-adoption-is-reported-not-gated.test.ts": 217,
+    "test/satisfied-task-census.test.ts": 0,
     "test/sandbox-subject-generator.test.ts": 1050,
     "test/scanner-gate-config.test.ts": 660,
     "test/scope-guard-merge-base.test.ts": 1967,
