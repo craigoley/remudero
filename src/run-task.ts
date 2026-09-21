@@ -787,6 +787,7 @@ import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
   observedStateKey,
+  automationProposalFromJudgedShard,
   proposalFromJudgedShard,
   realVerifyHumanJudge,
   shardsNeedingJudgement,
@@ -23896,6 +23897,7 @@ export async function defaultVerifyHumanCadenceResult(
       parked: 0,
       judged: 0,
       needsOperator: [],
+      automated: [],
       backlog: [],
       judgeFailed: [],
       skipped: [],
@@ -32809,9 +32811,15 @@ export function buildOpenPrViews(
  * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER: a failed or truncated read leaves every PR
  * without an entry, which restores exactly today's behaviour rather than refusing anything. A
  * transient git failure must never be able to uncredit the plan.
+ *
+ * `root: undefined` (W1-T3873) — {@link creditEvidenceRootFor} could not prove a checkout for the
+ * requested `owner/repo`, so there is nothing local left to scan. Same empty-map answer as an
+ * unreadable root, and for the same reason: absence must never manufacture a refusal, only decline
+ * to grant one.
  */
-export function readMergedPathsByPr(root: string, limit = MERGED_PATHS_SCAN_LIMIT): Map<number, string[]> {
+export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT): Map<number, string[]> {
   const byPr = new Map<number, string[]>();
+  if (root === undefined) return byPr;
   try {
     const out = execFileSync(
       "git",
@@ -32847,9 +32855,14 @@ export function readMergedPathsByPr(root: string, limit = MERGED_PATHS_SCAN_LIMI
  * candidate's subject undefined, which {@link creditSubjectIsImplementation} reports as unknown and
  * every destructive consumer declines on. The failure mode is a PR that stays open one pass longer,
  * never one that closes on evidence nobody read.
+ *
+ * `root: undefined` (W1-T3873) — same meaning and same empty-map answer as
+ * {@link readMergedPathsByPr}'s own: {@link creditEvidenceRootFor} found nothing provably rooted in
+ * the requested `owner/repo`.
  */
-function readMergeSubjectsByPr(root: string): Map<number, string> {
+function readMergeSubjectsByPr(root: string | undefined): Map<number, string> {
   const byPr = new Map<number, string>();
+  if (root === undefined) return byPr;
   try {
     const out = execFileSync("git", ["log", "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
       cwd: root,
@@ -32876,7 +32889,82 @@ const MERGED_PATHS_PER_PR_CAP = 200;
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
 const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
-function buildCreditCandidates(
+/**
+ * W1-T3873 — THE GIT-EVIDENCE ROOT BOTH READERS BELOW MUST SCAN for a credit pass over
+ * `owner/repo`: the engine `repoRoot` for a SELF target (the checkout this process already runs
+ * from), or that target's OWN already-synced checkout otherwise — `join(configRoot, "repos",
+ * repo)`, the SAME expression `daemonCommand`'s `targetCheckoutRoot` already resolves for
+ * cross-target COMMIT-TRAILER credit (W1-T3779, this file). Before this, `readMergedPathsByPr`
+ * and `readMergeSubjectsByPr` were always handed the bare `repoRoot` module constant, so a target
+ * repository's PR number was answered by the ENGINE repo's merge of the same number, or by
+ * nothing — see this task's rationale for the two ways that reads wrong.
+ *
+ * PROVES the checkout belongs to `owner/repo` before handing it back, the same way
+ * {@link buildCommitTrailerIndex} (lib/status.ts) proves a foreign checkout: comparing that
+ * checkout's `git remote.origin.url` against the requested slug. A missing, foreign or unreadable
+ * checkout returns `undefined` — a genuine ABSENCE, never a fallback to the engine's own history.
+ * A failed `loadConfig()` (no fleet config yet) degrades the same way: `undefined`, never a throw
+ * that could take out the whole credit pass over one config read.
+ *
+ * `undefined` back at the two readers means "no entry for ANY PR" — the SAME safe "no opinion"
+ * a failed `git log` already yields today (both readers' own best-effort catch). It can only
+ * WITHHOLD a credit that would otherwise have been answered from foreign evidence; it can never
+ * manufacture one (design clause (iii), this task).
+ */
+export function creditEvidenceRootFor(
+  owner: string,
+  repo: string,
+  opts: {
+    /** This checkout's own owner/repo, defaulting to {@link resolveOwnerRepo}. Injectable so a
+     *  test can name a self target without a real git repo backing `repoRoot`. */
+    selfOwnerRepo?: { owner: string; repo: string };
+    /** Where a non-self target's checkout lives — `join(configRoot, "repos", repo)`. Defaults to
+     *  `loadConfig().root`. */
+    configRoot?: string;
+    /** `git -C <cwd> <args>`, returning stdout; throws like `execFileSync`. Injectable so a test
+     *  can prove/disprove a fabricated checkout's origin without shelling out for real. */
+    exec?: (args: string[], cwd: string) => string;
+    /** Resolves THIS checkout's own owner/repo when `selfOwnerRepo` is not supplied, defaulting
+     *  to {@link resolveOwnerRepo}. Injectable so a test can force the "repoRoot has no readable
+     *  origin" branch below IN-PROCESS, without a real broken git config on this checkout. */
+    resolveOwnerRepo?: () => { owner: string; repo: string };
+  } = {},
+): string | undefined {
+  const self =
+    opts.selfOwnerRepo ??
+    (() => {
+      try {
+        return (opts.resolveOwnerRepo ?? resolveOwnerRepo)();
+      } catch {
+        return undefined; // repoRoot has no readable origin — cannot prove a self match either way
+      }
+    })();
+  if (self && owner.toLowerCase() === self.owner.toLowerCase() && repo.toLowerCase() === self.repo.toLowerCase()) {
+    return repoRoot;
+  }
+  let configRoot = opts.configRoot;
+  if (configRoot === undefined) {
+    try {
+      configRoot = loadConfig().root;
+    } catch {
+      return undefined; // no fleet config to locate the target checkout under — the safe, empty answer
+    }
+  }
+  const candidate = join(configRoot, "repos", repo);
+  const exec = opts.exec ?? ((args: string[], cwd: string) => execFileSync("git", args, { cwd, encoding: "utf8" }));
+  let originUrl: string;
+  try {
+    originUrl = exec(["config", "--get", "remote.origin.url"], candidate).trim();
+  } catch {
+    return undefined; // missing checkout, unreadable, or no `origin` remote — a genuine absence
+  }
+  const slug = originUrl.replace(/\.git$/, "").replace(/^.*[:/]([^/]+\/[^/]+)$/, "$1");
+  return slug.toLowerCase() === `${owner}/${repo}`.toLowerCase() ? candidate : undefined;
+}
+
+// W1-T3873: exported (was module-private) so test/cross-target-credit-evidence.test.ts can drive
+// it directly, the same way buildEscalationReconcileCandidates already was — no behaviour change.
+export function buildCreditCandidates(
   owner: string,
   repo: string,
   plan: Plan,
@@ -32888,20 +32976,27 @@ function buildCreditCandidates(
   // (see that function's doc for the measurement); omitted by `sweepCommand`, a one-shot CLI
   // invocation with no second pass to amortise a row cache over.
   github?: GitHub,
+  // W1-T3873 — ALSO APPENDED LAST, same convention: resolves the git-evidence root the two
+  // readers below scan for `owner/repo` (see {@link creditEvidenceRootFor}'s own doc). Every real
+  // caller omits this and gets that function's live git/config resolution; a test injects a fake
+  // to drive a self/target/foreign checkout without a real one on disk.
+  evidenceRootFor: (owner: string, repo: string) => string | undefined = creditEvidenceRootFor,
 ): CreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
   // W1-T3067: the free local evidence the plan-only DIFF refusal needs, built ONCE for the whole
   // walk below rather than per task — `deriveStatus` runs once per plan task (~1,400 a pass).
+  // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's.
+  const evidenceRoot = evidenceRootFor(owner, repo);
   const deps: DeriveDeps = {
     ledgerPath,
     github: github ?? buildBatchedGithub(owner, repo, { log }),
-    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+    mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
   };
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
-  const mergeSubjects = readMergeSubjectsByPr(repoRoot);
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
   const candidates: CreditCandidate[] = [];
   for (const task of plan.tasks) {
     const proj = deriveStatus(task, deps);
@@ -32961,7 +33056,15 @@ export function buildEscalationReconcileCandidates(
   // Injectable seams (mirrors buildCreditCandidates' buildBatchedGithub): real callers omit
   // both and get the live `gh` gateways; tests supply fakes to drive the parse + derivation
   // without shelling out.
-  injected: { issues?: IssueGateway; github?: GitHub; onIntake?: (intake: EscalationIntake) => void } = {},
+  injected: {
+    issues?: IssueGateway;
+    github?: GitHub;
+    onIntake?: (intake: EscalationIntake) => void;
+    // W1-T3873 — the same trailing evidence-root seam buildCreditCandidates takes positionally,
+    // folded into this builder's existing injected-object convention instead of a new positional
+    // parameter. Omitted ⇒ {@link creditEvidenceRootFor}'s live git/config resolution.
+    evidenceRootFor?: (owner: string, repo: string) => string | undefined;
+  } = {},
 ): EscalationReconcileCandidate[] {
   const issues = injected.issues ?? ghIssueGateway(owner, repo);
   let open: OpenIssue[];
@@ -32991,10 +33094,14 @@ export function buildEscalationReconcileCandidates(
   // A SECOND `git log` PER SWEEP PASS IS THE COST, and it is local and bounded. The alternative —
   // hoisting one map through the sweep composition into both builders — threads a new argument
   // through call sites that do not otherwise change, for a saving measured in milliseconds.
+  //
+  // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's — see
+  // {@link creditEvidenceRootFor}'s own doc, and `buildCreditCandidates`' identical fix above.
+  const evidenceRoot = (injected.evidenceRootFor ?? creditEvidenceRootFor)(owner, repo);
   const deps: DeriveDeps = {
     ledgerPath,
     github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
-    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+    mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
   };
   const candidates: EscalationReconcileCandidate[] = [];
   for (const issue of open) {
@@ -38500,7 +38607,7 @@ export interface VerifyHumanRouteDeps {
   priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>;
   /** Optional caller-selected batch size; omitted preserves the historical unlimited pass. */
   maxJudged?: number;
-  /** Stages a needs_operator shard as an inbox proposal. Called ONLY on that arm. */
+  /** Stages a needs_operator or automate shard as an inbox proposal. Called ONLY on those arms. */
   stageProposal: (proposal: Proposal) => void;
   /** Writes the {@link VERIFY_HUMAN_JUDGED_STEP} row. Called on BOTH arms, always. */
   appendRow: (row: LedgerLine) => void;
@@ -38511,6 +38618,7 @@ export interface VerifyHumanRouteDeps {
 export interface VerifyHumanRouteResult {
   judged: number;
   needsOperator: string[];
+  automated: string[];
   backlog: string[];
   skipped: string[];
   deferred: string[];
@@ -38539,6 +38647,7 @@ export async function routeVerifyHumanBacklog(
   const result: VerifyHumanRouteResult = {
     judged: 0,
     needsOperator: [],
+    automated: [],
     backlog: [],
     skipped: shards.filter((s) => !dueIds.has(s.id)).map((s) => s.id),
     // W1-T3921: deferred due work remains due for the next pass
@@ -38553,6 +38662,11 @@ export async function routeVerifyHumanBacklog(
     if (verdict.decision === "needs_operator") {
       deps.stageProposal(proposalFromJudgedShard(shard, verdict));
       result.needsOperator.push(shard.id);
+      continue;
+    }
+    if (verdict.decision === "automate") {
+      deps.stageProposal(automationProposalFromJudgedShard(shard, verdict));
+      result.automated.push(shard.id);
       continue;
     }
     result.backlog.push(shard.id);
@@ -38570,7 +38684,7 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
     const key = row.observed_state;
     const decision = row.judge_decision;
     if (typeof key !== "string" || !key) continue;
-    if (decision !== "needs_operator" && decision !== "backlog") continue;
+    if (decision !== "needs_operator" && decision !== "automate" && decision !== "backlog") continue;
     out.set(key, {
       decision,
       reason: typeof row.judge_reason === "string" ? row.judge_reason : "",
@@ -38655,8 +38769,13 @@ export async function verifyHumanSweepCommand(
   });
 
   const deferred = result.deferred ?? [];
-  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
-  for (const id of result.needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
+  // Keep the reporting boundary tolerant of older/injected route seams. A missing collection
+  // means no entries, never a crash after the sweep has already written its ledger/proposals.
+  const needsOperator = result.needsOperator ?? [];
+  const automated = result.automated ?? [];
+  console.log(`verify-human-sweep: judged ${result.judged}, ${needsOperator.length} need you, ${automated.length} entered self-improvement, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
+  for (const id of needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
+  for (const id of automated) console.log(`  AUTOMATE: ${id} — staged as verify-human-automate:${id} in the inbox`);
   return 0;
 }
 
@@ -40192,7 +40311,7 @@ export async function dispatchAlertFixRun(
  * Fetches every OPEN alert via the SAME `ghAlertGateway()` `rmd ops` already uses (ops.ts,
  * W1-T55), loads `plan/alert-policy.yaml` (data, rule 2 — no LLM ever decides act-vs-escalate),
  * and runs {@link runAlertLane} (src/lib/alert-lane.ts): a policy-matched "act" dispatches ONE
- * ephemeral, lane-owned fix run through the full [ci, remudero-review] gate (never a per-item
+ * ephemeral, lane-owned fix run through the full [ci-gate, remudero-review] gate (never a per-item
  * `plan/tasks.yaml` write — rule 15, the lane owns its run shape exactly like `rmd dep-review`);
  * a critical/high or gate-critical-path alert escalates via the SAME `escalate()`/
  * `buildAlertEscalation` machinery `rmd ops`'s own critical/high poll uses, sharing ONE
@@ -41761,7 +41880,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "alert-fix",
     syntax: "rmd alert-fix [--repo <name>] [--dry-run]",
     summary: "The alert-fix lane: policy-decide act-vs-escalate per open security alert.",
-    detail: "the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing",
+    detail: "the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci-gate, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing",
   },
   {
     name: "issues",
