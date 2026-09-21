@@ -58,7 +58,7 @@ type ProviderAuthClock = {
   iso: (ms: number) => string;
 };
 
-type ProviderAuthChild = Pick<ChildProcessWithoutNullStreams, "stdin" | "stdout" | "stderr" | "kill" | "once" | "on">;
+export type ProviderAuthChild = Pick<ChildProcessWithoutNullStreams, "stdin" | "stdout" | "stderr" | "kill" | "once" | "on">;
 
 export type ProviderAuthSessionDeps = {
   profiles: readonly ProviderAuthProfile[];
@@ -70,7 +70,9 @@ export type ProviderAuthSessionDeps = {
   validateEffectiveProfile?: (profile: ProviderAuthProfile) => boolean | Promise<boolean>;
 };
 
-type SessionRecord = {
+/** Exported so {@link processCodexLine}'s falsifier test can build a synthetic record (see that
+ *  function's doc comment); production code never constructs one outside `ProviderAuthSessionStore.start`. */
+export type SessionRecord = {
   projection: ProviderAuthProjection;
   profile: ProviderAuthProfile | null;
   expiresAtMs: number;
@@ -182,11 +184,21 @@ function codexEnvironment(profile: ProviderAuthProfile): NodeJS.ProcessEnv {
   return env;
 }
 
-function defaultCodexBin(profile: ProviderAuthProfile): string | null {
+/**
+ * Resolve `codex`'s executable when a profile does not pin one via `codexBin`. `which` is an
+ * injectable, defaulted-last parameter — a process-boundary directive cannot exempt an external
+ * binary lookup from diff coverage (W1-T3960), so a falsifier test supplies a fake `which` and
+ * asserts the recorded call instead of depending on a real `codex` binary being on the runner's
+ * PATH. Exported for that same falsifier.
+ */
+export function defaultCodexBin(
+  profile: ProviderAuthProfile,
+  which: (command: string) => string = (command) => execFileSync("which", [command], { encoding: "utf8" }),
+): string | null {
   const candidate = profile.codexBin;
   const resolved = candidate ?? (() => {
     try {
-      return execFileSync("which", ["codex"], { encoding: "utf8" }).trim();
+      return which("codex").trim();
     } catch {
       return null;
     }
@@ -217,7 +229,14 @@ function writeRpc(child: ProviderAuthChild, message: Record<string, unknown>): v
   child.stdin.write(`${JSON.stringify(message)}\n`);
 }
 
-function processCodexLine(store: ProviderAuthSessionStore, record: SessionRecord, line: string): void {
+/**
+ * Parse one line of a Codex app-server's stdout JSON-RPC stream. Exported (kept alongside
+ * {@link startProviderAuthSession}'s "kept named" reasoning) so a falsifier test can drive the
+ * defensive `!profile` branch directly: that branch cannot be reached through the public
+ * `ProviderAuthSessionStore` API (a session's `profile` is fixed at creation and a child process
+ * is only ever spawned when it is non-null), so it needs a synthetic record instead.
+ */
+export function processCodexLine(store: ProviderAuthSessionStore, record: SessionRecord, line: string): void {
   let message: unknown;
   try {
     message = JSON.parse(line);
