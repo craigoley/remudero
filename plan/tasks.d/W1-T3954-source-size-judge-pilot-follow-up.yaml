@@ -42,20 +42,18 @@
     (v) Verify every decision arm with focused tests and retain the test-tier manifest entry so
     coverage shards cannot refuse the new test file as unclassified.
   acceptance:
-    - claim: "the approved source-size pilot is recoverable, non-security, advisory, and bounded to LAND+DEBT follow-up debt"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
-    - claim: "the selected gate supplies a deterministic finding and the existing judge chooses only the consequence"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+    - claim: "the approved source-size pilot supplies a deterministic finding, remains recoverable and advisory, and lets the judge choose only bounded LAND+DEBT follow-up debt"
+      proof: "unit test: W1-T3954: material source-size facts reach the judge, which can file exactly one bounded follow-up"
     - claim: "a healthy path and the non-selected gate path do not spawn the risk judge"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: "unit test: W1-T3954: healthy and non-selected source-size paths do not spawn a judge"
     - claim: "judge outage and malformed output restore the old follow-up behavior"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: "unit test: W1-T3954: judge outage and malformed output restore the old follow-up behavior"
     - claim: "recoverable STOP cannot stop solely because the model is conservative, while unrecoverable STOP cannot land"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: "unit test: W1-T3954: recoverable STOP is routed to debt, but an unrecoverable STOP remains STOP"
     - claim: "the bounded side effect is failure-safe, retry-safe, and represented in a privacy-safe ledger decision"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: "unit test: W1-T3954: side-effect failure falls back without retrying, while duplicate retry is successful"
     - claim: "one bounded production-shaped run demonstrates the selected adapter's observed outcome without adding routine human approval"
-      proof: "unit test: test/gate-posture-production-adapter.test.ts"
+      proof: "unit test: W1-T3954: a bounded production-shaped run records the operator ruling before the side effect"
   falsifier: |
     Close this follow-up without implementation if current main already routes a real production
     source-size finding through decideGatePosture and the focused proof suite demonstrates the
