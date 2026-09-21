@@ -1,0 +1,53 @@
+- id: W1-T3985
+  title: "ANALYTICS CHECKPOINT IMPLEMENTATION MUST RESUME THE RETAINED LEDGER SAFELY — the operator-agent producer needs a bounded cursor, rotation-aware replay, and corruption fallback so a serve restart does not leave console-v1 cold"
+  repo: remudero
+  depends_on: ["W1-T3977"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  band_meaning: blast-radius
+  files:
+    - src/lib/analytics-route.ts
+    - src/lib/ledger-union.ts
+    - test/an-analytics-request-returns-under-its-own-ceiling.test.ts
+    - test/analytics-route.test.ts
+  origin: "operator-follow-up#W1-T3983-checkpoint-proof-repair-2026-09-21"
+  plan_refs: [W1-T3983, W1-T3977, CONSOLE-T34]
+  status: queued
+  attempts: 0
+  rationale: |
+    This is the dispatchable implementation follow-up for W1-T3983. The parent task remains in the
+    plan as historical evidence of the measured production timeout, but its original acceptance
+    titles predate the checkpoint regression tests and therefore cannot discriminate the implementation
+    from the merged base. The implementation branch now carries three load-bearing regressions that
+    name the actual new behavior: resume at the live cursor, reset that cursor across a rotation, and
+    fall back to the full union when checkpoint state is structurally corrupt.
+
+    Preserve the measured production contract from W1-T3983: 501 rotated ledger files totalling
+    333,259,448 bytes plus 6,808 live rows caused a 123,321 ms refresh timeout and left the public
+    operator-agent surface honestly cold. Keep the full retained-history meaning, aggregate counts,
+    explicit unavailable states, and the 128 KiB response bound. Do not fabricate zeros, silently
+    drop unreadable history, or raise the console consumer ceiling.
+  design: |
+    Persist only sanitized aggregate state and source cursors in a versioned, atomically replaced
+    checkpoint. On a compatible source, replay only new immutable rotations and the changed live
+    tail, seeding the existing bounded dedupe window so the resumed aggregate is identical to a full
+    union. When a rotation replaces the live file, reset the live cursor exactly once and do not
+    duplicate rows. If the checkpoint is malformed, structurally invalid, truncated, or no longer
+    matches the source manifest, fall back to the existing full union and publish no false evidence.
+    Preserve cold/last-good semantics when the full fallback cannot complete.
+  acceptance:
+    - claim: "the checkpoint resumes at the live cursor without changing the full snapshot"
+      proof: "unit test: analytics checkpoint resumes at the live cursor and preserves the full snapshot"
+    - claim: "a rotation resets the live cursor without duplicating rows"
+      proof: "unit test: analytics checkpoint follows a rotation and resets the live cursor without duplicating rows"
+    - claim: "structurally corrupt checkpoint state falls back to the full union"
+      proof: "unit test: structurally corrupt analytics checkpoint state falls back to the full union"
+  falsifier: |
+    Remove checkpoint resume and the live-cursor regression must reopen the retained corpus or fail its
+    read-count assertion. Remove rotation reset and the rotation test must duplicate or omit live rows.
+    Replace malformed checkpoint state with an empty aggregate and the corruption test must fail because
+    unavailable history was converted into false zeros.
+  note: "Follow-up carrying the implementation criteria for superseded W1-T3983. reservation hand-off: run-W1-T3985-1790029003000"
