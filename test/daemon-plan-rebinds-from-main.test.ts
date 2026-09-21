@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gitRepo } from "./helpers/git-repo.js";
-import { planReloader } from "../src/run-task.js";
+import { daemonCommand, planReloader } from "../src/run-task.js";
+import type { DaemonDeps } from "../src/lib/daemon.js";
 import type { Plan } from "../src/lib/plan.js";
 
 function planYaml(ids: string[]): string {
@@ -97,4 +99,36 @@ test("daemon sweep hooks rebind to a reloaded plan in test/daemon-plan-rebinds-f
     { max: 1 },
   );
   assert.ok(seen.some((plan) => plan === updated), "a later sweep/projection receives the reloaded plan");
+});
+
+test("daemon command wires the plan-reload callback in test/daemon-plan-rebinds-from-main.test.ts", async () => {
+  const home = join(tmpdir(), `rmd-plan-reload-${process.pid}-${Date.now()}`);
+  const root = join(home, "Remudero");
+  const planPath = join(home, "tasks.yaml");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  const oldCi = process.env.CI;
+  process.env.HOME = home;
+  process.env.CI = "1";
+  try {
+    let captured: DaemonDeps | undefined;
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps) => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(typeof captured?.onPlanReload, "function");
+    captured?.onPlanReload?.({ tasks: [], byId: new Map() } as unknown as Plan);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldCi === undefined) delete process.env.CI;
+    else process.env.CI = oldCi;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
