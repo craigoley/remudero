@@ -104,3 +104,20 @@ test("W1-T3843: a human-authored verify:human task still files", () => {
 
   assert.equal(result.violations.some((v) => v.check === "machine-filing-admission"), false);
 });
+
+test("W1-T3843: the canonical ci-learning shard is allowed to remain parked for human release", () => {
+  const filed = task({
+    author_class: "machine",
+    origin: "ci-learning:5505:ci-gate",
+    files: ["learnings/ci.yaml"],
+  });
+  const result = lintTask(filed, {
+    machineFilingAdmission: {
+      plan: planFor(filed),
+      releasedIds: new Set(),
+      pathExists: () => true,
+    },
+  });
+
+  assert.equal(result.violations.some((v) => v.check === "machine-filing-admission"), false);
+});
