@@ -234,9 +234,9 @@ test("buildStatusBoard: QUEUE HEAD — `refused` stays capped at IDLE_REASON_ID_
   assert.match(text, new RegExp(`\\+${manyIds.length - IDLE_REASON_ID_CAP} more`), "the truncation count reaches the rendered text too");
 });
 
-// ── ACCEPTANCE 5: "the DispatchFilterReason union still has six arms and gains none" ────────────
+// ── ACCEPTANCE 5: the DispatchFilterReason tally remains exhaustive, excluding only the breaker ─
 
-test("drain.ts: tallyDispatchFilters's DispatchFilterReason-keyed record still has exactly the original six arms — 'circuit-broken' is not one of them, because the breaker is not a DispatchFilterReason at all", () => {
+test("drain.ts: tallyDispatchFilters's DispatchFilterReason-keyed record has every declared arm — 'circuit-broken' is not one of them, because the breaker is not a DispatchFilterReason at all", () => {
   const tally = tallyDispatchFilters();
   runnableCandidates(plan(), NONE_MERGED, 10, {
     isCircuitTripped: (id) => id === "W1-T920",
@@ -256,6 +256,7 @@ test("drain.ts: tallyDispatchFilters's DispatchFilterReason-keyed record still h
     "continued-this-pass",
     "credit-indeterminate",
     "foreign-repo",
+    "held-pre-dispatch-refusal",
     "retired",
     "run-branch-already-pushed",
     "unmet-deps",
