@@ -500,6 +500,12 @@ test("the Dockerfile installs and executes the declared Codex pin in one layer",
   assert.match(dockerfile, /npm ci --prefix \/opt\/remudero-image-clis[\s\S]*?ln -s \/opt\/remudero-image-clis\/node_modules\/\.bin\/codex \/usr\/local\/bin\/codex[\s\S]*?codex --version/);
 });
 
+test("the Dockerfile installs Playwright from the copied root lockfile", () => {
+  const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  assert.match(dockerfile, /cp \/app\/package\.json \/app\/package-lock\.json \/tmp\/pw-pin\//);
+  assert.match(dockerfile, /npm ci --omit=dev --no-audit --no-fund --prefix \/tmp\/pw-pin/);
+});
+
 test("the image installs an immutable Codex deny-read boundary for every mounted credential and state path", () => {
   const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
   const requirements = readFileSync(join(REPO_ROOT, "deploy", "codex-requirements.toml"), "utf8");
