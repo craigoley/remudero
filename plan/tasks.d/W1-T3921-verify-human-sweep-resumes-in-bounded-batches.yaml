@@ -1,4 +1,4 @@
-- id: W1-T3917
+- id: W1-T3921
   title: "VERIFY-HUMAN JUDGING MUST YIELD AND RESUME — the provider-backed sweep writes each verdict before the next spawn, but one invocation can still consume the host's remaining transient disk and die on a later state write; let the same observed-state ledger resume a bounded batch without hiding or re-asking work"
   repo: remudero
   depends_on: [W1-T3916]
