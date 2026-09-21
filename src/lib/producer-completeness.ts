@@ -202,13 +202,6 @@ export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
   // `isPlanOnlyFilingPr`, the predicate that was already implemented beside it and never called —
   // removed here per this file's own "removing a field from this list means wiring it" rule. The
   // key is a plain assignment, not a conditional spread, so `producerAssignedKeys` sees it.
-  mergeable:
-    "single-PR-only REST field. #1082 wired mergeState (the narrowed vocabulary the disposition " +
-    "rows read) but deliberately did NOT widen mapRestPr to carry the raw booleans; mergeableFactLine " +
-    "(sweep.ts:887) still returns empty on every call. Wiring it is recon-DW's D4/D6.",
-  mergeableState:
-    "single-PR-only REST field, the raw GitHub string W1-T186 wants quoted verbatim in an " +
-    "escalation. Same producer gap as mergeable above; #1082 carried only the narrowed mergeState.",
   // mergeConflict WIRED by W1-T984: buildOpenPrViews (run-task.ts) now assigns it via
   // lib/open-prs-rest.ts's hydrateMergeConflictEvidence, scoped to PRs already read
   // mergeState === "dirty" — removed here per this file's own "removing a field from this list

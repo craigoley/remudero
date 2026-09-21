@@ -6082,7 +6082,7 @@ export interface ArmedStalledPr {
   /** W1-T3277: the main-distance fact that selected this ordinary stale PR, when present. */
   behindBy?: number;
   /** W1-T3277/W1-T1212: why this PR reached the shared update-branch effect. */
-  updateReason?: "armed-stalled" | "stale-gate" | "distance";
+  updateReason?: "armed-stalled" | "stale-gate" | "distance" | "stale-blocked";
 }
 
 /** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request; only these three are
@@ -6124,15 +6124,29 @@ export function openPrsBehindMain(
   for (const pr of prs) {
     const behindBy = behindMainByPr.get(pr.prNumber);
     if (behindBy === undefined) continue;
-    if (behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
     if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
+    // W1-T3920: GitHub reports the raw mergeable_state as `blocked` when an armed, otherwise
+    // green PR's checks no longer satisfy the latest merge ref after main moves. The normalized
+    // mergeState deliberately maps `blocked` to `clean`, so this discriminator must read the raw
+    // field. It is narrower than changing the ordinary distance threshold: only a positively
+    // observed auto-merge arm + green checks + successful review + positive base distance bypasses
+    // the eleven-commit storm guard. Unknown or conflicting facts stay out of this lane.
+    const staleBlocked =
+      behindBy > 0 &&
+      pr.autoMergeArmed === true &&
+      pr.mergeableState === "blocked" &&
+      pr.mergeable === true &&
+      pr.checksState === "green" &&
+      pr.reviewState === "success" &&
+      pr.isDraft !== true;
+    if (!staleBlocked && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
     out.push({
       prNumber: pr.prNumber,
       prUrl: pr.prUrl,
       ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
       headSha: pr.headSha,
       behindBy,
-      updateReason: "distance",
+      updateReason: staleBlocked ? "stale-blocked" : "distance",
     });
   }
   return out;
