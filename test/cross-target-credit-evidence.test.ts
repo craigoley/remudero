@@ -51,7 +51,7 @@ function planOf(...ids: string[]): Plan {
 
 // ── CRITERION 1 — a target plan-only filing does not credit a task with no run ───────────────────
 
-test("W1-T3873 criterion 1: a target-repo plan-only filing pull request does not earn credit once evidence is rooted in ITS OWN checkout", () => {
+test("W1-T3873 criterion 1: a target plan-only filing stays uncredited when no run exists — target-repo evidence is rooted in ITS OWN checkout", () => {
   const taskId = "PORTAL-T19";
   const prNumber = 107;
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
@@ -117,7 +117,7 @@ test("W1-T3873 falsifier: the SAME plan-only fixture reads CREDITED when the roo
 
 // ── CRITERION 2 — a target implementation merge still earns credit ───────────────────────────────
 
-test("W1-T3873 criterion 2: a target-repo IMPLEMENTATION merge still earns credit once rooted in its own checkout", () => {
+test("W1-T3873 criterion 2: a target implementation merge still earns credit — target-repo evidence is rooted in its own checkout", () => {
   const taskId = "PORTAL-T12";
   const prNumber = 108;
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
@@ -206,7 +206,7 @@ test("W1-T3873 criterion 3: origin proof accepts URL-shaped remotes only for the
   );
 });
 
-test("W1-T3873 criterion 3: a FOREIGN or missing target checkout leaves the existing fail-closed outcome unchanged — never a NEW refusal", () => {
+test("W1-T3873 criterion 3: foreign target evidence stays empty and fail-closed — missing evidence never manufactures a refusal", () => {
   // THE SAME plan-only fixture as criterion 1, but this time the resolved root is undefined
   // (foreign/missing). Both readers then answer with an EMPTY map, which is exactly the pre-
   // W1-T3067 shortcut's own behaviour: nothing contradicts the trailer credit, so it stands. An
@@ -245,7 +245,7 @@ test("W1-T3873 criterion 3: an unreadable engine origin also degrades to no evid
 
 // ── CRITERION 4 — the credit pass reads evidence ONCE per pass, never once per task ──────────────
 
-test("W1-T3873 criterion 4: buildEscalationReconcileCandidates resolves the evidence root ONCE, not once per open issue", () => {
+test("W1-T3873 criterion 4: target credit evidence is read once per pass — buildEscalationReconcileCandidates resolves the root once, not once per open issue", () => {
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
   const targetRepo = targetCreditEvidenceCheckout(configRoot, "target", { prNumber: 1, relPath: "src/x.ts", subjectVerb: "feat", originSlug: "o/target" });
   const plan = planOf("PORTAL-A", "PORTAL-B", "PORTAL-C");
