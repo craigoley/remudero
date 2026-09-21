@@ -38,6 +38,12 @@ import {
   type PromotionRollback,
   type ReplaySummary,
 } from "./experiment-promotion.js";
+import {
+  evaluateFollowUpPolicy,
+  readFollowUpHistory,
+  type FollowUpCandidate,
+  type FollowUpHistory,
+} from "./follow-up-policy.js";
 
 export const OPERATOR_AGENT_PROPOSAL_STEP = "panel.operator_agent_proposal";
 export const OPERATOR_AGENT_DECISION_STEP = "panel.operator_agent_decision";
@@ -1278,6 +1284,25 @@ export function buildOperatorAgentPromotionRollbackRoute(deps: OperatorAgentRout
   };
 }
 
+function followUpHistory(deps: OperatorAgentRouteDependencies): FollowUpHistory[] {
+  return readFollowUpHistory(deps.ledgerPath, clockFromMillisFn(deps.now).now());
+}
+
+/** The operator-agent execution seam delegates policy decisions to the durable follow-up module. */
+export function evaluateOperatorAgentFollowUp(candidate: FollowUpCandidate, now?: number) {
+  return evaluateFollowUpPolicy(candidate, { now });
+}
+
+/** GET /v1/operator-agent/follow-ups — durable follow-up candidates and receipts. */
+export function buildOperatorAgentFollowUpReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/follow-ups",
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, { followUps: followUpHistory(deps), source: "ledger" }),
+  };
+}
+
 /** GET /v1/operator-agent/settings — durable settings or explicit conservative defaults. */
 export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
@@ -1331,6 +1356,7 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentPromotionDecisionRoute(deps),
     buildOperatorAgentPromotionAdvanceRoute(deps),
     buildOperatorAgentPromotionRollbackRoute(deps),
+    buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
   ];

@@ -248,6 +248,13 @@ test("W1-T3272: the census proves it can see its corpus — a table that stops d
   assert.ok(real.population > 50, `the census must still see its corpus — measured ${real.population} stamps, expected > 50`);
 });
 
+test("W1-T3879: the census lists every follow-up timestamp that ages against the evaluation clock", () => {
+  assert.deepEqual(
+    AGED_FIELDS.filter((row) => row.source === "src/lib/follow-up-policy.ts").map((row) => row.field),
+    ["deadline", "snoozedUntil"],
+  );
+});
+
 test("W1-T3272: a hardcoded date that NO threshold ages is not reported — the check does not ban dates as such", () => {
   // `createdAt` is a real field on the same fixtures and is not in AGED_FIELDS, because the sweep
   // takes the MINIMUM of the two ages: a fresh lastActivityAt keeps a PR out of the staleness rung

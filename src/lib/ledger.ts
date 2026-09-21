@@ -75,6 +75,14 @@ export const LEDGER_COST_TAG_TASK = "task" as const;
 export const LEDGER_COST_TAG_INFRA = "infra" as const;
 export type LedgerCostTag = typeof LEDGER_COST_TAG_TASK | typeof LEDGER_COST_TAG_INFRA;
 
+/** Durable follow-up-policy-v1 events. These stay in the decision-retention set because a
+ * restart must preserve human stops, deduplication, and delivery receipts. */
+export const FOLLOW_UP_CANDIDATE_STEP = "panel.follow_up_candidate";
+export const FOLLOW_UP_STATE_STEP = "panel.follow_up_state";
+export const FOLLOW_UP_CONTROL_STEP = "panel.follow_up_control";
+export const FOLLOW_UP_RECEIPT_STEP = "panel.follow_up_receipt";
+export const FOLLOW_UP_POLICY_STEP = "panel.follow_up_policy";
+
 /** THE #212 CONJUNCTION (W1-T127 design note i): a strike is recorded only where a worker RAN and a
  *  judgment was POSTED. Both halves are asserted, never either, so this cannot degrade to one half
  *  of the conjunction it checks. Pure and total; callers supply what they observed. */
@@ -523,6 +531,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // Why: 471 raw rows collapsed to 45 run ids, one re-flagged 26 times (W1-T2558;
   // docs/forensics/ledger.md#decision_relevant_ledger_steps).
   "cost.anomaly",
+  // W1-T3879: follow-up-policy-v1 folds these rows after restart. Losing a candidate, control,
+  // state, policy, or receipt would re-arm a stopped or already delivered reminder.
+  FOLLOW_UP_CANDIDATE_STEP,
+  FOLLOW_UP_STATE_STEP,
+  FOLLOW_UP_CONTROL_STEP,
+  FOLLOW_UP_RECEIPT_STEP,
+  FOLLOW_UP_POLICY_STEP,
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.
