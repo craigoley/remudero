@@ -104,6 +104,10 @@ test("unit test: experiment promotion replays deterministically without executin
   );
   assert.equal(mismatched.ok, true);
   if (mismatched.ok) assert.equal(mismatched.summary.matched, 0);
+
+  const malformed = replayPromotion([{} as never], () => 1, () => 1);
+  assert.equal(malformed.ok, false);
+  if (!malformed.ok) assert.equal(malformed.error, "replay case is missing a caseId");
 });
 
 test("unit test: experiment promotion carries comparable baseline and canary guardrails", () => {
@@ -150,6 +154,12 @@ test("unit test: experiment promotion refuses promotion when evidence is insuffi
   // Mixed comparison population.
   const mixed = evaluateGuardrails(record, [validateGuardObservation(readyObservation({ comparisonPopulation: "a different population" }))!], NOW);
   assert.equal(mixed.state, "unmeasurable");
+
+  // Evidence outside the declared observation window is not comparable, even when its
+  // denominator, freshness, and population are otherwise valid.
+  const tooOld = evaluateGuardrails(record, [validateGuardObservation(readyObservation({ observedAt: "2026-09-17T10:00:00.000Z" }))!], NOW);
+  assert.equal(tooOld.state, "unmeasurable");
+  assert.match(tooOld.reasons[0] ?? "", /predates the observation window/);
 
   // A stale read: the promotion's own expiry has passed.
   const expired = evaluateGuardrails(record, [validateGuardObservation(readyObservation())!], "2026-09-28T10:00:00.000Z");

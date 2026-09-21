@@ -190,6 +190,9 @@ test("promotion registration refuses a malformed record and routes refuse unknow
     assert.equal((await post(base, "/v1/operator-agent/promotions/replay", { promotionId: "promotion:repo:missing", replay: readySummary() })).status, 404);
 
     assert.equal((await post(base, "/v1/operator-agent/promotions", { promotion })).status, 201);
+    const duplicate = await post(base, "/v1/operator-agent/promotions", { promotion });
+    assert.equal(duplicate.status, 200);
+    assert.equal((await duplicate.json()).existing, true);
     // Cannot advance to canary before shadow, and cannot decide before replay.
     assert.equal((await post(base, "/v1/operator-agent/promotions/decision", { promotionId: promotion.promotionId, decision: "approved" })).status, 409);
     assert.equal(
