@@ -343,11 +343,12 @@ export interface CapabilityReceipt {
   readonly remainingUses?: number;
 }
 
-/** Caps on every free-text {@link CapabilityReceipt} field, so a receipt stays a small, bounded
- *  record regardless of how long an attacker-influenced `grantId`/`operation`/`audience` or a
- *  refusal's derived `reason` happens to be. Named constants, not inlined, so a test can assert
- *  against the SAME bound this module enforces. */
+/** PRIMARY CONTROL: the only place `grantId`/`operation`/`audience` are capped before they enter a
+ *  {@link CapabilityReceipt} — so a receipt stays small regardless of how long an
+ *  attacker-influenced field happens to be. Not a fallback for a bound enforced elsewhere. */
 export const CAPABILITY_RECEIPT_FIELD_MAX_CHARS = 200;
+/** PRIMARY CONTROL: the only place a refusal's derived `reason` text is capped before it enters a
+ *  {@link CapabilityReceipt}. Named, not inlined, so a test can assert against this SAME bound. */
 export const CAPABILITY_RECEIPT_REASON_MAX_CHARS = 240;
 
 function boundedText(value: string, max: number): string {

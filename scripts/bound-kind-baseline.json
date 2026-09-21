@@ -6,6 +6,7 @@
   "grandfathered": [
     "src/lib/account-usage.ts:USAGE_CACHE_MAX_AGE_MS",
     "src/lib/board.ts:RECAP_ACK_HEADER",
+    "src/lib/capability-grant.ts:CAPABILITY_GRANT_SCHEMA_VERSION",
     "src/lib/classify.ts:MAX_STRIKES",
     "src/lib/classify.ts:MAX_TRANSIENT_RETRIES",
     "src/lib/clone-reaper.ts:DEFAULT_CLONE_REAP_MAX_AGE_MS",
