@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -3201,7 +3202,7 @@ export async function spawnOpenWeightWorker(
   let webSearchUsd = 0;
   // Identity for this run's reservations. The run id is not sufficient on its own: the tool loop
   // sends one paid request PER TURN, and each needs its own settleable row.
-  const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${Math.random().toString(36).slice(2, 10)}`;
+  const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${randomUUID()}`;
   try {
     const env = args.env ?? process.env;
     // Built once, before any model tool call.  The Azure key stays in `env` for the HTTPS request
