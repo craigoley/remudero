@@ -287,7 +287,7 @@ const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; p
   },
   "plan-reconcile": {
     branch: PLAN_RECONCILE_LANDING_BRANCH,
-    ownedDir: "plan/tasks.d",
+    ownedDir: "",
     prTitle: PLAN_RECONCILE_LANDING_PR_TITLE,
   },
 };
@@ -497,7 +497,11 @@ function landingKind(
     landingOwner: opts.landingOwner,
     sourceRepository: opts.sourceRepository ?? sourceRepositoryFromCwd(),
   });
-  return { ...template, ...identity };
+  const layoutIdentity =
+    template.family === "plan-reconcile"
+      ? { ...identity, ownedDir: relative(root, join(resolveRepoLayout(root).planDir, "tasks.d")) }
+      : identity;
+  return { ...template, ...layoutIdentity };
 }
 
 /** Anchors on `/pull/<n>`, mirroring `prUrlTarget` (run-task.ts) — duplicated locally since this

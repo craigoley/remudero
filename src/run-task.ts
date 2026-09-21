@@ -863,6 +863,8 @@ import {
   wipeTestCadenceCheck,
   type MeasurementCadenceDecision,
   buildPlanReconcileCadenceInput,
+  type PlanReconcileCadenceOpts,
+  type PlanReconcileShardRecord,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
   type VerifyHumanCadenceResult,
@@ -1992,6 +1994,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
 let composedRealGraph: ComposedRealGraph | undefined;
 
@@ -22316,14 +22319,52 @@ export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementati
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
  *  now under the SAME filter too — see {@link creditIsReconcilable}. */
-function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot): Set<string> {
+export function defaultCreditedMergedIds(
+  configOverride?: Config,
+  checkoutRoot = repoRoot,
+  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
+): Set<string> {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
+  // No ledger means no positive merge-credit evidence. Return an empty projection rather than
+  // reaching for the GitHub gateway from an isolated or not-yet-initialized checkout.
+  if (!existsSync(ledgerPath)) return new Set();
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   return new Set(
-    buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
+    creditBuilder(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
   );
+}
+
+/** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
+ * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
+ * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
+export function buildPlanReconcileProductionInput(deps: {
+  checkoutRoot: string;
+  readShards: () => readonly PlanReconcileShardRecord[];
+  creditedMergedIds: () => ReadonlySet<string>;
+  land?: typeof landPlanReconcileShards;
+}): PlanReconcileCadenceOpts | undefined {
+  try {
+    return buildPlanReconcileCadenceInput({
+      checkoutRoot: deps.checkoutRoot,
+      readShards: deps.readShards,
+      creditedMergedIds: deps.creditedMergedIds,
+      land: (inputs) => {
+        const landing = (deps.land ?? landPlanReconcileShards)(deps.checkoutRoot, inputs, {
+          targetRepository: resolveOwnerRepo(),
+          landingOwner: "measurement-cadence",
+        });
+        if (!landing.landed || landing.error) {
+          throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+        }
+      },
+    });
+  } catch {
+    // An unavailable config, plan, ledger or credit projection must not abort the other
+    // measurement-cadence rungs. Omit this optional rung for the tick and retry next time.
+    return undefined;
+  }
 }
 
 /** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
@@ -24321,6 +24362,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
    *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
   ratifications?: Ratifications;
   coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
+  /** W1-T3970: keep the cadence landing bridge injectable while production retains the real PR path. */
+  planReconcileLand?: typeof landPlanReconcileShards;
   /** W1-T3970: keep the production credit read injectable so offline cadence fixtures do not
    * accidentally shell out to the live GitHub projection. */
   creditedMergedIds?: () => ReadonlySet<string>;
@@ -24366,23 +24409,21 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
       // checkout. A failed landing throws so the cadence records an error and retries later; it
       // must never report a successful reconciliation on an unlanded PR.
-      const planReconcile = buildPlanReconcileCadenceInput({
+      const planReconcile = buildPlanReconcileProductionInput({
         checkoutRoot: repoRoot,
-        readShards: () => readPlanShards(join(repoRoot, "plan", "tasks.d")),
+        readShards: () => readPlanShards(join(resolveRepoLayout(repoRoot).planDir, "tasks.d")),
         // Keep the cadence's explicit config/root boundary. The hook is testable with an
         // injected Config, and an unattended target must never fall back to the operator's HOME
         // config just because the credit projection is evaluated lazily.
         creditedMergedIds: deps.creditedMergedIds ?? (() => defaultCreditedMergedIds(configFor(), repoRoot)),
-        land: (inputs) => {
-          const landing = landPlanReconcileShards(repoRoot, inputs, {
-            targetRepository: resolveOwnerRepo(),
-            landingOwner: "measurement-cadence",
-          });
-          if (!landing.landed || landing.error) {
-            throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
-          }
-        },
+        land: deps.planReconcileLand,
       });
+      const planReconcileOption =
+        planReconcile === undefined
+          ? {}
+          : {
+              planReconcile: { ...planReconcile },
+            };
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -24396,7 +24437,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
-        planReconcile: { ...planReconcile },
+        ...planReconcileOption,
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),
