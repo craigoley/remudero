@@ -76,8 +76,6 @@ ENV HOME=/home/node
 # operator exec can rewrite the pinned binaries. Falsifier: both `--version` calls below prove the
 # lockfile-installed bins are on PATH, in-layer. deploy/verify-image.sh and `checkBinaryPin` read
 # the Claude ARG below.
-# Keep these operator-visible contracts in lockstep with deploy/package-lock.json; the image probe
-# reads the same lockfile so a Dependabot CLI refresh cannot leave a stale baked pin behind.
 ARG CLAUDE_CODE_VERSION=2.1.276
 ARG CODEX_VERSION=0.155.0
 ENV DISABLE_AUTOUPDATER=1
