@@ -6737,9 +6737,10 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
 2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.
 3. One concern per PR. Branch from latest origin/main. Isolated worktrees.
 3B. **The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side
-   decision that can be raced.** `ci-gate` (the aggregate required context, including `ci` and
-   `coverage-ratchet`) AND `remudero-review` (acceptance verdict by a fresh-context reviewer) must both
-   be green; GitHub does the merging. The runner ARMS auto-merge and
+   decision that can be raced.** The two required contexts are `ci-gate` AND `remudero-review`; `ci-gate`
+   is the aggregate required context, including `ci` and `coverage-ratchet`, and `remudero-review` is
+   the acceptance verdict by a fresh-context reviewer. Both must be green; GitHub does the merging. The
+   runner ARMS auto-merge and
    observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary:
    auto-merge is safe to leave armed, because the contract, not the runner, decides.
 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
@@ -7064,7 +7065,7 @@ to the docs it falsified. Split by AUTOMATABILITY:
 - **The API reference (§7A `packages/api-client`) is GENERATED from the OpenAPI surface.**
 - **CHANGELOG is generated from Conventional Commits** (W1-T31).
 
-### Generated docs and their generators
+### generated docs and their generators
 
 This is the inventory of generated artifacts under `docs/`; each row names the generator and the
 source of truth that must be changed before regeneration. These artifacts are never corrected by
