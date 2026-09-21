@@ -299,6 +299,11 @@
     "dateNow": 0,
     "newDate": 1
   },
+  "src/lib/provider-auth-sessions.ts": {
+    "legacy": 3,
+    "dateNow": 0,
+    "newDate": 1
+  },
   "src/lib/provider-routing-policy.ts": {
     "legacy": 2,
     "dateNow": 1,
