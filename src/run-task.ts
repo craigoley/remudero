@@ -31399,6 +31399,26 @@ function isReviewPostedStep(step: unknown): boolean {
   return step === "review.posted" || step === "review.post_refused";
 }
 
+/** W1-T1015 — the old head a successful sweep update superseded. The three non-success siblings
+ * are deliberately read here too so ledger rotation retains their evidence, but they never add a
+ * head to the suppression set: a conflict or error minted no replacement head. */
+function sweepUpdatedHeadsForTask(ledger: Array<Record<string, unknown>>, taskId: string): Set<string> {
+  const updatedHeads = new Set<string>();
+  for (const line of ledger) {
+    if (line.task_id !== taskId) continue;
+    if (
+      line.step !== "sweep.update_branch.attempted" &&
+      line.step !== "sweep.update_branch.updated" &&
+      line.step !== "sweep.update_branch.conflict" &&
+      line.step !== "sweep.update_branch.error"
+    ) continue;
+    if (line.step !== "sweep.update_branch.updated") continue;
+    if (typeof line.head_sha !== "string" || line.head_sha.length === 0) continue;
+    updatedHeads.add(line.head_sha);
+  }
+  return updatedHeads;
+}
+
 /** Historical-head facts used to distinguish an orphaned review from a first review. */
 interface ReviewOrphanFacts {
   /** True iff this PR was reviewed on a head that is no longer the current one. */
@@ -31511,12 +31531,14 @@ export function reviewOrphansFor(
   diffDigestForHead?: (sha: string) => string | undefined,
 ): ReviewOrphanFacts {
   if (!taskId || !headSha) return { orphanedByPush: false, priorOrphans: 0 };
+  const sweepUpdatedHeads = sweepUpdatedHeadsForTask(ledger, taskId);
   const priorHeads = new Map<string, number>(); // sha -> latest parseable ts (ms since epoch)
   for (const l of ledger) {
     if (!isReviewPostedStep(l.step)) continue;
     if (l.task_id !== taskId) continue;
     const sha = typeof l.head_sha === "string" ? l.head_sha : "";
     if (!sha || sha === headSha) continue; // absent sha, or the CURRENT head — neither is an orphan
+    if (sweepUpdatedHeads.has(sha)) continue; // the sweep itself superseded this reviewed head
     const parsed = typeof l.ts === "string" ? Date.parse(l.ts) : NaN;
     const prior = priorHeads.get(sha);
     if (prior === undefined) {

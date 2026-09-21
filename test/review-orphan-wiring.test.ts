@@ -100,6 +100,94 @@ test("a refused post also proves the PR was reviewed before", () => {
   assert.equal(facts.orphanedByPush, true, "the review lane ran for that sha; the verdict is still stale");
 });
 
+test("W1-T1015: a sweep-updated prior head does not increment the orphan count", () => {
+  const facts = reviewOrphansFor(
+    [
+      ledgerLine("review.posted", "W1-A", PRIOR_A),
+      ledgerLine("sweep.update_branch.attempted", "W1-A", PRIOR_A),
+      ledgerLine("sweep.update_branch.updated", "W1-A", PRIOR_A),
+    ],
+    "W1-A",
+    CURRENT,
+  );
+  assert.deepEqual(facts, { orphanedByPush: false, priorOrphans: 0 }, "the sweep owns this supersession");
+});
+
+test("W1-T1015: a foreign push still increments the orphan count", () => {
+  const facts = reviewOrphansFor(
+    [
+      ledgerLine("review.posted", "W1-A", PRIOR_A),
+      ledgerLine("sweep.update_branch.updated", "W1-A", PRIOR_A),
+      ledgerLine("review.posted", "W1-A", PRIOR_B),
+    ],
+    "W1-A",
+    CURRENT,
+  );
+  assert.equal(facts.orphanedByPush, true);
+  assert.equal(facts.priorOrphans, 1, "the foreign prior head remains visible beside the suppressed sweep head");
+});
+
+test("W1-T1015: a failed update suppresses no orphan", () => {
+  const facts = reviewOrphansFor(
+    [
+      ledgerLine("review.posted", "W1-A", PRIOR_A),
+      ledgerLine("sweep.update_branch.attempted", "W1-A", PRIOR_A),
+      ledgerLine("sweep.update_branch.conflict", "W1-A", PRIOR_A),
+      ledgerLine("sweep.update_branch.error", "W1-A", PRIOR_A),
+    ],
+    "W1-A",
+    CURRENT,
+  );
+  assert.equal(facts.orphanedByPush, true);
+  assert.equal(facts.priorOrphans, 1, "a failed update minted no replacement head");
+});
+
+test("W1-T1015: absent evidence counts the head as foreign", () => {
+  const facts = reviewOrphansFor(
+    [
+      ledgerLine("review.posted", "W1-A", PRIOR_A),
+      ledgerLine("sweep.update_branch.attempted", "W1-A"),
+    ],
+    "W1-A",
+    CURRENT,
+  );
+  assert.equal(facts.orphanedByPush, true);
+  assert.equal(facts.priorOrphans, 1, "missing attribution cannot fail open into suppression");
+});
+
+test("W1-T1015: inverting the attribution fails the foreign-push control", async () => {
+  const runTaskUrl = new URL("../src/run-task.ts", import.meta.url);
+  const src = readFileSync(runTaskUrl, "utf8");
+  const target = "    if (sweepUpdatedHeads.has(sha)) continue; // the sweep itself superseded this reviewed head\n";
+  assert.equal(src.split(target).length - 1, 1, "the substitution target must be unique");
+  const originalSha = createHash("sha256").update(src).digest("hex");
+  const mutatedSrc = src.replace(target, "    if (!sweepUpdatedHeads.has(sha)) continue; // the sweep itself superseded this reviewed head\n");
+  const mutatedSha = createHash("sha256").update(mutatedSrc).digest("hex");
+  assert.notEqual(mutatedSha, originalSha, "the mutation must change the source");
+
+  // `writeMutantModule` normally copies a `src/lib` module and rewrites same-directory imports.
+  // `run-task.ts` sits at `src/` and imports both `./lib/*` and `./cli/*` modules, so resolve all
+  // of its relative imports to the real source tree before using the same in-repo mutant location.
+  const mutantSourceForLoader = mutatedSrc.replace(
+    /from "\.\/([^\"]+)\.js"/g,
+    (_m, name: string) => `from "${join(process.cwd(), "src", name)}.js"`,
+  );
+  const mutantPath = writeMutantModule("run-task.ts", mutantSourceForLoader);
+  const mutant = (await import(mutantPath)) as typeof import("../src/run-task.js");
+  const ledger = [
+    ledgerLine("review.posted", "W1-A", PRIOR_A),
+    ledgerLine("sweep.update_branch.updated", "W1-A", PRIOR_A),
+    ledgerLine("review.posted", "W1-A", PRIOR_B),
+    ledgerLine("review.posted", "W1-A", "cccc3333cccc3333cccc3333cccc3333cccc3333"),
+  ];
+  const expected = reviewOrphansFor(ledger, "W1-A", CURRENT);
+  const inverted = mutant.reviewOrphansFor(ledger, "W1-A", CURRENT);
+  assert.equal(expected.priorOrphans, 2, "the real path keeps both foreign heads");
+  assert.equal(inverted.priorOrphans, 1, "the inverted path suppresses the foreign heads instead");
+  const shaAfter = createHash("sha256").update(readFileSync(runTaskUrl, "utf8")).digest("hex");
+  assert.equal(shaAfter, originalSha, "the real source must be unchanged around the mutant run");
+});
+
 test("buildOpenPrViews keeps prior-head detection separate from the exact-input retry count", async () => {
   // THE END-TO-END DRIVE. This exercises the producer literal itself — not a fixture — which is
   // what makes the falsifier below land on a test that proves population rather than fabrication.
