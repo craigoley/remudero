@@ -59,6 +59,11 @@
     "dateNow": 1,
     "newDate": 0
   },
+  "src/lib/consequence-policy.ts": {
+    "legacy": 0,
+    "dateNow": 1,
+    "newDate": 4
+  },
   "src/lib/console-freshness.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -236,8 +241,8 @@
   },
   "src/lib/operator-agent.ts": {
     "legacy": 1,
-    "dateNow": 18,
-    "newDate": 30
+    "dateNow": 19,
+    "newDate": 31
   },
   "src/lib/operator-merge-hold.ts": {
     "legacy": 1,
