@@ -55,3 +55,30 @@ test("stale and unobservable connector reads are named rather than collapsed int
   assert.equal(unavailable.observation.status, "unavailable");
   assert.equal(unavailable.safeToComplete, false);
 });
+
+test("a connector observation failure is reconciled as unobservable with bounded evidence", async () => {
+  const result = await reconcileExternalEffect({
+    ...request("applied"),
+    observe: async () => {
+      throw new Error("provider timeout");
+    },
+  });
+
+  assert.equal(result.reconciliationState, "unobservable");
+  assert.equal(result.observation.status, "unavailable");
+  assert.equal(result.reason, "connector observation failed");
+  assert.match(result.evidenceReference, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(result.safeToComplete, false);
+});
+
+test("an observation without a valid timestamp is unobservable rather than fresh", async () => {
+  const result = await reconcileExternalEffect(request("applied", {
+    observedState: { first: true, second: true },
+    observedAt: "not-a-date",
+  }));
+
+  assert.equal(result.reconciliationState, "unobservable");
+  assert.equal(result.observation.status, "unavailable");
+  assert.equal(result.reason, "connector observation has no valid observation time");
+  assert.equal(result.safeToComplete, false);
+});
