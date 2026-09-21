@@ -15,6 +15,7 @@
     - src/lib/serve.ts
     - src/lib/worker-provider.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
     - test/provider-auth-sessions.test.ts
     - test/provider-auth-console.test.ts
   status: queued
@@ -49,15 +50,15 @@
     notifications, and provider disconnects all resolve to explicit non-operative states.
   acceptance:
     - claim: "provider auth start, read, and cancel expose only bounded opaque session projections"
-      proof: "unit test: provider auth projection redacts tokens paths transcripts and raw provider payloads"
+      proof: "grep: provider auth projection redacts tokens paths transcripts and raw provider payloads in test/provider-auth-sessions.test.ts"
     - claim: "Codex managed browser login reaches completion only from the documented app-server notification"
-      proof: "unit test: Codex auth completion requires the matching app-server login notification"
+      proof: "grep: Codex auth completion requires the matching app-server login notification in test/provider-auth-sessions.test.ts"
     - claim: "unsupported Claude handoff remains unsupported and cannot be activated by opening a browser"
-      proof: "unit test: unsupported provider auth cannot become complete from browser-open state"
+      proof: "grep: unsupported provider auth cannot become complete from browser-open state in test/provider-auth-sessions.test.ts"
     - claim: "expired, cancelled, failed, or malformed sessions cannot change the effective account"
-      proof: "unit test: provider auth refusal leaves effective account and queued admission unchanged"
+      proof: "grep: provider auth refusal leaves effective account and queued admission unchanged in test/provider-auth-sessions.test.ts"
     - claim: "provider auth routes never trust a browser-supplied upstream URL or credential store"
-      proof: "unit test: provider auth gateway uses configured provider targets only"
+      proof: "grep: provider auth gateway uses configured provider targets only in test/provider-auth-console.test.ts"
     - claim: "the daemon's public route table calls the provider-auth session module rather than leaving it test-only"
       proof: "grep: startProviderAuthSession( in src/lib/serve.ts"
   falsifier: |
