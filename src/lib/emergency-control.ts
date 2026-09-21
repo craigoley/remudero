@@ -391,7 +391,7 @@ export interface EmergencyClearRequest {
   readonly revocation: EmergencyRevocationSourceCheck;
 }
 
-/** How old a health/preflight read may be at clear time and still count as "fresh". */
+/** PRIMARY CONTROL: bounds the freshness window accepted by the emergency clear gate. */
 export const EMERGENCY_CLEAR_HEALTH_MAX_AGE_MS = 5 * 60 * 1000;
 
 export type EmergencyClearResult =

@@ -76,6 +76,11 @@ test("W1-T3900 (1): a missing reason, issuer, or incident receipt is refused at 
   assert.throws(() => createEmergencyStop(baseInput({ incidentReceiptId: "" })), /non-empty incidentReceiptId/);
 });
 
+test("W1-T3900 (1): invalid scope and clear policy values are refused at issuance", () => {
+  assert.throws(() => createEmergencyStop(baseInput({ scope: "unknown" as EmergencyStopInput["scope"] })), /scope to be one of/);
+  assert.throws(() => createEmergencyStop(baseInput({ clearPolicy: "unknown" as EmergencyStopInput["clearPolicy"] })), /clearPolicy to be one of/);
+});
+
 test("W1-T3900 (1): affectedCapabilities/affectedDelegationClasses default to the wildcard, and can be narrowed", () => {
   const wide = createEmergencyStop(baseInput());
   assert.equal(wide.affectedCapabilities, "*");
