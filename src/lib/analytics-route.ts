@@ -50,6 +50,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   buildAnalyticsTimeSeries,
   createHistoricalSeriesAccumulator,
@@ -1206,7 +1207,7 @@ function checkpointSource(stateDir: string): AnalyticsCheckpointSource | undefin
       const stat = statSync(entry.path);
       return { name: basename(entry.path), size: stat.size, mtimeMs: stat.mtimeMs };
     });
-    const livePath = join(stateDir, "ledger.ndjson");
+    const livePath = join(stateDir, LEDGER_FILENAME);
     const live = existsSync(livePath) ? statSync(livePath) : null;
     return { archives, live: live ? { size: live.size, mtimeMs: live.mtimeMs } : null, lastArchive: archives.at(-1)?.name ?? null, liveOffset: live?.size ?? 0 };
   } catch {
