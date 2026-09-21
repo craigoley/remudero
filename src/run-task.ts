@@ -32923,13 +32923,17 @@ export function creditEvidenceRootFor(
     /** `git -C <cwd> <args>`, returning stdout; throws like `execFileSync`. Injectable so a test
      *  can prove/disprove a fabricated checkout's origin without shelling out for real. */
     exec?: (args: string[], cwd: string) => string;
+    /** Resolves THIS checkout's own owner/repo when `selfOwnerRepo` is not supplied, defaulting
+     *  to {@link resolveOwnerRepo}. Injectable so a test can force the "repoRoot has no readable
+     *  origin" branch below IN-PROCESS, without a real broken git config on this checkout. */
+    resolveOwnerRepo?: () => { owner: string; repo: string };
   } = {},
 ): string | undefined {
   const self =
     opts.selfOwnerRepo ??
     (() => {
       try {
-        return resolveOwnerRepo();
+        return (opts.resolveOwnerRepo ?? resolveOwnerRepo)();
       } catch {
         return undefined; // repoRoot has no readable origin — cannot prove a self match either way
       }

@@ -21,7 +21,6 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
 
 import { buildCreditCandidates, buildEscalationReconcileCandidates, creditEvidenceRootFor } from "../src/run-task.js";
 import { repoRoot, resolveOwnerRepo } from "../src/lib/repo-location.js";
@@ -253,18 +252,22 @@ test("W1-T3873 criterion 3: a FOREIGN or missing target checkout leaves the exis
   assert.equal(candidates[0].derived.merged, true, "no local opinion is available, so today's trailer-only answer stands — never a manufactured refusal");
 });
 
-test("W1-T3873 criterion 3: an unreadable engine origin also degrades to no evidence", () => {
-  // Exercise the default self-identity read in a fresh process whose explicit repo root is not
-  // a checkout. This is the real failure arm in creditEvidenceRootFor, not the injected foreign-
-  // checkout path above: a broken engine origin must never turn a credit pass into a throw.
-  const moduleUrl = pathToFileURL(join(repoRoot, "src", "run-task.ts")).href;
-  const probe = `import { creditEvidenceRootFor } from ${JSON.stringify(moduleUrl)};\nprocess.stdout.write(String(creditEvidenceRootFor("o", "target")));`;
-  const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe, "--", "--repo-root", "/definitely/not/a/checkout"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+test("W1-T3873 criterion 3: an unreadable engine origin also degrades to no evidence, not a throw", () => {
+  // The real failure arm in creditEvidenceRootFor's self-identity read: `resolveOwnerRepo()`
+  // throwing (a checkout with no readable `origin` remote) must fall through to the SAME
+  // fail-closed answer as any other unproven checkout, never bubble up and take out a credit
+  // pass over one broken git config. Driven in-process via the injected `resolveOwnerRepo` seam
+  // (mirroring the injected `exec` seam already used above) so this needs no real broken repo.
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-cte-config-"));
+  // `configRoot/repos/target` was never created either, so a wrongly-resolved self would be the
+  // only way this could produce anything other than `undefined`.
+  const root = creditEvidenceRootFor("o", "target", {
+    configRoot,
+    resolveOwnerRepo: () => {
+      throw new Error("no readable origin");
+    },
   });
-  assert.equal(output, "undefined", "an unreadable engine origin is a safe no-evidence answer");
+  assert.equal(root, undefined, "an unreadable engine origin is a safe no-evidence answer, not a throw");
 });
 
 // ── CRITERION 4 — the credit pass reads evidence ONCE per pass, never once per task ──────────────
