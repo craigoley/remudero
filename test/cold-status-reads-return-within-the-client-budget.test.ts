@@ -221,7 +221,7 @@ test("an event-loop-blocked read still fires the fallback timer before the clien
   assert.equal(body.staleness?.stale, true);
 });
 
-test("cold and blocked reads report an honest unavailable/stale state, never a fabricated verified value", async () => {
+test("cold or blocked reads report unavailable or stale state instead of a fabricated verified value", async () => {
   const deps = depsFor(tmpRoot(), planOf([task({ id: "W1-T3925-HONEST" })]));
   const BUDGET_MS = 30;
 
@@ -247,7 +247,7 @@ test("cold and blocked reads report an honest unavailable/stale state, never a f
   }
 });
 
-test("a cold-read latency measurement fixture records a measurable latency for future regression checks", async () => {
+test("cold-read timing fixture records a measurable latency", async () => {
   const deps = depsFor(tmpRoot());
   const samples: number[] = [];
   const measure = async <T>(fn: () => Promise<T>): Promise<T> => {
