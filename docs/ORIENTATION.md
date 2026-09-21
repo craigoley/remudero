@@ -1,6 +1,6 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-21T04:14:23.709Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-21T04:16:57.364Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
@@ -32,9 +32,10 @@ not by re-deriving state from the full plan and ledger.
 - 2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.
 - 3. One concern per PR. Branch from latest origin/main. Isolated worktrees.
 - 3B. The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side
-  decision that can be raced. `ci-gate` (the aggregate required context, including `ci` and
-  `coverage-ratchet`) AND `remudero-review` (acceptance verdict by a fresh-context reviewer) must both
-  be green; GitHub does the merging. The runner ARMS auto-merge and
+  decision that can be raced. The two required contexts are `ci-gate` AND `remudero-review`; `ci-gate`
+  is the aggregate required context, including `ci` and `coverage-ratchet`, and `remudero-review` is
+  the acceptance verdict by a fresh-context reviewer. Both must be green; GitHub does the merging. The
+  runner ARMS auto-merge and
   observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary:
   auto-merge is safe to leave armed, because the contract, not the runner, decides.
 - 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
