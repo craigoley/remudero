@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: medium
   budget_usd: 20.00
-  files: [scripts/satisfied-task-census.mjs]
+  files: [scripts/satisfied-task-census.mjs, test/satisfied-task-census.test.ts]
   origin: "2026-09-21 review of #6389, the second build attempt on W1-T3688 to close unmerged on the identical refusal"
   plan_refs: ["W1-T3688", "W1-T3722", "W1-T3843"]
   status: queued
@@ -71,13 +71,13 @@
     record.
   acceptance:
     - claim: "a queued task whose discriminating proofs all pass against unmodified main is reported as having nothing left to build"
-      proof: "unit test: W1-T3961: a task whose proofs all pass at main is reported"
+      proof: "grep: W1-T3961: a task whose proofs all pass at main is reported in test/satisfied-task-census.test.ts"
     - claim: "a task carrying a whole-file proof is not reported, because that shape is stale by construction and would flag most of the backlog"
-      proof: "unit test: W1-T3961: a whole-file proof shape is never evidence of satisfaction"
+      proof: "grep: W1-T3961: a whole-file proof shape is never evidence of satisfaction in test/satisfied-task-census.test.ts"
     - claim: "a task with at least one proof that fails at main is not reported, so work that remains is left alone"
-      proof: "unit test: W1-T3961: a task with work remaining is not reported"
+      proof: "grep: W1-T3961: a task with work remaining is not reported in test/satisfied-task-census.test.ts"
     - claim: "the report names the task, its proofs and their verdicts, and refuses nothing"
-      proof: "unit test: W1-T3961: the census reports and does not refuse"
+      proof: "grep: W1-T3961: the census reports and does not refuse in test/satisfied-task-census.test.ts"
   falsifier: |
     Point the sweep at a fixture reproducing W1-T3688 -- a queued task whose name-filtered proofs
     all pass at main -- and it must be reported; delete the check and the fixture goes unreported,
