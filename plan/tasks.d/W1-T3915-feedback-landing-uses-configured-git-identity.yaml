@@ -1,0 +1,45 @@
+- id: W1-T3915
+  title: "AUTOMATED LANDING PRS MUST USE THE DEPLOYMENT'S VERIFIED GIT IDENTITY — the feedback bridge hard-codes an unrecognized bot email and Vercel refuses every console preview before build"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: medium
+  origin: "operator-session#console-1508-vercel-identity-2026-09-20"
+  plan_refs: ["W1-T243", "W1-T3492"]
+  files:
+    - src/lib/feedback-landing.ts
+    - test/feedback-landing.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED in console PR #1508: the code checks passed, but Vercel refused the preview before
+    deployment with "GitHub couldn't verify an account for commit da0df64". The commit metadata
+    is `rmd-feedback-bridge <rmd-feedback-bridge@users.noreply.github.com>`.
+
+    SOURCE ATTRIBUTION IS COMPLETE. `src/lib/feedback-landing.ts` hard-codes that name and email
+    and passes them explicitly to `git commit-tree` in `finishLanding`. The container entrypoint
+    already exposes the deployment-specific `RMD_GIT_AUTHOR_NAME` and `RMD_GIT_AUTHOR_EMAIL`
+    variables and writes them to global git config, but the landing bridge bypasses that configured
+    identity. The result is a valid Git commit that GitHub accepts but Vercel cannot attribute to a
+    member of its connected team, so every automated landing PR can fail its required preview.
+
+    Use those existing process environment variables at commit creation time, retaining the
+    purpose-scoped bridge identity as the safe default when a deployment has not configured a
+    verified author. Test both the override and the default against real commit metadata. Do not
+    hard-code a person's private email into core or change the landing branch, PR, or data-only
+    semantics.
+  acceptance:
+    - claim: "a landing commit uses the explicit RMD_GIT_AUTHOR_NAME and RMD_GIT_AUTHOR_EMAIL values when the deployment supplies them"
+      proof: "unit test: W1-T3915 configured landing commit identity"
+    - claim: "a landing with no identity override retains the existing purpose-scoped bridge identity"
+      proof: "unit test: W1-T3915 default landing commit identity"
+    - claim: "the bridge does not read a caller-supplied child environment as a substitute for process.env"
+      proof: "grep: process\\.env\\.RMD_GIT_AUTHOR_ in src/lib/feedback-landing.ts"
+  falsifier: |
+    This task is wrong if a configured deployment still produces a landing commit with the
+    bridge default identity, if an unset deployment loses the current default, if the code embeds
+    the operator's private identity, or if any capture/landing/PR tree behavior changes beyond the
+    commit metadata.
