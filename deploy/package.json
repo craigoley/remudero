@@ -1,9 +1,0 @@
-{
-  "name": "remudero-image-clis",
-  "private": true,
-  "version": "0.0.0",
-  "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.276",
-    "@openai/codex": "0.155.0"
-  }
-}

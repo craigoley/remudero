@@ -1,5 +1,0 @@
-{
-  "_comment": "exactly alpha's 41-char injectable weight -- beta must contribute ZERO for this to still pass. | W1-T3734: blocking moved from capChars (now an advisory curation target) to hardCapChars, so this fixture declares the runaway cliff.",
-  "capChars": 41,
-  "hardCapChars": 41
-}

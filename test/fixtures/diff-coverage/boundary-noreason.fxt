@@ -1,5 +1,0 @@
-const q = 1;
-// diff-cov: process-boundary
-function reexec() {
-  process.exit(spawnSync(process.execPath, []).status);
-}

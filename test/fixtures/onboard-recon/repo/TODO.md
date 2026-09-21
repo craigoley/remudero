@@ -1,2 +1,0 @@
-- [ ] wire up the widget cache
-- [ ] wire up the gadget cache

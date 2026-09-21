@@ -1,5 +1,0 @@
-{
-  "_comment": "alpha (a.yaml, 41 chars) + gamma (b.yaml, 41 chars) = 82 -- one over this RUNAWAY cliff, must BLOCK. W1-T3734: blocking lives on hardCapChars now.",
-  "capChars": 81,
-  "hardCapChars": 81
-}
