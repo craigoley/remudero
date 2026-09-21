@@ -47,6 +47,8 @@
  * once W1-T433's second cell exists — this shard deliberately does not build that consumer.
  */
 
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
 import {
   buildAnalyticsTimeSeries,
@@ -63,7 +65,7 @@ import {
 } from "./analytics-breakdowns.js";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
-import { openLedgerUnion } from "./ledger-union.js";
+import { fingerprintLedgerLine, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal } from "./operator-agent-capacity.js";
@@ -422,6 +424,85 @@ interface AnalyticsAccumulator {
   };
   historicalSeries: HistoricalSeriesAccumulator;
   breakdowns: AnalyticsBreakdownAccumulator;
+  checkpointHistory: CheckpointHistoryState;
+  checkpointBreakdowns: CheckpointBreakdownState;
+  checkpointHydrated: boolean;
+}
+
+type CheckpointHistoryBucket = {
+  observed: boolean;
+  completedRuns: number;
+  tokensTotal: number;
+  cacheRead: number;
+  inputTokens: number;
+  cacheCreation: number;
+  costUsd: number;
+  durationsMs: number[];
+};
+
+type CheckpointHistoryState = {
+  days: Map<string, CheckpointHistoryBucket>;
+  starts: Map<string, number>;
+};
+
+type CheckpointBreakdownState = {
+  starts: Set<string>;
+  terminals: Map<string, { verdict?: string; success?: boolean }>;
+  startsWithoutRunId: number;
+  terminalsWithoutRunId: number;
+  workCategories: Map<string, number>;
+};
+
+const CHECKPOINT_VERSION = 1 as const;
+const CHECKPOINT_FILENAME = ".analytics-console-v1.checkpoint.json";
+const CHECKPOINT_HISTORY_BUCKETS = 30;
+const CHECKPOINT_DAY_MS = 24 * 60 * 60 * 1000;
+const CHECKPOINT_SUCCESS_VERDICTS = new Set(["merged", "already_satisfied"]);
+
+type AnalyticsCheckpointSource = {
+  archives: Array<{ name: string; size: number; mtimeMs: number }>;
+  live: { size: number; mtimeMs: number } | null;
+  lastArchive: string | null;
+  liveOffset: number;
+};
+
+type AnalyticsCheckpointState = {
+  invocationsByVerb: Record<string, number>;
+  invocationsMeasured: boolean;
+  workersByLaneModel: WorkerLaneModelBucket[];
+  startsByRun: Array<[string, { ts: number; taskId: string }]>;
+  verdictsByRun: Array<[string, number]>;
+  workerDurationsByLane: Array<[string, { count: number; totalMs: number }]>;
+  workerDurationsMeasured: boolean;
+  tokensTotal: CacheHitTokens & { output: number };
+  routingTelemetry: {
+    taskTypesByRun: Array<[string, string]>;
+    assignmentsById: Array<[string, RoutingAssignment]>;
+    terminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
+    pendingTerminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
+    buckets: Array<Omit<RoutingTelemetryBucketState, "fallbackReasons"> & { fallbackReasons: Array<[string, number]> }>;
+    days: RoutingTelemetryDay[];
+  };
+  operatorAgentRows: AnalyticsAccumulator["operatorAgentRows"];
+  history: {
+    days: Array<[string, CheckpointHistoryBucket]>;
+    starts: Array<[string, number]>;
+  };
+  breakdowns: {
+    starts: string[];
+    terminals: Array<[string, { verdict?: string; success?: boolean }]>;
+    startsWithoutRunId: number;
+    terminalsWithoutRunId: number;
+    workCategories: Array<[string, number]>;
+  };
+};
+
+export interface AnalyticsCheckpoint {
+  version: typeof CHECKPOINT_VERSION;
+  source: AnalyticsCheckpointSource;
+  tail: Array<{ step: string; fingerprint: string }>;
+  state: AnalyticsCheckpointState;
+  snapshot: AnalyticsSnapshot;
 }
 
 type RoutingAssignment = {
@@ -483,6 +564,200 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     operatorAgentRows: { proof: [], decisions: [], capacity: [] },
     historicalSeries: createHistoricalSeriesAccumulator(),
     breakdowns: createAnalyticsBreakdownAccumulator(),
+    checkpointHistory: { days: new Map(), starts: new Map() },
+    checkpointBreakdowns: { starts: new Set(), terminals: new Map(), startsWithoutRunId: 0, terminalsWithoutRunId: 0, workCategories: new Map() },
+    checkpointHydrated: false,
+  };
+}
+
+function checkpointDay(value: unknown): string | undefined {
+  const raw = str(value);
+  const parsed = raw === undefined ? NaN : Date.parse(raw);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : undefined;
+}
+
+function checkpointHistoryBucket(state: CheckpointHistoryState, day: string): CheckpointHistoryBucket {
+  const existing = state.days.get(day);
+  if (existing) return existing;
+  const created: CheckpointHistoryBucket = {
+    observed: false,
+    completedRuns: 0,
+    tokensTotal: 0,
+    cacheRead: 0,
+    inputTokens: 0,
+    cacheCreation: 0,
+    costUsd: 0,
+    durationsMs: [],
+  };
+  state.days.set(day, created);
+  return created;
+}
+
+function checkpointTokenCounts(line: Record<string, unknown>): { total: number; input: number; cacheRead: number; cacheCreation: number } {
+  const raw = line.tokens;
+  if (!raw || typeof raw !== "object") return { total: 0, input: 0, cacheRead: 0, cacheCreation: 0 };
+  const tokens = raw as Record<string, unknown>;
+  const input = num(tokens.input) ?? 0;
+  const output = num(tokens.output) ?? 0;
+  const cacheRead = num(tokens.cacheRead) ?? 0;
+  const cacheCreation = num(tokens.cacheCreation) ?? 0;
+  return { total: input + output + cacheRead + cacheCreation, input, cacheRead, cacheCreation };
+}
+
+function captureCheckpointLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
+  const day = checkpointDay(line.ts);
+  if (day !== undefined) checkpointHistoryBucket(acc.checkpointHistory, day).observed = true;
+  const step = str(line.step);
+  const runId = str(line.run_id);
+  const timestamp = Date.parse(str(line.ts) ?? "");
+  if (step === "run.start" && runId && Number.isFinite(timestamp)) {
+    const prior = acc.checkpointHistory.starts.get(runId);
+    if (prior === undefined || timestamp < prior) acc.checkpointHistory.starts.set(runId, timestamp);
+  }
+  if (step === "verdict" && runId && Number.isFinite(timestamp)) {
+    const started = acc.checkpointHistory.starts.get(runId);
+    if (started !== undefined && day !== undefined) {
+      const bucket = checkpointHistoryBucket(acc.checkpointHistory, day);
+      bucket.completedRuns += 1;
+      bucket.durationsMs.push(Math.max(0, timestamp - started));
+    }
+  }
+  if (day !== undefined && str(line.model) !== undefined) {
+    const bucket = checkpointHistoryBucket(acc.checkpointHistory, day);
+    const tokens = checkpointTokenCounts(line);
+    bucket.tokensTotal += tokens.total;
+    bucket.inputTokens += tokens.input;
+    bucket.cacheRead += tokens.cacheRead;
+    bucket.cacheCreation += tokens.cacheCreation;
+    bucket.costUsd += num(line.total_cost_usd) ?? 0;
+  }
+
+  const breakdowns = acc.checkpointBreakdowns;
+  if (step === "run.start") {
+    const category = str(line.type);
+    const key = category && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(category) ? category : "unknown";
+    breakdowns.workCategories.set(key, (breakdowns.workCategories.get(key) ?? 0) + 1);
+    if (runId) breakdowns.starts.add(runId);
+    else breakdowns.startsWithoutRunId += 1;
+  } else if (step === "verdict") {
+    const terminal = {
+      ...(str(line.verdict) ? { verdict: str(line.verdict) } : {}),
+      ...(typeof line.success === "boolean" ? { success: line.success } : {}),
+    };
+    if (runId) breakdowns.terminals.set(runId, terminal);
+    else breakdowns.terminalsWithoutRunId += 1;
+  }
+}
+
+function checkpointMedian(values: readonly number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.floor((sorted.length - 1) / 2)];
+}
+
+function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string | null): LedgerTimeSeries[] {
+  const definitions = [
+    ["runs.completed", "Completed runs", "sum"],
+    ["tokens.total", "Total tokens", "sum"],
+    ["cache.reuse", "Cache reuse", "ratio"],
+    ["cost.modeled.usd", "Modeled cost (USD)", "sum"],
+    ["duration.p50.ms", "Run duration p50 (ms)", "p50"],
+  ] as const;
+  if (nowIso === null) {
+    return definitions.map(([id, name, aggregation]) => ({
+      id,
+      name,
+      window: "unmeasured",
+      bucketWidth: "1d",
+      aggregation,
+      coverage: "not-collected",
+      points: [],
+    }));
+  }
+  const end = Date.parse(`${checkpointDay(nowIso) ?? "1970-01-01"}T00:00:00.000Z`);
+  const days = Array.from({ length: CHECKPOINT_HISTORY_BUCKETS }, (_, index) =>
+    new Date(end - (CHECKPOINT_HISTORY_BUCKETS - index - 1) * CHECKPOINT_DAY_MS).toISOString().slice(0, 10),
+  );
+  const pointFor = (day: string, id: string) => {
+    const bucket = state.days.get(day);
+    if (bucket === undefined || !bucket.observed) return { t: `${day}T00:00:00.000Z`, value: null, gap: true, note: "missing" };
+    if (id === "runs.completed") return { t: `${day}T00:00:00.000Z`, value: bucket.completedRuns, gap: false };
+    if (id === "tokens.total") return { t: `${day}T00:00:00.000Z`, value: bucket.tokensTotal, gap: false };
+    if (id === "cost.modeled.usd") return { t: `${day}T00:00:00.000Z`, value: bucket.costUsd, gap: false };
+    if (id === "cache.reuse") {
+      const denominator = bucket.cacheRead + bucket.inputTokens + bucket.cacheCreation;
+      return denominator > 0
+        ? { t: `${day}T00:00:00.000Z`, value: bucket.cacheRead / denominator, gap: false }
+        : { t: `${day}T00:00:00.000Z`, value: null, gap: true, note: "not-collected" };
+    }
+    const duration = checkpointMedian(bucket.durationsMs);
+    return duration === undefined
+      ? { t: `${day}T00:00:00.000Z`, value: null, gap: true, note: "not-collected" }
+      : { t: `${day}T00:00:00.000Z`, value: duration, gap: false };
+  };
+  const window = `${days[0]}/${days.at(-1)}`;
+  return definitions.map(([id, name, aggregation]) => {
+    const points = days.map((day) => pointFor(day, id));
+    return {
+      id,
+      name,
+      window,
+      bucketWidth: "1d",
+      aggregation,
+      coverage: points.some((point) => point.value !== null && point.value !== undefined) ? "observed" : "not-collected",
+      points,
+    };
+  });
+}
+
+function checkpointBreakdowns(
+  state: CheckpointBreakdownState,
+  outcomes: OperatorAgentTaskOutcomeSignal | undefined,
+): { dimensions: AnalyticsBreakdownDimension[]; drilldowns: AnalyticsDrilldownRow[] } {
+  const counts = new Map<string, number>();
+  const add = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
+  for (const runId of state.starts) {
+    const terminal = state.terminals.get(runId);
+    if (!terminal) add("missing-terminal-receipt");
+    else if (CHECKPOINT_SUCCESS_VERDICTS.has(terminal.verdict ?? "") && terminal.success !== false) add("success");
+    else if (!terminal.verdict) add("unknown");
+    else add("failure");
+  }
+  for (let index = 0; index < state.startsWithoutRunId; index += 1) add("missing-terminal-receipt");
+  for (let index = 0; index < state.terminalsWithoutRunId; index += 1) add("unknown");
+  for (const [runId, terminal] of state.terminals) {
+    if (state.starts.has(runId)) continue;
+    if (terminal.verdict) add(CHECKPOINT_SUCCESS_VERDICTS.has(terminal.verdict) && terminal.success !== false ? "success" : "failure");
+    else add("unknown");
+  }
+  const outcomeDenominator = [...counts.values()].reduce((sum, value) => sum + value, 0);
+  const outcomeBuckets = ["success", "failure", "missing-terminal-receipt", "unknown"]
+    .filter((key) => (counts.get(key) ?? 0) > 0)
+    .map((key) => ({ key, label: key, count: counts.get(key)!, denominator: outcomeDenominator }));
+  if (outcomes?.status === "measured") {
+    const denominator = outcomes.armsClassified;
+    for (const [key, count] of [
+      ["reverted", outcomes.classes.reduce((sum, item) => sum + item.revertedCount, 0)],
+      ["follow-up-fix", outcomes.classes.reduce((sum, item) => sum + item.followupFixedCount, 0)],
+    ] as const) {
+      if (count > 0) outcomeBuckets.push({ key, label: key, count, denominator });
+    }
+  }
+  const categories = [...state.workCategories.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  const bounded = categories.slice(0, 20);
+  const overflow = categories.slice(20).reduce((sum, [, count]) => sum + count, 0);
+  if (overflow > 0) bounded.push(["other", overflow]);
+  const workDenominator = [...state.workCategories.values()].reduce((sum, value) => sum + value, 0);
+  const categoryBuckets = bounded
+    .filter(([, count]) => count > 0)
+    .map(([key, count]) => ({ key, label: key, count, denominator: workDenominator }));
+  const dimensions: AnalyticsBreakdownDimension[] = [
+    { key: "outcome", label: "Outcome", state: outcomeDenominator > 0 ? "observed" : "empty", denominator: outcomeDenominator, buckets: outcomeBuckets },
+    { key: "work-category", label: "Work category", state: workDenominator > 0 ? "observed" : "empty", denominator: workDenominator, buckets: categoryBuckets },
+  ];
+  return {
+    dimensions,
+    drilldowns: dimensions.flatMap((dimension) => dimension.buckets.slice(0, 40).map((bucket) => ({ ...bucket, dimension: dimension.key }))),
   };
 }
 
@@ -739,6 +1014,7 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
 function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
   acc.historicalSeries.add(line);
   acc.breakdowns.add(line);
+  captureCheckpointLine(acc, line);
   const selectedOperatorAgentRow = operatorAgentRow(line);
   if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
   else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
@@ -856,8 +1132,12 @@ function snapshotFromAccumulator(
     }),
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
     ...emptyLiveAnalyticsMetrics(),
-    timeSeries: buildAnalyticsTimeSeries(acc.historicalSeries, nowIso),
-    ...buildAnalyticsBreakdowns(acc.breakdowns, { operatorAgentOutcomes: options.operatorAgentOutcomes }),
+    timeSeries: acc.checkpointHydrated
+      ? checkpointTimeSeries(acc.checkpointHistory, nowIso)
+      : buildAnalyticsTimeSeries(acc.historicalSeries, nowIso),
+    ...(acc.checkpointHydrated
+      ? checkpointBreakdowns(acc.checkpointBreakdowns, options.operatorAgentOutcomes)
+      : buildAnalyticsBreakdowns(acc.breakdowns, { operatorAgentOutcomes: options.operatorAgentOutcomes })),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -915,6 +1195,221 @@ export async function deriveAnalyticsSnapshotFromLedger(
   );
 }
 
+function checkpointPath(stateDir: string): string {
+  return join(stateDir, CHECKPOINT_FILENAME);
+}
+
+function checkpointSource(stateDir: string): AnalyticsCheckpointSource | undefined {
+  try {
+    const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir);
+    const archives = rotations.map((entry) => {
+      const stat = statSync(entry.path);
+      return { name: basename(entry.path), size: stat.size, mtimeMs: stat.mtimeMs };
+    });
+    const livePath = join(stateDir, "ledger.ndjson");
+    const live = existsSync(livePath) ? statSync(livePath) : null;
+    return { archives, live: live ? { size: live.size, mtimeMs: live.mtimeMs } : null, lastArchive: archives.at(-1)?.name ?? null, liveOffset: live?.size ?? 0 };
+  } catch {
+    return undefined;
+  }
+}
+
+function checkpointSourceCanResume(previous: AnalyticsCheckpointSource, current: AnalyticsCheckpointSource): boolean {
+  if (current.archives.length < previous.archives.length) return false;
+  if (current.live === null) return previous.live === null && current.archives.every((entry, index) => {
+    const prior = previous.archives[index];
+    return prior?.name === entry.name && prior.size === entry.size && prior.mtimeMs === entry.mtimeMs;
+  });
+  if (previous.live !== null && current.live.size < previous.liveOffset && current.archives.length <= previous.archives.length) return false;
+  for (const prior of previous.archives) {
+    const currentEntry = current.archives.find((entry) => entry.name === prior.name);
+    if (!currentEntry || currentEntry.size !== prior.size || currentEntry.mtimeMs !== prior.mtimeMs) return false;
+  }
+  return true;
+}
+
+function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpointState {
+  return {
+    invocationsByVerb: { ...acc.invocationsByVerb },
+    invocationsMeasured: acc.invocationsMeasured,
+    workersByLaneModel: [...acc.workersByKey.values()].map((bucket) => ({ ...bucket })),
+    startsByRun: [...acc.startsByRun.entries()].map(([key, value]) => [key, { ...value }]),
+    verdictsByRun: [...acc.verdictsByRun.entries()],
+    workerDurationsByLane: [...acc.workerDurationsByLane.entries()].map(([key, value]) => [key, { ...value }]),
+    workerDurationsMeasured: acc.workerDurationsMeasured,
+    tokensTotal: { ...acc.tokensTotal },
+    routingTelemetry: {
+      taskTypesByRun: [...acc.routingTelemetry.taskTypesByRun.entries()],
+      assignmentsById: [...acc.routingTelemetry.assignmentsById.entries()].map(([key, value]) => [key, { ...value }]),
+      terminalsByAssignmentId: [...acc.routingTelemetry.terminalsByAssignmentId.entries()].map(([key, value]) => [key, { ...value }]),
+      pendingTerminalsByAssignmentId: [...acc.routingTelemetry.pendingTerminalsByAssignmentId.entries()].map(([key, value]) => [key, { ...value }]),
+      buckets: [...acc.routingTelemetry.bucketsByKey.values()].map((bucket) => ({
+        ...bucket,
+        fallbackReasons: [...bucket.fallbackReasons.entries()],
+      })),
+      days: [...acc.routingTelemetry.daysByDay.values()].map((day) => ({ ...day })),
+    },
+    operatorAgentRows: {
+      proof: acc.operatorAgentRows.proof.map((row) => ({ ...row })),
+      decisions: acc.operatorAgentRows.decisions.map((row) => ({ ...row })),
+      capacity: acc.operatorAgentRows.capacity.map((row) => ({ ...row })),
+    },
+    history: {
+      days: [...acc.checkpointHistory.days.entries()].map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]),
+      starts: [...acc.checkpointHistory.starts.entries()],
+    },
+    breakdowns: {
+      starts: [...acc.checkpointBreakdowns.starts],
+      terminals: [...acc.checkpointBreakdowns.terminals.entries()].map(([key, value]) => [key, { ...value }]),
+      startsWithoutRunId: acc.checkpointBreakdowns.startsWithoutRunId,
+      terminalsWithoutRunId: acc.checkpointBreakdowns.terminalsWithoutRunId,
+      workCategories: [...acc.checkpointBreakdowns.workCategories.entries()],
+    },
+  };
+}
+
+function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccumulator {
+  const acc = analyticsAccumulator();
+  acc.invocationsByVerb = { ...state.invocationsByVerb };
+  acc.invocationsMeasured = state.invocationsMeasured;
+  for (const bucket of state.workersByLaneModel) acc.workersByKey.set(`${bucket.lane}\0${bucket.model}`, { ...bucket });
+  for (const [key, value] of state.startsByRun) acc.startsByRun.set(key, { ...value });
+  for (const [key, value] of state.verdictsByRun) acc.verdictsByRun.set(key, value);
+  for (const [key, value] of state.workerDurationsByLane) acc.workerDurationsByLane.set(key, { ...value });
+  acc.workerDurationsMeasured = state.workerDurationsMeasured;
+  acc.tokensTotal = { ...state.tokensTotal };
+  acc.routingTelemetry.taskTypesByRun = new Map(state.routingTelemetry.taskTypesByRun);
+  acc.routingTelemetry.assignmentsById = new Map(state.routingTelemetry.assignmentsById.map(([key, value]) => [key, { ...value }]));
+  acc.routingTelemetry.terminalsByAssignmentId = new Map(state.routingTelemetry.terminalsByAssignmentId.map(([key, value]) => [key, { ...value }]));
+  acc.routingTelemetry.pendingTerminalsByAssignmentId = new Map(state.routingTelemetry.pendingTerminalsByAssignmentId.map(([key, value]) => [key, { ...value }]));
+  for (const bucket of state.routingTelemetry.buckets) {
+    acc.routingTelemetry.bucketsByKey.set(
+      [bucket.provider, bucket.assignedModel, bucket.taskType, bucket.routingRule].join("\0"),
+      { ...bucket, fallbackReasons: new Map(bucket.fallbackReasons) },
+    );
+  }
+  acc.routingTelemetry.daysByDay = new Map(state.routingTelemetry.days.map((day) => [day.day, { ...day }]));
+  acc.operatorAgentRows = {
+    proof: state.operatorAgentRows.proof.map((row) => ({ ...row })),
+    decisions: state.operatorAgentRows.decisions.map((row) => ({ ...row })),
+    capacity: state.operatorAgentRows.capacity.map((row) => ({ ...row })),
+  };
+  acc.checkpointHistory.days = new Map(state.history.days.map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]));
+  acc.checkpointHistory.starts = new Map(state.history.starts);
+  acc.checkpointBreakdowns.starts = new Set(state.breakdowns.starts);
+  acc.checkpointBreakdowns.terminals = new Map(state.breakdowns.terminals.map(([key, value]) => [key, { ...value }]));
+  acc.checkpointBreakdowns.startsWithoutRunId = state.breakdowns.startsWithoutRunId;
+  acc.checkpointBreakdowns.terminalsWithoutRunId = state.breakdowns.terminalsWithoutRunId;
+  acc.checkpointBreakdowns.workCategories = new Map(state.breakdowns.workCategories);
+  acc.checkpointHydrated = true;
+  return acc;
+}
+
+function validCheckpoint(value: unknown): value is AnalyticsCheckpoint {
+  if (!value || typeof value !== "object") return false;
+  const checkpoint = value as Partial<AnalyticsCheckpoint>;
+  return checkpoint.version === CHECKPOINT_VERSION && checkpoint.source !== undefined && checkpoint.state !== undefined && checkpoint.snapshot !== undefined && Array.isArray(checkpoint.tail);
+}
+
+export function readAnalyticsCheckpoint(stateDir: string): AnalyticsCheckpoint | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(checkpointPath(stateDir), "utf8"));
+    return validCheckpoint(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeAnalyticsCheckpoint(stateDir: string, checkpoint: AnalyticsCheckpoint): void {
+  const target = checkpointPath(stateDir);
+  const temporary = `${target}.tmp-${process.pid}`;
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(temporary, JSON.stringify(checkpoint));
+    renameSync(temporary, target);
+  } catch {
+    try { if (existsSync(temporary)) renameSync(temporary, `${temporary}.discarded`); } catch { /* best effort cleanup */ }
+  }
+}
+
+function appendCheckpointTail(
+  seed: readonly { step: string; fingerprint: string }[] | undefined,
+  accepted: Array<{ step: string; fingerprint: string }>,
+): Array<{ step: string; fingerprint: string }> {
+  const byStep = new Map<string, string[]>();
+  for (const row of [...(seed ?? []), ...accepted]) {
+    const values = byStep.get(row.step) ?? [];
+    if (!values.includes(row.fingerprint)) values.push(row.fingerprint);
+    if (values.length > MAX_RETAINED_LINES_PER_STEP) values.splice(0, values.length - MAX_RETAINED_LINES_PER_STEP);
+    byStep.set(row.step, values);
+  }
+  return [...byStep.entries()].flatMap(([step, values]) => values.map((fingerprint) => ({ step, fingerprint })));
+}
+
+export interface AnalyticsSnapshotReadResult {
+  snapshot: AnalyticsSnapshot;
+  checkpoint: AnalyticsCheckpoint;
+}
+
+export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
+  stateDir: string,
+  clock: Clock,
+  signal?: AbortSignal,
+  priorCheckpoint?: AnalyticsCheckpoint,
+  options: AnalyticsDeriveOptions = {},
+): Promise<AnalyticsSnapshotReadResult> {
+  const currentSource = checkpointSource(stateDir);
+  let canResume = priorCheckpoint !== undefined && currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
+  let acc: AnalyticsAccumulator;
+  let resumeCheckpoint: AnalyticsCheckpoint | undefined;
+  let resumeSource: AnalyticsCheckpointSource | undefined;
+  if (canResume) {
+    try {
+      acc = hydrateCheckpointState(priorCheckpoint!.state);
+      resumeCheckpoint = priorCheckpoint;
+      resumeSource = currentSource;
+    } catch {
+      // JSON shape validation is intentionally shallow so future checkpoint fields can be added
+      // without making older readers reject the file. A structurally corrupt state must still
+      // fail closed into the existing full union scan rather than strand the cache or fabricate
+      // an empty aggregate.
+      canResume = false;
+      acc = analyticsAccumulator();
+    }
+  } else {
+    acc = analyticsAccumulator();
+  }
+  const liveOffset = resumeCheckpoint !== undefined && resumeSource !== undefined && resumeCheckpoint.source.live !== null && resumeSource.live !== null && resumeSource.live.size < resumeCheckpoint.source.liveOffset
+    ? 0
+    : resumeCheckpoint?.source.liveOffset ?? 0;
+  const accepted: Array<{ step: string; fingerprint: string }> = [];
+  const union = openLedgerUnion(stateDir, {
+    dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
+    signal,
+    ...(resumeCheckpoint !== undefined && resumeCheckpoint.source.lastArchive !== null ? { afterRotation: resumeCheckpoint.source.lastArchive } : {}),
+    ...(resumeCheckpoint ? { liveStartOffset: liveOffset, dedupeSeed: resumeCheckpoint.tail } : {}),
+    onAcceptedRecord: (row, raw) => {
+      const step = str(row.step);
+      if (step) accepted.push({ step, fingerprint: fingerprintLedgerLine(raw) });
+    },
+  });
+  for await (const line of union) {
+    signal?.throwIfAborted();
+    accumulateAnalyticsLine(acc, line);
+  }
+  signal?.throwIfAborted();
+  const snapshot = snapshotFromAccumulator(acc, clock.iso(), options);
+  const source = checkpointSource(stateDir) ?? currentSource ?? { archives: [], live: null, lastArchive: null, liveOffset: 0 };
+  const checkpoint: AnalyticsCheckpoint = {
+    version: CHECKPOINT_VERSION,
+    source,
+    tail: appendCheckpointTail(resumeCheckpoint?.tail, accepted),
+    state: serializeCheckpointState(acc),
+    snapshot,
+  };
+  return { snapshot, checkpoint };
+}
+
 /** One unref'ed timeout owned by the analytics cache. A wrapper rather than Node's concrete
  * Timeout type keeps the scheduler deterministic in tests and gives cancellation one method. */
 export interface AnalyticsTimer {
@@ -926,7 +1421,8 @@ export type AnalyticsSnapshotReader = (
   stateDir: string,
   clock: Clock,
   signal: AbortSignal,
-) => AnalyticsSnapshot | Promise<AnalyticsSnapshot>;
+  priorCheckpoint?: AnalyticsCheckpoint,
+) => AnalyticsSnapshot | AnalyticsSnapshotReadResult | Promise<AnalyticsSnapshot | AnalyticsSnapshotReadResult>;
 
 export interface AnalyticsSnapshotCacheDeps {
   stateDir: string;
@@ -1086,12 +1582,14 @@ function errorText(error: unknown): string {
  * generic route cache; its AbortController and evidence semantics are analytics-specific. */
 export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): AnalyticsSnapshotCache {
   const clock = deps.clock ?? systemClock;
-  const readSnapshot = deps.readSnapshot ?? deriveAnalyticsSnapshotFromLedger;
+  const readSnapshot: AnalyticsSnapshotReader = deps.readSnapshot ?? ((stateDir, refreshClock, signal, priorCheckpoint) =>
+    deriveAnalyticsSnapshotFromCheckpointedLedger(stateDir, refreshClock, signal, priorCheckpoint));
   const refreshIntervalMs = deps.refreshIntervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
   const refreshTimeoutMs = deps.refreshTimeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
-  let value = coldAnalyticsSnapshot();
+  let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
+  let value = checkpoint === undefined ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(checkpoint.snapshot);
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;
@@ -1143,9 +1641,14 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
 
     let operation!: Promise<void>;
     operation = Promise.resolve()
-      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal))
-      .then((next) => {
+      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal, checkpoint))
+      .then((result) => {
         refreshController.signal.throwIfAborted();
+        const next = "snapshot" in result ? result.snapshot : result;
+        if ("snapshot" in result) {
+          checkpoint = result.checkpoint;
+          writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
+        }
         value = freezeAnalyticsSnapshot(next);
         log("serve.analytics_refresh.completed", {
           duration_ms: Math.max(0, clock.now() - beganAt),
