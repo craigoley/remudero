@@ -35916,7 +35916,7 @@ export function buildSweepHook(
   config: Config,
   ledgerPath: string,
   runId: string,
-  plan: Plan,
+  bootPlan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   tmpMaxAgeMs?: number,
   // Injectable board gateway — appended LAST so no positional caller shifts, the same convention
@@ -36027,14 +36027,14 @@ export function buildSweepHook(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
-      const activePlan = planAccessor?.() ?? plan;
+      const plan = planAccessor?.() ?? bootPlan;
       const effects = buildSweepEffects({
         owner: owner,
         repo: repo,
         config: config,
         ledgerPath: ledgerPath,
         runId: runId,
-        plan: activePlan,
+        plan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
         pacer,
@@ -36052,7 +36052,7 @@ export function buildSweepHook(
       // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-      const creditCandidates = buildCreditCandidates(owner, repo, activePlan, ledgerPath, log, boardGithub);
+      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
@@ -36079,7 +36079,7 @@ export function buildSweepHook(
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
       // W1-T195, closure here); same level-triggered doctrine as the credit rung below. Its
       // own read failures degrade to [] internally, so it never strands the credit rung.
-      await sweepEscalationReconcile(owner, repo, activePlan, ledgerPath, runId, log, { github: boardGithub });
+      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
