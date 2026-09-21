@@ -73,6 +73,7 @@
     threshold is insufficient: it would reintroduce the board-wide refresh storm that W1-T3277
     bounded.
   note: |
+    reservation hand-off: run-W1-T3747-1789943000000 -> plan-W1-T3920-stale-blocked-1789958000000
     The task is high risk because it writes to contributor branches unattended, but the blast
     radius is deliberately narrow: the existing single-winner, lease-protected update effect is
     reused, and only a positively observed stale-blocked merge shape bypasses the ordinary
