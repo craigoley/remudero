@@ -12,9 +12,7 @@
 # Pin Node to the exact `.nvmrc` version, never the floating `node:22-bookworm-slim` tag.
 # `assertPinnedNodeVersion` (scripts/coverage-merge-ratchet.mjs) throws on any string mismatch, so
 # a moved floating tag reddened six merge-lcov tests with no change in this repo (W1-T2770).
-# Bump this tag, its digest, and `.nvmrc` in one reviewed change. Falsifier:
 # test/merge-lcov-node-drift-cluster-and-image-pin.test.ts reads this line against `.nvmrc`.
-# Why the tag AND digest: docs/deploy-image-forensics.md, "FROM node:22.22.3-bookworm-slim".
 FROM node:22.22.3-bookworm-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
 
 # ── REQ 1: an init that reaps ────────────────────────────────────────────────────────────────
@@ -78,7 +76,6 @@ ENV HOME=/home/node
 # operator exec can rewrite the pinned binaries. Falsifier: both `--version` calls below prove the
 # lockfile-installed bins are on PATH, in-layer. deploy/verify-image.sh and `checkBinaryPin` read
 # the Claude ARG below.
-# Why: docs/deploy-image-forensics.md, "The image-local CLI lockfile".
 ARG CLAUDE_CODE_VERSION=2.1.220
 ARG CODEX_VERSION=0.152.0
 ENV DISABLE_AUTOUPDATER=1
