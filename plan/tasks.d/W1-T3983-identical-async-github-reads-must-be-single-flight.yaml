@@ -1,0 +1,55 @@
+- id: W1-T3983
+  title: "IDENTICAL ASYNC GITHUB READS SPAWN IN PARALLEL — concurrent review, daemon, and console wakeups ask the same PR/check question independently; coalesce the exact request before it reaches gh"
+  repo: remudero
+  depends_on: [W1-T3982, W1-T3297]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 18.00
+  files: [src/lib/github-transport.ts, test/the-transport-paces-its-own-reads.test.ts]
+  origin: "operator-session#github-secondary-limit-2026-09-21"
+  note: "reservation hand-off: unknown -> run-W1-T3983-1790033600000"
+  plan_refs: [W1-T3982, W1-T3297]
+  status: queued
+  attempts: 0
+  rationale: |
+    GitHub recommends avoiding concurrent requests and using webhooks instead of polling. The
+    transport already has a shared cadence floor, but that floor alone cannot prevent two callers
+    that wake together from both spawning the same allowed read. The first caller stamps the shared
+    window; the second caller still becomes a redundant child process unless the transport joins it
+    to the first promise.
+
+    The production consumers are not one caller: `waitForCiGreen` and `pollToGate` are async, and
+    the daemon/review/console can observe the same head during a wake boundary. Duplicate REST
+    reads are especially expensive during a secondary-limit episode because they consume cadence
+    and CPU even when every response is identical.
+
+    The safe boundary is exact-request single-flight, not a speculative result cache. It shares only
+    a currently-running real `gh` read keyed by its argv, removes the key on resolve or rejection,
+    leaves injected executors independent for tests, and preserves the existing cadence decision
+    before the first spawn. A failed request therefore never poisons a later retry.
+  design: |
+    (i) Add a process-local map of exact real async argv -> in-flight promise in `ghJsonAsync`.
+        The first caller performs the existing cadence check and spawn; later identical callers
+        await that promise and issue no child process of their own.
+    (ii) Do not coalesce injected executors, writes, or budget probes. They are test/offline seams or
+         have side effects, and the existing read/write/exempt classifications remain authoritative.
+    (iii) Delete the entry in `finally` on both success and failure. Never turn this into a TTL cache;
+          freshness remains the caller's responsibility and an error must remain retryable.
+    (iv) Add a real subprocess-counting regression with two concurrent identical reads, plus a
+         control proving a later call after settlement can spawn again.
+  acceptance:
+    - claim: "two concurrent identical real async reads share one promise and spawn gh exactly once"
+      proof: "unit test: identical real async reads are single-flight and spawn gh once"
+    - claim: "a rejected or settled request is removed so a later identical read is eligible to run"
+      proof: "unit test: identical real async reads are single-flight and spawn gh once"
+    - claim: "single-flight does not alter injected async executor behavior"
+      proof: "unit test: ghJsonAsync adds the default timeout to the single async transport spawn"
+    - claim: "the implementation is process-local promise coalescing, not an unbounded response cache"
+      proof: "grep: asyncReadInFlight = new Map<string, Promise<unknown>>(); in src/lib/github-transport.ts"
+  falsifier: |
+    Delete the `asyncReadInFlight` lookup/set/finally and rerun the subprocess-counting test; it must
+    observe two `gh` invocations. Then make the fake `gh` fail once and succeed on the next call; the
+    second call after rejection must execute, proving a failed request does not poison the key.
