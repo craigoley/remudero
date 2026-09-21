@@ -30,8 +30,8 @@
   acceptance:
     - claim: "new CI-learning task records target the existing canonical CI learnings shard"
       proof: "grep: export const CI_LEARNING_LESSONS_FILE = \"learnings/ci\\.yaml\" in src/lib/measurement-cadence.ts"
-    - claim: "the scoped CI-learning landing suite and whole-project typecheck pass together"
-      proof: "unit test: W1-T3492 criterion 1: scheduled CI-learning stages outside the checkout and lands exact task bytes"
+    - claim: "CI-learning idempotency reads the whole shard-backed plan"
+      proof: "grep: plan/tasks\\.yaml with plan/tasks\\.d/\\*\\.yaml in src/run-task.ts"
   falsifier: |
     Restore the generated target to `learnings/ci-gate-lessons.yaml` and the canonical-path
     assertion must fail. The implementation must not add a branch-protection requirement or make
