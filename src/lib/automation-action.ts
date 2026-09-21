@@ -1,26 +1,19 @@
 /**
  * src/lib/automation-action.ts — W1-T3883: BOUND AGENT-TO-AGENT DELEGATION.
  *
- * Personal agents are beginning to coordinate across people and services. A delegation envelope
- * is the signed, bounded capability handoff that makes that safe: it names sender, recipient,
- * principal, purpose, exact capability references, resource scope, audience, expiry, nonce, and
- * the parent receipt it descends from (mirrors {@link CapabilityGrant}'s no-secret, store-resolved
- * shape one layer up — capability-grant.ts scopes what a PROVIDER may resolve; this module scopes
- * what one AGENT may hand to another).
+ * A delegation envelope is a signed, bounded capability handoff between two AGENT identities: it
+ * names sender, recipient, principal, purpose, capability references, resource scope, audience,
+ * expiry, nonce, and the parent receipt it descends from (mirrors {@link CapabilityGrant}'s
+ * no-secret, store-resolved shape one layer up — that module scopes what a PROVIDER may resolve;
+ * this one scopes what one agent may hand to another).
  *
- * THE THREE LOAD-BEARING INVARIANTS, each with its own refusal code in
- * {@link executeBoundedDelegation}:
- *   1. NO ACTION BEFORE ACCEPTANCE — {@link acceptDelegationEnvelope} is a separate, explicit step
- *      the RECIPIENT identity must take; {@link executeBoundedDelegation} refuses `not-accepted`
- *      until it has.
- *   2. NARROW, NEVER WIDEN — acceptance may only select a SUBSET of the envelope's own
- *      `capabilities` (`capability-widened` if not), and {@link forwardDelegation} may only grant a
- *      subset of what the forwarder itself ACCEPTED, with an expiry that never outlives the
- *      parent's (`expiry-widened`).
- *   3. NO TRANSITIVE AUTHORITY — forwarding always mints a brand-new envelope with its own nonce
- *      and its own acceptance requirement; nothing here ever lets a grandchild act on a
- *      grandparent's acceptance. Ancestry is only ever consulted to look for a REVOCATION
- *      (`parent-revoked`), never to inherit a grant.
+ * THREE LOAD-BEARING INVARIANTS, each with its own refusal code — see the per-function doc
+ * comments below for the exact codes: (1) NO ACTION BEFORE ACCEPTANCE — the recipient must call
+ * {@link acceptDelegationEnvelope} before {@link executeBoundedDelegation} will act. (2) NARROW,
+ * NEVER WIDEN — acceptance and {@link forwardDelegation} may each only select a SUBSET of what
+ * they were themselves granted, with an expiry that never outlives the parent's. (3) NO
+ * TRANSITIVE AUTHORITY — forwarding always mints a brand-new envelope with its own nonce and its
+ * own acceptance requirement; ancestry is consulted only to find a REVOCATION, never to inherit.
  *
  * FALSIFIER: let a recipient act before acceptance, widen a grant, forward authority transitively,
  * replay a nonce, act after parent revocation, or hide the identity chain — the corresponding
