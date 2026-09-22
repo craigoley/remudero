@@ -11,8 +11,10 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { drained } from "../src/lib/flush-exit.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -102,6 +104,30 @@ void test("W1-T4063: the exit code survives the flush", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+void test("W1-T4063: a write that throws synchronously still resolves the drain", async () => {
+  // `drained()`'s own destroyed/writableEnded/writable check cannot see every way a stream stops
+  // delivering: a stream can still read `writable: true` yet throw synchronously out of `.write()`
+  // (ERR_STREAM_DESTROYED, a synchronous EPIPE) if it breaks between that check and the write call.
+  // The real pipes above never reproduce that race on demand, so this drives it directly against a
+  // minimal stand-in: the catch exists for exactly this shape, and this is the only way to prove it
+  // does not leave the returned promise hanging.
+  const throwingStream = {
+    destroyed: false,
+    writableEnded: false,
+    writable: true,
+    once() {
+      return throwingStream;
+    },
+    off() {
+      return throwingStream;
+    },
+    write() {
+      throw new Error("ERR_STREAM_DESTROYED: synthetic write failure");
+    },
+  } as unknown as Writable;
+  await assert.doesNotReject(drained(throwingStream), "a synchronous write throw must still resolve, never hang");
 });
 
 void test("W1-T4063: an early-closed reader does not hang the exit", async () => {

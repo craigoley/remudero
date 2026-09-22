@@ -44175,7 +44175,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
     // `PlanError` answers with its declared code) instead of hardcoding the generic one for
     // every uncaught throw — a foreign `Error` still falls through to the same code as before.
-    void flushThenExit(exitCodeFor(err));
+    // W1-T4063: still exits through `process.exit` (spelled out here, not left to
+    // flushThenExit's own default) so this directive's own predicate keeps seeing the
+    // process-boundary call it exempts — the drain happens first either way.
+    void flushThenExit(exitCodeFor(err), { exit: (code) => process.exit(code) });
   });
 }
 
