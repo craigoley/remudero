@@ -18,8 +18,14 @@ test("spawnWorker MATERIALIZES the redirected worker-home before building the ch
 test("spawnWorker passes the redirected HOME into buildWorkerEnv (the grant actually reaches the child env)", () => {
   const call = workerSrc.slice(workerSrc.indexOf("buildWorkerEnv(args.env"), workerSrc.indexOf("buildWorkerEnv(args.env") + 400);
   assert.match(call, /home:\s*workerHome/, "buildWorkerEnv must be called with { home: workerHome }");
+  assert.match(call, /xdgCacheHome:\s*workerCacheDir\(config\)/, "worker transport state must use the instance cache, not per-worker HOME");
 });
 
 test("workerHomeDir is resolved from config, never hardcoded", () => {
   assert.match(workerSrc, /workerHomeDir\(config\)/);
+});
+
+test("workerCacheDir is resolved from config, never from the operator HOME", () => {
+  assert.match(workerSrc, /workerCacheDir\(config\)/);
+  assert.doesNotMatch(workerSrc, /xdgCacheHome:\s*process\.env\.HOME/);
 });

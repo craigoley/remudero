@@ -28,6 +28,7 @@ import {
   canonicalWorkerProviderId,
   enabledWorkerProviders,
   overflowFallbackRefusal,
+  workerCacheDir,
   workerHomeDir,
   workerShell,
   workerZdotdir,
@@ -2165,6 +2166,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       zdotdir: workerZdotdir(config),
       shell: workerShell(config),
       home: workerHome,
+      xdgCacheHome: workerCacheDir(config),
       // Overflow valve: pass the operator's ANTHROPIC_API_KEY through to bill on API credits ONLY when `config.overflow ===
       // "api_key"`, which validateConfig refuses without a paired dailyCapUsd — so an uncapped api run cannot even be
       // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).

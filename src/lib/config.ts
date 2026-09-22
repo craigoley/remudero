@@ -277,6 +277,11 @@ export function workerHomeDir(config: Config): string {
   return config.workerHomeRoot ?? join(config.root, "worker-home");
 }
 
+/** Instance-owned cache shared by workers for transport coordination. */
+export function workerCacheDir(config: Pick<Config, "root">): string {
+  return join(config.root, "state", "cache");
+}
+
 /** Path to the instance config file. Derived, never a committed literal. */
 export function configPath(): string {
   return join(homedir(), ".config", "remudero", "config.json");

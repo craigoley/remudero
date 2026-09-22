@@ -58,7 +58,13 @@ const SANCTIONED_KEY = "ANTHROPIC_API_KEY";
 export function buildWorkerEnv(
   extra: Record<string, string> = {},
   parent: NodeJS.ProcessEnv = process.env,
-  opts: { zdotdir?: string; shell?: string; home?: string; allowApiKey?: boolean } = {},
+  opts: {
+    zdotdir?: string;
+    shell?: string;
+    home?: string;
+    xdgCacheHome?: string;
+    allowApiKey?: boolean;
+  } = {},
 ): Record<string, string> {
   const child: Record<string, string> = {};
 
@@ -76,6 +82,10 @@ export function buildWorkerEnv(
   // on any host, not only one whose `~/.bashrc` happens to be absent.
   if (opts.home && !("HOME" in extra)) {
     child.HOME = opts.home;
+  }
+
+  if (opts.xdgCacheHome) {
+    child.XDG_CACHE_HOME = opts.xdgCacheHome;
   }
 
   // Grants CLAUDE_CODE_SHELL (unless the caller set one via `extra`) — the var that isolates the
