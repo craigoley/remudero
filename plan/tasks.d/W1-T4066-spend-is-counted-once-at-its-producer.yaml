@@ -1,0 +1,49 @@
+- id: W1-T4066
+  title: "THE SPEND SERIES COUNTS EACH RUN'S LAST WORKER TWICE AND NEVER COUNTS THE FIX RUNG — 46 of 46 verdict rows restate the last implement cost (a 26.9% overstatement), while fix-rung and probe spend ($513.76 in four days) carries no model and is invisible: count every dollar once, at the row that produced it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T4024, W1-T2383]
+  files: [src/lib/spend-rows.ts, src/lib/analytics-route.ts, src/lib/analytics-timeseries.ts, src/run-task.ts, test/spend-is-counted-once-at-its-producer.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED on the 4-day union (346,646 rows, 2026-09-19..22).
+    (1) The series' rule is "a row with a string `model` adds its `total_cost_usd`" — in src/lib/analytics-route.ts and
+        again in src/lib/analytics-timeseries.ts. It summed $360.25; $76.45 of it came from 46 `verdict` rows.
+    (2) 46 of 46 verdicts carry `total_cost_usd` EXACTLY equal to the run's last `implement.*` row: `terminalVerdictFields`
+        (src/run-task.ts) writes `total_cost_usd: r.costUsd` from the final WorkerResult. Without them the total is
+        $283.80, so the series overstates by 26.9% (by day 18.3%, 42.4%, 17.4%).
+    (3) It also MISSES most spend: `fix.done` ($468.28, 369 rows, 352 distinct sessions) and `containment.probe` +
+        `isolation.probe` ($45.48) record `cost_usd` and no `model`. Net, the chart shows $360 of ~$798 produced.
+    (4) Session id is NOT a safe dedupe key: four sessions carry both `retro.synthesized` and
+        `retro.preflight_repair` with different, real costs ($15.77).
+  design: |
+    (i) One predicate, src/lib/spend-rows.ts `isProducedSpendRow(row)`, used by the series, `costModeledUsd` and the
+        cash reading alike. A cost counts once, on the row of the step that PRODUCED it; the row's own identity is the
+        key, not its session.
+    (ii) Writers label cost-bearing rows `spend_role: "produced" | "restated"`; `terminalVerdictFields` and
+         `cost.anomaly` write "restated". Rows written before the label are classified by step in the same function.
+    (iii) The amount is `total_cost_usd ?? cost_usd`. A missing cost stays absent — never drawn as 0.
+    (iv) A census test enumerates every cost-bearing `log(step, …)` in src/ and fails when one declares no
+         `spend_role`, so a new step cannot silently join or leave the total.
+  acceptance:
+    - claim: "a verdict restating its last worker adds nothing to the spend series"
+      proof: 'grep: test("W1-T4066: a verdict restating its last worker adds nothing to cost modeled usd" in test/spend-is-counted-once-at-its-producer.test.ts'
+    - claim: "fix-rung and probe cost_usd rows are counted once"
+      proof: 'grep: test("W1-T4066: fix rung and probe cost_usd rows are counted once" in test/spend-is-counted-once-at-its-producer.test.ts'
+    - claim: "two produced rows sharing a session id are both counted"
+      proof: 'grep: test("W1-T4066: two produced rows sharing a session_id are both counted" in test/spend-is-counted-once-at-its-producer.test.ts'
+    - claim: "every cost-bearing log step in src declares its spend role"
+      proof: 'grep: test("W1-T4066: every cost-bearing log step declares a spend role" in test/spend-is-counted-once-at-its-producer.test.ts'
+    - claim: "the series reads spend through the shared predicate"
+      proof: 'grep: isProducedSpendRow( in src/lib/analytics-route.ts'
+  falsifier: |
+    Keep the `model` rule and the first two go red. Dedupe by session id and the third goes red on the retro fixture.
+    Add a cost-bearing step without a role and the fourth goes red.

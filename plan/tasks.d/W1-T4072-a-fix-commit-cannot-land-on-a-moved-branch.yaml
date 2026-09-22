@@ -1,0 +1,50 @@
+- id: W1-T4072
+  title: "A FIX ROUND'S HARNESS COMMIT WRITES ITS STALE INDEX ONTO A BRANCH THAT MOVED UNDER IT — 2817d13de was +1 file against the round's head but a 38-file revert of main against its actual parent, and the ledger even listed 37 of those files as undeclared: commit from a private index built on the round's own head and move the branch by compare-and-swap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T3696]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-22 on run-W1-T4024-1790100143000.
+    (1) The fix rung made worktree sweep-W1-T4024-1790107172710 at 19:59:32 on de43dd999. At 20:11:56 an operator
+        script ran `git checkout -B` of the same branch in another worktree (git 2.39.5 lets `-B` share a branch across
+        worktrees; plain checkout refuses, and git >= 2.43 refuses `-B` too), then force-pushed 5338a40b5.
+    (2) At 20:18:29 the harness commit (`commitWorkerEdits`, src/run-task.ts) ran `add -- declared` then `commit` in the
+        fleet worktree, whose HEAD now resolved to 5338a40b5 while its index still held de43dd999 + the fix. The commit,
+        2817d13de, is +1 file against de43dd999 and 38 files (+245/-1632, a silent revert of main) against its parent.
+        The `implement.harness_commit` row listed 37 of them as `undeclared` — the code's "reported, never staged"
+        is false whenever index and HEAD disagree.
+    (3) It never reached origin; why the push failed is unknown because the sweep's push closure swallows every failure
+        except a foreign-head error.
+    The fleet never touches operator worktrees (owner recovery classifies them `foreign`); the defect is the commit's
+    trust in a shared index and branch.
+  design: |
+    (i) Build the commit tree from the round's recorded head (`priorHeadSha`) plus ONLY the declared paths, via a
+        temporary index file; `commit-tree -p priorHeadSha`.
+    (ii) Move the branch with `update-ref <ref> <new> <priorHeadSha>` — it succeeds only if the branch is still where the
+         round began — and push with `--force-with-lease=<ref>:<priorHeadSha>`.
+    (iii) On a moved branch: refuse, ledger `fix.head_moved_under_round` naming both shas and any other worktree
+          holding the branch, release the claim; the level-triggered sweep picks up the new head next pass, so nothing
+          is stuck.
+    (iv) A failed push is ledgered, never swallowed.
+  acceptance:
+    - claim: "a branch moved during the round refuses the commit and names both heads"
+      proof: 'grep: test("W1-T4072: a branch moved during the round refuses the commit and names both heads" in test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts'
+    - claim: "a stale index never enters the commit tree"
+      proof: 'grep: test("W1-T4072: a stale index never enters the commit tree" in test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts'
+    - claim: "an unmoved branch commits exactly the declared paths"
+      proof: 'grep: test("W1-T4072: an unmoved branch commits exactly the declared paths" in test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts'
+    - claim: "a refused push is ledgered"
+      proof: 'grep: test("W1-T4072: a refused push is ledgered not swallowed" in test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts'
+  falsifier: |
+    Restore `add` + plain `commit` and the second goes red with a 38-file tree. Drop the old-value on update-ref and
+    the first goes red.

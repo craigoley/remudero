@@ -1,0 +1,39 @@
+- id: W1-T4065
+  title: "THE LANE REAPER KEEPS 122 ORPHANED LANES AND NEVER SAYS WHY — in four days it wrote 92 undecidable rows and ZERO reap rows, every other keep reason is logged nowhere, and a fixed 14-day grace is measured against the newest file anywhere in the tree: census every keep by reason and let the grace tighten as disk headroom shrinks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T4021, W1-T2847, W1-T3528]
+  files: [src/lib/worker.ts, test/the-lane-reaper-says-why-it-keeps.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    SUPERSEDES W1-T4021, WHOSE PREMISE IS FALSE. W1-T4021 says the reaper's only candidate source is git's worktree
+    registration; `reapAdhocLanes` already lists `config.root/lanes` directly (src/lib/worker.ts, the ad-hoc lane
+    walk) and reaps unregistered lanes deliberately. The real gap, measured on the 4-day union 2026-09-19..22:
+    (1) 92 `adhoc_lane.reap.undecidable` rows and ZERO reap rows, while ~122 orphan lane directories persist.
+    (2) Every keep reason except undecidable is silent, so "why is this lane still here" has no ledger answer.
+    (3) The grace is a fixed 14 days measured from the NEWEST file anywhere in the lane tree — one touched log file
+        resets it — on a rung that runs only on dispatch.
+  design: |
+    (i) Every pass writes ONE `adhoc_lane.reap.census` row: kept counts and bytes BY REASON, reaped count and bytes.
+    (ii) The grace is derived, not fixed: it shrinks as disk headroom shrinks (proportional to the free-space fraction
+         the host's own disk-headroom reading reports), so a full disk reclaims sooner and an empty one keeps longer.
+    (iii) INVARIANTS: a lane with a live process, an open PR head, an unpushed commit or an inflight lock is NEVER
+          reaped whatever the grace; `undecidable` still keeps; the census row is written even when nothing is reaped.
+  acceptance:
+    - claim: "every pass records kept lanes by reason with their bytes"
+      proof: 'grep: test("W1-T4065: every pass census records kept lanes by reason and bytes" in test/the-lane-reaper-says-why-it-keeps.test.ts'
+    - claim: "the grace tightens as disk headroom shrinks"
+      proof: 'grep: test("W1-T4065: the grace shortens when disk headroom shrinks" in test/the-lane-reaper-says-why-it-keeps.test.ts'
+    - claim: "a lane with live work is never reaped whatever the grace"
+      proof: 'grep: test("W1-T4065: a lane holding live work is never reaped at any grace" in test/the-lane-reaper-says-why-it-keeps.test.ts'
+  falsifier: |
+    Log nothing on a quiet pass and the first goes red. Keep the fixed 14 days and the second goes red. Let a
+    shrunken grace reach a lane with an unpushed commit and the third goes red.

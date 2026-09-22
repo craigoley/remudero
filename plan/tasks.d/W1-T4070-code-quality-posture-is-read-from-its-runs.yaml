@@ -1,0 +1,46 @@
+- id: W1-T4070
+  title: "GITHUB CODE QUALITY RAN A SECOND CODEQL ANALYSIS ON EVERY PUSH FOR WEEKS AND NOTHING NOTICED — ~2,700 runner-minutes a day whose output nothing reads, marked 'static, never read live' in the posture table: detect it from its runs, because its workflow state stays active after the setting is turned off"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T4057]
+  files: [src/lib/github-posture.ts, test/code-quality-posture-is-read-from-its-runs.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22.
+    (1) "CodeQL - Code Quality" (workflow 343193516, path `dynamic/github-code-quality/codeql`) is GitHub's separate
+        Code Quality product, not CodeQL default setup (`code-scanning/default-setup` reads not-configured) and not
+        codeql.yml: `analysis-kinds: code-quality`, 98 quality queries, results uploaded outside code-scanning. 643 runs in
+        24 h at p50 4.2 min, ~2,700 runner-minutes/day. Neither it nor codeql.yml is a required check.
+    (2) Nothing consumes it: every open code-scanning alert comes from `.github/workflows/codeql.yml:analyze`, and the
+        `codeqlQuality` intake reads code-scanning alerts only.
+    (3) The operator turned the setting OFF at ~21:45Z on 2026-09-22 (Settings -> Code quality). `PUT
+        actions/workflows/343193516/disable` returns 422, and the workflow object still reports `state: active` after
+        the setting is off — so its `state` is NOT evidence of whether the product runs.
+    (4) `GITHUB_POSTURE_ALLOWLIST.code_quality` (src/lib/github-posture.ts) records the product as having no live read.
+  design: |
+    (i) The posture read detects Code Quality by its RUNS: any run of a `dynamic/github-code-quality/*` workflow created
+        since the last posture reading means the product is on. Its workflow `state` is recorded but never trusted.
+    (ii) On beside an active codeql.yml, it is reported as duplicate spend naming the settings path; the report is
+         written only on a change against the stored posture baseline.
+    (iii) INVARIANTS: GET-only (the module's own invariant); a 403/404 or unreadable listing reads as unknown, never
+          as off; no write, no setting change.
+  acceptance:
+    - claim: "a recent code-quality run beside codeql.yml is reported as duplicate analysis"
+      proof: 'grep: test("W1-T4070: a recent code-quality run beside codeql is reported as duplicate analysis" in test/code-quality-posture-is-read-from-its-runs.test.ts'
+    - claim: "an active workflow state with no recent run is not reported"
+      proof: 'grep: test("W1-T4070: an active workflow state with no recent run is not reported" in test/code-quality-posture-is-read-from-its-runs.test.ts'
+    - claim: "an unreadable listing is reported unknown, never off"
+      proof: 'grep: test("W1-T4070: an unreadable listing reads unknown never off" in test/code-quality-posture-is-read-from-its-runs.test.ts'
+    - claim: "the posture read issues no write"
+      proof: 'grep: test("W1-T4070: the posture read issues no write" in test/code-quality-posture-is-read-from-its-runs.test.ts'
+  falsifier: |
+    Trust the workflow `state` and the second goes red on today's post-disable reading. Read an error as off and the
+    third goes red.

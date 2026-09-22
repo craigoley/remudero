@@ -1,0 +1,49 @@
+- id: W1-T4069
+  title: "THE ESCALATION PATH HAS NO HYSTERESIS — 49 of 58 main-health issues reopened within an hour of auto-closing because a single green observation closes them (median green run: 2 observations), and starvation and cancelled-check notices page a human for conditions that clear in minutes: confirm open and close against each class's own recovery distribution"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T4056, W1-T104, W1-T345]
+  files: [src/lib/escalation-debounce.ts, src/lib/main-health-rung.ts, src/lib/escalation-catalogue.ts, src/lib/escalate.ts, test/escalations-confirm-against-their-own-recovery.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED (GitHub issues created 09-15..22; 4-day ledger union).
+    (1) 59 `[MANUAL] MAIN-HEALTH` issues, median open 35 min; 49 of 58 reopened < 60 min after closing (median gap
+        30 min). The ledger shows why: 13 red runs (median 20 observations, 58 min) and 13 green runs (median TWO
+        observations, 1 min; 5 of them a single observation). The red is mostly real; the churn is closing on one green.
+    (2) Self-clearing classes page a human: dispatch starvation (10 issues, e.g. #6225 open 37 min, closed when "a
+        dispatchable task appeared"); "required check cancelled twice" (6, median ~5 min); #6585/#6586 opened 2 s apart
+        and closed by hand as duplicates.
+    (3) Real classes do not self-clear: lifetime-cap (20, median 37 h) and fix-strikes-exhausted.
+    (4) CAUSE: `main-health-rung.ts` escalates on the first red observation and resolves on the first green; the
+        starvation escalation fires on the first idle tick. There is no confirmation step anywhere in the path.
+    W1-T4056 fixes WHICH checks main-health judges; this task fixes only the timing. They compose.
+  design: |
+    (i) src/lib/escalation-debounce.ts `confirmEscalation(class, observations)`: open only once a condition has outlasted
+        the duration within which most of that class's past episodes cleared on their own; resolve only once the clear
+        has outlasted the class's historical flap length. Both are fitted from the ledger and recomputed as history
+        changes — the Prometheus `for:` idea with the constant replaced by the class's own recovery distribution.
+    (ii) Self-clearing classes surface as a `fleet-notice` first and escalate to needs-human only past that duration.
+    (iii) INVARIANTS: a class with no recovery history escalates on the first observation (fails open, stays prompt);
+          the pending state is ledgered every tick; existing dedupe is unchanged; nothing here holds a PR.
+  acceptance:
+    - claim: "a red, one-green, red sequence keeps one issue open instead of closing and reopening"
+      proof: 'grep: test("W1-T4069: a red then one green then red sequence keeps one issue open" in test/escalations-confirm-against-their-own-recovery.test.ts'
+    - claim: "a starvation episode shorter than its class's recovery time writes a fleet notice"
+      proof: 'grep: test("W1-T4069: a short starvation episode writes a fleet notice not needs-human" in test/escalations-confirm-against-their-own-recovery.test.ts'
+    - claim: "a class with no history escalates on the first observation"
+      proof: 'grep: test("W1-T4069: a class with no history escalates on the first observation" in test/escalations-confirm-against-their-own-recovery.test.ts'
+    - claim: "two same-condition escalations inside the confirmation window yield one issue"
+      proof: 'grep: test("W1-T4069: two same-condition escalations inside the window yield one issue" in test/escalations-confirm-against-their-own-recovery.test.ts'
+    - claim: "main-health confirms through the shared debounce"
+      proof: 'grep: confirmEscalation( in src/lib/main-health-rung.ts'
+  falsifier: |
+    Close on the first green and the first goes red. Page on the first idle tick and the second goes red. Hold a
+    history-less class and the third goes red.

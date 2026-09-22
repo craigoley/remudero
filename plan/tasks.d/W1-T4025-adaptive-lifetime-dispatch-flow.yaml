@@ -10,12 +10,24 @@
   band_meaning: blast-radius
   origin: "operator direction 2026-09-22 while triaging #6517: no hard ceilings or floors; prefer automated flow, self-improvement, and follow-up tasks"
   plan_refs: [W1-T75, W1-T148, W1-T172, W1-T271, W1-T316, W1-T3523, W1-T3758, W1-T3932]
-  files: [src/lib/status.ts, src/lib/drain.ts, src/run-task.ts, src/lib/verify-human-judge.ts]
+  files: [src/lib/status.ts, src/lib/drain.ts, src/run-task.ts, src/lib/verify-human-judge.ts, src/lib/daemon.ts]
   status: queued
   attempts: 0
   note: |
     reservation hand-off: unknown -> run-W1-T4025-1790077962
     reservation hand-off: unknown -> file-t4025-adaptive-lifetime-dispatch
+
+    EVIDENCE ADDED 2026-09-22 (oper#followups-research-2026-09-22), for the builder; the criteria above are unchanged.
+      - 4-day union: 11 capped tasks wrote 1,139 `dispatch.lifetime_capped` rows — one per task per selection pass; only
+        the escalation is deduplicated.
+      - THE CAP FORGETS ITSELF: the count is rebuilt from whichever archives are retained, and falls when compaction
+        prunes them (09-20 19:35 records 2,800 -> 2,603 as archives 401 -> 361; 09-22 20:54 3,145 -> 2,943). W1-T3743,
+        W1-T3742, W1-T3736, W1-T3735 and W1-T3722 were capped and later released and merged this way.
+      - serve's frontier (`panel-graph.ts`) lists capped W1-T3990 as "the dispatcher's next pick": it applies the circuit
+        breaker but not the lifetime cap.
+      - The open implementation (#6633) edits src/lib/daemon.ts, now listed in files.
+      An adaptive disposition should be recorded ONCE, durably (surviving compaction), keyed to the task's contract
+      revision, and released only by an amendment — never by archive pruning.
   rationale: |
     OBSERVED in the live queue on 2026-09-22: W1-T3363 is halted by the lifetime dispatch cap and
     still carries a needs-human escalation (#6517), even though the operator direction is now to
