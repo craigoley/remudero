@@ -616,6 +616,11 @@ export interface GhReadCadenceDeps {
 /** ONE LINE PER PROCESS. An advisory that prints on every paced read is noise the daemon's log
  *  would bury, and noise is how a floor stops being read. Reset only for tests. */
 let ghCadenceAdvisoryEmitted = false;
+// A daemon can perform several read-shaped calls in one process. The shared file is for
+// coordination with sibling processes; sleeping after our own stamp would turn every normal
+// sweep into a 1.5s-per-read queue (and made the instrumented CI suite hit its timeout). Keep the
+// last value this process wrote so only a newer, foreign stamp consumes the cross-process gap.
+const ghCadenceOwnStampMs = new Map<string, number>();
 
 /**
  * Serialise the read-and-stamp critical section across daemon processes. A process-local pacer
@@ -718,11 +723,15 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     // shared gap still protects the secondary limiter across sibling processes without making a
     // normal sweep self-refuse after its first read.
     const latest = readStampMs(stampPath);
+    const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(stampPath) === latest;
     const elapsed = latest === undefined ? undefined : now() - latest;
-    const remaining = latest === undefined ? 0 : DEFAULT_GH_SHARED_READ_GAP_MS - (elapsed ?? 0);
+    const remaining = ownLatest || latest === undefined ? 0 : DEFAULT_GH_SHARED_READ_GAP_MS - (elapsed ?? 0);
     if (remaining > 0) sleepSync(remaining);
     // Stamp only after the gap so a concurrent process observes the completed transport slot.
     stamp(stampPath);
+    const stampedAt = readStampMs(stampPath);
+    if (stampedAt === undefined) ghCadenceOwnStampMs.delete(stampPath);
+    else ghCadenceOwnStampMs.set(stampPath, stampedAt);
     return decision;
   });
 }

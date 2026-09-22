@@ -284,8 +284,13 @@ test("the shared cadence lock is released and applies a bounded gap to a sibling
     const stamp = ghReadCadenceStampPath(env) as string;
     const sleeps: number[] = [];
     applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.equal(sleeps.some((ms) => ms > 0), false, "a process must not wait on its own freshly written stamp");
     assert.equal(existsSync(`${stamp}.lock`), false, "the lock must not survive a completed read");
     stampGhRead(stamp);
+    // Force a distinct mtime so this deterministic sibling simulation cannot round to the same
+    // millisecond as the process-local stamp above.
+    const siblingTime = (Date.now() + 5) / 1000;
+    utimesSync(stamp, siblingTime, siblingTime);
     applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
     assert.ok(sleeps.some((ms) => ms > 0), "a sibling read must observe the bounded shared gap");
     assert.equal(existsSync(`${stamp}.lock`), false, "the second read must release the lock too");
