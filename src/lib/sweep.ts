@@ -8093,7 +8093,7 @@ function freshFixDispatchCount(
  *  IS SWALLOWED ON PURPOSE. */
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
-export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning";
+export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence";
 
 interface DetachedSweepActionRegistration {
   actionKind: DetachedActionKind; taskId: string; startedAtMs: number;
