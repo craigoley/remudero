@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 30.00
-  files: [src/lib/daemon.ts, src/lib/status.ts, test/inflight-contention-does-not-durably-block.test.ts]
+  files: [src/lib/daemon.ts, src/lib/status.ts, test/inflight-contention-does-not-durably-block.test.ts, scripts/test-tier-manifest.json]
   origin: "operator-session#three-daemon-followup-2026-09-21"
   plan_refs: ["W1-T1268", "W1-T2910", "W1-T3565"]
   status: queued
