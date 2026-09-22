@@ -306,6 +306,7 @@
     "test/action-reconciliation-postconditions.test.ts": 0,
     "test/action-reconciliation-redaction.test.ts": 0,
     "test/action-reconciliation-retry.test.ts": 0,
+    "test/adaptive-lifetime-pressure-builds-its-own-shards.test.ts": 0,
     "test/adaptive-review-capacity.test.ts": 1874,
     "test/adaptive-review-widener-can-widen.test.ts": 0,
     "test/adhoc-lane-reap.test.ts": 1174,
