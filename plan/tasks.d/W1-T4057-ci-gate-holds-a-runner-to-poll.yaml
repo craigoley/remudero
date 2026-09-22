@@ -1,0 +1,57 @@
+- id: W1-T4057
+  title: "CI-GATE HOLDS A RUNNER FOR THE WHOLE CI DURATION JUST TO POLL — 18,244 runner-minutes in 3.8 days (~45 per merge, ~3.3 runners always busy waiting), and 1,157 of its 1,926 runs were cancelled mid-poll: conclude ci-gate from completion events instead of a 40-minute polling loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#ci-efficiency-research-2026-09-22"
+  plan_refs: [W1-T24]
+  files: [.github/workflows/ci-gate.yml, .github/workflows/ci.yml, test/ci-gate-concludes-from-events.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 FROM ALL 25,189 WORKFLOW RUNS SINCE 2026-09-19 (~3.8 days, 408 merges to main):
+
+    (1) ci-gate is the only required check besides remudero-review (branch protection, `strict: false`, no
+        merge queue). Its job (.github/workflows/ci-gate.yml) starts with the PR event and loops on the
+        check-runs API until the 27 names in its `REQUIRED` list conclude — `WAIT_CAP_SECONDS: "2400"` plus
+        `GRACE_WINDOW_SECONDS: "600"`. It therefore occupies a runner for as long as CI takes (first CI run to
+        ci-gate success p50 18.5 min, p90 23.4; ci-gate finishes 0.5 min after CI): 18,244 runner-minutes over
+        the window, ~4,800/day, ~45 per merge.
+    (2) `concurrency: cancel-in-progress` plus `types: [..., edited]` restarts the poll on every push AND every
+        title/body edit: 1,157 of 1,926 ci-gate runs ended cancelled (7,551 min), ~546 of them fired by
+        `edited` alone.
+    (3) `edited` IS DELIBERATE and must keep working: "The two acceptance-body gates can change their result
+        after a body-only repair. Re-run the lightweight aggregate on `edited` so its required ci-gate context
+        observes that new result without re-running ci.yml's expensive test jobs." The waste is the wait, not
+        the trigger.
+  design: |
+    THE INVARIANTS (docs/forensics/ci-gate-yml.md, W1-T24) — each must be pinned by a test:
+      - the required `ci-gate` context ALWAYS concludes on every head: a skipped or never-created check
+        deadlocks the merge;
+      - it concludes from the SAME 27-name REQUIRED list and the same rule it applies today;
+      - a body-only edit still re-evaluates the acceptance gates' result.
+    (i) Stop polling while CI runs. Candidate mechanisms, choose one and say why in the PR:
+        (a) evaluate ci-gate when its inputs complete — `workflow_run: completed` / `check_suite: completed`
+            re-evaluation that posts the `ci-gate` result for the PR head, so no runner waits; or
+        (b) move the evaluation into a final `ci.yml` job with `needs:` on its own jobs, leaving only a short
+            wait for the few REQUIRED checks produced by other workflows (each ~0.5-0.7 min).
+    (ii) An `edited` event re-evaluates against checks that have ALREADY concluded instead of starting a
+         fresh 40-minute wait.
+    (iii) Measure it: the PR records ci-gate runner-minutes per merge before and after on a sample of heads.
+  acceptance:
+    - claim: "ci-gate concludes on every head, including one whose only change is a body edit"
+      proof: 'grep: test("W1-T4057: ci-gate always concludes on a head" in test/ci-gate-concludes-from-events.test.ts'
+    - claim: "ci-gate applies the same REQUIRED list and rule as before"
+      proof: 'grep: test("W1-T4057: the required list and rule are unchanged" in test/ci-gate-concludes-from-events.test.ts'
+    - claim: "no ci-gate job waits for the duration of CI"
+      proof: 'grep: test("W1-T4057: no gate job polls for the length of ci" in test/ci-gate-concludes-from-events.test.ts'
+  falsifier: |
+    Keep the 2400 s poll and the third assertion goes red. Drop `edited` handling and the first goes red on a
+    body-only head. Change the REQUIRED list or its rule and the second goes red.
+  note: |
+    reservation hand-off: chore/file-flow-and-review-findings -> chore/file-ci-gate-polling
