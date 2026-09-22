@@ -863,6 +863,7 @@ import {
   wipeTestCadenceCheck,
   type MeasurementCadenceDecision,
   buildPlanReconcileCadenceInput,
+  type PlanReconcileCadenceOpts,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
   type VerifyHumanCadenceResult,
@@ -22227,6 +22228,55 @@ function defaultCreditedMergedIds(): Set<string> {
   );
 }
 
+/** Seams for {@link defaultPlanReconcileCadenceInput}; every one defaults to the real reader. */
+export interface PlanReconcileCadenceInputDeps {
+  readShards?: () => Array<{ taskId: string; path: string; text: string }>;
+  creditedMergedIds?: () => Set<string>;
+  land?: (inputs: readonly { relPath: string; content: string }[]) => void;
+  /** The scratch-index landing bridge the default `land` calls; a test injects a fake so no git
+   *  or GitHub write happens. */
+  landShards?: typeof landPlanReconcileShards;
+}
+
+/**
+ * W1-T3970 — the plan-reconcile rung's PRODUCTION inputs: the same shard bytes and credit
+ * projection `rmd plan-reconcile` uses, so the cadence no longer needs a human to run that verb.
+ * Landing goes through the scratch-index bridge ({@link landPlanReconcileShards}), never a write
+ * into this daemon's own checkout. A failed landing throws, so the cadence records an error
+ * instead of reporting a reconciliation that never reached a PR.
+ *
+ * AN UNREADABLE SHARD DIRECTORY OR CREDIT PROJECTION SKIPS THE RUNG (returns undefined), the same
+ * direction `planReconcileCommand` takes when it refuses to print "0 to reconcile" from a failed
+ * read: a failed read must not surface as a measured zero. The next fire retries.
+ */
+export function defaultPlanReconcileCadenceInput(
+  root: string,
+  deps: PlanReconcileCadenceInputDeps = {},
+): PlanReconcileCadenceOpts | undefined {
+  try {
+    return buildPlanReconcileCadenceInput({
+      checkoutRoot: root,
+      readShards: deps.readShards ?? (() => readPlanShards(join(root, "plan", "tasks.d"))),
+      creditedMergedIds: deps.creditedMergedIds ?? defaultCreditedMergedIds,
+      land:
+        deps.land ??
+        ((inputs) => {
+          const landing = (deps.landShards ?? landPlanReconcileShards)(root, inputs, {
+            targetRepository: resolveOwnerRepo(),
+            landingOwner: "measurement-cadence",
+          });
+          if (!landing.landed || landing.error) {
+            throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+          }
+        }),
+    });
+  } catch {
+    // reason: the shard directory or credit projection was unreadable — skip this fire's rung
+    // (status: not measured) rather than report zero drift from a failed read.
+    return undefined;
+  }
+}
+
 /** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
  * must direct larger status repairs into multiple reviewable plan-only PRs. */
 export const PLAN_RECONCILE_REVIEW_FILE_CEILING = 300;
@@ -24222,6 +24272,10 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
    *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
   ratifications?: Ratifications;
   coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
+  /** W1-T3970: supplies the plan-reconcile rung's inputs for one fire. `daemonCommand` passes
+   *  {@link defaultPlanReconcileCadenceInput}; absent skips the rung, so a bare hook never reads
+   *  the credit projection or lands a PR. */
+  planReconcileInput?: () => PlanReconcileCadenceOpts | undefined;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -24259,25 +24313,13 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       const verifyHuman = await defaultVerifyHumanCadenceResult(root, configFor(), verifyHumanRunId, cadenceClock);
-      // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
-      // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
-      // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
-      // checkout. A failed landing throws so the cadence records an error and retries later; it
-      // must never report a successful reconciliation on an unlanded PR.
-      const planReconcile = buildPlanReconcileCadenceInput({
-        checkoutRoot: repoRoot,
-        readShards: () => readPlanShards(join(repoRoot, "plan", "tasks.d")),
-        creditedMergedIds: defaultCreditedMergedIds,
-        land: (inputs) => {
-          const landing = landPlanReconcileShards(repoRoot, inputs, {
-            targetRepository: resolveOwnerRepo(),
-            landingOwner: "measurement-cadence",
-          });
-          if (!landing.landed || landing.error) {
-            throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
-          }
-        },
-      });
+      // W1-T3970: the pure plan reconciler is only useful when the production hook supplies the
+      // same shard bytes and credit projection as `rmd plan-reconcile`. `daemonCommand`'s call
+      // site passes `planReconcileInput` (see {@link defaultPlanReconcileCadenceInput}); a bare
+      // hook (every unit test that builds one without it) skips the rung entirely, so no test run
+      // ever reaches GitHub for a credit projection or lands a plan PR. Called lazily, once per
+      // fire that already passed the cadence decision.
+      const planReconcile = deps.planReconcileInput?.();
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -24291,7 +24333,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
-        planReconcile: { ...planReconcile },
+        ...(planReconcile ? { planReconcile } : {}),
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),
@@ -29623,7 +29665,9 @@ export async function daemonCommand(
   // joins against both live under THIS process's own config.root/repoRoot, never a drained
   // target's. Without this line `deps.checkMeasurementCadence` is undefined and the whole rung
   // is dead code, exactly how #1066 merged auto-triage's consumer with no producer.
-  const measurementCadenceHooks = target.isSelf ? buildMeasurementCadenceDaemonHooks({ config }) : undefined;
+  const measurementCadenceHooks = target.isSelf
+    ? buildMeasurementCadenceDaemonHooks({ config, planReconcileInput: () => defaultPlanReconcileCadenceInput(repoRoot) })
+    : undefined;
   // W1-T2277: the digest's own cadence rung. SELF-TARGET ONLY, same reason as the rungs above —
   // the ledger this reads and the marker/inbox files it writes both live under THIS process's
   // own config.root, never a drained target's. Without this line `deps.checkDigestCadence` is
