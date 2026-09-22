@@ -2799,21 +2799,59 @@ export interface EscalationState {
  * lock or worker can exist. Older daemons recorded that refusal through the same ledger step as a
  * paid independent failure, so recognize that exact historical verdict without rewriting or
  * concealing the row. Unknown or absent verdicts deliberately remain durable: only the proven
- * pre-dispatch refusal is re-admittable. */
+ * pre-dispatch refusal is re-admittable.
+ *
+ * W1-T3978: a shell-less implement can leave a producer-owned refusal after substantive edits.
+ * That exact terminal class gets one pending retry marker. The marker makes the task eligible
+ * until the retry's `run.start`; after that start the marker is spent, so a second refusal stays
+ * blocked. Ordinary `no_pr` rows never enter this state machine. */
 export function latestIndependentFailureBlock(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
 ): boolean {
   let last: "run" | "blocked" | "admission_refused" | undefined;
+  let harnessRefusal = false;
+  let retryPending = false;
+  let retrySpent = false;
+  const harnessRefusalRuns = new Set<string>();
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId && line.task !== taskId) continue;
     if (line.step === "run.start") {
+      if (retryPending) retrySpent = true;
+      retryPending = false;
       last = "run";
+    } else if (line.step === "implement.harness_commit_refused") {
+      harnessRefusalRuns.add(typeof line.run_id === "string" ? line.run_id : "");
+    } else if (line.step === "verdict" && line.verdict === "no_pr" && line.terminal_class === "harness_commit_refused") {
+      harnessRefusal = true;
+      if (typeof line.run_id === "string") harnessRefusalRuns.add(line.run_id);
+      last = "blocked";
     } else if (line.step === "dispatch.blocked_independent") {
+      const runId = typeof line.run_id === "string" ? line.run_id : "";
+      const exactHarnessRefusal =
+        line.verdict === "no_pr" &&
+        (line.terminal_class === "harness_commit_refused" || harnessRefusalRuns.has(runId));
+      if (exactHarnessRefusal) {
+        harnessRefusal = true;
+        if (runId) harnessRefusalRuns.add(runId);
+      }
       last = line.verdict === "blocked_illformed" ? "admission_refused" : "blocked";
+    } else if (
+      line.step === "dispatch.harness_commit_retry" &&
+      line.original_refusal === "harness_commit_refused" &&
+      line.original_verdict === "no_pr" &&
+      line.harness_commit_refused === true
+    ) {
+      const originalRunId = typeof line.original_run_id === "string" ? line.original_run_id : "";
+      if (harnessRefusalRuns.has(originalRunId) && !retrySpent) {
+        retryPending = true;
+      }
     }
   }
+  if (retryPending) return false;
+  if (harnessRefusal && retrySpent) return true;
+  if (harnessRefusal) return true;
   return last === "blocked";
 }
 

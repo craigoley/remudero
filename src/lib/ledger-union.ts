@@ -1,4 +1,5 @@
 import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { addAbortSignal, type Readable } from "node:stream";
@@ -159,6 +160,16 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
    * dedupe over an arbitrary collection of files.
    */
   dedupeWindowPerStep?: number;
+  /** Resume after an immutable rotation already represented by a checkpoint. */
+  afterRotation?: string;
+  /** Resume the mutable live ledger at a byte offset when it has only grown. */
+  liveStartOffset?: number;
+  /** Seed the bounded replay window without persisting raw ledger lines. */
+  dedupeSeed?: readonly { step: string; fingerprint: string }[];
+}
+
+export function fingerprintLedgerLine(raw: string): string {
+  return createHash("sha256").update(raw).digest("hex");
 }
 
 /** Stream-opening I/O. The third argument to {@link openLedgerUnion} exists so its cancellation
@@ -166,13 +177,13 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
 export interface LedgerUnionStreamIO {
   readdirSync: (dir: string) => string[];
   existsSync: (path: string) => boolean;
-  createReadStream: (path: string) => Readable;
+  createReadStream: (path: string, options?: { start?: number }) => Readable;
 }
 
 const realLedgerUnionStreamIO: LedgerUnionStreamIO = {
   readdirSync: (dir) => nodeReaddirSync(dir),
   existsSync: (path) => nodeExistsSync(path),
-  createReadStream: (path) => nodeCreateReadStream(path),
+  createReadStream: (path, options) => nodeCreateReadStream(path, options),
 };
 
 export async function* openLedgerUnion(
@@ -191,9 +202,22 @@ export async function* openLedgerUnion(
   }
   const { rotations } = listedLedgerFiles(stateDir, io);
   const livePath = ledgerLivePath(stateDir);
-  const entries = opts.includeLive === false ? rotations : [...rotations, { path: livePath, form: "plain" as const }];
+  const resumedRotations = opts.afterRotation === undefined
+    ? rotations
+    : rotations.filter((entry) => basename(entry.path) > opts.afterRotation!);
+  const entries = opts.includeLive === false ? resumedRotations : [...resumedRotations, { path: livePath, form: "plain" as const }];
   const seen = new Set<string>();
   const recentByStep = new Map<string, { order: string[]; next: number; seen: Set<string> }>();
+  if (opts.dedupeSeed !== undefined) {
+    for (const seed of opts.dedupeSeed) {
+      const recent = recentByStep.get(seed.step) ?? { order: [], next: 0, seen: new Set<string>() };
+      if (recent.seen.has(seed.fingerprint)) continue;
+      recent.seen.add(seed.fingerprint);
+      if (recent.order.length < (opts.dedupeWindowPerStep ?? Number.MAX_SAFE_INTEGER)) recent.order.push(seed.fingerprint);
+      else recent.order[recent.next] = seed.fingerprint;
+      recentByStep.set(seed.step, recent);
+    }
+  }
   const minimumTs = sinceMs(opts);
 
   const replayedInsideWindow = (step: string, line: string): boolean => {
@@ -224,7 +248,13 @@ export async function* openLedgerUnion(
     let rl: ReturnType<typeof createInterface> | undefined;
     let archiveUnread = false;
     try {
-      source = io.createReadStream(entry.path);
+      const liveStartOffset = entry.path === livePath && opts.liveStartOffset !== undefined
+        ? Math.max(0, opts.liveStartOffset)
+        : undefined;
+      source = io.createReadStream(
+        entry.path,
+        liveStartOffset === undefined ? undefined : { start: liveStartOffset },
+      );
       // `error` is otherwise only observable through readline's async iterator. Keep this
       // explicit so an audited reader can refuse a partial archive corpus rather than treating
       // a silently skipped rotation as proof that old attempts never happened.
@@ -258,7 +288,7 @@ export async function* openLedgerUnion(
         }
         if (parsed === undefined || !recordMatchesFilters(parsed, opts, minimumTs)) continue;
         const step = typeof parsed.step === "string" ? parsed.step : "";
-        if (replayedInsideWindow(step, line)) continue;
+        if (replayedInsideWindow(step, opts.dedupeSeed === undefined ? line : fingerprintLedgerLine(line))) continue;
         opts.onAcceptedRecord?.(parsed, line);
         yield parsed;
       }

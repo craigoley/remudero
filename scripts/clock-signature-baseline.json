@@ -31,7 +31,7 @@
   },
   "src/lib/board.ts": {
     "legacy": 0,
-    "dateNow": 1,
+    "dateNow": 0,
     "newDate": 2
   },
   "src/lib/capability-grant.ts": {
@@ -41,12 +41,12 @@
   },
   "src/lib/ci-parity.ts": {
     "legacy": 1,
-    "dateNow": 1,
+    "dateNow": 0,
     "newDate": 0
   },
   "src/lib/classify.ts": {
     "legacy": 1,
-    "dateNow": 1,
+    "dateNow": 0,
     "newDate": 1
   },
   "src/lib/claude-model-health.ts": {
@@ -56,8 +56,8 @@
   },
   "src/lib/clock.ts": {
     "legacy": 0,
-    "dateNow": 4,
-    "newDate": 12
+    "dateNow": 2,
+    "newDate": 10
   },
   "src/lib/clone-reaper.ts": {
     "legacy": 1,
@@ -76,23 +76,23 @@
   },
   "src/lib/console-shell-client.ts": {
     "legacy": 0,
-    "dateNow": 14,
-    "newDate": 7
+    "dateNow": 12,
+    "newDate": 6
   },
   "src/lib/console-shell-script.ts": {
     "legacy": 0,
     "dateNow": 2,
     "newDate": 5
   },
-  "src/lib/context-controls.ts": {
-    "legacy": 0,
-    "dateNow": 2,
-    "newDate": 2
-  },
   "src/lib/containment.ts": {
     "legacy": 0,
     "dateNow": 1,
     "newDate": 0
+  },
+  "src/lib/context-controls.ts": {
+    "legacy": 0,
+    "dateNow": 2,
+    "newDate": 2
   },
   "src/lib/correct.ts": {
     "legacy": 0,
@@ -157,11 +157,11 @@
   "src/lib/feedback-landing.ts": {
     "legacy": 0,
     "dateNow": 0,
-    "newDate": 2
+    "newDate": 1
   },
   "src/lib/feedback.ts": {
     "legacy": 0,
-    "dateNow": 2,
+    "dateNow": 1,
     "newDate": 1
   },
   "src/lib/fleet-control.ts": {
@@ -188,11 +188,6 @@
     "legacy": 0,
     "dateNow": 0,
     "newDate": 1
-  },
-  "src/lib/hand-run-census.ts": {
-    "legacy": 0,
-    "dateNow": 1,
-    "newDate": 0
   },
   "src/lib/inbox-thread.ts": {
     "legacy": 1,
@@ -221,13 +216,8 @@
   },
   "src/lib/ledger-path.ts": {
     "legacy": 0,
-    "dateNow": 2,
-    "newDate": 0
-  },
-  "src/lib/ledger-replay.ts": {
-    "legacy": 0,
     "dateNow": 1,
-    "newDate": 1
+    "newDate": 0
   },
   "src/lib/ledger.ts": {
     "legacy": 2,
@@ -314,11 +304,6 @@
     "dateNow": 1,
     "newDate": 3
   },
-  "src/lib/receipt.ts": {
-    "legacy": 0,
-    "dateNow": 1,
-    "newDate": 0
-  },
   "src/lib/report-commands.ts": {
     "legacy": 0,
     "dateNow": 3,
@@ -351,7 +336,7 @@
   },
   "src/lib/serve.ts": {
     "legacy": 7,
-    "dateNow": 2,
+    "dateNow": 1,
     "newDate": 1
   },
   "src/lib/service.ts": {
@@ -374,11 +359,6 @@
     "dateNow": 5,
     "newDate": 5
   },
-  "src/lib/task-card.ts": {
-    "legacy": 0,
-    "dateNow": 1,
-    "newDate": 0
-  },
   "src/lib/task-id-reservation.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -394,11 +374,6 @@
     "dateNow": 1,
     "newDate": 0
   },
-  "src/lib/trace.ts": {
-    "legacy": 0,
-    "dateNow": 2,
-    "newDate": 0
-  },
   "src/lib/verdict-calibration.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -411,7 +386,7 @@
   },
   "src/lib/worker-home.ts": {
     "legacy": 3,
-    "dateNow": 3,
+    "dateNow": 2,
     "newDate": 1
   },
   "src/lib/worker-provider.ts": {
@@ -426,13 +401,13 @@
   },
   "src/lib/worker.ts": {
     "legacy": 8,
-    "dateNow": 10,
+    "dateNow": 7,
     "newDate": 1
   },
   "src/run-task.ts": {
     "legacy": 22,
-    "dateNow": 55,
-    "newDate": 42
+    "dateNow": 53,
+    "newDate": 41
   },
   "src/spike.ts": {
     "legacy": 0,

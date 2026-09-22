@@ -1,0 +1,19 @@
+id: fb-1790036783486-fcf82d
+ts: 2026-09-22T00:26:23.486Z
+raw: "Console daemon branch-reap safety scan is fail-open for repos without
+  deploy/: planBranchReap calls git grep once over src/, scripts/, deploy/,
+  .github/. In remudero-console, deploy/ is absent, git exits 128, the catch
+  treats it as no source reference, and namedInSource becomes false even if src/
+  would contain the branch. Observed repeatedly as fatal deploy/: no such path
+  in remudero-console-daemon logs during UI-T55. Select only existing paths or
+  distinguish exit 1 no-match from an execution error and fail conservatively;
+  add a multi-repo regression test."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,19 @@
+id: fb-1790036267432-9a0ffc
+ts: 2026-09-22T00:17:47.433Z
+raw: "Console daemon manual review fails when its image runs from /app outside a
+  Git checkout: rmd review resolves owner/repo from cwd and aborts before
+  posting remudero-review. Make repo-specific daemon command execution select
+  the mounted repository checkout (or resolve configured repo independent of
+  cwd), add a regression test, and preserve normal daemon lifecycle ownership.
+  Observed on remudero-console daemon while reviewing PR #1580; rerunning the
+  normal command from /home/node/Remudero/repos/remudero-console succeeds far
+  enough to post a verdict."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
