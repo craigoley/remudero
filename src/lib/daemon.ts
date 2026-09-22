@@ -3814,8 +3814,8 @@ export async function runDaemon(
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.
     log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
-    await flushLifetimePressure();
     await stopTicker();
+    await flushLifetimePressure();
     restartInterphaseReviewClock();
 
     // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`.

@@ -185,7 +185,6 @@ test/daemon.test.ts	daemon-headroom-on- # pre-existing at W1-T2786 re-key — W1
 test/daemon.test.ts	daemon-headroom-policy- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/daemon.test.ts	daemon-headroom-timeaware- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/daemon.test.ts	daemon-idle- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/daemon.test.ts	daemon-lifetime-cap-spin- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/daemon.test.ts	daemon-lifetime-cap-throw- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/daemon.test.ts	daemon-no-orphan-sweep- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/daemon.test.ts	daemon-orphan-sweep- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending

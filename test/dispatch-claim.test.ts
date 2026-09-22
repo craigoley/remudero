@@ -402,7 +402,7 @@ const TEN_PROBE_YAML = `
   status: queued
 `;
 
-test("W1-T1268 UNCHANGED: all ten isDispatchEligible probes still fire, in order, and exactly one candidate survives", () => {
+test("W1-T1268: all ten isDispatchEligible probes still fire, and lifetime pressure remains selectable", () => {
   const plan = loadPlanFromYaml(TEN_PROBE_YAML, "fixture");
   const isMerged = (id: string) => id === "MERGED";
   const opts: NextRunnableOpts = {
@@ -415,11 +415,11 @@ test("W1-T1268 UNCHANGED: all ten isDispatchEligible probes still fire, in order
     hasPushedRunBranch: (id) => id === "PUSHED",
     excludeIds: new Set(["EXCLUDED"]),
   };
-  assert.equal(nextRunnable(plan, isMerged, opts)?.id, "CLEAN", "the one task none of the ten probes decline");
+  assert.equal(nextRunnable(plan, isMerged, opts)?.id, "CAPPED", "the lifetime signal is observable but not a terminal refusal");
   // runnableCandidates applies the identical chain — never a second, divergent one.
   assert.deepEqual(
     runnableCandidates(plan, isMerged, 10, opts).map((t) => t.id),
-    ["CLEAN"],
+    ["CAPPED", "CLEAN"],
   );
 });
 
