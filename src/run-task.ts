@@ -28669,9 +28669,7 @@ async function drainCommand(
         // drain flushes one bounded batch after the pass and routes it through the existing judge;
         // a judge/proposal failure is logged and does not hold this or a sibling task.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
-        onLifetimePressure: async (tasks) => {
-          await routeAdaptiveLifetimePressure(tasks, { plan, root: repoRoot, config, ledgerPath, runId });
-        },
+        onLifetimePressure: productionLifetimePressureHook({ plan: () => plan, root: repoRoot, config, ledgerPath, runId }),
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
@@ -30354,15 +30352,7 @@ export async function daemonCommand(
         // daemon flushes one bounded batch after the pass and routes it through the existing judge;
         // a judge/proposal failure is logged and does not hold this or a sibling task.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
-        onLifetimePressure: async (tasks) => {
-          await routeAdaptiveLifetimePressure(tasks, {
-            plan: activePlanRef.current,
-            root: repoRoot,
-            config,
-            ledgerPath,
-            runId,
-          });
-        },
+        onLifetimePressure: productionLifetimePressureHook({ plan: () => activePlanRef.current, root: repoRoot, config, ledgerPath, runId }),
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
@@ -39900,6 +39890,37 @@ export async function routeAdaptiveLifetimePressure(
     appendRow: (row) => appendLedger(deps.ledgerPath, row as LedgerLine),
     runId: deps.runId,
   });
+}
+
+/**
+ * The production `onLifetimePressure` hook, EXTRACTED so its body is reachable from a test.
+ *
+ * Inline in `drainCommand`/`daemonCommand` the surrounding deps object IS covered — both commands
+ * are driven by real tests with `runDaemon`/`runDrain` stubbed — but an `async (tasks) => { … }`
+ * body only runs when real pressure occurs, so `diff-coverage` named exactly those body lines.
+ * Lifting the body out leaves one expression per call site that runs at CONSTRUCTION. Same
+ * extraction-and-injection remedy {@link resolveEventPath} documents in this file.
+ *
+ * `plan` is a THUNK, not a value: the daemon re-projects its active plan every tick, so the hook
+ * must read it when it FIRES. Capturing `activePlanRef.current` eagerly would pin the first tick's
+ * projection for the life of the process.
+ */
+export function productionLifetimePressureHook(deps: {
+  plan: () => Plan;
+  root: string;
+  config: Config;
+  ledgerPath: string;
+  runId: string;
+}): (tasks: readonly Task[]) => Promise<void> {
+  return async (tasks) => {
+    await routeAdaptiveLifetimePressure(tasks, {
+      plan: deps.plan(),
+      root: deps.root,
+      config: deps.config,
+      ledgerPath: deps.ledgerPath,
+      runId: deps.runId,
+    });
+  };
 }
 
 /**

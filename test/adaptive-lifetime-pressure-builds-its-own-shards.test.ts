@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { routeAdaptiveLifetimePressure } from "../src/run-task.js";
+import { productionLifetimePressureHook, routeAdaptiveLifetimePressure } from "../src/run-task.js";
 import { VERIFY_HUMAN_JUDGED_STEP } from "../src/lib/verify-human-judge.js";
 import type { Config } from "../src/lib/config-schema.js";
 
@@ -133,6 +133,38 @@ test("routeAdaptiveLifetimePressure asks the judge about a shard whose evidence 
     assert.equal(result.judged, 0, "an empty task list judges nothing");
     assert.deepEqual(result.skipped, [], "and projects no shard at all");
     assert.equal(readFileSync(ledgerPath, "utf8").includes(SETTLED_KEY), true, "the prior row is left untouched");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("productionLifetimePressureHook reads its plan WHEN IT FIRES, not when it is built", async () => {
+  const { dir, plan, ledgerPath, config } = fixture();
+  try {
+    writeLedger(ledgerPath, [
+      { step: "daemon.spawn_infra_blocked", task: "T4025-C" },
+      { step: "pr.opened", task_id: "T4025-C" },
+      { step: VERIFY_HUMAN_JUDGED_STEP, observed_state: SETTLED_KEY, judge_decision: "backlog", judge_reason: "already seen" },
+    ]);
+
+    // The daemon re-projects its plan every tick, so the hook takes a THUNK. Counting the reads is
+    // what proves it: zero at construction, one once the hook is actually called. An eager capture
+    // would pin the first tick's projection and this test would read 1 before the call.
+    let planReads = 0;
+    const hook = productionLifetimePressureHook({
+      plan: () => { planReads += 1; return plan; },
+      root: dir,
+      config,
+      ledgerPath,
+      runId: "RUN-HOOK-1",
+    });
+    assert.equal(planReads, 0, "building the hook must not pin a plan projection");
+
+    await hook([plan.byId.get("T4025-C")!]);
+    assert.equal(planReads, 1, "the plan is read at fire time, so a later tick's projection wins");
+
+    // The shard is settled by the row above, so no judge call is spent and nothing is written.
+    assert.equal(readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).length, 3, "the hook wrote no rows");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
