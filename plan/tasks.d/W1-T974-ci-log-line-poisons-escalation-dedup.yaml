@@ -126,8 +126,6 @@
       proof: "unit test: W1-T974: an innocent ci log line reaches the issue body unchanged"
     - claim: "a genuine disagreement on the cause dimension still vetoes the duplicate match"
       proof: "unit test: W1-T974: a genuine cause disagreement still vetoes the dedup match"
-    - claim: "the suppression direction is the severe one and the duplicate direction is the mild one"
-      proof: "grep: the suppression direction is the severe one and the duplicate direction is the mild one in plan/tasks.d/W1-T974-ci-log-line-poisons-escalation-dedup.yaml"
   risk: high
   origin: "oper#ci-log-poisons-escalation-dedup-2026-08-18"
   plan_refs: ["W1-T195", "W1-T210", "W1-T138", "W1-T345"]
@@ -167,22 +165,14 @@
     `renderIssueBody`, not on an incident. A reader who cites this as a production failure has
     overstated it.
 
-    PROOF NOTES. Four criteria use the name-filtered `unit test:` form rather than a whole-file
-    path. Every title was measured against test/ with `grep -rlF` and matched ZERO files, against a
-    control title lifted from the real escalate suite that matched one. Each is plain prose under
-    100 characters with no comma, no semicolon-space and no regex metacharacter, so
-    `looksLikeScenarioNarrative` cannot fail them and `parseTestTarget`'s escaped-literal match has
-    nothing to mishandle. The fifth is a single-line `grep:` with an explicit path, verified with
-    the executor's real invocation AGAINST THIS CHANGESET'S OWN HEAD — a proof naming a file the
-    changeset does not touch reads hits 0 and `executed_fail`, which fails the review outright.
-
-    ONE ADVISORY IS ACCEPTED KNOWINGLY. `rmd lint-plan` emits a single finding against this shard,
-    a `proof-scope` WARNING that criterion 5's grep names this shard's own path while `files:` does
-    not list it. It is advisory and never blocking — the run carried 179 blocking tasks and NOT ONE
-    names W1-T974. Both remedies are worse: declaring the shard's own path would place the filing
-    inside its own implementation scope, and repointing the grep at src/lib/escalate.ts would name
-    a file this changeset does not touch, which reads hits 0 and `executed_fail` and FAILS THE
-    REVIEW OUTRIGHT rather than merely being unscoped.
+    PROOF NOTES. All four criteria use the name-filtered `unit test:` form rather than a whole-file
+    path. Every title was measured against test/ with `grep -rlF` and matched ZERO files on the
+    pre-implementation tree, against a control title lifted from the real escalate suite that
+    matched one. Each is plain prose under 100 characters with no comma, no semicolon-space and
+    no regex metacharacter, so `looksLikeScenarioNarrative` cannot fail them and
+    `parseTestTarget`'s escaped-literal match has nothing to mishandle. The acceptance contract is
+    deliberately executable end to end; the severity comparison remains rationale, not a
+    self-referential proof over this plan file.
 
     ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN CONTROL. W1-T974 read 0 on all of them:
     refs/rmd-id/* (control refs/rmd-id/W1-T971 = 1, negative W1-T999999 = 0), shard filenames on
