@@ -15,6 +15,10 @@
     - src/run-task.ts
     - test/drain.test.ts
     - test/daemon.test.ts
+    - test/plan-only-run-branch-exact-tip.test.ts
+    - test/plan-only-run-branch-changed-tip.test.ts
+    - test/plan-only-run-branch-implementation-block.test.ts
+    - test/plan-only-run-branch-reason.test.ts
   origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
   plan_refs: ["W1-T534", "W1-T916", "W1-T2530", "W1-T3067", "W1-T3994", "W1-T3996"]
   status: queued
@@ -53,13 +57,13 @@
     authority over it.
   acceptance:
     - claim: "a current plan-only receipt releases only the exact matching run-branch tip so the real task can be selected"
-      proof: "grep: planOnlyRunBranchReceipt in src/lib/drain.ts"
+      proof: "unit test: test/plan-only-run-branch-exact-tip.test.ts"
     - claim: "a changed or unreadable run-branch tip stays blocked rather than inheriting a stale plan-only receipt"
-      proof: "grep: planOnlyRunBranchReceipts in src/lib/sweep.ts"
+      proof: "unit test: test/plan-only-run-branch-changed-tip.test.ts"
     - claim: "an implementation-bearing run branch remains a blocking in-flight claim"
-      proof: "grep: unmatchedRunRefsRemainBlocking in src/lib/drain.ts"
+      proof: "unit test: test/plan-only-run-branch-implementation-block.test.ts"
     - claim: "the exception is an explicit plan-filing-run-branch-exception outcome rather than a silent omission"
-      proof: "grep: plan-filing-run-branch-exception in src/lib/daemon.ts"
+      proof: "unit test: test/plan-only-run-branch-reason.test.ts"
   falsifier: |
     Seed the raw remote result with run-W1-T999-1790040200000 at SHA A and a positive full-sweep
     filing receipt for exactly that ref/SHA. Before this fix the task is skipped solely because
@@ -74,3 +78,9 @@
     use run-W1-T4002-<epochMs> after this filing merges. This is recovery for the current W1-T3996
     collision and prevention for every pre-W1-T3994 filing that can still be open; W1-T3994 remains
     the author-time prevention gate.
+
+    The acceptance proofs deliberately use distinct pure-path `unit test:` forms against four new
+    test files declared in `files:`. A plan-only filing cannot prove future source symbols with
+    `grep:`; each absent test instead reaches the named forward-reference outcome at filing time and
+    executes once this task ships. The four-file split keeps every claim tied to its own
+    discriminating evidence rather than using one broad test as an answer to all four.
