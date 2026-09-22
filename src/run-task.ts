@@ -39936,23 +39936,49 @@ export function productionVerifyHumanRelease(
   runId: string,
   options: {
     riskJudge?: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
+    /** Live policy reader. The production callers pass plan/policy.yaml; omitted keeps old tests and callers byte-safe. */
+    riskPolicy?: () => RiskPolicy;
     /** Forwarded to realRiskJudge, so a test drives the REAL construction (mount resolution and
      *  parsing included) without a model call. */
     spawn?: typeof spawnWorker;
   } = {},
 ): VerifyHumanReleaseHook {
   let judge = options.riskJudge;
+  const readCurrentRiskPolicy = options.riskPolicy ?? (() => {
+    try {
+      return readRiskPolicy(policyPath(checkoutRoot));
+    } catch (e) {
+      // Tests and older callers may provide a synthetic checkout with no policy file; preserve
+      // their pre-policy behavior. Malformed or unreadable policy files still fail closed below.
+      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return DEFAULT_RISK_POLICY;
+      throw e;
+    }
+  });
   const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
     judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn });
     return judge(input);
   };
-  return (shard, verdict) =>
-    releaseAutomatedShard(shard, verdict, {
+  return async (shard, verdict) => {
+    let riskPolicy: RiskPolicy;
+    try {
+      riskPolicy = readCurrentRiskPolicy();
+    } catch (e) {
+      return { kind: "unavailable", reason: `risk policy unavailable: ${String((e as Error)?.message ?? e)}` };
+    }
+    return releaseAutomatedShard(shard, verdict, {
       task: (id) => plan.byId.get(id),
       riskJudge,
-      writeRelease: (taskId, provenance) =>
-        approveParkedTask(taskId, { plan, ledgerPath, runId, provenance: { ...provenance } }),
+      riskPolicy,
+      writeRelease: (taskId, provenance, resolvedPolicy) =>
+        approveParkedTask(taskId, {
+          plan,
+          ledgerPath,
+          runId,
+          riskPolicy: resolvedPolicy,
+          provenance: { ...provenance },
+        }),
     });
+  };
 }
 
 export async function verifyHumanSweepCommand(
@@ -40367,7 +40393,7 @@ export function approveParkedTask(
      *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
     provenance?: Record<string, unknown>;
   },
-): { code: number; message: string } {
+): { code: number; message: string; released?: boolean } {
   const task = deps.plan.byId.get(taskId);
   if (!task) return { code: 2, message: `rmd approve: unknown task '${taskId}' — not in the plan` };
   if (task.verify !== "human") {
@@ -40381,7 +40407,7 @@ export function approveParkedTask(
   }
   const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
   if (already.has(taskId)) {
-    return { code: 0, message: `rmd approve: ${taskId} is already released — no second row written` };
+    return { code: 0, released: true, message: `rmd approve: ${taskId} is already released — no second row written` };
   }
   const riskPolicy = deps.riskPolicy ?? DEFAULT_RISK_POLICY;
   if (!riskPolicy.verifyHumanReleaseEnabled) {
@@ -40389,6 +40415,7 @@ export function approveParkedTask(
     (deps.stageProposal ?? (() => {}))(proposal);
     return {
       code: 0,
+      released: false,
       message:
         `rmd approve: verify-human release is DISABLED by policy (risk.verifyHumanReleaseEnabled: ` +
         `false) — staged ${proposal.id} as a proposal instead of releasing ${taskId} directly`,
@@ -40401,7 +40428,7 @@ export function approveParkedTask(
     released: "verify-human",
     ...(deps.provenance ?? {}),
   });
-  return { code: 0, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
+  return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
 
 /** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring

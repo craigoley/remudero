@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,7 +13,7 @@ import {
 } from "../src/lib/risk-judge.js";
 import { RELEASE_LEDGER_STEP, type Plan, type Task } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveParkedTask, verifyHumanReleaseProposalId } from "../src/run-task.js";
+import { approveParkedTask, productionVerifyHumanRelease, verifyHumanReleaseProposalId } from "../src/run-task.js";
 
 /**
  * W1-T4050 — RISK LEVELS ARE HARD-CODED, NOT CONFIGURED.
@@ -162,6 +162,50 @@ test("W1-T4050: a policy change takes effect without a restart", () => {
     assert.equal(after.confidenceThreshold, 0.95, "the SAME live reader sees the edited value with no restart");
     assert.equal(after.verifyHumanReleaseEnabled, false);
     assert.notDeepEqual(before, after, "the reader is not returning a memoized snapshot from its first call");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4050: the automated release path reads the live risk policy", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4050-release-`));
+  const policyDir = join(tmp, "plan");
+  const policyFile = join(policyDir, "policy.yaml");
+  const ledgerPath = join(tmp, "ledger.ndjson");
+  const policy = (threshold: number, enabled: boolean) =>
+    `risk:\n  confidenceThreshold:\n    value: ${threshold}\n    origin: net-new\n  verifyHumanReleaseEnabled:\n    value: ${enabled}\n    origin: net-new\n`;
+  const task = parked("W1-T1041");
+  const plan = planOf([task]);
+  const shard = {
+    id: task.id,
+    title: task.title,
+    rationale: "",
+    acceptance: [],
+    ageDays: 1,
+    depsAllMerged: true,
+    citedInSrc: false,
+  };
+  try {
+    mkdirSync(policyDir, { recursive: true });
+    writeFileSync(policyFile, policy(0.95, true), "utf8");
+    const hook = productionVerifyHumanRelease(plan, tmp, ledgerPath, "RUN-LIVE", {
+      riskJudge: async () => verdict({ confidence: 0.8 }),
+    });
+
+    const aboveConfiguredThreshold = await hook(shard, { decision: "automate", reason: "safe" });
+    assert.equal(aboveConfiguredThreshold.kind, "escalated", "0.8 must not clear a live 0.95 threshold");
+    assert.equal(existsSync(ledgerPath), false, "an escalated release writes no release row");
+
+    writeFileSync(policyFile, policy(0.7, false), "utf8");
+    const disabled = await hook(shard, { decision: "automate", reason: "safe" });
+    assert.equal(disabled.kind, "escalated", "disabled policy must not be reported as released");
+    assert.match(disabled.reason, /DISABLED by policy/);
+    assert.equal(existsSync(ledgerPath), false, "a disabled policy writes no release row");
+
+    writeFileSync(policyFile, policy(0.7, true), "utf8");
+    const enabledAgain = await hook(shard, { decision: "automate", reason: "safe" });
+    assert.equal(enabledAgain.kind, "released", "the same hook sees the re-enabled policy without restart");
+    assert.match(readFileSync(ledgerPath, "utf8"), new RegExp(RELEASE_LEDGER_STEP));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

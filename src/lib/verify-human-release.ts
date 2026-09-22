@@ -20,7 +20,14 @@
  * Imported only by run-task.ts, never by a routing loop, so the risk-judge dependency cannot close
  * a cycle through measurement-cadence.ts.
  */
-import { buildFilingRiskJudgeInput, planRiskJudgeAction, type RiskJudgeInput, type RiskJudgeVerdict } from "./risk-judge.js";
+import {
+  buildFilingRiskJudgeInput,
+  DEFAULT_RISK_POLICY,
+  planRiskJudgeAction,
+  type RiskJudgeInput,
+  type RiskJudgeVerdict,
+  type RiskPolicy,
+} from "./risk-judge.js";
 import type { Task } from "./plan.js";
 import type { ShardUnderJudgement, VerifyHumanReleaseOutcome, VerifyHumanVerdict } from "./verify-human-judge.js";
 
@@ -43,8 +50,14 @@ export interface VerifyHumanReleasePorts {
   /** The record as the plan holds it; undefined when the id resolves to nothing. */
   task: (id: string) => Task | undefined;
   riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
+  /** The live policy snapshot for this release attempt. Absent preserves the pre-policy behavior. */
+  riskPolicy?: RiskPolicy;
   /** Writes the release row. `approveParkedTask`'s own guards apply; a non-zero code means no row. */
-  writeRelease: (taskId: string, provenance: MachineReleaseProvenance) => { code: number; message: string };
+  writeRelease: (
+    taskId: string,
+    provenance: MachineReleaseProvenance,
+    riskPolicy: RiskPolicy,
+  ) => { code: number; message: string; released?: boolean };
 }
 
 const unavailable = (reason: string): VerifyHumanReleaseOutcome => ({ kind: "unavailable", reason });
@@ -71,17 +84,23 @@ export async function releaseAutomatedShard(
   // "unavailable" marker means no LLM decision was reached.
   if (risk.availability === "unavailable") return unavailable("the risk judge reached no decision");
 
-  const action = planRiskJudgeAction(risk);
+  const riskPolicy = ports.riskPolicy ?? DEFAULT_RISK_POLICY;
+  const action = planRiskJudgeAction(risk, { confidenceThreshold: riskPolicy.confidenceThreshold });
   if (action.kind === "escalate") return { kind: "escalated", reason: action.reason };
 
-  const written = ports.writeRelease(task.id, {
-    released_by: "verify-human-judge",
-    author_class: "machine",
-    judge_reason: verdict.reason,
-    risk_verdict: risk.verdict,
-    risk_confidence: risk.confidence,
-    risk_reasons: [...risk.reasons],
-  });
+  const written = ports.writeRelease(
+    task.id,
+    {
+      released_by: "verify-human-judge",
+      author_class: "machine",
+      judge_reason: verdict.reason,
+      risk_verdict: risk.verdict,
+      risk_confidence: risk.confidence,
+      risk_reasons: [...risk.reasons],
+    },
+    riskPolicy,
+  );
   if (written.code !== 0) return unavailable(written.message);
+  if (written.released === false) return { kind: "escalated", reason: written.message };
   return { kind: "released", reason: action.reason };
 }
