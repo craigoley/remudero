@@ -1,0 +1,92 @@
+- id: W1-T4015
+  title: "THE RICHEST FAILURE CORPUS IN THE FLEET IS UNMINED — 16,948 classified worker failures and 256 measured failure-then-repair pairs, with recovery rates per class ranging 43% to 92%, and no rung reads any of it"
+  repo: remudero
+  depends_on: [W1-T4014]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/ci-failure-corpus.ts]
+  origin: oper#fleet-health-2026-09-22
+  plan_refs: ["W1-T2957", "W1-T4014"]
+  status: queued
+  attempts: 0
+  rationale: |
+    `ci-failure-corpus.ts` opens by naming why a red GATE is minable:
+
+        "THE ONE FAILURE CORPUS THAT ARRIVES WITH ITS OWN FIX ... objective, dated, attributable,
+         and uniquely accompanied by its own repair — the later commit on the SAME pull request
+         that turns that SAME gate green."
+
+    THAT PREMISE HOLDS FOR WORKER FAILURES TOO, AND IT WAS NEVER TESTED. Measured over the union of
+    the live ledger and all 422 archives on the fleet host, 2026-09-22:
+
+        failure_class            rows
+        unmet_criteria         15,504
+        instrument_entangled      559
+        test_theater              436
+        no_criteria               129
+        changeset_contradiction   114
+        nonzero_exit              114
+        criteria_tampered          60
+        signal                     32
+        ── total              ~16,948 CLASSIFIED failures
+
+    And the pairing the CI corpus depends on is present here as well. Folding `review.posted` rows
+    per task into an ordered sequence, a failure followed by a SUCCESS ON A DIFFERENT HEAD is that
+    failure's own repair:
+
+        tasks with >= 1 review failure   444
+        repaired later                   256   (57.7%)
+        never repaired                   188
+
+    NOTHING READS ANY OF IT. `grep` over `src/lib` for a miner keyed on `failure_class` returns
+    nothing; the only corpora that exist are `ci-failure-corpus.ts` and `ci-lesson-recurrence.ts`,
+    both keyed on CI gate names.
+
+    THE PAYLOAD IS THE PER-CLASS RECOVERY RATE, AND THE SPREAD IS THE WHOLE SIGNAL:
+
+        class                    repaired  stuck  recovery
+        test_theater                   12      1      92%
+        criteria_tampered              31      9      78%
+        unmet_criteria                141    106      57%
+        changeset_contradiction        42     35      55%
+        instrument_entangled           14     14      50%
+        no_criteria                    16     21      43%
+
+    A class at 92% is one the fix rung already solves; a class at 43% is where it is weakest, and
+    `no_criteria` being the worst is itself a finding — those are PRs whose acceptance block never
+    parsed, which is a FILING defect the fix rung cannot repair by editing code. The spread says
+    where to spend, and no dashboard in this repo can currently show it.
+
+    SEQUENCED BEHIND W1-T4014, DELIBERATELY. W1-T4014 measured the existing learning loop: 42
+    proposals filed in six days, zero ever released, no operator surface. A second generator
+    feeding the same missing consumer makes the accumulation worse. Build the release path first;
+    this task is the second half of the same idea, not a parallel one.
+
+    SCOPE BOUNDARY: this task is the CORPUS and its measured shape — a pure fold over ledger rows,
+    same construction as `ci-failure-corpus.ts` (which is pure by design, "PURE BY CONSTRUCTION,
+    WHICH IS BOTH A TESTABILITY CHOICE AND LAW 5"). It does NOT file proposals. Whether a proposal
+    rung rides on top is a separate ruling that depends on what the first corpus reading shows, and
+    on W1-T4014's answer about whether the filing RATE is already too high.
+
+    DO NOT MINE `unmet_criteria` AS ONE CLASS. At 15,504 rows it is 91% of the corpus and is
+    certainly several distinct defects wearing one label; a lesson drawn from it undifferentiated
+    would be true of everything and actionable for nothing. Sub-classify before drawing any
+    conclusion from it, and report the sub-distribution rather than a single rate.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add — the only way past
+    `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
+
+  acceptance:
+    - claim: "a pure fold reports each worker failure class with how often it was later repaired"
+      proof: "unit test: W1-T4015: the corpus reports recovery per failure class"
+    - claim: "a failure is paired only with a repair on a later, different head"
+      proof: "unit test: W1-T4015: a repair must land on a new head"
+    - claim: "the largest class is reported sub-classified, never as one undifferentiated rate"
+      proof: "unit test: W1-T4015: the dominant class is not reported undifferentiated"
+  note: |
+    reservation hand-off: plan/file-improvement-loops-1790075116 -> plan/file-improvement-loops-1790075116
+
+    Minted on the filing branch, which `rmd next-task-id` now requires.
