@@ -8,6 +8,14 @@
  * The first test asserts an ABSENCE, which a `grep:` proof cannot express: a grep reports hits, so
  * it can never substantiate "this is gone". It fails on the tree that still carries the constant
  * and passes once it is removed, so it discriminates in the direction that matters.
+ *
+ * @source-text-subject — the third test's SUBJECT genuinely IS run-task.ts's source text. "The
+ * regime is derived in exactly ONE place" is a structural claim about the file: it counts call
+ * sites and inline comparisons, and no amount of calling `strikeRegimeForDispatch` can observe how
+ * many places derive the regime. That is the census's own second remedy, not a way around it — the
+ * first two tests here already assert BEHAVIOUR (a module export and the helper's decisions), so
+ * nothing that could be exercised by calling code is being read as text instead. The count is
+ * guarded by its own corpus control before any equality is asserted.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
