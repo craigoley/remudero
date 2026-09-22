@@ -68,7 +68,7 @@
     - claim: "filters, cursor, count, and response bytes are bounded before ledger rows reach the caller"
       proof: "grep: action-results route enforces bounded filters and explicit unavailable states in test/action-results-bounds.test.ts"
     - claim: "the route is actually mounted and named in the public contract"
-      proof: "grep: /v1/action-results in src/lib/panel-graph.ts"
+      proof: "grep: /v1/action-results in openapi/daemon.yaml"
     - claim: "the new projection module is called by the daemon's panel-graph assembly rather than being reachable only from its own tests"
       proof: "grep: buildActionResultsRoute( in src/lib/panel-graph.ts"
   falsifier: |
