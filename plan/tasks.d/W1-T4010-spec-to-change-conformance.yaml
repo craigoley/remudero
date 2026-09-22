@@ -1,0 +1,65 @@
+- id: W1-T4010
+  title: "VERIFY IMPLEMENTATION AGAINST ITS ORIGINATING SPEC — versioned intent, acceptance mapping, diff evidence, and fail-closed conformance"
+  repo: remudero
+  depends_on: [W1-T3852, W1-T3855, W1-T3898, W1-T4007]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:warp-software-factory-2026-09-22"
+  plan_refs: ["§Self-improvement", "W1-T3855", "W1-T3898", "W1-T4007"]
+  files:
+    - src/lib/spec-conformance.ts
+    - src/lib/review.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/spec-conformance.test.ts
+    - test/spec-conformance-wiring.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Warp's factory build guide describes a `validate-changes-match-specs` step that checks the
+    implementation against the originating specification before the human release decision. This
+    is a distinct and valuable invariant for RMD: acceptance and review currently prove many local
+    conditions, but the system does not yet produce one bounded answer to "did this change implement
+    the approved intent, and which evidence says so?" A passing test suite alone can miss a change
+    that solves a different problem.
+
+    The parallel should strengthen RMD's existing intent-plan, action-receipt, and review boundaries,
+    not replace them with an LLM verdict. Conformance is evidence for a human and for the scorer;
+    it is not merge authority, and an unavailable or ambiguous spec must remain visible rather than
+    being interpreted as a pass.
+
+    Research reference: https://www.warp.dev/blog/software-factory-build-guide.
+  design: |
+    Add a versioned `spec-conformance-v1` result linking the originating intent/spec revision and
+    factory revision to acceptance identifiers, declared change scope, changed-file evidence,
+    executable proofs, review/verification artifacts, and terminal classification: `pass`,
+    `partial`, `refused`, `failed`, `unavailable`, or `unknown`. Require an explicit mapping for
+    each material acceptance claim; a missing, stale, conflicting, or out-of-scope mapping fails
+    closed and names the gap. Redact prompts, credentials, and unbounded diffs from the projection.
+
+    Run the check after implementation and before release approval, preserve the immutable result,
+    and link it into the activity and bounded score bundle. Keep human review, CI, action policy,
+    and rollback as independent authorities. A spec revision or factory revision change invalidates
+    the prior result rather than silently reusing it.
+  acceptance:
+    - claim: "spec-conformance-v1 links an immutable intent/spec and factory revision to acceptance identifiers, declared scope, proofs, and verification artifacts"
+      proof: "grep: W1-T4010 criterion 1 in test/spec-conformance.test.ts"
+    - claim: "every material acceptance claim requires an explicit evidence mapping, and missing, stale, conflicting, or out-of-scope mappings fail closed"
+      proof: "grep: W1-T4010 criterion 2 in test/spec-conformance.test.ts"
+    - claim: "pass, partial, refused, failed, unavailable, and unknown conformance states remain distinct and immutable"
+      proof: "grep: W1-T4010 criterion 3 in test/spec-conformance.test.ts"
+    - claim: "spec or factory revision changes invalidate the prior result rather than silently reusing it"
+      proof: "grep: W1-T4010 criterion 4 in test/spec-conformance.test.ts"
+    - claim: "the serving or review path records conformance before release approval without making it the sole merge or action authority"
+      proof: "grep: evaluateSpecConformance( in src/lib/review.ts"
+    - claim: "the public daemon contract names spec-conformance-v1 and its fail-closed states"
+      proof: "grep: spec-conformance-v1 in openapi/daemon.yaml"
+  falsifier: |
+    Mark a change conformant without a current originating spec, accept an unmapped material
+    criterion, reuse a result after the spec or factory revision changes, or turn unavailable
+    evidence into a pass. The corresponding proof must fail.
+  note: "This is a post-implementation evidence contract, not a second acceptance parser, merge gate, or autonomous approval path. reservation hand-off: run-W1-T4010-<epochMs>"

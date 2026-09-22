@@ -1,0 +1,70 @@
+- id: W1-T4008
+  title: "MEASURE FACTORY FLOW WITHOUT VANITY METRICS — stage automation, human touchpoints, inference spend, cycle time, quality, rework, and honest unknowns"
+  repo: remudero
+  depends_on: [W1-T3852, W1-T3853, W1-T3882, W1-T3899, W1-T4007]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:warp-software-factory-2026-09-22"
+  plan_refs: ["§Self-improvement", "W1-T3852", "W1-T3882", "W1-T3899", "W1-T4007"]
+  files:
+    - src/lib/factory-metrics.ts
+    - src/lib/analytics-route.ts
+    - src/lib/ledger.ts
+    - openapi/daemon.yaml
+    - test/factory-metrics.test.ts
+    - test/factory-metrics-wiring.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Warp defines factory success by shipped product relative to inference cost and human time, and
+    tracks how much of the change lifecycle is automated rather than counting agent sessions. Its
+    factory stack pairs this with DORA-style outcomes, cost per PR, cycle time, defects, time to fix,
+    and a cost-quality Pareto view. That is the useful parallel for RMD: self-improvement needs a
+    measurement surface that can tell whether an automation actually reduced human work while
+    preserving quality, not just whether a model produced text.
+
+    RMD already projects bounded activity and analytics, carries action and outcome receipts, and
+    has an evaluation loop. It does not yet have a stage-level efficiency contract that distinguishes
+    automatic, assisted, manual, refused, and unmeasured work across triage, spec, implementation,
+    review, verification, ship, and monitor. Without that distinction, a missing timestamp or human
+    decision can be misread as a zero and an automation can look better by hiding its review cost.
+
+    Research reference: https://www.warp.dev/blog/we-are-now-factory-engineers-not-product-engineers.
+    Warp's percentages and cost claims remain Warp-specific; this task defines measurement, not a
+    product claim about RMD's current automation rate.
+  design: |
+    Add a versioned `factory-efficiency-v1` event and aggregate projection keyed by bounded run,
+    factory revision, repository, task class, and PR or change identity. Each lifecycle stage records
+    its state (`automatic`, `assisted`, `manual`, `refused`, `failed`, `unavailable`, or
+    `unmeasured`), observed timestamps, human touchpoint references when available, inference and
+    provider-reported spend when available, cycle time, terminal outcome, defect/rework joins, and
+    source/freshness. Human time may be operator-entered or instrumented; it must never be inferred
+    from an absent field.
+
+    Aggregate only compatible scopes and measurement classes. Keep account-wide capacity distinct
+    from per-run spend, mark partial windows and missing instrumentation, and expose a bounded
+    read projection for the console and scorer. A metric cannot become a promotion gate until its
+    population, corpus/window, and join completeness are explicit. The serving path must record
+    stage transitions at the existing lifecycle seams rather than synthesize a second activity feed.
+  acceptance:
+    - claim: "factory-efficiency-v1 distinguishes every lifecycle stage and automatic, assisted, manual, refused, failed, unavailable, and unmeasured states"
+      proof: "grep: W1-T4008 criterion 1 in test/factory-metrics.test.ts"
+    - claim: "metrics preserve factory revision, run/change identity, source, freshness, measurement class, scope, and join completeness"
+      proof: "grep: W1-T4008 criterion 2 in test/factory-metrics.test.ts"
+    - claim: "missing human time, spend, outcome, or defect evidence remains unmeasured or unavailable and is never aggregated as zero"
+      proof: "grep: W1-T4008 criterion 3 in test/factory-metrics.test.ts"
+    - claim: "account-wide capacity is not rendered as per-run spend, and incompatible scopes or measurement classes are refused"
+      proof: "grep: W1-T4008 criterion 4 in test/factory-metrics.test.ts"
+    - claim: "the existing lifecycle or analytics path records the measurement projection rather than leaving it test-only"
+      proof: "grep: recordFactoryStage( in src/lib/ledger.ts"
+    - claim: "the public daemon contract names factory-efficiency-v1 and its stage and measurement states"
+      proof: "grep: factory-efficiency-v1 in openapi/daemon.yaml"
+  falsifier: |
+    Treat an absent human touch as zero minutes, fill missing spend with zero, add incompatible
+    provider windows, report a full-automation rate without stage evidence, or omit the factory
+    revision from an aggregate. The corresponding proof must fail.
+  note: "This is the measurement substrate for factory tuning, not a dashboard implementation or a claim that all human time is currently observable. reservation hand-off: run-W1-T4008-<epochMs>"
