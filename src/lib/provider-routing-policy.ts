@@ -464,23 +464,6 @@ export function policyForCapability(
 }
 
 /**
- * The policy one spawn's auction runs under. The operator's explicit preference always wins; only
- * an `automatic` policy takes the requested capability's declared preference
- * (`capabilities.provider_preference`, .remudero/mounts.yaml), and only for a routable provider.
- */
-export function policyForCapability(
-  policy: EffectiveProviderRoutingPolicy,
-  capability: string | undefined,
-  preferences: Record<string, WorkerProviderId> | undefined,
-): { policy: EffectiveProviderRoutingPolicy; capabilityPreference?: { capability: string; provider: WorkerProviderId } } {
-  const provider = capability === undefined ? undefined : preferences?.[capability];
-  if (policy.preference !== "automatic" || provider === undefined || !policy.routableProviders.includes(provider)) {
-    return { policy };
-  }
-  return { policy: { ...policy, preference: provider }, capabilityPreference: { capability: capability!, provider } };
-}
-
-/**
  * Prefer one eligible provider, otherwise use the existing most-headroom selector unchanged.
  * Readability/reserve are never bypassed and an all-ineligible set still throws its named error.
  */
