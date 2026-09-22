@@ -68,7 +68,7 @@
     - claim: "filters, cursor, count, and response bytes are bounded before ledger rows reach the caller"
       proof: "grep: action-results route enforces bounded filters and explicit unavailable states in test/action-results-bounds.test.ts"
     - claim: "the route is actually mounted and named in the public contract"
-      proof: "grep: /v1/action-results in src/lib/panel-graph.ts"
+      proof: "grep: /v1/action-results in openapi/daemon.yaml"
     - claim: "the new projection module is called by the daemon's panel-graph assembly rather than being reachable only from its own tests"
       proof: "grep: buildActionResultsRoute( in src/lib/panel-graph.ts"
   falsifier: |
@@ -90,3 +90,5 @@
     honest without an undeclared scope overrun. The generated test-tier manifest is intentionally shared metadata; its ownership remains with the generated-file gate rather than one implementation task. The source implementation remains responsible for route behavior and
     executable assertions; this amendment only records the fixture that its integration surface
     necessarily changes.
+    Amendment 2026-09-22 public-contract: the literal route path proof now points to
+    openapi/daemon.yaml; panel-graph wiring remains a separate criterion.
