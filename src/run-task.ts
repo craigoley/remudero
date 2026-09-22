@@ -1339,6 +1339,7 @@ import {
   sweepArmTaskId,
   uncreditableHeadReason,
   creditSubjectIsImplementation,
+  planOnlyRunBranchReceipts,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -36444,6 +36445,8 @@ export function buildSweepHook(
     // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
     // idling on code that already paid for a verdict it could never publish.
     let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
+    // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
+    let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         pacer,
@@ -36452,6 +36455,8 @@ export function buildSweepHook(
         isMerged,
           readMainPlan: resolvedReadMainPlan,
       });
+      // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
+      thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
@@ -36559,7 +36564,12 @@ export function buildSweepHook(
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
     await draftHook();
-    return reviewerCodeStale ? { reviewerCodeStale } : undefined;
+    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0
+      ? {
+          ...(reviewerCodeStale ? { reviewerCodeStale } : {}),
+          planOnlyRunBranchReceipts: thisPassPlanOnlyRunBranchReceipts,
+        }
+      : undefined;
   };
 }
 
