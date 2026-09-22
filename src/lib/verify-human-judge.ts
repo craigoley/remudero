@@ -55,6 +55,22 @@ export interface ShardUnderJudgement {
   depsAllMerged: boolean;
   /** Whether anything in `src/` cites this id — evidence the work landed under another shard. */
   citedInSrc: boolean;
+  /**
+   * THE SHARD'S OWN EVIDENCE, when it carries any. A machine-filed shard cites a corpus in its
+   * title ("THE ci-gate GATE REFUSED 36 PULL REQUESTS IN THIS WINDOW") and records the corpus in
+   * its record — `ci_learning_prs` on all 42 CI-learning shards — but NONE of them carries a
+   * `rationale`, and `rationale` was the only free text this projection passed. So the judge was
+   * shown a claim about 36 pull requests and no pull requests, and refused it for exactly that:
+   * "references '36 PULL REQUESTS IN THIS WINDOW' without providing the PR list". The refusal was
+   * CORRECT ON ITS INPUT; the input was impoverished.
+   *
+   * BOUNDED ON PURPOSE. These records carry a `note` running to a hundred-plus file paths from a
+   * single repair, and pasting it whole would bury the signal it is supposed to supply. Only a
+   * summary reaches the judge — see `shardEvidence`. Absent stays ABSENT: a shard with no evidence
+   * must look different from one whose evidence was withheld, or this field re-creates the defect
+   * it exists to close.
+   */
+  evidence?: string;
 }
 
 /**
@@ -150,6 +166,7 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
     ``,
     `WHAT IT CLAIMS TO DELIVER:`,
     acceptance,
+    ...(shard.evidence ? [``, `EVIDENCE THE RECORD ITSELF CARRIES:`, shard.evidence] : []),
     ``,
     `Decide — exactly one of:`,
     `  needs_operator — put this in front of him; it is a real ask`,
@@ -165,13 +182,42 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
 
 /** Parse the judge's two lines. Anything unreadable fails OPEN
  *  ({@link FAIL_OPEN_VERIFY_HUMAN_VERDICT} — `needs_operator`, and marked as a default). */
+/** Markdown and quoting a model wraps a labelled value in: `**bold**`, `` `code` ``, "quotes".
+ *  Stripped from BOTH sides of the label's colon before the value is read. This is presentation,
+ *  never meaning — the decision itself is still matched against {@link VALID_DECISIONS} below, so
+ *  widening what the DECORATION may look like never widens what a decision may SAY. */
+const LABEL_DECORATION = "[*_`\"'\\s]*";
+
+function labelledValue(text: string, label: string): string | undefined {
+  // The label may itself be emphasised (`**LABEL:**`), and so may the value (`**automate**`).
+  const re = new RegExp(`${LABEL_DECORATION}${label}${LABEL_DECORATION}:${LABEL_DECORATION}([^\n]*)`, "i");
+  return re.exec(text)?.[1];
+}
+
+/**
+ * Parse the judge's two lines. Anything unreadable fails OPEN
+ * ({@link FAIL_OPEN_VERIFY_HUMAN_VERDICT} — `needs_operator`, and marked as a default).
+ *
+ * TOLERANT OF DECORATION, STRICT ABOUT MEANING. The previous pattern required a word character
+ * immediately after the colon, so every markdown-emphasised rendering failed open. MEASURED: 5 of
+ * 6 realistic shapes failed (`**LABEL:** automate`, `LABEL: **automate**`, backticked, quoted),
+ * while the same model's prose in the very same reply uses bold headings. On the fleet that read
+ * as "no parseable VERIFY_HUMAN_DECISION" — a PARSE failure recorded as an operator decision.
+ *
+ * FAILING OPEN IS UNTOUCHED: an unreadable verdict must never auto-release. The defect was never
+ * the fallback, it was how often an ANSWERED verdict reached it.
+ */
 export function parseVerifyHumanVerdict(text: string): VerifyHumanVerdict {
-  const m = text.match(/VERIFY_HUMAN_DECISION:\s*(\w+)/i);
-  const decision = m?.[1]?.toLowerCase() as VerifyHumanDecision | undefined;
+  const raw = labelledValue(text, "VERIFY_HUMAN_DECISION");
+  // Take the first bare word of the captured value: `automate**` and `automate` both yield
+  // `automate`, while a sentence yields its first word and is then refused by VALID_DECISIONS.
+  const decision = /([a-z_]+)/i.exec(raw ?? "")?.[1]?.toLowerCase() as VerifyHumanDecision | undefined;
   // W1-T3916: judge fallback still fails open on an unusable verdict
   if (!decision || !VALID_DECISIONS.has(decision)) return { ...FAIL_OPEN_VERIFY_HUMAN_VERDICT };
-  const reasonMatch = text.match(/VERIFY_HUMAN_REASON:\s*(.+)/i);
-  return { decision, reason: reasonMatch?.[1]?.trim() || "(no reason stated)" };
+  const reason = labelledValue(text, "VERIFY_HUMAN_REASON")
+    ?.replace(/[*`_"']+\s*$/, "")
+    .trim();
+  return { decision, reason: reason || "(no reason stated)" };
 }
 
 /** Injectable judge dependency — real callers wire {@link realVerifyHumanJudge}; tests inject a

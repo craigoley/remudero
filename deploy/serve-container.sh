@@ -108,13 +108,21 @@ IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
 REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"
 
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+INSTANCE_NAME="${RMD_SERVE_INSTANCE:-}"
+INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-${SCRIPT_ROOT}/.remudero/daemon-instances.yaml}"
+INSTANCE_STATE_DIR=""
+INSTANCE_IMAGE=""
+INSTANCE_PORT=""
+
 CONTAINER_NAME="${RMD_SERVE_CONTAINER:-remudero-serve}"
 DAEMON_CONTAINER="${RMD_DAEMON_CONTAINER:-remudero-daemon}"
 TUNNEL_CONTAINER="${RMD_TUNNEL_CONTAINER:-cloudflared}"
 NETWORK="${RMD_SERVE_DOCKER_NETWORK:-rmd-net}"
+DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 
 STATE_MOUNT_DEST="/home/node/Remudero"
-DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/remudero"
+DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
 SERVE_REPO_DIR="${RMD_SERVE_REPO_DIR:-${HOME:-/root}/rmd-serve-repo}"
 CONSOLE_BUILD_ROOT="${DAEMON_REPO_DIR}/apps/dashboard/dist"
 # W1-T2434: the host-side account file and where it lands in the container — see the header note
@@ -133,9 +141,8 @@ GITHUB_WEBHOOK_SECRET_MOUNT_DEST="/home/node/.rmd-github-webhook-secret"
 # W1-T2778: one file, never the daemon's whole credential directory. The host-side source is
 # resolved after GH_APP_* capture because a captured value names the daemon container's namespace.
 APP_PRIVATE_KEY_MOUNT_DEST="/home/node/.rmd-github-app-private-key.pem"
-SERVE_PORT="${RMD_SERVE_PORT:-4317}"
-# The pair from part 1 of the header. Both are named here, next to each other, so a future edit
-# cannot drop one and leave a launch that boots and binds the wrong interface.
+SERVE_PORT_OVERRIDE="${RMD_SERVE_PORT:-}"
+SERVE_PORT="${SERVE_PORT_OVERRIDE:-4317}"
 SERVE_BIND_HOST="0.0.0.0"
 SERVE_NETWORK_ENV_VALUE="container"
 
@@ -147,6 +154,7 @@ REPLACE=0
 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --instance) INSTANCE_NAME="${2:?--instance needs a name}"; shift 2 ;;
     --replace)   REPLACE=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
     --tag)       TAG="${2:?--tag needs a value}"; REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"; shift 2 ;;
@@ -154,6 +162,65 @@ while [ $# -gt 0 ]; do
     *)           echo "serve-container: unknown argument $1" >&2; exit 2 ;;
   esac
 done
+
+registry_field() {
+  local field="$1"
+  awk -v wanted_instance="${INSTANCE_NAME}" -v wanted_field="${field}" '
+    $0 == "  " wanted_instance ":" { inside = 1; next }
+    inside && $0 ~ /^  [A-Za-z0-9_.-]+:$/ { inside = 0 }
+    inside && $0 ~ "^    " wanted_field ":" {
+      sub("^    " wanted_field ": *", "")
+      print
+      exit
+    }
+  ' "${INSTANCE_REGISTRY}"
+}
+
+if [ -n "${INSTANCE_NAME}" ]; then
+  case "${INSTANCE_NAME}" in
+    *[!a-zA-Z0-9_.-]*|"")
+      echo "serve-container: REFUSING — instance name is not Docker-safe: ${INSTANCE_NAME}" >&2
+      exit 2
+      ;;
+  esac
+  if [ ! -r "${INSTANCE_REGISTRY}" ]; then
+    echo "serve-container: REFUSING — instance registry is not readable: ${INSTANCE_REGISTRY}" >&2
+    echo "  Set RMD_INSTANCE_REGISTRY to the daemon registry used by the host installers." >&2
+    exit 1
+  fi
+  INSTANCE_REPO="$(registry_field repo)"
+  INSTANCE_STATE_DIR="$(registry_field state_dir)"
+  DAEMON_CONTAINER="$(registry_field container_name)"
+  INSTANCE_IMAGE="$(registry_field image)"
+  for pair in "repo:${INSTANCE_REPO}" "state_dir:${INSTANCE_STATE_DIR}" "container_name:${DAEMON_CONTAINER}" "image:${INSTANCE_IMAGE}"; do
+    field="${pair%%:*}"
+    value="${pair#*:}"
+    if [ -z "${value}" ]; then
+      echo "serve-container: REFUSING — instance '${INSTANCE_NAME}' is missing '${field}' in ${INSTANCE_REGISTRY}." >&2
+      exit 2
+    fi
+  done
+  DAEMON_REPO="${INSTANCE_REPO}"
+  REF="${INSTANCE_IMAGE}"
+  CONTAINER_NAME="${RMD_SERVE_CONTAINER:-remudero-${INSTANCE_NAME}-serve}"
+  case "${INSTANCE_NAME}" in
+    core) INSTANCE_PORT=4317 ;;
+    site) INSTANCE_PORT=4318 ;;
+    console) INSTANCE_PORT=4319 ;;
+    *) INSTANCE_PORT="" ;;
+  esac
+  if [ -n "${SERVE_PORT_OVERRIDE}" ]; then
+    SERVE_PORT="${SERVE_PORT_OVERRIDE}"
+  elif [ -n "${INSTANCE_PORT}" ]; then
+    SERVE_PORT="${INSTANCE_PORT}"
+  else
+    echo "serve-container: REFUSING — instance '${INSTANCE_NAME}' needs RMD_SERVE_PORT." >&2
+    exit 2
+  fi
+fi
+
+DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
+CONSOLE_BUILD_ROOT="${DAEMON_REPO_DIR}/apps/dashboard/dist"
 
 # ── 1. REFUSE TO RUN INSIDE A CONTAINER ─────────────────────────────────────────────────────────
 # Same refusal, same reason, as recycle-container.sh section 1: this file is COPYed into the image
@@ -194,7 +261,7 @@ if docker inspect "${DAEMON_CONTAINER}" >/dev/null 2>&1; then
   DAEMON_STATE_DIR="$(docker inspect "${DAEMON_CONTAINER}" \
     --format "{{range .Mounts}}{{if eq .Destination \"${STATE_MOUNT_DEST}\"}}{{.Source}}{{end}}{{end}}" 2>/dev/null || true)"
 fi
-STATE_DIR="${RMD_STATE_DIR:-${DAEMON_STATE_DIR:-${HOME:-/root}/rmd-state}}"
+STATE_DIR="${RMD_STATE_DIR:-${DAEMON_STATE_DIR:-${INSTANCE_STATE_DIR:-${HOME:-/root}/rmd-state}}}"
 
 if [ -n "${DAEMON_STATE_DIR}" ] && [ "${STATE_DIR}" != "${DAEMON_STATE_DIR}" ]; then
   echo "serve-container: REFUSING — the state mount disagrees with the running daemon." >&2
@@ -506,7 +573,7 @@ RUN_ARGS=(
   # that splice's own comment for why the bare `"${ARR[@]}"` form is unsafe under `set -u`.
   "${GITHUB_WEBHOOK_SECRET_ARGS[@]+"${GITHUB_WEBHOOK_SECRET_ARGS[@]}"}"
   "${REF}"
-  ./bin/rmd serve --host "${SERVE_BIND_HOST}"
+  ./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}"
 )
 
 if [ "${DRY_RUN}" -eq 1 ]; then
@@ -526,6 +593,12 @@ fi
 if [ ! -w "${SERVE_REPO_DIR}" ]; then
   echo "serve-container: REFUSING — serve code directory is not writable by this host user: ${SERVE_REPO_DIR}" >&2
   echo "  The container runs as uid 1000 and must be able to clone and update its own checkout." >&2
+  exit 1
+fi
+
+echo "serve-container: preflight docker pull ${REF}"
+if ! docker pull "${REF}" >/dev/null 2>&1; then
+  echo "serve-container: REFUSING — target image ${REF} could not be pulled; existing container was left untouched." >&2
   exit 1
 fi
 
@@ -592,6 +665,9 @@ if [ "${FAIL}" -ne 0 ]; then
   exit 1
 fi
 
+if [ -n "${INSTANCE_NAME}" ]; then
+  echo "serve-container: instance ${INSTANCE_NAME} gateway on ${CONTAINER_NAME}:${SERVE_PORT} for ${DAEMON_REPO}"
+fi
 echo "serve-container: OK — ${CONTAINER_NAME} on ${NETWORK}, state ${STATE_DIR}, code ${SERVE_REPO_DIR}, image ${REF}"
 echo "  The console URL carries the read token; read it from the log or from"
 echo "  ${STATE_DIR}/state/service-tokens.json (0600) rather than pasting it anywhere."

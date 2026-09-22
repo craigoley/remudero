@@ -1,0 +1,119 @@
+- id: W1-T4025
+  title: "THE LIFETIME DISPATCH CAP HARD-STOPS NON-CONVERGENCE INSTEAD OF ROUTING IT — replace the raw ever-dispatched ceiling with an adaptive judge-and-follow-up flow so repeated work becomes automation, backlog, or a real operator question rather than a permanently blocked task"
+  repo: remudero
+  depends_on: [W1-T3932]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator direction 2026-09-22 while triaging #6517: no hard ceilings or floors; prefer automated flow, self-improvement, and follow-up tasks"
+  plan_refs: [W1-T75, W1-T148, W1-T172, W1-T271, W1-T316, W1-T3523, W1-T3758, W1-T3932]
+  files: [src/lib/status.ts, src/lib/drain.ts, src/run-task.ts, src/lib/verify-human-judge.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> run-W1-T4025-1790077962
+    reservation hand-off: unknown -> file-t4025-adaptive-lifetime-dispatch
+  rationale: |
+    OBSERVED in the live queue on 2026-09-22: W1-T3363 is halted by the lifetime dispatch cap and
+    still carries a needs-human escalation (#6517), even though the operator direction is now to
+    automate non-convergence and emit follow-up work rather than enforce a fixed ceiling.
+
+    (1) THE CURRENT CAP IS A TERMINAL DISPATCH REFUSAL. W1-T271 added `dispatchesEver` and
+        `isLifetimeDispatchCapExceeded`; W1-T316 wired that predicate into both drain and daemon
+        paths. The current path excludes a task once the raw `run.start` count reaches the default
+        ten, writes a lifetime-cap escalation, and offers no judge, proposal, repair task, or
+        resumable re-evaluation. A merged PR can be perfectly healthy while the task remains
+        halted by this independent counter.
+
+    (2) THE REPOSITORY ALREADY HAS THE RIGHT AUTOMATION ORGAN. W1-T3932 shipped the three-way
+        verify-human judge (`needs_operator`, `automate`, `backlog`) and routes `automate` through
+        the existing proposal/self-improvement flow without editing plan records or manufacturing
+        operator release. This task should reuse that seam, not create a second judge or a direct
+        task mutation path.
+
+    (3) THE COUNTER IS STILL VALUABLE EVIDENCE. `dispatchesEver` must remain available as a
+        pressure/non-convergence signal, and W1-T3523's orphan classification plus W1-T3758's
+        capacity-outage distinction must continue to prevent infrastructure weather from being
+        charged as task failure. The change is to what the signal does, not to erase the history
+        or weaken the distinction between a worker failure and a fleet-wide refusal.
+
+    (4) THIS IS THE OPERATOR'S SETTLED POLICY, NOT A NEW QUESTION. The requested replacement is:
+        repeated work produces a durable, idempotent follow-up decision; `automate` enters the
+        existing self-improvement proposal flow; `backlog` remains visible and re-evaluable; and
+        `needs_operator` is the only human escalation. A provider/judge failure fails open to the
+        human route. No required PR check, merge gate, or healthy PR is held by the task's
+        non-convergence handling.
+
+    (5) THE FILE OVERLAP IS DELIBERATE AND NARROW. W1-T75, W1-T148, and W1-T172 are the existing
+        status/drain/run-task surfaces that establish credit correction, candidate selection, and
+        dispatch orchestration. This task does not re-implement those contracts or compete for
+        their ordinary work; it changes only the lifetime-cap outcome into the W1-T3932 judge and
+        follow-up route. The overlap is therefore a shared seam, not a second copy of their work.
+  design: |
+    (i) KEEP `dispatchesEver` AS A SENSOR, REMOVE ITS HARD TERMINAL WALL. Replace the direct
+        lifetime-cap exclusion with an adaptive non-convergence observation that is keyed by task,
+        cause, and current evidence. The observed count may trigger a re-evaluation, but no literal
+        N is the permanent answer and no task is retired merely because its count crossed N.
+
+    (ii) ROUTE THROUGH THE EXISTING THREE-WAY JUDGE. Supply the judge a structured evidence packet
+        naming the task, dispatch history, last outcome, open PR/merge evidence, and whether the
+        latest run was orphaned or capacity-refused. `needs_operator` preserves an actionable
+        inbox item; `automate` stages one deterministic proposal for the existing self-improvement
+        flow; `backlog` records a visible retryable disposition. The judge cannot edit a plan,
+        release a verify-human task, merge a PR, or suppress a required check.
+
+    (iii) MAKE FOLLOW-UP FLOW IDEMPOTENT AND RESUMABLE. The same observed state must not mint
+        duplicate proposals or repeatedly escalate the same unchanged cause. A changed task
+        contract, new PR evidence, or a new infrastructure cause must invalidate the old
+        disposition and permit one fresh evaluation. If the judge or registry is unavailable, the
+        state remains visible and due for retry; it must not silently disappear and must not strand
+        an unrelated PR.
+
+    (iv) PRESERVE THE SAFETY POLARITY. Orphaned runs and fleet-wide capacity refusals are not
+        task-attributable dispatch failures, so they cannot consume the task's adaptive pressure
+        budget. A worker that actually started and failed remains attributable. An active stop
+        still stops new work. These are evidence and emergency controls, not a new fixed floor or
+        ceiling.
+
+    (v) REMOVE THE OBSOLETE LIFETIME-CAP ESCALATION AS A PRODUCT BLOCK. Existing historical
+        `dispatch.circuit_broken`/lifetime-cap rows remain readable for provenance. New decisions
+        use the adaptive disposition record and name the follow-up/proposal id, reason, and next
+        evaluation condition. The merge/PR path remains independent: a green PR is never held by
+        this task's judge, and a blocked task never makes an otherwise mergeable PR stuck.
+
+    (vi) TEST THE REAL DRAIN AND DAEMON WIRING, NOT HAND-BUILT OPTIONS ONLY. The regression suite
+        must prove the old cap would have fired, then prove the production command routes the same
+        evidence through all three judge arms, deduplicates unchanged state, retries after a
+        material advance, and leaves plan files, release rows, and PR gates untouched.
+
+    FILES NOTE: the worker must add a dedicated adaptive-flow test file. It is intentionally omitted
+    from `files:` on this filing so the plan linter treats the named unit-test proofs as forward
+    references rather than claiming that the existing lifetime-cap tests already prove the new
+    behavior. The implementation must add that test file and make each title below resolve.
+  acceptance:
+    - claim: "the lifetime dispatch count remains observable as non-convergence evidence but no fixed count creates a terminal task block by itself"
+      proof: "unit test: W1-T4025 lifetime signal remains observable without a terminal cap"
+    - claim: "a repeated-dispatch observation reaches the existing three-way judge and routes needs_operator, automate, and backlog distinctly"
+      proof: "unit test: W1-T4025 repeated dispatch reaches the three-way judge"
+    - claim: "an automate decision stages one idempotent self-improvement proposal with task, cause, evidence, and judge provenance"
+      proof: "unit test: W1-T4025 automate stages one idempotent proposal"
+    - claim: "unchanged repeated-dispatch evidence does not duplicate proposals or escalations, while a material task or runtime advance permits re-evaluation"
+      proof: "unit test: W1-T4025 unchanged evidence deduplicates and material advance re-evaluates"
+    - claim: "an unavailable or malformed judge fails open to a visible needs_operator disposition and never silently releases or suppresses work"
+      proof: "unit test: W1-T4025 unavailable judge fails open to needs_operator"
+    - claim: "orphaned runs and fleet-wide capacity refusals remain excluded from task-attributable non-convergence pressure, while real worker failures remain attributable"
+      proof: "unit test: W1-T4025 orphan and capacity refusals do not spend task pressure"
+    - claim: "the adaptive follow-up path does not edit plan files, manufacture operator release, or block an unrelated healthy pull request"
+      proof: "unit test: W1-T4025 adaptive follow-up does not block a healthy PR"
+  falsifier: |
+    Keep the current unconditional `isLifetimeDispatchCapExceeded` exclusion and the first
+    acceptance claim fails: a fixed count still permanently blocks a task. Route `automate` directly
+    into runnable task state, edit `verify:`, or write `ratify.approved` and the safety claim fails.
+    Re-run identical evidence and mint two proposals or two issues and idempotency fails. Count a
+    capacity refusal or orphaned run as task failure and W1-T3523/W1-T3758's attribution boundary
+    fails. Make the judge unavailable read as clear/backlog with no visible retry and the fail-open
+    claim fails. Add the new behavior to required PR checks and a healthy PR can become stuck,
+    violating the explicit no-stuck-PR boundary.

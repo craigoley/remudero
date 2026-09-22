@@ -861,6 +861,9 @@ export interface BuildSweepEffectsDeps {
   runNpmScriptImpl?: SweepRuntimeFn;
   commitGeneratorOutputImpl?: SweepRuntimeFn;
   readPackageScriptsImpl?: SweepRuntimeFn;
+  /** W1-T4004 — the baseline executor's read-only pre/post-write worktree observation.  Kept
+   * injectable so tests can prove a moved or dirty head declines before the generator/push seam. */
+  readBaselineRatchetWorktreeStateImpl?: typeof readBaselineRatchetWorktreeState;
   dispatchFixCatchOutcomeImpl?: typeof dispatchFixCatchOutcome;
   worktreeRemoveImpl?: typeof worktreeRemove;
   /** W1-T3390 coverage seam — the plan-only shard-repair rung's own raw `git` spawns (branch -D,
@@ -1115,6 +1118,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "releaseStaleRed",
   "releaseBaseCausedStandDown",
   "selectAdaptiveReviewWidth",
+  // W1-T4004 — production-backed only when policy permits it; the false default stays inert.
+  "repairRecordableRatchet",
   // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
   // position is free — it is listed last because it is the newest, not because order matters.
   "repairMissingTaskTrailer",
@@ -1154,6 +1159,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "releaseBaseCausedStandDown"
   | "rebaseDirtyFleetBranch"
   | "selectAdaptiveReviewWidth"
+  | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
@@ -1219,6 +1225,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     runNpmScriptImpl: runNpmScriptViaSpawn = requiredSweepRuntime("runNpmScriptImpl"),
     commitGeneratorOutputImpl: commitGeneratorOutputViaGit = requiredSweepRuntime("commitGeneratorOutputImpl"),
     readPackageScriptsImpl: readPackageScriptsFor = requiredSweepRuntime("readPackageScriptsImpl"),
+    readBaselineRatchetWorktreeStateImpl: readBaselineRatchetWorktreeStateForBuild = readBaselineRatchetWorktreeState,
     dispatchFixCatchOutcomeImpl: dispatchFixCatchOutcomeForBuild = dispatchFixCatchOutcome,
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
     planRepairGitImpl: planRepairGit = defaultPlanRepairGit,
@@ -1353,6 +1360,160 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     return main?.sha && main.committedAt ? { sha: main.sha, committedAt: main.committedAt } : undefined;
   };
 
+  /**
+   * W1-T4004 — the production executor for the two operator-ratified baseline writers.  This is
+   * intentionally a sibling of `dispatchFix`, not a shortcut around it: it takes the same
+   * fleet-branch ownership lock, materializes the branch into the same fix worktree, commits with
+   * the existing generator helper, and pushes with the same expected-head guard.  A refusal is
+   * always false, allowing `runSweep` to use the normal worker fix rung unchanged.
+   */
+  const repairRecordableRatchet = async (pr: OpenPrView, scripts: readonly string[]): Promise<boolean> => {
+    const decline = (reason: string, extra: Record<string, unknown> = {}): false => {
+      log("sweep.ratchet_repair_executor_declined", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        reason,
+        ...extra,
+      });
+      return false;
+    };
+    const uniqueScripts = [...new Set(scripts)];
+    if (
+      uniqueScripts.length === 0 ||
+      uniqueScripts.length !== scripts.length ||
+      uniqueScripts.some((script) => !Object.hasOwn(RATIFIED_BASELINE_RATCHET_REPAIRS, script))
+    ) {
+      return decline("unratified_script_set");
+    }
+    const ratchetScripts = uniqueScripts as RatifiedBaselineRatchetScript[];
+
+    // The view that selected this PR is a snapshot.  Re-read the branch before any local git
+    // operation so a contributor push becomes a harmless ordinary-fix fallback, never a write to
+    // an obsolete head.
+    let live: { headRefName?: unknown; headRefOid?: unknown; body?: unknown };
+    try {
+      live = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body"]) as {
+        headRefName?: unknown;
+        headRefOid?: unknown;
+        body?: unknown;
+      };
+    } catch (error) {
+      return decline("live_head_unreadable", { error: capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP) });
+    }
+    const branch = typeof live.headRefName === "string" ? live.headRefName : undefined;
+    const observedHeadSha = typeof live.headRefOid === "string" ? live.headRefOid : undefined;
+    if (!branch || !observedHeadSha) return decline("live_head_missing");
+    if (observedHeadSha !== pr.headSha) return decline("live_head_changed", { observed_head_sha: observedHeadSha });
+
+    const { task, synthetic } = fixRungTaskForForBuild(
+      plan,
+      pr,
+      typeof live.body === "string" ? live.body : undefined,
+      branch,
+    );
+    // The synthetic-task exception in the ordinary fix rung permits a human-named branch.  This
+    // unattended writer does not: it may touch only a fleet run branch that claims this exact
+    // task, even when a synthetic task happens to resolve.
+    if (!isDispatchedRunBranch(branch) || !fixHeadAcceptable(branch, task.id, synthetic)) {
+      return decline("unowned_head", { branch, task_id: task.id });
+    }
+
+    const branchRef = `refs/heads/${branch}`;
+    try {
+      const ownerPath = registeredWorktreeOwnerImpl(repoDir, branchRef);
+      if (ownerPath) return decline("registered_worktree_owner", { branch, worktree_path: boundedWorktreeOwnerPath(ownerPath) });
+    } catch (error) {
+      return decline("registered_worktree_owner_unreadable", {
+        branch,
+        error: capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP),
+      });
+    }
+
+    let branchClaim: InflightLockHandle | undefined;
+    let worktreePath = "";
+    try {
+      try {
+        branchClaim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, branch), { run_id: runId });
+      } catch (error) {
+        if (error instanceof InflightLockError) return decline("inflight_lock_owner", { branch, holder_run_id: error.holder.run_id });
+        throw error;
+      }
+
+      worktreePath = join(worktreesDir(config), `ratchet-${task.id}-${pr.prNumber}-${nowMsImpl()}`);
+      createFixRungWorktree(repoDir, worktreePath, branch);
+      const before = readBaselineRatchetWorktreeStateForBuild(worktreePath);
+      if (!before) return decline("worktree_unreadable", { branch });
+      if (before.headSha !== observedHeadSha || before.changedPaths.length > 0) {
+        return decline("worktree_head_or_cleanliness_mismatch", {
+          branch,
+          observed_head_sha: observedHeadSha,
+          worktree_head_sha: before.headSha,
+          changed_paths: before.changedPaths,
+        });
+      }
+
+      const packageScripts = readPackageScriptsFor(worktreePath) as Readonly<Record<string, string>>;
+      for (const script of ratchetScripts) {
+        const repair = RATIFIED_BASELINE_RATCHET_REPAIRS[script];
+        if (typeof packageScripts[script] !== "string" || typeof packageScripts[repair.signalScript] !== "string") {
+          return decline("script_not_declared", { script, signal_script: repair.signalScript });
+        }
+        const generated = await runNpmScriptViaSpawn(script, worktreePath) as { status?: unknown };
+        if (generated.status !== 0) return decline("generator_failed", { script });
+        const verified = await runNpmScriptViaSpawn(repair.signalScript, worktreePath) as { status?: unknown };
+        if (verified.status !== 0) return decline("signal_failed", { script, signal_script: repair.signalScript });
+      }
+
+      const after = readBaselineRatchetWorktreeStateForBuild(worktreePath);
+      const allowedPaths: ReadonlySet<string> = new Set(
+        ratchetScripts.map((script) => RATIFIED_BASELINE_RATCHET_REPAIRS[script].baselinePath),
+      );
+      if (!after || after.headSha !== observedHeadSha) {
+        return decline("worktree_head_changed_before_commit", { branch, observed_head_sha: observedHeadSha });
+      }
+      if (after.changedPaths.length === 0) return decline("generator_made_no_change", { scripts: ratchetScripts });
+      if (after.changedPaths.some((path) => !allowedPaths.has(path))) {
+        return decline("unexpected_generated_path", { changed_paths: after.changedPaths, allowed_paths: [...allowedPaths].sort() });
+      }
+
+      const committed = await commitGeneratorOutputViaGit({
+        cwd: worktreePath,
+        message: `chore(ci): record baseline ratchet for #${pr.prNumber}`,
+      }) as { sha?: unknown; changed?: unknown };
+      if (committed.changed !== true || typeof committed.sha !== "string" || committed.sha.length === 0) {
+        return decline("generator_commit_empty", { scripts: ratchetScripts });
+      }
+      gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: committed.sha });
+      log("sweep.ratchet_repair_executor_applied", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        branch,
+        scripts: ratchetScripts,
+        generated_paths: after.changedPaths,
+        commit_sha: committed.sha,
+      });
+      return true;
+    } catch (error) {
+      return decline("executor_error", { error: capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP) });
+    } finally {
+      if (worktreePath) {
+        try {
+          worktreeRemoveForBuild(repoDir, worktreePath);
+        } catch (error) {
+          // A cleanup failure cannot turn an already-applied repair into a false refusal, but it
+          // must remain visible: otherwise the next pass cannot distinguish a clean release from
+          // a worktree that the reaper will need to recover.
+          log("sweep.ratchet_repair_cleanup_failed", {
+            pr_number: pr.prNumber,
+            head_sha: pr.headSha,
+            error: capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP),
+          });
+        }
+      }
+      branchClaim?.release();
+    }
+  };
+
   return {
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
@@ -1374,6 +1535,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         maxWidth: policy.reviewLaneMax,
         log,
       }),
+    repairRecordableRatchet,
     // impl-BI — RETURN THE OUTCOME. PR #968 taught `runSweep` to read this effect's return
     // value (`armOutcomeArmed(armOutcome)` → `acted:false` + a stand-down reason), but THIS
     // adapter — the only implementation the daemon ever runs — still discarded it, so the
@@ -4379,6 +4541,84 @@ export function recordableRatchetRepairFor(
     if (!scripts.includes(script)) scripts.push(script);
   }
   return scripts.length > 0 ? scripts.sort() : undefined;
+}
+
+/**
+ * W1-T4004 — conflict regeneration and unattended baseline recording are different authority
+ * decisions.  The former may use {@link REGENERABLE_ARTIFACT_GENERATORS}; this deliberately
+ * separate, exact table is the complete set the operator ratified for the latter.  In particular,
+ * adding a future conflict generator must not silently authorize a daemon branch write.
+ *
+ * Each entry owns both its generated baseline path and its no-record verifier.  The verifier is
+ * deliberately data adjacent to its writer: a generator that succeeds but does not make its own
+ * gate green must fall through to the ordinary fix worker rather than claim a repair.
+ */
+export const RATIFIED_BASELINE_RATCHET_REPAIRS = Object.freeze({
+  "comment-load-ratchet": {
+    baselinePath: "scripts/comment-load-baseline.json",
+    signalScript: "comment-load-signal",
+  },
+  "source-size-baseline:legacy": {
+    baselinePath: "scripts/source-size-baseline.json",
+    signalScript: "source-size-signal",
+  },
+} as const);
+
+export type RatifiedBaselineRatchetScript = keyof typeof RATIFIED_BASELINE_RATCHET_REPAIRS;
+
+/**
+ * The ratified baseline-only admission.  It intentionally reads the observed red check names
+ * directly instead of filtering {@link recordableRatchetRepairFor}'s broad conflict registry:
+ * the two allowlists answer different questions and must stay independently reviewable.
+ */
+export function ratifiedBaselineRatchetRepairFor(
+  pr: Pick<OpenPrView, "redRequiredChecks" | "ciFailures" | "mergeState">,
+): RatifiedBaselineRatchetScript[] | undefined {
+  if (pr.mergeState === "dirty") return undefined;
+  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)])].filter(Boolean);
+  if (red.length === 0) return undefined;
+  const scripts: RatifiedBaselineRatchetScript[] = [];
+  for (const checkName of red) {
+    if (!Object.hasOwn(RATIFIED_BASELINE_RATCHET_REPAIRS, checkName)) return undefined;
+    const script = checkName as RatifiedBaselineRatchetScript;
+    if (!scripts.includes(script)) scripts.push(script);
+  }
+  return scripts.sort();
+}
+
+/** The worktree facts W1-T4004 must observe before it runs a generator or stages a commit. */
+export interface BaselineRatchetWorktreeState {
+  headSha: string;
+  changedPaths: string[];
+}
+
+/**
+ * Read the materialized fix worktree without writing it.  `git diff HEAD` sees both staged and
+ * unstaged tracked changes, while `ls-files --others` includes an untracked add — together they
+ * make a pre-existing dirty checkout an explicit refusal instead of allowing `git add -A` below
+ * to commit someone else's work.  Any unreadable git state is `undefined`, never a clean tree.
+ */
+export function readBaselineRatchetWorktreeState(worktreePath: string): BaselineRatchetWorktreeState | undefined {
+  try {
+    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }).trim();
+    const tracked = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "-z", "HEAD"], {
+      encoding: "utf8",
+      stdio: "pipe",
+    })
+      .split("\0")
+      .filter(Boolean);
+    const untracked = execFileSync("git", ["-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
+      encoding: "utf8",
+      stdio: "pipe",
+    })
+      .split("\0")
+      .filter(Boolean);
+    if (headSha.length === 0) return undefined;
+    return { headSha, changedPaths: [...new Set([...tracked, ...untracked])].sort() };
+  } catch {
+    // An unreadable git worktree is a refusal, never evidence that it is clean.
+    return undefined;
+  }
 }
 
 export const MISSING_TASK_TRAILER_REPAIR_STEP = "sweep.missing_task_trailer_repaired" as const;
@@ -9140,9 +9380,9 @@ export async function runSweep(
                 standDownReason = terminalStandDown;
                 break;
               }
-              // W1-T2998 — THE DETERMINISTIC REPAIR IS TRIED FIRST, AND ONLY UNDER THREE CONDITIONS
-              // AT ONCE: the operator enabled it, an executor was injected, and every red required
-              // check resolved to a registry-declared generator. Placed AFTER the terminal-state
+              // W1-T4004 — THE DETERMINISTIC REPAIR IS TRIED FIRST, AND ONLY UNDER THREE CONDITIONS
+              // AT ONCE: the operator enabled it, a production executor exists, and every red required
+              // check belongs to the separate two-member baseline-recording authority. Placed AFTER the terminal-state
               // pre-flight above and BEFORE `claimFixDispatch` below — ORDER IS LOAD-BEARING: a
               // repair that breaks out AFTER the claim leaks it, because the claim is released by
               // `fixClaim.run` and a repaired PR never reaches that call. Measured as five tests
@@ -9160,7 +9400,7 @@ export async function runSweep(
               }
               const ratchetScripts =
                 policy.recordableRatchetRepairEnabled === true && deps.repairRecordableRatchet
-                  ? recordableRatchetRepairFor(pr)
+                  ? ratifiedBaselineRatchetRepairFor(pr)
                   : undefined;
               if (ratchetScripts && deps.repairRecordableRatchet) {
                 const repaired = await deps.repairRecordableRatchet(pr, ratchetScripts);
