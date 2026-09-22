@@ -29135,6 +29135,33 @@ const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
 type DaemonSweepHookBuilder = typeof buildSweepHook;
 type DaemonSweepLightHookBuilder = typeof buildSweepLightHook;
 
+/**
+ * Build the landing bridge's review handoff from the same review command used by the daemon.
+ * Keeping this small adapter callable gives the landing path a current-head proof seam: URL
+ * parsing and both asynchronous review outcomes can be driven without starting an unbounded
+ * daemon or writing the real feedback inbox.
+ */
+export function buildLandingReviewRequest(
+  owner: string,
+  repo: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  review: typeof reviewCommand = reviewCommand,
+): LandingReviewRequest {
+  return (prUrl) => {
+    const match = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
+    if (!match) {
+      log("feedback.landing_review.failed", { pr_url: prUrl, reason: "unparseable pull-request URL" });
+      return;
+    }
+    void review(match[1]!, ["--repo", `${owner}/${repo}`], { executionMode: "deterministic" }).then(
+      (code) => {
+        if (code !== 0) log("feedback.landing_review.failed", { pr_url: prUrl, exit_code: code });
+      },
+      (error) => log("feedback.landing_review.failed", { pr_url: prUrl, error: String((error as Error)?.message ?? error) }),
+    );
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -29674,19 +29701,12 @@ export async function daemonCommand(
   // the SAME review command the board sweep uses, so the first landing cannot sit green-but-
   // unreviewed waiting for a human. `reviewCommand` owns its pending-post idempotency and exact
   // head checks; a failed promise is logged and the landing remains open for the next pass.
-  const requestLandingReview: LandingReviewRequest = (prUrl) => {
-    const match = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
-    if (!match) {
-      log("feedback.landing_review.failed", { pr_url: prUrl, reason: "unparseable pull-request URL" });
-      return;
-    }
-    void reviewCommand(match[1]!, ["--repo", `${target.owner}/${target.repo}`], { executionMode: "deterministic" }).then(
-      (code) => {
-        if (code !== 0) log("feedback.landing_review.failed", { pr_url: prUrl, exit_code: code });
-      },
-      (error) => log("feedback.landing_review.failed", { pr_url: prUrl, error: String((error as Error)?.message ?? error) }),
-    );
-  };
+  const requestLandingReview = buildLandingReviewRequest(
+    target.owner,
+    target.repo,
+    log,
+    deps.reviewCommand ?? reviewCommand,
+  );
   const sweepFeedbackLandingRung = target.isSelf
     ? () =>
         sweepFeedbackLanding(repoRoot, {

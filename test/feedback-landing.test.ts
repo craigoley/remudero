@@ -20,7 +20,7 @@ import {
 } from "../src/lib/feedback-landing.js";
 import { checkCliFreshness } from "../src/lib/self-sync.js";
 import { missingFeedbackMessage } from "../src/lib/triage.js";
-import { triageCommand } from "../src/run-task.js";
+import { buildLandingReviewRequest, daemonCommand, triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // ── Why every landFeedback()/captureFeedback({land}) call below is wrapped ──────────────
@@ -645,11 +645,68 @@ test("feedback landing requests review before arming auto-merge", () => {
       gh,
       requestReview: (url) => {
         events.push(`review:${url}`);
+        return Promise.resolve();
       },
     }),
   );
   assert.equal(result.landed, true);
   assert.deepEqual(events, ["create", "review:https://github.com/o/r/pull/14"]);
+});
+
+test("landing review handoff uses the current PR URL and logs invalid, nonzero, and rejected review outcomes", async () => {
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const reviewCalls: Array<{ pr: string; args: string[]; mode: unknown }> = [];
+  const requestReview = buildLandingReviewRequest(
+    "acme",
+    "remudero",
+    (step, extra) => events.push({ step, extra }),
+    async (pr, args, options) => {
+      reviewCalls.push({ pr, args: args ?? [], mode: options?.executionMode });
+      if (pr === "42") return 3;
+      throw new Error("review transport unavailable");
+    },
+  );
+
+  requestReview("not-a-pull-request");
+  requestReview("https://github.com/acme/remudero/pull/42?head=latest");
+  requestReview("https://github.com/acme/remudero/pull/43#current-head");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(reviewCalls, [
+    { pr: "42", args: ["--repo", "acme/remudero"], mode: "deterministic" },
+    { pr: "43", args: ["--repo", "acme/remudero"], mode: "deterministic" },
+  ]);
+  assert.deepEqual(events, [
+    { step: "feedback.landing_review.failed", extra: { pr_url: "not-a-pull-request", reason: "unparseable pull-request URL" } },
+    { step: "feedback.landing_review.failed", extra: { pr_url: "https://github.com/acme/remudero/pull/42?head=latest", exit_code: 3 } },
+    { step: "feedback.landing_review.failed", extra: { pr_url: "https://github.com/acme/remudero/pull/43#current-head", error: "review transport unavailable" } },
+  ]);
+});
+
+test("daemonCommand wires the landing review adapter into the real sweep dependency", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-daemon-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps) => {
+        assert.equal(typeof deps.sweepFeedbackLanding, "function");
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+      reviewCommand: async () => 0,
+    });
+    assert.equal(code, 0);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("feedback landing review failure is retryable and never arms merge", () => {
