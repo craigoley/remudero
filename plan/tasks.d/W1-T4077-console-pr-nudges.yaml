@@ -1,0 +1,82 @@
+- id: W1-T4077
+  title: "THE CONSOLE CANNOT NUDGE A STALLED PR — the daemon half of 'review now' and 'fix now' is built, but the nudge is read only between main-loop iterations (one took 43 minutes today), a fix runs INSIDE the loop, a fix nudge on a strike-exhausted PR spawns nothing, and the console's only credential is pinned below the route's tier: pick nudges up on a timer, run them detached, let the operator override the strike ledger, and switch each action on or off"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-22: a button to get a stalled PR reviewed, and one to dispatch a fix worker for a red PR the daemon is not fixing"
+  plan_refs: [W1-T404, W1-T430, W1-T531, W1-T913, W1-T4045]
+  files: [src/lib/panel-actions.ts, src/lib/fleet-control.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/service.ts, plan/policy.yaml, test/console-pr-nudges.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 ON origin/main, AND WHAT IS ALREADY BUILT.
+    (1) THE DAEMON HALF EXISTS. `POST /v1/pr-actions` (src/lib/panel-actions.ts) validates `{action: fix|review,
+        prNumber}` and writes one idempotent marker `state/PR_ACTION_REQUESTED-<action>-<n>` (src/lib/fleet-control.ts
+        `requestPrAction`) — no command, URL or token in it. The daemon reads `pendingPrActions()` and runs
+        `rmd review <n>` / `rmd fix <n>` through `runPrAction` (src/run-task.ts), logs
+        `console.pr_action_completed|refused|failed`, and clears the marker. `rmd review` has no admission gate: it
+        posts remudero-review=pending and reviews the current head directly.
+    (2) THE NUDGE IS READ TOO SLOWLY, AND A FIX BLOCKS THE LOOP. The read sits in the main-loop iteration
+        (src/lib/daemon.ts, before dispatch), and `await deps.runPrAction(request)` holds that iteration for the whole
+        command. Measured today: daemon pid 75605 ran one iteration at 19:33 and the next began after 20:16 because
+        inline fix rounds held it — a nudge filed in that window would have waited ~43 min, and a fix nudge would
+        itself hold dispatch for the length of a fix round (13-18 min observed).
+    (3) A FIX NUDGE DOES NOTHING IN THE CASE IT EXISTS FOR. `rmd fix` routes through `routeFix` with the same
+        `priorStrikes`/`strikeHistory` as the sweep, so a red PR the sweep has stopped fixing (strikes exhausted,
+        escalated) returns "escalated, no spawn". The operator asking for a fix IS the decision to try again.
+    (4) THE CONSOLE CANNOT REACH THE ROUTE. `/v1/pr-actions` is `tier: "high"` (+ a confirm nonce). The console's
+        bearer write token resolves to tier "low" by W1-T404's ruling (v); the Cloudflare Access provider (W1-T531,
+        tier "middle") is not configured on serve (its config carries no `accessTeamDomain`/`accessAudience`), and
+        even configured, `grantedScopes` (src/lib/service.ts) returns the FIRST provider that grants, so the bearer
+        token would still win. The console also posts to a path that does not exist (CONSOLE-T42 fixes that side).
+    (5) WHY THE ROUTE CAN SIT BELOW "HIGH". It executes nothing in the request: it records one bounded, idempotent
+        intent that the daemon runs through its own pipeline — budget ceiling, one worker per PR, the PR's review and
+        merge gates unchanged. The worst a nudge can do is spend one extra review or fix round.
+  design: |
+    (i) PICKED UP ON A TIMER, RUN DETACHED. Pending PR actions are consumed by the timer-driven lane that already
+        runs between iterations (the inter-phase review clock), and serve's write of a marker also wakes it, so a nudge
+        starts within seconds whatever the main loop is doing. Each runs as a detached sweep action keyed by
+        (action, PR): a second click overwrites the request instead of starting a parallel worker, and dispatch is
+        never held.
+    (ii) OPERATOR OVERRIDE FOR FIX. A console fix nudge dispatches one fix round even when the sweep's disposition
+         is escalated or strike-exhausted, and ledgers `operator_override: true` with who asked. It still refuses —
+         with a named reason the console shows — when the PR is merged or closed, when a fix worker already owns the
+         branch, or when the daily cost ceiling is spent. The override does not reset or erase the strike ledger.
+    (iii) EACH ACTION CAN BE SWITCHED OFF, AND THE DAEMON ENFORCES IT. `plan/policy.yaml` gains `consolePrActions:
+          {review: on, fix: on}`; a state marker switches one off instantly without a PR. A switched-off action is
+          refused at the route with its reason — the console cannot bypass it.
+    (iv) STATUS FOR THE CONSOLE. `GET /v1/pr-actions` (read scope) returns each request's state — queued, running,
+         completed, refused, failed — with its detail and whether each action is currently allowed, so the console
+         can show progress and render a disabled button with a reason instead of one that fails on click.
+    (v) WHO CLICKED. The route records the operator identity the console asserts (Clerk user id) beside the hashed
+        token origin, in the marker and every outcome row.
+    (vi) THE CREDENTIAL, WITHOUT A NEW SECRET. The console already sends a Cloudflare Access service token on every
+         request, which Cloudflare verifies and asserts as a signed JWT. Enable the existing Access provider on serve
+         (team domain + audience tag, both non-secret, supplied by the operator), make `grantedScopes` return the
+         STRONGEST grant rather than the first, and set `/v1/pr-actions` to tier "middle". The bearer token stays
+         pinned at "low"; drain, merge-hold and approval routes stay "high".
+  acceptance:
+    - claim: "a review nudge starts while the main loop is busy"
+      proof: 'grep: test("W1-T4077: a review nudge starts while the main loop is busy" in test/console-pr-nudges.test.ts'
+    - claim: "a fix nudge runs detached and never holds dispatch"
+      proof: 'grep: test("W1-T4077: a fix nudge runs detached and never holds dispatch" in test/console-pr-nudges.test.ts'
+    - claim: "a fix nudge on a strike-exhausted PR dispatches one round and records the override"
+      proof: 'grep: test("W1-T4077: a fix nudge on a strike-exhausted PR dispatches one round and records the override" in test/console-pr-nudges.test.ts'
+    - claim: "a fix nudge still refuses a merged PR, an owned branch or a spent ceiling with a named reason"
+      proof: 'grep: test("W1-T4077: a fix nudge refuses a merged PR or owned branch or spent ceiling with a reason" in test/console-pr-nudges.test.ts'
+    - claim: "a switched-off action is refused by the daemon"
+      proof: 'grep: test("W1-T4077: a switched-off action is refused by the daemon with its reason" in test/console-pr-nudges.test.ts'
+    - claim: "the console can read each request's state and whether each action is allowed"
+      proof: 'grep: test("W1-T4077: request state and allowed actions are readable" in test/console-pr-nudges.test.ts'
+    - claim: "a verified Access identity outranks the bearer token, which stays low"
+      proof: 'grep: test("W1-T4077: a verified Access identity outranks the bearer token which stays low" in test/console-pr-nudges.test.ts'
+  falsifier: |
+    Leave the read in the main loop and the first goes red with a busy-loop fixture. Await the command inline and the
+    second goes red. Route the override through `routeFix`'s strike check and the third spawns nothing. Let the
+    override ignore an owned branch and two fix workers race — the fourth goes red. Enforce the switch only in the
+    console and the fifth goes red. Keep first-match grants and the seventh goes red.
