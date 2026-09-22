@@ -48,18 +48,26 @@ test("INCIDENT_SCOPE_RE matches only an explicit only-affected or exhaustive-lis
   assert.equal(INCIDENT_SCOPE_RE.test("We are investigating elevated error rates for some Claude models."), false);
 });
 
-test("the observed incident routes opus and claude-opus-5 to healthy Opus 4.7 without matching Opus 5.1", () => {
+test("the observed incident routes a claude-opus-5 pin to healthy Opus 4.7, and opus to Opus 5.5, without matching Opus 5.1", () => {
   const ladder = capabilities();
   const degraded = parseDegradedClaudeModels(STATUS_FIXTURE, ladder);
   assert.deepEqual(degraded, ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-6"]);
   assert.equal(degraded.includes("claude-opus-4-7"), false);
+  assert.equal(degraded.includes("claude-opus-5-5"), false, "the Opus 5 incident must not match Opus 5.5");
 
-  for (const requested of ["opus", "claude-opus-5"]) {
-    const route = resolveClaudeModelHealth(requested, ladder, reading(degraded));
-    assert.equal(route.eligible, true);
-    assert.equal(route.state, "degraded");
-    assert.equal(route.routedModel, "claude-opus-4-7");
-  }
+  const pinned = resolveClaudeModelHealth("claude-opus-5", ladder, reading(degraded));
+  assert.equal(pinned.eligible, true);
+  assert.equal(pinned.state, "degraded");
+  assert.equal(pinned.routedModel, "claude-opus-4-7");
+
+  // The alias starts at the best frontier candidate, which is Opus 5.5 since the 2026-09-22 model change.
+  const alias = resolveClaudeModelHealth("opus", ladder, reading(degraded));
+  assert.equal(alias.state, "healthy");
+  assert.equal(alias.routedModel, "claude-opus-5-5");
+  assert.equal(
+    resolveClaudeModelHealth("opus", ladder, reading(["claude-opus-5-5", ...degraded])).routedModel,
+    "claude-opus-4-7",
+  );
 
   const collision = parseDegradedClaudeModels({
     incidents: [{ incident_updates: [{ body: "Only Opus 5.1 is affected." }] }],
@@ -85,6 +93,7 @@ test("a newer explicit incident scope removes recovered models instead of unioni
 test("candidate ladders are complete same-capability policy and an explicit pin never upgrades", () => {
   const ladder = capabilities();
   assert.deepEqual(ladder.claudeCandidates?.frontier, [
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
@@ -276,7 +285,7 @@ test("the Claude SDK receives Opus 4.7 while durable evidence keeps requested, r
   let spawnedModel: string | undefined;
   try {
     const result = await spawnWorker(workerArgs(root, {
-      readClaudeHealth: async () => reading(["claude-opus-5", "claude-opus-4-8", "claude-opus-4-6"]),
+      readClaudeHealth: async () => reading(["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-6"]),
       now: () => NOW,
     }, ["claude"], (model) => { spawnedModel = model; }));
     assert.equal(spawnedModel, "claude-opus-4-7");
