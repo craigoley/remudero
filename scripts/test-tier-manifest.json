@@ -1570,6 +1570,7 @@
     "test/the-harness-commits-a-workers-edits.test.ts": 0,
     "test/the-harness-commits-for-a-worker-with-no-shell.test.ts": 0,
     "test/the-headline-index-is-dark.test.ts": 0,
+    "test/the-headroom-card-sees-every-subscription.test.ts": 0,
     "test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts": 844,
     "test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts": 1172,
     "test/the-heap-pressure-arm-ends-the-pass.test.ts": 0,
