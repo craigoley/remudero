@@ -13,7 +13,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: unknown -> file-t4028-codex-headroom
+    reservation hand-off: unknown -> file-t4027-8-console-port
   rationale: |
     MEASURED 2026-09-22. app.remudero.com/analytics renders a `Provider headroom` card asking "Is
     a provider window close to exhausted?" and answers `Unavailable` — correctly, because the
