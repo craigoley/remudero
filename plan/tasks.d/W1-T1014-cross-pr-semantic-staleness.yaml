@@ -122,16 +122,27 @@
         their own ids and their own scope; folding them in here would hide three separate decisions
         behind one.
   acceptance:
+    - claim: "the record states that the branch-protection flip is the operator's step, not the harness's, on the W1-T3407 precedent"
+      proof: "grep: THE FLIP ITSELF IS THE OPERATOR'S STEP, NOT THE HARNESS'S in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+    - claim: "the record carries a before-state re-read live at dispatch rather than a figure carried forward from the filing"
+      proof: "grep: THE BEFORE-STATE, RE-DERIVED RATHER THAN CARRIED in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+    - claim: "the record names the exact command the operator runs once this merges, so the handoff is executable rather than described"
+      proof: "grep: The operator, after this record merges, runs: in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
     - claim: "the shard records the inter-merge interval and the re-validation wall-clock against each other, so the deadlock question is answered from data rather than asserted"
       proof: "grep: sits at 0\\.97x the median in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the shard records the serialised throughput ceiling turning strict on would impose, and how often observed demand already exceeds it"
       proof: "grep: observed rate on 4 of 11 days in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the shard costs option (b) in CI-minutes at every measured concurrency rather than calling it expensive"
       proof: "grep: 43,100 in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the merge queue is named as a third option with the repo-specific reason it cannot simply be switched on"
       proof: "grep: AND IT IS SPECIFIC TO THIS REPO in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the three family members are cited with their own scope rather than folded into this task"
       proof: "grep: IT MUST NOT ABSORB W1-T985 OR THE FILING-DIFF GAP in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
   risk: high
   origin: "oper#cross-pr-semantic-staleness-2026-08-18"
   plan_refs: ["W1-T999", "W1-T1007", "W1-T985", "W1-T1009", "W1-T983"]
