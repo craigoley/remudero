@@ -277,6 +277,19 @@ export function workerHomeDir(config: Config): string {
   return config.workerHomeRoot ?? join(config.root, "worker-home");
 }
 
+/**
+ * Cache root shared by every worker and daemon process on the host. A per-run HOME is deliberate
+ * for shell isolation, but using it as XDG_CACHE_HOME created one GitHub cadence stamp per worker.
+ * Prefer the explicit host override, then the daemon's XDG/HOME roots; retain the instance path
+ * only for hermetic launches that provide neither variable.
+ */
+export function workerCacheDir(
+  config: Pick<Config, "root">,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return env.RMD_GH_CACHE_HOME ?? env.XDG_CACHE_HOME ?? (env.HOME ? join(env.HOME, ".cache") : join(config.root, "state", "cache"));
+}
+
 /** Path to the instance config file. Derived, never a committed literal. */
 export function configPath(): string {
   return join(homedir(), ".config", "remudero", "config.json");

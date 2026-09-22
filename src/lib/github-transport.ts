@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import type { ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 
@@ -162,35 +162,35 @@ function parseGhJsonBody(args: string[], body: string): unknown {
 export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsync = execFileAsync): Promise<unknown> {
   // Injected executors are test/offline seams and may have independent side effects, so only the
   // real `gh` transport participates in production single-flight coalescing.
-  if (execAsync !== execFileAsync) {
-    const { stdout } = await execAsync("gh", args, {
-      encoding: "utf8",
-      maxBuffer: DEFAULT_GH_MAX_BUFFER,
-      timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-    });
-    return parseGhJsonBody(args, stdout);
+  if (execAsync === execFileAsync) {
+    const key = JSON.stringify(args);
+    const existing = asyncReadInFlight.get(key);
+    if (existing) return existing;
+    const request = (async (): Promise<unknown> => {
+      // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
+      // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
+      // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
+      applyGhReadCadence(args);
+      const { stdout } = await execAsync("gh", args, {
+        encoding: "utf8",
+        maxBuffer: DEFAULT_GH_MAX_BUFFER,
+        timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+      });
+      return parseGhJsonBody(args, stdout);
+    })();
+    asyncReadInFlight.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
+    }
   }
-  const key = JSON.stringify(args);
-  const existing = asyncReadInFlight.get(key);
-  if (existing) return existing;
-  const request = (async (): Promise<unknown> => {
-    // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
-    // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
-    // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
-    applyGhReadCadence(args);
-    const { stdout } = await execAsync("gh", args, {
-      encoding: "utf8",
-      maxBuffer: DEFAULT_GH_MAX_BUFFER,
-      timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-    });
-    return parseGhJsonBody(args, stdout);
-  })();
-  asyncReadInFlight.set(key, request);
-  try {
-    return await request;
-  } finally {
-    if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
-  }
+  const { stdout } = await execAsync("gh", args, {
+    encoding: "utf8",
+    maxBuffer: DEFAULT_GH_MAX_BUFFER,
+    timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+  });
+  return parseGhJsonBody(args, stdout);
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
@@ -381,6 +381,21 @@ export function paceGhEntry<T>(
 /** SHARED with `hooks/deny-floor.sh` rule 9's default. The two must agree or the windows diverge. */
 export const DEFAULT_GH_READ_CADENCE_S = 180;
 
+/** A short, cross-process transport gap protects the secondary limiter without making a normal
+ * daemon sweep self-refuse after its first read. This is not another 180-second budget window. */
+export const DEFAULT_GH_SHARED_READ_GAP_MS = DEFAULT_GH_PACE_MIN_GAP_MS;
+export const GH_SHARED_READ_GAP_ENV = "RMD_GH_SHARED_READ_GAP_MS";
+const GH_CADENCE_LOCK_WAIT_MS = 25;
+const GH_CADENCE_LOCK_MAX_WAIT_MS = 1_000;
+const GH_CADENCE_LOCK_STALE_MS = 30_000;
+
+function resolveGhSharedReadGapMs(env: NodeJS.ProcessEnv): number {
+  const raw = env[GH_SHARED_READ_GAP_ENV];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_GH_SHARED_READ_GAP_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_GH_SHARED_READ_GAP_MS;
+}
+
 /**
  * How many further reads ONE enforce-mode invocation may make after its first read is admitted.
  *
@@ -480,7 +495,8 @@ export function ghArgvBucketHint(args: readonly string[]): string | undefined {
 
 /**
  * The stamp file, resolved EXACTLY as `hooks/deny-floor.sh` rule 9 resolves it
- * (`${XDG_CACHE_HOME:-$HOME/.cache}/remudero/gh-last-read`) so the two surfaces share one window.
+ * (`${RMD_GH_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/remudero/gh-last-read`) so the two
+ * surfaces share one window, including an explicit host-wide cache override.
  * `undefined` when neither variable is set — the caller then paces nothing and allows the call.
  */
 /**
@@ -505,7 +521,7 @@ export function ghReadBurst(env: NodeJS.ProcessEnv = process.env): number {
 let ghReadBurstScope: { remaining: number } | undefined;
 
 export function ghReadCadenceStampPath(env: NodeJS.ProcessEnv = process.env, bucket?: string): string | undefined {
-  const root = env.XDG_CACHE_HOME ?? (env.HOME !== undefined ? `${env.HOME}/.cache` : undefined);
+  const root = env.RMD_GH_CACHE_HOME ?? env.XDG_CACHE_HOME ?? (env.HOME !== undefined ? `${env.HOME}/.cache` : undefined);
   if (root === undefined || root === "") return undefined;
   return `${root}/remudero/gh-last-read${bucket === undefined ? "" : `-${bucket}`}`;
 }
@@ -662,12 +678,66 @@ export interface GhReadCadenceDeps {
   nowMs?(): number;
   readStampMs?(path: string | undefined): number | undefined;
   stamp?(path: string | undefined): void;
+  sleepSync?(ms: number): void;
   warn?(line: string): void;
 }
 
 /** ONE LINE PER PROCESS. An advisory that prints on every paced read is noise the daemon's log
  *  would bury, and noise is how a floor stops being read. Reset only for tests. */
 let ghCadenceAdvisoryEmitted = false;
+// A daemon can perform several read-shaped calls in one process. The shared file is for
+// coordination with sibling processes; sleeping after our own stamp would turn every normal
+// sweep into a 1.5s-per-read queue (and made the instrumented CI suite hit its timeout). Keep the
+// last value this process wrote so only a newer, foreign stamp consumes the cross-process gap.
+const ghCadenceOwnStampMs = new Map<string, number>();
+
+/**
+ * Serialise the read-and-stamp critical section across daemon processes. A process-local pacer
+ * cannot protect two launchd jobs (or a worker and the daemon) from both seeing an old stamp. The
+ * lock is a tiny directory because mkdir is atomic on the filesystems Remudero supports. It is
+ * fail-open after a bounded wait, and stale locks are reclaimed so a killed process cannot freeze
+ * GitHub access permanently.
+ */
+function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void, fn: () => T): T {
+  const lockPath = `${stampPath}.lock`;
+  const startedAt = systemClock.now();
+  let locked = false;
+  try {
+    mkdirSync(dirname(lockPath), { recursive: true });
+    while (!locked) {
+      try {
+        mkdirSync(lockPath);
+        locked = true;
+        break;
+      } catch {
+        try {
+          const ageMs = systemClock.now() - statSync(lockPath).mtimeMs;
+          if (ageMs > GH_CADENCE_LOCK_STALE_MS) {
+            rmdirSync(lockPath);
+            continue;
+          }
+        } catch {
+          // The owner may have released the lock between stat and mkdir. Retry immediately.
+        }
+        if (systemClock.now() - startedAt >= GH_CADENCE_LOCK_MAX_WAIT_MS) break;
+        sleepSync(GH_CADENCE_LOCK_WAIT_MS);
+      }
+    }
+  } catch {
+    // An unwritable cache is already a documented fail-open case; run the call without a lock.
+  }
+  try {
+    return fn();
+  } finally {
+    if (locked) {
+      try {
+        rmdirSync(lockPath);
+      } catch {
+        // Fail open: a cleanup failure must not turn a successful GitHub call into a daemon error.
+      }
+    }
+  }
+}
 
 export function resetGhCadenceAdvisoryForTest(): void {
   ghCadenceAdvisoryEmitted = false;
@@ -693,36 +763,55 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   const isWrite = ghArgvIsWrite(args);
   const isExempt = ghArgvIsCadenceExempt(args);
   const burstAllowed = !isWrite && !isExempt && (ghReadBurstScope?.remaining ?? 0) > 0;
-  const decision = ghReadCadenceDecision({
-    isWrite,
-    isExempt,
-    nowMs: now(),
-    lastReadMs: readStampMs(stampPath),
-    mode: resolveGhTransportFloorMode(env),
+  const evaluate = (): GhReadCadenceDecision => {
+    const decision = ghReadCadenceDecision({
+      isWrite,
+      isExempt,
+      nowMs: now(),
+      lastReadMs: readStampMs(stampPath),
+      mode: resolveGhTransportFloorMode(env),
+    });
+    // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
+    // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
+    // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
+    if (burstAllowed && ghReadBurstScope) ghReadBurstScope.remaining -= 1;
+    else if (!decision.allow) throw new GhReadCadenceRefusal(decision, bucket ?? "core", 0);
+    // GRANTED ONLY BY AN ADMITTED, GATED READ, AND ONLY INSIDE AN OPEN SCOPE. An exempt call
+    // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
+    // that would otherwise be refused.
+    else if (!isWrite && !isExempt && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
+    if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
+      ghCadenceAdvisoryEmitted = true;
+      const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
+      warn(
+        `gh read cadence (advisory, W1-T3297): a read ${decision.ageS}s after the last on the ${bucket ?? "core"} ` +
+          `limiter, under the ${decision.windowS}s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.`,
+      );
+    }
+    return decision;
+  };
+
+  // Writes, budget probes, and calls without a usable cache path need no shared coordination.
+  if (isWrite || isExempt || stampPath === undefined) return evaluate();
+
+  const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
+  const sharedReadGapMs = resolveGhSharedReadGapMs(env);
+  return withGhCadenceLock(stampPath, sleepSync, () => {
+    const decision = evaluate();
+    // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
+    // shared gap still protects the secondary limiter across sibling processes without making a
+    // normal sweep self-refuse after its first read.
+    const latest = readStampMs(stampPath);
+    const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(stampPath) === latest;
+    const elapsed = latest === undefined ? undefined : now() - latest;
+    const remaining =
+      ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
+    if (remaining > 0) sleepSync(remaining);
+    // Stamp only after the gap so a concurrent process observes the completed transport slot.
+    stamp(stampPath);
+    const stampedAt = readStampMs(stampPath);
+    if (stampedAt === undefined) ghCadenceOwnStampMs.delete(stampPath);
+    else ghCadenceOwnStampMs.set(stampPath, stampedAt);
+    return decision;
   });
-  // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
-  // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
-  // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
-  if (burstAllowed && ghReadBurstScope) ghReadBurstScope.remaining -= 1;
-  else if (!decision.allow) throw new GhReadCadenceRefusal(decision, bucket ?? "core", 0);
-  // GRANTED ONLY BY AN ADMITTED, GATED READ, AND ONLY INSIDE AN OPEN SCOPE. An exempt call
-  // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
-  // that would otherwise be refused.
-  else if (!isWrite && !isExempt && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
-  if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
-    ghCadenceAdvisoryEmitted = true;
-    const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
-    warn(
-      `gh read cadence (advisory, W1-T3297): a read ${decision.ageS}s after the last on the ${bucket ?? "core"} ` +
-        `limiter, under the ${decision.windowS}s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.`,
-    );
-  }
-  // STAMPED ONLY ON AN ALLOWED READ, matching hooks/deny-floor.sh: a refusal must not extend its
-  // own window, and a write must not consume the read budget it was never charged against. The
-  // refusal half needs no test of `decision.allow` here — the throw above already returned, so a
-  // `decision.allow &&` guard would be a branch that can never be false, which is dead code that
-  // reads as a covered decision. Enforced by the "a REFUSED read does not extend its own window"
-  // case, which fails if the throw is ever moved below this line.
-  if (!ghArgvIsWrite(args) && !ghArgvIsCadenceExempt(args)) stamp(stampPath);
-  return decision;
 }
