@@ -1,0 +1,49 @@
+- id: W1-T4071
+  title: "THE COVERAGE SHARDS ARE BALANCED ON DURATIONS NEVER MEASURED UNDER COVERAGE — predictions are even to 0.1 min yet shard 2 runs at 0.74x while shard 4 runs at 0.96x, and the heaviest entries date from 2026-09-08: record per-file durations from the coverage run itself and fold them in as an EWMA"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T2904, W1-T3302, W1-T3699, W1-T3724, W1-T3207]
+  files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, scripts/test-duration-reporter.mjs, test/coverage-durations-self-correct.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 from 15 successful source-PR CI runs x 4 coverage shards (job logs) and 80 sampled runs.
+    (1) The balancer's predictions are even (14.9-15.3 min per shard) but actual/predicted spans 0.47-1.20, with a
+        STABLE per-shard bias: 0.92, 0.74, 0.82, 0.96. The slowest shard's p50 is 15.3 min vs a 13.1 min mean — up to
+        2.1 min of critical path per PR.
+    (2) THE CAUSE. PR source diffs skip the uninstrumented run (W1-T3207, ci.yml) and the coverage job records no
+        durations, so the manifest is fed only by uninstrumented runs while it schedules instrumented ones. The coverage
+        slowdown varies wildly per file (p10 0.01x, p50 0.13x, p90 1.72x, p99 5.9x): test/the-verb-census-reaches-a-reader
+        runs 359 s against a 59 s entry, test/adoption-report-has-a-producer 450 s against 110 s — both unchanged since
+        0688d7a64 (2026-09-08). 499 of 1,772 entries are 0 placeholders weighted at the median.
+    (3) `balanceFilesByDuration` packs by serial sum while node runs files concurrently (15-19 min of test time in 8-15
+        min of wall), so one 7-minute file is a floor, not a weight.
+  design: |
+    (i) The coverage command also runs scripts/test-duration-reporter.mjs, recording per-file wall time UNDER
+        instrumentation on every PR and main run, kept as a separate `coverage` series.
+    (ii) Each observation folds in as an EWMA, tracking drift both ways and damping runner noise (the timing-data split
+         CircleCI and Knapsack Pro use). Beyond them: no PR per update — main's CI publishes the snapshot keyed by base
+         sha and every shard reads the same bytes; an absent snapshot falls back to the committed manifest.
+    (iii) Pack by makespan across the shard's concurrent workers, with the longest file as a floor.
+    (iv) INVARIANTS: the four shards partition the file set exactly (the aggregator checks the union once per run); a
+         zero reading never replaces a real one; the selection is deterministic for a given (snapshot, file set).
+    Splitting the three 6-7.6 minute unmocked tests is a larger lever and a separate item.
+  acceptance:
+    - claim: "the coverage command writes duration evidence for every selected file"
+      proof: 'grep: test("W1-T4071: the coverage command writes duration evidence for every selected file" in test/coverage-durations-self-correct.test.ts'
+    - claim: "an EWMA update moves a stale entry toward the observation both ways and ignores a zero"
+      proof: 'grep: test("W1-T4071: an EWMA update moves a stale entry both ways and ignores a zero" in test/coverage-durations-self-correct.test.ts'
+    - claim: "four shards reading one snapshot partition the suite and an absent snapshot falls back"
+      proof: 'grep: test("W1-T4071: four shards partition the suite and an absent snapshot falls back" in test/coverage-durations-self-correct.test.ts'
+    - claim: "makespan packing never places two files above the shard mean in one shard"
+      proof: 'grep: test("W1-T4071: makespan packing never places two files above the shard mean together" in test/coverage-durations-self-correct.test.ts'
+  falsifier: |
+    Over the next 15 source-PR runs after landing, a per-shard mean actual/predicted spread above 0.1, or a p50
+    slowest-minus-mean gap still near 2.1 min, means it has not worked.

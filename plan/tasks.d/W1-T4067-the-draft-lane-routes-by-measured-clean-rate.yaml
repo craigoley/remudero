@@ -1,0 +1,47 @@
+- id: W1-T4067
+  title: "THE DRAFT LANE STAYS PINNED TO THE ONE DEPLOYMENT THAT ANSWERS IN PROSE — 13 clean of 1,211 gpt-5-nano drafts since 09-16 (72-81 clean a day before), while gpt-oss-120b and gpt-5.6-luna now fit the 18.8k-token prompt and have never been tried: route by measured clean drafts per dollar and fall through the ladder when the output contract breaks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T3621, W1-T3664, W1-T3095]
+  files: [src/lib/draft-routing.ts, src/lib/worker.ts, src/lib/worker-provider.ts, src/run-task.ts, .remudero/mounts.yaml, test/the-draft-lane-routes-by-measured-clean-rate.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED (ledger union; 09-10..18 read through a file, 09-19..22 from the 4-day dump).
+    (1) From 09-16 every `inbox.draft_synthesized` row has `routed_model: gpt-5-nano`: 1,211 attempts, 13 clean
+        (`inbox.drafted lint_clean:true`), ~1.1%. 654 failures answered in prose; 138 had a stamp but no fragment;
+        re-lints climb (153 on 09-22). Baseline 09-13/14: 72 and 81 clean a day.
+    (2) THE PIN IS STALE. `.remudero/mounts.yaml` routes `inbox_draft` to the `cash.balanced` ladder
+        [gpt-5-nano, gpt-oss-120b, gpt-5.6-luna], ordered for a 259k-token prompt; #5689 (W1-T3621) cut the prompt to
+        ~18.8k tokens, so the other rungs fit and have never been sampled.
+    (3) `runOpenWeightWalkingLadder` (src/lib/worker.ts) advances only on an unsupported-response-format error; a broken
+        OUTPUT CONTRACT (prose, no fragment) is never a reason to try the next rung. W1-T3664's marker rule did not help.
+  design: |
+    (i) src/lib/draft-routing.ts `chooseDraftDeployment(stats)`: per (lane, deployment) attempts, clean drafts, contract
+        failures and cost, read from rows already written. Thompson sampling over a Beta posterior on clean rate, scored
+        as clean drafts per dollar — exploration proportional to uncertainty, no fixed share; ladder order is the prior.
+    (ii) A contract failure retries the NEXT rung within the same attempt; the ladder is walked at most once.
+    (iii) INVARIANTS: the context-fit check still removes a model that cannot hold the prompt; the daily cash cap is
+          enforced before any request; every choice writes a row naming the arm, its posterior and why; a failed read of
+          the stats routes by row order and ledgers `draft.routing.error`, never blocking the draft.
+  acceptance:
+    - claim: "an arm with a low measured clean rate loses traffic without any configured threshold"
+      proof: 'grep: test("W1-T4067: an arm with 2 clean of 200 loses traffic to an arm with 60 clean of 100" in test/the-draft-lane-routes-by-measured-clean-rate.test.ts'
+    - claim: "a prose-only output is retried on the next rung within the same attempt"
+      proof: 'grep: test("W1-T4067: a prose-only output is retried on the next rung within one attempt" in test/the-draft-lane-routes-by-measured-clean-rate.test.ts'
+    - claim: "an untried arm that fits the context is sampled with positive probability"
+      proof: 'grep: test("W1-T4067: an untried arm that fits the context is sampled with positive probability" in test/the-draft-lane-routes-by-measured-clean-rate.test.ts'
+    - claim: "a stats read failure routes by row order and is ledgered"
+      proof: 'grep: test("W1-T4067: a stats read failure routes by row order and ledgers the error" in test/the-draft-lane-routes-by-measured-clean-rate.test.ts'
+    - claim: "the worker routes drafts through the chooser"
+      proof: 'grep: chooseDraftDeployment( in src/lib/worker.ts'
+  falsifier: |
+    Keep the static order and the first goes red. Drop the contract-failure trigger and the second goes red. Give an
+    untried arm probability zero and the third goes red.

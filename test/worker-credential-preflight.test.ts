@@ -163,6 +163,12 @@ test("the two new classes are distinct from every macOS class, so a Linux failur
 });
 
 // ── the rung IN THE REAL SPAWN PATH — the tests that prove it fires where it must ─────────────
+//
+// The three file-rung tests below pin `platform: "linux"` through the `keychain.platform` seam
+// spawnWorker already exposes. The file rung is the NON-darwin branch; left to `process.platform`,
+// a darwin host routes these tests into `ensureWorkerKeychain` instead, so they measured the macOS
+// keychain rather than the rung they name (and the "absent" test passed there only because
+// `credential-item-missing` is shared by both rungs). The darwin branch keeps its own test below.
 
 /** Drive the production `spawnWorker`. `readCredentialFile` is NEVER injected: the default
  *  reader reads the real fixture file.
@@ -220,7 +226,7 @@ async function spawnAgainst(realHome: string, platform?: NodeJS.Platform): Promi
 }
 
 test("spawnWorker REFUSES before spawning when the credential file is absent", async () => {
-  const { reachedSpawn, err } = await spawnAgainst(homeWith());
+  const { reachedSpawn, err } = await spawnAgainst(homeWith(), "linux");
   assert.equal(reachedSpawn, false, "the rung must fire BEFORE the spawn attempt, not after");
   assert.ok(
     err instanceof WorkerKeychainError,
@@ -230,13 +236,13 @@ test("spawnWorker REFUSES before spawning when the credential file is absent", a
 });
 
 test("spawnWorker REFUSES before spawning when the file holds no Claude credential", async () => {
-  const { reachedSpawn, err } = await spawnAgainst(homeWith(JSON.stringify({ mcpOAuth: {} })));
+  const { reachedSpawn, err } = await spawnAgainst(homeWith(JSON.stringify({ mcpOAuth: {} })), "linux");
   assert.equal(reachedSpawn, false);
   assert.equal((err as WorkerKeychainError).reasonClass, "credential-file-malformed");
 });
 
 test("spawnWorker does NOT refuse a healthy credential — it reaches the spawn attempt", async () => {
-  const { reachedSpawn, err } = await spawnAgainst(homeWith(HEALTHY));
+  const { reachedSpawn, err } = await spawnAgainst(homeWith(HEALTHY), "linux");
   assert.ok(
     !(err instanceof WorkerKeychainError),
     `a healthy credential was refused by the credential rung: ${String((err as Error)?.message ?? "")}`,

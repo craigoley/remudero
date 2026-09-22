@@ -6146,6 +6146,8 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
   "package-lock.json": "a dependency lockfile, not gate logic",
+  "deploy/package.json": "the image's CLI manifest, an acr-build trigger input (IMAGE_BAKED_PATHS), not gate logic",
+  "deploy/package-lock.json": "the image's CLI lockfile, an acr-build trigger input (IMAGE_BAKED_PATHS), not gate logic",
   "scripts/test-tier-manifest.json":
     "the per-test-file duration ledger (W1-T2904) — DATA scripts/test-tier-manifest.mjs's --check reads, " +
     "not the rule logic itself, same shape as openapi/daemon.yaml above",

@@ -9,6 +9,11 @@
     "dateNow": 0,
     "newDate": 2
   },
+  "src/lib/action-results.ts": {
+    "legacy": 1,
+    "dateNow": 0,
+    "newDate": 3
+  },
   "src/lib/analytics-route.ts": {
     "legacy": 0,
     "dateNow": 0,

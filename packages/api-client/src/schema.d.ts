@@ -279,6 +279,57 @@ export interface components {
       chain: TraceChain;
       rendered: string;
     };
+    /** A redacted external-effect reconciliation receipt; connector payloads never cross the daemon boundary. */
+    ExternalActionResult: {
+      version: "external-effect-v1";
+      originatingActionId: string;
+      originatingReceiptId: string;
+      capabilityGrantId: string;
+      connector: string;
+      targetIdentity: string;
+      requestedOperation: string;
+      preconditionSnapshot: Record<string, never>;
+      expectedPostconditions: ({
+        path: string;
+        /** JSON-compatible expected value; scalar values are preserved by the daemon even though the generated client represents this open object conservatively. */
+        equals: Record<string, never>;
+        description?: string;
+      })[];
+      observedState?: Record<string, never>;
+      observation: {
+        status: "fresh" | "stale" | "unavailable";
+        observedAt?: string;
+        ageMs?: number;
+        maxAgeMs: number;
+      };
+      idempotencyKey: string;
+      reconciliationState: "applied" | "refused" | "pending" | "partially-applied" | "drifted" | "stale" | "unobservable";
+      partialSuccess?: {
+        satisfied: (string)[];
+        unsatisfied: (string)[];
+      };
+      retryPath: {
+        kind: "none" | "retry" | "compensation";
+        allowed: boolean;
+        reason: string;
+        attemptNumber?: number;
+      };
+      evidenceReference: string;
+      safeToComplete: boolean;
+      reason?: string;
+    };
+    /** Bounded read-only external-action-results-v1 projection. Unavailable source state is explicit and is never represented as a healthy empty list. */
+    ExternalActionResultsEnvelope: {
+      version: "external-action-results-v1";
+      state: "verified" | "unavailable";
+      source: string;
+      generatedAt: string;
+      cursor?: string;
+      results?: (ExternalActionResult)[];
+      truncated?: boolean;
+      reason?: string;
+      detail?: string;
+    };
     /** POST /v1/feedback/decision's body -- accept or reject a `proposed` entry. */
     ProposalDecisionRequest: {
       id: string;
@@ -1141,6 +1192,16 @@ export interface paths {
     get: {
       responses: {
           "200": OperatorActivityResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/action-results": {
+    get: {
+      responses: {
+          "200": ExternalActionResultsEnvelope;
+          "400": Error;
           "401": Error;
           "403": Error;
         };

@@ -20,6 +20,8 @@ import {
   PROOF_PAYLOAD_SHAPES,
   proofDialectViolations,
   proofResolvabilityViolations,
+  proofScopeViolations,
+  proofSelfPathViolations,
   proofShapeViolations,
   provenanceViolation,
   rule15FilingViolation,
@@ -1086,6 +1088,118 @@ test("SELF-REFERENCE: W1-T353's own ruling-shaped TITLE (word 'ruling' appears r
   });
   assert.equal(rulingVerifyViolation(t), undefined);
   assert.equal(lintTask(t).ok, true);
+});
+
+// ── proofSelfPathViolations (W1-T1070) ─────────────────────────────────────────
+// A grep:/unit test: proof naming THIS task's own shard/record file (task.sourcePath) — a
+// different defect from proofScopeViolations' generic out-of-scope proof, and NOT silenced by
+// declaring that same path in files: (design point (ii)).
+
+const SELF_SHARD_PATH = "plan/tasks.d/W1-T9001-fixture-shard.yaml";
+
+test("W1-T1070: a self-path grep proof draws its own named violation", () => {
+  const t = task({
+    id: "W1-T9001",
+    sourcePath: SELF_SHARD_PATH,
+    acceptance: [{ claim: "the thing is true", proof: `grep: the thing in ${SELF_SHARD_PATH}` }],
+  });
+  const violations = proofSelfPathViolations(t);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0]!.check, "proof-self-path");
+  assert.notEqual(violations[0]!.check, "proof-scope");
+});
+
+test("W1-T1070: declaring the shard's own path does not silence it", () => {
+  const t = task({
+    id: "W1-T9001",
+    sourcePath: SELF_SHARD_PATH,
+    files: [SELF_SHARD_PATH],
+    acceptance: [{ claim: "the thing is true", proof: `grep: the thing in ${SELF_SHARD_PATH}` }],
+  });
+  const violations = proofSelfPathViolations(t);
+  assert.equal(violations.length, 1, "declaring the path in files: must NOT silence this check");
+  assert.equal(violations[0]!.check, "proof-self-path");
+});
+
+test("W1-T1070: the self-path violation points at the filing PR body", () => {
+  const t = task({
+    id: "W1-T9001",
+    sourcePath: SELF_SHARD_PATH,
+    acceptance: [{ claim: "the thing is true", proof: `grep: the thing in ${SELF_SHARD_PATH}` }],
+  });
+  const [violation] = proofSelfPathViolations(t);
+  assert.match(violation!.message, /## Acceptance/);
+  assert.match(violation!.message, /FILING PR/);
+  // Sends the author to the body block, NOT to files: — unlike proof-scope's remedy.
+  assert.doesNotMatch(violation!.message, /Add ".*" to files:/);
+});
+
+test("W1-T1070: an ordinary out-of-scope grep keeps its message", () => {
+  const t = task({
+    id: "GREP-OUT-OF-SCOPE-W1-T1070",
+    files: ["src/lib/foo.ts"],
+    acceptance: [{ claim: "no window arithmetic references the wrong field", proof: "grep: totalCostUsd in test/bar.test.ts" }],
+  });
+  const violations = proofScopeViolations(t);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0]!.check, "proof-scope");
+  assert.match(violations[0]!.message, /Add "test\/bar\.test\.ts" to files: or rewrite the proof/);
+  // Not this task's own record — the self-path check has nothing to say here.
+  assert.equal(proofSelfPathViolations(t).length, 0);
+});
+
+test("W1-T1070: a name-filtered unit test proof stays silent", () => {
+  const t = task({
+    id: "W1-T9001",
+    sourcePath: SELF_SHARD_PATH,
+    acceptance: [{ claim: "the thing is true", proof: "unit test: the shard's own criterion holds" }],
+  });
+  assert.equal(proofSelfPathViolations(t).length, 0);
+});
+
+test("W1-T1070: every self-path criterion on a shard is reported", () => {
+  const t = task({
+    id: "W1-T9001",
+    sourcePath: SELF_SHARD_PATH,
+    acceptance: [
+      { claim: "first claim", proof: `grep: first in ${SELF_SHARD_PATH}` },
+      { claim: "second claim", proof: `grep: second in ${SELF_SHARD_PATH}` },
+      { claim: "third claim", proof: `grep: third in ${SELF_SHARD_PATH}` },
+    ],
+  });
+  const violations = proofSelfPathViolations(t);
+  assert.equal(violations.length, 3, "all three self-path criteria must be reported, not only the first");
+  assert.match(violations[0]!.message, /criterion 1/);
+  assert.match(violations[1]!.message, /criterion 2/);
+  assert.match(violations[2]!.message, /criterion 3/);
+});
+
+test("W1-T1070: the check warns by default at pre-dispatch", () => {
+  const t = task({
+    id: "W1-T9001",
+    sourcePath: SELF_SHARD_PATH,
+    files: ["src/lib/example.ts"], // any non-empty declared scope — declared-scope's own concern, not this check's
+    acceptance: [{ claim: "the thing is true", proof: `grep: the thing in ${SELF_SHARD_PATH}` }],
+  });
+  // Drives the PRODUCTION default: lintTask with no opts, exactly as preDispatchLint sees it.
+  const res = lintTask(t);
+  const v = res.violations.find((x) => x.check === "proof-self-path");
+  assert.ok(v, "lintTask must surface the check without any opt being passed");
+  assert.equal(v?.severity, "warn");
+  assert.equal(res.ok, true, "a WARN must never refuse a queued task at dispatch");
+});
+
+test("W1-T1070: the changed-tasks pass raises the check to blocking", () => {
+  const t = task({
+    id: "W1-T9001",
+    sourcePath: SELF_SHARD_PATH,
+    files: ["src/lib/example.ts"],
+    acceptance: [{ claim: "the thing is true", proof: `grep: the thing in ${SELF_SHARD_PATH}` }],
+  });
+  const res = lintTask(t, { proofSelfPath: "block" });
+  const v = res.violations.find((x) => x.check === "proof-self-path");
+  assert.equal(v?.severity, "block");
+  assert.equal(res.ok, false, "the changed-tasks pass must refuse a newly filed/edited self-path proof");
 });
 
 // ── BUDGET-SANITY (soft) ──────────────────────────────────────────────────────

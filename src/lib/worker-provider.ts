@@ -18,6 +18,8 @@ import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { withTempDir } from "./tmp.js";
+import { assertModelAllowed, modelAllowed } from "./model-gate.js";
+import type { ModelApproval } from "./config-schema.js";
 import {
   spawnDetachedGroup,
   teardownProcessGroup,
@@ -801,6 +803,8 @@ export interface OpenWeightModelSelection {
 export interface OpenWeightSelectionOptions {
   /** Promote Luna only for the cash request reached after the subscription auction blocks. */
   cashSqueezed?: boolean;
+  /** The operator's approvals; a human-gated deployment (Astra, Fable) is skipped without one. */
+  modelApprovals?: ModelApproval[];
 }
 
 /**
@@ -837,7 +841,8 @@ export function selectOpenWeightModel(
   const candidates = options.cashSqueezed && configured.includes("gpt-5.6-luna")
     ? ["gpt-5.6-luna", ...configured.filter((candidate) => candidate !== "gpt-5.6-luna")]
     : configured;
-  const safe = candidates.filter((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
+  const safe = candidates.filter((candidate) =>
+    SAFE_OPENWEIGHT_MODEL_ID.test(candidate) && modelAllowed(candidate, { modelApprovals: options.modelApprovals }));
   if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
   if (promptBytes === undefined) {
     return { model: safe[0]!, effort: requestedEffort ?? "default", capability, alternatives: safe.slice(1) };
@@ -937,7 +942,8 @@ export function selectCodexModel(
   const preferred = forced
     ? [forced]
     : [...(config.workerProviders?.codexModels?.[tier] ?? codexCandidatesForCapability(capabilities, tier, requestedEffort))];
-  const mappedCandidates = [...new Set(preferred)];
+  // A human-gated model (Astra, Fable) is never a candidate without an operator approval.
+  const mappedCandidates = [...new Set(preferred)].filter((id) => modelAllowed(id, config));
   const candidates = mappedCandidates
     .map((id) => visible.find((model) => model.id === id || model.model === id))
     .filter((model): model is CodexModelInfo => model !== undefined);
@@ -1935,6 +1941,9 @@ export function codexPreToolUseProfile(settingsFile: string): string[] {
 
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
+  // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
+  if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
+  assertModelAllowed(model, config);
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
   const disposableReview = args.sandboxIntent === "disposable-review";
   const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
@@ -1988,7 +1997,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   // this shared segment so fresh and resumed reviewers/probes cannot drift apart. A write-capable
   // non-repository cwd receives no bypass and Codex refuses it before doing work.
   if (skipGitRepoCheck) shared.splice(2, 0, "--skip-git-repo-check");
-  if (model) shared.push("--model", model);
+  shared.push("--model", model);
   if (effort) shared.push("-c", `model_reasoning_effort=\"${effort}\"`);
   // `codex exec resume` accepts none of the fresh worker's workspace-write, cwd, or bounded-Git
   // containment arguments. A resumed writer must therefore start fresh through the ordinary

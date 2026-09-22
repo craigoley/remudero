@@ -1,13 +1,14 @@
 - id: W1-T4006
-  title: "THE CLOSURE-VALUE CALIBRATION HAS NEVER ONCE BEEN ACTIVE ON THE TWO DAEMONS THAT LOG IT — 352 consecutive `missing-prior-snapshot` refusals, and the third daemon never logs the step at all, so nobody has ruled on which configuration is correct"
+  title: "THE DISPATCH-VALUE CALIBRATION REFUSES WHOLESALE WHEN ANY ONE CLASS IS THIN — 337 of 337 remudero selection passes (2026-09-19..22) refused and none calibrated, so value never ranks anything and dispatch falls back to filing order: replace the all-or-nothing gate with a pooled Beta posterior per class and a seeded Thompson draw"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
   risk: high
+  band_meaning: span
   budget_usd: 20.00
-  files: [src/lib/dispatch-value.ts]
+  files: [src/lib/dispatch-value.ts, src/run-task.ts, test/dispatch-value-posterior.test.ts, scripts/test-tier-manifest.json]
   origin: oper#fleet-health-2026-09-22
   plan_refs: ["W1-T3704"]
   status: queued
@@ -62,12 +63,40 @@
     `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
 
   acceptance:
-    - claim: "the two daemon configurations are reconciled, so a dispatch-value row means the same thing on every lane"
-      proof: "unit test: W1-T4006: every lane agrees on whether dispatch value is calibrated"
-    - claim: "a calibration that cannot run no longer emits a per-tick refusal row"
-      proof: "unit test: W1-T4006: an uncalibratable lane is quiet"
+    - claim: "a zero-merge class gets a finite positive score shrunk toward the pooled rate"
+      proof: 'grep: test("W1-T4006: a zero-merge class gets a finite positive score shrunk toward the pooled rate" in test/dispatch-value-posterior.test.ts'
+    - claim: "one thin class no longer refuses the whole calibration"
+      proof: 'grep: test("W1-T4006: one thin class no longer refuses the whole calibration" in test/dispatch-value-posterior.test.ts'
+    - claim: "a class score converges to its measured rate as its dispatched trials grow"
+      proof: 'grep: test("W1-T4006: a class score converges to its measured rate as trials grow" in test/dispatch-value-posterior.test.ts'
+    - claim: "draws are reproducible for a fixed seed"
+      proof: 'grep: test("W1-T4006: draws are reproducible for a fixed seed" in test/dispatch-value-posterior.test.ts'
   note: |
     reservation hand-off: plan/file-dispatch-value-1790074290 -> plan/file-dispatch-value-1790074290
 
     Minted on the filing branch itself, which is now what `rmd next-task-id` requires — it refuses
     to reserve from `main`, since main can never be the filing branch.
+
+    AMENDED 2026-09-22 (oper#followups-research-2026-09-22) — THE ORIGINAL PREMISE NO LONGER HOLDS, AND THE DESIGN
+    AND CRITERIA ABOVE ARE REPLACED. Measured on the 4-day ledger union (2026-09-19..22):
+      - remudero DOES emit the step now: `dispatch.value.refused` on 337 of 337 selection passes, 0 calibrated. The
+        reasons are never `missing-prior-snapshot` there; they are always the class list — docs and plan-lint have zero
+        merges, retro and triage are thin, src is unstable.
+      - THE CAUSE is `src/lib/dispatch-value.ts`: `if (refusals.length > 0) return { kind: "refused" }`, with `scoreFor`
+        refusing any class with `merged <= 0` or under its population floor — ONE thin class switches ranking off for
+        every class. And the rate divides merges in the window by OPEN tasks in the plan (src 14/521, docs 0/56), not by
+        dispatches.
+      - THE CONSEQUENCE: `compareDispatch` falls through to id order on every pass, so dispatch is filing order
+        (W1-T4064 depends on this task).
+      - The claim "the value gate refuses classes" was wrong: nothing refuses DISPATCH by class; the gate only turns
+        ranking off. docs and plan-lint sit at zero because 53 of 56 docs tasks are blocked or verify-human.
+    NEW DESIGN:
+      (i) Each class gets a Beta posterior over P(merge per dispatch): trials are `run.start` -> credited merge, not open
+          tasks. The prior is pooled from the whole fleet (empirical Bayes), so a thin or zero-merge class is shrunk toward
+          the fleet rate instead of refused.
+      (ii) Rank with a Thompson draw seeded by the plan tree sha, so the order stays reproducible (the selector's
+           determinism rule). Exploration shrinks by itself as evidence accrues — no floor number.
+      (iii) INVARIANTS: a missing score is never treated as zero; the selector stays pure (no reads of its own); the same
+            seed yields the same order.
+    FALSIFIER: no `dispatch.value.calibrated` row within 24 h of deploy, or a merged docs run leaving the docs posterior
+    unchanged.

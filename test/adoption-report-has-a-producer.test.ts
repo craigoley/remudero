@@ -185,7 +185,18 @@ test("the daemon's own producer hook attaches an adoptionReport when called for 
   const root = tmp("rmd-adopt-hook-");
   try {
     mkdirSync(join(root, "state"), { recursive: true });
-    const hooks = buildMeasurementCadenceDaemonHooks({ config: { root } as Config, now: () => new Date("2026-08-25T12:00:00Z") });
+    // The run closure stays REAL; only its GitHub-facing leaves are pinned offline (the same seams
+    // test/the-verb-census-reaches-a-reader.test.ts pins, for the same reason): left live, an
+    // authenticated `gh` on the host drives the plan-reconcile rung to a real landing push.
+    const hooks = buildMeasurementCadenceDaemonHooks({
+      config: { root } as Config,
+      now: () => new Date("2026-08-25T12:00:00Z"),
+      creditedMergedIds: () => new Set(),
+      planReconcileLand: () => {
+        throw new Error("an adoption-report fixture must never reach the plan-reconcile landing bridge");
+      },
+      coverageImprovementReader: () => ({ status: "refused", reason: "no_coverage_merged_artifact", detail: "offline fixture" }),
+    });
     const result = await hooks.runMeasurementCadence();
     assert.ok(result.adoptionReport, "the real daemon producer must attach an adoptionReport");
     assert.ok(Array.isArray(result.adoptionReport.findings));

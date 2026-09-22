@@ -1,0 +1,43 @@
+- id: W1-T4061
+  title: "A PLAYWRIGHT BUMP LEAVES THE IMAGE'S BROWSER STALE AND NOTHING REBUILDS IT — the image bakes the Chromium build pinned by the ROOT package-lock.json, but neither acr-build.yml nor IMAGE_BAKED_PATHS watches that file; rebuild and recycle when the pinned playwright-core version changes, not on every lockfile edit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#auto-recycle-2026-09-22"
+  plan_refs: ["W1-T3240"]
+  files:
+    - .github/workflows/acr-build.yml
+    - src/lib/deployer.ts
+    - test/a-playwright-bump-rebuilds-the-image.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    deploy/Dockerfile resolves PW_VERSION from /app/package-lock.json and installs that Chromium
+    build into the image (REQ 15). The root package-lock.json changed 12 times in the 30 days to
+    2026-09-22, almost all unrelated dependency bumps, so watching the whole file would rebuild and
+    recycle about a dozen times a month for nothing — which is why the auto-recycle PR of that day
+    deliberately left it out. But a playwright-core bump is a real image change nothing detects, and
+    it is the known cause of "every browser proof fails and the review calls it executed and FAILED"
+    (the Playwright-bump incident the operator memory records).
+  design: |
+    (i) Build: in acr-build.yml, add package-lock.json to the push paths AND a first step that
+    compares packages['node_modules/playwright-core'].version between the pushed commit and its
+    parent, exiting the job early (success, no build) when it did not change.
+    (ii) Drift: count a commit as image drift when it changed that version, not when it merely
+    touched the lockfile — so the auto-recycle tick recycles for a Playwright bump and for nothing
+    else in that file.
+    (iii) Keep the two in agreement with a test, like IMAGE_BAKED_PATHS and the push paths.
+  acceptance:
+    - claim: "a playwright-core version change builds a new image"
+      proof: 'grep: test("W1-T4061: a playwright-core bump starts the image build" in test/a-playwright-bump-rebuilds-the-image.test.ts'
+    - claim: "an unrelated lockfile change neither builds nor counts as drift"
+      proof: 'grep: test("W1-T4061: an unrelated lockfile change is not image drift" in test/a-playwright-bump-rebuilds-the-image.test.ts'
+    - claim: "a playwright-core bump counts as image drift for the recycle tick"
+      proof: 'grep: test("W1-T4061: a playwright-core bump is image drift" in test/a-playwright-bump-rebuilds-the-image.test.ts'
+  falsifier: |
+    CLOSE IF acr-build.yml or IMAGE_BAKED_PATHS already reacts to a playwright-core version change.

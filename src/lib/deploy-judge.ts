@@ -1,6 +1,23 @@
 import { isInPlanScope } from "./plan-scope.js";
 
 export type DeployImpactScore = 0 | 1 | 3 | 9 | 18;
+
+/** Files that reach the fleet only through a rebuilt image (W1-T3240); acr-build.yml builds on
+ *  exactly these, and a test holds the two lists equal. */
+export const IMAGE_BAKED_PATHS: readonly string[] = [
+  "deploy/Dockerfile",
+  "deploy/entrypoint.sh",
+  ".dockerignore",
+  // The image's own CLI install (claude, codex) and the Codex requirements it copies in: a change
+  // to either reaches workers only through a rebuilt image.
+  "deploy/package.json",
+  "deploy/package-lock.json",
+  "deploy/codex-requirements.toml",
+];
+
+function touchesImage(change: DeployWorthChange): boolean {
+  return change.files.some((file) => IMAGE_BAKED_PATHS.includes(file));
+}
 export type DeployWorthSource = "deterministic" | "judge" | "fail-closed";
 
 export interface RecordedDeployRestartThreshold {
@@ -101,6 +118,13 @@ export function deterministicDeployWorth(change: DeployWorthChange): DeployWorth
     return {
       score: 0,
       reason: "plan-only change: deterministic zero; the judge is not consulted",
+      source: "deterministic",
+    };
+  }
+  if (touchesImage(change)) {
+    return {
+      score: 18,
+      reason: "image input changed: only a recycle onto the rebuilt image delivers it",
       source: "deterministic",
     };
   }
