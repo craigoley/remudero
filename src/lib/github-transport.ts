@@ -384,9 +384,17 @@ export const DEFAULT_GH_READ_CADENCE_S = 180;
 /** A short, cross-process transport gap protects the secondary limiter without making a normal
  * daemon sweep self-refuse after its first read. This is not another 180-second budget window. */
 export const DEFAULT_GH_SHARED_READ_GAP_MS = DEFAULT_GH_PACE_MIN_GAP_MS;
+export const GH_SHARED_READ_GAP_ENV = "RMD_GH_SHARED_READ_GAP_MS";
 const GH_CADENCE_LOCK_WAIT_MS = 25;
 const GH_CADENCE_LOCK_MAX_WAIT_MS = 1_000;
 const GH_CADENCE_LOCK_STALE_MS = 30_000;
+
+function resolveGhSharedReadGapMs(env: NodeJS.ProcessEnv): number {
+  const raw = env[GH_SHARED_READ_GAP_ENV];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_GH_SHARED_READ_GAP_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_GH_SHARED_READ_GAP_MS;
+}
 
 /** The `search` limiter — a separate bucket with its own, far lower ceiling. */
 export const GH_SEARCH_BUCKET = "search";
@@ -717,6 +725,7 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   if (isWrite || isExempt || stampPath === undefined) return evaluate();
 
   const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
+  const sharedReadGapMs = resolveGhSharedReadGapMs(env);
   return withGhCadenceLock(stampPath, sleepSync, () => {
     const decision = evaluate();
     // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
@@ -725,7 +734,8 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     const latest = readStampMs(stampPath);
     const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(stampPath) === latest;
     const elapsed = latest === undefined ? undefined : now() - latest;
-    const remaining = ownLatest || latest === undefined ? 0 : DEFAULT_GH_SHARED_READ_GAP_MS - (elapsed ?? 0);
+    const remaining =
+      ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
     if (remaining > 0) sleepSync(remaining);
     // Stamp only after the gap so a concurrent process observes the completed transport slot.
     stamp(stampPath);

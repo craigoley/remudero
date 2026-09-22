@@ -299,6 +299,23 @@ test("the shared cadence lock is released and applies a bounded gap to a sibling
   }
 });
 
+test("an explicit zero shared gap skips only the bounded sibling delay", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lock-override-`));
+  try {
+    const env = { XDG_CACHE_HOME: dir, RMD_GH_SHARED_READ_GAP_MS: "0" } as NodeJS.ProcessEnv;
+    const stamp = ghReadCadenceStampPath(env) as string;
+    const sleeps: number[] = [];
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    stampGhRead(stamp);
+    const siblingTime = (Date.now() + 5) / 1000;
+    utimesSync(stamp, siblingTime, siblingTime);
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.equal(sleeps.some((ms) => ms > 0), false, "the explicit zero override must skip the sibling delay");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a search read stamps its own limiter, leaving the shared read window untouched", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-wire-search-`));
   try {
