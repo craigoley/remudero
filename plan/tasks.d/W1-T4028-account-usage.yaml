@@ -1,0 +1,81 @@
+- id: W1-T4028
+  title: "CODEX HEADROOM HAS NO READER ANYWHERE IN THE PROCESS, SO THE CONSOLE'S PROVIDER-HEADROOM CARD CAN ONLY EVER SAY 'UNAVAILABLE' — the claude lane's windows are read from a cache the codex lane has no equivalent of"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: medium
+  origin: "operator ask 2026-09-22: instrument codex headroom, after the console's Provider headroom card was confirmed Unavailable in Chrome"
+  plan_refs: [W1-T4024, W1-T4027]
+  files: [src/lib/account-usage.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t4027-8-console-port
+  rationale: |
+    MEASURED 2026-09-22. app.remudero.com/analytics renders a `Provider headroom` card asking "Is
+    a provider window close to exhausted?" and answers `Unavailable` — correctly, because the
+    number does not exist anywhere in the process.
+
+    The fleet dispatches on three lanes. Their headroom instrumentation is not symmetric:
+
+      claude   `cachedUsageUtilization` in ~/.claude.json — five-hour and weekly windows, with a
+               `fetchedAtMs` and an `accountUuid`, read by lib/account-usage.ts
+      codex    NOTHING. No rate-limit read, no usage read, no cached utilisation, anywhere in src/
+      cash     not a window at all — metered spend, answered in dollars (W1-T4024)
+
+    (1) IT IS A MISSING READER, NOT A MISSING RENDER. Nothing in src/ reads a codex rate-limit or
+        usage figure, so no amount of console work can surface one. This is the plumbing half of
+        W1-T4024's panel.
+
+    (2) THE ASYMMETRY IS INVISIBLE AND THEREFORE DANGEROUS. An operator reading the console sees
+        one instrumented lane and infers the fleet's headroom from it. A codex lane at its ceiling
+        looks identical to a codex lane with room, and the divert decisions that depend on
+        headroom have no codex signal to weigh.
+
+    (3) THE CLAUDE READER IS THE TEMPLATE, INCLUDING ITS REFUSALS. lib/account-usage.ts already
+        establishes the shape worth copying: a reading carries its own as-of, a reading belonging
+        to a different account is REFUSED rather than rendered, and the module states plainly that
+        it measures combined burn rather than the fleet's share. A codex reader that skips those
+        would be worse than none — a confident wrong headroom is the W1-T3755 shape again.
+
+    (4) THE SOURCE MUST BE ESTABLISHED BEFORE THE SHAPE. Whether codex exposes usage at all, and
+        on what surface, is the first question. If it does not, the honest outcome is a stated
+        "no source exists" — which is a DIFFERENT answer from today's silence, and is what
+        W1-T4027 asks every absent series to distinguish.
+  design: |
+    (i) ESTABLISH THE SOURCE FIRST, AND RECORD WHAT WAS FOUND. Before any reader is written,
+        determine what the codex surface actually exposes — a rate-limit header, a usage endpoint,
+        a local cache — and record it. A task that cannot find a source ends by saying so, in the
+        console, rather than leaving the card silent.
+
+    (ii) THE READING CARRIES ITS OWN AS-OF AND ITS OWN IDENTITY. Same contract as the claude
+         reader: the instant it describes, and whose account it describes. A reading that cannot
+         establish either is refused, not rendered.
+
+    (iii) A REFUSED OR ABSENT READING IS NEVER DRAWN AS HEADROOM. Not zero, not full, not an empty
+          bar — the three renderings that all read as "fine" to someone scanning quickly.
+
+    (iv) NO CREDENTIAL IS READ THAT IS NOT ALREADY READ. The claude reader is explicit that it
+         never touches the keychain and discards the parsed file in the same expression. The codex
+         reader inherits that constraint rather than reopening it.
+
+    NOT IN SCOPE: changing any routing or divert decision on the basis of the new signal. Making
+    the number exist and be honestly rendered comes first; spending it is a separate judgement.
+  acceptance:
+    - claim: "a codex usage reading carries the instant it describes and whose account it describes"
+      proof: "unit test: a codex reading carries its as-of and identity"
+    - claim: "a reading that cannot establish its identity or freshness is refused rather than rendered"
+      proof: "unit test: an unidentifiable codex reading is refused"
+    - claim: "an absent or refused codex reading is never drawn as zero, full, or an empty window"
+      proof: "unit test: absent codex headroom is not drawn as a window"
+    - claim: "no credential surface is read that the claude reader does not already read"
+      proof: "grep: NEVER FROM THE KEYCHAIN in src/lib/account-usage.ts"
+  falsifier: |
+    Render an absent reading as 0% or 100% and the third assertion goes red — both scan as "fine",
+    which is the whole hazard. Accept a reading with no as-of and a frozen cache becomes
+    indistinguishable from a live one, which the first catches. Reach for the keychain because it
+    is the easiest place to find an identity and the fourth goes red. Return a plausible default
+    when the source cannot be found, and the second goes red: no source must read as no source.
