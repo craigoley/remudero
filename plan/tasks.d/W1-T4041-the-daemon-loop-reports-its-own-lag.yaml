@@ -1,0 +1,99 @@
+- id: W1-T4041
+  title: "THREE INDEPENDENT TIMER-DRIVEN LANES WENT SILENT TOGETHER FOR 34 MINUTES WHILE THE PROCESS STAYED ALIVE — the liveness heartbeat, the inter-phase review clock and the sweep all stopped at once and no row says which phase held them: sample the daemon's own loop lag and ledger the phase in force when a tick is late"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    THE INCIDENT. PR #6561's checks went green at 13:21:55Z. Its review posted at 13:40:54Z — 19
+    minutes later. #6564 went green at 13:19:52Z and waited 21 minutes. Neither wait was CI: both
+    are measured from the LAST CHECK COMPLETING to `sweep.review_started`.
+
+    (1) WHAT THE LEDGER UNION SHOWS, AND WHY IT IS NOT AN ADMISSION PROBLEM. #6561 was disposed
+    `wait` every ~60s with an honest reason — "checks pending 12m", 14m, 15m, 16m, 17m, 18m, 19m —
+    the last at 13:19:22.445Z. Checks went green at 13:21:55Z. The next row for that PR is
+    13:40:54Z `sweep.review_started`. In between the daemon wrote NOTHING about it. This is read
+    from the deduplicated ledger UNION (`rmd ledger-grep`), not the live file, which had already
+    been compacted — an earlier reading of mine off the live file alone was wrong for that reason
+    and is not the basis of anything here.
+
+    ADMISSION IS EXONERATED, on the code rather than by inference. `lightPassActionable`
+    (src/run-task.ts) opens with `if (disposition === "post-review") return true;` —
+    unconditionally. `runSweepLightPass`'s `selectedNumbers` is the union of BOTH lanes
+    (`...spawning`, `...planFilings`), so the plan-filing bound cannot starve one lane while the
+    other runs. Neither bound was reached: there were 7 open PRs and the spawning width is 3.
+
+    (2) THE THREE LANES STOPPED TOGETHER. This is the actual finding.
+      - `daemon.alive`, the liveness heartbeat: 13:05:54Z (phase "sweep"), then NOTHING until
+        13:40:02Z (phase "dispatch"). 34 minutes.
+      - The inter-phase review clock: its last row is `daemon.review_clock.wake_consumed` at
+        13:19:23.868Z. It is wired in production (`sleepUntilSweepWake: githubEventWake.sleep`),
+        it was demonstrably alive that instant, and it emitted nothing afterwards.
+      - The full sweep: last `sweep.pass` 13:19:23.020Z, next 13:40:53.809Z.
+    The process did NOT die: it wrote `ledger_compaction.fired` at 13:33:10Z and `daemon.headroom`
+    at 13:37:58Z, then dispatched normally. The ONE review that landed in that window (#6563 at
+    13:27:23Z) carries `actor: operator` and run id `review-PR6563-…` — a different process
+    entirely, not this daemon.
+
+    (3) WHY "STOPPED TOGETHER" IS THE WHOLE SIGNAL. Those three lanes share exactly one thing: they
+    are all driven by timers on this process's event loop. The review clock waits on
+    `signal.sleep(ms)`, which resolves from `timers.setTimer`; the heartbeat ticker waits on
+    `deps.sleep(pollIntervalMs)`; the sweep loop is awaited between them. A blocked event loop
+    freezes all three at once and leaves the process alive to continue afterwards — which is
+    precisely the observed shape. No other single cause explains all three, and each lane's own
+    bounds and guards were checked and exonerated above.
+
+    THIS SHARD DOES NOT ASSERT THE CULPRIT. A plausible one exists and is recorded so the next
+    reader can test it rather than re-derive it: the state directory holds 371 ledger files and
+    320 MB, `src/lib/ledger.ts` reads them with SYNCHRONOUS fs calls (`readdirSync` and siblings;
+    it contains no `fs/promises` import and no `createReadStream`), and `ledger_compaction.fired`
+    lands INSIDE the window. That is motive and opportunity, not proof, and a shard that asserted
+    it would be doing exactly what this one exists to stop.
+
+    (4) WHY INSTRUMENTATION AND NOT A FIX. Every lane that could have reported this outage was
+    itself frozen by it, so absence of evidence was the only evidence available — and reasoning
+    from that absence produced two wrong root causes before this one, each of which survived
+    review of the code and died only against a later measurement. The fleet cannot afford a defect
+    class whose signature is silence. A loop-lag sampler is the smallest change that converts the
+    next occurrence from archaeology into a row that names the phase.
+
+    (5) WHY IT CANNOT BE THE SAME EVENT LOOP IT MEASURES. A sampler that schedules its own timer on
+    the blocked loop records nothing, for the same reason everything else did — this is the
+    "status commands are not ground truth" trap. The measurement therefore takes the delay from the
+    CLOCK, comparing wall time against expected tick time, so an overrun is still observable on the
+    first tick that runs AFTER the block clears. It reports the lag it just suffered, never the lag
+    it is currently in; that is a real limit and the criteria state it rather than hide it.
+
+    (6) NOT A THRESHOLD, AND NOT A GUARD. Nothing is gated, refused, restarted or capped. This adds
+    one ledger row on a late tick and none on a punctual one. The daemon's behaviour is unchanged.
+
+    FILES. src/lib/daemon.ts owns the loop, the phase labels and every lane named above. The suite
+    is new — the existing daemon tests assert what each phase DOES, never that the loop kept
+    running while it did, which is why a 34-minute freeze shipped unobserved.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four `unit test:` proofs are carried in the `grep: test("…"`
+    form so each resolves to a line THIS diff introduces and fails at the base ref, rather than the
+    bare-title form whose zero-match TAP wrapper exits 0 on a tree that has none of the behaviour.
+    The fifth names the new ledger step literal in code. No pattern contains the substring " in ",
+    and every dot is escaped.
+
+    THIS FILING CARRIES NO TRAILER AND SITS ON A chore/ BRANCH, not `run-W1-T4041-*`.
+  acceptance:
+    - claim: "a tick that ran late reports the lag it suffered"
+      proof: 'grep: test("W1-T4041: a tick delayed past its interval reports the lag" in test/the-daemon-loop-reports-its-own-lag.test.ts'
+    - claim: "the lag row names the phase that was in force when the tick was late"
+      proof: 'grep: test("W1-T4041: the lag row names the phase that was in force" in test/the-daemon-loop-reports-its-own-lag.test.ts'
+    - claim: "a punctual tick adds no row so the signal stays rare enough to read"
+      proof: 'grep: test("W1-T4041: an on-time tick reports nothing" in test/the-daemon-loop-reports-its-own-lag.test.ts'
+    - claim: "a sampler that throws is swallowed and never takes the daemon loop down"
+      proof: 'grep: test("W1-T4041: a sampler failure never takes the daemon loop down" in test/the-daemon-loop-reports-its-own-lag.test.ts'
+    - claim: "the new ledger step exists in the daemon loop rather than only in this record"
+      proof: "grep: daemon\\.loop_lag in src/lib/daemon.ts"
+  risk: high
+  origin: "oper#three-lanes-silent-together-2026-09-22"
+  plan_refs: ["W1-T2852", "W1-T1211", "W1-T2379"]
+  files: [src/lib/daemon.ts, test/the-daemon-loop-reports-its-own-lag.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0

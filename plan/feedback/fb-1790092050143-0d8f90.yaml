@@ -1,0 +1,56 @@
+id: fb-1790092050143-0d8f90
+ts: 2026-09-22T15:47:30.143Z
+raw: "THE DOCUMENTED MANUAL REPAIR FOR A STALLED PR CANNOT RUN AT ITS OWN
+  DEFAULT SETTING, AND IT FAILS EXACTLY WHEN AN OPERATOR IS ALREADY INTERVENING
+  BECAUSE AUTOMATION DID NOT WORK — observed directly 2026-09-22 while clearing
+  PR 6573, reproduced five times, not inferred. `rmd review <n>` is what
+  docs/review-gate.md names for a PR whose required `remudero-review` status is
+  absent on the current head. It issues MORE THAN ONE GitHub read per
+  invocation: the first resolves criteria and self-syncs, then `readHeadShaRest`
+  (run-task.ts, inside `runReview`) reads again about four seconds later.
+  run-task.ts wraps the verb in `withGhTransportFloor`, which is
+  `withGhTransportFloorMode(\"enforce\")`, and the enforce floor is 180 seconds.
+  So the verb refuses ITS OWN SECOND READ, every time, by construction.
+  VERBATIM: \"GhReadCadenceRefusal: gh read cadence floor: a read-shaped call 4s
+  after the last one on the core limiter (floor 180s, W1-T3297)\". AND RETRYING
+  IS SELF-DEFEATING, WHICH IS THE PART THAT WASTES THE OPERATOR'S TIME.
+  `applyGhReadCadence` stamps on an ALLOWED read -- correctly, and its own
+  comment says a refusal must not extend its own window -- but each invocation
+  spends one allowed read before being refused, so every attempt re-stamps the
+  clock. Measured across six consecutive attempts, the reported age went 173s,
+  3s, 50s, 96s, 142s, 2s: the operator can never reach 180s by trying. THE
+  ASYMMETRY IS THE DIAGNOSIS AND IT IS ONE LINE APART IN THE SAME FILE. The
+  DAEMON runs under `withDaemonGhTransportFloor` = ADVISORY (run-task.ts,
+  daemonCommand), so the fleet's own review calls are unaffected and this has
+  never shown up in automation. Only the standalone verb enforces. Nothing in
+  deploy/ or launchd sets RMD_GH_TRANSPORT_FLOOR, so the enforce mode is reached
+  by default on an operator machine and never on the fleet. WORKAROUND USED, ON
+  THE RECORD: RMD_GH_TRANSPORT_FLOOR=advisory ./bin/rmd review 6573, which
+  posted remudero-review=success (5 criteria substantiated, proof_exec 5/5).
+  That override is DESIGNED IN -- `withGhTransportFloorMode` only forces its
+  mode when the operator has not chosen one -- so this is not a bypass. But an
+  operator who does not read the transport source cannot know that, and the
+  refusal text does not say it. CANDIDATE REMEDIES, CHEAP FIRST. (a) MAKE THE
+  REFUSAL ACTIONABLE: when a read is refused inside a verb that has already
+  spent an allowed read this invocation, say so and name the override and the
+  wait, instead of a bare refusal plus a stack trace. Cheapest, no behaviour
+  change, removes the dead end. (b) DO NOT SPEND BUDGET ON A DOOMED INVOCATION:
+  a verb that will need N reads should discover at its FIRST read that it cannot
+  finish, rather than burning one read and re-stamping the clock. (c) EXPENSIVE,
+  AND IT NEEDS A RULING RATHER THAN A PATCH: make the floor per-INVOCATION
+  instead of per-read, so the spacing that GitHub's secondary limit actually
+  punishes -- between bursts -- is preserved while a bounded verb completes.
+  That changes a safety mechanism and should not be done quietly. FALSIFYING
+  CHECK: if `rmd review` completes unattended on a machine with no
+  RMD_GH_TRANSPORT_FLOOR set and no prior gh read in the last 180 seconds, then
+  the second read is not always refused and this is environment-specific;
+  re-derive by running the verb cold and reading which call raises."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

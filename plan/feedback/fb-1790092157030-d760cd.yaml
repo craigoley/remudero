@@ -1,0 +1,46 @@
+id: fb-1790092157030-d760cd
+ts: 2026-09-22T15:49:17.031Z
+raw: "NEGATIVE RESULT, RECORDED SO IT IS NOT RE-FILED: THE POST-REVIEW STALL
+  ESCALATION WORKS, AND THE HYPOTHESIS THAT IT IS BLIND TO NON-EXECUTION IS
+  FALSE. Investigating the 2026-09-22 manual repair of PR 6573, the working
+  hypothesis was that `detectPostReviewStall` only counts consecutive THROWN
+  failures and would therefore be blind to a disposition the sweep records and
+  never acts on. MEASURED AGAINST THE REAL LEDGER, AND THE HYPOTHESIS DID NOT
+  SURVIVE. Corpus: the CONFIG ROOT, not the checkout -- the first query read the
+  checkout's own state/ directory, which holds no ledger at all, and returned a
+  vacuous zero; the real store is the state volume beside it, and that
+  distinction is the same config.root-versus-repoRoot trap recorded elsewhere.
+  Three-form union: 673 .gz archives plus 8 plain files, 126,681 lines. POSITIVE
+  CONTROL: run.start 1714, review.posted 1827, so the query could see its
+  corpus. FINDINGS: sweep.disposed totals 12,455 rows; 132 carry disposition
+  post-review with acted:false; ALL 132 carry an action_error; and they collapse
+  to just ELEVEN distinct PR-plus-head episodes, so the 132 are repeated ticks
+  of eleven incidents rather than 132 incidents. Every error is a `gh pr view`
+  command failure -- GitHub transport, not a logic fault. And the escalation
+  fired: `sweep.post_review.stalled.escalated` reads 14 in the same corpus. So a
+  post-review action that throws IS counted, IS deduped per episode, and DOES
+  escalate, exactly as sweep.ts's own comment claims. NOTHING SHOULD BE BUILT
+  HERE. WHAT THE MEASUREMENT CANNOT SETTLE, STATED RATHER THAN GLOSSED. This
+  corpus is an operator machine's and its coverage does not reach today -- PR
+  6573 appears in it nowhere -- so the specific stall repaired by hand on
+  2026-09-22, a required remudero-review status simply ABSENT on a new head with
+  no error row and no escalation, is NOT in this population and was not tested
+  by this measurement. A positive control proves the query can see its corpus;
+  it does not prove the corpus covers the window. Anyone revisiting this must
+  re-run the same three-form union against the FLEET's ledger and look
+  specifically for heads that received a post-review disposition and no
+  subsequent review.posted WITHOUT an action_error -- that is the shape this
+  measurement leaves open and the only shape still worth asking about.
+  FALSIFYING CHECK FOR THIS RECORD ITSELF: if the fleet corpus shows post-review
+  dispositions with acted:false and NO action_error, then silent non-execution
+  is real after all and this negative result is scoped to the operator corpus
+  only."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
