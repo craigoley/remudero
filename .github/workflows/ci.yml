@@ -720,12 +720,12 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - name: Determine this diff's fast-lane class (W1-T2428 — a PLAN_ONLY/DOCS_ONLY diff cannot move source coverage)
+      - name: Determine this diff's coverage class (W1-T2428 — a PLAN_ONLY/DOCS_ONLY/TEST_ONLY diff cannot move source coverage)
         # INVARIANT: the class comes from the real predicate — scripts/diff-class.mjs imports
         # `isInPlanScope` from src/lib/plan-scope.ts. Two of the repo's three scope predicates
         # already disagree; a bash reimplementation here would be a fourth (W1-T2428, Q1). It fails
         # closed twice over: the script resolves an unreadable, empty or malformed input to SOURCE,
-        # and this step clamps stdout to the three known tokens, so even a bare Node invocation that
+        # and this step clamps stdout to the four known coverage tokens, so even a bare Node invocation that
         # cannot start leaves CLASS=SOURCE. `plan-scope.ts` is a dependency-free leaf and Node 22.22.3
         # strips its type annotations, so this runs before npm ci. On a push, changed-files.txt is left
         # empty and the script's own empty-list rule resolves it to SOURCE.
@@ -737,9 +737,9 @@ jobs:
           else
             : > changed-files.txt
           fi
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            PLAN_ONLY|DOCS_ONLY|TEST_ONLY|SOURCE) ;;
             *) CLASS="SOURCE" ;;
           esac
           cat diff-class.log || true
@@ -1046,7 +1046,7 @@ jobs:
             fi
             VALUE="$(cat "$CLASS_FILE")"
             case "$VALUE" in
-              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:SOURCE|push:SOURCE) ;;
+              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:SOURCE|push:SOURCE) ;;
               *)
                 echo "coverage-ratchet: coverage-shard-${SHARD} carried unrecognised class metadata '${VALUE}'."
                 exit 1

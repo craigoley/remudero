@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // scripts/diff-class.mjs — W1-T2428: classifies a diff as PLAN_ONLY, DOCS_ONLY, or SOURCE, so
 // `ci` and `coverage-ratchet` can skip suites that class cannot fail (no `src/**` or `test/**`
-// file moved). The class comes from `isInPlanScope` (src/lib/plan-scope.ts), the same
+// file moved). The coverage classifier adds TEST_ONLY only for the instrumented coverage lane;
+// ordinary source/test validation remains SOURCE. The class comes from `isInPlanScope` (src/lib/plan-scope.ts), the same
 // predicate the reviewer's sweep uses (W1-T205) — never a second scope-rule implementation.
 //
-// THREE CLASSES: PLAN_ONLY (every file in plan scope), DOCS_ONLY (every file in plan scope or
+// THREE BASE CLASSES: PLAN_ONLY (every file in plan scope), DOCS_ONLY (every file in plan scope or
 // under `docs/`), SOURCE (anything else, including an empty or unreadable list). `classify()`
 // never throws and fails closed to SOURCE, never PLAN_ONLY, on anything undeterminable.
+// `classifyCoverage()` additionally returns TEST_ONLY when every changed path is under `test/`;
+// it still fails closed to SOURCE for an empty, unreadable, or mixed list.
 //
 // USAGE: `--changed-files <path>` classifies a newline-separated file list (`-` reads stdin);
 // `--list-plan-reading-suites` prints the suites `planReadingSuiteFiles` selects; W1-T2680's
@@ -46,6 +49,9 @@ export const CLASSES = Object.freeze({
   SOURCE: "SOURCE",
 });
 
+/** The coverage lane's extra, safe-to-skip class. It is deliberately not a base class. */
+export const COVERAGE_CLASSES = Object.freeze({ ...CLASSES, TEST_ONLY: "TEST_ONLY" });
+
 /**
  * Whether a repo-relative path counts as "docs" for DOCS_ONLY — the `docs/` prefix only, never a
  * bare `.md` match: `MASTER-PLAN.md` is already plan scope, and a bare extension match would also
@@ -53,6 +59,11 @@ export const CLASSES = Object.freeze({
  */
 export function isDocsPath(path) {
   return path.startsWith("docs/");
+}
+
+/** A test-only path is rooted under test/, never a similarly named source or docs path. */
+export function isTestPath(path) {
+  return typeof path === "string" && path.startsWith("test/");
 }
 
 /**
@@ -110,6 +121,24 @@ export function classify(files) {
       reason: `classification threw — undeterminable, failing closed to SOURCE: ${err && err.message ? err.message : String(err)}`,
     };
   }
+}
+
+/**
+ * Classifies the expensive coverage lane without weakening the ordinary source/test lane.
+ * Instrumented source coverage cannot change when a diff adds or edits only test/** files, so
+ * those diffs can register the required coverage check with a skipped artifact. Any uncertainty
+ * (empty, malformed, mixed, or a base class other than SOURCE) keeps the base verdict intact.
+ */
+export function classifyCoverage(files) {
+  const base = classify(files);
+  if (base.class !== CLASSES.SOURCE || !Array.isArray(files) || files.length === 0) return base;
+  if (files.every(isTestPath)) {
+    return {
+      class: COVERAGE_CLASSES.TEST_ONLY,
+      reason: `all ${files.length} changed file(s) are under test/ — instrumented source coverage cannot move`,
+    };
+  }
+  return base;
 }
 
 /**
@@ -280,6 +309,9 @@ export function main(argv) {
     args: argv,
     options: {
       "changed-files": { type: "string" },
+      // Coverage-only optimization: required coverage still registers, but test-only diffs do not
+      // spend ~39 minutes installing browsers and collecting an unchanged source-coverage graph.
+      "coverage-class": { type: "boolean", default: false },
       "list-plan-reading-suites": { type: "boolean", default: false },
       // W1-T2680: given a changed-file list, print every suite that WALKS a population those files
       // belong to, or READS one of them as text — the suites `git grep -l <symbol>` cannot reach.
@@ -330,7 +362,7 @@ export function main(argv) {
     files = undefined; // classify() below treats this as undeterminable — fails closed to SOURCE
   }
 
-  const { class: cls, reason } = classify(files);
+  const { class: cls, reason } = values["coverage-class"] ? classifyCoverage(files) : classify(files);
   console.error(`diff-class: ${cls} — ${reason}`);
   console.log(cls);
   process.exitCode = 0; // ALWAYS 0 in classify mode — the class token on stdout carries the verdict
