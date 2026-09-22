@@ -50,12 +50,8 @@ function detectRealNodeModules(config: Pick<Config, "root">): WorktreeNodeModule
   return { skipped: false, worktreeRoot, realNodeModules };
 }
 
-function temporaryRoot(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
-}
-
 test("a fleet worktree with a real node_modules is named while a symlink is ignored", () => {
-  const root = temporaryRoot("rmd-real-node-modules-");
+  const root = mkdtempSync(join(tmpdir(), "rmd-real-node-modules-"));
   try {
     const config = { root } satisfies Pick<Config, "root">;
     const configuredWorktreeRoot = worktreesDir(config as Config);
@@ -84,7 +80,7 @@ test("a fleet worktree with a real node_modules is named while a symlink is igno
 });
 
 test("a configured root with no live worktrees skips instead of failing or inventing a finding", () => {
-  const root = temporaryRoot("rmd-no-live-worktrees-");
+  const root = mkdtempSync(join(tmpdir(), "rmd-no-live-worktrees-"));
   try {
     const config = { root } satisfies Pick<Config, "root">;
     const report = detectRealNodeModules(config);
