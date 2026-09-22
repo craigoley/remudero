@@ -91,6 +91,8 @@ line numbers** — every one here had gone stale. Each rule cites the PR that ea
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.** → doctrine/plan-and-task-hygiene/a-shard-s-field-is-not-a-completion-signal-it-stays-on.md
 - **Decoding rule citations — where each family canonically lives.** → doctrine/plan-and-task-hygiene/decoding-rule-citations-where-each-family-canonically.md
+- **Take the cheap candidate a record prices beside a costly one — and name what the costly one
+  now waits for.** → doctrine/plan-and-task-hygiene/take-the-cheap-candidate-and-name-what-the-expensive-one.md
 
 ## CI and merging
 

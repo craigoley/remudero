@@ -1,6 +1,6 @@
 import type { Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
-import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
 /**
  * Risk judge — P34 clause (b), MASTER-PLAN §4B/§9, W1-T248. A lightweight judge on the
@@ -52,6 +52,12 @@ export interface RiskJudgeVerdict {
   confidence: number;
   /** Optional gate-posture consequence. Absent for ordinary change-risk judgments. */
   gateConsequence?: RiskJudgeGateConsequence;
+  /** W1-T478 — the raw judge text that failed to parse, capped at {@link REPORT_EXCERPT_CAP} via
+   *  {@link capStderrExcerpt} (the #1584 "absent, never empty" precedent this copies). Present ONLY
+   *  on {@link MALFORMED_RESPONSE_VERDICT}: a read that FAILED kept its evidence, distinct from a
+   *  read that SAID NO. Never present on a genuine parsed verdict, adverse or not — there is no
+   *  unparsed text to keep once `RISK_VERDICT` was actually read. */
+  unparseableExcerpt?: string;
 }
 
 // ── What the judge is shown — the candidate CHANGE, never task.risk ──────
@@ -278,7 +284,12 @@ function scrubRiskJudgeVerdict(
 ): RiskJudgeVerdict {
   const findings = new Set<RiskJudgeScrubFinding>(inputFindings);
   const reasons = verdict.reasons.map((reason) => scrubRiskJudgeString(reason, findings));
-  const scrubbed: RiskJudgeVerdict = { ...verdict, reasons };
+  // W1-T478: the kept excerpt is untrusted judge text too — scrub it exactly like `reasons`,
+  // never let the capture bypass the boundary the rest of this module enforces.
+  const scrubbed: RiskJudgeVerdict =
+    verdict.unparseableExcerpt === undefined
+      ? { ...verdict, reasons }
+      : { ...verdict, reasons, unparseableExcerpt: scrubRiskJudgeString(verdict.unparseableExcerpt, findings) };
   if (!findings.has("credential")) return scrubbed;
   return {
     ...scrubbed,
@@ -553,6 +564,16 @@ const MALFORMED_RESPONSE_VERDICT: RiskJudgeVerdict = {
   ],
 };
 
+/** The capped, "absent never empty" excerpt of the judge text that failed to parse (W1-T478) —
+ *  the same {@link capStderrExcerpt}/{@link REPORT_EXCERPT_CAP} discipline #1584 established for
+ *  a failed spawn's stderr. Returns `undefined` for whitespace-only raw output, so a truly empty
+ *  response and an off-contract prose response stay distinguishable rather than both reading as
+ *  an empty field. */
+function unparseableResponseExcerpt(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  return trimmed ? capStderrExcerpt(trimmed, REPORT_EXCERPT_CAP) : undefined;
+}
+
 // ── The deterministic controller (Standing rule 12: judgment advisory, action deterministic) ──
 
 export type RiskJudgeActionKind = "proceed" | "escalate";
@@ -796,6 +817,7 @@ export async function runRiskJudge(
     reasons: verdict.reasons,
     confidence: verdict.confidence,
     ...(verdict.gateConsequence === undefined ? {} : { gate_consequence: verdict.gateConsequence }),
+    ...(verdict.unparseableExcerpt === undefined ? {} : { unparseable_excerpt: verdict.unparseableExcerpt }),
     action: action.kind,
     reason: action.reason,
     ...(spent === undefined
@@ -904,9 +926,11 @@ export const RISK_JUDGE_MAX_ATTEMPTS = 3;
 /** Build a `judge` function wired to a real spawn. THE RETRY RE-REQUESTS, NEVER RE-ASKS
  *  (W1-T2212): the same args (prompt included) go to `spawn` on every attempt. Only an
  *  `unparseable` outcome retries, bounded at {@link RISK_JUDGE_MAX_ATTEMPTS}; a parsed
- *  verdict returns immediately. At the bound, {@link MALFORMED_RESPONSE_VERDICT} returns;
- *  the caller's unavailable-judge policy then decides whether to retain deterministic flow or
- *  escalate. Why: docs/forensics/risk-judge.md#realriskjudge. */
+ *  verdict returns immediately. At the bound, {@link MALFORMED_RESPONSE_VERDICT} returns,
+ *  carrying the LAST attempt's raw text as {@link RiskJudgeVerdict.unparseableExcerpt} (W1-T478)
+ *  — the text that failed to parse is kept, capped, rather than thrown away; the caller's
+ *  unavailable-judge policy then decides whether to retain deterministic flow or escalate.
+ *  Why: docs/forensics/risk-judge.md#realriskjudge. */
 export function realRiskJudge(opts: {
   mount: Mount;
   cwd: string;
@@ -940,12 +964,16 @@ export function realRiskJudge(opts: {
       opts.log?.("risk_judge.parse_attempt", { attempt, max_attempts: maxAttempts, kind: outcome.kind });
       if (outcome.kind === "parsed") return outcome.verdict;
       if (attempt === maxAttempts) {
+        // W1-T478: keep the LAST attempt's raw text (the one that actually exhausted the
+        // bound) under a length cap — a read that FAILED must not throw away why.
+        const excerpt = unparseableResponseExcerpt(outcome.raw);
         return {
           ...MALFORMED_RESPONSE_VERDICT,
           reasons: [
             `judge output carried no parseable RISK_VERDICT after ${attempt} attempt(s) — no LLM ` +
               "risk decision was made; this is a MALFORMED RESPONSE, not an adverse risk judgment",
           ],
+          ...(excerpt === undefined ? {} : { unparseableExcerpt: excerpt }),
         };
       }
     }

@@ -94,7 +94,8 @@
   origin: "oper#review-lane-starved-by-daemon-iteration-2026-09-22"
   plan_refs: ["W1-T2379", "W1-T2981", "W1-T1259", "W1-T2744"]
   files: [src/lib/daemon.ts, src/lib/sweep.ts, test/the-measurement-cadence-does-not-block-the-loop.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   note: |
     RESERVATION HAND-OFF, RECORDED BECAUSE THE MINT COULD NOT RECORD IT. `rmd next-task-id` reserved
@@ -105,3 +106,19 @@
     The escape is granted only where the reservation recorded a value to hand off FROM, and it did.
     The filing branch below is the real holder, named on its own physical line so nothing trails it.
     reservation hand-off: unknown -> chore/file-t4033-t4034
+    WITHDRAWN 2026-09-22 — THE SYMPTOM WAS REAL, THIS ROOT CAUSE WAS NOT. This shard blamed the
+    measurement cadence's inline await at daemon.ts:2580 for starving review admission. Three
+    measurements killed it.
+    (i) The inter-phase review clock is LIVE across that cadence by construction — started at
+    daemon.ts:2516, first stopped at 2868, with the cadence at ~2578 between them — so had the
+    cadence been the blocker the light pass would still have run. It did not.
+    (ii) `lightPassActionable` admits `post-review` unconditionally, so a live light pass would
+    have reviewed the waiting PRs.
+    (iii) The cadence is not what held the loop: `daemon.alive` stopped at 13:05:54Z, BEFORE the
+    cadence fired, and the review clock, the heartbeat and the sweep all went silent together while
+    the process stayed alive and later continued.
+    Detaching the cadence also breaks a deliberate mechanism: W1-T2852's suite asserts "measurement
+    remains the phase holding the main loop" and drives a restricted review pass from a GitHub wake
+    DURING it. Five of its tests fail against the detach, and bending them to fit would have
+    destroyed the design they encode.
+    SUPERSEDED BY W1-T4041, which instruments the loop instead of guessing at it.

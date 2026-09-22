@@ -1150,6 +1150,7 @@ import {
   type CappedOverride,
   type CriterionVerdict,
   type CriterionRefusal,
+  type ProofExecutor,
   type ReviewVerdict,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
@@ -1301,6 +1302,7 @@ import {
   type MergeConflictEvidence,
   type OpenPrView,
   type ReviewDispatchMode,
+  type ReviewReuseInputs,
   type RollupCheckEntry,
   type PostFixReverificationSummary,
   type ProofDiscriminationEvidence,
@@ -1320,6 +1322,7 @@ import {
   currentPlanIneligibilityReason,
   defaultSweepGhRun,
   dispatchFixCatchOutcome,
+  discriminateReviewReuse,
   escalationTaskIdFor,
   fixDispatchErrorClass,
   fixDispatchSignalDeath,
@@ -1719,16 +1722,154 @@ export function buildSweepEffects(
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
         : reviewerCodeGate.call(String(_prNumber), args, opts);
     });
+  const reviewRepoDir =
+    deps.repo === (deps.localRepoName ?? resolveOwnerRepo().repo) ? repoRoot : join(deps.config.root, "repos", deps.repo);
+  const materializeReviewReuse =
+    (deps.materializeReviewWorktreeImpl as typeof materializeReviewWorktree | undefined) ?? materializeReviewWorktree;
+  const buildBaseProofReuse =
+    (deps.buildBaseProofDirImpl as typeof buildBaseProofDir | undefined) ?? buildBaseProofDir;
+  const reviewReuseExecProof = deps.reviewReuseExecProofImpl as ProofExecutor | undefined;
   const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
-    // A base move still needs fresh proof discrimination; the existing semantic review path is
-    // the safe fallback until a proof-only runner can be exposed without duplicating review.ts.
-    if (mode.kind !== "reuse") {
+    const fallbackToFullReview = async (reason: string): Promise<number> => {
       deps.log("sweep.review_reuse_discrimination_fallback", {
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
-        ...(mode.kind === "discriminate-only" ? { judged_head_sha: mode.judgedHeadSha } : {}),
+        requested_review_mode: mode.kind,
+        effective_review_mode: "full-review",
+        fallback_reason: reason,
+        ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+    };
+
+    if (mode.kind === "discriminate-only") {
+      const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
+      const prior = readLedgerLines(deps.ledgerPath)
+        .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
+        .at(-1)?.decision_verdict as ReviewVerdict | undefined;
+      if (
+        !pr.taskId ||
+        !prior ||
+        (prior.state !== "success" && prior.state !== "failure") ||
+        !Array.isArray(prior.criteria) ||
+        reuseInputs.currentOwnDiffDigest === undefined ||
+        reuseInputs.currentMergeBaseSha === undefined
+      ) {
+        return fallbackToFullReview("prior verdict, task identity, or current reuse facts are unreadable");
+      }
+
+      let worktreePath: string | undefined;
+      let baseProof: BaseProofDir | undefined;
+      let fallbackReason: string | undefined;
+      let exitCode: number | undefined;
+      try {
+        const materialized = materializeReviewReuse(deps.config, reviewRepoDir, pr.prNumber, pr.headSha);
+        if (materialized.worktreePath === undefined) {
+          fallbackReason =
+            `PR-head worktree unavailable (${materialized.failure.errorClass}): ${materialized.failure.message}`;
+        } else {
+          worktreePath = materialized.worktreePath;
+          const criteria = prior.criteria.map((criterion) => ({ proof: criterion.proof }));
+          baseProof = buildBaseProofReuse(criteria, worktreePath);
+          if (baseProof.baseCheckoutDir === undefined) {
+            fallbackReason =
+              baseProof.baseWorktreeFailure !== undefined
+                ? `merge-base worktree unavailable: ${baseProof.baseWorktreeFailure}`
+                : "merge-base proof evidence is unavailable";
+          } else {
+            const diff = String(ghExec(["pr", "diff", pr.prUrl], { encoding: "utf8", maxBuffer: 1 << 26 }));
+            const discriminated = discriminateReviewReuse({
+              prior,
+              diff,
+              report: pr.body ?? "",
+              headCheckoutDir: worktreePath,
+              baseCheckoutDir: baseProof.baseCheckoutDir,
+              baseUnreadablePaths: baseProof.baseUnreadablePaths,
+              baseIsCheckout: baseProof.baseIsCheckout,
+              addedTestFiles: baseProof.addedTestFiles,
+              taskDeclaredFiles: deps.plan.byId.get(pr.taskId)?.files,
+              execProof: reviewReuseExecProof,
+            });
+            if (!discriminated.ok) {
+              fallbackReason = discriminated.reason;
+            } else {
+              const verdict: ReviewVerdict = {
+                ...discriminated.verdict,
+                reviewContractDigest: prior.reviewContractDigest,
+                ownDiffDigest: reuseInputs.currentOwnDiffDigest,
+                mergeBaseSha: reuseInputs.currentMergeBaseSha,
+              };
+              const discriminationPosted = await postReviewStatusGuarded({
+                owner: deps.owner,
+                repo: deps.repo,
+                sha: pr.headSha,
+                state: verdict.state,
+                description: reviewPostedDescription(verdict),
+                taskId: pr.taskId,
+                evidence: reviewEvidenceStrength(verdict.criteria),
+                ledgerPath: deps.ledgerPath,
+                runId: deps.runId,
+                prUrl: pr.prUrl,
+                reviewInputDigest: pr.reviewInputDigest,
+                reviewEngineRevision: REVIEW_ENGINE_REVISION,
+                fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
+              });
+              if (!discriminationPosted.posted && !discriminationPosted.replayed) {
+                exitCode = 1;
+              } else {
+                appendLedger(deps.ledgerPath, {
+                  run_id: deps.runId,
+                  task_id: pr.taskId,
+                  step: "review.posted",
+                  context: REVIEW_CONTEXT,
+                  state: verdict.state,
+                  head_sha: pr.headSha,
+                  pr_url: pr.prUrl,
+                  decision_verdict: verdict,
+                  review_reused: false,
+                  review_discriminated: true,
+                  requested_review_mode: mode.kind,
+                  // W1-T3901 effective_review_mode records the actual review cost path.
+                  effective_review_mode: "proof-only-discrimination",
+                  discriminated_from_head_sha: mode.judgedHeadSha,
+                  discrimination_result: verdict.state,
+                  ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
+                  proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+                  ...reviewLedgerLegibilityFields(verdict),
+                });
+                exitCode = 0;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        const reason = `proof-only discrimination errored: ${String((error as Error)?.message ?? error)}`;
+        deps.log("sweep.review_reuse_discrimination_error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
+        fallbackReason = reason;
+      } finally {
+        if (baseProof?.baseIsCheckout && baseProof.baseCheckoutDir !== undefined) {
+          removeBaseProofWorktree(reviewRepoDir, baseProof.baseCheckoutDir, deps.worktreeRemoveImpl);
+        }
+        if (worktreePath !== undefined) {
+          try {
+            (deps.worktreeRemoveImpl ?? worktreeRemove)(reviewRepoDir, worktreePath);
+          } catch (error) {
+            deps.log("sweep.review_reuse_discrimination_cleanup_error", {
+              pr_number: pr.prNumber,
+              head_sha: pr.headSha,
+              error: String((error as Error)?.message ?? error),
+            });
+          }
+        }
+      }
+      if (fallbackReason !== undefined) return fallbackToFullReview(fallbackReason);
+      return exitCode ?? 1;
+    }
+
+    // Exact reuse keeps the existing guarded post path. It never executes proofs because its
+    // identity inputs are unchanged; only base movement reaches the proof-only branch above.
+    if (mode.kind !== "reuse") {
+      return fallbackToFullReview("unknown review reuse mode");
     }
     const prior = readLedgerLines(deps.ledgerPath)
       .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
@@ -1764,6 +1905,8 @@ export function buildSweepEffects(
       pr_url: pr.prUrl,
       decision_verdict: verdict,
       review_reused: true,
+      requested_review_mode: mode.kind,
+      effective_review_mode: "verdict-reuse",
       reused_from_head_sha: mode.judgedHeadSha,
       ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
       proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
@@ -9282,9 +9425,7 @@ export async function runFixRung(opts: {
           // `strikeRegimeOf` as "keyword_only" BY CONSTRUCTION (never a decision), which let the
           // amnesty in `priorStrikesFor` erase every body-repair strike the instant the task's
           // regime turned "executed", however many were spent (this task's rationale, §1/§2).
-          const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
-            ? "executed"
-            : "keyword_only";
+          const verdictRegime = strikeRegimeForDispatch(review.criteria);
           deps.log("fix.dispatch", {
             strike: strikes,
             strike_cap: opts.strikeCap,
@@ -9994,9 +10135,7 @@ export async function runFixRung(opts: {
     // when the floor actually ran proofs is a strike against EVIDENCE. Untagged
     // historical lines are read as "keyword_only" (see priorStrikesFor) — they were
     // all written before the executor shipped.
-    const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
-      ? "executed"
-      : "keyword_only";
+    const verdictRegime = strikeRegimeForDispatch(review.criteria);
 
     const fixArgs: SpawnWorkerArgs = {
       cwd: opts.worktreePath,
@@ -32885,6 +33024,30 @@ export function currentStrikeRegimeFor(lines: Array<Record<string, unknown>>, ta
  * this, because every one of them predates the executor.
  */
 export type StrikeRegime = "executed" | "keyword_only";
+
+/** The empty-input decision is evidence, not an inference from a failed proof search. */
+export const EMPTY_CRITERIA_REGIME_REASON = "an empty criteria array is not evidence of keyword noise";
+
+/**
+ * W1-T4033 — THE REGIME A STRIKE IS SPENT UNDER, DERIVED FROM THE EVIDENCE IT WAS DISPATCHED
+ * AGAINST. `criteria.some(...)` asks "did any proof execute", which is the right question ONLY
+ * when there are criteria to ask it of. A ci-log or merge-conflict round has NONE by construction
+ * — the reviewer runs only once CI is green — so `[].some(...)` returned `false` and every such
+ * strike was tagged `keyword_only`, then amnestied by {@link priorStrikesFor} under the
+ * `"executed"` regime. MEASURED 2026-09-22 on the live ledger: 200 of 200 `fix.dispatch` rows read
+ * `keyword_only`, 190 of them ci-log or merge-conflict, and 153 dispatches printed `strike 1/2` —
+ * `priorStrikes` read ZERO every time, so the cap never advanced and a futile loop never ended.
+ *
+ * THE EMPTY CASE IS THE WHOLE FIX: an empty criteria array is not evidence of keyword noise, it is
+ * the absence of a reviewer verdict. What such a round WAS dispatched against — a named failing
+ * check, a real conflicting file list — is executed evidence, so its strike must count. Every round
+ * that HAS criteria is byte-for-byte unchanged, so W1-T199's amnesty keeps working for the case it
+ * was built for: a judged round whose every proof was `not_executable`.
+ */
+export function strikeRegimeForDispatch(criteria: ReadonlyArray<{ proof_exec?: unknown }>): StrikeRegime {
+  if (criteria.length === 0) return "executed";
+  return criteria.some((c) => c.proof_exec !== "not_executable") ? "executed" : "keyword_only";
+}
 
 /** The regime a ledger `fix.dispatch` line records — untagged ⇒ pre-executor. */
 export function strikeRegimeOf(line: Record<string, unknown>): StrikeRegime {

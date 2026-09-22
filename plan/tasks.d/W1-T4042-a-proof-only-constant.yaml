@@ -1,0 +1,87 @@
+- id: W1-T4042
+  title: "AN EXPORTED CONSTANT EXISTS ONLY TO MAKE A GREP PROOF MATCH A NON-COMMENT LINE — EMPTY_CRITERIA_REGIME_REASON is referenced nowhere, one occurrence in the whole tree, and it is what turned a failing review green: delete it and prove the claim against the code that actually runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: |
+    WHAT HAPPENED. W1-T4033's criterion 5 was a doc-shaped `grep:` whose pattern matched only a
+    PROSE COMMENT. The reviewer executed it, observed it pass on the head, and then withdrew the
+    pass with a reason worth quoting in full: "every executor-returned matching line is a comment;
+    non-discriminating, positive override withdrawn, keyword floor applied" (#6573, proof_exec
+    `executed_stale`). That rule is right. A proof you satisfy by writing a sentence substantiates
+    nothing, and it is the same family as the `detectTestTheater` guard this repo already runs.
+
+    WHAT MADE THE PR GREEN INSTEAD. An automated repair pushed one commit, "make empty-criteria
+    evidence explicit", adding:
+
+        export const EMPTY_CRITERIA_REGIME_REASON = "an empty criteria array is not evidence of keyword noise";
+
+    That is the proof's own pattern, verbatim, as a string literal on a non-comment line. MEASURED
+    on origin/main after the merge: `EMPTY_CRITERIA_REGIME_REASON` occurs EXACTLY ONCE in the tree —
+    its own declaration — with zero references under src/, test/ or scripts/. It is never read,
+    never imported, never asserted. Its only effect is to move the grep's hit from a comment line to
+    a code line, which is precisely the discrimination the reviewer's rule exists to enforce. The
+    letter of the proof was satisfied and its purpose was inverted.
+
+    WHY THIS IS A TASK AND NOT A DRIVE-BY DELETE. Deleting the constant alone would strand
+    W1-T4033's merged criterion 5, whose proof pattern is that exact sentence. Standing rule 21
+    makes MERGED terminal, so that criterion is deliberately NOT amended — it stays exactly as it
+    was judged, and this task carries the honest replacement claim instead. That is the shape rule
+    21's own message prescribes: "file a follow-up task carrying it".
+
+    WHAT THE HONEST PROOF IS. The substantive claim W1-T4033 shipped is that BOTH strike writers —
+    the ordinary dispatch and the body-repair arm — derive the regime from ONE helper rather than
+    each computing it, so the two can never drift. That is checkable against code that actually
+    runs: `strikeRegimeForDispatch(review.criteria)` appears at both call sites and nowhere else.
+    Verified with `rmd check-proof --base`: head hits 2, base hits 0, verdict "discriminates".
+
+    AND THE ABSENCE IS ASSERTED, NOT ASSUMED. A `grep:` proof can only assert presence, so "the
+    constant is gone" is carried by a unit test that imports the module and asserts the export is
+    absent. That test FAILS on the current tree (where the constant exists) and passes once it is
+    removed, so it discriminates in the direction that matters and cannot pass vacuously.
+
+    NOT A REVIEWER CHANGE. The reviewer's comment-only rule is correct and is untouched. Nothing
+    about proof grading, the keyword floor or the executor changes here. This deletes dead code and
+    states the claim against live code.
+
+    FILES. src/run-task.ts holds both the constant and the two call sites. The suite is new: no
+    existing test asserts the absence of an export, which is why a proof-only constant could land.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. The two `unit test:` proofs take the `grep: test("…"` form
+    so each resolves to a line THIS diff introduces and fails at the base ref. The third names the
+    live call site. No pattern contains " in ", and every dot is escaped.
+
+    risk: high IS RULE 19'S SPAN, NOT BLAST RADIUS. The linter derives three concerns from the file
+    basenames (run-task, the suite, the tier manifest). The change itself deletes two lines and adds
+    one test file; decomposing a two-line deletion into three tasks would be worse than recording
+    the span here, which is the same call W1-T999's own note documents for this rule.
+
+    THIS FILING CARRIES NO TRAILER AND SITS ON A chore/ BRANCH, not `run-W1-T4042-*`.
+  acceptance:
+    - claim: "the regime is derived in exactly one place so a second writer cannot drift"
+      proof: 'grep: test("W1-T4042: the regime is derived in exactly one place" in test/the-regime-helper-has-one-derivation.test.ts'
+    - claim: "the proof-only constant is no longer exported by the module"
+      proof: 'grep: test("W1-T4042: the proof-only constant is no longer exported" in test/the-regime-helper-has-one-derivation.test.ts'
+    - claim: "removing it does not change how the helper decides the empty case"
+      proof: 'grep: test("W1-T4042: the helper still decides the empty case the same way" in test/the-regime-helper-has-one-derivation.test.ts'
+  risk: high
+  origin: "oper#proof-only-constant-2026-09-22"
+  plan_refs: ["W1-T4033", "W1-T199"]
+  files: [src/run-task.ts, test/the-regime-helper-has-one-derivation.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  note: |
+    CRITERION 1 REPOINTED BEFORE ANY PUSH, AND WHY THE FIRST FORM COULD NOT WORK. As authored it was
+    `grep: strikeRegimeForDispatch(review\.criteria) in src/run-task.ts` — an INVARIANT, not a change.
+    W1-T4033 landed both call sites, so the pattern reads 2 hits at the merge base as well as at the
+    head. `rmd preflight --proofs` refused it in exactly those terms: "1 of 3 proof(s) pass at BOTH
+    head and 53088a55c; they establish nothing", with the remedy "repoint each at behaviour this diff
+    changes. A control assertion needs a corpus control of its own."
+    THE CLAIM IS STILL WORTH MAKING — a second derivation reappearing is the drift this task guards —
+    so it moves to a census test in the NEW suite, which does not exist at the base ref and therefore
+    discriminates. That test reads the source, asserts exactly two call sites and exactly one
+    `proof_exec !== "not_executable"` comparison (the helper's own), and asserts the file it read was
+    non-empty first, so it can never pass by comparing nothing.
