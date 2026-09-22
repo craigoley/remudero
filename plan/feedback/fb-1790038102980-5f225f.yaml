@@ -1,0 +1,20 @@
+id: fb-1790038102980-5f225f
+ts: 2026-09-22T00:48:22.980Z
+raw: "Console daemon review worktrees are symlinked to core repo node_modules
+  despite different package.json/package-lock hashes. Reviewing remudero-console
+  PR #1581 emitted: worktree checkout was cut from origin/main but node_modules
+  is symlinked from /home/node/Remudero/remudero whose hashes differ; a worker
+  may see Cannot find module or a version its own diff never asked for. The
+  second review happened to pass, but this undermines deterministic proof
+  execution. Make dependency materialization repo- and lockfile-scoped (or
+  refuse/reinstall on mismatch), never cross-link incompatible dependency trees;
+  add a regression covering two configured repos with divergent locks."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
