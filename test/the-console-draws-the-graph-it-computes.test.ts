@@ -154,6 +154,7 @@ test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the 
   const routes = buildPanelGraphRoutes(panelGraphDeps(tmpRoot()));
   const shape = routes.map((r) => `${r.method} ${r.path}`).sort();
   assert.deepEqual(shape, [
+    "GET /v1/action-results",
     "GET /v1/drain/preview",
     "GET /v1/feedback",
     "GET /v1/inbox",
