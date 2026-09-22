@@ -526,9 +526,26 @@ export interface CreditBackfillReceipt {
   prNumber: number;
 }
 
+/** W1-T3996: a SUBTRACT-ONLY quarantine mark against one durable {@link CreditStoreEntry} source,
+ *  tied to the EXACT recorded PR that proved it plan-only — never inferred from a branch name, a
+ *  task status field, or an operator override (design's own bar). Once written it is never
+ *  cleared by this module; only a fresh, non-plan-only credit for the SAME source could displace
+ *  it, and nothing here manufactures one. */
+export interface DurableCreditInvalidation {
+  prUrl: string;
+  prNumber: number;
+  /** Always `"durable-credit-plan-only"` today — see {@link invalidateDurableCredit}'s call site. */
+  reason: string;
+}
+
 /** One task's durable merge-evidence paths plus independent backfill-writer bookkeeping. */
 export type CreditStoreTaskRecord = Partial<Record<CreditStoreEntry["source"], CreditStoreEntry>> & {
   backfillReceipt?: CreditBackfillReceipt;
+  /** W1-T3996: sources whose durable entry above has been REVALIDATED and found plan-only. A
+   *  reader consults this BEFORE trusting the sibling entry, so a later projection with no
+   *  merged-path map in hand (the ordinary case) refuses the same credit it refused last time it
+   *  had one, rather than resurrecting it. */
+  invalidated?: Partial<Record<CreditStoreEntry["source"], DurableCreditInvalidation>>;
 };
 
 /** DELIVERABLE A — the durable, GitHub-independent record of merge credit, keyed by task id then by the path
@@ -680,6 +697,24 @@ export function recordCredit(store: CreditStore, taskId: string, entry: CreditSt
   const existing = store[taskId] ?? {};
   if (existing[entry.source]) return store;
   return { ...store, [taskId]: { ...existing, [entry.source]: entry } };
+}
+
+/** W1-T3996: SUBTRACT-ONLY — records that `source`'s durable entry for `taskId` is refused, tied
+ *  to the exact PR the caller just proved plan-only. Idempotent, matching {@link recordCredit}'s
+ *  own shape: a source already quarantined is left untouched rather than overwritten, so the
+ *  FIRST reason recorded stands as the audit trail. This never removes the sibling
+ *  {@link CreditStoreEntry} itself — a live rung (e.g. `corroborateByBranch`) that re-derives the
+ *  SAME source must still see it occupied and refuse to persist a duplicate, which is why the
+ *  quarantine sits ALONGSIDE the entry rather than in place of it. */
+export function invalidateDurableCredit(
+  store: CreditStore,
+  taskId: string,
+  source: CreditStoreEntry["source"],
+  invalidation: DurableCreditInvalidation,
+): CreditStore {
+  const existing = store[taskId] ?? {};
+  if (existing.invalidated?.[source]) return store;
+  return { ...store, [taskId]: { ...existing, invalidated: { ...existing.invalidated, [source]: invalidation } } };
 }
 
 /** Whether the backfill writer has durably recorded a successful append for this task. Kept
@@ -2256,40 +2291,69 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   const readCreditStore = deps.readCreditStore ?? (() => loadCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath)));
   const writeCreditStore =
     deps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath), store));
-  const creditStore = readCreditStore();
+  let creditStore = readCreditStore();
   const durableCredit = creditStore[task.id];
   if (durableCredit) {
     // Trailer is the STURDIER of the two evidentially — an anchored body hit, not a ref GitHub deletes on merge
     // — but either alone suffices: this is a tie-break for which url to report.
     const entry = durableCredit.trailer ?? durableCredit["head-branch"];
     if (entry) {
-      const base: StatusProjection = {
-        taskId: task.id,
-        source: entry.source,
-        status: "merged",
-        merged: true,
-        prUrl: entry.prUrl,
-        prNumber: entry.prNumber,
-        prState: entry.prState,
-        // DELIVERABLE B: the discoverable signal (design (iii)) — a task credited by exactly one
-        // of the two durable paths says so right here, in the SAME projection every existing
-        // caller of `merged`/`source` already reads, no second query required.
-        ...(isSinglePathCredited(creditStore, task.id) ? { singlePathCredit: true as const } : {}),
-      };
-      // W1-T119/W1-T179 PARITY: the durable record proves the MERGE beyond doubt, but `indeterminate` asks
-      // whether THIS cycle's read succeeded, so a dark cycle is still surfaced — from cheap flags the gateway
-      // already computed, never a NEW PR-record read.
-      if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
-        const previous = deps.previousProjection?.(task.id);
-        const now = deps.now ?? Date.now;
-        return {
-          ...base,
-          indeterminate: true,
-          unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
-          githubUnobservableSince: previous?.githubUnobservableSince ?? new Date(now()).toISOString(),
+      // W1-T3996 DURABLE-CREDIT REVALIDATION — a HEAD-BRANCH entry gets ONE more look before this rung trusts
+      // it, because the rung that WRITES one (`corroborateByBranch` below) only ever ran the LEDGER-based
+      // `isPlanOnlyFilingPr` guard, never the DIFF-based `isPlanOnlyChangeset` one rung (c) runs before ITS OWN
+      // persist — so a plan-only filing PR whose ledger row carries no `plan_only` marker slips straight past
+      // it and sits in `merge-credit.json` forever (the W1-T3990/#6468 incident this task recovers). A TRAILER
+      // entry needs no second look: line ~2449 below only ever persists one AFTER `planOnlyRefusal` already
+      // cleared, so re-checking it here would just repeat a check it already passed.
+      const alreadyInvalidated = entry.source === "head-branch" ? durableCredit.invalidated?.["head-branch"] : undefined;
+      const planOnlyPaths =
+        !alreadyInvalidated && entry.source === "head-branch" ? deps.mergedPathsByPr?.get(entry.prNumber) : undefined;
+      const isRevalidatedPlanOnly = planOnlyPaths !== undefined && planOnlyPaths.length > 0 && isPlanOnlyChangeset(planOnlyPaths);
+      if (!alreadyInvalidated && !isRevalidatedPlanOnly) {
+        const base: StatusProjection = {
+          taskId: task.id,
+          source: entry.source,
+          status: "merged",
+          merged: true,
+          prUrl: entry.prUrl,
+          prNumber: entry.prNumber,
+          prState: entry.prState,
+          // DELIVERABLE B: the discoverable signal (design (iii)) — a task credited by exactly one
+          // of the two durable paths says so right here, in the SAME projection every existing
+          // caller of `merged`/`source` already reads, no second query required.
+          ...(isSinglePathCredited(creditStore, task.id) ? { singlePathCredit: true as const } : {}),
         };
+        // W1-T119/W1-T179 PARITY: the durable record proves the MERGE beyond doubt, but `indeterminate` asks
+        // whether THIS cycle's read succeeded, so a dark cycle is still surfaced — from cheap flags the gateway
+        // already computed, never a NEW PR-record read.
+        if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
+          const previous = deps.previousProjection?.(task.id);
+          const now = deps.now ?? Date.now;
+          return {
+            ...base,
+            indeterminate: true,
+            unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
+            githubUnobservableSince: previous?.githubUnobservableSince ?? new Date(now()).toISOString(),
+          };
+        }
+        return base;
       }
-      return base;
+      if (isRevalidatedPlanOnly) {
+        // durable-credit-plan-only: SUBTRACT ONLY, tied to the EXACT recorded PR — never inferred from the
+        // branch name, a task status field, or an operator override. Persisted so a LATER call with no path
+        // map in hand (the ordinary case: the map is one bounded `git log` per PASS, not every derivation)
+        // reads this mark instead of re-deriving it, and so `corroborateByBranch` below — reached in THIS
+        // very call once the durable rung declines — cannot silently re-persist the same known-bad PR.
+        creditStore = invalidateDurableCredit(creditStore, task.id, "head-branch", {
+          prUrl: entry.prUrl,
+          prNumber: entry.prNumber,
+          reason: "durable-credit-plan-only",
+        });
+        writeCreditStore(creditStore);
+      }
+      // FALL THROUGH, refused or already-quarantined alike: every rung below gets to answer as if this
+      // durable entry had never existed, which is what actually stops suppressing dispatch — merely
+      // flagging the surviving projection would still leave the task read as merged.
     }
   }
 
@@ -2350,11 +2414,17 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     const cands = deps.mergedHeadBranches?.(task.id) ?? deps.github.findMergedByHeadBranch?.(task.id);
     if (!cands) return undefined; // null (read failed → W1-T119) or method absent (fixture) — skip
     const debunked = debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex);
+    // W1-T3996: the durable rung above may have JUST quarantined this exact PR this very call (or on a
+    // previous one) — without this, a plan-only filing whose ledger row carries no `plan_only` marker
+    // would sail past `isPlanOnlyFilingPr` below and get re-persisted in the SAME projection that just
+    // refused it, undoing the revalidation before this function even returns.
+    const invalidatedUrl = creditStore[task.id]?.invalidated?.["head-branch"]?.prUrl;
     const hit = cands.find(
       (pr) =>
         pr.state.toUpperCase() === "MERGED" &&
         ownsBranch(pr.headRefName, task.id) &&
         !debunked.has(pr.url) &&
+        pr.url !== invalidatedUrl &&
         // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched from this task's
         // OWN worktree, which the retro, triage and plan flows reuse, would otherwise credit the task it just
         // filed unconditionally.
