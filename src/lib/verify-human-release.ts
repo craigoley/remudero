@@ -50,7 +50,6 @@ export interface VerifyHumanReleasePorts {
   /** The record as the plan holds it; undefined when the id resolves to nothing. */
   task: (id: string) => Task | undefined;
   riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
-  /** The live policy snapshot for this release attempt. Absent preserves the pre-policy behavior. */
   riskPolicy?: RiskPolicy;
   /** Writes the release row. `approveParkedTask`'s own guards apply; a non-zero code means no row. */
   writeRelease: (
