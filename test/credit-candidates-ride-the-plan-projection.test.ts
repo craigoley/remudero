@@ -163,6 +163,8 @@ test("creditCandidatesFromProjection is the named candidate mapping", () => {
   assert.equal(candidates[0]?.creditIsImplementation, true);
 });
 
+// The two markers are the measured #5886 body shape; either marker alone is intentionally not
+// enough to withdraw ordinary commit-trailer credit.
 const PREREQUISITE_ONLY_BODY = `Prerequisite split for W1-T3685's own PR (#5861), which the blocked_review fix rung refused under Standing rule 25.
 
 This PR carries ONLY the instrument: scripts/console-parity-ratchet.mjs and scripts/console-parity-baseline.json.`;
