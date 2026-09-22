@@ -1742,10 +1742,6 @@ export function buildSweepEffects(
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
     };
 
-    if (mode.kind === "full-review") {
-      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
-    }
-
     if (mode.kind === "discriminate-only") {
       const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
       const prior = readLedgerLines(deps.ledgerPath)
