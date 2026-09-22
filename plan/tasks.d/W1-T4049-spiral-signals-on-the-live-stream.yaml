@@ -1,0 +1,61 @@
+- id: W1-T4049
+  title: "A SPIRALING WORKER IS CAUGHT ONLY AT RUN END — the live stream observer carries a tool NAME and an error FLAG but not the fingerprints flight-signals' repetition and error-loop predicates need; carry bounded fingerprints and evaluate both mid-run (W1-T360's retained half)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator-ruling#W1-T360-2026-09-22"
+  plan_refs: ["W1-T360", "W1-T20", "W1-T942", "W1-T2557"]
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/a-spiral-is-seen-while-the-worker-runs.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE OPERATOR RETIRED THE LLM FLIGHT JUDGE AND KEPT THE DETERMINISTIC PREDICATES (W1-T360,
+    2026-09-22). src/lib/flight-signals.ts implements them (test/flight-signals.test.ts 14/14), but
+    nothing evaluates them against a live run, so a worker that spirals is caught only at run end.
+
+    THE LIVE OBSERVER DOES NOT CARRY WHAT TWO OF THEM NEED — MEASURED, AND IT CORRECTS W1-T20's
+    CLOSURE NOTE. collectWorkerResult (src/lib/worker.ts) emits `tool-executing` with `toolName` only,
+    and a tool_result as `toolOutcome: "error" | "success"` only. repeatedToolCallPredicate hashes a
+    call's name AND input (hashToolCall), so with the name alone five Reads of five different files
+    would look like a loop. errorSignatureLoopPredicate compares fingerprinted error text, so with a
+    bare flag five different errors would look like one error repeating.
+
+    THE THIRD IS ALREADY COVERED, SO IT IS DELIBERATELY NOT WIRED. stallTimeoutPredicate needs only
+    turn timing, which the observer does carry — but the worker-state sensor already ledgers silence
+    at its quiet floor (DEFAULT_WORKER_QUIET_FLOOR_MS = 30_000) and W1-T2557 already fires a mid-flight
+    runaway signal on a derived turn bound. Wiring stall again would be a second alarm for one fact.
+  design: |
+    (i) CARRY BOUNDED FINGERPRINTS, NEVER RAW PAYLOADS. On `tool-executing`, add a short stable hash of
+    name + canonical input (hashToolCall already exists — reuse it). On a tool_result error, add a
+    short fingerprint of the error text, normalised the way errorSignatureLoopPredicate expects.
+    Neither the input nor the error text itself crosses the observer: a transcript is not telemetry.
+    (ii) KEEP A BOUNDED ROLLING WINDOW of turn snapshots inside the worker-state sensor, per run, and
+    evaluate repeatedToolCallPredicate and errorSignatureLoopPredicate as turns complete.
+    (iii) OBSERVE BEFORE YOU ACT. A trip ledgers `worker.flight_signal.tripped` with the predicate,
+    the turn and the evidence fingerprints — once per run per predicate. It does NOT halt the worker:
+    a kill switch waits on a measured trip precision, the same order W1-T2557's runaway signal took.
+    (iv) THE HOT PATH STAYS CHEAP: hashing is per block, the window is capped, and a predicate error is
+    caught and ledgered, never allowed to disturb the stream loop that every worker runs.
+  acceptance:
+    - claim: "a tool call's observer event carries a bounded fingerprint of its name and input, never the raw input"
+      proof: 'grep: test("W1-T4049: a tool call carries a fingerprint and never its raw input" in test/a-spiral-is-seen-while-the-worker-runs.test.ts'
+    - claim: "five identical tool calls in a live run ledger a repeated-tool-call trip mid-run"
+      proof: 'grep: test("W1-T4049: five identical calls trip the repetition signal mid-run" in test/a-spiral-is-seen-while-the-worker-runs.test.ts'
+    - claim: "five reads of different files do NOT trip it, which a name-only signal would"
+      proof: 'grep: test("W1-T4049: different inputs to the same tool do not trip" in test/a-spiral-is-seen-while-the-worker-runs.test.ts'
+    - claim: "the same error repeating ledgers an error-loop trip, and five different errors do not"
+      proof: 'grep: test("W1-T4049: one error repeating trips and different errors do not" in test/a-spiral-is-seen-while-the-worker-runs.test.ts'
+    - claim: "a trip is ledgered once per run per predicate and never halts the worker"
+      proof: 'grep: test("W1-T4049: a trip is ledgered once and does not halt the worker" in test/a-spiral-is-seen-while-the-worker-runs.test.ts'
+  falsifier: |
+    CLOSE IF the observer already carries a tool-input fingerprint and an error fingerprint at build
+    time — re-read collectWorkerResult's streamObserver calls. At 855dcb0b6 it carries toolName and
+    toolOutcome only.

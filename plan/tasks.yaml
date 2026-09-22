@@ -7033,7 +7033,20 @@
       proof: "unit test over a productive fixture (growing diff, varied tool calls, no error loop) -> every predicate returns not-tripped"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-22 BY OPERATOR RULING (W1-T360's disposition) - SHIPPED IN SUBSTANCE. This
+  # record's acceptance is the predicates themselves (repetition, no-progress, and no false
+  # positive on a healthy transcript), and src/lib/flight-signals.ts implements them with
+  # test/flight-signals.test.ts at 14/14 on 2026-09-22. What was never built is the WIRING, and
+  # the ruling narrows it to the three predicates whose inputs the live streamObserver already
+  # carries. That wiring is filed as its own task rather than rewritten into this 2026-07 record.
+  # CORRECTION (after #6614 merged): the sentence above says the live streamObserver already
+  # carries the three predicates' inputs. MEASURED, it does not for two: tool-executing carries
+  # toolName only (repeatedToolCallPredicate hashes name AND input), and a tool_result carries an
+  # error FLAG only (errorSignatureLoopPredicate needs fingerprinted text). stallTimeout's inputs
+  # are carried, but the sensor's 30s quiet floor and W1-T2557's runaway bound already cover it.
+  # W1-T4049 carries the accurate scope: two predicates, observer fingerprints first.
   attempts: 0
 
 # ── §5C TASK PRE-FLIGHT (the plan gate). Task quality moves UPSTREAM of the runner: a deterministic linter
@@ -7147,7 +7160,14 @@
   # 120-turn mount fits, rather than decomposing a criterion that is only a few lines of load-time assertion.
   risk: high
   origin: architect
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-22 BY OPERATOR RULING (W1-T360). Layer 2, the LLM flight judge, is retired:
+  # it spends a model call per trip on a job risk-score.ts / risk-judge.ts already do post-hoc
+  # at the arm gate, and every run is already bounded by max_turns and budget_usd.
+  # src/lib/flight-judge.ts has no production caller; four comments cite it as a DESIGN
+  # PRECEDENT (run-task.ts once, specialist-panel.ts three times), so deleting the module is
+  # left to whoever moves that precedent text.
   attempts: 0
 
 - id: W1-T22
@@ -7179,7 +7199,16 @@
       proof: "unit test: scoring the same diff twice returns an identical band + factors (no clock/random input)"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-09-22 BY OPERATOR RULING (W1-T360) - SHIPPED IN SUBSTANCE as
+  # src/lib/risk-score.ts and src/lib/risk-judge.ts, which run at the arm gate today. Closing
+  # rather than leaving it queued: retiring W1-T21 makes this record's only dependency read
+  # SATISFIED (unmetDependencies excludes a retirement-carrying dep from the unmet list), which
+  # would otherwise dispatch a worker to build what already exists.
+  # DEPENDENTS NOW UNBLOCKED, DELIBERATELY: W2-T1 and W2-T3 name this record in depends_on.
+  # Their real prerequisite - deterministic risk scoring - has shipped, so releasing them is
+  # the correct reading, not a side effect. W2-T3 remains gated on its other dependencies.
   attempts: 0
 
 - id: W2-T1
@@ -8882,7 +8911,14 @@
   risk: medium
   origin: retro#1784058021334
   plan_refs: ["§4B"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-22 BY OPERATOR RULING (W1-T360), together with W1-T21. This record's
+  # golden is an engineered spiral that trips a Layer-1 predicate AND INVOKES THE JUDGE. The
+  # judge is retired, so leaving this queued would - once W1-T21's retirement satisfies its
+  # dependency - dispatch a worker to build a test around a component being withdrawn. A spiral
+  # golden for the RETAINED half (predicates tripping on the live observer) belongs with the
+  # wiring task, not here.
   attempts: 0
 
 # W1-T24 SPLIT (plan/t24-bootstrap-split): the machine half (W1-T24 — ci-gate workflow + docs) ships under

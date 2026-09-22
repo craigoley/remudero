@@ -124,8 +124,6 @@
       proof: "unit test: W1-T968: head unavailable with a prior arm on this head reports armed"
     - claim: "the step the new read consults is registered so a rotation cannot archive the evidence"
       proof: "unit test: W1-T968: automerge armed is registered in the decision relevant ledger steps"
-    - claim: "the phrase must answer about the pull request rather than about the call"
-      proof: "grep: the phrase must answer about the pull request rather than about the call in plan/tasks.d/W1-T968-arm-report-describes-the-call.yaml"
   risk: high
   origin: "oper#arm-report-describes-the-call-2026-08-18"
   plan_refs: ["W1-T449", "W1-T230"]
@@ -177,25 +175,17 @@
     eight measured mechanisms that merged green and nothing calls, and a new emission with no
     named consumer would be the ninth.
 
-    PROOF NOTES. Five criteria use the name-filtered `unit test:` form rather than a whole-file
-    path, so each names the behaviour it proves. Each title was measured against test/ with
-    `grep -rlF` and matched ZERO files, against a control title lifted from the real suite that
-    matched one. Every title is plain prose under 100 characters with no comma, no semicolon-space
-    and no regex metacharacter, so `looksLikeScenarioNarrative` cannot fail them and
-    `parseTestTarget`'s escaped-literal match has nothing to mishandle. The sixth is a
-    single-line `grep:` with an explicit path, driven from the full bullet text rather than a path
-    slug, verified by hand to read one hit at head and zero at the merge base.
-
-    ONE ADVISORY IS ACCEPTED KNOWINGLY RATHER THAN SILENCED. `rmd lint-plan` emits exactly one
-    finding against this shard, a `proof-scope` WARNING that criterion 6's grep names this shard's
-    own path while `files:` does not list it. It is advisory, never blocking — the run carried 618
-    warnings and 179 blocking tasks and NOT ONE blocking line names W1-T968. The warning is
-    accepted rather than fixed because both remedies are worse: adding the shard's own path to
-    `files:` would put the filing inside its own implementation scope, and repointing the grep at
-    a declared source path would name a file this change does not touch, so the pattern would read
-    zero at head and the criterion would fail executed rather than merely being unscoped. The
-    builder does not need to touch this path, so the scope guard the warning predicts will not
-    fire on the implementation branch.
+    PROOF NOTES. All five criteria use the name-filtered `unit test:` form rather than a
+    whole-file path, so each names the behaviour it proves. Each title was measured against test/
+    with `grep -rlF` and matched ZERO files on the pre-implementation tree, against a control title
+    lifted from the real suite that matched one. Every title is plain prose under 100 characters
+    with no comma, no semicolon-space and no regex metacharacter, so `looksLikeScenarioNarrative`
+    cannot fail them and `parseTestTarget`'s escaped-literal match has nothing to mishandle. The
+    acceptance contract is deliberately executable end to end: that the phrase answers about the
+    pull request and not the call is this task's intent, which criteria 1-4 prove behaviourally,
+    not a self-referential proof over this plan file. A sixth criterion once grepped this shard for
+    its own claim text; it read one hit at head and zero at base only while the shard was unmerged,
+    and two at both once it landed, so proof-discrimination refused it on the implementation PR.
 
     ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN CONTROL. W1-T968 read 0 on all four
     seconds before the reservation: refs/rmd-id/* (control refs/rmd-id/W1-T965 = 1, negative
