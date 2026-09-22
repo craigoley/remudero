@@ -66,7 +66,7 @@ test("array order does not matter: the success-after-failure fixture reads healt
 
 // ── acceptance 2 — the reported attempt is the LATEST for that name, not the first encountered ──
 
-test("when a check fails twice under the same name, the reported attempt is the LATEST by startedAt — identified by its OWN jobId, listed FIRST in the array", () => {
+test("the reported attempt is the most recent for its check name — when a check fails twice, it is identified by its OWN jobId, listed FIRST in the array", () => {
   const rollup = [
     { name: "diff-coverage", conclusion: "FAILURE", startedAt: "2026-09-10T00:10:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/222" },
     { name: "diff-coverage", conclusion: "FAILURE", startedAt: "2026-09-10T00:00:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/111" },
