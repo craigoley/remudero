@@ -64,6 +64,8 @@ const mod = (await import(pathToFileURL(SCRIPT_PATH).href)) as {
     commitMessages: string | undefined;
     addedFiles: readonly string[];
     readFile: (path: string) => string | undefined;
+    changedFiles?: readonly string[];
+    declaredTaskIds?: readonly string[];
   }) => { ok: boolean; defect?: string; message: string };
   resolveMergeBase: (worktreePath: string, baseRef: string) => string | undefined;
   commitMessagesSinceBase: (worktreePath: string, mergeBase: string | undefined) => string;
@@ -89,6 +91,55 @@ const noFile = () => undefined;
 function shardYaml(id: string) {
   return `- id: ${id}\n  title: "a filed shard"\n  repo: remudero\n  status: queued\n`;
 }
+
+// ── W1-T3994: a filing may be plan-only, but it must not mint its own run-branch credit ───────
+
+test("a plan-only filing on its own run branch is refused", () => {
+  const filedId = "W1-T3994-FILING";
+  const shard = `plan/tasks.d/${filedId}-filing.yaml`;
+  const result = evaluateWorkerBranchShape({
+    headRef: `run-${filedId}-1790041223007`,
+    commitMessages: "chore(plan): file a task\n",
+    addedFiles: [shard],
+    readFile: (path) => (path === shard ? shardYaml(filedId) : undefined),
+    changedFiles: [shard],
+    declaredTaskIds: [filedId],
+  });
+  assert.equal(result.ok, false, "a self-crediting run-shaped filing must be refused before it can merge");
+  assert.equal(result.defect, "plan-filing-run-credit");
+  assert.match(result.message, new RegExp(filedId));
+  assert.match(result.message, /non-run filing branch/);
+});
+
+test("a plan-only filing on a non-run branch remains exempt", () => {
+  const filedId = "W1-T3994-NONRUN";
+  const shard = `plan/tasks.d/${filedId}-filing.yaml`;
+  const result = evaluateWorkerBranchShape({
+    headRef: "codex/file-a-plan-record",
+    commitMessages: "chore(plan): file a task\n",
+    addedFiles: [shard],
+    readFile: (path) => (path === shard ? shardYaml(filedId) : undefined),
+    changedFiles: [shard],
+    declaredTaskIds: [filedId],
+  });
+  assert.equal(result.ok, true, result.message);
+  assert.match(result.message, /exempt from the run-<taskId>-<epochMs> shape check/);
+});
+
+test("a non-plan implementation on its correctly shaped run branch still passes", () => {
+  const filedId = "W1-T3994-IMPLEMENT";
+  const shard = `plan/tasks.d/${filedId}-filing.yaml`;
+  const result = evaluateWorkerBranchShape({
+    headRef: `run-${filedId}-1790041223007`,
+    commitMessages: "feat: implement the task\n",
+    addedFiles: [shard],
+    readFile: (path) => (path === shard ? shardYaml(filedId) : undefined),
+    changedFiles: [shard, "src/example.ts"],
+    declaredTaskIds: [filedId],
+  });
+  assert.equal(result.ok, true, result.message);
+  assert.match(result.message, /carries the run-<taskId>-<epochMs> shape/);
+});
 
 // ── acceptance 1: a branch claiming a task by trailer with a non-conforming name is refused ────
 
@@ -357,7 +408,7 @@ test("main(): REFUSES with exit 1 against a real worktree whose new commit trail
   }
 });
 
-test("main(): a real worktree with one READABLE added shard and one added-but-missing-from-disk shard resolves cleanly, exit 0 on a matching head ref", async () => {
+test("main(): a real worktree with one READABLE added shard and one added-but-missing-from-disk shard resolves cleanly on a non-run filing ref", async () => {
   // The vanished shard proves readFile's own try/catch (a worktree seam, not a git one) degrades
   // to "no claim from this file" rather than crashing main() outright — main() never re-throws.
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-branch-shape-main-shard-mix-"));
@@ -378,9 +429,7 @@ test("main(): a real worktree with one READABLE added shard and one added-but-mi
     // exercise its catch branch honestly.
     rmSync(join(dir, "plan", "tasks.d", "W1-T0000-vanished.yaml"));
 
-    const r = await withExitCode(() =>
-      main(["--head-ref", `run-${TASK_ID}-1787887966537`, "--base", baseSha, "--worktree-path", dir]),
-    );
+    const r = await withExitCode(() => main(["--head-ref", "codex/file-shard-mix", "--base", baseSha, "--worktree-path", dir]));
     assert.equal(r.exitCode, 0, r.err.join("\n"));
     assert.deepEqual(r.err, [], "a pass prints nothing on stderr");
     assert.equal(r.out.length, 1);
