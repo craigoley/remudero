@@ -73,9 +73,10 @@ test("FAST_GATE_STEPS: exactly six census entries, each bound at the shared FAST
   }
   assert.equal(
     NON_CENSUS_STEPS.length,
-    11,
+    12,
     "the seven pre-existing npm-script gates plus W1-T2491's branch-shape gate, W1-T2488's source-size-ratchet, the " +
-      "comment-load ratchet and W1-T3702's lint-plan gate are untouched by this task",
+      "comment-load ratchet, W1-T3702's lint-plan gate and the plan-shaped self-path-proof ratchet (a dir-walk suite, " +
+      "so a plain step rather than a census member) are untouched by this task",
   );
 });
 
@@ -299,6 +300,7 @@ test("runPreflightFast: with the census entries removed from `steps`, a spawn th
     const call = calls.find((c) => c.args.includes(step.script));
     assert.equal(call, undefined, `${step.script} must never be spawned once the census steps are removed from the list`);
   }
-  assert.equal(result.steps.length, 11);
+  // 12: the 11 prior non-census steps plus the plan-shaped self-path-proof ratchet (no boundMs).
+  assert.equal(result.steps.length, 12);
   assert.equal(result.ok, true, "with every pre-existing step at its default clean PASS and no census step present, the run reads green — the exact blind spot #3304 fell through");
 });
