@@ -31,7 +31,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 
-type CiJob = { name?: string; steps?: Array<{ run?: string }> };
+type CiJob = { name?: string; steps?: Array<{ name?: string; run?: string }> };
 
 async function loadCiJobs(): Promise<Record<string, CiJob>> {
   const raw = await readFile(CI_YAML_PATH, "utf8");
@@ -91,18 +91,32 @@ test("W1-T1027: no install step carries a retry, a lock wait, or a per-attempt t
   }
 });
 
-test("W1-T1027: source-capable jobs retain the exact no-apt install command; coverage-ratchet alone may guard it by diff class", async () => {
+test("W1-T1027: source-capable jobs retain the exact no-apt install command; only the measured duplicate ci lane may guard it", async () => {
   const jobs = await loadCiJobs();
   const runs = Object.fromEntries(playwrightInstallSteps(jobs));
   assert.equal(Object.keys(runs).length, 3, "expected exactly three install steps");
   assert.equal(
-    runs.ci,
     runs["test-slow"],
-    "the unguarded install steps must stay byte-identical — PR #2150 took the board down on the copy " +
-      "that had not been fixed, five minutes after PR #2148 hung on the other",
+    "npx playwright install chromium",
+    "the slow tier remains an unguarded source-capable install",
   );
+  assert.match(runs.ci, /npx playwright install chromium\s*$/, "ci must retain the exact Chromium command in its non-skipped arm");
+  assert.match(runs.ci, /steps\.setup-class\.outputs\.class/, "ci's browser skip must use the early classifier");
   assert.match(runs["coverage-ratchet"], /if \[ "\$CLASS" != "SOURCE" \]/, "coverage-ratchet may skip the browser only after the canonical source-class guard");
   assert.match(runs["coverage-ratchet"], /npx playwright install chromium\s*$/, "a SOURCE coverage diff must retain the exact Chromium command");
+});
+
+test("adaptive setup: source PR ci shards skip duplicate dependency/browser setup while pushes remain unguarded", async () => {
+  const jobs = await loadCiJobs();
+  const ciSteps = jobs.ci?.steps ?? [];
+  const setup = ciSteps.find((s) => s.name?.startsWith("Classify the diff before dependency"));
+  const install = ciSteps.find((s) => s.name === "Install (clean, from lockfile)");
+  const browser = ciSteps.find((s) => s.name?.startsWith("Install Playwright's Chromium"));
+  assert.match(setup?.run ?? "", /scripts\/diff-class\.mjs --changed-files changed-files-setup\.txt/);
+  assert.match(install?.run ?? "", /GITHUB_EVENT_NAME.*pull_request/);
+  assert.match(install?.run ?? "", /matrix\.shard.*!=.*1/);
+  assert.match(browser?.run ?? "", /steps\.setup-class\.outputs\.class.*SOURCE/);
+  assert.match(browser?.run ?? "", /npx playwright install chromium/);
 });
 
 test("W1-T1027: no fourth job silently grows a playwright install step", async () => {

@@ -83,12 +83,34 @@ jobs:
           # leaves no such ref. It self-clears on a re-run, so it reads as noise — it cost four CI
           # cycles across #1658, #1659 and #1677 in one day.
           fetch-depth: 0
+      - name: Classify the diff before dependency and browser setup
+        id: setup-class
+        run: |
+          if [ -n "${GITHUB_BASE_REF}" ]; then
+            git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
+            git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files-setup.txt 2>/dev/null || : > changed-files-setup.txt
+          else
+            : > changed-files-setup.txt
+          fi
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files-setup.txt 2>diff-class-setup.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class-setup.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "setup policy class: ${CLASS}."
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${{ steps.setup-class.outputs.class }}" = "SOURCE" ] && [ "${{ matrix.shard }}" != "1" ]; then
+            echo "setup policy: source PR shard ${{ matrix.shard }} skips duplicate npm ci; shard 1 owns typecheck and coverage-ratchet owns the source harness."
+            exit 0
+          fi
+          npm ci
       - name: Determine Playwright's pinned browser version (cache key input)
         id: playwright-version
         run: |
@@ -115,7 +137,12 @@ jobs:
         # FALSIFIER: test/workflow-playwright-install.test.ts refuses `--with-deps` and every
         # retry/wait token in either install step.
         # Why: W1-T1027 filed it, W1-T1034 (#2223) measured it — docs/forensics/ci-yml.md.
-        run: npx playwright install chromium
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${{ steps.setup-class.outputs.class }}" = "SOURCE" ]; then
+            echo "setup policy: source PR skips Playwright here because the ci test harness is intentionally skipped and coverage-ratchet owns the instrumented run."
+            exit 0
+          fi
+          npx playwright install chromium
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement. A
         # strict-mode violation anywhere in src/**/test/** fails it and blocks merge via ci-gate.
