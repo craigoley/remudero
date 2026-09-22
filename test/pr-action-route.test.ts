@@ -33,7 +33,7 @@ test("malformed confirmed PR actions fail closed before they become durable daem
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const headers = { "content-type": "application/json", [OPERATOR_HEADER]: "present" };
   try {
-    for (const body of [{}, { action: "restart", prNumber: 259 }, { action: "fix", prNumber: 0 }, { action: "fix", prNumber: 2.5 }, { action: "review", prNumber: 259, extra: true }]) {
+    for (const body of [null, [], "fix", {}, { action: "restart", prNumber: 259 }, { action: "fix", prNumber: 0 }, { action: "fix", prNumber: 2.5 }, { action: "review", prNumber: 259, extra: true }]) {
       const payload = JSON.stringify(body);
       const confirmation = await fetch(`${base}/v1/confirm`, {
         method: "POST",

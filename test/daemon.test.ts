@@ -1073,6 +1073,38 @@ test("console PR action: a named refusal is ledgered and consumed without turnin
   assert.match(String(refused!.extra.detail), /not eligible/);
 });
 
+test("console PR action: a thrown error is ledgered by name and the marker is still cleared, not retried forever", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const cleared: Array<[string, number]> = [];
+  let actions = [{ action: "fix" as const, prNumber: 259, origin: "console-operator", requestedAt: "2026-09-21T00:00:00.000Z" }];
+
+  const summary = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      pendingPrActions: () => actions,
+      runPrAction: async () => { throw new Error("fixCommand: worktree busy"); },
+      clearPrAction: (action, prNumber) => {
+        cleared.push([action, prNumber]);
+        actions = [];
+      },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+
+  assert.equal(summary.stopReason, "max_reached", "a thrown action error does not crash the daemon poll loop");
+  assert.deepEqual(cleared, [["fix", 259]], "a marker whose action threw is still consumed -- it cannot retry forever");
+  const failed = lines.find((line) => line.step === "console.pr_action_failed");
+  assert.ok(failed, "the daemon ledgers the thrown error by name");
+  assert.equal(failed!.extra.action, "fix");
+  assert.equal(failed!.extra.pr_number, 259);
+  assert.match(String(failed!.extra.error), /worktree busy/);
+});
+
 test("headroom exhaustion resumes ON ITS OWN once the underlying window actually resets — no exit either side", async () => {
   // Proves acceptance criterion (a): "the daemon does not exit at all... it
   // RESUMES after the clock passes resets_at". readUsage is a fresh call

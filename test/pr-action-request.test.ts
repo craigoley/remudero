@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { pendingPrActions } from "../src/lib/fleet-control.js";
+import { clearPrAction, pendingPrActions, prActionFilePath } from "../src/lib/fleet-control.js";
 import { buildPrActionRoute } from "../src/lib/panel-actions.js";
 import { createConfirmNonceStore, createService, makeConfirmNonceRoute, type IdentityProvider } from "../src/lib/service.js";
 
@@ -61,5 +61,22 @@ test("confirmed PR actions record one durable request without starting a worker 
     assert.equal(pending.length, 1, "the handler persists intent for the daemon's next normal poll");
     assert.deepEqual(pending[0] && { action: pending[0].action, prNumber: pending[0].prNumber }, { action: "fix", prNumber: 259 });
     assert.ok(Number.isFinite(Date.parse(pending[0]!.requestedAt)));
+
+    // The daemon's own consumption path (lib/daemon.ts's finally clause), exercised directly
+    // against the real function rather than the faked one daemon.test.ts injects: the marker
+    // this route just wrote is the exact one `clearPrAction` must remove, at the exact path
+    // `prActionFilePath` derives -- so a mismatch between the two would strand the request
+    // forever instead of clearing it on the next poll.
+    assert.ok(existsSync(prActionFilePath(root, "fix", 259)), "the marker file exists at the path the daemon will clear");
+    assert.equal(clearPrAction(root, "fix", 259), true, "a real, present marker is removed");
+    assert.equal(pendingPrActions(root).length, 0, "the daemon's next poll sees no stale duplicate work");
+    assert.equal(clearPrAction(root, "fix", 259), false, "clearing an already-consumed marker is a safe no-op, not an error");
   });
+});
+
+test("prActionFilePath refuses to derive a path for an unsafe action or PR number", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-pr-action-request-path-"));
+  assert.throws(() => prActionFilePath(root, "restart" as never, 259), /unsafe action/);
+  assert.throws(() => prActionFilePath(root, "fix", 0), /unsafe PR number/);
+  assert.throws(() => prActionFilePath(root, "fix", 2.5), /unsafe PR number/);
 });
