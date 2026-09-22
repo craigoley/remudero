@@ -1,0 +1,78 @@
+- id: W1-T4044
+  title: "EXTERNAL EFFECT TRUTH EXISTS ONLY INSIDE WORKER RECEIPTS — the console's API-T44 cannot read applied, drifted, partial, stale, or unobservable outcomes because W1-T3899 added the bounded model and ledger rows but no authenticated public projection"
+  repo: remudero
+  depends_on: [W1-T3899]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 24.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "console-queue-research#1611-2026-09-22"
+  plan_refs: ["W1-T3899", "API-T44", "UI-T44"]
+  files:
+    - src/lib/action-results.ts
+    - src/lib/panel-graph.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/action-results-route.test.ts
+    - test/action-results-redaction.test.ts
+    - test/action-results-bounds.test.ts
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED 2026-09-22: remudero-console issue #1611 remains open because API-T44 has no
+    implementation PR. The dependency is not an operator decision: console API-T44 can validate
+    and render only a server-owned core projection, while core's current OpenAPI surface has no
+    `/v1` action-results route. W1-T3899 is merged and owns the `external-effect-v1` result model,
+    worker reconciliation, redacted evidence reference, and `external_effect.reconciled` ledger
+    row, but its PR added only the schema and worker seam. A console route that guesses a path or
+    reads raw daemon state would either show an empty healthy result or create a second source of
+    truth; both would keep the queue blocked for the wrong reason.
+
+    This is a small unblocker with a hard boundary: expose the already-owned, redacted result
+    projection and nothing that executes a connector. Recheck and compensation remain core-owned
+    execution work and are not implied by a successful read; until their executor contract exists,
+    a later console action must remain an explicit unavailable/refused state rather than pretending
+    that a browser request can perform one. The projection lets API-T44 proceed with honest reads
+    and gives the next request/automation task a durable, typed seam to consume.
+  design: |
+    Add a read-scoped `GET /v1/action-results` route to the existing panel-graph route assembly,
+    backed by the daemon's own bounded ledger reader. Return a versioned
+    `external-action-results-v1` envelope with source, generatedAt, optional changedSince cursor,
+    and only validated `external-effect-v1` results. Preserve every reconciliation state
+    (`applied`, `refused`, `pending`, `partially-applied`, `drifted`, `stale`, `unobservable`),
+    observation freshness, target identity, expected postconditions, retry path, safeToComplete,
+    and opaque evidenceReference. Redact or drop connector evidence and reject malformed rows;
+    an unreadable or partial ledger must be explicit `unavailable`, never a healthy empty array.
+
+    Bound filters and result count/bytes, keep repository/run/action/receipt identity server-owned,
+    and do not accept a daemon URL, credential, connector payload, observed measurement, or
+    compensation instruction from the caller. Register the route in OpenAPI and regenerate the
+    api-client schema. Do not add a second reconciliation engine, direct connector call, or
+    optimistic POST action in this task; file that executor/request contract separately after this
+    read seam has live evidence.
+  acceptance:
+    - claim: "the public route returns a typed, bounded projection of external-effect ledger results and preserves their source and freshness"
+      proof: "unit test: action-results route preserves bounded external-effect projections"
+    - claim: "applied, refused, pending, partially-applied, drifted, stale, and unobservable outcomes remain distinct rather than becoming success or zero"
+      proof: "unit test: action-results route preserves every reconciliation state"
+    - claim: "malformed, oversized, or unreadable evidence degrades to an explicit unavailable state and never exposes raw connector output"
+      proof: "unit test: action-results route never exposes raw connector evidence"
+    - claim: "filters, cursor, count, and response bytes are bounded before ledger rows reach the caller"
+      proof: "unit test: action-results route enforces bounded filters and explicit unavailable states"
+    - claim: "the route is actually mounted and named in the public contract"
+      proof: "grep: /v1/action-results in src/lib/panel-graph.ts"
+  falsifier: |
+    Seed the ledger with one row for every external-effect state plus raw connector fields. The
+    route must preserve the state machine and safe-to-complete meaning while omitting raw fields.
+    Corrupt the ledger, exceed the filter/row/byte bounds, or provide a browser-owned target or
+    upstream URL: the response must be unavailable/refused and must not be an empty verified list.
+    Remove the route registration or OpenAPI path and the mounted-route/schema checks must fail.
+    Do not treat a passing read projection as proof that a recheck or compensation was executed;
+    those require a later executor contract and receipt.
+  note: |
+    Filed after reviewing console issue #1611/API-T44. The console's existing API-T44 plan can
+    consume this read contract, but its recheck/compensation actions must stay unavailable until a
+    separate core task supplies an authorized executor and durable receipt path. This separation
+    keeps the automated flow moving without inventing an action engine at the UI boundary.
