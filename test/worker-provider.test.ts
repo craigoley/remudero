@@ -804,7 +804,7 @@ test("Codex capacity makes toolchain and synchronous spawn failures unreadable",
   assert.match(absent.detail ?? "", /not executable/);
 
   const spawnFailed = await readCodexCapacity(
-    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexHome: "/tmp/codex-spawn-fail" } },
+    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: "/tmp/codex-spawn-fail" } },
     { spawn: () => { throw new Error("spawn refused"); } },
   );
   assert.equal(spawnFailed.readable, false);
@@ -815,7 +815,7 @@ test("Codex capacity fails closed on malformed, exited, errored, and paginated R
   const config = (home: string) => ({
     claudeBin: "/unused",
     root: "/tmp",
-    workerProviders: { enabled: ["codex"] as Array<"codex">, codexBin: "/bin/sh", codexHome: home },
+    workerProviders: { enabled: ["codex"] as Array<"codex">, codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: home },
   });
   const run = async (
     home: string,
@@ -913,7 +913,7 @@ test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral wo
           teardown: () => {},
         },
       },
-      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
     );
     stdout.write('{"type":"thread.');
     stdout.write('started","thread_id":"fragmented-thread"}\n{"type":"turn.started"}\n');
@@ -967,7 +967,7 @@ test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained
             },
           },
         },
-        { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+        { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
       );
       (stream === "stdout" ? stdout : stderr).write("x".repeat(limitBytes + 1));
       await assert.rejects(resultPromise, (error: unknown) => {
@@ -1008,7 +1008,7 @@ test("W1-T3787 event bytes distinguish retained JSONL kinds in test/worker-provi
           },
         },
       },
-      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
     );
     stdout.write('{"type":"thread.started","thread_id":"bounded"}\n');
     stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"kept"}}\n');
@@ -1156,7 +1156,7 @@ test("Codex spawn carries a subscription refusal through the shared ledger seam"
         teardown: () => {},
       },
     },
-    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
   );
   assert.equal(result.isError, true, "Codex 0.152.0's turn.failed remains an error");
   assert.equal(result.subtype, "error_codex");
@@ -1204,7 +1204,7 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
       config: {
         claudeBin: "/unused/claude",
         root,
-        workerProviders: { enabled: ["claude", "codex"], codexBin: "/bin/sh" },
+        workerProviders: { enabled: ["claude", "codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" },
       },
       providerRouting: {
         readClaude: async () => capacity("claude", 80),
@@ -1398,7 +1398,7 @@ async function spawnMeasuredClaude(
     config: {
       claudeBin: "/unused",
       root,
-      workerProviders: { enabled: ["claude", "codex"], codexBin: "/bin/sh" },
+      workerProviders: { enabled: ["claude", "codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" },
     },
     providerRouting: {
       readClaude,
@@ -1533,7 +1533,7 @@ test("W1-T3490 criterion 3: Codex worker clock bound tears down the contained pr
           },
         },
       },
-      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
     ),
     (error: unknown) => {
       assert.ok(error instanceof Error);

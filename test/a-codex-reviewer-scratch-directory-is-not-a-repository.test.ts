@@ -15,7 +15,7 @@ function config(root: string) {
     root,
     workerProviders: {
       enabled: ["codex" as const],
-      codexBin: "/bin/sh",
+      codexBin: "/bin/sh", codexModel: "gpt-6-luna",
       codexHome: join(root, "codex-home"),
     },
   };

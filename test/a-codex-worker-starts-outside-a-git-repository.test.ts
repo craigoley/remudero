@@ -35,7 +35,7 @@ function config(root: string) {
   return {
     claudeBin: "/unused/claude",
     root,
-    workerProviders: { enabled: ["codex" as const], codexBin: "/bin/sh", codexHome: join(root, "codex-home") },
+    workerProviders: { enabled: ["codex" as const], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") },
   };
 }
 

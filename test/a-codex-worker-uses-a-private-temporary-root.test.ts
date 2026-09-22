@@ -42,7 +42,7 @@ function config(root: string, codexHome = join(root, "durable-codex-home")) {
   return {
     claudeBin: "/unused/claude",
     root,
-    workerProviders: { enabled: ["codex" as const], codexBin: "/bin/sh", codexHome },
+    workerProviders: { enabled: ["codex" as const], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome },
   };
 }
 

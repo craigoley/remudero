@@ -315,7 +315,7 @@ test("W1-T2946 mutation: omitting the disposable review intent restores read-onl
           teardown: () => {},
         },
       },
-      { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+      { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
     );
 
     assert.deepEqual(

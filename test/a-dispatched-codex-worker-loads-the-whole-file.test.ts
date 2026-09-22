@@ -89,7 +89,7 @@ async function capturedArgs(): Promise<string[]> {
       {
         claudeBin: "/unused/claude",
         root,
-        workerProviders: { enabled: ["codex" as const], codexBin: "/bin/sh", codexHome: join(root, "codex-home") },
+        workerProviders: { enabled: ["codex" as const], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") },
       } as never,
     );
     controlled.finish();
