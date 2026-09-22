@@ -1484,6 +1484,38 @@ export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): numbe
   return tally.capacityBlocked > tally.starts ? tally.starts : tally.starts - tally.capacityBlocked;
 }
 
+/** W1-T4025: task-attributable lifetime pressure, not a terminal ceiling. Capacity refusals and
+ * proven orphaned worker starts are host evidence, so neither spends the task's adaptive signal.
+ * A run with an unknown identity remains counted: uncertainty must not buy an unbounded retry. */
+export function taskAttributableLifetimeDispatches(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  opts: OrphanDetectionOpts = {},
+): number {
+  const rows = indexedTaskRows(lines, taskId, index);
+  const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
+  let starts = 0;
+  let capacityBlocked = 0;
+  for (const line of rows) {
+    if (line.step === "run.start" && line.task_id === taskId) {
+      if (typeof line.run_id !== "string" || !orphanRunIds.has(line.run_id)) starts += 1;
+    }
+    if (line.step === "daemon.spawn_infra_blocked" && line.task === taskId) capacityBlocked += 1;
+  }
+  return effectiveLifetimeDispatches({ starts, capacityBlocked });
+}
+
+/** Repeated attributable work is a signal for the adaptive judge, never a refusal wall. */
+export function hasRepeatedTaskAttributableLifetimeDispatches(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  opts: OrphanDetectionOpts = {},
+): boolean {
+  return taskAttributableLifetimeDispatches(lines, taskId, index, opts) > 1;
+}
+
 /** THE THRESHOLD IS A MEASUREMENT, NOT A GUESS (W1-T271): 274 of 282 ever-dispatched tasks (97%) were
  *  dispatched 1-4 times ever, and every count at or above 5 is a documented FAILURE. 10 sits above the ENTIRE
  *  legitimate population. Why: the corpus and per-task counts are in docs/forensics/status.md */
