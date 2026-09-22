@@ -1,0 +1,22 @@
+id: fb-1790086853999-c6a250
+ts: 2026-09-22T14:20:53.999Z
+raw: "Architect triage failed to convert the approved console-proof planning
+  blocker into a task. In run TRIAGE-fb-1790082750747-07ee12-1790086041678,
+  attempt 1 emitted W1-T4035 through W1-T4037 but relint rejected status: open;
+  attempt 2 then repaired files but returned no ALREADY_DECIDED, AMBIGUOUS, or
+  PROPOSED verdict, so triage discarded the scope and filed no task. Fix triage
+  relint retry so it validates task schema before first emission, preserves the
+  required final verdict across repair, and carries the originally proposed task
+  set into the retry. Add a deterministic regression for the status-open then
+  relint-repair path, and cover the console target proof roots that prompted
+  this run. This blocks fb-1790082750747-07ee12 and the observable PR-action
+  console successor."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
