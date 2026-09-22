@@ -1,0 +1,38 @@
+- id: W1-T4032
+  title: "The review-reuse fallback drops a plan-only filing flag and can strand a healthy plan PR behind implementation criteria"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/run-task.ts]
+  origin: oper#needs-human-cross-repo-2026-09-22
+  plan_refs: ["W1-T3505", "W1-T3798"]
+  status: queued
+  attempts: 0
+  rationale: |
+    The sweep's ordinary post-review runner passes `pr.isPlanFiling` into the review command,
+    but the review-reuse/discrimination fallback in `src/run-task.ts` accepts that flag and then
+    drops it when it calls `reviewCommand`. A plan-only PR that reaches this fallback is therefore
+    re-resolved from its `run-W1-T<n>-<epochMs>` branch as an implementation task. The reviewer
+    loads that task's implementation acceptance criteria and can fail on code behaviour that is
+    intentionally absent from a filing PR.
+
+    OBSERVED on PR #6548 (W1-T4025), 2026-09-22: every product and repository check passed, but
+    `remudero-review` failed with `unmet: a repeated-dispatch observation reaches the existing
+    three-way judge...`. The PR changes only `plan/tasks.d/`, has no task trailer, and its body
+    carries filing criteria. The current main code has the exact two-path split: the ordinary
+    runner supplies `planOnlyFiling`, while `reviewFallbackRunner` ignores its `_isPlanFiling`
+    parameter. This is a recoverable automation defect, not an operator decision.
+
+    Repair the fallback to preserve the already-classified boolean and add a behaviour-level test
+    covering both true and false values. The fix must not infer plan-only from a branch name or an
+    absent trailer; it only carries the classification already produced by the sweep. This keeps
+    implementation PRs fully judged and lets a filing PR proceed without being misattributed.
+  acceptance:
+    - claim: "review-reuse fallback preserves a plan-only filing classification"
+      proof: "unit test: W1-T4032: a review-reuse fallback forwards the plan-only flag"
+    - claim: "review-reuse fallback preserves an implementation classification"
+      proof: "unit test: W1-T4032: an implementation fallback forwards false"
