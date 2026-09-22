@@ -33972,21 +33972,42 @@ export function creditEvidenceRootFor(
   return slug.toLowerCase() === `${owner}/${repo}`.toLowerCase() ? candidate : undefined;
 }
 
+/**
+ * W1-T4078 — identify the measured Rule-25 prerequisite shape without turning PR prose into a
+ * general-purpose subject classifier. `undefined` means the body was not readable, so callers
+ * must preserve the existing answer rather than infer either implementation or prerequisite.
+ * Both markers are required: a body that merely mentions a prerequisite, or merely mentions an
+ * instrument, is not enough to withdraw a previously valid commit-trailer credit.
+ */
+export function prerequisiteOnlyMergeBody(body: string | undefined, taskId: string): boolean | undefined {
+  if (body === undefined) return undefined;
+  const escapedTaskId = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const namesPrerequisite = new RegExp(`^Prerequisite split for\\s+${escapedTaskId}\\b`, "im").test(body);
+  const carriesOnlyInstrument = /\bthis\s+PR\s+carries\s+ONLY\s+the\s+instrument\b/i.test(body);
+  return namesPrerequisite && carriesOnlyInstrument;
+}
+
 /** Map one whole-plan projection to the credit consumer's narrow candidate shape. Keeping this
  * pure makes the performance refactor unable to change the merged/pr/url ownership filter. */
 export function creditCandidatesFromProjection(
   projections: Iterable<StatusProjection>,
   mergeSubjects: ReadonlyMap<number, string>,
+  mergeBodies: ReadonlyMap<number, string> = new Map(),
 ): CreditCandidate[] {
   const candidates: CreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
+    const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber));
+    const prerequisiteOnly = prerequisiteOnlyMergeBody(mergeBodies.get(projection.prNumber), projection.taskId);
     candidates.push({
       taskId: projection.taskId,
       prNumber: projection.prNumber,
       prUrl: projection.prUrl,
       merged: true,
-      creditIsImplementation: creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber)),
+      // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
+      // the squash commit carries the task trailer. Unreadable body evidence stays with the
+      // subject result so this repair can only subtract the measured false credit.
+      creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit,
     });
   }
   return candidates;
@@ -34039,7 +34060,16 @@ export function buildCreditCandidates(
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
   const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
   const projection = projectPlan(plan, deps);
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects);
+  // W1-T4078 — `buildBatchedGithub` already has each merged PR body in the same cache that fed
+  // the projection. Read those bodies by PR number so the measured prerequisite-only split can
+  // be refused without adding a GitHub request or weakening ordinary commit-trailer credit.
+  const mergeBodies = new Map<number, string>();
+  for (const candidate of projection.values()) {
+    if (!candidate.merged || candidate.prNumber === undefined || candidate.prUrl === undefined) continue;
+    const pr = baseGithub.prByRef(candidate.prUrl);
+    if (pr?.body !== undefined) mergeBodies.set(candidate.prNumber, pr.body);
+  }
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies);
 }
 
 /**
