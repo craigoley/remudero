@@ -29083,6 +29083,10 @@ export async function daemonCommand(
      *  passes this. */
     runDaemon?: typeof runDaemon;
     runTask?: typeof runTask;
+    /** Command seams for the selected-repository PR-action wiring test. Production keeps the
+     * established fix/review implementations; tests inject terminal fakes without touching GitHub. */
+    fixCommand?: typeof fixCommand;
+    reviewCommand?: typeof reviewCommand;
     /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
      * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
      * the full and light paths without reading this source file as text. */
@@ -29996,8 +30000,8 @@ export async function daemonCommand(
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];
           const exitCode = request.action === "fix"
-            ? await fixCommand(args)
-            : await reviewCommand(String(request.prNumber), ["--repo", target.repo]);
+            ? await (deps.fixCommand ?? fixCommand)(args)
+            : await (deps.reviewCommand ?? reviewCommand)(String(request.prNumber), ["--repo", target.repo]);
           return exitCode === 0
             ? { outcome: "completed", detail: `${request.action} command accepted PR #${request.prNumber}` }
             : { outcome: "refused", detail: `${request.action} command refused PR #${request.prNumber} (exit ${exitCode})` };

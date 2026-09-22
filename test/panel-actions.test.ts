@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { daemonCommand } from "../src/run-task.js";
+import type { DaemonDeps } from "../src/lib/daemon.js";
 import {
   bearerTokenId,
   DRAIN_FEEDBACK_VERDICTS,
@@ -16,6 +18,7 @@ import type { GitHub } from "../src/lib/status.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import {
   consumeDrainNow,
+  clearPrAction,
   isPaused,
   isQuietHours,
   isStopped,
@@ -24,6 +27,7 @@ import {
   pauseDetail,
   pendingKicks,
   requestPause,
+  requestPrAction,
   requestStop,
   setQuietHours,
   stopDetail,
@@ -921,6 +925,66 @@ test("confirmed PR actions write durable attributed requests for the daemon, wit
   assert.equal(request!.action, "fix");
   assert.equal(request!.pr_number, 259);
   assert.equal(request!.origin, pending[0].origin);
+});
+
+test("PR action markers clear only the named terminal request and report a missing marker", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}panel-pr-action-clear-`));
+  try {
+    requestPrAction(root, "fix", 259, "console-test");
+    assert.equal(clearPrAction(root, "fix", 259), true, "the daemon clears the exact request it finished");
+    assert.deepEqual(pendingPrActions(root), []);
+    assert.equal(clearPrAction(root, "fix", 259), false, "a second clear reports that no marker remains");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("daemonCommand wires selected-repository PR actions to the established fix and review commands", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-pr-action-wire-`));
+  const root = join(home, "Remudero");
+  const planPath = join(home, "tasks.yaml");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  const oldCi = process.env.CI;
+  process.env.HOME = home;
+  process.env.CI = "1";
+  const calls: Array<{ action: string; args: string[] }> = [];
+  let captured: DaemonDeps | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps) => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+      fixCommand: async (args) => {
+        calls.push({ action: "fix", args });
+        return 0;
+      },
+      reviewCommand: async (prNumber, rest) => {
+        calls.push({ action: "review", args: [prNumber, ...(rest ?? [])] });
+        return 7;
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(typeof captured?.runPrAction, "function");
+    const fixed = await captured!.runPrAction!({ action: "fix", prNumber: 259, origin: "console-test", requestedAt: "2026-09-21T00:00:00.000Z" });
+    const reviewed = await captured!.runPrAction!({ action: "review", prNumber: 260, origin: "console-test", requestedAt: "2026-09-21T00:00:01.000Z" });
+    assert.deepEqual(fixed, { outcome: "completed", detail: "fix command accepted PR #259" });
+    assert.deepEqual(reviewed, { outcome: "refused", detail: "review command refused PR #260 (exit 7)" });
+    assert.deepEqual(calls, [
+      { action: "fix", args: ["259", "--repo", "remudero"] },
+      { action: "review", args: ["260", "--repo", "remudero"] },
+    ]);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldCi === undefined) delete process.env.CI;
+    else process.env.CI = oldCi;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("POST /v1/pr-actions rejects malformed or unconfirmed bodies before any request marker is written", async () => {
