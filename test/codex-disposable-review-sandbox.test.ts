@@ -50,7 +50,7 @@ async function captureCodexSpawn(
           teardown: () => {},
         },
       },
-      { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+      { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
     );
     assert.ok(captured);
     assert.equal(existsSync(captured.env.TMPDIR!), false, "the provider reaps its private TMPDIR after the spawn");
