@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MountsError, validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
-import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+import { REPORT_EXCERPT_CAP, type spawnWorker, type WorkerResult } from "../src/lib/worker.js";
 import {
   assessRisk,
   buildRiskJudgePrompt,
@@ -518,4 +518,93 @@ test("realRiskJudge wires spawnRiskJudgeWorker's result through parseRiskJudgeVe
     confidence: 0.8,
     reasons: ["touches an unreviewed area"],
   });
+});
+
+// ── W1-T478: a read that FAILED is not a read that SAID NO — the raw text is kept, capped,
+// and the exhausted-retry verdict stays distinguishable from a genuine adverse finding ──────
+
+const UNPARSEABLE_JUDGE_TEXT = "not sure what to make of this diff, seems fine I guess — no machine-readable line here";
+
+function exhaustingSpawn(text: string): typeof spawnWorker {
+  return (async () => fakeWorkerResult(text)) as typeof spawnWorker;
+}
+
+test("W1-T478: realRiskJudge's exhausted-retry verdict is distinguishable from a genuine high-risk finding — availability + confidence 0, not confidence 1", async () => {
+  const spawn = exhaustingSpawn(UNPARSEABLE_JUDGE_TEXT);
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const malformed = await judge(baseInput());
+  const genuine = verdict({ verdict: "high", confidence: 0.95, reasons: ["touches CI workflow files"] });
+
+  assert.equal(malformed.availability, "unavailable", "a parse failure carries availability: unavailable");
+  assert.equal(genuine.availability, undefined, "a genuine parsed verdict carries no availability field at all");
+  assert.notEqual(malformed.confidence, 1, "confidence 1 would read as certainty a read that FAILED never had");
+  assert.equal(malformed.confidence, 0);
+});
+
+test("W1-T478: the exhausted-retry verdict carries the raw text that failed to parse, under REPORT_EXCERPT_CAP", async () => {
+  const spawn = exhaustingSpawn(UNPARSEABLE_JUDGE_TEXT);
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const malformed = await judge(baseInput());
+  assert.equal(malformed.unparseableExcerpt, UNPARSEABLE_JUDGE_TEXT, "the text that failed to parse must be kept verbatim, up to the cap");
+});
+
+test("W1-T478: a genuine parsed verdict — adverse or not — never carries an unparseableExcerpt field", async () => {
+  const spawn = exhaustingSpawn("RISK_VERDICT: high\nRISK_CONFIDENCE: 0.9\nRISK_REASON: touches auth middleware");
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const verdictOut = await judge(baseInput());
+  assert.ok(!("unparseableExcerpt" in verdictOut), "a successfully parsed verdict has no unparsed text to keep");
+});
+
+test("W1-T478: the excerpt is truncated at REPORT_EXCERPT_CAP, never a silent full-text ledger row", async () => {
+  const longText = "x".repeat(REPORT_EXCERPT_CAP + 500);
+  const spawn = exhaustingSpawn(longText);
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const malformed = await judge(baseInput());
+  assert.ok(malformed.unparseableExcerpt !== undefined);
+  assert.ok(malformed.unparseableExcerpt!.length < longText.length, "the excerpt must be capped, not the full raw text");
+  assert.match(malformed.unparseableExcerpt!, /…\[truncated, \d+ more chars\]$/);
+});
+
+test("W1-T478: whitespace-only judge output keeps NO excerpt field — absent, never an empty string (the #1584 discipline)", async () => {
+  const spawn = exhaustingSpawn("   \n\t  ");
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const malformed = await judge(baseInput());
+  assert.ok(!("unparseableExcerpt" in malformed), "a truly empty response must carry no field, never an empty one");
+});
+
+test("W1-T478: a parse failure still escalates and still withdraws the arm", async () => {
+  const spawn = exhaustingSpawn(UNPARSEABLE_JUDGE_TEXT);
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const malformed = await judge(baseInput());
+  const action = planRiskJudgeAction(malformed);
+  assert.equal(action.kind, "escalate", "an unreadable judge response must still fail closed to ESCALATE");
+});
+
+test("W1-T478: runRiskJudge ledgers the excerpt on the risk_judge.decision row under `unparseable_excerpt`", async () => {
+  const input = baseInput();
+  const log: { step: string; extra?: Record<string, unknown> }[] = [];
+  const spawn = exhaustingSpawn(UNPARSEABLE_JUDGE_TEXT);
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const deps: RiskJudgeOrchestratorDeps = {
+    judge,
+    escalate: async () => "https://github.com/owner/repo/issues/478",
+    log: (step, extra) => log.push({ step, extra }),
+  };
+  await runRiskJudge(input, deps);
+  const decisionLine = log.find((l) => l.step === "risk_judge.decision");
+  assert.ok(decisionLine, "a risk_judge.decision line must be ledgered");
+  assert.equal(decisionLine!.extra?.unparseable_excerpt, UNPARSEABLE_JUDGE_TEXT);
+});
+
+test("W1-T478: runRiskJudge's decision row omits `unparseable_excerpt` entirely for a genuine parsed verdict", async () => {
+  const input = baseInput();
+  const log: { step: string; extra?: Record<string, unknown> }[] = [];
+  const deps: RiskJudgeOrchestratorDeps = {
+    judge: async () => verdict({ verdict: "high", confidence: 0.9, reasons: ["touches CI workflow files"] }),
+    escalate: async () => "https://github.com/owner/repo/issues/479",
+    log: (step, extra) => log.push({ step, extra }),
+  };
+  await runRiskJudge(input, deps);
+  const decisionLine = log.find((l) => l.step === "risk_judge.decision");
+  assert.ok(!("unparseable_excerpt" in (decisionLine!.extra ?? {})), "a genuine finding's row carries no unparsed-text field at all");
 });
