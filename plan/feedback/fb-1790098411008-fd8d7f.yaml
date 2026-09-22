@@ -1,0 +1,140 @@
+id: fb-1790098411008-fd8d7f
+ts: 2026-09-22T17:33:31.008Z
+raw: >-
+  THE FAST GATE CAN NEVER ADMIT A plan/-WALKING CENSUS, BECAUSE ITS DISCOVERER
+  ONLY LOOKS AT src/ — so a plan-only diff that breaks one pays a full
+  instrumented CI shard to find out what runs locally in ONE SECOND. Observed
+  2026-09-22 on PR 6596, on a change I made myself.
+
+
+  TWO CENSUS SCRIPTS EXIST AND ARE NOT IN THE GATE. package.json declares eight
+  `census:*` scripts. FAST_GATE_STEPS carries SIX of them -- bound-kind,
+  ledger-literal, catch-erasure, negative-reachability, authority,
+  no-shallowing. The two missing are `census:self-path-proof` and
+  `census:wall-clock-bound`. MEASURED on this machine, one run each: both 1s.
+  The six already admitted measured 0s, 0s, 1s, 1s, 1s, 0s. So there is no cost
+  argument for the exclusion -- the absent pair is indistinguishable from the
+  admitted six on the only axis the admission predicate measures.
+
+
+  AND THEY WERE NEVER REFUSED -- THEY WERE NEVER SEEN. CENSUS_POPULATION holds
+  seven members, six ADMITTED and one REFUSED. Neither `self-path-proof` nor
+  `wall-clock-bound` appears anywhere in src/lib/ci-parity.ts. This is not a
+  decision anyone made and recorded; it is an absence.
+
+
+  THE MECHANISM, READ FROM SOURCE. The gate's own comment states the invariant:
+  "THE CENSUS ENTRIES ARE A PROJECTION (W1-T2643) of CENSUS_POPULATION, so an
+  admitted member with no step cannot occur", and CENSUS_FAST_GATE_STEPS is
+  `CENSUS_ADMITTED_MEMBERS.map(...)`. Population membership is policed by
+  `censusPopulationDrift`, which discovers candidates through
+  `discoverSrcFilteredLsFilesCallers` whose filter is, verbatim: `.filter((c) =>
+  c.idiom === "ls-files" && c.walks.some((walk) => walk.startsWith("src/") ||
+  walk === "src/"))`. `test/a-shards-proof-cannot-target-its-own-file.test.ts`
+  walks `plan/tasks.d/`. It is therefore invisible to the discoverer BY
+  CONSTRUCTION, and no plan-walking census can ever reach the population that
+  the fast gate projects from.
+
+
+  THE REMEDY IS NOT A HAND-ADD, AND THAT IS THE LOAD-BEARING PART.
+  `censusPopulationDrift` returns BOTH `unknown` (discovered, not in the
+  population) and `stale` (in the population, not discovered). Adding these two
+  by hand would put them in `known` while the discoverer still cannot see them,
+  so they would be reported `stale` -- and a meta-test pins CENSUS_SUITE_ROSTER,
+  CENSUS_POPULATION, censusPopulationDrift and FAST_GATE_STEPS as "one
+  consistent" set. The population genuinely cannot be edited without teaching
+  the discoverer first.
+
+
+  SO THE FIX IS A CORPUS DIMENSION ON THE DISCOVERER, AND THIS REPO HAS ALREADY
+  FIXED THE SAME SHAPE ONCE ON A DIFFERENT AXIS. W1-T2809's own comment: "WHICH
+  ENUMERATION IDIOM a candidate was recognised BY. TRAP: the recognizer
+  implemented ONE (`git ls-files`) and was blind to the other; the populations
+  MEASURED disjoint at 28 and 84 suites sharing one member". That widened the
+  IDIOM axis and left the CORPUS axis hard-coded to `src/`. A census that walks
+  plan/ is the same blindness one dimension over.
+
+
+  THE COST, MEASURED TODAY RATHER THAN ARGUED. A plan-only edit to one shard
+  added three `grep:` criteria whose proofs target that shard's own file, taking
+  its self-path proof count from its recorded baseline of 5 to 8.
+  `census:self-path-proof` refused it -- correctly, and in the direction main is
+  already moving, since PR 6603 removed a self-certifying W1-T974 proof the same
+  day. But the refusal arrived as `ci-shard (2/4)` FAILURE after a full
+  instrumented run, and locating it meant pulling the job log and grepping for
+  `not ok`. Run locally the same check names the shard and the overage in one
+  second.
+
+
+  WHY THIS BELONGS IN THE FAST LANE AT ALL, IN THE GATE'S OWN WORDS. Its
+  admission predicate is "deterministic, runs in seconds, and has blocked a PR
+  or is the identical shape as one that has", and a sibling entry's reason says
+  outright: "ADMITTED rather than refused because the fast lane exists to catch
+  exactly this class before a full CI cycle". `census:self-path-proof` is
+  deterministic, runs in 1s, and blocked a PR today. It satisfies the predicate
+  on every clause.
+
+
+  SCOPE AND SEQUENCING, SAID PLAINLY. Widening the discoverer is INSTRUMENT work
+  -- it changes how a gate decides what it gates -- so under Standing rule 25 it
+  rides alone, without the population entries it would then make legal. Two
+  changes, in order: teach the discoverer the corpus axis (and prove it by
+  measuring the population before and after, the way W1-T2809 reported 28 versus
+  84), then admit whatever it now discovers with its own measured verdict.
+
+
+  FALSIFYING CHECKS. (1) If some other path already admits plan-walking censuses
+  to the fast gate, this is a documentation gap -- re-derive by printing
+  FAST_GATE_STEPS' scripts and diffing against the `census:*` keys in
+  package.json; today that diff is exactly `self-path-proof` and
+  `wall-clock-bound`. (2) If widening the discoverer turns up a large `unknown`
+  set rather than these two, the cost of admitting them all must be measured
+  BEFORE any is admitted, because the gate's refusal is relative to the run's
+  own median and a flood of new cheap entries moves that median. (3) If
+  `census:wall-clock-bound` turns out to walk src/ after all and is excluded for
+  some other reason, that reason should be recorded as a REFUSED verdict rather
+  than left as an absence.
+
+  CORRECTION 2026-09-22, BEFORE MERGE, BY THE SAME SESSION THAT FILED THIS: THE CENTRAL
+  MECHANISM CLAIM ABOVE IS WRONG ON FOUR COUNTS AND THE REMEDY IT PROPOSES MEASURES TO ZERO.
+  The claims are left standing verbatim above rather than edited away, because the reasoning
+  that produced them is the thing worth not repeating. (1) THE CORPUS AXIS IS NOT THE
+  EXCLUDING FILTER. Measured by running discoverCensusCandidates against the live tree and re-
+  applying both filters: the CURRENT gate population (ls-files AND src/) is 41 files; a
+  WIDENED one (ls-files AND (src/ OR plan/)) is also 41. The corpus widening this record proposes
+  ADDS EXACTLY ZERO files. There is nothing to build. (2) THE EXCLUDING AXIS IS THE IDIOM. The
+  self-path census is discovered as a candidate. Run against the real tree,
+  test/a-shards-proof-cannot-target-its-own-file.test.ts appears in discoverCensusCandidates
+  with idiom=dir-walk and walks=[src/]. It is filtered by the ls-files idiom clause, never by
+  the corpus clause. So NEVER SEEN is false: it is seen, classified, and deliberately not
+  gated. (3) THAT NARROWING IS A RECORDED, PRICED DEFERRAL, NOT A BLINDNESS. ci-parity.ts
+  states it twice in its own words: INVARIANT the GATE is not widened with the REPORT, the
+  guard requires every discovered file to carry an entry, and MEASURED the dir-walk idiom adds
+  83 with none; and STOPGAP W1-T2809, the measured ~84 dir-walk suites is its own filing, not
+  a rider on this task. Admitting the dir-walk class is already someone's declared next filing
+  with its cost already measured. This record re-derived a known deferral as a defect. (4) THE
+  POPULATION SIZE IS 41, NOT SEVEN. The seven-members figure came from a sed range that
+  truncated the array mid-way; censusPopulationDrift against the live tree reports unknown=0,
+  stale=0 over a CENSUS_POPULATION of 41. WHAT REMAINS TRUE AND IS WORTH KEEPING: the two
+  scripts census:self-path-proof and census:wall-clock-bound really are absent from
+  FAST_GATE_STEPS while six census siblings are present; both really do run in 1s against 0-1s
+  for the admitted six; and the cost really was paid on PR 6596, where a plan-only overreach
+  was caught only after a full instrumented shard. THE REAL OPTION IS SMALLER THAN THIS RECORD IMAGINED
+  and does not touch discovery at all: FAST_GATE_STEPS already carries hand-declared
+  non-census entries (claims, jscpd, cli-reference:check, lint-plan:fast), so one more 1s step
+  could be declared beside them without widening any axis or adding anything to
+  CENSUS_POPULATION. Whether a census-named script may be a non-projected step is UNVERIFIED
+  and must be checked against test/fast-gate-admits-the-census-class.test.ts before anyone
+  builds it. THE LESSON, WHICH IS THE PART WORTH FILING: two filters were read in sequence and
+  the second was blamed without running the first. The check that settles it is four lines --
+  call the discoverer, apply each filter, print the counts -- and it was available before the
+  record was written, not only after.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

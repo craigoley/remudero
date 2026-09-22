@@ -10,7 +10,8 @@
   origin: "operator ask 2026-09-22: instrument codex headroom, after the console's Provider headroom card was confirmed Unavailable in Chrome"
   plan_refs: [W1-T4024, W1-T4027]
   files: [src/lib/account-usage.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t4027-8-console-port
@@ -79,3 +80,19 @@
     indistinguishable from a live one, which the first catches. Reach for the keychain because it
     is the easiest place to find an identity and the fourth goes red. Return a plausible default
     when the source cannot be found, and the second goes red: no source must read as no source.
+    WITHDRAWN 2026-09-22 — ITS PREMISE WAS FALSE WHEN IT WAS FILED. The title says "CODEX HEADROOM HAS
+    NO READER ANYWHERE IN THE PROCESS". `codexCapacityFromRateLimits` and `readCodexCapacity`
+    (src/lib/worker-provider.ts) landed 2026-09-01 in #3498, twenty-one days before this record, and
+    the daemon persists the reading: `state/provider-routing-status.json` held "codex primary 10080m
+    70%" at 2026-09-22T17:45:22Z. THE CARD HALF OF THE TITLE WAS RIGHT, AND FOR A REASON NEITHER RECORD
+    NAMED: the console requests `/v1/analytics?projectionVersion=console-v1`, and that projection is
+    `{version, asOf, metrics, operatorAgent}` — it carries no `provider` block and no `timeSeries` at
+    all (read from the daemon's own snapshot 2026-09-22), so the card has nothing to draw and says
+    "unavailable". Behind it, `adaptLiveAnalyticsMetrics` also collapses every window to the SELECTED
+    provider's tightest one (58%, claude, with codex at 70% used), which is what a full-snapshot caller
+    sees. Building a second codex reader would have added a credential surface for data the process
+    already has.
+    SUPERSEDED BY W1-T4024, rewritten in this same PR to expose every provider's windows from the
+    existing snapshot. This record's four criteria are honoured there by construction: every reading
+    carries its as-of and account, an unreadable reading is reported as such, an absent window is
+    never drawn as 0% or 100%, and no credential is read because serve reads only the snapshot file.

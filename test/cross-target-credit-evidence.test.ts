@@ -328,3 +328,59 @@ test("W1-T3873 criterion 4: buildCreditCandidates resolves the evidence root ONC
   });
   assert.equal(calls, 1, "one plan of five tasks resolves the evidence root exactly once, never five times");
 });
+
+function headBranchGateway(taskId: string, prNumber: number, title?: string) {
+  const url = `https://github.com/o/target/pull/${prNumber}`;
+  const ref = {
+    number: prNumber,
+    url,
+    state: "MERGED",
+    headRefName: `run-${taskId}-1790097000000`,
+    ...(title === undefined ? {} : { title }),
+  };
+  return {
+    prByRef: () => ({ ...ref }),
+    findMergedByTrailer: () => null,
+    findMergedByHeadBranch: (id: string) => (id === taskId ? [ref] : []),
+    headRefName: () => ref.headRefName,
+    prBody: () => undefined,
+  };
+}
+
+function escalationRow(taskId: string) {
+  return [{ number: 4043, url: "https://github.com/o/target/issues/4043", title: "needs a human", body: `**Task:** ${taskId}\n` }];
+}
+
+test("W1-T4043: a merged plan-only head-branch filing stays live for the escalation reconciler", () => {
+  const taskId = "W1-T4043";
+  const candidates = buildEscalationReconcileCandidates("o", "target", planOf(taskId), ledgerFile(), undefined, {
+    issues: listIssues(escalationRow(taskId)),
+    github: headBranchGateway(taskId, 4043, "chore(plan): amend the acceptance contract") as never,
+    evidenceRootFor: () => undefined,
+  });
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].derived.merged, false, "a plan-only branch credit cannot close the human receipt");
+  assert.equal(candidates[0].derived.indeterminate, undefined, "a known filing is live, not unreadable");
+});
+
+test("W1-T4043: a genuine implementation head-branch merge remains auto-resolvable", () => {
+  const taskId = "W1-T4043";
+  const candidates = buildEscalationReconcileCandidates("o", "target", planOf(taskId), ledgerFile(), undefined, {
+    issues: listIssues(escalationRow(taskId)),
+    github: headBranchGateway(taskId, 4044, "fix(status): require implementation evidence") as never,
+    evidenceRootFor: () => undefined,
+  });
+  assert.equal(candidates[0].derived.merged, true, "a real implementation still flows to automatic closure");
+  assert.equal(candidates[0].derived.indeterminate, undefined);
+});
+
+test("W1-T4043: missing implementation evidence leaves the escalation indeterminate", () => {
+  const taskId = "W1-T4043";
+  const candidates = buildEscalationReconcileCandidates("o", "target", planOf(taskId), ledgerFile(), undefined, {
+    issues: listIssues(escalationRow(taskId)),
+    github: headBranchGateway(taskId, 4045) as never,
+    evidenceRootFor: () => undefined,
+  });
+  assert.equal(candidates[0].derived.merged, false, "unknown evidence cannot close the human receipt");
+  assert.equal(candidates[0].derived.indeterminate, true, "unknown evidence waits for a readable pass");
+});

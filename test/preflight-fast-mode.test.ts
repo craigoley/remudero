@@ -41,7 +41,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 // ── acceptance 1: the fast mode runs the curated npm-script gates and reports each ──────────
 // step's own pass/fail ───────────────────────────────────────────────────────────────────────
 
-test("FAST_GATE_STEPS: the curated list is exactly the eleven deterministic npm-script gates, including W1-T2734's source-size signal, the comment-load ratchet and W1-T3702's diff-scoped lint-plan, plus the six census entries (four from W1-T2478, W1-T2695's authority-census, and W1-T2898's ledger-literal-census)", () => {
+test("FAST_GATE_STEPS: the curated list is exactly the twelve deterministic npm-script gates, including W1-T2734's source-size signal, the comment-load ratchet, W1-T3702's diff-scoped lint-plan and the plan-shaped self-path-proof ratchet, plus the six census entries (four from W1-T2478, W1-T2695's authority-census, and W1-T2898's ledger-literal-census)", () => {
   const scripts = FAST_GATE_STEPS.map((s) => s.script).sort();
   assert.deepEqual(scripts, [
     "api-client:check",
@@ -51,6 +51,7 @@ test("FAST_GATE_STEPS: the curated list is exactly the eleven deterministic npm-
       "census:ledger-literal",
     "census:negative-reachability",
     "census:no-shallowing",
+    "census:self-path-proof",
     "claims",
     "cli-reference:check",
     "comment-load-signal",

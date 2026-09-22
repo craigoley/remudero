@@ -13,6 +13,11 @@
   plan_refs: ["W1-T2914", "W1-T496", "W1-T1289"]
   status: queued
   attempts: 0
+  # EXECUTED BY HAND 2026-09-22: this task's whole deliverable is a DECISIONS.md entry, and
+  # ruling-verify correctly refuses it at verify: auto, so the operator wrote it in #6561.
+  # `pr:` is deriveStatus's explicit-hand-execution credit (precedence source (b)); without it
+  # this record sits verify:human + queued forever and counts in the parked backlog.
+  pr: 6561
   rationale: |
     OBSERVED at a0b6ba81e. This is a RULING, not a build.
 

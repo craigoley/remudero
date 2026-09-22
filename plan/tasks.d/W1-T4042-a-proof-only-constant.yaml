@@ -71,7 +71,7 @@
   origin: "oper#proof-only-constant-2026-09-22"
   plan_refs: ["W1-T4033", "W1-T199"]
   files: [src/run-task.ts, test/the-regime-helper-has-one-derivation.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     CRITERION 1 REPOINTED BEFORE ANY PUSH, AND WHY THE FIRST FORM COULD NOT WORK. As authored it was

@@ -10,7 +10,7 @@
   files: [src/run-task.ts]
   origin: oper#needs-human-cross-repo-2026-09-22
   plan_refs: ["W1-T3505", "W1-T3798"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> codex/file-W1-T4032-review-fallback

@@ -10,7 +10,7 @@
   files: [src/lib/worker.ts, test/worktree-node-modules.test.ts, test/workspace-node-modules-link.test.ts, test/workspace-node-modules-paths.test.ts, test/workspace-node-modules-occupied-destination.test.ts, test/workspace-node-modules-root-baseline.test.ts]
   origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
   plan_refs: ["W1-T137", "W1-T2312", "W1-T2777", "W1-T4002"]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED 2026-09-22: linkWorktreeNodeModules creates only

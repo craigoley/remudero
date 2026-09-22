@@ -1144,12 +1144,50 @@ interface InterphaseReviewClock {
   stop(): Promise<{ eventWakeSeen: boolean }>;
 }
 
+/**
+ * W1-T4041 — REPORT A TICK THAT CAME BACK LATE, AND NAME THE PHASE THAT WAS IN FORCE.
+ *
+ * On 2026-09-22 three lanes went silent TOGETHER for 34 minutes while the process stayed alive and
+ * later continued: `daemon.alive` (13:05:54Z to 13:40:02Z), the inter-phase review clock (last row
+ * 13:19:23.868Z) and the sweep (13:19:23Z to 13:40:53Z). They share exactly one property — all three
+ * are timer-driven on this event loop. Every lane that could have reported the outage was frozen by
+ * it, so absence of evidence was the only evidence, and reasoning from it produced two wrong root
+ * causes before this one.
+ *
+ * THE THRESHOLD IS DERIVED, NOT PICKED: an overrun is reported only when the tick came back later
+ * than one WHOLE interval past its due time, i.e. at least one tick was missed. That scales with
+ * whatever interval the caller is running and needs no tuning.
+ *
+ * WHAT IT CANNOT DO, STATED RATHER THAN HIDDEN: a sampler on the blocked loop records nothing WHILE
+ * the block is in force — it reports the lag it just suffered, on the first tick that runs after the
+ * block clears. That is a real limit, and it is why this reports rather than gates.
+ *
+ * Swallows everything: observability must never be able to take down the loop it observes.
+ */
+export function reportLoopLag(
+  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  try {
+    const lagMs = sample.observedAtMs - sample.dueAtMs;
+    if (!(lagMs > sample.intervalMs)) return;
+    log("daemon.loop_lag", {
+      phase: sample.phase,
+      lag_ms: Math.round(lagMs),
+      interval_ms: sample.intervalMs,
+      missed_ticks: Math.floor(lagMs / sample.intervalMs),
+    });
+  } catch {
+    // Reason: a throwing logger must cost the reading, never the tick.
+  }
+}
+
 /** The review-only clock for the part of an iteration that previously had none: after the full
  *  reconciliation await returns and before a phase ticker or an idle wait takes over. It owns only
  *  the light pass, so no fix, merge, close, escalation or dispatch action is introduced here. A wake
  *  observed during an active pass stays pending and makes the next wait resolve immediately, which
  *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md. */
-function startInterphaseReviewClock(
+export function startInterphaseReviewClock(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1160,18 +1198,33 @@ function startInterphaseReviewClock(
   let elapsedMs = 0;
   const wait = deps.sleepUntilSweepWake;
   const quantumMs = Math.max(1, Math.min(pollIntervalMs, INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS));
+  // W1-T2897 Clock port: the same instant source as `deps.now`, never a second bare `new Date()`
+  // in this file (the clock-signature census holds src/lib/daemon.ts at its recorded row).
+  const interphaseClock = clockFromDateFn(deps.now);
+  // W1-T4045: when the last pass ran, so the interval can be measured in TIME as well as in ticks.
+  let lastPassAtMs = interphaseClock.now();
   // This clock exists to consume the durable event signal, and must not synthesize it over the
   // legacy plain wait seam, which cannot be interrupted at a phase boundary. Production always wires
   // the interruptible form; omission retains the exact earlier call cadence.
   const runner = deps.sweepLight && wait
     ? (async () => {
         while (active) {
+          const clockDueAtMs = interphaseClock.now() + quantumMs;
           const result = await wait(quantumMs);
+          reportLoopLag(
+            { phase: "interphase", dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs },
+            log,
+          );
           if (result === "wake") {
             eventWakeSeen = true;
             eventWakePending = true;
           } else {
-            elapsedMs += quantumMs;
+            // W1-T4045 — COUNT TIME, NOT ONLY TICKS. A late wake used to add the NOMINAL quantum, so when
+            // the event loop was blocked between waits (one synchronous ledger-union read measured 9.22 s,
+            // W1-T4046) a 60 s interval needed sixty resolved waits — roughly nine minutes of ~9 s blocks.
+            // The maximum keeps today's behaviour wherever time does not outrun the ticks (every frozen
+            // fixture clock) and fires promptly where it does, so it can never make a pass later.
+            elapsedMs = Math.max(elapsedMs + quantumMs, interphaseClock.now() - lastPassAtMs);
           }
           if (!active) break;
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
@@ -1182,6 +1235,7 @@ function startInterphaseReviewClock(
           const trigger = eventWakePending ? "github-event" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
+          lastPassAtMs = interphaseClock.now();
           try {
             await deps.sweepLight!();
             if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger });
@@ -1327,7 +1381,12 @@ function startInFlightTicker(
           // Dispatch and retro can hold the loop for tens of minutes, so let an event wake this wait only
           // when the ticker owns the retrigger. The nested ticker inside a full pass stays on the ordinary
           // clock, so an event arriving then remains pending for one later accepted pass (W1-T2568).
+          const tickDueAtMs = daemonClock.now() + pollIntervalMs;
           const waitResult = await (sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
+          reportLoopLag(
+            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs },
+            log,
+          );
           if (waitResult === "wake") eventWakePending = true;
           if (!owner.active) break;
           // The acknowledgement gap (W1-T1065 part iv). The pause row is written only inside the branch that acts

@@ -94,8 +94,7 @@
   origin: "oper#review-lane-starved-by-daemon-iteration-2026-09-22"
   plan_refs: ["W1-T2379", "W1-T2981", "W1-T1259", "W1-T2744"]
   files: [src/lib/daemon.ts, src/lib/sweep.ts, test/the-measurement-cadence-does-not-block-the-loop.test.ts, scripts/test-tier-manifest.json]
-  status: blocked
-  retirement: withdrawn
+  status: merged
   attempts: 0
   note: |
     RESERVATION HAND-OFF, RECORDED BECAUSE THE MINT COULD NOT RECORD IT. `rmd next-task-id` reserved
@@ -122,3 +121,27 @@
     DURING it. Five of its tests fail against the detach, and bending them to fit would have
     destroyed the design they encode.
     SUPERSEDED BY W1-T4041, which instruments the loop instead of guessing at it.
+    CORRECTED 2026-09-22 — THE WITHDRAWAL ABOVE DID NOT HOLD: THIS CHANGE SHIPPED AS #6593. The fleet
+    built and merged the detach (commit 53088a55c, carrying `Remudero-Task: W1-T4034`) while this
+    record was being withdrawn, so the plan said "withdrawn" while main said "shipped". The record now
+    says what happened. THREE THINGS IN #6593 ARE TRUE AND ONE IS NOT.
+    TRUE: the measurement cadence is now detached; the review lane keeps its turn during that cadence;
+    and W1-T2852's invariant survives — #6593 repointed that suite's fixture from the measurement
+    cadence to the digest cadence, which is still awaited inline, so "a GitHub wake starts a
+    restricted review pass while an inline phase holds the loop" is still asserted (19/19 green). My
+    objection that rewriting those five tests would "destroy the design they encode" was wrong.
+    NOT TRUE: the stated root cause. `daemon.alive` stopped at 13:05:54Z, BEFORE the cadence fired,
+    and the inter-phase review clock is live across the cadence by construction, so the cadence did
+    not produce the 34-minute freeze. W1-T4041 carries the real finding (three timer-driven lanes
+    silent together while the process stayed alive).
+    AND #6593's MESSAGE CARRIES STALE FIGURES: "42 and 29 minutes" is wall-clock from PR creation and
+    includes ~20 minutes of CI. Measured from the last check completing to `sweep.review_started`,
+    the review-lane waits were 19.2 minutes (#6561) and 21.3 minutes (#6564). A commit message cannot
+    be amended after merge; this record is where the correction lives.
+    THE DETACH IS KEPT, AND ITS LIMIT IS MEASURED. The daemon no longer AWAITS the cadence, so its
+    sequencing stops waiting on a result nothing reads. But detaching does not move work off the
+    thread: the cadence's SYNCHRONOUS ledger-union reads still block every timer in the process while
+    they run. MEASURED 2026-09-22 on the live 389-file corpus: one `readLedgerUnionRecordsSync` call
+    blocked the event loop 9.22 s; the existing async `readLedgerUnionRecords` did the same read with
+    a worst block of 0.01 s. So the detach alone does not keep the loop responsive, it is not the fix
+    for the outage, and nothing should cite it as one. W1-T4046 moves those reads to the async reader.

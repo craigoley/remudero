@@ -801,9 +801,14 @@ import {
   realVerifyHumanJudge,
   shardsNeedingJudgement,
   verifyHumanVerdictRow,
+  applyAutomateVerdict,
+  awaitingRelease,
+  releaseEscalatedKeys,
   type ShardUnderJudgement,
+  type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./lib/verify-human-judge.js";
+import { releaseAutomatedShard } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
 import {
@@ -4089,14 +4094,54 @@ export function armAndLogOutcome(
 }
 
 /**
+ * W1-T968 — is this exact pull request ARMED on this exact head, per the ledger? PURE over lines
+ * the caller already read, mirroring {@link armRunIdFromLedger} (same step, same `pr_url` key).
+ *
+ * THE DEFECT. {@link armReportPhrase} answered from the ONE outcome the latest call returned. The
+ * review lane (`armIfVerdictPermits`) arms and ledgers `automerge.armed` with `head_sha` on a PASS;
+ * an Architect lane's later, redundant `armAndLogOutcome` then gets `arm-error-ignored`, which
+ * {@link armOutcomeArmed} rightly reads as "this call armed nothing" — so the line printed "NOT
+ * armed" for a PR armed seconds earlier. That rule (lib/sweep.ts) is not re-derived here; this is
+ * a second, independent read of what the ledger already recorded.
+ *
+ * KEYED ON PR + HEAD (design iii): an arm must not survive a re-head, and an absent `headSha` never
+ * falls back to a pr-url-only match — an unkeyable claim answers `false`, which never overstates.
+ *
+ * LAST EVENT WINS. `withdrawArmIfVerdictRefuses` ledgers `automerge.disarmed` on the SAME head when
+ * a later verdict refuses, so "an arm row exists" is not "armed now". That row has `head_sha` and
+ * no `pr_url`, so it matches on the head. `automerge.disarm_skipped` records a withdrawal that left
+ * the arm standing, so it is not one. Rows are read in append order, as `readLedgerLines` returns.
+ */
+export function priorArmOnHead(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prUrl: string,
+  headSha: string | undefined,
+): boolean {
+  if (!headSha) return false;
+  let armed = false;
+  for (const line of lines) {
+    if (line.head_sha !== headSha) continue;
+    if (line.step === "automerge.armed" && line.pr_url === prUrl) armed = true;
+    else if (line.step === "automerge.disarmed" && (line.pr_url === undefined || line.pr_url === prUrl)) armed = false;
+  }
+  return armed;
+}
+
+/**
  * impl-BI — the human-readable half of the same honesty fix. Every one of the five lanes
  * printed a fixed `"… gated + armed …"` to the console whatever happened; `retroCommand`
  * printed "retro PR gated + armed (review success)" 1.2 seconds after the console had already
  * carried `automerge.ledger_refused`. Pure and exported so the assertion is on the STRING,
  * not on a mock's call count.
+ *
+ * W1-T968: gained `priorArmOnThisHead` as a SECOND input, never a re-derivation of the first. The
+ * outcome argument keeps deciding what this CALL did; `priorArmOnThisHead` — computed by
+ * {@link priorArmOnHead} against the ledger — separately answers whether the PULL REQUEST is
+ * already armed regardless of this call. Defaulted to `false` so every existing caller/fixture
+ * that never learned about the ledger keeps its exact prior behavior.
  */
-export function armReportPhrase(outcome: ArmOutcome): string {
-  return armOutcomeArmed(outcome) ? `armed (${outcome})` : `NOT armed (${outcome})`;
+export function armReportPhrase(outcome: ArmOutcome, priorArmOnThisHead = false): string {
+  return armOutcomeArmed(outcome) || priorArmOnThisHead ? `armed (${outcome})` : `NOT armed (${outcome})`;
 }
 
 /**
@@ -17867,7 +17912,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     // W1-T2258: `view.headRefOid` is the SAME head the `review.posted` line just above was keyed
     // to — already in hand, no extra read needed to close the join gap for this lane.
     const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
-    console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), view.url, view.headRefOid);
+    console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome, priorArm)}: ${view.url}`);
     // impl-FR — THE DETECTOR. This lane is the ONLY arm path for a Dependabot PR: the sweep's
     // ordered, first-match-wins DISPOSITION_RULES put `dep-review` above both `mergeable` and
     // `post-review`, and the shared review lane refuses `dependabot/` heads by name. So an arm
@@ -24669,6 +24717,9 @@ export async function defaultVerifyHumanCadenceResult(
       stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       runId,
+      release: productionVerifyHumanRelease(plan, repoRoot, ledgerPath, runId),
+      releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+      releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
   } catch (e) {
     return {
@@ -26805,7 +26856,10 @@ async function retroCommand(
     }
     const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
-    say(`retro PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
+    say(`retro PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("retro.error", retroErrorLedgerFields(e) ?? { error: String((e as Error)?.message ?? e) });
@@ -33025,9 +33079,6 @@ export function currentStrikeRegimeFor(lines: Array<Record<string, unknown>>, ta
  */
 export type StrikeRegime = "executed" | "keyword_only";
 
-/** The empty-input decision is evidence, not an inference from a failed proof search. */
-export const EMPTY_CRITERIA_REGIME_REASON = "an empty criteria array is not evidence of keyword noise";
-
 /**
  * W1-T4033 — THE REGIME A STRIKE IS SPENT UNDER, DERIVED FROM THE EVIDENCE IT WAS DISPATCHED
  * AGAINST. `criteria.some(...)` asks "did any proof execute", which is the right question ONLY
@@ -33965,6 +34016,39 @@ export interface EscalationIntake {
   droppedNoReferent: number;
 }
 
+/** W1-T4043 — the escalation closer is a DESTRUCTIVE consumer of merge credit, so a
+ * head-branch-only projection must carry the same implementation-subject evidence as the
+ * credit-backfill closer. The ordinary status projection deliberately remains broader: it is
+ * read by dispatch and the board, and the subject is not ground truth for implementation. This
+ * guard is only for the issue close, where unknown evidence must leave the receipt open. */
+function reconcileImplementationEvidence(
+  taskId: string,
+  projection: StatusProjection,
+  github: GitHub,
+  mergeSubjects: ReadonlyMap<number, string>,
+): boolean | undefined {
+  if (!projection.merged || projection.source !== "head-branch" || projection.prNumber === undefined) return true;
+  const recorded = mergeSubjects.get(projection.prNumber);
+  if (recorded !== undefined) return creditSubjectIsImplementation(recorded);
+
+  // The local subject map is intentionally bounded and may lag one merge behind. The batched
+  // gateway already has the live PR title in its head-branch rows, so consult that in-memory
+  // surface before paying for a direct lookup. A missing title remains UNKNOWN, never a filing.
+  try {
+    const branchHit = github.findMergedByHeadBranch?.(taskId)?.find((pr) => pr.number === projection.prNumber);
+    if (branchHit?.title !== undefined) return creditSubjectIsImplementation(branchHit.title);
+  } catch {
+    /* an unreadable live surface is unknown implementation evidence, not a close */
+  }
+  try {
+    const direct = github.prByRef(projection.prNumber);
+    if (direct?.title !== undefined) return creditSubjectIsImplementation(direct.title);
+  } catch {
+    /* same fail-open direction: retain the human receipt until the next readable pass */
+  }
+  return undefined;
+}
+
 export function buildEscalationReconcileCandidates(
   owner: string,
   repo: string,
@@ -34016,6 +34100,7 @@ export function buildEscalationReconcileCandidates(
   // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's — see
   // {@link creditEvidenceRootFor}'s own doc, and `buildCreditCandidates`' identical fix above.
   const evidenceRoot = (injected.evidenceRootFor ?? creditEvidenceRootFor)(owner, repo);
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
   const deps: DeriveDeps = {
     ledgerPath,
     github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
@@ -34078,6 +34163,9 @@ export function buildEscalationReconcileCandidates(
       continue;
     }
     const proj = deriveStatus(task, deps);
+    const implementationEvidence = reconcileImplementationEvidence(taskId, proj, deps.github, mergeSubjects);
+    const implementationGuardedMerged =
+      proj.merged && (proj.source !== "head-branch" || implementationEvidence === true);
     // W1-T162: a referent whose PR CLOSED WITHOUT MERGING is also terminal — superseded or
     // abandoned, no longer a live blocker — distinct from an open/blocked-pending-fix PR.
     // deriveStatus's `prState` carries the raw GitHub state through unchanged (status.ts's
@@ -34090,9 +34178,13 @@ export function buildEscalationReconcileCandidates(
       issueNumber: issue.number,
       taskId,
       derived: {
-        merged: proj.merged,
+        merged: implementationGuardedMerged,
         closed: closedWithoutMerge,
-        indeterminate: proj.indeterminate,
+        indeterminate:
+          proj.indeterminate ||
+          (proj.merged && proj.source === "head-branch" && implementationEvidence === undefined)
+            ? true
+            : undefined,
         prUrl: proj.prUrl,
         prNumber: proj.prNumber,
         source: proj.source,
@@ -38467,7 +38559,10 @@ async function triageCommandLocked(
     }
     const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
-    say(`triage PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
+    say(`triage PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("triage.error", { error: String((e as Error)?.message ?? e) });
@@ -38882,7 +38977,10 @@ export async function planCommand(
     }
     const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
-    say(`plan PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
+    say(`plan PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("plan.error", { error: String((e as Error)?.message ?? e) });
@@ -39653,6 +39751,10 @@ export interface VerifyHumanRouteDeps {
   /** Writes the {@link VERIFY_HUMAN_JUDGED_STEP} row. Called on BOTH arms, always. */
   appendRow: (row: LedgerLine) => void;
   runId: string;
+  /** The continue arm — see verify-human-judge.ts's release section. Absent ⇒ prior behaviour. */
+  release?: VerifyHumanReleaseHook;
+  releasedIds?: ReadonlySet<string>;
+  releaseEscalatedKeys?: ReadonlySet<string>;
 }
 
 /** What one pass did. `skipped` are settled states; `deferred` are still due for a later pass. */
@@ -39663,6 +39765,8 @@ export interface VerifyHumanRouteResult {
   backlog: string[];
   skipped: string[];
   deferred: string[];
+  /** Released to the fleet this pass (automate + risk-judge proceed). Absent reads as none. */
+  released?: string[];
 }
 
 /**
@@ -39680,7 +39784,9 @@ export async function routeVerifyHumanBacklog(
   shards: readonly ShardUnderJudgement[],
   deps: VerifyHumanRouteDeps,
 ): Promise<VerifyHumanRouteResult> {
-  const due = shardsNeedingJudgement(shards, deps.priorVerdicts);
+  const releasedIds = deps.releasedIds ?? new Set<string>();
+  // A released task is the fleet's now: never re-judged, never re-released.
+  const due = shardsNeedingJudgement(shards, deps.priorVerdicts).filter((s) => !releasedIds.has(s.id));
   // W1-T3921: failed verdict remains eligible for the next batch
   const dueIds = new Set(due.map((s) => s.id));
   // W1-T3921: --limit <n> applies only to due observed states
@@ -39693,7 +39799,25 @@ export async function routeVerifyHumanBacklog(
     skipped: shards.filter((s) => !dueIds.has(s.id)).map((s) => s.id),
     // W1-T3921: deferred due work remains due for the next pass
     deferred: due.slice(toJudge.length).map((s) => s.id),
+    released: [],
   };
+  const automateHooks = {
+    release: deps.release,
+    stageProposal: deps.stageProposal,
+    appendRow: (row: Record<string, unknown>) => deps.appendRow(row as LedgerLine),
+    runId: deps.runId,
+  };
+  const bucketOf = (bucket: "released" | "needsOperator" | "automated"): string[] =>
+    bucket === "released" ? (result.released ??= []) : bucket === "needsOperator" ? result.needsOperator : result.automated;
+  // THE BACKFILL — the same rule the daemon cadence applies: a shard settled as automate before the
+  // release arm existed is otherwise never revisited.
+  if (deps.release) {
+    for (const shard of awaitingRelease(shards, deps.priorVerdicts, releasedIds, deps.releaseEscalatedKeys ?? new Set())) {
+      const prior = deps.priorVerdicts.get(observedStateKey(shard));
+      if (!prior) continue;
+      bucketOf(await applyAutomateVerdict(shard, prior, automateHooks)).push(shard.id);
+    }
+  }
   for (const shard of toJudge) {
     const verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
     // UNCONDITIONAL, and BEFORE either arm: a crash between the verdict and its effect leaves
@@ -39706,8 +39830,7 @@ export async function routeVerifyHumanBacklog(
       continue;
     }
     if (verdict.decision === "automate") {
-      deps.stageProposal(automationProposalFromJudgedShard(shard, verdict));
-      result.automated.push(shard.id);
+      bucketOf(await applyAutomateVerdict(shard, verdict, automateHooks)).push(shard.id);
       continue;
     }
     result.backlog.push(shard.id);
@@ -39744,6 +39867,41 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * TOUCHES NO PLAN FILE. It reads the plan, writes ledger rows and stages proposals. `--dry-run`
  * judges nothing and spends nothing; it reports which shards a real pass WOULD ask about.
  */
+/**
+ * The PRODUCTION continue arm, shared by the daemon cadence and `rmd verify-human-sweep`. See
+ * lib/verify-human-release.ts for the contract: a filing-time risk judge must say PROCEED, and the
+ * release is the `ratify.approved` row `rmd approve` already writes — now carrying a machine author.
+ *
+ * THE RISK JUDGE IS BUILT LAZILY, on the first release attempt. Resolving a mount can throw, and an
+ * eager build inside the cadence's try-block would turn a missing mount into a refused rung for
+ * every shard — including the ones that only needed a needs_operator proposal.
+ */
+export function productionVerifyHumanRelease(
+  plan: Plan,
+  checkoutRoot: string,
+  ledgerPath: string,
+  runId: string,
+  options: {
+    riskJudge?: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
+    /** Forwarded to realRiskJudge, so a test drives the REAL construction (mount resolution and
+     *  parsing included) without a model call. */
+    spawn?: typeof spawnWorker;
+  } = {},
+): VerifyHumanReleaseHook {
+  let judge = options.riskJudge;
+  const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
+    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn });
+    return judge(input);
+  };
+  return (shard, verdict) =>
+    releaseAutomatedShard(shard, verdict, {
+      task: (id) => plan.byId.get(id),
+      riskJudge,
+      writeRelease: (taskId, provenance) =>
+        approveParkedTask(taskId, { plan, ledgerPath, runId, provenance: { ...provenance } }),
+    });
+}
+
 export async function verifyHumanSweepCommand(
   rest: string[],
   deps: {
@@ -39786,12 +39944,16 @@ export async function verifyHumanSweepCommand(
     const deferred = due.length - selected.length;
     console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${selected.length} would be judged, ${shards.length - due.length} already settled, ${deferred} deferred due. Nothing spent.`);
     for (const d of selected) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
+    const pending = awaitingRelease(shards, priorVerdicts, releasedTaskIds(readLedgerRawLines(ledgerPath)), releaseEscalatedKeys(rows));
+    console.log(`verify-human-sweep --dry-run: ${pending.length} earlier automate verdict(s) would be put to the risk judge for release.`);
+    for (const d of pending) console.log(`  would release-check ${d.id}`);
     return 0;
   }
 
   // The STATE root, never the checkout: `ledgerPathFor(config)` resolves under `config.root`, and
   // a decision whose ledger row and whose proposal land in different directories is half-recorded.
   const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const sweepRunId = `VHSWEEP-${(deps.clock ?? systemClock).iso()}`;
   const result = await (deps.route ?? routeVerifyHumanBacklog)(shards, {
     judge: realVerifyHumanJudge({
       mounts: loadMounts(mountsPath(root)),
@@ -39806,7 +39968,10 @@ export async function verifyHumanSweepCommand(
         current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
       ),
     appendRow: (row) => appendLedger(ledgerPath, row),
-    runId: `VHSWEEP-${(deps.clock ?? systemClock).iso()}`,
+    runId: sweepRunId,
+    release: productionVerifyHumanRelease(plan, root, ledgerPath, sweepRunId),
+    releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+    releaseEscalatedKeys: releaseEscalatedKeys(rows),
   });
 
   const deferred = result.deferred ?? [];
@@ -39817,6 +39982,7 @@ export async function verifyHumanSweepCommand(
   console.log(`verify-human-sweep: judged ${result.judged}, ${needsOperator.length} need you, ${automated.length} entered self-improvement, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
   for (const id of needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
   for (const id of automated) console.log(`  AUTOMATE: ${id} — staged as verify-human-automate:${id} in the inbox`);
+  for (const id of result.released ?? []) console.log(`  RELEASED: ${id} — risk judge said proceed; dispatch-eligible now`);
   return 0;
 }
 
@@ -40109,6 +40275,9 @@ export function approveParkedTask(
     runId: string;
     ledgerLines?: readonly string[];
     append?: typeof appendLedger;
+    /** A MACHINE-written release carries who decided it and why (Law 5: the author class rides
+     *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
+    provenance?: Record<string, unknown>;
   },
 ): { code: number; message: string } {
   const task = deps.plan.byId.get(taskId);
@@ -40131,6 +40300,7 @@ export function approveParkedTask(
     task_id: taskId,
     step: RELEASE_LEDGER_STEP,
     released: "verify-human",
+    ...(deps.provenance ?? {}),
   });
   return { code: 0, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
@@ -40615,7 +40785,10 @@ export async function approveCommand(
     }
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
-    console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), result.prUrl, armHeadSha);
+    console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
     // CHAINED AFTER THE RATIFICATION LANDED, never before: the note describes work that is now
     // really in the plan. Scoped to the proposal id — the docket gathers notes across ALL tasks,
     // so an id that is not a task id still reaches the weekly gather (the task scoping applies to
@@ -40882,8 +41055,11 @@ async function approveBatchCommand(
     }
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), result.prUrl, armHeadSha);
     console.log(
-      `rmd approve: batch of ${result.accepted.length} gated — ${armReportPhrase(armOutcome)} ` +
+      `rmd approve: batch of ${result.accepted.length} gated — ${armReportPhrase(armOutcome, priorArm)} ` +
         `(review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`,
     );
     return reviewCode;

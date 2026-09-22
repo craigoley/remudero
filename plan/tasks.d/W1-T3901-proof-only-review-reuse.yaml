@@ -16,7 +16,7 @@
     - test/review-reuse-discrimination-outcome.test.ts
   origin: "operator-session#pr-6271-followup-2026-09-20"
   plan_refs: ["W1-T3798", "W1-T3704", "W1-T3853"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

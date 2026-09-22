@@ -1,0 +1,46 @@
+- id: W1-T4055
+  title: "A FRESH-TREE REVIEW THAT FAILS SAYS NOTHING ABOUT WHY — 52 of 53 fresh-tree reviews on 2026-09-20/21 exited non-zero and 136 reviews were skipped as stale reviewer code, while the ledger carries only an exit code or `fresh_tree: unavailable`: record the child's failure reason and stderr tail before anything else is changed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "oper#review-latency-research-2026-09-22"
+  plan_refs: [W1-T3697, W1-T3691, W1-T3618]
+  files: [src/run-task.ts, test/a-fresh-tree-review-failure-names-its-cause.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 FROM THE LEDGER UNION. On 2026-09-20 and 2026-09-21 the fresh-tree review path
+    (`review.ran_from_fresh_tree`) exited non-zero 52 times out of 53, and 136 `review.skipped_stale_reviewer_code`
+    rows were written; 24 pull requests waited 14-39 minutes for a process restart instead. On 09-22 the
+    same path succeeded 21 times and failed 9. Separately, 31 verdicts were computed and then withheld as
+    "reviewer code materially behind origin/main".
+
+    THE CAUSE CANNOT BE READ. The stale-reviewer wrapper in src/run-task.ts logs
+    `review.ran_from_fresh_tree` with `exit_code` only, and when the child could not run at all it logs
+    `review.skipped_stale_reviewer_code` with `fresh_tree: "unavailable"` and no reason. Why the child
+    fails — install, checkout, auth, a reviewer error — is exactly the fact a fix needs, and it is
+    discarded at the one place that has it. This task records it; it does not guess at a fix.
+  design: |
+    (i) `reviewFromFreshTree` returns, beside its exit code, a bounded failure description: the
+        spawn/checkout error message when it could not run, and the last lines of the child's stderr
+        when it ran and exited non-zero. Bounded in size so a ledger row stays small; secrets are not a
+        risk the child's stderr introduces beyond what the review lane already logs, and the existing
+        redaction applies.
+    (ii) `review.ran_from_fresh_tree` carries `failure` when `exit_code !== 0`, and
+         `review.skipped_stale_reviewer_code` carries `fresh_tree_reason` instead of a bare "unavailable".
+    (iii) Nothing is retried or reclassified here. The next task is chosen from what these rows say.
+  acceptance:
+    - claim: "a fresh-tree review that exits non-zero ledgers the tail of its stderr"
+      proof: 'grep: test("W1-T4055: a failed fresh-tree review records its stderr tail" in test/a-fresh-tree-review-failure-names-its-cause.test.ts'
+    - claim: "a fresh tree that could not run ledgers why, not just unavailable"
+      proof: 'grep: test("W1-T4055: an unavailable fresh tree records its reason" in test/a-fresh-tree-review-failure-names-its-cause.test.ts'
+    - claim: "the recorded failure text is bounded"
+      proof: 'grep: test("W1-T4055: the failure text is bounded" in test/a-fresh-tree-review-failure-names-its-cause.test.ts'
+  falsifier: |
+    Keep logging the exit code alone and the first assertion goes red. Keep the bare "unavailable" and the
+    second goes red. Log the whole stderr and the third goes red on a large fixture.

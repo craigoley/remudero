@@ -150,6 +150,114 @@ export interface RoutingTelemetrySnapshot {
   daily: RoutingTelemetryDay[];
 }
 
+/** W1-T4024 — cash-lane dollars over one named trailing window. */
+export interface CashSpendWindow {
+  name: "7d" | "30d";
+  days: number;
+  fromDay: string;
+  toDay: string;
+  usd: number;
+  rows: number;
+  /** FALSE when the window starts before the oldest retained day, or covers a day restored from a
+   *  checkpoint that predates cash collection. A compacting ledger must never read as a falling spend. */
+  complete: boolean;
+  reason?: string;
+}
+
+export interface CashSpendSnapshot {
+  state: "observed" | "not-collected";
+  unit: "usd";
+  asOf: string | null;
+  coverage: string;
+  windows: CashSpendWindow[];
+  reason?: string;
+}
+
+const CASH_SPEND_WINDOWS: ReadonlyArray<{ name: CashSpendWindow["name"]; days: number }> = [
+  { name: "7d", days: 7 },
+  { name: "30d", days: 30 },
+];
+
+const CASH_SPEND_COVERAGE =
+  "implement workers only: fix-rung workers record no provider, so their cash spend cannot be attributed";
+
+export function notCollectedCashSpend(reason: string): CashSpendSnapshot {
+  return { state: "not-collected", unit: "usd", asOf: null, coverage: CASH_SPEND_COVERAGE, windows: [], reason };
+}
+
+/** Sum cash-lane dollars over each named window ending on `nowIso`'s UTC day. PURE. */
+function cashSpend(history: CheckpointHistoryState, nowIso: string): CashSpendSnapshot {
+  const end = Date.parse(nowIso);
+  if (!Number.isFinite(end)) return notCollectedCashSpend("no as-of instant to anchor a window");
+  const observed = [...history.days.entries()].filter(([, bucket]) => bucket.observed).map(([day]) => day).sort();
+  const oldest = observed[0];
+  const toDay = utcDayFromTimestamp(end);
+  const windows = CASH_SPEND_WINDOWS.map(({ name, days }): CashSpendWindow => {
+    const fromDay = utcDayFromTimestamp(end - (days - 1) * CHECKPOINT_DAY_MS);
+    let usd = 0;
+    let rows = 0;
+    let uncollected = 0;
+    for (const [day, bucket] of history.days) {
+      if (day < fromDay || day > toDay) continue;
+      usd += bucket.cashUsd ?? 0;
+      rows += bucket.cashRows ?? 0;
+      if (bucket.observed && bucket.cashCollected !== true) uncollected += 1;
+    }
+    const startsBeforeHistory = oldest === undefined || fromDay < oldest;
+    const reason = oldest === undefined
+      ? "no ledger history is retained"
+      : startsBeforeHistory
+        ? `window starts ${fromDay}, before the oldest retained day ${oldest}`
+        : uncollected > 0
+          ? `${uncollected} day(s) in the window were restored from a checkpoint that predates cash collection`
+          : undefined;
+    return {
+      name,
+      days,
+      fromDay,
+      toDay,
+      usd: Math.round(usd * 1e6) / 1e6,
+      rows,
+      complete: !startsBeforeHistory && uncollected === 0,
+      ...(reason ? { reason } : {}),
+    };
+  });
+  return { state: "observed", unit: "usd", asOf: nowIso, coverage: CASH_SPEND_COVERAGE, windows };
+}
+
+/** W1-T4024 — THE SECOND, SMALL, VERSIONED PROJECTION THE CONSOLE FETCHES BESIDE console-v1.
+ *
+ *  WHY NOT GROW console-v1. Measured on the live snapshot 2026-09-22, console-v1 is already 100,489
+ *  bytes — 77% of the console's 128 KB response cap — almost all of it the operator-agent block,
+ *  whose four detail arrays sit at their 100-item cap. Adding the series and provider blocks
+ *  (~14 KB) would leave ~13 KB of margin under a limit that, when crossed, makes the console refuse
+ *  the WHOLE response and blank the entire analytics page. A separate projection keeps both small,
+ *  leaves console-v1 (and W1-T3884's contract) byte-identical, and isolates failure: operator-agent
+ *  growth can no longer blank headroom, nor the reverse. Same path, so no route or relay change. */
+export const CONSOLE_SIGNALS_PROJECTION_VERSION = "console-signals-v1";
+
+export interface ConsoleSignalsProjection {
+  version: typeof CONSOLE_SIGNALS_PROJECTION_VERSION;
+  asOf: string | null;
+  /** The same bounded series the full snapshot serves — the trend cards' only source. */
+  timeSeries: LedgerTimeSeries[];
+  /** Live, merged at request time exactly as the full snapshot merges it. */
+  queue: LiveAnalyticsMetrics["queue"];
+  provider: LiveAnalyticsMetrics["provider"];
+  spend: { cash: CashSpendSnapshot };
+}
+
+export function buildConsoleSignalsProjection(base: AnalyticsSnapshot, live: LiveAnalyticsMetrics): ConsoleSignalsProjection {
+  return {
+    version: CONSOLE_SIGNALS_PROJECTION_VERSION,
+    asOf: base.asOf,
+    timeSeries: base.timeSeries,
+    queue: live.queue,
+    provider: live.provider,
+    spend: base.spend ?? { cash: notCollectedCashSpend("snapshot predates cash collection; awaiting first refresh") },
+  };
+}
+
 /** `GET /v1/analytics`'s body — the four questions, one field group each. */
 export interface AnalyticsSnapshot {
   /** `null` until this process has completed its first ledger-union refresh. */
@@ -186,6 +294,8 @@ export interface AnalyticsSnapshot {
   provider: LiveAnalyticsMetrics["provider"];
   /** Five bounded ledger-backed series; queue and provider trends remain live-only. */
   timeSeries: LedgerTimeSeries[];
+  /** W1-T4024 — money, in dollars, never mixed with subscription utilisation. */
+  spend: { cash: CashSpendSnapshot };
   /** Outcome and work-category dimensions built from terminal run evidence. */
   dimensions: AnalyticsBreakdownDimension[];
   /** Flat rows for console drilldown views, derived from the same bounded dimensions. */
@@ -451,6 +561,13 @@ type CheckpointHistoryBucket = {
   cacheCreation: number;
   costUsd: number;
   durationsMs: number[];
+  /** W1-T4024 — cash-lane money folded into this day. Optional because checkpoints written before
+   *  W1-T4024 restore buckets without it; see `cashCollected`. */
+  cashUsd?: number;
+  cashRows?: number;
+  /** TRUE only on a bucket this version CREATED. A bucket restored from an older checkpoint lacks it,
+   *  so a window touching that day reports itself incomplete instead of silently undercounting. */
+  cashCollected?: boolean;
 };
 
 type CheckpointHistoryState = {
@@ -608,6 +725,9 @@ function checkpointHistoryBucket(state: CheckpointHistoryState, day: string): Ch
     cacheCreation: 0,
     costUsd: 0,
     durationsMs: [],
+    cashUsd: 0,
+    cashRows: 0,
+    cashCollected: true,
   };
   state.days.set(day, created);
   return created;
@@ -650,6 +770,17 @@ function captureCheckpointLine(acc: AnalyticsAccumulator, line: Record<string, u
     bucket.cacheRead += tokens.cacheRead;
     bucket.cacheCreation += tokens.cacheCreation;
     bucket.costUsd += num(line.total_cost_usd) ?? 0;
+  }
+
+  // W1-T4024 — cash-lane money comes from WORKER rows that name their provider, never from
+  // `verdict` or `cost.anomaly`. Measured 2026-09-22: 168 `cost.anomaly` rows restate worker costs,
+  // and 38 of 68 `verdict` rows exactly restate their run's worker total (the rest are unexplained).
+  // Neither carries `provider`, so selecting on it excludes both by construction. `routingTelemetry`
+  // is NOT the source: its terminals are joined from `verdict` rows alone (66 of 602 assignments).
+  if (day !== undefined && step === "implement.done" && str(line.provider) === "cash") {
+    const bucket = checkpointHistoryBucket(acc.checkpointHistory, day);
+    bucket.cashUsd = (bucket.cashUsd ?? 0) + (num(line.total_cost_usd) ?? 0);
+    bucket.cashRows = (bucket.cashRows ?? 0) + 1;
   }
 
   const breakdowns = acc.checkpointBreakdowns;
@@ -1152,6 +1283,7 @@ function snapshotFromAccumulator(
     timeSeries: acc.checkpointHydrated
       ? checkpointTimeSeries(acc.checkpointHistory, nowIso)
       : buildAnalyticsTimeSeries(acc.historicalSeries, nowIso),
+    spend: { cash: cashSpend(acc.checkpointHistory, nowIso) },
     ...(acc.checkpointHydrated
       ? checkpointBreakdowns(acc.checkpointBreakdowns, options.operatorAgentOutcomes)
       : buildAnalyticsBreakdowns(acc.breakdowns, { operatorAgentOutcomes: options.operatorAgentOutcomes })),
@@ -1545,7 +1677,23 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   Object.freeze(value.provider.allowance.remaining);
   Object.freeze(value.provider.allowance.trend);
   Object.freeze(value.provider.allowance);
+  // Guarded: a snapshot restored from a checkpoint written before W1-T4024 carries neither field.
+  if (value.provider.accounts) {
+    for (const account of value.provider.accounts.accounts) {
+      for (const window of account.windows) Object.freeze(window);
+      Object.freeze(account.windows);
+      Object.freeze(account);
+    }
+    Object.freeze(value.provider.accounts.accounts);
+    Object.freeze(value.provider.accounts);
+  }
   Object.freeze(value.provider);
+  if (value.spend?.cash) {
+    for (const window of value.spend.cash.windows) Object.freeze(window);
+    Object.freeze(value.spend.cash.windows);
+    Object.freeze(value.spend.cash);
+    Object.freeze(value.spend);
+  }
   for (const bucket of value.routingTelemetry.buckets) {
     for (const reason of bucket.fallbackReasons) Object.freeze(reason);
     Object.freeze(bucket.fallbackReasons);
@@ -1594,6 +1742,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     },
     ...emptyLiveAnalyticsMetrics(),
     timeSeries: buildAnalyticsTimeSeries([], null),
+    spend: { cash: notCollectedCashSpend("no ledger-union refresh has completed yet") },
     dimensions: breakdowns.dimensions,
     drilldowns: breakdowns.drilldowns,
     operatorAgentMemory: { state: "cold", asOf: null, rows: [] },
@@ -1770,7 +1919,14 @@ export function buildAnalyticsRoute(deps: {
       // The analytics cache owns historical refreshes. Live metrics are a separate, already
       // captured process-owned value, so this handler never starts a refresh or provider read.
       const live = deps.currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics();
-      const snapshot = { ...base, ...live, dimensions: base.dimensions, drilldowns: base.drilldowns } as AnalyticsSnapshot;
+      // W1-T4024: a snapshot restored from a pre-W1-T4024 checkpoint has no `spend` until the first
+      // refresh; say so explicitly rather than let the field vanish from the payload.
+      if (requestedVersion === CONSOLE_SIGNALS_PROJECTION_VERSION) {
+        sendJson(res, 200, buildConsoleSignalsProjection(base, live));
+        return;
+      }
+      const spend = base.spend ?? { cash: notCollectedCashSpend("snapshot predates cash collection; awaiting first refresh") };
+      const snapshot = { ...base, ...live, spend, dimensions: base.dimensions, drilldowns: base.drilldowns } as AnalyticsSnapshot;
       const resolution = resolveConsoleV1Projection(snapshot, requestedVersion);
       if (!resolution.ok) {
         sendJson(res, 409, resolution);

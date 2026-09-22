@@ -545,6 +545,13 @@ function setupFakeRetroFixture(
      *  BOTH open-weight spellings: W1-T3607 made `cash` canonical and kept `openweight` as a
      *  deprecated alias, and `WorkerProviderId` still admits each, so each must be refused here. */
     workerProvider?: "claude" | "codex" | "cash" | "openweight";
+    /** CI reads GREEN on the first poll instead of red, so the run goes on past the marker advance
+     *  into review, the arm and the gated report line (W1-T968). */
+    ciGreen?: boolean;
+    /** Seed the ledger with the `automerge.armed` row a REVIEW-lane arm writes for this fixture's
+     *  PR on the head its `/pulls/*` answer reports (W1-T968). The fake `gh` fails every
+     *  `pr merge`, so the review's own withdrawal is ledgered `disarm_skipped` and the arm stands. */
+    priorArm?: boolean;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -565,6 +572,20 @@ function setupFakeRetroFixture(
   if (opts.seedMarker) {
     mkdirSync(join(root, "state"), { recursive: true });
     writeFileSync(join(root, "state", "last-retro.json"), JSON.stringify(opts.seedMarker, null, 2) + "\n");
+  }
+  if (opts.priorArm) {
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "ledger.ndjson"),
+      JSON.stringify({
+        ts: "2026-08-16T00:00:00.000Z",
+        step: "automerge.armed",
+        pr_url: "https://github.com/craigoley/remudero/pull/999999",
+        head_sha: "deadbeef",
+        lane: "review",
+        outcome: "armed",
+      }) + "\n",
+    );
   }
 
   // ── a real local "origin" (bare) + a pre-cloned repoDir (skips `gh repo clone`) ──
@@ -650,8 +671,12 @@ function setupFakeRetroFixture(
       opts.existingPrWithoutReport
         ? `    */pulls?head=*) echo '[{"html_url":"https://github.com/craigoley/remudero/pull/434343","number":434343}]'; exit 0 ;;`
         : `    */pulls?head=*) echo '[]'; exit 0 ;;`,
-      `    */pulls/*) echo '{"number":999999,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}'; exit 0 ;;`,
-      `    */check-runs*) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"failure"}]}'; exit 0 ;;`,
+      // A green run goes on into review, which reads the PR's own url off this row the way every real
+      // REST pulls response carries it; the red-CI variants never get that far and keep the old shape.
+      opts.ciGreen
+        ? `    */pulls/*) echo '{"number":999999,"html_url":"https://github.com/craigoley/remudero/pull/999999","state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}'; exit 0 ;;`
+        : `    */pulls/*) echo '{"number":999999,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}'; exit 0 ;;`,
+      `    */check-runs*) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"${opts.ciGreen ? "success" : "failure"}"}]}'; exit 0 ;;`,
       `    */status) echo '{"statuses":[]}'; exit 0 ;;`,
       `  esac`,
       `fi`,
@@ -773,6 +798,35 @@ function setupFakeRetroFixture(
 
   return { root, branch, fakeSpawn, spawnArgs, prepublishPreflight, run };
 }
+
+// W1-T968 — retro's gated report answers about the PULL REQUEST, not the call. Every other variant
+// here stops at a red CI poll, so retro's gated tail was reached by no test at all. This one lets
+// CI read green and seeds a standing REVIEW-lane arm on the fixture's head; the review this run
+// makes refuses and its withdrawal fails (the fake `gh` refuses every `pr merge`), and this lane's
+// own arm is refused. The old phrase, a function of that last outcome alone, printed "NOT armed".
+test("W1-T968: a retro PR reports a standing prior arm as armed although its own arm was refused", async (t) => {
+  const fx = setupFakeRetroFixture(t, { ciGreen: true, priorArm: true });
+  await fx.run(async () => {
+    await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
+    const said = (console.log as unknown as { mock: { calls: Array<{ arguments: unknown[] }> } }).mock.calls.map((c) =>
+      c.arguments.map(String).join(" "),
+    );
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const steps = JSON.stringify(ledgerLines.map((l) => l.step));
+
+    assert.ok(!ledgerLines.some((l) => l.step === "retro.error"), `the run must reach its gate; steps=${steps}`);
+    assert.ok(ledgerLines.some((l) => l.step === "automerge.disarm_skipped"), `the withdrawal failed, so the arm stands; steps=${steps}`);
+    const ownArm = ledgerLines.filter((l) => l.lane === "operator" && String(l.step).startsWith("automerge."));
+    assert.ok(ownArm.length > 0 && ownArm.every((l) => l.step !== "automerge.armed"), `this lane's own arm armed nothing; steps=${steps}`);
+
+    const gated = said.filter((line) => line.includes("retro PR gated — "));
+    assert.equal(gated.length, 1, `exactly one gated report line; console=${JSON.stringify(said)}`);
+    assert.match(gated[0], /retro PR gated — armed \(/, "the pull request is armed, whatever this lane's own call returned");
+  });
+});
 
 test("retroCommand: a clean run reaches the REAL saveMarker call at the end of the success path and lands a valid marker", async (t) => {
   // The ONE variant that opts into the REAL scripts/generate-plan-index.mjs subprocess
