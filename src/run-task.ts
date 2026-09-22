@@ -11236,6 +11236,8 @@ export interface NoPrVerdict {
      * a reader can tell "looked and found nothing" from "the field predates this task".
      */
     no_pr_shape: "awaiting-notification" | "unclassified";
+    /** W1-T3978: producer-owned terminal classification. Absent means the ordinary no-PR path. */
+    terminal_class?: "harness_commit_refused";
   };
 }
 
@@ -11266,6 +11268,7 @@ export function noPrVerdict(
   costUsd: number,
   stage: string,
   commitsAheadCount: number,
+  terminalClass?: "harness_commit_refused",
 ): NoPrVerdict {
   const reportExcerpt = noPrReportExcerpt(r);
   return {
@@ -11291,6 +11294,7 @@ export function noPrVerdict(
       // W1-T465: recorded UNCONDITIONALLY, unlike `report_excerpt` above — an absent field and a
       // field reading `unclassified` mean different things, and only one of them is a measurement.
       no_pr_shape: classifyNoPrShape(reportExcerpt),
+      ...(terminalClass === "harness_commit_refused" ? { terminal_class: terminalClass } : {}),
     },
   };
 }
@@ -14845,9 +14849,19 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // decision on lines no test can reach without driving this entire dispatch — which is what
     // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
     // request must be exercised, not reasoned about from outside.
+    const harnessCommitRefusalState: { reason?: string } = {};
     commitCount = harnessCommitForShellLessWorker({
-      harnessOwnsGit, commitCount, report: fullText(impl), worktreePath, declaredPaths: task.files ?? [], log, say,
+      harnessOwnsGit,
+      commitCount,
+      report: fullText(impl),
+      worktreePath,
+      declaredPaths: task.files ?? [],
+      log,
+      say,
+      onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
     });
+    const harnessCommitRefusalReason = harnessCommitRefusalState.reason;
+    const harnessCommitRefused = harnessCommitRefusalReason !== undefined && commitCount === 0;
 
     if (!prUrl && commitCount === 0) {
       // W1-T412: HARVEST BEFORE THIS BLOCK'S RETURNS, because every path out of it returns and
@@ -14924,7 +14938,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             `(${resolution.reason}) — falling to no_pr`,
         );
       }
-      const v = noPrVerdict(impl, costUsd, "implement", commitCount);
+      const v = noPrVerdict(
+        impl,
+        costUsd,
+        "implement",
+        commitCount,
+        harnessCommitRefused ? "harness_commit_refused" : undefined,
+      );
       try {
         worktreeRemove(repoDir, worktreePath);
         log("worktree.remove", { on: "no_pr" });
@@ -14933,7 +14953,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       }
       log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
       say(`verdict: no_pr — worker completed without opening a PR · ${impl.numTurns} turns`);
-      return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
+      return {
+        taskId,
+        runId,
+        merged: false,
+        costUsd,
+        verdict: "no_pr",
+        ...(harnessCommitRefused
+          ? { harnessCommitRefused: true as const, harnessCommitRefusalReason }
+          : {}),
+      } as RunResult;
     }
 
     // Ensure the branch is on origin (worker pushes without -u).
@@ -34467,6 +34496,13 @@ export function harnessCommitForShellLessWorker(
   }
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
+}
+
+/** Keep the run-body refusal state callback independently executable for the harness path. */
+export function createHarnessCommitRefusalRecorder(state: { reason?: string }): (reason: string) => void {
+  return (reason) => {
+    state.reason = reason;
+  };
 }
 
 /** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is
