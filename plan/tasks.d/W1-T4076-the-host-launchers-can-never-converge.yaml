@@ -3,6 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
+  priority: 1
   verify: human
   principles: {tdd: strict}
   budget_usd: 25.00
