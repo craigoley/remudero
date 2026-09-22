@@ -286,6 +286,19 @@ test("W1-T3901 adapter falls back when the PR-head or merge-base worktree is una
 });
 
 test("W1-T3901 adapter contains discrimination errors and cleanup errors", async () => {
+  const rejected = adapterFixture({
+    execProof: () => {
+      throw new Error("proof evidence disappeared");
+    },
+  });
+  try {
+    await withLiveWritesAllowed(() => rejected.effects.postReview!(rejected.pr, { kind: "discriminate-only", judgedHeadSha: rejected.priorHead }));
+    assert.equal(rejected.calls.includes("fallback-review"), true);
+    assert.equal(rejected.calls.includes("sweep.review_reuse_discrimination_fallback"), true);
+  } finally {
+    rejected.cleanup();
+  }
+
   const errored = adapterFixture({
     materialize: () => {
       throw new Error("materializer exploded");
