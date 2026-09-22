@@ -39844,18 +39844,18 @@ export interface VerifyHumanRouteResult {
  * mutation: it only records the judge result and stages the same idempotent inbox proposal used by
  * `verify-human-sweep`. Keeping this as a separate adapter lets the drain/daemon paths share the
  * judge without making a pressure signal a hidden blocking gate. */
-export interface AdaptiveLifetimePressureDeps {
+type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   plan: Plan;
   root: string;
   config: Config;
   ledgerPath: string;
   runId: string;
-}
+};
 
 /** Route repeated attributable dispatch pressure through the existing three-way LLM judge. */
 export async function routeAdaptiveLifetimePressure(
   tasks: readonly Task[],
-  deps: AdaptiveLifetimePressureDeps,
+  deps: AdaptiveLifetimePressureRoute,
 ): Promise<VerifyHumanRouteResult> {
   const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
   const shards = tasks.map((task): ShardUnderJudgement => {
