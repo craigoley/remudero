@@ -27,6 +27,16 @@ function assertPolicyError(fn: () => unknown, pattern: RegExp): void {
   assert.throws(fn, (error: unknown) => error instanceof PolicyError && pattern.test((error as Error).message));
 }
 
+function enforceRaw(): Record<string, unknown> {
+  const raw = policyRaw();
+  (((raw.githubEventWake as Record<string, unknown>).semanticCheckMode as Record<string, unknown>).value) = "enforce";
+  return raw;
+}
+
+function setRatification(raw: Record<string, unknown>, value: unknown, origin = "net-new"): void {
+  (raw.githubEventWake as Record<string, unknown>).enforceRatification = { value, origin };
+}
+
 function checkRunBody(name: string, headSha: unknown): string {
   return JSON.stringify({
     action: "completed",
@@ -97,6 +107,52 @@ test("webhook enforce refuses incomplete ratification", () => {
     assertPolicyError(() => validatePolicy(raw), new RegExp(candidate.name === "uncovered" ? "cover every observed" : "full UTC day|UTC midnight"));
   }
   assert.equal(loadPolicy(policyPath(REPO_ROOT)).values.githubEventWake.semanticCheckMode, "shadow");
+});
+
+test("webhook enforce rejects malformed ratification fields", () => {
+  const valid = {
+    observedFrom: "2026-09-19T00:00:00Z",
+    observedThrough: "2026-09-20T00:00:00Z",
+    ratifiedAt: "2026-09-21T00:00:00Z",
+    aggregateHeadsCovered: 12,
+    aggregateHeadsTotal: 12,
+  };
+
+  const scalar = enforceRaw();
+  (scalar.githubEventWake as Record<string, unknown>).enforceRatification = "not-a-mapping";
+  assertPolicyError(() => validatePolicy(scalar), /enforceRatification.*mapping/);
+
+  const scalarValue = enforceRaw();
+  setRatification(scalarValue, "not-a-mapping-value");
+  assertPolicyError(() => validatePolicy(scalarValue), /enforceRatification\.value.*mapping/);
+
+  const malformedTimestamp = enforceRaw();
+  setRatification(malformedTimestamp, { ...valid, observedFrom: "" });
+  assertPolicyError(() => validatePolicy(malformedTimestamp), /observedFrom.*UTC ISO timestamp/);
+
+  const invalidTimestamp = enforceRaw();
+  setRatification(invalidTimestamp, { ...valid, observedFrom: "not-a-dateZ" });
+  assertPolicyError(() => validatePolicy(invalidTimestamp), /observedFrom.*valid UTC ISO timestamp/);
+
+  const nonMidnight = enforceRaw();
+  setRatification(nonMidnight, {
+    ...valid,
+    observedFrom: "2026-09-19T06:00:00Z",
+    observedThrough: "2026-09-20T06:00:00Z",
+  });
+  assertPolicyError(() => validatePolicy(nonMidnight), /UTC midnight/);
+
+  const earlyRatification = enforceRaw();
+  setRatification(earlyRatification, { ...valid, ratifiedAt: "2026-09-20T00:00:00Z" });
+  assertPolicyError(() => validatePolicy(earlyRatification), /ratifiedAt.*after the evidence window/);
+
+  const invalidCount = enforceRaw();
+  setRatification(invalidCount, { ...valid, aggregateHeadsCovered: 1.5 });
+  assertPolicyError(() => validatePolicy(invalidCount), /aggregateHeadsCovered.*non-negative integer/);
+
+  const inheritedOrigin = enforceRaw();
+  setRatification(inheritedOrigin, valid, "inherited");
+  assertPolicyError(() => validatePolicy(inheritedOrigin), /origin.*net-new/);
 });
 
 test("webhook summaries preserve bounded head identity", async () => {
