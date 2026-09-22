@@ -65,3 +65,4 @@
     both scope-time checks returned no run branch and no merged PR trailer. The reservation was
     forced past a local pre-push gate only because this shared checkout contains an unreadable
     cross-user `test/mutants-*` directory; CI remains the authoritative full gate.
+    The implementation PR will carry the task trailer only after this plan filing is merged.
