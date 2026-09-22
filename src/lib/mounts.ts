@@ -617,9 +617,12 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);
-  if (stepUp && tiers[stepUp.model] >= tiers[architect.model]) {
+  // A PEER IS ALLOWED, ABOVE IS NOT — the bar `judge: opus` (3) already clears beside a squeeze
+  // Architect on `gpt-5.6-terra` (3), because G-17 constrains worker ROUTES, not seats. Strict
+  // dominance here refused the whole table under that squeeze. Operator ruling 2026-09-22.
+  if (stepUp && tiers[stepUp.model] > tiers[architect.model]) {
     throw new MountsError(
-      `'step_up' (${stepUp.model}, tier ${tiers[stepUp.model]}) must sit strictly below the Architect (${architect.model}, tier ${tiers[architect.model]}).`,
+      `'step_up' (${stepUp.model}, tier ${tiers[stepUp.model]}) must not outrank the Architect (${architect.model}, tier ${tiers[architect.model]}) — a peer tier is allowed, above it is not.`,
     );
   }
   return mounts;
