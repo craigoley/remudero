@@ -162,35 +162,35 @@ function parseGhJsonBody(args: string[], body: string): unknown {
 export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsync = execFileAsync): Promise<unknown> {
   // Injected executors are test/offline seams and may have independent side effects, so only the
   // real `gh` transport participates in production single-flight coalescing.
-  if (execAsync !== execFileAsync) {
-    const { stdout } = await execAsync("gh", args, {
-      encoding: "utf8",
-      maxBuffer: DEFAULT_GH_MAX_BUFFER,
-      timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-    });
-    return parseGhJsonBody(args, stdout);
+  if (execAsync === execFileAsync) {
+    const key = JSON.stringify(args);
+    const existing = asyncReadInFlight.get(key);
+    if (existing) return existing;
+    const request = (async (): Promise<unknown> => {
+      // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
+      // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
+      // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
+      applyGhReadCadence(args);
+      const { stdout } = await execAsync("gh", args, {
+        encoding: "utf8",
+        maxBuffer: DEFAULT_GH_MAX_BUFFER,
+        timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+      });
+      return parseGhJsonBody(args, stdout);
+    })();
+    asyncReadInFlight.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
+    }
   }
-  const key = JSON.stringify(args);
-  const existing = asyncReadInFlight.get(key);
-  if (existing) return existing;
-  const request = (async (): Promise<unknown> => {
-    // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
-    // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
-    // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
-    applyGhReadCadence(args);
-    const { stdout } = await execAsync("gh", args, {
-      encoding: "utf8",
-      maxBuffer: DEFAULT_GH_MAX_BUFFER,
-      timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-    });
-    return parseGhJsonBody(args, stdout);
-  })();
-  asyncReadInFlight.set(key, request);
-  try {
-    return await request;
-  } finally {
-    if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
-  }
+  const { stdout } = await execAsync("gh", args, {
+    encoding: "utf8",
+    maxBuffer: DEFAULT_GH_MAX_BUFFER,
+    timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+  });
+  return parseGhJsonBody(args, stdout);
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
