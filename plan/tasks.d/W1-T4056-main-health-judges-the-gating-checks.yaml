@@ -1,0 +1,58 @@
+- id: W1-T4056
+  title: "MAIN-HEALTH JUDGES EVERY CHECK ON MAIN'S HEAD AS REQUIRED, SO A SCHEDULED HOST-LIVENESS MONITOR OR A CODEQL SCAN FILES 'MAIN IS RED' — the rung passes no required contexts, and 14 of the 24 main-health escalations since 2026-09-17 named only heartbeat-watch or Analyze (actions): judge main by the checks ci-gate requires"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "oper#flow-research-2026-09-22"
+  plan_refs: [W1-T2340]
+  files: [src/lib/main-health-rung.ts, src/run-task.ts, test/main-health-judges-the-gating-checks.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    (1) THE REQUIRED FILTER IS NEVER GIVEN. `mainHealthFromRollup(sha, rollup, requiredContexts)`
+        (src/lib/sweep.ts) filters to the required contexts only when it knows them; otherwise it judges
+        `all`. Its one caller, `buildMainHealthRung` (src/lib/main-health-rung.ts), calls it as
+        `mainHealthFromRollup(sha, rollup, undefined)`. Every check run attached to main's head therefore
+        counts — and a SCHEDULED workflow attaches its run to the default branch's head. The escalation it
+        files still says "required check(s) concluded failing on main", which is not what it measured.
+    (2) MEASURED 2026-09-22 FROM THE ISSUES THEMSELVES (`[MANUAL] MAIN-HEALTH: main's own check suite is
+        red`, their "concluded failing on main:" line):
+            since 2026-09-12   83 issues; 65 name `heartbeat-watch (reads every host's beat branch off-machine; …)`
+            since 2026-09-17   24 issues; 13 name only heartbeat-watch, 1 only `Analyze (actions)` (#6626,
+                               open now), 10 name `ci` / `ci-shard (1/4)`
+        `heartbeat-watch` is .github/workflows/fleet-heartbeat-watch.yml, on `schedule: "37 * * * *"` — a
+        host-liveness monitor. A silent host (the Mac mini is shut down) is not a defect in main's code.
+        `Analyze (actions)` is CodeQL (codeql.yml). Neither is in ci-gate's `REQUIRED` list (27 names,
+        .github/workflows/ci-gate.yml), which is the repository's own definition of what gates a merge.
+    (3) WHY IT MATTERS. Each is a MANUAL escalation (`needs-human`) and feeds the "main was red N% of the
+        week" reading; the flow research measured main red on 76% of conclusive checks 09-16..21, a number
+        this inflates. A real red main must stay loud — so the fix is to judge the right checks, not to
+        quieten the rung.
+  design: |
+    (i) `buildMainHealthRung` takes the required contexts from `readCiGateRequiredChecks(repoRoot)`
+        (src/lib/ci-gate-required.ts, already used for early-fix classification) and passes them to
+        `mainHealthFromRollup`. `daemonCommand` supplies the reader.
+    (ii) AN UNREADABLE CONTRACT KEEPS TODAY'S BEHAVIOUR: `readCiGateRequiredChecks` returns [] on any
+         unreadable shape, and an empty list must still judge every check — never "no required checks, so
+         green". That is `mainHealthFromRollup`'s existing `knownRequired` arm; this task only feeds it.
+    (iii) A failing check OUTSIDE the required set is not dropped silently: `main.health.observed` carries
+          it as `advisory_failing_checks`, so a red monitor stays visible in the ledger without escalating
+          as "main is red".
+  acceptance:
+    - claim: "a failing scheduled monitor on main's head alone does not read main as red"
+      proof: 'grep: test("W1-T4056: a red monitor alone does not make main red" in test/main-health-judges-the-gating-checks.test.ts'
+    - claim: "a failing ci-gate-required check still reads main as red"
+      proof: 'grep: test("W1-T4056: a red required check still makes main red" in test/main-health-judges-the-gating-checks.test.ts'
+    - claim: "an unreadable ci-gate contract judges every check, as before"
+      proof: 'grep: test("W1-T4056: an unreadable contract judges every check" in test/main-health-judges-the-gating-checks.test.ts'
+    - claim: "a failing non-required check is ledgered as advisory"
+      proof: 'grep: test("W1-T4056: a red non-required check is ledgered as advisory" in test/main-health-judges-the-gating-checks.test.ts'
+  falsifier: |
+    Keep passing `undefined` and the first assertion goes red on a heartbeat-watch-only fixture. Drop
+    required checks along with the monitors and the second goes red. Treat an empty contract as "nothing
+    required" and the third goes red. Filter the monitors out without recording them and the fourth goes red.
