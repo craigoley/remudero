@@ -9,7 +9,7 @@
   risk: high
   origin: "oper#board-review-check-freezes-the-loop-2026-09-22"
   plan_refs: [W1-T4041, W1-T4045, W1-T4046, W1-T2464, W1-T2304, W1-T3297]
-  files: [src/run-task.ts, test/the-board-review-check-reuses-the-tick-projection.test.ts, scripts/test-tier-manifest.json]
+  files: [src/run-task.ts, test/the-board-review-check-reuses-the-tick-projection.test.ts, test/board-review-wiring.test.ts, scripts/test-tier-manifest.json]
   status: queued
   attempts: 0
   rationale: |
@@ -85,6 +85,9 @@
          the existing inner catch, which degrades only the escalation/origin arms — the same behaviour a
          failed projection has today. The open-PR list still decides reconciliation.
     (iii) Callers that pass neither provider (CLI, tests) keep today's behaviour byte for byte.
+    (v) test/board-review-wiring.test.ts pins the daemon call site as the literal `buildBoardReviewDaemonHooks({ config })`;
+        that one assertion is widened to accept the added providers. Its property (daemonCommand CONSTRUCTS the
+        hooks) is unchanged and still reddens when the construction is removed.
     (iv) OUT OF SCOPE, NAMED: the remaining open-PR read (1+2N synchronous calls, ~11 s at 11 open PRs)
          could reuse the sweep's own read of the same rows; that needs a freshness contract between two
          phases and is a separate task. So are the other `buildBatchedGithub(owner, repo)` constructions
