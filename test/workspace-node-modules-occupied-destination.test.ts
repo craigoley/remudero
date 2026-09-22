@@ -78,6 +78,34 @@ test("an unreadable (non-ENOENT) destination state is treated the same as occupi
   }
 });
 
+test("a symlink attempt that throws reports the named 'failed' outcome instead of throwing out of the helper", () => {
+  const root = tmp("wsoccupied-symlinkfail-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ workspaces: ["apps/dashboard"] }));
+    const worktreePath = join(root, "worktree");
+    seedWorkspace(repoDir, "apps/dashboard", worktreePath);
+
+    const eperm = Object.assign(new Error("EPERM: operation not permitted, symlink"), { code: "EPERM" });
+    const results = linkWorkspaceNodeModules(repoDir, worktreePath, {
+      symlink: () => {
+        throw eperm;
+      },
+    });
+
+    assert.deepEqual(results, [{ workspace: "apps/dashboard", outcome: "failed" }]);
+    assert.equal(workspaceNodeModulesIncomplete(results), true);
+    assert.equal(
+      existsSync(join(worktreePath, "apps", "dashboard", "node_modules")),
+      false,
+      "a failed symlink attempt must leave no partial destination behind",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an ENOENT destination IS treated as free -- the boundary the EACCES case above is compared against", () => {
   const root = tmp("wsoccupied-enoent-");
   try {

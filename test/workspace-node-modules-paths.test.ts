@@ -105,6 +105,22 @@ test("deriveWorkspacePaths never reads outside the checkout for an unsafe ../out
   }
 });
 
+test("deriveWorkspacePaths, with no listDirs override, uses the real filesystem default and degrades an absent wildcard parent to no matches rather than throwing", () => {
+  const root = tmp("wspaths-realdefault-");
+  try {
+    const repoDir = join(root, "source");
+    // Deliberately no `packages/` directory at all -- the safe glob's own parent is absent, so the
+    // real `readdirSync` default this function falls back to (no `listDirs` override passed) must
+    // hit its own ENOENT branch and degrade to "no matches", not throw and abort the whole read.
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "fixture", workspaces: ["packages/*"] }));
+
+    assert.deepEqual(deriveWorkspacePaths(repoDir), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("linkWorkspaceNodeModules reports an unsafe glob as a named unsafe-path outcome and never touches disk for it", () => {
   const root = tmp("wspaths-linkunsafe-");
   try {
