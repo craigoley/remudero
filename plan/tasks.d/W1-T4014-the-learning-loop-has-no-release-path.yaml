@@ -1,0 +1,72 @@
+- id: W1-T4014
+  title: "THE SELF-IMPROVEMENT LOOP MINES AND FILES BUT NOTHING EVER RELEASES — 42 CI-learning shards filed in six days, 41 still queued, ZERO ever built, and no surface anywhere tells an operator they exist"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/status-board.ts]
+  origin: oper#fleet-health-2026-09-22
+  plan_refs: ["W1-T2959", "W1-T3542", "W1-T3754"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 over `plan/tasks.d/` and `origin/main`'s history:
+
+        CI-learning shards ever filed          42
+        still status: queued                   41   (1 blocked)
+        ever BUILT (a merged PR citing the id)  0
+        oldest landed                          2026-09-16 (six days)
+
+    Every one is `verify: human`; 41 carry `author_class: machine`. That is Law 5 working as
+    designed — a machine may propose work into the plan, only an operator releases it. The mining
+    half is healthy: it produced ~7 proposals a day from real red gates, each carrying its own
+    repair evidence.
+
+    THE CONSUMER DOES NOT EXIST. Nothing reads `author_class` for reporting. Grepping the operator
+    surfaces — `status-board.ts`, `board.ts`, `digest.ts` — finds no count of parked proposals, no
+    "N awaiting your ruling", nothing. The only place the population appears is an INTERNAL daemon
+    bucket, `daemon.idle_reasons.verify-not-auto` (90 on the remudero daemon), which exists to
+    explain why the dispatcher skipped them, not to tell a human they are waiting.
+
+    SO THE LOOP IS OPEN, NOT CLOSED. It generates at roughly 7/day and is consumed at 0/day. The
+    output accumulates in the plan, indistinguishable from ordinary backlog, and the operator is
+    never told a decision is owed. A proposal nobody is asked to rule on is not a proposal.
+
+    THIS IS THE PREREQUISITE FOR EVERY OTHER MINING RUNG, WHICH IS WHY IT IS FILED FIRST AND
+    SEPARATELY. W1-T4015 proposes a second corpus (review/worker failures, 256 measured
+    failure→repair pairs). Adding a second GENERATOR to a system whose CONSUMER is missing makes
+    the accumulation worse, not better: two rungs filing parked proposals nobody surfaces is
+    strictly worse than one. Build this first.
+
+    WHAT IS ACTUALLY MISSING is small: the population is already computable from the plan
+    (`author_class: machine` + `verify: human` + not merged), and the board already renders
+    operator-facing state. What does not exist is a row that says so, and an idea of what "release"
+    means as an action — today an operator would have to hand-edit `verify:` in 41 shards.
+
+    DESIGN CONSTRAINT, NOT NEGOTIABLE: this must NOT auto-release. Law 5's boundary is the point of
+    the parking, and a rung that released its own proposals would be a machine ruling on guidance.
+    The deliverable is VISIBILITY plus a one-action release path, never an automatic one.
+
+    A SECOND READING TO RULE ON WHILE HERE: 42 proposals in six days, zero released, may mean the
+    RATE is wrong rather than the surface. If an operator would never plausibly rule on 7 items a
+    day, the miner should be deduplicating or batching before filing — `ci-lesson-recurrence.ts`
+    already exists and may be the right place. Measure which it is before adding a queue an
+    operator will ignore for a different reason.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add — the only way past
+    `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
+
+  acceptance:
+    - claim: "an operator surface reports how many machine-authored proposals await a ruling"
+      proof: "unit test: W1-T4014: parked proposals are counted for the operator"
+    - claim: "the count distinguishes awaiting-a-ruling from ordinary backlog"
+      proof: "unit test: W1-T4014: parked is not conflated with queued"
+    - claim: "nothing in the path releases a proposal without a person"
+      proof: "unit test: W1-T4014: release is never automatic"
+  note: |
+    reservation hand-off: plan/file-improvement-loops-1790075116 -> plan/file-improvement-loops-1790075116
+
+    Minted on the filing branch, which `rmd next-task-id` now requires.
