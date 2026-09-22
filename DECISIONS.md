@@ -2883,3 +2883,89 @@ AN AGENT MAY RECOMMEND 'NO' BUT MAY NEVER RECORD IT — operator ruling from the
 
 **Rollback:** revert this entry and re-open both tasks by clearing their `retirement:` key. Entry (1)
 also describes shipped code (#5837); reverting the ruling does not revert that PR.
+
+## 2026-09-22 — OPERATOR DECISION: W1-T3102 — retro proposals are RECORDS, not prose
+
+*Operator-authored, recorded by hand at the operator's instruction on 2026-09-22 ("1 - records"),
+resolving W1-T3102, which was parked at `verify: human` because it asks the operator to choose a
+record shape. `ruling-verify` correctly refuses this task at `verify: auto`; the entry below is the
+operator making the edit by hand, which is what that gate exists to force.*
+
+**THE PROBLEM, RESTATED FROM THE SHARD'S OWN MEASUREMENT.** Thirty-one live proposals are ranked in
+a single MASTER-PLAN paragraph as one run of ids. None carries a `status:` field and none carries a
+falsifier. A shard can be asked whether it is still true; a rank inside a sentence cannot. The
+corpus that feeds the plan is the one corpus no instrument can read, retire, or refute, and it only
+grows — a proposal leaves the ranking when a human edits the sentence.
+
+- **CHOSEN: (a) THEN (b), IN THAT ORDER.** Proposals become records under `plan/proposals.d/`, one
+  file per proposal, each carrying a machine-readable `status:` and an executable falsifier in the
+  shard dialect — the same dialect `rmd check-acceptance` already validates and `rmd lint-plan`
+  already lints. THEN they route through `updateProposalRegistry`, the writer W1-T2458 used for
+  followups and which `feedback-docket.ts` already names as its filing route.
+- **WHY THAT ORDER AND NOT THE REVERSE.** The deciding property is refutability, and it is the one
+  property no live proposal has. Taking (b) alone would give proposals a queue before it gave them
+  an executable falsifier — easier to act on without being easier to be wrong about, which is the
+  wrong direction for a corpus that already only grows.
+- **WHY PROPOSALS GET THEIR OWN RECORD TYPE WHEN FOLLOWUPS DID NOT.** W1-T2458 already settled that
+  mined prose becomes records, so that question is not re-opened. Proposals differ from followups in
+  LIFETIME, not in kind: a followup is consumed once, while a proposal carries a standing rank across
+  retro cycles. A standing rank needs a status field to move through; an inbox row has nowhere to put
+  one. That is the entire distinction and it is why (a) exists at all.
+- **THE `retroPrompt` / RULE 27 CONTRADICTION IS SETTLED IN FAVOUR OF RULE 27.** `retroPrompt`'s
+  instruction 4 ("PROPOSALS ONLY ... Do NOT edit plan/tasks.yaml") enforces a prohibition MASTER-PLAN
+  records as already lifted, twice. The prompt is the stale half. It must be corrected to say the
+  retro writes proposal RECORDS and that automatic filing is permitted under rule 27. Until it is,
+  every retro cycle spends a worker obeying a rule that no longer exists.
+- **AND THEREFORE the proposal registry is the docket, with `plan/proposals.d/` as its record store.**
+  A proposal is filed as a record first and enters the registry second; the registry is where work is
+  drawn from, never where a proposal's truth is decided.
+
+**WHAT THIS ENTRY DOES NOT DO.** It does not migrate the thirty-one existing proposals, create
+`plan/proposals.d/`, or edit `retroPrompt`. W1-T3102's declared `files:` is `DECISIONS.md` alone;
+the migration and the prompt correction are separate tasks that cite this entry and land separately.
+
+**Rollback:** revert this entry and re-open W1-T3102. No code ships with it, so reverting the ruling
+reverts everything it decided.
+
+## 2026-09-22 — OPERATOR DECISION: W1-T3103 — the allowlist proxy, not the two-phase worktree
+
+*Operator-authored, recorded by hand at the operator's instruction on 2026-09-22 ("2 - go with your
+recommendations"), resolving W1-T3103, which was parked at `verify: human` and which deliberately
+offered no recommendation of its own.*
+
+**THE EXPOSURE, RESTATED.** The phase that writes code is the phase that holds a token which can
+push, comment and merge: W1-T2914 records that the worker env allowlist carries `GH_TOKEN` and
+`CLAUDE_CODE_OAUTH_TOKEN`, and that `gh` runs OUTSIDE the sandbox via `excludedCommands`.
+`hooks/deny-floor.sh` says of itself that it is "a tripwire, NOT a sandbox". The sandbox binaries are
+present and baked — `deploy/Dockerfile` REQ 8 installs and verifies `bwrap` — so the material for a
+stronger boundary exists and nothing asks for it.
+
+- **CHOSEN: (b), THE ALLOWLIST PROXY.** Both phases keep a network; egress is confined to an
+  allowlist. Declined: (a), removing the network namespace during implement.
+- **WHY (b) OVER (a).** (a) is strictly stronger and strictly more disruptive. Because `gh` is
+  sandbox-exempt today, every lane that shells it mid-implement would fail — and fail as ENETUNREACH
+  deep inside a tool rather than as a diagnosable refusal. This fleet's whole direction is unattended
+  flow. An exposure fix that converts working lanes into opaque hangs trades a real capability for a
+  hypothetical attacker, and the failure it introduces is the kind nobody can triage from a log.
+- **(b) IS NOT GREENFIELD, AND THAT IS HALF THE REASON.** W1-T1289 sits at `status: blocked` on
+  exactly this: `settings/worker.json` declares four allowlisted domains under a sandbox marked
+  `enabled` and `failIfUnavailable`, and NOTHING IN THE TREE ENFORCES THEM. The declared boundary
+  already exists and is currently a lie. This ruling is therefore also a ruling to UNBLOCK W1-T1289
+  and give that declaration its enforcement owner — `src/lib/containment.ts`, `settings/worker.json`,
+  `test/egress-enforcement-owner.test.ts`, the files it already names.
+- **THE MEASUREMENT IS STILL OWED, AND IT IS NOW (a)'s TRIGGER RATHER THAN A PRECONDITION.** Nobody
+  has counted how many implement turns actually touch the network. Count it over a real window. If
+  the answer is near zero, removing the network namespace becomes cheap and (a) should be re-argued
+  on that number. If it is material, (a) stays declined and the allowlist is the ceiling. (a) is
+  deferred, not killed.
+- **THE RESIDUAL EXPOSURE IS ACCEPTED, NOT HIDDEN.** (b) does not remove either token from the
+  implement phase, and an allowlisted host is still reachable by a compromised turn. The operator
+  accepts that in exchange for every `gh`-shelling lane continuing to work, and a later ruling may
+  revisit it on the measurement above.
+
+**THE NAME OF THE SHAPE BEING DECIDED**, so a later reader can tell which question was settled: this
+rules against the two-phase worktree — install online with credentials, implement with the network
+namespace removed and no token in env — and for an allowlist-confined single phase.
+
+**Rollback:** revert this entry and re-open W1-T3103. W1-T1289 returns to `blocked`; nothing else
+moves, because no code ships with this entry.
