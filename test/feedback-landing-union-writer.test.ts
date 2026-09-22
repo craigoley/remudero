@@ -211,7 +211,7 @@ test("auto-merge is NOT armed when this call cannot determine whether the head i
   const bareOrigin = makeBareOrigin();
   const rootA = cloneRoot(bareOrigin);
   const rootB = cloneRoot(bareOrigin);
-  writeFeedbackEntry(rootA, "fb-unreadable-a", "root A's own record — already landed and armed");
+  writeFeedbackEntry(rootA, "fb-unreadable-a", "root A's own record — already landed and awaiting review");
   writeFeedbackEntry(rootB, "fb-unreadable-b", "root B's own record — cannot even prove the union is complete");
 
   const { gh: ghA, createCount: createCountA, mergeCount: mergeCountA } = fakeGh("https://github.com/o/r/pull/309");
@@ -220,7 +220,7 @@ test("auto-merge is NOT armed when this call cannot determine whether the head i
   const aResult = withLiveWritesAllowed(() => landFeedback(rootA, { gh: ghA }));
   assert.equal(aResult.landed, true);
   assert.equal(createCountA(), 1);
-  assert.equal(mergeCountA(), 1, "sanity: root A's own PR was armed, exactly as before this task");
+  assert.equal(mergeCountA(), 0, "the landing bridge must not arm auto-merge before review");
 
   // The branch now genuinely exists (root A pushed it), so `rev-parse origin/<branch>` succeeds —
   // but the FOLLOW-UP `ls-tree` read of its pending content fails unexpectedly. This must NOT
@@ -246,7 +246,7 @@ test("auto-merge is NOT armed when this call cannot determine whether the head i
 
 // ── acceptance: an already-open PR is still a one-call no-op, never re-armed ────────────────
 
-test("a second root's disjoint batch reuses the SAME already-open PR — still a one-call no-op, never a second `pr create`/`pr merge`", () => {
+test("a second root's disjoint batch reuses the SAME already-open PR — still a one-call no-op, never a second `pr create` or pre-review merge arm", () => {
   const bareOrigin = makeBareOrigin();
   const rootA = cloneRoot(bareOrigin);
   const rootB = cloneRoot(bareOrigin);
@@ -260,14 +260,14 @@ test("a second root's disjoint batch reuses the SAME already-open PR — still a
   const a = withLiveWritesAllowed(() => landFeedback(rootA, { gh }));
   assert.equal(a.landed, true);
   assert.equal(createCount(), 1);
-  assert.equal(mergeCount(), 1);
+  assert.equal(mergeCount(), 0);
 
   // The PR from A's call is still open (nothing merged it). B's disjoint batch pushes new
   // content — the branch DOES move — but the PR itself is reused, never re-created or re-armed.
   const b = withLiveWritesAllowed(() => landFeedback(rootB, { gh }));
   assert.equal(b.landed, true);
   assert.equal(createCount(), 1, "still only ONE `pr create` across both roots' calls");
-  assert.equal(mergeCount(), 1, "still only ONE `pr merge` — never re-armed on a later, unrelated root's push");
+  assert.equal(mergeCount(), 0, "neither landing call may arm merge before the shared review lane");
 
   const tree = landingTree(bareOrigin);
   assert.match(tree, /fb-reuse-a\.yaml/);
