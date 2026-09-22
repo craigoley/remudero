@@ -1,0 +1,82 @@
+- id: W1-T4051
+  title: "THE BOARD-REVIEW CHECK FREEZES EVERY TIMER IN THE DAEMON FOR ~140 SECONDS, ON A TICK THAT THEN DECIDES NOT TO FIRE — it reads the whole board through synchronous, paced GitHub calls on every iteration: 116 of 312 checks over two days blocked the loop for more than a minute"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "oper#board-review-check-freezes-the-loop-2026-09-22"
+  plan_refs: [W1-T4041, W1-T4045, W1-T4046, W1-T2464, W1-T2304, W1-T3297]
+  files: [src/run-task.ts, src/lib/daemon.ts, test/the-board-review-check-does-not-freeze-the-loop.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LOOP-LAG SAMPLER NAMED IT. MEASURED 2026-09-22 ON THE LIVE DAEMON (pid 645931, running #6598).
+
+    (1) THE TWO OVERRUNS IT REPORTED. `daemon.loop_lag` rows at 18:20:42Z (sweep, 99,153 ms late) and
+        18:28:41Z (sweep, 145,763 ms late). The second lines up with a 137.0 s window in which the
+        daemon wrote NO ledger row at all: from `ci_learning_cadence.skipped` at 18:26:23.476Z to
+        `board_review.skipped` at 18:28:40.515Z. In src/lib/daemon.ts the only code between those
+        two log calls is `boardDecision = deps.checkBoardReview();` — a synchronous call.
+
+    (2) WHY IT BLOCKS. `buildBoardReviewDaemonHooks`'s `check` (src/run-task.ts) calls
+        `defaultBoardReviewItems`, which pages `fetchOpenPrsRest(owner, repo, ghJson)` and runs
+        `projectPlan` against `buildBatchedGithub`. `ghJson` (src/lib/github-transport.ts) is
+        `execFileSync("gh", …)` preceded by `applyGhReadCadence`, whose pacing is `Atomics.wait`. Every
+        call and every pacing gap holds the event loop: no heartbeat, no review clock, no sweep.
+
+    (3) IT IS NOT RARE. Every `ci_learning_cadence.*` row paired with the next `board_review.*` row from
+        the same daemon pid, 2026-09-21 and 2026-09-22 (`rmd ledger-grep`, the union):
+
+            312 checks   p50 24 ms   p90 134.6 s   max 298.3 s   116 over 60 s
+
+        The distribution is bimodal: the fast mode is a read that returned nothing quickly, and the slow
+        mode is a read that worked. Recent slow checks: 139.7, 143.0, 162.7, 140.9 (13:33:17Z, inside the
+        13:05-13:40Z outage window), 152.9, 141.8, 138.8, 148.9, 143.7, 155.0, 137.0 and 148.3 s. Most of
+        them end in `board_review.skipped`: the loop froze for over two minutes to decide to do nothing.
+
+    (4) THIS CORRECTS W1-T4046, WHICH NAMED THE WRONG PHASE. The measurement cadence was
+        `measurement_cadence.skipped` at both fires in the window (18:26:23Z and 18:37:56Z), so it caused
+        neither overrun. Its synchronous union reads are real, but they are not what the sampler caught.
+        W1-T4046 is withdrawn with that correction recorded.
+
+    (5) THE SAMPLER UNDER-REPORTS, AND THAT IS STATED RATHER THAN FIXED HERE. `reportLoopLag` fires
+        only past one whole interval (60 s), so a 40-55 s block is invisible to it. The sweep shows a
+        recurring 40-51 s silent gap after every `sweep.plan_filing_classified` row. Whether those gaps
+        are blocks or awaits is not established. They are named so the next measurement looks at them;
+        they are not in this task's scope.
+  design: |
+    THE INVARIANTS THAT MUST SURVIVE, all documented at `buildBoardReviewDaemonHooks`:
+      - one read serves both the reconciler and the cadence decision (the depth arms need items);
+      - reconciliation runs on quiet ticks too (W1-T2464: "a board whose findings have all cleared
+        trips no depth arm at all, so it never fires again and the dead rows sit forever");
+      - an outage yields no items, so no fire and no retirement — never "every referent resolved".
+
+    (i) VERIFY FIRST, THEN CHOOSE. The daemon already refreshes the open board asynchronously every
+        iteration (`board_gateway.fetch_ok`, `board_snapshot.committed`), and it writes the plan
+        projection to `state/status.json`. If those carry what `boardItemsFromOpenPrs` needs (open PR
+        ids, draft flag, opened-at, failing-check count, and the needs-human escalation join), the check
+        builds its items from them with ZERO GitHub calls, and freshness is judged from their own
+        as-of: stale is treated as an outage, not as an empty board. If they do not, the check becomes
+        async (`checkBoardReview` returns a Promise and daemon.ts awaits it) and its reads go through
+        the async transport. Record which of the two was taken, and why, in the PR.
+    (ii) The `run` path (a firing tick, at most daily) keeps its own fresh read — its doc says why the
+         report must describe the board it diagnosed — and must also not block the loop.
+    (iii) Nothing is capped or skipped: no "check less often". The same decision is made from the same
+          board, without holding the thread.
+  acceptance:
+    - claim: "a board-review check makes no synchronous GitHub call and lets a concurrent timer keep firing"
+      proof: 'grep: test("W1-T4051: a board-review check does not hold the event loop" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
+    - claim: "a quiet tick still retires a proposal whose referent has left the open board"
+      proof: 'grep: test("W1-T4051: a quiet tick still retires a departed referent" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
+    - claim: "an unreadable or stale board yields no fire and no retirement"
+      proof: 'grep: test("W1-T4051: an unreadable board neither fires nor retires" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
+    - claim: "the depth arms still decide from the same items the reconciler saw"
+      proof: 'grep: test("W1-T4051: one read serves the reconciler and the decision" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
+  falsifier: |
+    Keep `ghJson` on the check path and the first assertion goes red: a timer that should fire every few
+    milliseconds records one late tick spanning the whole read. Gate reconciliation on `decision.fire`
+    and the second goes red. Read a stale snapshot as an empty board and the third goes red: every
+    proposal retires at once. Build the decision from a second read and the fourth goes red.

@@ -10,7 +10,8 @@
   origin: "oper#sync-ledger-union-freezes-the-loop-2026-09-22"
   plan_refs: [W1-T4041, W1-T4045, W1-T4034, W1-T3335]
   files: [src/lib/ledger-union.ts, src/lib/measurement-cadence.ts, test/a-union-read-keeps-the-loop-responsive.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     THE MEASUREMENT. Run 2026-09-22 inside the daemon container against the live state directory
@@ -66,3 +67,28 @@
     every few milliseconds records one late tick spanning the whole read. Build the async path with a
     different dedupe or filter and the second goes red on a fixture with duplicated rotated lines.
     Leave one cadence helper on the sync resolver and the third goes red.
+  note: |
+    WITHDRAWN 2026-09-22, BEFORE ANY BUILD — TWO PREMISES OF THIS SHARD ARE WRONG, AND THE PHASE IT TARGETS
+    DID NOT CAUSE THE OVERRUNS THE SAMPLER CAUGHT. Everything above is kept as filed.
+
+    (a) "runMeasurementCadenceReport is already awaited, so the change stays inside the declared files"
+        is FALSE. It is a synchronous function (`export function runMeasurementCadenceReport(...):
+        MeasurementCadenceRunResult`); its only caller is src/run-task.ts. Making its helpers async
+        reaches outside `files:`.
+    (b) "three sites" UNDERCOUNTS. One cadence fire makes at least eight synchronous union reads across
+        five files: previous metrics (latestMeasurementRows), ruleEfficacyReport (rule-efficacy.ts),
+        mineVerdictRows (verdict-calibration.ts), mineAutonomyLedgerLines (autonomy.ts),
+        blockedCiShareFromLedger, scanShape4Gates (one per distinct pattern), runVerbCensus and
+        runWipeTestCadenceReport. runVerbCensus also has a second, synchronous caller in run-task.ts's
+        digest cadence.
+    (c) THE SAMPLER NAMED A DIFFERENT PHASE. Both `daemon.loop_lag` overruns after #6598 deployed
+        (18:20:42Z, 99 s; 18:28:41Z, 146 s) fell in windows where the cadence was
+        `measurement_cadence.skipped`. The 146 s one is a 137 s silent window around
+        `deps.checkBoardReview()`, which reads the board through synchronous, paced GitHub calls on
+        every iteration — filed as W1-T4051 with two days of measurements.
+
+    REFILE, AS A NEW TASK, WHEN W1-T4051 has landed and `daemon.loop_lag` rows still show an overrun inside a window
+    where `measurement_cadence.ran` fired. Then re-scope with the whole read list above as `files:`, and
+    consider ONE async union pass shared by every cadence reader instead of eight separate reads.
+    Withdrawn rather than left blocked because its design and `files:` are wrong as written: a worker
+    dispatched from this record would build the wrong change.
