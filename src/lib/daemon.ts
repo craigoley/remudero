@@ -2586,16 +2586,45 @@ export async function runDaemon(
         log("measurement_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
       }
       if (decision?.fire) {
-        log("measurement_cadence.fired", { reason: decision.reason });
-        if (deps.runMeasurementCadence) {
-          try {
-            const result = await deps.runMeasurementCadence();
-            // The row is DERIVED from the result's own keys rather than hand-enumerated here, because a
-            // hand-enumerated row silently drops every member added after it — which is how three fields reached
-            // zero occurrences in this file (W1-T2502).
-            log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
-          } catch (e) {
-            log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+        // W1-T4034: the cadence runs detached so the sweep keeps its turn. Review admission happens
+        // only inside a sweep pass and a sweep pass only happens once per daemon iteration, so an
+        // inline await here cost the review lane this cadence's whole duration — measured
+        // 2026-09-22, its verify-human leg alone ran 8m38s inside a 21.5-minute iteration in which
+        // no sweep ran and two already-green PRs waited 42 and 29 minutes for a 21-second review.
+        // Nothing downstream reads the result (best-effort by contract, W1-T1259), so the await
+        // bought the loop nothing. Same shape as `ci-learning` below, guard included.
+        if (deps.runMeasurementCadence && detachedActionInFlight("measurement-cadence")) {
+          log("measurement_cadence.already_detached", {
+            reason: decision.reason,
+            refusal: "measurement-cadence action already in flight",
+            flow: "the cadence runs detached so the sweep keeps its turn",
+          });
+        } else {
+          log("measurement_cadence.fired", { reason: decision.reason });
+          if (deps.runMeasurementCadence) {
+            try {
+              const work = deps.runMeasurementCadence();
+              detachSweepAction(
+                work
+                  .then((result) => {
+                    // The row is DERIVED from the result's own keys rather than hand-enumerated here, because a
+                    // hand-enumerated row silently drops every member added after it — which is how three fields reached
+                    // zero occurrences in this file (W1-T2502).
+                    log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
+                  })
+                  .catch((e) => {
+                    log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+                  }),
+                { actionKind: "measurement-cadence", taskId: "DAEMON" },
+              );
+              log("measurement_cadence.detached", {
+                reason: decision.reason,
+                flow: "the cadence runs detached so the sweep keeps its turn",
+              });
+            } catch (e) {
+              // A SYNCHRONOUS throw from the hook itself, before any promise exists to detach.
+              log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+            }
           }
         }
       } else if (decision) {

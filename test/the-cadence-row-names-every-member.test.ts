@@ -239,9 +239,13 @@ test("a FIRING decision still runs the cadence exactly once and logs fired then 
       },
     });
     assert.equal(runs, 1, "a firing decision must run the cadence exactly once — unchanged by this task");
+    // W1-T4034 inserted `.detached` BETWEEN these two: the cadence is now handed to
+    // `detachSweepAction` instead of awaited inline, so the loop is free while it runs. The
+    // sequence is still asserted EXACTLY and still ordered — fired, then detached, then ran —
+    // rather than relaxed to a membership check, because the ordering is the whole claim.
     assert.deepEqual(
       lines.filter((l) => l.step.startsWith("measurement_cadence")).map((l) => l.step),
-      ["measurement_cadence.fired", "measurement_cadence.ran"],
+      ["measurement_cadence.fired", "measurement_cadence.detached", "measurement_cadence.ran"],
     );
     assert.equal(lines.find((l) => l.step === "measurement_cadence.fired")!.extra.reason, "first run");
   } finally {
