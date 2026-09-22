@@ -179,6 +179,43 @@ test("streamed analytics: a state dir with ZERO rotations is not a refusal", asy
   }
 });
 
+test("unit test: operator-agent memory refresh includes rotated and live ledger rows", async () => {
+  const dir = tmpStateDir("rmd-analytics-agent-memory-");
+  try {
+    const proposal = {
+      proposalId: "operator-agent:repo:scale:queue-pressure",
+      repo: "owner/repo",
+      proposalText: "Increase the worker pool for owner/repo.",
+      confidence: 0.96,
+      reasoning: "The queue and p50 latency crossed the conservative threshold together.",
+      category: "scale",
+      status: "pending",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      expiresAt: "2026-09-01T00:00:00.000Z",
+      evidence: [{ label: "Queued tasks", value: "8", source: "run-ledger", observedAt: "2026-08-01T00:00:00.000Z", freshness: "verified" }],
+    };
+    writeGzArchive(dir, "ledger.2026-08-01T00-00-00-000Z.ndjson.gz", [JSON.stringify({
+      step: "panel.operator_agent_proposal",
+      proposal,
+    })]);
+    writeLive(dir, [JSON.stringify({
+      step: "panel.operator_agent_settings",
+      settings: { enabled: false, confidenceThreshold: 0.95 },
+      updatedAt: "2026-08-14T00:00:00.000Z",
+    })]);
+
+    const snapshot = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-08-14T01:00:00.000Z")));
+    assert.equal(snapshot.operatorAgentMemory.state, "ready");
+    assert.deepEqual(snapshot.operatorAgentMemory.rows.map((row) => row.step), [
+      "panel.operator_agent_proposal",
+      "panel.operator_agent_settings",
+    ]);
+    assert.equal(Object.keys(snapshot).includes("operatorAgentMemory"), false, "memory is process-owned, not a second analytics wire field");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("streamed analytics: a corrupt archive is skipped, best-effort, never a crash", async () => {
   const dir = tmpStateDir("rmd-analytics-corrupt-");
   try {

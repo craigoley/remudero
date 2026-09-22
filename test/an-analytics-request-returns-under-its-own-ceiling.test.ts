@@ -461,6 +461,50 @@ test("every analytics lifecycle exit aborts the active union source", async () =
   assert.deepEqual(exits, [0]);
 });
 
+test("unit test: serve assembly shares the operator-agent refresh across read and write routes", async () => {
+  const proposal = {
+    proposalId: "operator-agent:repo:scale:queue-pressure",
+    repo: "owner/repo",
+    proposalText: "Increase the worker pool for owner/repo.",
+    confidence: 0.96,
+    reasoning: "The queue and p50 latency crossed the conservative threshold together.",
+    category: "scale",
+    status: "pending",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    expiresAt: "2026-09-01T00:00:00.000Z",
+    evidence: [{ label: "Queued tasks", value: "8", source: "run-ledger", observedAt: "2026-08-01T00:00:00.000Z", freshness: "verified" }],
+  };
+  const refreshed = deriveAnalyticsSnapshot([{ step: "panel.operator_agent_proposal", proposal }], "2026-08-14T00:00:00.000Z");
+  const served = serveFixture(async () => refreshed);
+  const server = buildServeServer(served.deps);
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const port = (server.address() as AddressInfo).port;
+    const base = `http://127.0.0.1:${port}`;
+    const headers = { authorization: "Bearer read-token" };
+    const initial = await fetch(`${base}/v1/operator-agent/proposals`, { headers });
+    assert.equal(initial.status, 200);
+    assert.equal(((await initial.json()) as { proposals: Array<{ proposalId: string }> }).proposals[0]?.proposalId, proposal.proposalId);
+
+    const second = { ...proposal, proposalId: "operator-agent:repo:fix:docs" };
+    const write = await fetch(`${base}/v1/operator-agent/proposals`, {
+      method: "POST",
+      headers: { authorization: "Bearer write-token", "content-type": "application/json" },
+      body: JSON.stringify({ proposal: second }),
+    });
+    assert.equal(write.status, 201);
+    const afterWrite = await fetch(`${base}/v1/operator-agent/proposals`, { headers });
+    assert.deepEqual(
+      ((await afterWrite.json()) as { proposals: Array<{ proposalId: string }> }).proposals.map((item) => item.proposalId).sort(),
+      [proposal.proposalId, second.proposalId].sort(),
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    rmSync(served.root, { recursive: true, force: true });
+  }
+});
+
 test("abort is not a corrupt archive and corrupt archives remain best effort", async () => {
   const controller = new AbortController();
   const abortReason = new Error("stop after the first source");
