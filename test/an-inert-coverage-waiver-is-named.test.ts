@@ -5,7 +5,7 @@ import { formatBlockingViolation, computeBoundaryRanges, DIFF_COV_DIRECTIVES } f
 
 const added = new Map([["src/example.ts", new Map([[2, "return 1;"]])]]);
 
-test("a c8 ignore beside a reported line is named as not honoured", () => {
+test("W1-T3366: a c8 ignore beside a reported line is named as not honoured", () => {
   const result = formatBlockingViolation(
     "src/example.ts:2",
     added,
@@ -15,7 +15,7 @@ test("a c8 ignore beside a reported line is named as not honoured", () => {
   assert.match(result, /c8 ignore waiver is not honoured/);
 });
 
-test("the inert-waiver message names the diff-cov directive", () => {
+test("W1-T3366: the inert-waiver message names the diff-cov directive", () => {
   const result = formatBlockingViolation(
     "src/example.ts:2",
     added,
@@ -25,7 +25,7 @@ test("the inert-waiver message names the diff-cov directive", () => {
   assert.match(result, new RegExp(`diff-cov: ${DIFF_COV_DIRECTIVES.join(" or ")}`));
 });
 
-test("a honoured diff-cov directive still waives its region", () => {
+test("W1-T3366: a honoured diff-cov directive still waives its region", () => {
   const { ranges, errors } = computeBoundaryRanges(
     [
       "// diff-cov: process-boundary — re-exec glue",
