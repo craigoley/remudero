@@ -1,0 +1,42 @@
+- id: W1-T4054
+  title: "A PULL REQUEST'S PENDING AGE MEASURES ITS LAST ACTIVITY, NOT ITS CI — checksPendingSince has never had a producer, so every push, comment or label restarts the clock and the stale-pending escalation can be deferred forever: derive it from the pending required checks' own start times"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "oper#review-latency-research-2026-09-22"
+  plan_refs: [W1-T176, W1-T114, W1-T2300]
+  files: [src/run-task.ts, src/lib/sweep.ts, src/lib/producer-completeness.ts, test/a-pending-age-measures-ci.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    (1) NO PRODUCER. `OpenPrView.checksPendingSince` (src/lib/sweep.ts) is read by `pendingAgeMinutes` as
+        `pr.checksPendingSince ?? pr.lastActivityAt`, and `buildOpenPrViews` (src/run-task.ts) sets
+        `lastActivityAt: pr.updatedAt` and never sets `checksPendingSince`. `KNOWN_UNWIRED`
+        (src/lib/producer-completeness.ts) records it: "no producer derives the first-pending timestamp".
+    (2) OBSERVED 2026-09-22 ON #6612. Its `sweep.disposed` reasons read "checks pending 6m, 7m, 1m, 2m, 4m,
+        3m, 8m, 9m" — the age fell back each time the PR's `updated_at` moved (four pushes, 17:58-18:27Z).
+        The 60-minute stale-pending escalation measures nothing about CI while a PR keeps moving.
+    (3) THE DATA IS ALREADY IN HAND. `rollupFromRest` (src/lib/open-prs-rest.ts) maps each check run's
+        `started_at` and each status's `created_at` to `RestRollupEntry.startedAt` (W1-T2300), on the same
+        rollup `checksStateFromRollup` already reads. No new GitHub call.
+  design: |
+    (i) A pure helper beside `checksStateFromRollup` returns the EARLIEST `startedAt` among the entries that
+        make the state pending (the same required-context filter), or undefined when none carries one.
+    (ii) `buildOpenPrViews` assigns `checksPendingSince` from it as a plain top-level key (so
+         `producerAssignedKeys` sees it), and the entry is removed from `KNOWN_UNWIRED` per that file's rule.
+    (iii) Undefined keeps today's fallback, so a rollup without start times behaves exactly as now.
+  acceptance:
+    - claim: "the pending age is measured from the pending required check's own start"
+      proof: 'grep: test("W1-T4054: pending age starts at the pending check" in test/a-pending-age-measures-ci.test.ts'
+    - claim: "a later push or comment does not reset the pending age while the same check stays pending"
+      proof: 'grep: test("W1-T4054: pr activity does not reset the pending age" in test/a-pending-age-measures-ci.test.ts'
+    - claim: "a rollup with no start times falls back to last activity as before"
+      proof: 'grep: test("W1-T4054: no start time keeps the old fallback" in test/a-pending-age-measures-ci.test.ts'
+  falsifier: |
+    Leave the producer unwired and the first two assertions go red. Take the LATEST start instead of the
+    earliest and the first goes red on a two-check fixture. Drop the fallback and the third goes red.
