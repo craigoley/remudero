@@ -73,6 +73,11 @@ import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow, ty
 import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow, type OperatorAgentDecisionSignal } from "./operator-agent-decisions.js";
 import { adaptOperatorAgentProofRows, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal } from "./operator-agent-proof.js";
 import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "./operator-agent-outcomes.js";
+import {
+  selectOperatorAgentMemoryRow,
+  type OperatorAgentMemoryLedgerRow,
+  type OperatorAgentMemorySnapshot,
+} from "./operator-agent.js";
 import { verdictCalibrationReport } from "./verdict-calibration.js";
 import { adaptLiveAnalyticsMetrics, emptyLiveAnalyticsMetrics, type LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
 
@@ -185,6 +190,12 @@ export interface AnalyticsSnapshot {
   dimensions: AnalyticsBreakdownDimension[];
   /** Flat rows for console drilldown views, derived from the same bounded dimensions. */
   drilldowns: AnalyticsDrilldownRow[];
+  /**
+   * Process-owned durable operator-agent memory. This property is deliberately non-enumerable so
+   * it remains available to serve-owned routes without becoming a second public analytics wire
+   * contract or leaking ledger-backed agent history through GET /v1/analytics.
+   */
+  operatorAgentMemory: OperatorAgentMemorySnapshot;
 }
 
 /** A console-v1 metric's provenance, carried explicitly because the console renders it and
@@ -422,6 +433,7 @@ interface AnalyticsAccumulator {
     proof: OperatorAgentProofLedgerRow[];
     decisions: OperatorDecisionLedgerRow[];
     capacity: OperatorAgentCapacityLedgerRow[];
+    memory: OperatorAgentMemoryLedgerRow[];
   };
   historicalSeries: HistoricalSeriesAccumulator;
   breakdowns: AnalyticsBreakdownAccumulator;
@@ -484,7 +496,10 @@ type AnalyticsCheckpointState = {
     buckets: Array<Omit<RoutingTelemetryBucketState, "fallbackReasons"> & { fallbackReasons: Array<[string, number]> }>;
     days: RoutingTelemetryDay[];
   };
-  operatorAgentRows: AnalyticsAccumulator["operatorAgentRows"];
+  operatorAgentRows: Omit<AnalyticsAccumulator["operatorAgentRows"], "memory"> & {
+    /** Optional for checkpoints written before W1-T4001. */
+    memory?: OperatorAgentMemoryLedgerRow[];
+  };
   history: {
     days: Array<[string, CheckpointHistoryBucket]>;
     starts: Array<[string, number]>;
@@ -562,7 +577,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     workerDurationsMeasured: false,
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     routingTelemetry: routingTelemetryAccumulator(),
-    operatorAgentRows: { proof: [], decisions: [], capacity: [] },
+    operatorAgentRows: { proof: [], decisions: [], capacity: [], memory: [] },
     historicalSeries: createHistoricalSeriesAccumulator(),
     breakdowns: createAnalyticsBreakdownAccumulator(),
     checkpointHistory: { days: new Map(), starts: new Map() },
@@ -800,11 +815,14 @@ const OPERATOR_AGENT_CAPACITY_OBSERVATION_FIELDS = OPERATOR_AGENT_CAPACITY_FIELD
 /** Retain only the bounded fields the operator-agent adapters need; prompts and ledger excerpts
  * never enter the analytics snapshot's response path. */
 type SelectedOperatorAgentRow =
+  | { family: "memory"; row: OperatorAgentMemoryLedgerRow }
   | { family: "proof"; row: OperatorAgentProofLedgerRow }
   | { family: "decisions"; row: OperatorDecisionLedgerRow }
   | { family: "capacity"; row: OperatorAgentCapacityLedgerRow };
 
 function operatorAgentRow(line: Record<string, unknown>): SelectedOperatorAgentRow | undefined {
+  const memory = selectOperatorAgentMemoryRow(line);
+  if (memory) return { family: "memory", row: memory };
   const step = str(line.step);
   if (step === "review.posted") {
     return { family: "proof", row: { step, task_id: line.task_id, proof_exec: line.proof_exec } };
@@ -1010,7 +1028,12 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   acc.breakdowns.add(line);
   captureCheckpointLine(acc, line);
   const selectedOperatorAgentRow = operatorAgentRow(line);
-  if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
+  if (selectedOperatorAgentRow?.family === "memory") {
+    acc.operatorAgentRows.memory.push(selectedOperatorAgentRow.row);
+    if (acc.operatorAgentRows.memory.length > 2_000) {
+      acc.operatorAgentRows.memory.splice(0, acc.operatorAgentRows.memory.length - 2_000);
+    }
+  } else if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
   else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
   else if (selectedOperatorAgentRow?.family === "capacity") acc.operatorAgentRows.capacity.push(selectedOperatorAgentRow.row);
 
@@ -1132,7 +1155,17 @@ function snapshotFromAccumulator(
     ...(acc.checkpointHydrated
       ? checkpointBreakdowns(acc.checkpointBreakdowns, options.operatorAgentOutcomes)
       : buildAnalyticsBreakdowns(acc.breakdowns, { operatorAgentOutcomes: options.operatorAgentOutcomes })),
+    operatorAgentMemory: {
+      state: "ready",
+      asOf: nowIso,
+      rows: acc.operatorAgentRows.memory.map((row) => ({ ...row })),
+    },
   };
+  Object.defineProperty(out, "operatorAgentMemory", {
+    value: out.operatorAgentMemory,
+    enumerable: false,
+    writable: false,
+  });
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   return out;
@@ -1249,6 +1282,7 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       proof: acc.operatorAgentRows.proof.map((row) => ({ ...row })),
       decisions: acc.operatorAgentRows.decisions.map((row) => ({ ...row })),
       capacity: acc.operatorAgentRows.capacity.map((row) => ({ ...row })),
+      memory: acc.operatorAgentRows.memory.map((row) => ({ ...row })),
     },
     history: {
       days: [...acc.checkpointHistory.days.entries()].map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]),
@@ -1289,6 +1323,7 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
     proof: state.operatorAgentRows.proof.map((row) => ({ ...row })),
     decisions: state.operatorAgentRows.decisions.map((row) => ({ ...row })),
     capacity: state.operatorAgentRows.capacity.map((row) => ({ ...row })),
+    memory: (state.operatorAgentRows.memory ?? []).map((row) => ({ ...row })),
   };
   acc.checkpointHistory.days = new Map(state.history.days.map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]));
   acc.checkpointHistory.starts = new Map(state.history.starts);
@@ -1442,6 +1477,13 @@ export interface AnalyticsSnapshotCache {
 }
 
 function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
+  if (!value.operatorAgentMemory) {
+    Object.defineProperty(value, "operatorAgentMemory", {
+      value: { state: value.asOf === null ? "cold" : "ready", asOf: value.asOf, rows: [] },
+      enumerable: false,
+      writable: false,
+    });
+  }
   Object.freeze(value.invocationsByVerb);
   for (const bucket of value.workersByLaneModel) Object.freeze(bucket);
   Object.freeze(value.workersByLaneModel);
@@ -1513,6 +1555,9 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   for (const day of value.routingTelemetry.daily) Object.freeze(day);
   Object.freeze(value.routingTelemetry.daily);
   Object.freeze(value.routingTelemetry);
+  for (const row of value.operatorAgentMemory.rows) Object.freeze(row);
+  Object.freeze(value.operatorAgentMemory.rows);
+  Object.freeze(value.operatorAgentMemory);
   return Object.freeze(value) as AnalyticsSnapshot;
 }
 
@@ -1551,6 +1596,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     timeSeries: buildAnalyticsTimeSeries([], null),
     dimensions: breakdowns.dimensions,
     drilldowns: breakdowns.drilldowns,
+    operatorAgentMemory: { state: "cold", asOf: null, rows: [] },
   };
   // Keep the pre-existing cold-cache object enumerable shape stable for callers that compare
   // the retained cache value directly; buildAnalyticsRoute materializes these fields on the
@@ -1558,6 +1604,7 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
   Object.defineProperties(snapshot, {
     dimensions: { value: snapshot.dimensions, enumerable: false, writable: false },
     drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
+    operatorAgentMemory: { value: snapshot.operatorAgentMemory, enumerable: false, writable: false },
   });
   return freezeAnalyticsSnapshot(snapshot);
 }

@@ -92,7 +92,7 @@ import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
-import { buildOperatorAgentRoutes } from "./operator-agent.js";
+import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
@@ -3541,6 +3541,7 @@ interface ServeRoutesAssembly {
 function assembleServeRoutes(
   deps: ServeDeps,
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
+  operatorAgentMemory?: OperatorAgentMemorySource,
 ): ServeRoutesAssembly {
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -3611,7 +3612,10 @@ function assembleServeRoutes(
   // Personal context governance is mounted with the existing operator-agent routes. Its context
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
-  const operatorAgentRoutes = buildOperatorAgentRoutes({ ledgerPath: deps.ledgerPath });
+  const operatorAgentRoutes = buildOperatorAgentRoutes({
+    ledgerPath: deps.ledgerPath,
+    ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
+  });
   // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
   // ledger-backed context-governance engine above — same ledgerPath, so a self-service forget and
   // a governance delete are the identical durable receipt, never a second memory store. Raw
@@ -3840,6 +3844,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     stateDir: dirname(deps.ledgerPath),
     log: deps.log,
   });
+  const operatorAgentMemory = createOperatorAgentMemorySource(() => analyticsCache.current().operatorAgentMemory);
   const liveAnalyticsCache = createLiveAnalyticsSnapshotCache({
     ...deps.liveAnalytics,
     root: deps.fleetControlRoot,
@@ -3878,6 +3883,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const routeAssembly = assembleServeRoutes(
     { ...deps, consoleSha, confirmNonces, liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current },
     analyticsCache.current,
+    operatorAgentMemory,
   );
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same

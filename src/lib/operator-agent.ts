@@ -9,6 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
+import type { ServerResponse } from "node:http";
 import type { Route } from "./service.js";
 import { clockFromMillisFn } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
@@ -238,6 +239,26 @@ export type OperatorAgentSettingsRead = {
   scope?: OperatorAgentSettingsScope;
 };
 
+/**
+ * The bounded, process-owned slice of the ledger that the proposal/settings routes need.
+ * `state: "cold"` is deliberately distinct from an empty row list: the serve-owned analytics
+ * refresh has not yet observed the ledger, so a request must not turn that absence into verified
+ * empty history.
+ */
+export type OperatorAgentMemoryLedgerRow = Readonly<Record<string, unknown>>;
+
+export interface OperatorAgentMemorySnapshot {
+  state: "cold" | "ready";
+  asOf: string | null;
+  rows: readonly OperatorAgentMemoryLedgerRow[];
+}
+
+export interface OperatorAgentMemorySource {
+  current(): OperatorAgentMemorySnapshot;
+  /** Record a just-written bounded event without reopening the ledger on the request path. */
+  record(row: Record<string, unknown>): void;
+}
+
 export type OperatorAgentExperimentState =
   | "proposed"
   | "approved"
@@ -360,7 +381,10 @@ export interface OperatorAgentPromotionHistory extends PromotionRecord {
   events: OperatorAgentPromotionEvent[];
 }
 
-export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & { now?: () => number };
+export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath"> & {
+  now?: () => number;
+  memory?: OperatorAgentMemorySource;
+};
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
 type ProposalDecisionInput = { proposalId: string; decision: OperatorAgentDecision; note?: string };
@@ -994,19 +1018,6 @@ function validateConsequencePreflightInput(body: unknown): { error: string } | C
   return { action: body.action as unknown as ConsequenceActionInput };
 }
 
-function readRows(ledgerPath: string): Array<Record<string, unknown>> {
-  // The agent's history is a durable read, so it must include the live ledger and both supported
-  // rotation forms. The live reader is intentionally not substituted here: a compacted decision
-  // must remain visible in /v1/operator-agent/proposals after restart.
-  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: [OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_OUTCOME_STEP],
-  }).rows;
-}
-
-function readSettingsRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readLedgerUnionRecordsSync(dirname(ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP }).rows;
-}
-
 function readExperimentRows(ledgerPath: string): Array<Record<string, unknown>> {
   return readLedgerUnionRecordsSync(dirname(ledgerPath), {
     step: [
@@ -1043,7 +1054,7 @@ function settingsFromRow(row: Record<string, unknown>, requestedScope?: Operator
 
 export function readOperatorAgentSettings(deps: OperatorAgentRouteDependencies, requestedScope?: OperatorAgentSettingsScope): OperatorAgentSettingsRead {
   let result: { settings: OperatorAgentSettings; scope?: OperatorAgentSettingsScope } | undefined;
-  for (const row of readSettingsRows(deps.ledgerPath)) {
+  for (const row of readSettingsRows(deps)) {
     const candidate = settingsFromRow(row, requestedScope);
     if (candidate) result = candidate;
   }
@@ -1077,11 +1088,107 @@ function outcomeFromRow(row: Record<string, unknown>): { proposalId: string; out
   return "error" in parsed ? null : { proposalId: parsed.proposalId, outcome: parsed.outcome };
 }
 
+/**
+ * Select and redact one operator-agent event for the serve-owned memory snapshot. The ledger is
+ * still the source of truth; this is only the bounded read model. In particular, actor/bearer
+ * fields, prompts, and arbitrary ledger payload are never retained here.
+ */
+export function selectOperatorAgentMemoryRow(row: Record<string, unknown>): OperatorAgentMemoryLedgerRow | undefined {
+  const proposal = proposalFromRow(row);
+  if (proposal) return { step: OPERATOR_AGENT_PROPOSAL_STEP, proposal };
+
+  const decision = decisionFromRow(row);
+  if (decision) {
+    return {
+      step: OPERATOR_AGENT_DECISION_STEP,
+      proposal_id: String(row.proposal_id),
+      decision: decision.decision,
+      at: decision.at,
+      ...(decision.note ? { note: decision.note } : {}),
+    };
+  }
+
+  const outcome = outcomeFromRow(row);
+  if (outcome) {
+    return { step: OPERATOR_AGENT_OUTCOME_STEP, proposal_id: outcome.proposalId, outcome: outcome.outcome };
+  }
+
+  const settings = settingsFromRow(row);
+  if (settings) {
+    const updatedAt = iso(row.updatedAt) ? String(row.updatedAt) : undefined;
+    return {
+      step: OPERATOR_AGENT_SETTINGS_STEP,
+      settings: settings.settings,
+      ...(settings.scope ? { scope: settings.scope } : {}),
+      ...(updatedAt ? { updatedAt } : {}),
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Overlay write receipts on the shared analytics snapshot. This makes a successful write visible
+ * immediately while the next background analytics refresh catches the durable row; duplicate
+ * receipts are collapsed by their redacted JSON representation.
+ */
+export function createOperatorAgentMemorySource(
+  base: () => OperatorAgentMemorySnapshot,
+): OperatorAgentMemorySource {
+  const overlay: OperatorAgentMemoryLedgerRow[] = [];
+  const maxOverlayRows = 256;
+  return {
+    current: () => {
+      const snapshot = base();
+      if (snapshot.state !== "ready" || overlay.length === 0) return snapshot;
+      const seen = new Set(snapshot.rows.map((row) => JSON.stringify(row)));
+      const additions = overlay.filter((row) => !seen.has(JSON.stringify(row)));
+      return additions.length === 0 ? snapshot : { ...snapshot, rows: [...snapshot.rows, ...additions] };
+    },
+    record: (row) => {
+      const selected = selectOperatorAgentMemoryRow(row);
+      if (!selected) return;
+      overlay.push(selected);
+      if (overlay.length > maxOverlayRows) overlay.splice(0, overlay.length - maxOverlayRows);
+    },
+  };
+}
+
+function readRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<Record<string, unknown>> {
+  const memory = deps.memory?.current();
+  if (memory?.state === "ready") return memory.rows as ReadonlyArray<Record<string, unknown>>;
+  return readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+    step: [OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_OUTCOME_STEP],
+  }).rows;
+}
+
+function readSettingsRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<Record<string, unknown>> {
+  const memory = deps.memory?.current();
+  if (memory?.state === "ready") return memory.rows as ReadonlyArray<Record<string, unknown>>;
+  return readLedgerUnionRecordsSync(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP }).rows;
+}
+
+/**
+ * A serve-owned memory source is intentionally fail-closed before its first background refresh.
+ * Returning an observed empty list here would let the console treat cold state as "no history";
+ * falling back to a synchronous union scan would recreate the request-path starvation this cache
+ * exists to prevent. Direct route callers without a memory source retain the historical reader.
+ */
+function rejectColdOperatorAgentMemory(deps: OperatorAgentRouteDependencies, res: ServerResponse): boolean {
+  const memory = deps.memory?.current();
+  if (!memory || memory.state === "ready") return false;
+  sendJson(res, 503, {
+    error: "unavailable",
+    source: "operator-agent-memory",
+    detail: "the first background ledger refresh has not completed; no verified operator-agent history is available",
+  });
+  return true;
+}
+
 export function readOperatorAgentHistory(deps: OperatorAgentRouteDependencies): OperatorAgentHistory[] {
   const proposals = new Map<string, OperatorAgentProposal>();
   const decisions = new Map<string, OperatorAgentDecisionEvent[]>();
   const outcomes = new Map<string, OperatorAgentOutcome>();
-  for (const row of readRows(deps.ledgerPath)) {
+  for (const row of readRows(deps)) {
     const proposal = proposalFromRow(row);
     if (proposal && !proposals.has(proposal.proposalId)) proposals.set(proposal.proposalId, proposal);
     const decision = decisionFromRow(row);
@@ -1419,7 +1526,10 @@ export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDepe
     method: "GET",
     path: "/v1/operator-agent/proposals",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, { proposals: readOperatorAgentHistory(deps), source: "ledger" }),
+    handler: (_req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
+      sendJson(res, 200, { proposals: readOperatorAgentHistory(deps), source: "ledger" });
+    },
   };
 }
 
@@ -1431,6 +1541,7 @@ export function buildOperatorAgentProposalRegisterRoute(deps: OperatorAgentRoute
     scope: "write",
     tier: "low",
     handler: jsonAction(validateRegistration, (input, req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
       const existing = findProposal(deps, input.proposal.proposalId);
       if (existing) {
         if (JSON.stringify(existing.proposalText) !== JSON.stringify(input.proposal.proposalText) || existing.repo !== input.proposal.repo) {
@@ -1450,6 +1561,7 @@ export function buildOperatorAgentProposalRegisterRoute(deps: OperatorAgentRoute
         return;
       }
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROPOSAL_STEP, input.proposal.proposalId, bearerTokenId(req), { proposal: input.proposal });
+      deps.memory?.record({ step: OPERATOR_AGENT_PROPOSAL_STEP, proposal: input.proposal });
       sendJson(res, 201, { ok: true, existing: false, proposal: input.proposal });
     }),
   };
@@ -1463,6 +1575,7 @@ export function buildOperatorAgentDecisionRoute(deps: OperatorAgentRouteDependen
     scope: "write",
     tier: "low",
     handler: jsonAction(validateDecision, (input, req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
       const existing = findProposal(deps, input.proposalId);
       if (!existing) {
         sendJson(res, 404, { error: "not_found", detail: `no operator-agent proposal "${input.proposalId}"` });
@@ -1474,6 +1587,13 @@ export function buildOperatorAgentDecisionRoute(deps: OperatorAgentRouteDependen
       }
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_DECISION_STEP, input.proposalId, bearerTokenId(req), {
+        proposal_id: input.proposalId,
+        decision: input.decision,
+        at,
+        ...(input.note ? { note: input.note } : {}),
+      });
+      deps.memory?.record({
+        step: OPERATOR_AGENT_DECISION_STEP,
         proposal_id: input.proposalId,
         decision: input.decision,
         at,
@@ -1492,6 +1612,7 @@ export function buildOperatorAgentOutcomeRoute(deps: OperatorAgentRouteDependenc
     scope: "write",
     tier: "low",
     handler: jsonAction(validateOutcome, (input, req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
       const existing = findProposal(deps, input.proposalId);
       if (!existing) {
         sendJson(res, 404, { error: "not_found", detail: `no operator-agent proposal "${input.proposalId}"` });
@@ -1505,6 +1626,7 @@ export function buildOperatorAgentOutcomeRoute(deps: OperatorAgentRouteDependenc
         proposal_id: input.proposalId,
         outcome: input.outcome,
       });
+      deps.memory?.record({ step: OPERATOR_AGENT_OUTCOME_STEP, proposal_id: input.proposalId, outcome: input.outcome });
       sendJson(res, 200, { ok: true, proposalId: input.proposalId, outcome: input.outcome });
     }),
   };
@@ -1938,6 +2060,7 @@ export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDepe
     path: "/v1/operator-agent/settings",
     scope: "read",
     handler: (req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
       const requested = requestedSettingsScope(req);
       if (requested.error) {
         sendJson(res, 400, { error: "invalid_request", detail: requested.error });
@@ -1956,12 +2079,20 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
     scope: "write",
     tier: "low",
     handler: jsonAction(validateSettingsInput, (input, req, res) => {
+      if (rejectColdOperatorAgentMemory(deps, res)) return;
       const updatedAt = clockFromMillisFn(deps.now).iso();
+      const row = {
+        step: OPERATOR_AGENT_SETTINGS_STEP,
+        settings: input.settings,
+        ...(input.scope ? { scope: input.scope } : {}),
+        updatedAt,
+      };
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_SETTINGS_STEP, "operator-agent-settings", bearerTokenId(req), {
         settings: input.settings,
         ...(input.scope ? { scope: input.scope } : {}),
         updatedAt,
       });
+      deps.memory?.record(row);
       sendJson(res, 200, { settings: input.settings, source: "ledger", ...(input.scope ? { scope: input.scope } : {}), updatedAt });
     }),
   };

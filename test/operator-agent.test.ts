@@ -7,7 +7,11 @@ import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import {
   buildOperatorAgentRoutes,
+  createOperatorAgentMemorySource,
+  selectOperatorAgentMemoryRow,
   readOperatorAgentHistory,
+  OPERATOR_AGENT_PROPOSAL_STEP,
+  type OperatorAgentMemorySource,
   type OperatorAgentProposal,
 } from "../src/lib/operator-agent.js";
 
@@ -58,8 +62,8 @@ function fixture(): { ledgerPath: string; proposal: OperatorAgentProposal } {
   };
 }
 
-async function withService<T>(ledgerPath: string, fn: (base: string) => Promise<T>, now?: () => number): Promise<T> {
-  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildOperatorAgentRoutes({ ledgerPath, now }) });
+async function withService<T>(ledgerPath: string, fn: (base: string) => Promise<T>, now?: () => number, memory?: OperatorAgentMemorySource): Promise<T> {
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildOperatorAgentRoutes({ ledgerPath, now, memory }) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   try {
@@ -135,6 +139,116 @@ test("operator-agent routes keep reads separate from writes and persist proposal
     "panel.operator_agent_outcome",
   ]);
   assert.equal(lines[1]?.proposal_id, proposal.proposalId);
+});
+
+test("unit test: operator-agent reads use the refreshed memory snapshot without a synchronous union read", async () => {
+  const { ledgerPath, proposal } = fixture();
+  const memory: OperatorAgentMemorySource = {
+    current: () => ({
+      state: "ready",
+      asOf: "2026-09-21T00:00:00.000Z",
+      rows: [
+        { step: OPERATOR_AGENT_PROPOSAL_STEP, proposal },
+        {
+          step: "panel.operator_agent_decision",
+          proposal_id: proposal.proposalId,
+          decision: "accepted",
+          at: proposal.createdAt,
+          note: "The queue signal is strong enough to review.",
+        },
+        {
+          step: "panel.operator_agent_outcome",
+          proposal_id: proposal.proposalId,
+          outcome: { summary: "Queue latency fell after the pool change.", helped: true, observedAt: proposal.createdAt },
+        },
+      ],
+    }),
+    record: () => assert.fail("a read must not record or rescan the ledger"),
+  };
+
+  await withService(ledgerPath, async (base) => {
+    const response = await get(base, READ_TOKEN);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { proposals: Array<OperatorAgentProposal & { status: string; outcome?: { helped?: boolean } }> };
+    assert.deepEqual(body.proposals.map((item) => item.proposalId), [proposal.proposalId]);
+    assert.equal(body.proposals[0]?.status, "accepted");
+    assert.equal(body.proposals[0]?.outcome?.helped, true);
+  }, undefined, memory);
+});
+
+test("unit test: a cold operator-agent snapshot is unavailable rather than an observed empty ledger", async () => {
+  const { ledgerPath } = fixture();
+  const memory: OperatorAgentMemorySource = {
+    current: () => ({ state: "cold", asOf: null, rows: [] }),
+    record: () => assert.fail("cold state must reject writes before recording a receipt"),
+  };
+
+  await withService(ledgerPath, async (base) => {
+    const proposals = await get(base, READ_TOKEN);
+    assert.equal(proposals.status, 503);
+    assert.deepEqual(await proposals.json(), {
+      error: "unavailable",
+      source: "operator-agent-memory",
+      detail: "the first background ledger refresh has not completed; no verified operator-agent history is available",
+    });
+    const settings = await getSettings(base, READ_TOKEN);
+    assert.equal(settings.status, 503);
+  }, undefined, memory);
+});
+
+test("unit test: operator-agent writes invalidate the snapshot for read-after-write", async () => {
+  const { ledgerPath, proposal } = fixture();
+  const memory = createOperatorAgentMemorySource(() => ({ state: "ready", asOf: "2026-09-21T00:00:00.000Z", rows: [] }));
+
+  await withService(ledgerPath, async (base) => {
+    assert.equal((await post(base, "/v1/operator-agent/proposals", WRITE_TOKEN, { proposal })).status, 201);
+    const response = await get(base, READ_TOKEN);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { proposals: OperatorAgentProposal[] };
+    assert.equal(body.proposals[0]?.proposalId, proposal.proposalId);
+  }, undefined, memory);
+});
+
+test("unit test: operator-agent memory redacts and retains a decision note", () => {
+  assert.deepEqual(
+    selectOperatorAgentMemoryRow({
+      step: "panel.operator_agent_decision",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      decision: "accepted",
+      at: "2026-09-21T00:00:00.000Z",
+      note: "The bounded evidence supports review.",
+      bearer_token_id: "must-not-be-retained",
+      prompt: "must-not-be-retained",
+    }),
+    {
+      step: "panel.operator_agent_decision",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      decision: "accepted",
+      at: "2026-09-21T00:00:00.000Z",
+      note: "The bounded evidence supports review.",
+    },
+  );
+  assert.deepEqual(
+    selectOperatorAgentMemoryRow({
+      step: "panel.operator_agent_outcome",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      outcome: {
+        summary: "The bounded change reduced queue latency.",
+        helped: true,
+        observedAt: "2026-09-22T00:00:00.000Z",
+      },
+      bearer_token_id: "must-not-be-retained",
+    }),
+    {
+      step: "panel.operator_agent_outcome",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      outcome: {
+        summary: "The bounded change reduced queue latency.",
+        helped: true,
+        observedAt: "2026-09-22T00:00:00.000Z",
+      },
+    },
+  );
 });
 
 test("reads the default operator-agent settings when no settings row exists; persists a valid operator-agent settings update in the ledger", async () => {
