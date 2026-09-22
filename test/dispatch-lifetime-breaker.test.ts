@@ -126,41 +126,50 @@ test("isLifetimeDispatchCapExceeded: a policy-data override (rule 2) changes the
 // ── wired into isDispatchEligible (via nextRunnable/runnableCandidates, its two
 // exported callers) — mirrors the existing isCircuitTripped tests in drain.test.ts ──
 
-test("W1-T271: a task past the lifetime cap is refused by isDispatchEligible (nextRunnable), with a legible callback naming it", () => {
+test("W1-T4025: repeated lifetime pressure is observed by nextRunnable without refusing the task", () => {
   const plan = fixturePlan(); // A, D — both independent and otherwise runnable
   const capped: string[] = [];
+  const pressured: string[] = [];
   const next = nextRunnable(plan, NONE_MERGED, {
     isLifetimeCapExceeded: (id) => id === "A",
     onLifetimeCapExceeded: (t) => capped.push(t.id),
+    onLifetimePressure: (t) => pressured.push(t.id),
   });
   assert.deepEqual(capped, ["A"]);
-  assert.equal(next?.id, "D", "A is skipped for its lifetime cap; D is the next runnable task");
+  assert.deepEqual(pressured, ["A"]);
+  assert.equal(next?.id, "A", "the old lifetime cap is now a sensor; pressure must not block dispatch");
 });
 
-test("W1-T271: the lifetime cap is independent of the streak breaker — both may be wired, either can halt a task on its own", () => {
+test("W1-T4025: lifetime pressure remains independent of the streak breaker and never halts the task", () => {
   const plan = fixturePlan();
   const capped: string[] = [];
+  const pressured: string[] = [];
   const broken: string[] = [];
   const next = nextRunnable(plan, NONE_MERGED, {
     isCircuitTripped: () => false, // streak breaker clear
     onCircuitBreak: (t) => broken.push(t.id),
-    isLifetimeCapExceeded: (id) => id === "A", // lifetime cap alone halts A
+    isLifetimeCapExceeded: (id) => id === "A", // lifetime pressure alone observes A
     onLifetimeCapExceeded: (t) => capped.push(t.id),
+    onLifetimePressure: (t) => pressured.push(t.id),
   });
   assert.deepEqual(broken, [], "the streak breaker never fires when it reports clear");
-  assert.deepEqual(capped, ["A"], "the lifetime cap halts A on its own, independent of the streak breaker's verdict");
-  assert.equal(next?.id, "D");
+  assert.deepEqual(capped, ["A"], "the legacy observation hook still sees A");
+  assert.deepEqual(pressured, ["A"], "the adaptive route sees A independently of the streak breaker");
+  assert.equal(next?.id, "A", "the lifetime sensor never halts A on its own");
 });
 
-test("W1-T271: runnableCandidates applies the exact same lifetime-cap gate as nextRunnable", () => {
+test("W1-T4025: runnableCandidates carries lifetime pressure without filtering the task", () => {
   const plan = fixturePlan();
   const capped: string[] = [];
+  const pressured: string[] = [];
   const candidates = runnableCandidates(plan, NONE_MERGED, 5, {
     isLifetimeCapExceeded: (id) => id === "A",
     onLifetimeCapExceeded: (t) => capped.push(t.id),
+    onLifetimePressure: (t) => pressured.push(t.id),
   });
   assert.deepEqual(capped, ["A"]);
-  assert.deepEqual(candidates.map((t) => t.id), ["D"], "A is excluded from the concurrent candidate list too");
+  assert.deepEqual(pressured, ["A"]);
+  assert.deepEqual(candidates.map((t) => t.id), ["A", "D"], "A remains in the concurrent candidate list");
 });
 
 test("W1-T271: no isLifetimeCapExceeded wired at all ⇒ nextRunnable behaves exactly as before this cap existed", () => {
@@ -224,12 +233,12 @@ async function captureDrainDeps(config: Config, planPath: string): Promise<Drain
   return captured;
 }
 
-test("W1-T316 REACHABILITY: drainCommand wires isLifetimeCapExceeded/onLifetimeCapExceeded into the DrainDeps it hands runDrain", async () => {
+test("W1-T4025 REACHABILITY: drainCommand wires the adaptive lifetime sensor and follow-up route", async () => {
   const config = drainFixtureConfig();
   try {
     const deps = await captureDrainDeps(config, emptyPlanPath());
     assert.equal(typeof deps.isLifetimeCapExceeded, "function", "drainCommand must wire the lifetime-cap predicate");
-    assert.equal(typeof deps.onLifetimeCapExceeded, "function", "drainCommand must wire the lifetime-cap escalation hook");
+    assert.equal(typeof deps.onLifetimePressure, "function", "drainCommand must wire the adaptive follow-up route");
   } finally {
     rmSync(config.root, { recursive: true, force: true });
   }
@@ -295,14 +304,14 @@ async function captureDaemonDeps(planPath: string): Promise<DaemonDeps> {
   return captured;
 }
 
-test("W1-T316 REACHABILITY: daemonCommand wires isLifetimeCapExceeded/onLifetimeCapExceeded into the DaemonDeps it hands runDaemon", async () => {
+test("W1-T4025 REACHABILITY: daemonCommand wires the adaptive lifetime sensor and follow-up route", async () => {
   const { home, planPath } = daemonFixtureHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
     const deps = await captureDaemonDeps(planPath);
     assert.equal(typeof deps.isLifetimeCapExceeded, "function", "daemonCommand must wire the lifetime-cap predicate");
-    assert.equal(typeof deps.onLifetimeCapExceeded, "function", "daemonCommand must wire the lifetime-cap escalation hook");
+    assert.equal(typeof deps.onLifetimePressure, "function", "daemonCommand must wire the adaptive follow-up route");
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
@@ -333,15 +342,18 @@ test("W1-T316: daemonCommand's WIRED isLifetimeCapExceeded tracks a REAL ledger,
 
 // ── the exclusion is ledgered and escalated ONCE, never a silent skip (design step ii) ────
 
-test("W1-T316: a task excluded by isLifetimeCapExceeded is ledgered via a legible callback, not a silent skip", () => {
+test("W1-T4025: lifetime pressure is ledgered and observed, never silently used as a skip", () => {
   const plan = fixturePlan(); // A, D
   const seen: string[] = [];
+  const pressured: string[] = [];
   const next = nextRunnable(plan, NONE_MERGED, {
     isLifetimeCapExceeded: (id) => id === "A",
     onLifetimeCapExceeded: (t) => seen.push(t.id),
+    onLifetimePressure: (t) => pressured.push(t.id),
   });
   assert.deepEqual(seen, ["A"], "the exclusion callback fires exactly once, naming the excluded task");
-  assert.equal(next?.id, "D");
+  assert.deepEqual(pressured, ["A"]);
+  assert.equal(next?.id, "A");
 });
 
 test("escalateLifetimeCapExceeded: dedups on its own ledger step, and writes the marker whether or not delivery succeeds", () => {
