@@ -33,6 +33,7 @@ import {
   type PlanOnlyRunBranchReceipt,
   type PushedRunRef,
 } from "../src/lib/drain.js";
+import { planOnlyRunBranchReceipts, type OpenPrView } from "../src/lib/sweep.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { deriveStatus, type GitHub } from "../src/lib/status.js";
 // W1-T343: runDaemon ADOPTS this file's own lane machinery (runnableCandidates,
@@ -1730,6 +1731,30 @@ test("W1-T916: the daemon dispatch path carries the same supplier", async () => 
 function receipt(ref: string, sha: string, prNumber = 1): PlanOnlyRunBranchReceipt {
   return { ref, sha, prNumber };
 }
+
+test("W1-T4002: planOnlyRunBranchReceipts returns only positively classified complete heads", () => {
+  const complete = {
+    isPlanFiling: true,
+    planFilingSource: "emitter-ledger",
+    headRefName: "run-W1-T999-1790040200000",
+    headSha: "shaA",
+    prNumber: 6501,
+  } as OpenPrView;
+  const wrongSource = {
+    ...complete,
+    planFilingSource: "unreadable",
+    prNumber: 6502,
+  } as OpenPrView;
+  const missingSha = {
+    ...complete,
+    headSha: undefined,
+    prNumber: 6503,
+  } as unknown as OpenPrView;
+
+  assert.deepEqual(planOnlyRunBranchReceipts([complete, wrongSource, missingSha]), [
+    { ref: "run-W1-T999-1790040200000", sha: "shaA", prNumber: 6501 },
+  ]);
+});
 
 test("W1-T4002: parsePushedRunRefs keeps the exact ref AND sha, unlike runBranchTaskIds' bare id reduction", () => {
   const raw = "shaA\trefs/heads/run-W1-T999-1790040200000\nshaB\trefs/heads/run-W1-T998-1790040200000\n";

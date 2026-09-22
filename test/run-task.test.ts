@@ -8436,6 +8436,59 @@ test("buildSweepHook: the daemon sweep closure runs EVERY rung — incl. the esc
   }
 });
 
+test("W1-T4002: buildSweepHook returns this pass's complete plan-only run-branch receipt", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-sweephook-plan-filing-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-sweephook-plan-filing-"));
+  const prUrl = "https://github.com/o/r/pull/900";
+  const script = `#!/usr/bin/env node
+const args = process.argv.slice(2).join(" ");
+if (args.includes("pulls?state=open")) {
+  process.stdout.write(JSON.stringify([{
+    number: 900,
+    html_url: ${JSON.stringify(prUrl)},
+    state: "open",
+    body: "",
+    title: "plan filing",
+    updated_at: "2026-09-22T00:00:00Z",
+    head: { ref: "run-W1-T999-1790040200000", sha: "shaA" },
+  }]));
+} else if (args.includes("check-runs") || args.endsWith("/status")) {
+  process.stdout.write(args.includes("check-runs") ? JSON.stringify({ check_runs: [] }) : JSON.stringify({ statuses: [] }));
+} else if (args.includes("/pulls/900")) {
+  process.stdout.write(JSON.stringify({ mergeable_state: "clean", mergeable: true }));
+} else {
+  process.stdout.write("[]");
+}
+`;
+  writeFileSync(join(bin, "gh"), script, { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(
+    ledgerPath,
+    JSON.stringify({ step: "pr.opened", pr_url: prUrl, plan_only: true }) + "\n",
+  );
+  try {
+    const hook = buildSweepHook(
+      "o",
+      "r",
+      { root, claudeBin: "/bin/true" } as Config,
+      ledgerPath,
+      "SWEEP-PLAN-FILING",
+      { tasks: [], byId: new Map() },
+      () => {},
+    );
+    const outcome = await hook();
+    assert.deepEqual(outcome?.planOnlyRunBranchReceipts, [
+      { ref: "run-W1-T999-1790040200000", sha: "shaA", prNumber: 900 },
+    ]);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("sweepCommand: `rmd sweep --repo <other>` runs the full pipeline incl. the escalation reconciler over offline gh and reports the reconcile count, exit 0", async () => {
   const bin = mkdtempSync(join(tmpdir(), "gh-sweepcmd-"));
   writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
