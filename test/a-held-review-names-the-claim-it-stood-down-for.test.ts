@@ -43,6 +43,10 @@ test("a materialization failure still reports the absent checkout", () => {
   const annotation = reviewVerdictAnnotation({ keywordOnly: true, decisionDisposition: "computed" });
 
   assert.equal(annotation, "KEYWORD-ONLY: no proof was executed (no PR-head checkout)");
+
+  // An ordinary, non-degraded verdict carries neither cause and renders nothing —
+  // exercised here directly rather than left to incidental coverage elsewhere.
+  assert.equal(reviewVerdictAnnotation({ keywordOnly: false, decisionDisposition: "computed" }), "");
 });
 
 test("the two causes carry different ledger reasons", async () => {
@@ -58,6 +62,10 @@ test("the two causes carry different ledger reasons", async () => {
   assert.notEqual(held.review_reason, materializationFailure.review_reason);
   assert.equal(materializationFailure.degraded_reason, "head fetch failed");
   assert.equal(materializationFailure.degraded_reason_class, "fetch-failure");
+
+  // Neither cause present (an ordinary, healthy verdict) names nothing — no key is
+  // manufactured for a reason that never happened.
+  assert.deepEqual(reviewLedgerReasonFields({ decisionDisposition: "computed" }), {});
 
   const root = mkdtempSync(join(tmpdir(), "rmd-held-review-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-held-review-bin-"));
