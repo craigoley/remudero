@@ -859,3 +859,40 @@ test("W1-T968: priorArmOnHead discriminates a real prior arm, no arm, and a diff
     "a row recorded against a DIFFERENT head reads false — refutes a head-blind predicate",
   );
 });
+
+// ── a withdrawal on the same head supersedes the arm before it ──────────────────────
+// `withdrawArmIfVerdictRefuses` ledgers `automerge.disarmed` against the SAME head when a later
+// verdict refuses. An "any arm row exists" predicate reads that head as armed forever — the
+// overstating direction design (iii) forbids. Each case below refutes one wrong predicate.
+test("W1-T968: a disarm after the arm on this head reports not armed", () => {
+  const PR_URL = "https://github.com/craigoley/remudero/pull/968";
+  const HEAD = "3968396839683968396839683968396839683968";
+  const OTHER_HEAD = "4968496849684968496849684968496849684968";
+  const armed = { step: "automerge.armed", pr_url: PR_URL, head_sha: HEAD, lane: "review" };
+  // The shape the real writer produces: head_sha, reason and outcome, and NO pr_url.
+  const disarmed = { step: "automerge.disarmed", head_sha: HEAD, outcome: "disarmed", reason: "verdict refuses auto-merge" };
+
+  const priorArm = priorArmOnHead([armed, disarmed], PR_URL, HEAD);
+  assert.equal(priorArm, false, "an arm withdrawn on this head is not armed — refutes an any-row-exists predicate");
+  assert.equal(armReportPhrase("arm-error-ignored", priorArm), "NOT armed (arm-error-ignored)");
+
+  assert.equal(priorArmOnHead([disarmed, armed], PR_URL, HEAD), true, "a re-arm after the withdrawal reads armed — last event wins");
+  assert.equal(
+    priorArmOnHead([armed, { ...disarmed, step: "automerge.disarm_skipped" }], PR_URL, HEAD),
+    true,
+    "a withdrawal that did not withdraw leaves the arm standing — refutes treating every disarm step alike",
+  );
+  assert.equal(
+    priorArmOnHead([armed, { ...disarmed, head_sha: OTHER_HEAD }], PR_URL, HEAD),
+    true,
+    "a withdrawal on a DIFFERENT head says nothing about this one — refutes a head-blind withdrawal",
+  );
+});
+
+test("W1-T968: automerge disarmed is registered in the decision relevant ledger steps", () => {
+  assert.equal(
+    DECISION_RELEVANT_LEDGER_STEPS.has("automerge.disarmed"),
+    true,
+    "a rotation that archives the withdrawal but keeps the arm would make priorArmOnHead overstate",
+  );
+});

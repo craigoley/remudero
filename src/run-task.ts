@@ -4089,29 +4089,23 @@ export function armAndLogOutcome(
 }
 
 /**
- * W1-T968 — does the ledger ALREADY carry an `automerge.armed` row for this exact pull request on
- * this exact head sha? PURE over lines the caller already read, mirroring {@link armRunIdFromLedger}
- * right above (same step, same `pr_url` key), plus the head sha this task adds.
+ * W1-T968 — is this exact pull request ARMED on this exact head, per the ledger? PURE over lines
+ * the caller already read, mirroring {@link armRunIdFromLedger} (same step, same `pr_url` key).
  *
- * THE DEFECT THIS CLOSES. {@link armReportPhrase} is a pure function of the ONE outcome the most
- * recent call returned. The review lane (`armIfVerdictPermits`) already arms and already ledgers
- * `automerge.armed` with `head_sha` on a full PASS; the Architect lane's own later
- * `armAndLogOutcome` then issues a SECOND, redundant `gh pr merge --auto` against a PR that is
- * already armed, which `attemptArm` classifies as `arm-error-ignored` — a real outcome, correctly
- * read by {@link armOutcomeArmed} as "this call armed nothing". The console line built from that
- * outcome alone answers about the CALL, not the pull request the operator is actually asking
- * about, so it prints "NOT armed" for a PR that armed seconds earlier. This predicate is the read
- * that lets the phrase answer about the PR instead.
+ * THE DEFECT. {@link armReportPhrase} answered from the ONE outcome the latest call returned. The
+ * review lane (`armIfVerdictPermits`) arms and ledgers `automerge.armed` with `head_sha` on a PASS;
+ * an Architect lane's later, redundant `armAndLogOutcome` then gets `arm-error-ignored`, which
+ * {@link armOutcomeArmed} rightly reads as "this call armed nothing" — so the line printed "NOT
+ * armed" for a PR armed seconds earlier. That rule (lib/sweep.ts) is not re-derived here; this is
+ * a second, independent read of what the ledger already recorded.
  *
- * KEYED ON PR + HEAD, NEVER PR ALONE (design iii): matching on `pr_url` alone would claim an arm
- * survives a re-head, which is exactly the state a genuinely fresh attempt deserves to report as
- * unarmed. An absent `headSha` (the caller's own head read failed too) never falls back to a
- * pr-url-only match — an unkeyable claim answers `false`, the direction that never overstates.
+ * KEYED ON PR + HEAD (design iii): an arm must not survive a re-head, and an absent `headSha` never
+ * falls back to a pr-url-only match — an unkeyable claim answers `false`, which never overstates.
  *
- * DOES NOT RE-DERIVE `armOutcomeArmed`'s rule — that predicate decides which OUTCOME counts as
- * armed and stays the one place that owns it (lib/sweep.ts); this only asks whether the ledger
- * separately already recorded a genuine arm for this pr+head, regardless of what the immediate
- * call itself returned.
+ * LAST EVENT WINS. `withdrawArmIfVerdictRefuses` ledgers `automerge.disarmed` on the SAME head when
+ * a later verdict refuses, so "an arm row exists" is not "armed now". That row has `head_sha` and
+ * no `pr_url`, so it matches on the head. `automerge.disarm_skipped` records a withdrawal that left
+ * the arm standing, so it is not one. Rows are read in append order, as `readLedgerLines` returns.
  */
 export function priorArmOnHead(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -4119,7 +4113,13 @@ export function priorArmOnHead(
   headSha: string | undefined,
 ): boolean {
   if (!headSha) return false;
-  return lines.some((line) => line.step === "automerge.armed" && line.pr_url === prUrl && line.head_sha === headSha);
+  let armed = false;
+  for (const line of lines) {
+    if (line.head_sha !== headSha) continue;
+    if (line.step === "automerge.armed" && line.pr_url === prUrl) armed = true;
+    else if (line.step === "automerge.disarmed" && (line.pr_url === undefined || line.pr_url === prUrl)) armed = false;
+  }
+  return armed;
 }
 
 /**
