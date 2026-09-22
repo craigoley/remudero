@@ -2792,6 +2792,24 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "— a missing input is not that checkout's defect (design note iv). Deliberately no `remedyFiles`: a " +
       "lint-plan violation's remedy is the offending task's own shard, never one fixed baseline path",
   },
+  {
+    job: "self-path-proof",
+    script: "census:self-path-proof",
+    skipWhenAbsent: "plan/tasks.d",
+    reason:
+      "same-class as lint-plan above — a PLAN-SHAPED gate a plan-only PR can fail, which CI reached only " +
+      "after a full instrumented shard. `test/a-shards-proof-cannot-target-its-own-file.test.ts` ratchets each " +
+      "shard's self-path proof count against scripts/self-path-proof-baseline.json. It blocked #6596 on " +
+      "2026-09-22 (a shard taken from its baseline of 5 to 8), caught as ci-shard (2/4) FAILURE, when the same " +
+      "script runs locally in ~1s. NOT A CENSUS-CLASS MEMBER, AND THAT IS DELIBERATE: the suite enumerates " +
+      "with readdirSync, so discoverCensusCandidates classes it `dir-walk`, and W1-T2809 defers the whole " +
+      "dir-walk class (~84 suites, measured) to its own filing — putting it in CENSUS_POPULATION would make " +
+      "censusPopulationDrift report it `stale`. So it carries NO `boundMs` (the census class is keyed on " +
+      "boundMs) and sits beside lint-plan, its plan-shaped sibling. The day the dir-walk deferral is resolved " +
+      "and this suite is admitted as a census member, test/the-fast-gate-runs-the-self-path-proof-ratchet " +
+      "refuses the resulting double entry. Deliberately no `remedyFiles`: this ratchet's remedy is fewer " +
+      "self-path proofs in the offending shard, never a raise of the grandfather baseline",
+  },
   // W1-T2643: the four census entries are no longer hand-written here — they are
   // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
   // suite's admission means editing CENSUS_POPULATION, never this array directly.

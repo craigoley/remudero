@@ -7041,6 +7041,12 @@
   # test/flight-signals.test.ts at 14/14 on 2026-09-22. What was never built is the WIRING, and
   # the ruling narrows it to the three predicates whose inputs the live streamObserver already
   # carries. That wiring is filed as its own task rather than rewritten into this 2026-07 record.
+  # CORRECTION (after #6614 merged): the sentence above says the live streamObserver already
+  # carries the three predicates' inputs. MEASURED, it does not for two: tool-executing carries
+  # toolName only (repeatedToolCallPredicate hashes name AND input), and a tool_result carries an
+  # error FLAG only (errorSignatureLoopPredicate needs fingerprinted text). stallTimeout's inputs
+  # are carried, but the sensor's 30s quiet floor and W1-T2557's runaway bound already cover it.
+  # W1-T4049 carries the accurate scope: two predicates, observer fingerprints first.
   attempts: 0
 
 # ── §5C TASK PRE-FLIGHT (the plan gate). Task quality moves UPSTREAM of the runner: a deterministic linter

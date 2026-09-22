@@ -33962,6 +33962,39 @@ export interface EscalationIntake {
   droppedNoReferent: number;
 }
 
+/** W1-T4043 — the escalation closer is a DESTRUCTIVE consumer of merge credit, so a
+ * head-branch-only projection must carry the same implementation-subject evidence as the
+ * credit-backfill closer. The ordinary status projection deliberately remains broader: it is
+ * read by dispatch and the board, and the subject is not ground truth for implementation. This
+ * guard is only for the issue close, where unknown evidence must leave the receipt open. */
+function reconcileImplementationEvidence(
+  taskId: string,
+  projection: StatusProjection,
+  github: GitHub,
+  mergeSubjects: ReadonlyMap<number, string>,
+): boolean | undefined {
+  if (!projection.merged || projection.source !== "head-branch" || projection.prNumber === undefined) return true;
+  const recorded = mergeSubjects.get(projection.prNumber);
+  if (recorded !== undefined) return creditSubjectIsImplementation(recorded);
+
+  // The local subject map is intentionally bounded and may lag one merge behind. The batched
+  // gateway already has the live PR title in its head-branch rows, so consult that in-memory
+  // surface before paying for a direct lookup. A missing title remains UNKNOWN, never a filing.
+  try {
+    const branchHit = github.findMergedByHeadBranch?.(taskId)?.find((pr) => pr.number === projection.prNumber);
+    if (branchHit?.title !== undefined) return creditSubjectIsImplementation(branchHit.title);
+  } catch {
+    /* an unreadable live surface is unknown implementation evidence, not a close */
+  }
+  try {
+    const direct = github.prByRef(projection.prNumber);
+    if (direct?.title !== undefined) return creditSubjectIsImplementation(direct.title);
+  } catch {
+    /* same fail-open direction: retain the human receipt until the next readable pass */
+  }
+  return undefined;
+}
+
 export function buildEscalationReconcileCandidates(
   owner: string,
   repo: string,
@@ -34013,6 +34046,7 @@ export function buildEscalationReconcileCandidates(
   // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's — see
   // {@link creditEvidenceRootFor}'s own doc, and `buildCreditCandidates`' identical fix above.
   const evidenceRoot = (injected.evidenceRootFor ?? creditEvidenceRootFor)(owner, repo);
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
   const deps: DeriveDeps = {
     ledgerPath,
     github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
@@ -34075,6 +34109,9 @@ export function buildEscalationReconcileCandidates(
       continue;
     }
     const proj = deriveStatus(task, deps);
+    const implementationEvidence = reconcileImplementationEvidence(taskId, proj, deps.github, mergeSubjects);
+    const implementationGuardedMerged =
+      proj.merged && (proj.source !== "head-branch" || implementationEvidence === true);
     // W1-T162: a referent whose PR CLOSED WITHOUT MERGING is also terminal — superseded or
     // abandoned, no longer a live blocker — distinct from an open/blocked-pending-fix PR.
     // deriveStatus's `prState` carries the raw GitHub state through unchanged (status.ts's
@@ -34087,9 +34124,13 @@ export function buildEscalationReconcileCandidates(
       issueNumber: issue.number,
       taskId,
       derived: {
-        merged: proj.merged,
+        merged: implementationGuardedMerged,
         closed: closedWithoutMerge,
-        indeterminate: proj.indeterminate,
+        indeterminate:
+          proj.indeterminate ||
+          (proj.merged && proj.source === "head-branch" && implementationEvidence === undefined)
+            ? true
+            : undefined,
         prUrl: proj.prUrl,
         prNumber: proj.prNumber,
         source: proj.source,

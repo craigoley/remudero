@@ -1187,7 +1187,7 @@ export function reportLoopLag(
  *  the light pass, so no fix, merge, close, escalation or dispatch action is introduced here. A wake
  *  observed during an active pass stays pending and makes the next wait resolve immediately, which
  *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md. */
-function startInterphaseReviewClock(
+export function startInterphaseReviewClock(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1201,6 +1201,8 @@ function startInterphaseReviewClock(
   // W1-T2897 Clock port: the same instant source as `deps.now`, never a second bare `new Date()`
   // in this file (the clock-signature census holds src/lib/daemon.ts at its recorded row).
   const interphaseClock = clockFromDateFn(deps.now);
+  // W1-T4045: when the last pass ran, so the interval can be measured in TIME as well as in ticks.
+  let lastPassAtMs = interphaseClock.now();
   // This clock exists to consume the durable event signal, and must not synthesize it over the
   // legacy plain wait seam, which cannot be interrupted at a phase boundary. Production always wires
   // the interruptible form; omission retains the exact earlier call cadence.
@@ -1217,7 +1219,12 @@ function startInterphaseReviewClock(
             eventWakeSeen = true;
             eventWakePending = true;
           } else {
-            elapsedMs += quantumMs;
+            // W1-T4045 — COUNT TIME, NOT ONLY TICKS. A late wake used to add the NOMINAL quantum, so when
+            // the event loop was blocked between waits (one synchronous ledger-union read measured 9.22 s,
+            // W1-T4046) a 60 s interval needed sixty resolved waits — roughly nine minutes of ~9 s blocks.
+            // The maximum keeps today's behaviour wherever time does not outrun the ticks (every frozen
+            // fixture clock) and fires promptly where it does, so it can never make a pass later.
+            elapsedMs = Math.max(elapsedMs + quantumMs, interphaseClock.now() - lastPassAtMs);
           }
           if (!active) break;
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
@@ -1228,6 +1235,7 @@ function startInterphaseReviewClock(
           const trigger = eventWakePending ? "github-event" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
+          lastPassAtMs = interphaseClock.now();
           try {
             await deps.sweepLight!();
             if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger });

@@ -1,0 +1,51 @@
+- id: W1-T4048
+  title: "THE RETRO PROMPT STILL FORBIDS WHAT RULE 27 PERMITS — retroPrompt instructs 'PROPOSALS ONLY … Do NOT edit plan/tasks.yaml'; correct it to write proposal RECORDS and to name rule 27's permission to file (W1-T3102 ruling)"
+  repo: remudero
+  depends_on: [W1-T4047]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator-ruling#W1-T3102-2026-09-22"
+  plan_refs: ["W1-T3102", "W1-T4047", "W1-T2456"]
+  files:
+    - src/run-task.ts
+    - test/the-retro-writes-proposal-records.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CONTRADICTION, READ FROM SOURCE AT 855dcb0b6. retroPrompt's instruction 4 reads: "Mine
+    FAILURES (blocked_* verdicts) into PROPOSED golden/new tasks — PROPOSALS ONLY, in a 'Retro
+    proposals' note. Do NOT edit plan/tasks.yaml." MASTER-PLAN rule 27 reads: "AUTOMATIC FILING IS
+    PERMITTED — THE FLEET MAY FILE, BUILD, TEST AND MERGE ITS OWN WORK, and escalates to a human only
+    when a judge decides one is genuinely needed" [operator ruling, 2026-08-29; W1-T2456].
+    The prompt enforces a prohibition the plan lifted, and every retro cycle spends a worker obeying
+    it. The operator settled it in favour of rule 27 (DECISIONS.md, W1-T3102, 2026-09-22).
+
+    AND THE RETRO WRITES PROSE WHERE THE RULING WANTS RECORDS. Once W1-T4047 ships the record type,
+    the retro should write plan/proposals.d/*.yaml rather than appending bullets to MASTER-PLAN.
+  design: |
+    (i) Replace instruction 4's prohibition with: mine failures into proposal RECORDS under
+    plan/proposals.d/ in W1-T4047's schema, each with an executable falsifier; rule 27 permits
+    automatic filing, so a proposal the retro is confident in may be filed as a task shard instead.
+    (ii) ONE-TIME MIGRATION, SAID IN THE PROMPT: on a run that finds a '## Retro proposals' section
+    and no plan/proposals.d/, migrate the live bullets into records (re-derive the count — it was 21
+    at 855dcb0b6, not the 31 W1-T3102 measured), then reduce the MASTER-PLAN section to a pointer.
+    (iii) KEEP THE ID DISCIPLINE the current instruction 4 already states (next unused P<N>, never
+    reused) — it moves to the records, it is not dropped.
+    (iv) EXISTING PINS: test/retro-acceptance-block-shape.test.ts and test/retro-cash-divert.test.ts
+    assert retroPrompt text. Update what they pin rather than weakening what they check.
+  acceptance:
+    - claim: "the retro prompt no longer forbids editing the plan, which rule 27 permits"
+      proof: 'grep: test("W1-T4048: the retro prompt no longer forbids filing" in test/the-retro-writes-proposal-records.test.ts'
+    - claim: "the retro prompt instructs the retro to write proposal records under plan/proposals.d"
+      proof: 'grep: test("W1-T4048: the retro prompt writes proposal records" in test/the-retro-writes-proposal-records.test.ts'
+    - claim: "the retro prompt names rule 27's permission in the rule's own terms"
+      proof: 'grep: test("W1-T4048: the retro prompt cites rule 27" in test/the-retro-writes-proposal-records.test.ts'
+    - claim: "the next-unused proposal-id discipline survives the move to records"
+      proof: 'grep: test("W1-T4048: the retro prompt keeps the next unused proposal id rule" in test/the-retro-writes-proposal-records.test.ts'
+  falsifier: |
+    CLOSE IF retroPrompt no longer contains "Do NOT edit plan/tasks.yaml" at build time — re-read it,
+    since another change may already have lifted it.

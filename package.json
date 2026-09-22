@@ -101,7 +101,7 @@
     "dashboard:ci": "npm run --silent typecheck:dashboard && npm run --silent test:dashboard && npm run --silent build:console"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.276",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.280",
     "playwright": "^1.63.0",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
