@@ -337,6 +337,16 @@ test("W1-T3901 adapter records guarded-post refusal and unknown-mode fallback", 
   }
 });
 
+test("W1-T3901 public dispatcher keeps full-review mode on the default review runner", async () => {
+  const fixture = adapterFixture();
+  try {
+    await withLiveWritesAllowed(() => fixture.effects.postReview!(fixture.pr, { kind: "full-review" }));
+    assert.equal(fixture.calls.includes("fallback-review"), true);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("W1-T3901 run-task adapter posts proof-only discrimination and records effective_review_mode", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-reuse-w1-t3901-"));
   const bin = mkdtempSync(join(tmpdir(), "rmd-review-reuse-w1-t3901-gh-"));
