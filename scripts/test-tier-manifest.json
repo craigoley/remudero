@@ -845,6 +845,7 @@
     "test/grep-zero-cause.test.ts": 1316,
     "test/hand-run-census.test.ts": 1702,
     "test/handfiled-arm-handoff.test.ts": 719,
+    "test/harness-commit-refusal-retry.test.ts": 0,
     "test/head-sha-rest.test.ts": 896,
     "test/headroom-blind-governor-rung.test.ts": 1359,
     "test/headroom-blind-window.test.ts": 1338,
