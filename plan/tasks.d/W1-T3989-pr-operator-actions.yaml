@@ -10,7 +10,7 @@
   budget_usd: 90.00
   origin: human
   plan_refs: ["W1-T76", "W1-T95", "W1-T404", "W1-T500", "CONSOLE-T18", "API-T51"]
-  files: [src/lib/fleet-control.ts, src/lib/panel-actions.ts, src/lib/daemon.ts, src/lib/serve.ts, src/run-task.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/panel-actions.test.ts, test/daemon.test.ts, test/pr-action-request.test.ts, test/pr-action-route.test.ts, test/route-wiring.test.ts]
+  files: [src/lib/fleet-control.ts, src/lib/panel-actions.ts, src/lib/daemon.ts, src/lib/serve.ts, src/run-task.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/panel-actions.test.ts, test/daemon.test.ts, test/pr-action-request.test.ts, test/pr-action-route.test.ts, test/route-wiring.test.ts, test/console-token-refresh.test.ts]
   rationale: |
     The daemon already derives every open pull request's exact-head disposition, review state and
     worker telemetry. It also has two bounded operator verbs: `rmd fix <pr>` reuses the normal
