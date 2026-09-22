@@ -560,6 +560,7 @@ export function pendingPrActions(root: string): PrActionRequest[] {
   try {
     names = readdirSync(dir).filter((name) => name.startsWith(PR_ACTION_PREFIX));
   } catch {
+    // The state directory has not been initialized, so there are no durable requests to consume.
     return [];
   }
   const requests: PrActionRequest[] = [];
