@@ -28,6 +28,7 @@ import {
   OpenWeightUnsupportedResponseFormatError,
   OpenWeightRequestTimeoutError,
 } from "../src/lib/worker-provider.js";
+import { runOpenWeightWalkingLadder } from "../src/lib/worker.js";
 
 test("the selection carries the rest of its ladder, not just the winner", () => {
   // Asserted against the REAL configured ladder, and deliberately WITHOUT naming a model: the
@@ -48,25 +49,34 @@ test("alternatives is always a LIST, never absent — an optional field re-creat
   }
 });
 
-/** The walker's contract, exercised through the same shape `spawnWorker` uses. */
+/** The walker's contract, exercised through the REAL `runOpenWeightWalkingLadder`.
+ *
+ * THIS USED TO RESTATE THE LOOP. A local copy passes against a base checkout that never had the
+ * walker, so `proof-discrimination` refused the PR: "3 proof(s) pass at both PR head and merge
+ * base". The copy also cannot catch a divergence between itself and production — the defect it was
+ * written to prove would survive a rewrite of the real loop. Driving the exported function means
+ * the test fails at base (the symbol is absent) and tracks the implementation thereafter. */
 async function walk(
   rungs: readonly string[],
   outcome: (model: string) => Promise<{ text: string }>,
 ): Promise<{ landedOn?: string; error?: unknown; attempts: string[] }> {
   const attempts: string[] = [];
-  let last: unknown;
-  for (const [i, model] of rungs.entries()) {
-    try {
-      attempts.push(model);
-      await outcome(model);
-      return { landedOn: model, attempts };
-    } catch (err) {
-      if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) return { error: err, attempts };
-      last = err;
-      if (i === rungs.length - 1) break;
-    }
+  const selection = {
+    model: rungs[0]!,
+    alternatives: rungs.slice(1),
+    effort: "default" as const,
+    capability: "low" as never,
+  };
+  try {
+    const result = await runOpenWeightWalkingLadder(async (sel) => {
+      attempts.push(sel.model);
+      await outcome(sel.model);
+      return {} as never;
+    }, selection as never);
+    return { landedOn: (result as { routedModel?: string }).routedModel, attempts };
+  } catch (err) {
+    return { error: err, attempts };
   }
-  return { error: last, attempts };
 }
 
 test("a capability refusal walks to the next rung and lands there — PR6555 ladder repair", () => {

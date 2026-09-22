@@ -1730,7 +1730,7 @@ export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.se
  * BOUNDED BY THE LADDER: one attempt per remaining candidate, over a list the context gate already
  * filtered — it can neither loop nor widen the context rule.
  */
-async function runOpenWeightWalkingLadder(
+export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
 ): Promise<WorkerResult> {
