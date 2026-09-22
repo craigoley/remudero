@@ -1,0 +1,81 @@
+- id: W1-T4004
+  title: "THE RATIFIED BASELINE-RATCHET REPAIR STILL HAS NO PRODUCTION EXECUTOR — wire the two-ledger repair with a narrower admission set than conflict regeneration"
+  repo: remudero
+  depends_on: [W1-T2998, W1-T3015, W1-T3289]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/the-ratified-baseline-ratchet-repair-has-a-production-executor.test.ts
+  origin: "operator-session#automatic-flow-followup-2026-09-22"
+  plan_refs: ["W1-T2998", "W1-T3015", "W1-T3289"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-22 while repairing PR #6505: the sweep derives
+    `recordableRatchetRepairFor(pr)` only when the policy flag is true, but no production
+    `buildSweepEffects` call supplies `repairRecordableRatchet`. Grepping the runtime tree finds
+    the name only in SweepDeps, runSweep, and fake-driven tests. Thus W1-T3289 made the decision
+    visible in policy, but flipping its value cannot yet repair a contributor branch: the pass
+    falls through to the ordinary CI-log fix worker.
+
+    That fallback is not harmless. On #6505 the worker repeatedly made the very baseline change
+    `comment-load-ratchet` requested, then the harness refused it as outside the task's declared
+    files. The PR remained red and occupied WIP while no judgement was required. The same check is
+    already a default local gate; consuming a worker and a CI cycle after it fires is avoidable
+    queue pressure.
+
+    A second observation changes the shape of the original ratification. DECISIONS.md and
+    W1-T3289 evaluated a two-member `REGENERABLE_ARTIFACT_GENERATORS` registry containing only
+    `scripts/source-size-baseline.json` and `scripts/comment-load-baseline.json`. The current
+    registry has since expanded with plan, docs, learnings, CLI, snapshot, and API-client outputs.
+    That broader registry remains appropriate for conflict regeneration, but it is no longer the
+    bounded two-ledger authority that ratified unattended baseline writes. Reusing it for this
+    executor would silently broaden the operator's decision.
+  design: |
+    1. Keep `recordableRatchetRepairEnabled` false in this task. This task makes its true arm real;
+       a later policy-only decision may enable it after the production surface has passed review.
+    2. Define a distinct, exact two-script admission set for this lane only:
+       `comment-load-ratchet` and `source-size-baseline:legacy`. It must not be derived from, and
+       must not mutate, `REGENERABLE_ARTIFACT_GENERATORS`; conflict regeneration and unattended
+       baseline recording answer different authority questions.
+    3. Supply `repairRecordableRatchet` through every real `buildSweepEffects` construction. It
+       must fetch and materialize the PR's current fleet-owned branch, compare its observed head
+       before writing, run only the admitted generator(s), verify each generated baseline with its
+       corresponding no-record signal, and commit/push only generated changes with the existing
+       expected-head compare-and-swap. Any missing branch, dirty/unowned head, mixed red set,
+       generator/check failure, empty change, lock collision, or push mismatch must return false
+       and leave the existing worker fix rung as the fallback.
+    4. Reuse the established fix-worktree, branch-claim, generator-commit, and ledger mechanisms;
+       do not add a second unchecked git-write path. The outer sweep row remains the authoritative
+       `sweep.ratchet_repaired` receipt and must name the actual scripts and head.
+    5. Do not widen to score floors or any other generated artifact. A later policy-only task may
+       change the existing flag from false to true only after this production wiring is merged.
+  acceptance:
+    - claim: "with the flag true, the real sweep-effects construction invokes a production baseline-ratchet executor and a successful result prevents an LLM fix dispatch"
+      proof: "unit test: W1-T4004: production executor repairs an admitted baseline without dispatching a worker"
+    - claim: "the automatic baseline-repair admission contains exactly comment-load-ratchet and source-size-baseline:legacy, while a current non-baseline conflict generator is refused"
+      proof: "unit test: W1-T4004: baseline repair admission is independent from conflict regeneration"
+    - claim: "the executor verifies the PR head and uses the existing expected-head push guard, so a moved contributor branch is declined rather than overwritten"
+      proof: "unit test: W1-T4004: a changed head declines the repair before any generator or push"
+    - claim: "a mixed or failed generator repair falls through to the existing worker fix rung rather than reporting a false repair"
+      proof: "unit test: W1-T4004: a declined baseline repair falls through to fix dispatch"
+    - claim: "the shipped false policy value still performs no unattended branch write"
+      proof: "unit test: W1-T4004: disabled policy never invokes the production executor"
+  falsifier: |
+    Delete the production `repairRecordableRatchet` wiring while leaving the policy true in the
+    first acceptance fixture: it must change from no worker dispatch to one fix dispatch. Replace
+    the narrow set with `REGENERABLE_ARTIFACT_GENERATORS`; the independent-admission fixture must
+    fail when a non-baseline generator becomes eligible. Make the executor accept a changed head;
+    the no-generator/no-push assertion must fail.
+  note: |
+    Reservation hand-off: unknown -> codex/plan-baseline-ratchet-executor
+    The W1-T3289 shipped test establishes policy reachability, not production execution: it injects
+    the effect the real builder currently omits. This task closes that producer gap without
+    overturning its false-by-default policy boundary. Rule 25 checked: all proposed paths are
+    product, plan, or test surfaces; no gate/instrument file is coupled to a product edit.
