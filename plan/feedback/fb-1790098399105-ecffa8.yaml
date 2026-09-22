@@ -1,0 +1,65 @@
+id: fb-1790098399105-ecffa8
+ts: 2026-09-22T17:33:19.105Z
+raw: "THE REVIEWER RECOVERS A TASK ID FROM THE RUN BRANCH AND THE CI GATE DOES
+  NOT, SO A TRAILERLESS PR IS JUDGED AGAINST TWO DIFFERENT CRITERIA SETS AND
+  NOTHING REPORTS IT — observed 2026-09-22 on PR 6596, where it made a body-only
+  repair impossible to land and needed a human to diagnose. THE TWO READINGS,
+  SAME HEAD, SAME MINUTE. `proof-discrimination` passed at 16:35 resolving THREE
+  criteria from the PR body. `rmd review` at the same head printed \"criteria
+  from plan at 828071057... task W1-T1014 (5 criteria)\". The body carries NO
+  `Remudero-Task:` trailer -- confirmed by an anchored grep over the stored body
+  -- and its own text explains that the trailer was deliberately dropped so that
+  judging would move to the body block. It moved for one gate out of two. THE
+  MECHANISM, READ FROM SOURCE RATHER THAN INFERRED. run-task.ts's review path
+  contains, verbatim: \"W1-T2846: a fleet PR can lose its trailer while
+  retaining the task-bearing run branch. Give the existing exact-trailer
+  criteria resolver only the recovered identity it needs\" followed by `if
+  (taskId && !reviewTaskIdFromBody(body)) body = ...` -- it SYNTHESIZES a
+  trailer from the recovered task identity before calling
+  `resolvePlanCriteriaAtHead`. That resolver's own doc says a body with no
+  anchored trailer resolves nothing and the caller falls back to `##
+  Acceptance`; the synthesis is what stops that happening.
+  scripts/proof-discrimination-gate.mjs's `criteriaForReview(body, headSha)`
+  passes the RAW body to the same resolver and performs no recovery: a grep of
+  that script for `isDispatchedRunBranch`, `headRefName` and `head_ref` returns
+  ZERO. So the reviewer judges the PLAN and the gate judges the BODY, by
+  construction, whenever a run-branch PR has no trailer. AND THE EXISTING
+  DIVERGENCE INSTRUMENT CANNOT SEE THIS CASE, WHICH IS WHY IT WENT UNREPORTED.
+  W1-T2315 already added `review.resolver_divergence`, whose own comment says it
+  exists to \"name the divergence rather than let it pass silently into the body
+  fallback\". It fires when a TRAILER RESOLVED NOTHING -- a different fact. Here
+  the trailer resolved perfectly, because the reviewer had just written it; the
+  divergence is that the GATE never received one. No divergence line appeared in
+  the review output for 6596, correctly by that instrument's own definition and
+  uselessly for this failure. THE COST IS A REPAIR LOOP THAT CANNOT CONVERGE.
+  W1-T1014's five shard criteria are `grep:` proofs against the shard's own text
+  and were satisfied by an earlier PR, so they pass at the merge base too.
+  Someone reasonably repaired the PR BODY -- dropped the trailer, wrote three
+  criteria that discriminate -- and `proof-discrimination` went green while
+  `remudero-review` kept failing on the five it resolved from the plan. Nothing
+  in either verdict names the other's criteria set, so the two greens and one
+  red do not compose into a diagnosis. PROPOSED REMEDIES, CHEAP FIRST. (a) MAKE
+  THE ASYMMETRY VISIBLE: have the reviewer state in its posted description WHICH
+  source and how many criteria it judged, and have the gate do the same, so two
+  verdicts over different sets are readable as such rather than looking like
+  disagreement about the same set. (b) MAKE THE GATE RECOVER THE SAME IDENTITY
+  the reviewer does -- the head ref is in the event payload the gate already
+  reads, and `isDispatchedRunBranch` is already exported. Then both judge the
+  plan and a body edit stops being a false repair path. (c) OR REMOVE THE
+  RECOVERY and let a trailerless PR be judged by its body everywhere; that is
+  the opposite direction and undoes W1-T2846, so it needs that task's own
+  evidence re-argued rather than a patch. FALSIFYING CHECK: if the gate already
+  recovers the branch identity on some path this grep missed, or if
+  `review.resolver_divergence` does fire for a body that never had a trailer,
+  then the two sets cannot diverge and this is a reporting complaint rather than
+  a defect -- re-derive by running both resolvers over one trailerless
+  run-branch head and comparing the criteria counts."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
