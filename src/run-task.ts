@@ -801,9 +801,14 @@ import {
   realVerifyHumanJudge,
   shardsNeedingJudgement,
   verifyHumanVerdictRow,
+  applyAutomateVerdict,
+  awaitingRelease,
+  releaseEscalatedKeys,
   type ShardUnderJudgement,
+  type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./lib/verify-human-judge.js";
+import { releaseAutomatedShard } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
 import {
@@ -24712,6 +24717,9 @@ export async function defaultVerifyHumanCadenceResult(
       stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       runId,
+      release: productionVerifyHumanRelease(plan, repoRoot, ledgerPath, runId),
+      releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+      releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
   } catch (e) {
     return {
@@ -39743,6 +39751,10 @@ export interface VerifyHumanRouteDeps {
   /** Writes the {@link VERIFY_HUMAN_JUDGED_STEP} row. Called on BOTH arms, always. */
   appendRow: (row: LedgerLine) => void;
   runId: string;
+  /** The continue arm — see verify-human-judge.ts's release section. Absent ⇒ prior behaviour. */
+  release?: VerifyHumanReleaseHook;
+  releasedIds?: ReadonlySet<string>;
+  releaseEscalatedKeys?: ReadonlySet<string>;
 }
 
 /** What one pass did. `skipped` are settled states; `deferred` are still due for a later pass. */
@@ -39753,6 +39765,8 @@ export interface VerifyHumanRouteResult {
   backlog: string[];
   skipped: string[];
   deferred: string[];
+  /** Released to the fleet this pass (automate + risk-judge proceed). Absent reads as none. */
+  released?: string[];
 }
 
 /**
@@ -39770,7 +39784,9 @@ export async function routeVerifyHumanBacklog(
   shards: readonly ShardUnderJudgement[],
   deps: VerifyHumanRouteDeps,
 ): Promise<VerifyHumanRouteResult> {
-  const due = shardsNeedingJudgement(shards, deps.priorVerdicts);
+  const releasedIds = deps.releasedIds ?? new Set<string>();
+  // A released task is the fleet's now: never re-judged, never re-released.
+  const due = shardsNeedingJudgement(shards, deps.priorVerdicts).filter((s) => !releasedIds.has(s.id));
   // W1-T3921: failed verdict remains eligible for the next batch
   const dueIds = new Set(due.map((s) => s.id));
   // W1-T3921: --limit <n> applies only to due observed states
@@ -39783,7 +39799,25 @@ export async function routeVerifyHumanBacklog(
     skipped: shards.filter((s) => !dueIds.has(s.id)).map((s) => s.id),
     // W1-T3921: deferred due work remains due for the next pass
     deferred: due.slice(toJudge.length).map((s) => s.id),
+    released: [],
   };
+  const automateHooks = {
+    release: deps.release,
+    stageProposal: deps.stageProposal,
+    appendRow: (row: Record<string, unknown>) => deps.appendRow(row as LedgerLine),
+    runId: deps.runId,
+  };
+  const bucketOf = (bucket: "released" | "needsOperator" | "automated"): string[] =>
+    bucket === "released" ? (result.released ??= []) : bucket === "needsOperator" ? result.needsOperator : result.automated;
+  // THE BACKFILL — the same rule the daemon cadence applies: a shard settled as automate before the
+  // release arm existed is otherwise never revisited.
+  if (deps.release) {
+    for (const shard of awaitingRelease(shards, deps.priorVerdicts, releasedIds, deps.releaseEscalatedKeys ?? new Set())) {
+      const prior = deps.priorVerdicts.get(observedStateKey(shard));
+      if (!prior) continue;
+      bucketOf(await applyAutomateVerdict(shard, prior, automateHooks)).push(shard.id);
+    }
+  }
   for (const shard of toJudge) {
     const verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
     // UNCONDITIONAL, and BEFORE either arm: a crash between the verdict and its effect leaves
@@ -39796,8 +39830,7 @@ export async function routeVerifyHumanBacklog(
       continue;
     }
     if (verdict.decision === "automate") {
-      deps.stageProposal(automationProposalFromJudgedShard(shard, verdict));
-      result.automated.push(shard.id);
+      bucketOf(await applyAutomateVerdict(shard, verdict, automateHooks)).push(shard.id);
       continue;
     }
     result.backlog.push(shard.id);
@@ -39834,6 +39867,41 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * TOUCHES NO PLAN FILE. It reads the plan, writes ledger rows and stages proposals. `--dry-run`
  * judges nothing and spends nothing; it reports which shards a real pass WOULD ask about.
  */
+/**
+ * The PRODUCTION continue arm, shared by the daemon cadence and `rmd verify-human-sweep`. See
+ * lib/verify-human-release.ts for the contract: a filing-time risk judge must say PROCEED, and the
+ * release is the `ratify.approved` row `rmd approve` already writes — now carrying a machine author.
+ *
+ * THE RISK JUDGE IS BUILT LAZILY, on the first release attempt. Resolving a mount can throw, and an
+ * eager build inside the cadence's try-block would turn a missing mount into a refused rung for
+ * every shard — including the ones that only needed a needs_operator proposal.
+ */
+export function productionVerifyHumanRelease(
+  plan: Plan,
+  checkoutRoot: string,
+  ledgerPath: string,
+  runId: string,
+  options: {
+    riskJudge?: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
+    /** Forwarded to realRiskJudge, so a test drives the REAL construction (mount resolution and
+     *  parsing included) without a model call. */
+    spawn?: typeof spawnWorker;
+  } = {},
+): VerifyHumanReleaseHook {
+  let judge = options.riskJudge;
+  const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
+    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn });
+    return judge(input);
+  };
+  return (shard, verdict) =>
+    releaseAutomatedShard(shard, verdict, {
+      task: (id) => plan.byId.get(id),
+      riskJudge,
+      writeRelease: (taskId, provenance) =>
+        approveParkedTask(taskId, { plan, ledgerPath, runId, provenance: { ...provenance } }),
+    });
+}
+
 export async function verifyHumanSweepCommand(
   rest: string[],
   deps: {
@@ -39876,12 +39944,16 @@ export async function verifyHumanSweepCommand(
     const deferred = due.length - selected.length;
     console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${selected.length} would be judged, ${shards.length - due.length} already settled, ${deferred} deferred due. Nothing spent.`);
     for (const d of selected) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
+    const pending = awaitingRelease(shards, priorVerdicts, releasedTaskIds(readLedgerRawLines(ledgerPath)), releaseEscalatedKeys(rows));
+    console.log(`verify-human-sweep --dry-run: ${pending.length} earlier automate verdict(s) would be put to the risk judge for release.`);
+    for (const d of pending) console.log(`  would release-check ${d.id}`);
     return 0;
   }
 
   // The STATE root, never the checkout: `ledgerPathFor(config)` resolves under `config.root`, and
   // a decision whose ledger row and whose proposal land in different directories is half-recorded.
   const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const sweepRunId = `VHSWEEP-${(deps.clock ?? systemClock).iso()}`;
   const result = await (deps.route ?? routeVerifyHumanBacklog)(shards, {
     judge: realVerifyHumanJudge({
       mounts: loadMounts(mountsPath(root)),
@@ -39896,7 +39968,10 @@ export async function verifyHumanSweepCommand(
         current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
       ),
     appendRow: (row) => appendLedger(ledgerPath, row),
-    runId: `VHSWEEP-${(deps.clock ?? systemClock).iso()}`,
+    runId: sweepRunId,
+    release: productionVerifyHumanRelease(plan, root, ledgerPath, sweepRunId),
+    releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
+    releaseEscalatedKeys: releaseEscalatedKeys(rows),
   });
 
   const deferred = result.deferred ?? [];
@@ -39907,6 +39982,7 @@ export async function verifyHumanSweepCommand(
   console.log(`verify-human-sweep: judged ${result.judged}, ${needsOperator.length} need you, ${automated.length} entered self-improvement, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled, ${deferred.length} deferred due.`);
   for (const id of needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
   for (const id of automated) console.log(`  AUTOMATE: ${id} — staged as verify-human-automate:${id} in the inbox`);
+  for (const id of result.released ?? []) console.log(`  RELEASED: ${id} — risk judge said proceed; dispatch-eligible now`);
   return 0;
 }
 
@@ -40199,6 +40275,9 @@ export function approveParkedTask(
     runId: string;
     ledgerLines?: readonly string[];
     append?: typeof appendLedger;
+    /** A MACHINE-written release carries who decided it and why (Law 5: the author class rides
+     *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
+    provenance?: Record<string, unknown>;
   },
 ): { code: number; message: string } {
   const task = deps.plan.byId.get(taskId);
@@ -40221,6 +40300,7 @@ export function approveParkedTask(
     task_id: taskId,
     step: RELEASE_LEDGER_STEP,
     released: "verify-human",
+    ...(deps.provenance ?? {}),
   });
   return { code: 0, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
