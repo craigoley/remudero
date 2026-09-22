@@ -39645,9 +39645,46 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock):
       ageDays: shardAgeDays(task.id, root, nowMs),
       depsAllMerged: deps.every((d) => plan.byId.get(d)?.status === "merged"),
       citedInSrc: idCitedInSrc(task.id, root),
+      ...(() => {
+        const evidence = shardEvidence(task);
+        return evidence ? { evidence } : {};
+      })(),
     });
   }
   return out;
+}
+
+/**
+ * The evidence a shard's OWN RECORD carries, summarised for {@link ShardUnderJudgement.evidence}.
+ *
+ * WHY: `rationale` was the only free text passed, and NONE of the 42 machine-filed CI-learning
+ * shards has one — while ALL 42 carry `ci_learning_prs`. The judge saw a title claiming "36 PULL
+ * REQUESTS" and no pull requests, and refused it saying so. Right on its input.
+ *
+ * BOUNDED: one `note` here lists a hundred-plus paths from a single repair, so the corpus goes as
+ * a count plus head sample and the note as its leading sentence — enough to identify the gate, not
+ * a transcript. `undefined` when there is nothing to say, never "", so a shard with no evidence
+ * reads differently from one whose evidence was withheld.
+ */
+function shardEvidence(task: Task): string | undefined {
+  const rec = task as unknown as Record<string, unknown>;
+  const parts: string[] = [];
+
+  const prs = rec.ci_learning_prs;
+  if (Array.isArray(prs) && prs.length > 0) {
+    const head = prs.slice(0, 12).join(", ");
+    parts.push(
+      `corpus: ${prs.length} pull request(s) — ${head}${prs.length > 12 ? `, … (${prs.length - 12} more)` : ""}`,
+    );
+  }
+  if (typeof rec.origin === "string" && rec.origin) parts.push(`origin: ${rec.origin}`);
+  if (Array.isArray(task.files) && task.files.length > 0) parts.push(`declared files: ${task.files.join(", ")}`);
+  if (typeof rec.note === "string" && rec.note) {
+    // The leading sentence only — these notes run to thousands of characters of path lists.
+    const lead = rec.note.split(/(?<=\.)\s/)[0]?.trim() ?? "";
+    if (lead) parts.push(`note: ${lead.slice(0, 300)}`);
+  }
+  return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
 /** Days since the shard's file first appeared in git history; 0 when unreadable. Age is

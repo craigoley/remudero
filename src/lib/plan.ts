@@ -108,6 +108,10 @@ export interface Task {
   repo: string;
   depends_on: string[];
   plan_refs?: string[];
+  /** The PR corpus a machine-filed CI-learning shard was mined from. Written by the ci-learning
+   *  rung on all 42 such shards and, until this field existed, DROPPED by the loader — so a title
+   *  claiming "36 PULL REQUESTS" reached consumers with none attached. */
+  ci_learning_prs?: number[];
   type: TaskType;
   verify: "auto" | "human";
   /** Risk band (second mount-routing axis, §9): resolves the run's mount via `resolveMount(type,
@@ -405,6 +409,9 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       repo: req(e.repo as string, "repo", id),
       depends_on: Array.isArray(e.depends_on) ? (e.depends_on as string[]) : [],
       plan_refs: Array.isArray(e.plan_refs) ? (e.plan_refs as string[]) : undefined,
+      ci_learning_prs: Array.isArray(e.ci_learning_prs)
+        ? (e.ci_learning_prs as unknown[]).filter((n): n is number => typeof n === "number")
+        : undefined,
       type: type as TaskType,
       verify: (e.verify as Task["verify"]) ?? "auto",
       risk,
