@@ -859,6 +859,21 @@ export interface EscalationDedupKey {
   contractRevision?: string;
 }
 
+/** Replace a bare CR, U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) with a single space
+ *  (W1-T974). These are the three characters besides `\n` itself that JavaScript's `m` regex flag
+ *  treats as a line start, and the ones a producer's log-tail splice can leave sitting INSIDE one
+ *  line after a newline-only split and an ends-only `.trim()` (`summarizeCiFailure`,
+ *  src/run-task.ts) — a forged `**Cause:**`/`**Head:**` line smuggled in that way would otherwise
+ *  parse as if {@link renderIssueBody} had written it. `\n` itself is left untouched: every honest
+ *  named line {@link renderIssueBody} writes is newline-separated, so stripping it too would break
+ *  every read below (the mistake this shard's own criterion 2 falsifies). Applied ONLY here, at the
+ *  one place an already-open issue's body is fed back into these `^...$/m` regexes — never at
+ *  {@link renderIssueBody} itself, so an innocent log line still reaches a NEWLY created issue body
+ *  byte for byte (criterion 3). */
+function normalizeCandidateBody(body: string): string {
+  return body.replace(/\r|\u2028|\u2029/g, " ");
+}
+
 /** Scan an already-fetched OPEN-issue list for a duplicate of `e` — the pure matching predicate
  *  {@link findDuplicateEscalation} and {@link lookupDuplicateEscalation} both apply to whatever
  *  `listOpen` returned, so a change to the matching rule can never drift between the two callers. */
@@ -866,7 +881,7 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
   return open.find((issue) => {
-    const body = issue.body ?? "";
+    const body = normalizeCandidateBody(issue.body ?? "");
     if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
     if (prRef) {
       // W1-T195: the composite key. taskId + PR are REQUIRED matches. headSha/cause veto only when

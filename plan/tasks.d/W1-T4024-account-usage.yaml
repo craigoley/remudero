@@ -1,86 +1,135 @@
 - id: W1-T4024
-  title: "THE CONSOLE CANNOT ANSWER 'HOW MUCH RUNWAY DO I HAVE AND WHAT HAS CASH COST ME' — the account strip reads one subscription's windows, codex headroom has no reader at all, and the cash lane appears ZERO times in the rendered page"
+  title: "THE CONSOLE CANNOT SHOW HEADROOM, CASH SPEND OR TRENDS BECAUSE ITS PROJECTION CARRIES NONE OF THEM — console-v1 is {version, asOf, metrics, operatorAgent}; behind it the adapter collapses every subscription window to the selected provider's tightest (58% while codex had 30% left), and cash spend is never projected at all"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 50.00
-  risk: medium
+  risk: high
   origin: "operator ask 2026-09-22: a way to see headroom across linked subscriptions and what the cash lane has cost"
-  plan_refs: [W1-T3726]
-  files: [src/lib/account-usage.ts]
+  plan_refs: [W1-T3726, W1-T4028]
+  files: [src/lib/analytics-live-metrics.ts, src/lib/analytics-route.ts, test/the-headroom-card-sees-every-subscription.test.ts, test/an-analytics-request-returns-under-its-own-ceiling.test.ts, scripts/test-tier-manifest.json]
   status: queued
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t4024-runway-panel
+    REWRITTEN 2026-09-22 BEFORE ANY BUILD, BECAUSE TWO OF ITS PREMISES WERE FALSE WHEN FILED. The
+    original rationale said "CODEX HEADROOM HAS NO READER. Nothing in src/ reads a codex rate-limit
+    or usage figure." `codexCapacityFromRateLimits` and `readCodexCapacity`
+    (src/lib/worker-provider.ts) landed 2026-09-01 in #3498 — three weeks earlier. It also measured
+    the OLD console (345,405 bytes of `rmd serve` HTML); the operator's console is app.remudero.com,
+    whose headroom card reads `/v1/analytics`. The original design (one honest unit per lane, "not
+    instrumented" never drawn as zero, an as-of on every figure, cash over a NAMED window) was sound
+    and is kept; the premises and the files are corrected. W1-T4028 (a codex reader) is withdrawn
+    in the same PR as superseded by this task.
   rationale: |
-    MEASURED 2026-09-22 against the rendered console (345,405 bytes fetched from a live serve):
+    THE DATA ALREADY REACHES THE SERVER; IT NEVER REACHES THE CONSOLE. MEASURED 2026-09-22 on the live
+    Azure host.
 
-      headroom       13 occurrences
-      usage          56 occurrences
-      spend          73 occurrences
-      subscription    1 occurrence
-      cash            0 occurrences
+    (0) THE CONSOLE ASKS FOR A PROJECTION THAT CARRIES NONE OF IT. lib/rmd-control.ts in the console
+        requests `/v1/analytics?projectionVersion=console-v1`, and the route answers with
+        `snapshot.consoleV1` alone (`resolveConsoleV1Projection`). Read from the daemon's own snapshot:
+            full snapshot   keys include timeSeries (5 series) and provider
+            console-v1      keys: version, asOf, metrics, operatorAgent — no timeSeries, no provider
+        So the headroom card says "unavailable", and the trend cards have no series to draw. This is
+        also why CONSOLE-T37's shape adapter (console #1606) did not make trends render in production:
+        it corrected field names on data the console never receives.
 
-    The fleet spends on THREE lanes — `claude` and `codex` are subscriptions, `cash` is metered
-    Azure pay-as-you-go. The live ledger attributes runs to all three (`"provider":"claude"` 183,
-    `"provider":"cash"` 96, `"provider":"codex"` 60) and carries `cost_usd` per run. The console
-    surfaces the first and neither of the others.
+    (1) THE DAEMON PERSISTS EVERY SUBSCRIPTION WINDOW. `state/provider-routing-status.json`
+        (written by `writeProviderRoutingStatus`, src/lib/provider-routing-status.ts) held, at
+        observedAt 2026-09-22T17:45:22Z:
+            claude  readable  session (5h) 2%   weekly (all models) 42%   weekly (Fable) 0%
+            codex   readable  codex primary 10080m 70%
+        serve reads that file through `readProviderRoutingStatus` in
+        src/lib/live-analytics-snapshot-cache.ts — no credential, no probe.
 
-    (1) ONE SUBSCRIPTION, NOT THE LINKED SET. `lib/account-usage.ts` reads `~/.claude.json`'s
-        `cachedUsageUtilization` — a single Anthropic account's five-hour and weekly windows. It is
-        careful and honest about what it shows (it refuses a reading whose `accountUuid` does not
-        match, and states that it measures COMBINED burn rather than the fleet's share). It simply
-        answers for one lane of three.
+    (2) THE ADAPTER THROWS IT AWAY. `adaptLiveAnalyticsMetrics` (src/lib/analytics-live-metrics.ts)
+        exposes ONE figure, `provider.allowance.remaining`, via `providerRemaining`, which returns
+        `snapshot.selected.tightestRemainingPercent` when present and otherwise the `Math.min` of
+        every window of every provider. Run against the real snapshot above it returned
+        `{"state":"observed","value":58}` — claude's weekly window, because claude was the SELECTED
+        provider. CODEX WAS AT 70% USED, 30% LEFT, AND APPEARS NOWHERE. That is what a full-snapshot
+        caller sees today; simply forwarding this scalar to the console would replace "unavailable" with
+        a number that overstates headroom and names no lane, which is worse than absent.
 
-    (2) CODEX HEADROOM HAS NO READER. Nothing in src/ reads a codex rate-limit or usage figure.
-        This is not a rendering gap — the number does not exist anywhere in the process, so the
-        panel must say so rather than draw an empty gauge that reads as "plenty left".
+    (3) CASH SPEND IS NEVER PROJECTED. `/v1/analytics` emits five series (runs.completed,
+        tokens.total, cache.reuse, cost.modeled.usd, duration.p50.ms) and `workersByLaneModel`,
+        whose `lane` is the WORK lane (implement/fix/review), not the provider lane. No field answers
+        "what has the cash lane cost". The number is derivable: `implement.done` rows carry
+        `provider`, `billing_mode` and `total_cost_usd`; in the live ledger `provider=cash` held 95
+        rows and $1.63.
 
-    (3) CASH IS INVISIBLE AND IT IS THE ONE THAT BILLS. A subscription window refills; a cash run
-        is money. `cost_usd` is recorded per run with its `provider` and `model`, so the number is
-        derivable today — nothing surfaces it. The operator's question, verbatim, was how much has
-        been spent on the cash lane, and the console cannot answer it at all.
+    (4) THE DOUBLE-COUNT TRAP IS REAL, AND ONLY PART OF IT IS UNDERSTOOD. The same ledger holds 168
+        `cost.anomaly` rows ($747.72): 40 of 40 sampled share a `run_id` with an attributed worker
+        cost row, and none carries `provider` or `model`, so they restate rather than add. It also
+        holds 68 `verdict` rows carrying `total_cost_usd` AND `model`, one per run that also has
+        worker `.done` cost rows. MEASURED PER RUN: in 38 of 68 the verdict's figure EXACTLY equals
+        that run's worker total (a restatement); in 30 it differs (27 lower, 3 higher), and what it
+        measures in those runs is NOT established here. So this task does not assert that every
+        verdict restates — it asserts only that the cash reading must not depend on the answer.
+        Selecting worker rows on `provider === "cash"` excludes both `verdict` and `cost.anomaly`
+        by construction (neither carries `provider`), and the test pins it with fixtures of each.
 
-    (4) THE THREE ARE ONE QUESTION. "Can I keep going?" is answered by subscription headroom AND
-        cash burn together: a fleet at 90% of its weekly window with a cash divert armed is in a
-        very different position from one at 90% with no divert. Splitting them across two places,
-        or omitting one, is what makes the question unanswerable now.
+    (5) A KNOWN UNDER-COUNT, STATED RATHER THAN HIDDEN. `fix.done` rows carry `cost_usd` and
+        `billing_mode` but NO `provider`, so fix-rung spend on the cash lane cannot be attributed.
+        The reading states that it covers implement workers only; it does not guess.
   design: |
-    (i) ONE READING PER LANE, EACH WITH ITS OWN HONEST UNIT. A subscription lane reports WINDOW
-        UTILISATION (what refills, and when). The cash lane reports MONEY SPENT over a stated
-        period. They are not the same quantity and must not share an axis or a gauge — a
-        percentage next to a dollar figure invites the reading that one is "cheaper".
+    (0) DELIVERED THROUGH A SECOND, SMALL, VERSIONED PROJECTION — NOT BY GROWING console-v1. MEASURED on
+        the live snapshot: console-v1 is already 100,489 bytes, 77% of the console's 128 KB response cap
+        (MAX_ANALYTICS_RESPONSE_BYTES), almost all of it the operator-agent block whose four detail
+        arrays are each at their 100-item cap. Growing it by the series and provider blocks (~14 KB)
+        would leave ~13 KB of margin under a limit that, when crossed, makes the console refuse the
+        WHOLE response and blank the entire analytics page. So the route recognises a second named
+        version on the same path, `?projectionVersion=console-signals-v1`, answering
+        `{version, asOf, timeSeries, queue, provider, spend}` — the five bounded series, the live queue
+        and provider blocks merged at request time exactly as the full snapshot merges them, and cash
+        spend. It needs no new route and no relay change, leaves console-v1 and W1-T3884's contract
+        byte-identical, and isolates failure: operator-agent growth can no longer blank headroom, nor
+        the reverse. The live `queue` block rides along because the console's queue card is dead for
+        the identical reason (console-v1's `queue.pending` is null and no live queue is sent).
 
-    (ii) A LANE WITH NO READER SAYS SO, AND IS NOT DRAWN AS ZERO. Codex has no usage source today.
-         An absent reading renders as "not instrumented", never as an empty bar — this repo has
-         already paid for a board that rendered a missing input as a confident value (W1-T3755).
+    (i) PER-PROVIDER, PER-WINDOW, BESIDE THE EXISTING SCALAR. Add a `provider.accounts` array: for
+        each provider in the snapshot, its id, account label, readable flag and reason, and every
+        window as `{name, usedPercent, remainingPercent, resetsAt}`, with the snapshot's as-of. The
+        existing `provider.allowance.remaining` scalar stays exactly as it is — routing and other
+        consumers read it — so this is additive and no current reader changes.
 
-    (iii) EVERY FIGURE CARRIES ITS AS-OF. `cachedUsageUtilization` has a `fetchedAtMs` and can be
-          stale; a cash total is only as complete as the ledger window it summed. Both state the
-          instant they describe, so a frozen number is visibly frozen.
+    (ii) NO NEW READER AND NO CREDENTIAL SURFACE. serve reads only the daemon's snapshot file, as it
+         already does. Credential isolation holds by construction rather than by review.
 
-    (iv) CASH SPEND IS SUMMED OVER A NAMED WINDOW, NOT "ALL TIME". The ledger compacts and rotates,
-         so an all-time total would silently shrink as history ages out — a falling spend figure
-         that means nothing changed. The window is stated and bounded by what the ledger actually
-         still holds.
+    (iii) CASH IS MONEY OVER A NAMED WINDOW. `spend.cash` reports USD over the trailing 7 and 30 days
+          from `implement.done` rows with `provider === "cash"`, each with its window bounds, row
+          count and as-of. When a window starts before the oldest ledger row still retained, the
+          figure is marked `complete: false` rather than silently shrinking as history compacts.
 
-    NOT IN SCOPE: instrumenting codex usage (its own task once a source exists), changing any
-    routing or divert decision, and redesigning the console's other panels.
+    (iv) UNITS NEVER SHARE A FIELD. Utilisation is a percentage of a refilling window; cash is
+         dollars spent. They are separate objects, so no consumer can add or average them.
+
+    (v) STALENESS IS PER READING. A stale or unreadable snapshot marks every provider entry stale or
+        unreadable with its as-of; it is never rendered as 0% or 100% used.
+
+    NOT IN SCOPE: historical headroom trends (the route documents provider trends as live-only and
+    uncollected), attributing fix-rung spend (needs `provider` on `fix.done`), and the console's
+    rendering, which is its own task in the console repo once this payload exists.
   acceptance:
-    - claim: "the cash lane's spend over a named window is derivable from ledger rows and returned by the reading"
-      proof: "unit test: cash spend is summed over a named window"
-    - claim: "a lane with no usage reader renders as not-instrumented rather than as an empty or zero gauge"
-      proof: "unit test: an uninstrumented lane is not drawn as zero"
-    - claim: "subscription utilisation and cash money are reported as distinct units, never merged into one figure"
-      proof: "unit test: window utilisation and money are separate units"
-    - claim: "every figure carries the instant it describes, so a stale reading is visibly stale"
-      proof: "unit test: each reading carries its as-of"
+    - claim: "a console-signals-v1 projection carries the provider view, cash spend and the bounded series, and stays small"
+      proof: 'grep: test("W1-T4024: the console-signals-v1 projection carries headroom spend and series" in test/the-headroom-card-sees-every-subscription.test.ts'
+    - claim: "the console-v1 envelope is unchanged"
+      proof: 'grep: test("W1-T4024: the console-v1 envelope is unchanged" in test/the-headroom-card-sees-every-subscription.test.ts'
+    - claim: "every window of every provider in the snapshot reaches the analytics payload with its provider"
+      proof: 'grep: test("W1-T4024: every snapshot window reaches the payload with its provider" in test/the-headroom-card-sees-every-subscription.test.ts'
+    - claim: "a provider that was not the selected one still reports its windows"
+      proof: 'grep: test("W1-T4024: windows of a provider that was not selected are not dropped" in test/the-headroom-card-sees-every-subscription.test.ts'
+    - claim: "cash spend counts only cash-lane worker rows and never a verdict or cost anomaly row"
+      proof: 'grep: test("W1-T4024: cash spend counts only cash-lane worker rows" in test/the-headroom-card-sees-every-subscription.test.ts'
+    - claim: "subscription utilisation and cash money are separate units that never share a field"
+      proof: 'grep: test("W1-T4024: window utilisation and money are separate units" in test/the-headroom-card-sees-every-subscription.test.ts'
+    - claim: "a cash window that starts before the oldest retained ledger row is marked incomplete"
+      proof: 'grep: test("W1-T4024: cash spend over a window older than the ledger is marked incomplete" in test/the-headroom-card-sees-every-subscription.test.ts'
   falsifier: |
-    Render codex as 0% and the second assertion goes red — that is the reading this task exists to
-    prevent, and it is the one a gauge component does by default. Sum cash spend with no window and
-    the first goes red, because a compacting ledger makes an all-time total fall on its own. Merge
-    the two into a single "budget used" percentage and the third goes red, which is the shape that
-    looks tidiest on a dashboard and is the least honest. Drop the as-of and a frozen cache reads
-    identical to a fresh one, which the fourth catches.
+    Keep returning `selected.tightestRemainingPercent` alone and the second assertion goes red —
+    that is the live defect, codex invisible behind claude's number. Sum every cost field and the
+    third goes red on the verdict and cost.anomaly fixtures. Put utilisation and dollars in one
+    "budget used" figure and the fourth goes red. Sum an unbounded window over a compacted fixture
+    and the fifth goes red, because a total that falls as history ages out means nothing changed.
