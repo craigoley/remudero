@@ -41,20 +41,20 @@ export const ACTION_RESULTS_CONTRACT_VERSION = "external-action-results-v1" as c
  *  mirrors {@link import("./panel-graph.js").OPERATOR_ACTIVITY_MAX_ITEMS}'s role for that route. */
 export const ACTION_RESULTS_MAX_ITEMS = 200;
 
-/** Bound on any single string filter value (`connector`/`taskId`/`runId`). */
+/** BACKSTOP: bound on any single string filter value (`connector`/`taskId`/`runId`). */
 export const ACTION_RESULTS_MAX_FILTER_LENGTH = 200;
 
-/** A single ledger row larger than this is rejected outright rather than parsed — oversized
+/** BACKSTOP: a single ledger row larger than this is rejected outright rather than parsed — oversized
  *  "evidence" smuggled past write-time redaction can never reach this far. */
 export const ACTION_RESULTS_MAX_ROW_BYTES = 32 * 1024;
 
-/** Total serialized item bytes this projection ever returns in one read; the remainder is
+/** PRIMARY CONTROL: total serialized item bytes this projection ever returns in one read; the remainder is
  *  reported via `truncated`, never silently dropped without a signal. */
 export const ACTION_RESULTS_MAX_RESPONSE_BYTES = 256 * 1024;
 
 const MAX_LIST_ENTRIES = 50;
 const MAX_FIELD_STRING = 500;
-const EVIDENCE_REFERENCE_RE = /^sha256:[0-9a-f]{64}$/;
+export const EVIDENCE_REFERENCE_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** The public, redacted shape of one `external-effect-v1` reconciliation result. Deliberately
  *  omits `preconditionSnapshot` and `observedState` (see module header) — `evidenceReference`
@@ -106,6 +106,22 @@ export type ActionResultsEnvelope =
 
 function boundedString(value: unknown, max = MAX_FIELD_STRING): string | undefined {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
+}
+
+/** Runtime ledger values normally came from JSON.parse, but this projection is also a public
+ * pure seam. Treat a value that cannot be serialized as a malformed row, not as an exception that
+ * turns the whole read into an unrelated 503. */
+type SerializedBytes = { bytes: number } | { reason: string };
+
+function serializedByteLength(value: unknown): SerializedBytes {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined
+      ? { reason: "value is not JSON-serializable" }
+      : { bytes: Buffer.byteLength(serialized, "utf8") };
+  } catch (error) {
+    return { reason: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function parseStringArray(value: unknown, max = MAX_LIST_ENTRIES): string[] | undefined {
@@ -186,7 +202,9 @@ function parsePartialSuccess(value: unknown): { satisfied: string[]; unsatisfied
  * path. Oversized rows are rejected before any field is even read.
  */
 export function parseActionResultRow(row: Record<string, unknown>): ActionResultItem | undefined {
-  if (Buffer.byteLength(JSON.stringify(row), "utf8") > ACTION_RESULTS_MAX_ROW_BYTES) return undefined;
+  if (!isRecord(row)) return undefined;
+  const rowSize = serializedByteLength(row);
+  if ("reason" in rowSize || rowSize.bytes > ACTION_RESULTS_MAX_ROW_BYTES) return undefined;
 
   const runId = row.run_id;
   const taskId = row.task_id;
@@ -373,6 +391,10 @@ export function buildActionResultsProjection(input: ActionResultsProjectionInput
   let rejected = 0;
   const matched: Array<{ item: ActionResultItem; ts: number }> = [];
   for (const row of input.ledgerLines) {
+    if (!isRecord(row)) {
+      rejected += 1;
+      continue;
+    }
     if (row.step !== EXTERNAL_EFFECT_RECONCILED_STEP) continue;
     const item = parseActionResultRow(row);
     if (item === undefined) {
