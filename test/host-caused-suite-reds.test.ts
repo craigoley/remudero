@@ -98,7 +98,6 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly â€
     // `HOST_CAUSED_SUITE_REDS.filter((e) => e.cause === "bash-3.2-no-associative-arrays")` to be
     // empty. The portability itself has its own suite,
     // test/recycle-container-bash3-portability.test.ts.
-    "test/worker-credential-preflight.test.ts": { cause: "darwin-keychain-unprovisioned", count: 2 },
     "test/fleet-heartbeat.test.ts": { cause: "bsd-date-control-arm", count: 2 },
     // W1-T2785: measured 2026-09-04 on the mini â€” `node --test` on this file reports
     // `# tests 10 / # pass 9 / # fail 1`, the one failure being "the staleness predicate
@@ -109,7 +108,6 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly â€
     // the host-capability-fixtures.test.ts platform-tool scan, which greps test/ for that literal).
     "test/fleet-heartbeat-supervisor-tick.test.ts": { cause: "bsd-date-control-arm", count: 1 },
     "test/recovery-drill.test.ts": { cause: "undiagnosed-ps-orphan-sweep", count: 2 },
-    "test/dispatch-memory-governor.test.ts": { cause: "linux-procfs-absent", count: 1 },
     "test/proof-spawner-env-isolation.test.ts": { cause: "macos-corefoundation-env-leak", count: 1 },
     "test/worker.test.ts": { cause: "w1-t2205-e2e-darwin-keychain-asymmetry", count: 1 },
     // W1-T2770: the merge-lcov Node-pin-drift cluster is guarded by nodeVersion vs
@@ -178,10 +176,10 @@ test("hostCausedSuiteRedsStep: on a full-house darwin/bash-3.2/node-drift host, 
   assert.equal(step.ok, true, "informational â€” never its own verdict");
   // TWO clusters on two independent axes, so this still proves the step names file, cause AND
   // count rather than happening to print one row. W1-T3595 retired the bash-3.2 cluster this
-  // assertion used to read, so it moves to the darwin-keychain one, which keys off the same
-  // platform axis the retired cluster did.
-  assert.match(step.detail, /test\/worker-credential-preflight\.test\.ts/);
-  assert.match(step.detail, /darwin-keychain-unprovisioned/);
+  // assertion used to read, so it moved to the darwin-keychain one; that cluster was fixed
+  // hermetically (2026-09-22), so it now reads the BSD-date one, on the same platform axis.
+  assert.match(step.detail, /test\/fleet-heartbeat\.test\.ts/);
+  assert.match(step.detail, /bsd-date-control-arm/);
   assert.match(step.detail, /~2 test\(s\)/);
   assert.match(step.detail, /test\/merge-lcov\.test\.ts/);
   assert.match(step.detail, /node-version-drift-from-pin/);
