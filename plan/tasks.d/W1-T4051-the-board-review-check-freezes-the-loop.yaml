@@ -1,5 +1,5 @@
 - id: W1-T4051
-  title: "THE BOARD-REVIEW CHECK FREEZES EVERY TIMER IN THE DAEMON FOR ~140 SECONDS, ON A TICK THAT THEN DECIDES NOT TO FIRE — it reads the whole board through synchronous, paced GitHub calls on every iteration: 116 of 312 checks over two days blocked the loop for more than a minute"
+  title: "THE BOARD-REVIEW CHECK FREEZES EVERY TIMER IN THE DAEMON FOR ~140 SECONDS BECAUSE IT RE-DERIVES THE WHOLE PLAN PROJECTION ON A COLD GATEWAY — ~280 synchronous GitHub calls per check, 116 of 312 checks over two days blocked the loop past a minute; hand it the projection the tick already derived"
   repo: remudero
   depends_on: []
   type: implement
@@ -9,7 +9,7 @@
   risk: high
   origin: "oper#board-review-check-freezes-the-loop-2026-09-22"
   plan_refs: [W1-T4041, W1-T4045, W1-T4046, W1-T2464, W1-T2304, W1-T3297]
-  files: [src/run-task.ts, src/lib/daemon.ts, test/the-board-review-check-does-not-freeze-the-loop.test.ts, scripts/test-tier-manifest.json]
+  files: [src/run-task.ts, test/the-board-review-check-reuses-the-tick-projection.test.ts, scripts/test-tier-manifest.json]
   status: queued
   attempts: 0
   rationale: |
@@ -24,8 +24,9 @@
     (2) WHY IT BLOCKS. `buildBoardReviewDaemonHooks`'s `check` (src/run-task.ts) calls
         `defaultBoardReviewItems`, which pages `fetchOpenPrsRest(owner, repo, ghJson)` and runs
         `projectPlan` against `buildBatchedGithub`. `ghJson` (src/lib/github-transport.ts) is
-        `execFileSync("gh", …)` preceded by `applyGhReadCadence`, whose pacing is `Atomics.wait`. Every
-        call and every pacing gap holds the event loop: no heartbeat, no review clock, no sweep.
+        `execFileSync("gh", …)`. Every call holds the event loop for its whole duration: no heartbeat,
+        no review clock, no sweep. (The read cadence is advisory by default, so pacing is not the cost —
+        (5) below measures the call count instead.)
 
     (3) IT IS NOT RARE. Every `ci_learning_cadence.*` row paired with the next `board_review.*` row from
         the same daemon pid, 2026-09-21 and 2026-09-22 (`rmd ledger-grep`, the union):
@@ -42,7 +43,29 @@
         neither overrun. Its synchronous union reads are real, but they are not what the sampler caught.
         W1-T4046 is withdrawn with that correction recorded.
 
-    (5) THE SAMPLER UNDER-REPORTS, AND THAT IS STATED RATHER THAN FIXED HERE. `reportLoopLag` fires
+    (5) WHERE THE 140 s GOES, MEASURED BY STAGE. The check's read was replayed in the daemon container
+        against the live checkout, with a copy of state/status.json as the projection cache, under a
+        CPU profile and a child-process spy:
+
+            fetchOpenPrsRest       10.4-11.5 s    21-23 gh calls (1 list + 2 rollups per open PR)
+            loadPlan                1.0 s
+            projectPlan           118-122 s       2,102 projections; 126 of 130 sampled s in spawnSync
+              gh api --paginate pulls/N/files      213 calls   70.6 s
+              gh api pulls?state=closed (pages)     55 calls   33.8 s
+              gh api issues?labels=needs-human      15 calls    9.3 s
+              check-runs / status per open head     20 calls   10.5 s
+
+        A single `gh api` call costs ~210 ms in the container, so the cost is the COUNT, not pacing.
+        The count is a cold gateway: `defaultBoardReviewItems` constructs `buildBatchedGithub(owner,
+        repo)` on EVERY check, with no `snapshotCache`, so its lifetime memo of changed files (which
+        is correct for merged PRs, whose file lists never change) and the board's delta enumeration
+        are both empty every time. Meanwhile `daemonCommand` already derives the same projection once
+        per tick, on ONE warm, snapshot-backed gateway (`refreshMerged` → `lastProj`, R-24/W1-T2509),
+        and `isOpenPr`, `isCreditIndeterminate`, `openSiblingObservation` and `openPrCount` all read
+        it with the stated rule "never a second GitHub read path". The board review is the reader
+        that breaks that rule.
+
+    (6) THE SAMPLER UNDER-REPORTS, AND THAT IS STATED RATHER THAN FIXED HERE. `reportLoopLag` fires
         only past one whole interval (60 s), so a 40-55 s block is invisible to it. The sweep shows a
         recurring 40-51 s silent gap after every `sweep.plan_filing_classified` row. Whether those gaps
         are blocks or awaits is not established. They are named so the next measurement looks at them;
@@ -50,33 +73,34 @@
   design: |
     THE INVARIANTS THAT MUST SURVIVE, all documented at `buildBoardReviewDaemonHooks`:
       - one read serves both the reconciler and the cadence decision (the depth arms need items);
-      - reconciliation runs on quiet ticks too (W1-T2464: "a board whose findings have all cleared
-        trips no depth arm at all, so it never fires again and the dead rows sit forever");
-      - an outage yields no items, so no fire and no retirement — never "every referent resolved".
+      - reconciliation runs on quiet ticks too (W1-T2464);
+      - an outage never retires anything.
 
-    (i) VERIFY FIRST, THEN CHOOSE. The daemon already refreshes the open board asynchronously every
-        iteration (`board_gateway.fetch_ok`, `board_snapshot.committed`), and it writes the plan
-        projection to `state/status.json`. If those carry what `boardItemsFromOpenPrs` needs (open PR
-        ids, draft flag, opened-at, failing-check count, and the needs-human escalation join), the check
-        builds its items from them with ZERO GitHub calls, and freshness is judged from their own
-        as-of: stale is treated as an outage, not as an empty board. If they do not, the check becomes
-        async (`checkBoardReview` returns a Promise and daemon.ts awaits it) and its reads go through
-        the async transport. Record which of the two was taken, and why, in the PR.
-    (ii) The `run` path (a firing tick, at most daily) keeps its own fresh read — its doc says why the
-         report must describe the board it diagnosed — and must also not block the loop.
-    (iii) Nothing is capped or skipped: no "check less often". The same decision is made from the same
-          board, without holding the thread.
+    (i) `buildBoardReviewDaemonHooks` takes two optional providers, `projection: () => Map<string,
+        StatusProjection> | undefined` and `plan: () => Plan`. When given, the default items read passes
+        them to `defaultBoardReviewItems` as its `projectPlan`/`loadPlan` seams — no new code path, the
+        existing BoardReviewItemsIo bundle already carries both. `daemonCommand` wires them to `lastProj`
+        and `activePlanRef.current`, exactly as the readers beside it do.
+    (ii) NO PROJECTION IS NOT AN EMPTY BOARD. If the tick has not derived one, the provider throws into
+         the existing inner catch, which degrades only the escalation/origin arms — the same behaviour a
+         failed projection has today. The open-PR list still decides reconciliation.
+    (iii) Callers that pass neither provider (CLI, tests) keep today's behaviour byte for byte.
+    (iv) OUT OF SCOPE, NAMED: the remaining open-PR read (1+2N synchronous calls, ~11 s at 11 open PRs)
+         could reuse the sweep's own read of the same rows; that needs a freshness contract between two
+         phases and is a separate task. So are the other `buildBatchedGithub(owner, repo)` constructions
+         without a snapshot cache (run-task.ts ~13500, ~26220, ~26416, ~37141), which are not on the
+         daemon's timer path as far as measured.
   acceptance:
-    - claim: "a board-review check makes no synchronous GitHub call and lets a concurrent timer keep firing"
-      proof: 'grep: test("W1-T4051: a board-review check does not hold the event loop" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
-    - claim: "a quiet tick still retires a proposal whose referent has left the open board"
-      proof: 'grep: test("W1-T4051: a quiet tick still retires a departed referent" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
-    - claim: "an unreadable or stale board yields no fire and no retirement"
-      proof: 'grep: test("W1-T4051: an unreadable board neither fires nor retires" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
-    - claim: "the depth arms still decide from the same items the reconciler saw"
-      proof: 'grep: test("W1-T4051: one read serves the reconciler and the decision" in test/the-board-review-check-does-not-freeze-the-loop.test.ts'
+    - claim: "given the tick's projection and plan, the board-review check derives no projection and loads no plan of its own"
+      proof: 'grep: test("W1-T4051: the board-review check reuses the tick projection and plan" in test/the-board-review-check-reuses-the-tick-projection.test.ts'
+    - claim: "escalations reach the board items from the tick's projection"
+      proof: 'grep: test("W1-T4051: escalations come from the tick projection" in test/the-board-review-check-reuses-the-tick-projection.test.ts'
+    - claim: "a tick with no projection degrades the escalation arm only, and a quiet tick still retires a departed referent"
+      proof: 'grep: test("W1-T4051: no projection degrades escalations, not reconciliation" in test/the-board-review-check-reuses-the-tick-projection.test.ts'
+    - claim: "the daemon hands the board review its own projection and plan"
+      proof: 'grep: test("W1-T4051: the daemon wires the board review to its tick projection" in test/the-board-review-check-reuses-the-tick-projection.test.ts'
   falsifier: |
-    Keep `ghJson` on the check path and the first assertion goes red: a timer that should fire every few
-    milliseconds records one late tick spanning the whole read. Gate reconciliation on `decision.fire`
-    and the second goes red. Read a stale snapshot as an empty board and the third goes red: every
-    proposal retires at once. Build the decision from a second read and the fourth goes red.
+    Leave `defaultBoardReviewItems` calling `projectPlan` on a fresh gateway and the first assertion goes
+    red: the projectPlan spy is called. Drop the provider's escalation join and the second goes red. Let
+    a missing projection throw out of the items read (or read as an empty board) and the third goes red:
+    the departed referent is no longer retired. Drop the wiring in `daemonCommand` and the fourth goes red.
