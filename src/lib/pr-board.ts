@@ -1,34 +1,13 @@
-/**
- * src/lib/pr-board.ts — W1-T3685.
+/** W1-T3685: cross-repository pull-request board data.
  *
- * THE ONE QUESTION AN OPERATOR ASKS FIRST AND THE CLI COULD NOT ANSWER: what is open, across
- * every repository the fleet drains, and what is red. `rmd status` renders THIS DAEMON'S OWN
- * board from local state — its own doc comment says "GITHUB IS DECORATION, NEVER A GATE" — and
- * `rmd ci-failures` answers a narrower question (failures, one repo, by day). Neither reads
- * GitHub cross-repo, so the operator's substitute was a 20-line script calling `gh pr list`
- * once per repo, rewritten from a container scratch directory three times in one day.
+ * Invariants: one `gh pr list` call per repository; an unreadable repository is UNAVAILABLE,
+ * never an empty queue; and this module surveys exactly the repository list its caller supplies.
+ * `rmd status` is the daemon's local board and `rmd ci-failures` is one-repository history, so
+ * neither answers the fleet-wide question this module fills.
  *
- * THREE DESIGN RULES, EACH A REFUSAL:
- *
- * (i) ONE `gh pr list` CALL PER REPOSITORY. `gh pr list --json … --limit N` already returns the
- *     check rollup, so a per-PR follow-up read is refused by construction — the secondary-rate-
- *     limit hazard is real even against a clean quota (a burst of per-PR calls 403s).
- *
- * (ii) A REPOSITORY THAT CANNOT BE READ IS NAMED UNAVAILABLE, never rendered as zero open. An
- *      empty queue and an unreachable queue are opposite facts and must not print the same —
- *      {@link RepoPullRequestBoard} carries the distinction in its own return shape rather than
- *      collapsing a thrown read into `[]`.
- *
- * (iii) THIS MODULE NEVER CHOOSES WHICH REPOSITORIES TO SURVEY. {@link surveyPullRequestBoard}
- *       takes the repository list as an argument and walks exactly that list — the caller
- *       (the CLI dispatch in run-task.ts) owns sourcing a default set from configuration. A
- *       hardcoded list INSIDE this function would be indistinguishable, from the caller's side,
- *       from one it actually asked for, which is the exact defect the first acceptance test
- *       (a survey covering a DIFFERENT list than any default) is built to catch.
- *
- * PURE BY CONSTRUCTION otherwise (Law 5): this module opens no socket of its own — `fetch` is
- * injected, defaulting to the real {@link ghJson} — writes no file, mints no id, and files
- * nothing. It only ever returns data.
+ * The fetcher is injected and defaults to {@link ghJson}; this module writes no files, mints no
+ * ids, chooses no default repositories, and never performs per-PR follow-up reads. The focused
+ * suite is the falsifier for the call bound, unavailable-state distinction, and exact input list.
  */
 
 import { ghJson } from "./github-transport.js";

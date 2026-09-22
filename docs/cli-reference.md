@@ -36,6 +36,7 @@ usage:
   rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
+  rmd board [--repo <owner/repo> ...]   # Print what is open, and what is red, across every fleet repository.
   rmd census-membership [--base <ref>] [--files]   # Name the population-walking census suites this diff enters.
   rmd caller-sweep <symbol> [<symbol>...] [--files]   # Name the suites reachable from a changed symbol, including through its src/ callers.
   rmd ci-learning [--days N] [--force]   # Stage a marked, parked shard for each repaired CI failure in the window.
@@ -318,6 +319,16 @@ rmd ci-failures [--days N]
 ```
 
 W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).
+
+### `rmd board`
+
+Print what is open, and what is red, across every fleet repository.
+
+```
+rmd board [--repo <owner/repo> ...]
+```
+
+W1-T3685: the one question an operator asks first and no other verb answered — `rmd status` renders this daemon's OWN board from local state, `rmd ci-failures` answers a narrower one (failures, one repo, by day). Surveys every repository named by `--repo` (repeatable), or `config.fleetRepos` when none is given, or a three-repository fallback when that is unset too — never a list written into `pr-board.ts` itself. ONE `gh pr list --json ...` call per repository (surveyPullRequestBoard, src/lib/pr-board.ts): a per-PR follow-up read is refused by design, the secondary-rate-limit hazard. A repository that cannot be read prints UNAVAILABLE with the read error, never rendered as zero open — an empty queue and an unreachable one are opposite facts. Each open pull request prints its number, title, draft state, head branch, and the NAMES of its failing and pending checks. REPORT-ONLY: exit code is always 0, whatever the board contains — this verb reports, it does not gate.
 
 ### `rmd census-membership`
 
