@@ -47,13 +47,13 @@
     make a learning verdict certify a PR.
   acceptance:
     - claim: "a fired CI-learning action that is still awaiting a corpus read does not prevent the daemon from reaching queue reconciliation and dispatch"
-      proof: "unit test: a fired ci-learning action does not hold queue reconciliation"
+      proof: "unit test: test/a-fired-ci-learning-must-not-hold-queue-reconciliation.test.ts"
     - claim: "only one CI-learning action may be detached at a time and a second firing is ledgered as an explicit in-flight refusal"
-      proof: "unit test: a second fired ci-learning action is refused while the first is detached"
+      proof: "unit test: test/a-fired-ci-learning-must-not-hold-queue-reconciliation.test.ts"
     - claim: "an unreadable CI-learning corpus releases its cadence fire and reports the failure without treating missing evidence as a successful lesson"
-      proof: "unit test: an unreadable detached ci-learning corpus releases its fire"
+      proof: "unit test: test/a-fired-ci-learning-must-not-hold-queue-reconciliation.test.ts"
     - claim: "the daemon has an explicit CI-learning detached-action path rather than awaiting the cadence runner inline"
-      proof: "unit test: W1-T3997: a runner that throws before returning a promise remains a visible best-effort failure"
+      proof: "unit test: test/a-fired-ci-learning-must-not-hold-queue-reconciliation.test.ts"
   falsifier: |
     Hold the asynchronous CI-learning corpus promise after the fire and drive one
     daemon tick with a runnable task and a sweep recorder. Before the fix, the
