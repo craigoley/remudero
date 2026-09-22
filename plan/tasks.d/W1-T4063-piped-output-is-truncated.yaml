@@ -1,0 +1,59 @@
+- id: W1-T4063
+  title: "EVERY RMD VERB TRUNCATES ITS OUTPUT WHEN PIPED — main() ends with process.exit(), which discards stdout still queued for an asynchronous pipe: `rmd ledger-grep` printed 522 of 280,672 matching lines through a pipe and all of them to a file, so any analysis that pipes rmd reads a silent, oldest-first subset: flush stdout and stderr before the process exits"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "oper#piped-output-truncation-2026-09-22"
+  plan_refs: [W1-T2893, W1-T2901]
+  files: [src/lib/flush-exit.ts, src/run-task.ts, test/a-piped-command-output-is-never-truncated.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 IN THE DAEMON CONTAINER, same command, same corpus:
+
+        rmd ledger-grep '"ts":"2026-09-2[0-2]' > file        280,672 lines   (header reports "matches: 280067")
+        rmd ledger-grep '"ts":"2026-09-2[0-2]' | cat > file      522 lines
+
+    Reproduced locally against a synthetic 5,000-row archive (HOME pointed at a temporary config): 5,000 lines
+    to a file, 503 through a pipe read after a 2 s delay.
+
+    (1) THE CAUSE IS THE PROCESS BOUNDARY, NOT THE VERB. `main()` (src/run-task.ts) ends
+        `process.exit(await dispatchCommand(cmd, rest, REGISTRY, USAGE))`, and the uncaught-error path ends
+        `process.exit(exitCodeFor(err))`. On POSIX, Node writes to a PIPE asynchronously; `process.exit()`
+        terminates with whatever is still queued unwritten. A file or TTY is written synchronously, which is
+        why every interactive check looked right. `ledgerGrepCommand` (src/lib/report-commands.ts) writes one
+        `console.log` per match, so any output past the pipe's buffer is lost — the OLDEST rows survive, since
+        archives print oldest first.
+    (2) WHY IT MATTERS BEYOND ONE VERB. `rmd ledger-grep` is the sanctioned way to read the ledger union, and
+        operators, research agents and fleet lanes pipe it into grep/node. A truncated read does not error: it
+        returns a plausible, smaller, oldest-biased answer — the "a check that passes while comparing nothing"
+        failure. Today's filings were re-measured through files and held; every future piped read would not.
+  design: |
+    (i) One helper, src/lib/flush-exit.ts: `flushThenExit(code)` waits until stdout and stderr have drained
+        everything already written (a zero-length write's callback on each, which completes after earlier
+        writes) and then exits with `code`. The exit function is read at call time so tests that stub
+        `process.exit` keep working.
+    (ii) NEVER HANG ON A CLOSED READER. `rmd … | head` closes the pipe early; an EPIPE or a destroyed stream
+         resolves the wait instead of blocking, so the process still exits with its own code.
+    (iii) `main()`'s dispatch exit and its uncaught-error exit both go through it. The per-verb handlers are
+          untouched.
+  acceptance:
+    - claim: "a real rmd ledger-grep delivers every matching line through a slow pipe"
+      proof: 'grep: test("W1-T4063: piped ledger-grep output is complete" in test/a-piped-command-output-is-never-truncated.test.ts'
+    - claim: "the same harness detects truncation when the process exits without flushing"
+      proof: 'grep: test("W1-T4063: control: a bare process\.exit truncates the same write" in test/a-piped-command-output-is-never-truncated.test.ts'
+    - claim: "main() exits through the flushing helper"
+      proof: 'grep: flushThenExit( in src/run-task.ts'
+    - claim: "the exit code survives the flush"
+      proof: 'grep: test("W1-T4063: the exit code survives the flush" in test/a-piped-command-output-is-never-truncated.test.ts'
+    - claim: "a reader that closes early does not hang the exit"
+      proof: 'grep: test("W1-T4063: an early-closed reader does not hang the exit" in test/a-piped-command-output-is-never-truncated.test.ts'
+  falsifier: |
+    Keep `process.exit(await dispatchCommand(...))` and the first assertion goes red (503 of 5,000 lines). Remove
+    the control and a harness that reads too fast could pass vacuously — the second proves it can see the loss.
+    Swallow the code and the third goes red; wait on a closed pipe and the fourth times out.
