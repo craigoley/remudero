@@ -124,14 +124,19 @@
   acceptance:
     - claim: "the shard records the inter-merge interval and the re-validation wall-clock against each other, so the deadlock question is answered from data rather than asserted"
       proof: "grep: sits at 0\\.97x the median in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the shard records the serialised throughput ceiling turning strict on would impose, and how often observed demand already exceeds it"
       proof: "grep: observed rate on 4 of 11 days in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the shard costs option (b) in CI-minutes at every measured concurrency rather than calling it expensive"
       proof: "grep: 43,100 in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the merge queue is named as a third option with the repo-specific reason it cannot simply be switched on"
       proof: "grep: AND IT IS SPECIFIC TO THIS REPO in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
     - claim: "the three family members are cited with their own scope rather than folded into this task"
       proof: "grep: IT MUST NOT ABSORB W1-T985 OR THE FILING-DIFF GAP in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      satisfied_by: "#6560"
   risk: high
   origin: "oper#cross-pr-semantic-staleness-2026-08-18"
   plan_refs: ["W1-T999", "W1-T1007", "W1-T985", "W1-T1009", "W1-T983"]
@@ -244,3 +249,38 @@
     auto-rebase to soften the ceiling: if the ceiling actually binds, that is a NEW measurement
     and a NEW task, and pre-building relief for a cost nobody has yet paid is how this repo has
     previously shipped a bound that fires on a healthy condition.
+
+    DISPATCH 2026-09-22 — THE FLIP ITSELF IS THE OPERATOR'S STEP, NOT THE HARNESS'S, BY THE SAME
+    RULING BATCH'S OWN PRECEDENT. #6560 unparked W1-T1014 and W1-T3407 together, and W1-T3407's
+    own note is explicit about its sibling live-protection PATCH: "THE PROTECTION FLIP IS THE
+    OPERATOR'S STEP AND IS DELIBERATELY NOT AN ACCEPTANCE CRITERION... no harness can enable
+    [it] for itself." `required_status_checks.strict` is the same shape of change — an outward-
+    facing, repo-wide branch-protection PATCH via `gh api`, affecting every open PR the moment it
+    lands, with no revert-by-file-diff. This run does not execute it, for the reason W1-T3407
+    already gave and none of W1-T1014's own acceptance criteria depend on: all five are `grep:`
+    proofs against this shard's own text and were already satisfied by #6560, before this run
+    began.
+
+    THE BEFORE-STATE, RE-DERIVED RATHER THAN CARRIED. `gh api repos/craigoley/remudero/branches/
+    main/protection` read live at dispatch, 2026-09-22, still: `required_status_checks: {strict:
+    false, contexts: ["remudero-review","ci-gate"]}`, `enforce_admins: {enabled: false}`. Matches
+    the rationale in (iii) and the 2026-09-06 addendum's re-read; no drift.
+
+    THE HANDOFF. The operator, after this record merges, runs:
+    `gh api -X PATCH repos/craigoley/remudero/branches/main/protection/required_status_checks
+    -f strict=true -f 'contexts[]=remudero-review' -f 'contexts[]=ci-gate'`
+    and records the after-read (the same GET, re-run) wherever he tracks the ceiling from (ii) —
+    this shard's acceptance does not gate on that read because, per the same precedent, a task at
+    `verify: auto` cannot name an operator action as its own proof.
+
+    OPERATOR RULING 2026-09-22 (SECOND) - THE STRICT FLIP IS DECLINED. DO NOT RUN THE PATCH ABOVE.
+    This reverses the earlier same-day ruling that took option (a). The operator's direction is
+    "I don't want slow downs and more checks", and the measurement in (ii) is exactly that trade:
+    strict serialises merges at one per re-validation window - about 115/day at the p50 window and
+    67/day at the p90 - below observed demand on 4 of 11 days. `required_status_checks.strict`
+    therefore STAYS false, and the handoff paragraph above is superseded, not pending.
+    THE RESIDUAL IS ACCEPTED, NOT HIDDEN: without strict, a semantically stale merge (the #2157 /
+    #2155 shape) can still turn main red after both PRs were individually green. The duplicate-id
+    sub-class the 2026-09-06 addendum measured is separately covered by the atomic id reservation
+    (W1-T3091) and task-id-existence, which refuse the collision before merge. Option (b) remains
+    declined for the cost recorded in (iv).

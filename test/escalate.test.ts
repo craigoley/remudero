@@ -1080,6 +1080,118 @@ test("W1-T345: distinct classes on the same taskId, no PR, never dedup against e
   assert.equal(issues.calls.length, 2);
 });
 
+// ── W1-T974: a bare CR/U+2028/U+2029 inside a candidate issue body must not forge an optional
+// dedup line ─────────────────────────────────────────────────────────────────────────────────
+//
+// summarizeCiFailure (src/run-task.ts) splits a check's logTail on "\n" only and trims only the
+// ends, so a bare carriage return (or U+2028/U+2029) sitting INSIDE one log line survives into
+// e.detail untouched — and JavaScript's `m` regex flag treats all three, not just "\n", as a line
+// start. Smuggled that way, a log line can forge a `**Cause:**`/`**Head:**` line renderIssueBody
+// never wrote. matchDuplicateEscalation now normalizes a CANDIDATE issue's body before parsing it.
+
+test("W1-T974: a forged cause line inside a ci log tail no longer matches the dedup", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  // Mimics summarizeCiFailure's defect: a bare CR mid-line, immediately followed by text shaped
+  // exactly like renderIssueBody's own "**Cause:** <token>" line. This escalation itself never
+  // sets `cause` — the forged text lives only inside the free-text `detail`, exactly like a log
+  // tail spliced into an escalation's detail field by a caller that never classified a cause.
+  const first = escalate(
+    escalation({
+      taskId: "DAEMON",
+      summary: "dispatch queue starved",
+      detail: "claims — claims\r**Cause:** ci",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+
+  // A second, genuinely distinct observation on the same (taskId, class): a different summary,
+  // cause still honestly unset on both sides. Pre-fix, the forged "**Cause:** ci" line inside
+  // issue #1's body parses as defined, and matchesOptionalDimension's missing-side permissiveness
+  // lets that MATCH regardless of the differing summary — the second escalation never opens its
+  // own issue and is silently appended as a comment on the first instead.
+  const second = escalate(
+    escalation({
+      taskId: "DAEMON",
+      summary: "a distinct, unrelated observation",
+      detail: "no forged line in this one",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.notEqual(second, first, "a forged Cause line inside issue #1's body must not swallow issue #2");
+  assert.equal(issues.calls.length, 2, "two genuinely distinct escalations must open two issues, not one");
+  assert.equal(issues.comments.length, 0, "no comment — the forged line must not manufacture a dedup match");
+});
+
+test("W1-T974: an honest cause line in a multi line detail still parses unchanged", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const multiLineDetail = ["first log line", "second log line", "third log line — genuinely multi-line"].join("\n");
+
+  const first = escalate(
+    escalation({ taskId: "DAEMON", cause: "ci", summary: "daemon condition observed", detail: multiLineDetail }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+  const second = escalate(
+    escalation({ taskId: "DAEMON", cause: "ci", summary: "daemon condition observed", detail: multiLineDetail }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  // The falsifier against a blanket newline strip: `\n` must survive normalization untouched, or
+  // the honest, newline-separated **Cause:** line this escalation genuinely set would stop parsing
+  // and this dedup — which has nothing to do with any forged line — would break too.
+  assert.equal(second, first, "a genuinely multi-line detail must not break the honest Cause line's own parse");
+  assert.equal(issues.calls.length, 1);
+  assert.equal(issues.comments.length, 1);
+});
+
+test("W1-T974: an innocent ci log line reaches the issue body unchanged", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  // Shaped like the real, measured issue #1965 line the task's own rationale cites: tabs and a
+  // BOM, no CR/U+2028/U+2029 anywhere in it.
+  const innocentLine = "- claims — claims\tPlan claims (every plan/claims.yaml assertion must exit 0)\t﻿2026-08-16T12:30:59Z";
+
+  escalate(escalation({ taskId: "DAEMON", summary: "daemon condition observed", detail: innocentLine }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+
+  // The falsifier for a blanket-escaping implementation: normalization is scoped to the ONE
+  // read site (an already-open candidate's body) and never touches renderIssueBody's own output,
+  // so a log line an operator might copy or grep still reaches a newly created issue's body byte
+  // for byte, tabs and BOM included.
+  assert.ok(
+    issues.calls[0].body.includes(innocentLine),
+    "an innocent log line must reach the created issue body byte for byte unchanged",
+  );
+});
+
+test("W1-T974: a genuine cause disagreement still vetoes the dedup match", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  const first = escalate(escalation({ taskId: "DAEMON", cause: "ci", summary: "daemon condition observed" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+  const second = escalate(escalation({ taskId: "DAEMON", cause: "conflict", summary: "daemon condition observed" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-2",
+  });
+
+  // The falsifier against simply dropping the optional dimension (or disabling it) to close the
+  // forgery: matchesOptionalDimension must still veto when BOTH sides carry a value and disagree.
+  assert.notEqual(second, first, "a genuine cause disagreement must still open its own issue, not dedupe");
+  assert.equal(issues.calls.length, 2);
+  assert.equal(issues.comments.length, 0);
+});
+
 test("W1-T2912: a listOpen read failure refuses to create rather than falling through to create(), for a referent-less escalation exactly as it does for a PR-keyed one", () => {
   const path = ledgerPath();
   const store = fakeIssueStore();
