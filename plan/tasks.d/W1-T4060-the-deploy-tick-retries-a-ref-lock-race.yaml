@@ -1,0 +1,43 @@
+- id: W1-T4060
+  title: "THE DEPLOY TICK LOSES ONE TICK IN SEVEN TO A FETCH RACE — `rmd deploy-run`'s `git fetch` in daemon-install fails 'cannot lock ref … is at X but expected Y' and the tick reports the install root unfit; retry a ref-lock failure bounded, the way the entrypoint's boot fetch already does (W1-T2501)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator-session#auto-recycle-2026-09-22"
+  plan_refs: ["W1-T2501", "W1-T3245"]
+  files:
+    - src/lib/deployer.ts
+    - test/the-deploy-tick-retries-a-ref-lock-race.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 on the fleet host: 41 of 288 `rmd-fleet-watchdog` ticks in 24 hours ended
+    "install root at /home/craigoleyagent/rmd-state2/daemon-install is unfit (fetch-failed: git
+    fetch origin failed … cannot lock ref 'refs/remotes/origin/<branch>': is at <a> but expected
+    <b>)". That is two fetches racing in one repository: the core container mounts the whole state
+    directory, daemon-install included, so the daemon's own freshness fetch and the watchdog's fetch
+    update the same remote-tracking refs. The three instances use separate checkouts, so it is not
+    the three timers firing together.
+
+    The next tick recovers each time, so this delays rather than blocks, but it delayed a deploy
+    request by a full interval on 2026-09-22 and, once image recycles are automatic (the
+    auto-recycle PR of the same day), every lost tick delays a required recycle.
+  design: |
+    (i) In realDeployDeps.fetch, retry a failure whose stderr matches "cannot lock ref", bounded
+    (three attempts, a short back-off) — the same classification the entrypoint's boot_fetch uses
+    (W1-T2501), and ONLY that class: any other fetch failure still reports the install root unfit
+    on the first attempt.
+    (ii) Ledger each retried attempt so the rate stays measurable.
+  acceptance:
+    - claim: "a ref-lock fetch failure is retried and the tick proceeds"
+      proof: 'grep: test("W1-T4060: a ref-lock race is retried and the tick proceeds" in test/the-deploy-tick-retries-a-ref-lock-race.test.ts'
+    - claim: "any other fetch failure is not retried"
+      proof: 'grep: test("W1-T4060: any other fetch failure still reports the install root unfit" in test/the-deploy-tick-retries-a-ref-lock-race.test.ts'
+    - claim: "the retry is bounded"
+      proof: 'grep: test("W1-T4060: the retry stops after three attempts" in test/the-deploy-tick-retries-a-ref-lock-race.test.ts'
+  falsifier: |
+    CLOSE IF realDeployDeps.fetch already retries "cannot lock ref" at build time.
