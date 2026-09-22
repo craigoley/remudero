@@ -329,6 +329,7 @@
     "test/an-event-wake-must-not-discard-an-admitted-batch.test.ts": 914,
     "test/an-import-sweep-sees-every-import-form.test.ts": 252,
     "test/an-inbox-draft-grounds-depends-on-without-the-whole-plan.test.ts": 0,
+    "test/an-inert-coverage-waiver-is-named.test.ts": 0,
     "test/an-inherited-red-is-not-the-authors.test.ts": 256,
     "test/an-injected-clock-stamp-is-exempt-and-stays-exempt.test.ts": 0,
     "test/an-inline-quoted-absence-claim-is-a-mention.test.ts": 0,

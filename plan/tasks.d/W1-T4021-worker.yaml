@@ -1,0 +1,81 @@
+- id: W1-T4021
+  title: "A LANE THAT LOSES ITS GIT REGISTRATION IS INVISIBLE TO THE REAPER FOREVER — the reaper's only candidate source is git's own worktree registration, so an orphaned lane directory is unreachable by construction and nothing else reclaims it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: "measured 2026-09-22 clearing 16G of orphaned lanes by hand on the Azure host; the reaper was armed the whole time and could not see any of them"
+  plan_refs: [W1-T2847, W1-T3528]
+  files: [src/lib/worker.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
+  rationale: |
+    MEASURED 2026-09-22 on the Azure host, clearing by hand:
+
+      123 directories under /home/node/Remudero/lanes   16G
+      122 of them carrying a stale `.git` pointer
+        0 of them registered as worktrees
+      oldest: 2026-09-07 — fifteen days, through many reap cadences
+
+    `sweep.armAdhocLaneReap` reads `value: true` in plan/policy.yaml, so the reaper was ARMED for
+    every one of those days. It reclaimed none of them, and it was right not to: it never saw them.
+
+    (1) THE ONLY CANDIDATE SOURCE IS GIT'S REGISTRATION. `runAdhocLaneReapRung` reaps
+        `adhocLaneRoot(config)` and, for lanes outside the managed roots, asks
+        `unmanagedWorktreeLanes` — whose own comment states the boundary plainly: "the source is
+        still git's own registration ... Supplying `candidatePaths` is the safety boundary — no
+        parent directory is walked to find unmanaged lanes."
+
+        So a lane is reachable IFF git still has an admin entry for it. Once that entry is gone —
+        a `git worktree prune` while the directory was briefly unreadable, an admin dir removed, a
+        checkout moved — the DIRECTORY REMAINS AND THE CANDIDATE DOES NOT. There is no second pass,
+        no cadence and no verb that can ever reclaim it.
+
+    (2) THE BOUNDARY IS RIGHT; THE CONSEQUENCE IS NOT. Walking a parent directory to find "big
+        things that look stale" is exactly the shape lib/disk-artifact-reclaim.ts refuses by name
+        ("SCOPE IS AN ALLOWLIST OF NAMES ... Size is not a reason to delete anything"). That
+        judgement should stand. What must change is that losing a registration currently converts
+        a managed lane into an unmanaged directory with no owner, silently and permanently.
+
+    (3) IT IS NOT SELF-LIMITING. 16G accumulated in fifteen days and would have kept accumulating:
+        every future orphan is permanent, so the floor only rises. The same shape is present on the
+        Mac mini, whose `remudero` clone carries 80 registered worktrees against a 228G disk with
+        16G free.
+  design: |
+    (i) AN ORPHANED LANE IS IDENTIFIED BY ITS OWN EVIDENCE, NOT BY SIZE OR AGE ALONE. A directory
+        is a candidate IFF it sits DIRECTLY under the managed lane root AND carries a `.git` file
+        whose gitdir names this repository's worktrees admin path. That is a bounded, positive
+        predicate: it cannot match a directory that was never a lane of this repo, and it needs no
+        walk of anything above the managed root.
+
+    (ii) THE KEEP/REMOVE DECISION STAYS WHERE IT IS. Candidates are handed to
+         `reapStaleWorktrees` through the existing `candidatePaths` seam, so every guard that
+         protects a registered lane — liveness, lock, grace, `activity-unknown` keeps — protects an
+         orphaned one identically. This adds a SOURCE of candidates, never a second policy.
+
+    (iii) AN ORPHAN IS REPORTED AS AN ORPHAN. It is ledgered distinctly from a registered lane, so
+          a fleet accumulating orphans is legible before it is expensive — the fifteen days above
+          produced no row anyone could have read.
+
+    DO NOT WALK THE PARENT OF THE MANAGED ROOT, and do not select on size. The reaper that would
+    have caught this by walking for large directories is the one lib/disk-artifact-reclaim.ts
+    refuses to be, and for a reason this task does not reopen.
+  acceptance:
+    - claim: "a directory under the managed root whose gitdir names this repo is a candidate even with no registration"
+      proof: "grep: orphaned lane in src/lib/worker.ts"
+    - claim: "a directory that was never a lane of this repo is never a candidate, whatever its size or age"
+      proof: "grep: never a candidate in src/lib/worker.ts"
+    - claim: "orphans are ledgered distinctly from registered lanes, so accumulation is visible before it is expensive"
+      proof: 'grep: adhoc_lane\.orphaned in src/lib/worker.ts'
+  falsifier: |
+    Select candidates by size or by age alone and the second assertion goes red — that is the
+    reaper this repo has already refused to build. Drop the gitdir check and a sibling directory
+    that merely sits under the root becomes deletable, which the second assertion also catches.
+    Route orphans around `reapStaleWorktrees` and the liveness/lock guards no longer apply, so a
+    live orphan could be destroyed: assert the candidates go through the existing seam. Fold the
+    orphan row into `adhoc_lane.reap` and the third goes red, leaving accumulation unreadable again.

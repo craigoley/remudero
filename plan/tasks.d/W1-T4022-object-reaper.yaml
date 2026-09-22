@@ -1,0 +1,79 @@
+- id: W1-T4022
+  title: "THE OBJECT REAPER'S THREE REFUSALS ARE ALL NEAR-PERMANENTLY TRUE ON A WORKING FLEET, SO THE OBJECT STORE IS NEVER COMPACTED — each refusal is individually correct, and their conjunction is a gate that a busy host can never pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: "measured 2026-09-22 on both hosts while clearing worktrees by hand — 1.51 GiB of loose objects on Azure, and the reaper had never been able to run"
+  plan_refs: [W1-T3092]
+  files: [src/lib/object-reaper.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
+  rationale: |
+    MEASURED 2026-09-22. `git count-objects -vH` on the Azure host's shared store:
+
+      count: 80085        size: 1.51 GiB        size-pack: 78.10 MiB
+
+    80,085 loose objects against a 78 MiB pack — the store has essentially never been compacted.
+
+    `objectReapRefusal` returns a refusal, and never reaps, when ANY of three conditions holds:
+
+      worktrees registered > 0   "a prune racing a worker can remove an object it is about to reference"
+      inflight locks held  > 0   "the fleet is mid-dispatch"
+      open handles under .git > 0  "a live process holds the object store"
+
+    (1) EVERY ONE OF THE THREE IS CORRECT IN ISOLATION. A prune racing a worker really can destroy
+        a referenced object. This task does not propose weakening any of them.
+
+    (2) THEIR CONJUNCTION IS UNPASSABLE ON A HOST THAT IS WORKING. The fleet creates worktrees
+        continuously — reviewer and sweep trees appeared within minutes of clearing 84 of them by
+        hand on 2026-09-22 — and the daemon holds `.git` open for its own operation. So the gate
+        is open only when the host is idle AND has no registered worktree AND no lock AND no open
+        handle, which on a fleet that dispatches around the clock is approximately never. The
+        1.51 GiB is the evidence: not a tuning problem, a reachability problem.
+
+    (3) THE THIRD CONDITION MAY BE UNSATISFIABLE BY CONSTRUCTION. `openFileCount` defaults to
+        `() => 1` — a fail-closed default that reads "assume a handle is open" when nothing
+        supplies a real count. If production never injects a real counter, the refusal fires
+        unconditionally and the other two conditions are moot. WORTH CHECKING FIRST: if that is
+        so, the whole rung is dead code and this task is smaller than it looks.
+
+    (4) IT IS BOTH HOSTS. The Mac mini's `remudero` clone carries 80 registered worktrees against
+        a 228G disk with 16G free — the same gate, held shut the same way.
+  design: |
+    (i) ESTABLISH FIRST WHETHER THE RUNG HAS EVER RUN. Read `openFileCount`'s production wiring
+        before anything else. A rung that cannot reach its own body is a different defect from one
+        whose guards are too strict, and the fix for each is not the fix for the other.
+
+    (ii) A SAFE WINDOW IS CREATED, NOT WAITED FOR. The conditions are correct, so the reaper must
+         run when they are genuinely false — inside a drain the fleet already performs, where
+         dispatch is quiesced and worktrees are released — rather than hoping to observe a quiet
+         moment that a working host never offers.
+
+    (iii) A REFUSAL SAYS WHICH CONDITION AND FOR HOW LONG. Today a refusal names the condition but
+          nothing accumulates it, so "refused once" and "has refused every time for three weeks"
+          read identically. The second is the one worth acting on.
+
+    (iv) INCREMENTAL IS ACCEPTABLE, UNBOUNDED GROWTH IS NOT. Reclaiming some objects safely beats
+         reclaiming all of them never.
+
+    DO NOT WEAKEN ANY OF THE THREE REFUSALS to make the gate passable. The race they prevent
+    destroys a referenced object, which is worse than any amount of disk.
+  acceptance:
+    - claim: "a refusal records how long the rung has been refusing, so a permanent block is distinguishable from a single busy moment"
+      proof: "grep: consecutive refusals in src/lib/object-reaper.ts"
+    - claim: "the reaper runs inside a quiesced window rather than waiting to observe an idle host"
+      proof: "grep: quiesced window in src/lib/object-reaper.ts"
+    - claim: "all three refusal conditions still refuse — none is weakened to make the gate passable"
+      proof: "grep: never weakened in src/lib/object-reaper.ts"
+  falsifier: |
+    Relax any of the three conditions and the third assertion goes red — that is the change this
+    task exists to refuse, and it is the one that looks most like progress. Make the reaper merely
+    retry more often and the second goes red, because a busy host never offers the window however
+    often it is sampled. Log a refusal without accumulating it and the first goes red, leaving a
+    three-week block indistinguishable from one busy tick.

@@ -20,7 +20,7 @@ import {
 } from "../src/lib/feedback-landing.js";
 import { checkCliFreshness } from "../src/lib/self-sync.js";
 import { missingFeedbackMessage } from "../src/lib/triage.js";
-import { triageCommand } from "../src/run-task.js";
+import { makeLandingReviewRequest, triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // ── Why every landFeedback()/captureFeedback({land}) call below is wrapped ──────────────
@@ -144,7 +144,11 @@ test("W1-T243 END-TO-END: a captured entry is invisible on origin/main until lan
   // ...and gh was asked to open exactly one PR for it (never a `git push` straight to main).
   assert.equal(createCount(), 1);
   assert.ok(calls.some((c) => c[0] === "pr" && c[1] === "create" && c.includes(LANDING_BRANCH) && c.includes("main")));
-  assert.ok(calls.some((c) => c[0] === "pr" && c[1] === "merge"), "auto-merge is armed — GitHub does the merging, not this code");
+  assert.equal(
+    calls.some((c) => c[0] === "pr" && c[1] === "merge"),
+    false,
+    "the landing bridge leaves auto-merge to the shared review lane",
+  );
 
   // Simulate the gate merging the PR (ci + remudero-review green) — a real fast-forward, since
   // the landing commit's parent IS origin/main's prior tip.
@@ -602,7 +606,7 @@ test("landFeedback: `gh pr create` throwing a NON-Error value (no `.message`) st
   assert.match(result.error ?? "", /gh: command not found, no message property at all/);
 });
 
-test("landFeedback: `gh pr merge` throwing is swallowed (best-effort auto-merge arm) — still landed:true with the PR url", () => {
+test("landFeedback: opening a fresh landing PR does not arm auto-merge before the shared review lane", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -611,13 +615,217 @@ test("landFeedback: `gh pr merge` throwing is swallowed (best-effort auto-merge 
   const gh = (args: string[]): string => {
     if (args[0] === "pr" && args[1] === "list") return "[]";
     if (args[0] === "pr" && args[1] === "create") return "Creating pull request\nhttps://github.com/o/r/pull/13\n";
-    if (args[0] === "pr" && args[1] === "merge") throw new Error("simulated: auto-merge arming failed");
+    if (args[0] === "pr" && args[1] === "merge") throw new Error("unexpected pre-review auto-merge arm");
     throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
   };
 
   const result = withLiveWritesAllowed(() => landFeedback(root, { gh }));
-  assert.equal(result.landed, true, "a failed best-effort auto-merge arm must never turn a successful push+PR into a failure");
+  assert.equal(result.landed, true, "a successful push and PR creation remain landed");
   assert.equal(result.prUrl, "https://github.com/o/r/pull/13");
+});
+
+test("feedback landing requests review before arming auto-merge", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-review.yaml"), "id: fb-review\nraw: x\n");
+  const events: string[] = [];
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return "[]";
+    if (args[0] === "pr" && args[1] === "create") {
+      events.push("create");
+      return "Creating pull request\nhttps://github.com/o/r/pull/14\n";
+    }
+    if (args[0] === "pr" && args[1] === "merge") throw new Error("unexpected pre-review auto-merge arm");
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+
+  const result = withLiveWritesAllowed(() =>
+    landFeedback(root, {
+      gh,
+      requestReview: (url) => {
+        events.push(`review:${url}`);
+      },
+    }),
+  );
+  assert.equal(result.landed, true);
+  assert.deepEqual(events, ["create", "review:https://github.com/o/r/pull/14"]);
+});
+
+test("feedback landing review failure is retryable and never arms merge", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-retry.yaml"), "id: fb-retry\nraw: x\n");
+  let reviewAttempts = 0;
+  let creates = 0;
+  let merges = 0;
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return creates > 0 ? JSON.stringify([{ url: "https://github.com/o/r/pull/15" }]) : "[]";
+    if (args[0] === "pr" && args[1] === "create") {
+      creates++;
+      return "Creating pull request\nhttps://github.com/o/r/pull/15\n";
+    }
+    if (args[0] === "pr" && args[1] === "merge") {
+      merges++;
+      return "";
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const requestReview = () => {
+    reviewAttempts++;
+    if (reviewAttempts === 1) throw new Error("reviewer temporarily unavailable");
+  };
+
+  const first = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview }));
+  assert.equal(first.landed, true);
+  assert.match(first.error ?? "", /review handoff failed/);
+  const second = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview }));
+  assert.equal(second.landed, true);
+  assert.equal(reviewAttempts, 2, "the open PR is retried on the next landing pass");
+  assert.equal(creates, 1, "retry reuses the existing landing PR");
+  assert.equal(merges, 0, "a failed handoff never arms merge");
+});
+
+test("an existing landing PR missing review is repaired before merge", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-existing.yaml"), "id: fb-existing\nraw: x\n");
+  let reviewRequests = 0;
+  let merges = 0;
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/o/r/pull/16" }]);
+    if (args[0] === "pr" && args[1] === "create") throw new Error("must reuse the open landing PR");
+    if (args[0] === "pr" && args[1] === "merge") {
+      merges++;
+      return "";
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const result = withLiveWritesAllowed(() =>
+    landFeedback(root, {
+      gh,
+      requestReview: (url) => {
+        assert.equal(url, "https://github.com/o/r/pull/16");
+        reviewRequests++;
+      },
+    }),
+  );
+  assert.equal(result.landed, true);
+  assert.equal(reviewRequests, 1);
+  assert.equal(merges, 0, "repair requests review before any merge arm");
+});
+
+test("feedback landing swallows a rejected pending review promise on a freshly-created PR", async () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-fresh-pending.yaml"), "id: fb-fresh-pending\nraw: x\n");
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return "[]";
+    if (args[0] === "pr" && args[1] === "create") return "Creating pull request\nhttps://github.com/o/r/pull/17\n";
+    if (args[0] === "pr" && args[1] === "merge") throw new Error("unexpected pre-review auto-merge arm");
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+
+  // `requestReview` returning a PENDING (thenable) rather than `void` — the fresh-PR branch of
+  // `ensurePrOpen` must fire it and NEVER await it (the call returns synchronously), and a later
+  // rejection must never surface as an unhandled rejection (the whole reason for its own
+  // `.then(undefined, () => undefined)`, not the caller's `try`/`catch`, which only ever sees a
+  // SYNCHRONOUS throw from `requestReview` itself, never an async rejection).
+  let rejectPending: (() => void) | undefined;
+  const pending = new Promise<void>((_resolve, reject) => {
+    rejectPending = () => reject(new Error("review dispatch failed asynchronously"));
+  });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview: () => pending }));
+  assert.equal(result.landed, true, "the synchronous call returns before the pending review settles");
+  assert.equal(result.prUrl, "https://github.com/o/r/pull/17");
+  assert.equal(result.error, undefined, "a still-pending review is not a synchronous failure");
+
+  rejectPending?.();
+  await pending.catch(() => undefined); // let the swallowing `.then` run before the test exits
+});
+
+test("feedback landing swallows a rejected pending review promise when repairing an existing PR", async () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-existing-pending.yaml"), "id: fb-existing-pending\nraw: x\n");
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/o/r/pull/18" }]);
+    if (args[0] === "pr" && args[1] === "create") throw new Error("must reuse the open landing PR");
+    if (args[0] === "pr" && args[1] === "merge") throw new Error("unexpected pre-review auto-merge arm");
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+
+  // Same pending/never-awaited/swallowed-rejection shape as the fresh-create test above, but for
+  // the OTHER `ensurePrOpen` branch — the already-open PR repair path.
+  let rejectPending: (() => void) | undefined;
+  const pending = new Promise<void>((_resolve, reject) => {
+    rejectPending = () => reject(new Error("review dispatch failed asynchronously"));
+  });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview: () => pending }));
+  assert.equal(result.landed, true, "the synchronous call returns before the pending review settles");
+  assert.equal(result.prUrl, "https://github.com/o/r/pull/18");
+  assert.equal(result.error, undefined, "a still-pending review is not a synchronous failure");
+
+  rejectPending?.();
+  await pending.catch(() => undefined); // let the swallowing `.then` run before the test exits
+});
+
+// ── makeLandingReviewRequest (run-task.ts): daemonBoot's W1-T3990 callback, extracted so its
+// parse/dispatch/log behaviour is unit-testable without booting the whole daemon (W1-T3995).
+test("makeLandingReviewRequest: an unparseable PR url logs and never calls the review command", () => {
+  const events: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => events.push([step, extra]);
+  const runReviewCommand = () => {
+    throw new Error("must not be called for an unparseable url");
+  };
+  const request = makeLandingReviewRequest(log, runReviewCommand, "o/r");
+  request("https://github.com/o/r/not-a-pull-url");
+  assert.deepEqual(events, [
+    ["feedback.landing_review.failed", { pr_url: "https://github.com/o/r/not-a-pull-url", reason: "unparseable pull-request URL" }],
+  ]);
+});
+
+test("makeLandingReviewRequest: a review that settles at exit code 0 logs nothing", async () => {
+  const events: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => events.push([step, extra]);
+  const calls: Array<[string, string[], unknown]> = [];
+  const runReviewCommand = async (prArg: string, rest: string[], deps: unknown) => {
+    calls.push([prArg, rest, deps]);
+    return 0;
+  };
+  const request = makeLandingReviewRequest(log, runReviewCommand, "o/r");
+  request("https://github.com/o/r/pull/19");
+  assert.deepEqual(calls, [["19", ["--repo", "o/r"], { executionMode: "deterministic" }]]);
+  await new Promise((resolve) => setImmediate(resolve)); // let the un-awaited `.then` settle
+  assert.deepEqual(events, [], "a clean review exit is silent, matching the board sweep's own logging");
+});
+
+test("makeLandingReviewRequest: a review that settles NON-zero logs the exit code", async () => {
+  const events: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => events.push([step, extra]);
+  const runReviewCommand = async () => 7;
+  const request = makeLandingReviewRequest(log, runReviewCommand, "o/r");
+  request("https://github.com/o/r/pull/20");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [["feedback.landing_review.failed", { pr_url: "https://github.com/o/r/pull/20", exit_code: 7 }]]);
+});
+
+test("makeLandingReviewRequest: a rejected review command logs the error, never throws synchronously", async () => {
+  const events: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => events.push([step, extra]);
+  const runReviewCommand = async () => {
+    throw new Error("review command spawn failed");
+  };
+  const request = makeLandingReviewRequest(log, runReviewCommand, "o/r");
+  assert.doesNotThrow(() => request("https://github.com/o/r/pull/21"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [
+    ["feedback.landing_review.failed", { pr_url: "https://github.com/o/r/pull/21", error: "review command spawn failed" }],
+  ]);
 });
 
 test("landFeedback: a git failure that throws a NON-Error value still resolves to landed:false, folding the raw value into `error` (the outer catch's `?? e` fallback)", () => {

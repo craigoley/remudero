@@ -1,0 +1,77 @@
+- id: W1-T4023
+  title: "EVERY RECLAIM RUNG IS WIRED TO THE DISPATCH PATH, SO A HOST THAT STOPS DISPATCHING IS NEVER CLEANED AGAIN — the janitor rides `runTaskBody`, and a paused daemon returns at `daemon.pause` before reaching it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: "measured 2026-09-22 across both hosts: the Mac mini's daemon has ticked and paused ~97 times without dispatching, so no reclaim rung has run there, while its debris grew untouched"
+  plan_refs: [W1-T411, W1-T2847, W1-T4016]
+  files: [src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
+  rationale: |
+    MEASURED 2026-09-22 on the Mac mini, whose daemon has been up 8h40m:
+
+      98 rows  daemon.pause
+      97 rows  daemon.tick
+       0 rows  any reclaim/reap step
+
+    It ticks, pauses, and never dispatches. Meanwhile that host holds 1.2G of worker homes, 22
+    worktrees and a clone carrying 80 registrations, against a 228G disk with 16G free.
+
+    (1) THE RUNGS ARE NOT ON THE TICK PATH AT ALL. `pruneStaleRuns`,
+        `logWorktreeReapBootSurvey`, `runAdhocLaneReapRung` and `logDiskReclaimRung` are called
+        from `runTaskBody` (src/run-task.ts) — the per-DISPATCH body. `src/lib/daemon.ts` contains
+        no call to any of them.
+
+    (2) A PAUSE RETURNS BEFORE DISPATCH. daemon.ts logs `daemon.pause` and then `continue`s the
+        poll loop, so every line below it — including dispatch, and therefore including the whole
+        janitor — is skipped. An operator hold, a worker hold, or a deliberately quiesced host all
+        take that branch.
+
+    (3) SO RECLAIM IS COUPLED TO THE ONE CONDITION THAT MAKES IT UNNECESSARY. A busy host cleans
+        itself constantly; an idle one, which has the most headroom to clean safely and the least
+        reason to be interrupted, never cleans at all. That is backwards, and it is why the Mac
+        mini's debris is the oldest on the fleet while the Azure host's is hours old.
+
+    (4) THE COUPLING IS INVISIBLE IN THE LEDGER. Nothing records "reclaim did not run because this
+        host is not dispatching". The absence of reclaim rows on a paused host is indistinguishable
+        from a host with nothing to reclaim.
+  design: |
+    (i) RECLAIM RUNS ON THE TICK, NOT ONLY ON DISPATCH. The reclaim rungs are reachable from the
+        poll loop itself, so a daemon that is up runs them whether or not it dispatches. Every
+        existing refusal inside each rung is unchanged — this alters WHEN they are reached, never
+        what they are willing to remove.
+
+    (ii) A PAUSED HOST IS THE SAFEST TIME TO RECLAIM, NOT THE MOST DANGEROUS. Reclaim while
+         quiesced races nothing. A hold means "start no new work", and reclaiming debris from runs
+         that are already over is not new work — but it must still respect a STOP, which is a
+         different instruction from a pause.
+
+    (iii) NOT ON EVERY TICK. The poll interval is seconds; these sweeps stat whole directory
+          trees. They run on their own cadence, so a quiet daemon does not spend its life
+          statting, and the cadence is visible rather than implicit in the dispatch rate.
+
+    (iv) THE LEDGER DISTINGUISHES "RAN, FOUND NOTHING" FROM "NEVER RAN". Today those read the same,
+         which is how this went unnoticed for weeks on a host in plain view.
+
+    NOT IN SCOPE: what each rung is willing to delete (W1-T4016 covers the orphaned-lane gap, and
+    W1-T4017 the object store). This task is only about the rungs being REACHED.
+  acceptance:
+    - claim: "a daemon that ticks without dispatching still reaches the reclaim rungs"
+      proof: "unit test: a paused tick still reaches reclaim"
+    - claim: "a STOP still suppresses reclaim, because stop and pause are different instructions"
+      proof: "unit test: a stopped daemon reclaims nothing"
+    - claim: "reclaim runs on its own cadence rather than on every poll"
+      proof: "unit test: reclaim does not run on every tick"
+  falsifier: |
+    Run the rungs on every tick and the third assertion goes red — a seconds-long poll interval
+    would have the daemon statting trees continuously. Treat STOP like PAUSE and the second goes
+    red, which is the one case where "the host is quiet" must NOT license activity. Leave the calls
+    only in `runTaskBody` and the first goes red on a tick fixture that never dispatches, which is
+    exactly the Mac mini's shape.
