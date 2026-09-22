@@ -79,3 +79,24 @@ test("ABSENT STAYS ABSENT — a shard carrying no evidence reports none", () => 
   const [shard] = parkedVerifyHumanShards(plan, root, clock);
   assert.equal(shard?.evidence, undefined, "no evidence must read as undefined, never an empty string");
 });
+
+/**
+ * WHY THE PAIR AND NOT THE HALF. "Absent stays absent" is true at the merge base too — trivially,
+ * because `evidence` does not exist there at all, so a shard with a corpus and a shard with none
+ * BOTH read `undefined`. `proof-discrimination` grades that shape `executed_stale` and is right
+ * to: the assertion cannot fail on the tree this PR is meant to change.
+ *
+ * The criterion's actual content is a CONTRAST — "a shard with no evidence must read differently
+ * from one whose evidence was withheld", which is the defect this closes. Asserting both sides in
+ * one test is what makes that claim checkable, and it fails at the base on the second half.
+ */
+test("absence is DISTINGUISHABLE from withheld evidence — none reads undefined, a corpus reads through", () => {
+  const bare = planWith("  priority: 1");
+  const [none] = parkedVerifyHumanShards(loadPlan(join(bare, "plan", "tasks.yaml")), bare, clock);
+  assert.equal(none?.evidence, undefined, "no evidence must read as undefined, never an empty string");
+
+  const carrying = planWith('  ci_learning_prs: [5289, 5318, 5321]\n  origin: "ci-learning:5289:ci-gate"');
+  const [some] = parkedVerifyHumanShards(loadPlan(join(carrying, "plan", "tasks.yaml")), carrying, clock);
+  assert.ok(some?.evidence, "a shard that HAS a corpus must not read as absent -- that is the defect");
+  assert.match(some.evidence, /5289/, "and the corpus must be reachable, not merely non-empty");
+});
