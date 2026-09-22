@@ -1,0 +1,24 @@
+id: fb-1790079968421-abaf88
+ts: 2026-09-22T12:26:08.421Z
+raw: "Cross-repository semantic-supersession failure: console implementation PR
+  #1581 merged and credited UI-T55. Later plan PR #1590 materially broadened
+  UI-T55 with observable action lifecycle and E2E requirements but kept status:
+  queued. Console Architect triage #1602 then rejected the requested successor
+  by reading only the static queued status and claiming no stale-credit gap,
+  despite durable daemon ledger evidence that #1581 credited/fulfilled UI-T55.
+  This violates the intended post-merge amendment/follow-up invariant (W1-T180)
+  and credit-is-provenance-not-satisfaction boundary (W1-T2280). Fix core
+  planning/triage/lint so actual merge credit derived from PR trailer and branch
+  is consulted for target-repo tasks, regardless of a stale queued YAML field;
+  when a credited task is materially amended, require or mint an explicit
+  successor carrying the new scope and make triage unable to reject it as
+  uncredited. Add a cross-repo regression reproducing #1581/#1590 semantics."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
