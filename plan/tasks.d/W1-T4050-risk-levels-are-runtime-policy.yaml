@@ -20,9 +20,9 @@
   attempts: 0
   rationale: |
     THE OPERATOR'S WORDS: "I don't want strictness, I want risk levels and rules that can be
-    configured in the console." BACKLOGGED BY HIS OWN RULING on 2026-09-22 — filed at `priority: 90`
+    configured in the console." BACKLOGGED BY THE OPERATOR'S OWN RULING on 2026-09-22 — filed at `priority: 90`
     so it stays visible in the plan and dispatches only once higher-priority work drains. It is not
-    parked: nothing here needs him before it can be built.
+    parked: nothing here needs the operator before it can be built.
 
     WHAT IS HARD-CODED TODAY, READ AT 855dcb0b6. planRiskJudgeAction (src/lib/risk-judge.ts) escalates
     below DEFAULT_CONFIDENCE_THRESHOLD = 0.7, a module literal. plan/policy.yaml carries sweep, drain,
