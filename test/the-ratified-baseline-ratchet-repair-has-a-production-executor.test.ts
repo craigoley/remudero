@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { Config } from "../src/lib/config.js";
+import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import type { Plan } from "../src/lib/plan.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -48,15 +49,27 @@ interface ExecutorCalls {
   commits: number;
   removed: string[];
   ghReads: number;
+  logs: Array<{ step: string; extra: Record<string, unknown> | undefined }>;
 }
 
-function buildProductionExecutor(root: string, options: {
+interface ExecutorOptions {
   liveHead?: string;
+  liveBranch?: string;
+  ghError?: Error;
+  registeredOwner?: string;
+  registeredOwnerError?: Error;
   statuses?: Record<string, number>;
   states?: BaselineRatchetWorktreeState[];
-} = {}) {
+  packageScripts?: Readonly<Record<string, string>>;
+  commitResult?: { changed?: boolean; sha?: string };
+  createWorktreeError?: Error;
+  pushError?: Error;
+  removeWorktreeError?: Error;
+}
+
+function buildProductionExecutor(root: string, options: ExecutorOptions = {}) {
   mkdirSync(join(root, "state", "inflight"), { recursive: true });
-  const calls: ExecutorCalls = { generators: [], pushes: [], commits: 0, removed: [], ghReads: 0 };
+  const calls: ExecutorCalls = { generators: [], pushes: [], commits: 0, removed: [], ghReads: 0, logs: [] };
   const task = {
     id: "W1-T4004",
     title: "ratified baseline executor",
@@ -78,7 +91,7 @@ function buildProductionExecutor(root: string, options: {
     ledgerPath: join(root, "state", "ledger.ndjson"),
     runId: "SWEEP-W1-T4004",
     plan: { tasks: [task], byId: new Map([[task.id, task]]) } as unknown as Plan,
-    log: () => {},
+    log: (step, extra) => { calls.logs.push({ step, extra }); },
     policy: DEFAULT_SWEEP_POLICY,
     nowMsImpl: () => 1_790_075_494_125,
     reviewRunner: async () => 0,
@@ -86,13 +99,19 @@ function buildProductionExecutor(root: string, options: {
     ghJsonImpl: (args) => {
       calls.ghReads++;
       assert.deepEqual(args, ["pr", "view", ratchetPr().prUrl, "--json", "headRefName,headRefOid,body"]);
-      return { headRefName: BRANCH, headRefOid: options.liveHead ?? HEAD, body: "Remudero-Task: W1-T4004\n" };
+      if (options.ghError) throw options.ghError;
+      return { headRefName: options.liveBranch ?? BRANCH, headRefOid: options.liveHead ?? HEAD, body: "Remudero-Task: W1-T4004\n" };
     },
-    registeredWorktreeOwnerImpl: () => undefined,
+    registeredWorktreeOwnerImpl: () => {
+      if (options.registeredOwnerError) throw options.registeredOwnerError;
+      return options.registeredOwner;
+    },
     fixBranchClaimKeyImpl: () => "W1-T4004-ratchet-claim",
-    createFixRungWorktreeImpl: () => undefined,
+    createFixRungWorktreeImpl: () => {
+      if (options.createWorktreeError) throw options.createWorktreeError;
+    },
     readBaselineRatchetWorktreeStateImpl: () => states.shift(),
-    readPackageScriptsImpl: () => ({
+    readPackageScriptsImpl: () => options.packageScripts ?? ({
       "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs",
       "comment-load-signal": "node scripts/comment-load-ratchet.mjs --no-record",
       "source-size-baseline:legacy": "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",
@@ -104,17 +123,23 @@ function buildProductionExecutor(root: string, options: {
     },
     commitGeneratorOutputImpl: () => {
       calls.commits++;
-      return { changed: true, sha: "c".repeat(40) };
+      return options.commitResult ?? { changed: true, sha: "c".repeat(40) };
     },
     gitPushRunBranchImpl: (_worktree: string, opts = {}) => {
       calls.pushes.push(opts);
+      if (options.pushError) throw options.pushError;
     },
     worktreeRemoveImpl: (_repo: string, path: string) => {
       calls.removed.push(path);
+      if (options.removeWorktreeError) throw options.removeWorktreeError;
     },
   };
   // This is the entrypoint builder the daemon calls, not a test-only hand-built SweepDeps object.
   return { effects: buildEntrypointSweepEffects(deps), calls, ledgerPath: deps.ledgerPath };
+}
+
+function declineReason(calls: ExecutorCalls): unknown {
+  return calls.logs.find(({ step }) => step === "sweep.ratchet_repair_executor_declined")?.extra?.reason;
 }
 
 function sweepDeps(root: string, repairRecordableRatchet: NonNullable<SweepDeps["repairRecordableRatchet"]>) {
@@ -170,6 +195,72 @@ test("W1-T4004: a changed head declines the repair before any generator or push"
     assert.deepEqual(calls.pushes, []);
     assert.equal(calls.commits, 0);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4004: production executor names each unsafe pre-write refusal and never pushes", async () => {
+  const cases: ReadonlyArray<{
+    name: string;
+    options?: ExecutorOptions;
+    scripts?: readonly string[];
+    reason: string;
+  }> = [
+    { name: "unratified script", scripts: ["source-size-signal"], reason: "unratified_script_set" },
+    { name: "unreadable live head", options: { ghError: new Error("GitHub unavailable") }, reason: "live_head_unreadable" },
+    { name: "unowned head", options: { liveBranch: "human-branch" }, reason: "unowned_head" },
+    { name: "unreadable registered owner", options: { registeredOwnerError: new Error("git failed") }, reason: "registered_worktree_owner_unreadable" },
+    {
+      name: "moved or dirty worktree",
+      options: { states: [{ headSha: MOVED_HEAD, changedPaths: [] }] },
+      reason: "worktree_head_or_cleanliness_mismatch",
+    },
+    {
+      name: "missing signal script",
+      options: { packageScripts: { "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs" } },
+      reason: "script_not_declared",
+    },
+    {
+      name: "worktree changed while generating",
+      options: { states: [{ headSha: HEAD, changedPaths: [] }, { headSha: MOVED_HEAD, changedPaths: [] }] },
+      reason: "worktree_head_changed_before_commit",
+    },
+    {
+      name: "generator wrote outside the ratified baseline",
+      options: { states: [{ headSha: HEAD, changedPaths: [] }, { headSha: HEAD, changedPaths: ["scripts/unrelated.json"] }] },
+      reason: "unexpected_generated_path",
+    },
+    { name: "empty generator commit", options: { commitResult: { changed: false } }, reason: "generator_commit_empty" },
+    {
+      name: "executor or cleanup failure",
+      options: { createWorktreeError: new Error("worktree unavailable"), removeWorktreeError: new Error("cleanup unavailable") },
+      reason: "executor_error",
+    },
+  ];
+  for (const refusal of cases) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4004-refusal-"));
+    try {
+      const { effects, calls } = buildProductionExecutor(root, refusal.options);
+      assert.equal(await effects.repairRecordableRatchet!(ratchetPr(), refusal.scripts ?? ["comment-load-ratchet"]), false, refusal.name);
+      assert.equal(declineReason(calls), refusal.reason, refusal.name);
+      assert.deepEqual(calls.pushes, [], `${refusal.name} must not push a branch`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("W1-T4004: an already-held branch claim declines before a writer starts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4004-claim-"));
+  const { effects, calls } = buildProductionExecutor(root);
+  const held = acquireInflightLock(join(root, "state", "inflight"), "W1-T4004-ratchet-claim", { run_id: "OTHER-RUN" });
+  try {
+    assert.equal(await effects.repairRecordableRatchet!(ratchetPr(), ["comment-load-ratchet"]), false);
+    assert.equal(declineReason(calls), "inflight_lock_owner");
+    assert.deepEqual(calls.generators, []);
+    assert.deepEqual(calls.pushes, []);
+  } finally {
+    held.release();
     rmSync(root, { recursive: true, force: true });
   }
 });
