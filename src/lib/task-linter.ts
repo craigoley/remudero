@@ -57,6 +57,7 @@ export type LintCheck =
   | "proof-grep-self-certifying"
   | "proof-engine-divergence"
   | "proof-scope"
+  | "proof-self-path"
   | "proof-name-resolution"
   | "proof-unit-test-unresolvable"
   | "credited-test-path"
@@ -1324,6 +1325,56 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
         "still absent when this is reviewed, the criterion grades executed_fail instead, which " +
         `overrides keyword coverage and fails the PR. Add "${path}" to files: or rewrite the proof ` +
         "to name a path already in scope.",
+    });
+  });
+  return violations;
+}
+
+// ── PROOF-SELF-PATH (W1-T1070 — a proof naming the shard's OWN record) ──────
+// A proof at the task's OWN shard/monolith path (`task.sourcePath`, set once at parse time by
+// parseTasksFromYaml from the file the record actually lives in) is a DIFFERENT defect from an
+// ordinary out-of-scope proof, and `proofScopeViolations`' own first-listed remedy ("add the path
+// to files:") is actively harmful here: the shard is read ONLY through an implementing PR's
+// `Remudero-Task:` trailer, on a diff Rule 15 refuses to let a worker touch at all
+// (criterionFieldTampered), so a self-path proof matches base and head IDENTICALLY at implement
+// time regardless of what files: says, and grades executed_stale by construction. Declaring the
+// path does not change that — it only silences the generic warning (design point (ii); two shards
+// already took that "fix" and are now scoped to nothing but their own YAML). This check therefore
+// does NOT consult declared files: at all, and proofScopeViolations above is left untouched (design
+// point (vi)) — a self-path proof may still ALSO trip proof-scope when it is not declared, and that
+// is fine: the two checks answer different questions. WARN by default so no queued task is refused
+// at dispatch; the changed-tasks pass raises it to block (see LintOpts.proofSelfPath).
+// Why: docs/forensics/task-linter.md#proofselfpathviolations (W1-T1070, W1-T310, W1-T1056).
+
+/** Every criterion whose `grep:`/`unit test:` proof names THIS task's own shard or monolith record
+ *  — `task.sourcePath`. See the section comment above; `undefined` sourcePath (a hand-built fixture
+ *  Task, never parsed from disk) has no file to compare against and is silent. */
+export function proofSelfPathViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const ownPath = task.sourcePath;
+  if (!ownPath) return [];
+  const severity: LintSeverity = opts.proofSelfPath ?? "warn";
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
+    const path = proofScopePath(whitelisted);
+    if (!path) return; // names no path (a name-filtered unit test:, or bare prose) — nothing to compare
+    if (path !== ownPath) return; // names some other file — proof-scope's business, not this one
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    violations.push({
+      check: "proof-self-path",
+      severity,
+      message:
+        `criterion ${i + 1} ("${claimHead}") proof names "${path}" — THIS TASK'S OWN shard/record ` +
+        "file. That path is read only through an implementing PR's Remudero-Task: trailer, on a " +
+        "diff that never touches the shard itself (Rule 15's criterionFieldTampered refuses a " +
+        "worker who edits criteria at all), so the proof matches base and head identically at " +
+        "implement time and grades executed_stale by construction, no matter what files: says. " +
+        `Adding "${path}" to files: does NOT fix this — that only silences the generic proof-scope ` +
+        "warning without changing the proof, which stays exactly as stale. Move this proof to the " +
+        "FILING PR's own ## Acceptance body block, where it discriminates real bytes, and give this " +
+        "criterion a proof about the code the task will actually change.",
     });
   });
   return violations;
@@ -3281,6 +3332,10 @@ export interface LintOpts {
   /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
    *  for the measured retrofit count driving the default. */
   proofScope?: LintSeverity;
+  /** Severity for {@link proofSelfPathViolations}. Default "warn" — the engine-wide default, so the
+   *  32 shards already carrying this shape are not refused at dispatch overnight. The changed-tasks
+   *  pass (`lint-plan --base`) sets this to "block" so a newly filed or edited shard is refused. */
+  proofSelfPath?: LintSeverity;
   /** W1-T3730 — is THIS diff a filing (plan-only) rather than a build? Supplied only by
    *  `lint-plan --base`, the one caller holding the diff; absent ⇒ {@link
    *  proofUnitTestUnresolvableViolations} behaves exactly as it did before this field existed, so
@@ -3385,6 +3440,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-grep-self-certifying",
   "proof-engine-divergence",
   "proof-scope",
+  "proof-self-path",
   "proof-name-resolution",
   "proof-base-discrimination",
   "proof-unit-test-base-wrapper",
@@ -3439,6 +3495,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofResolvabilityViolations(task, opts));
   violations.push(...proofGrepSafetyViolations(task, opts));
   violations.push(...proofScopeViolations(task, opts));
+  violations.push(...proofSelfPathViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...creditedTestPathViolations(task, opts));

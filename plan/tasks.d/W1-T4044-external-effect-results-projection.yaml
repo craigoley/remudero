@@ -19,7 +19,6 @@
     - test/action-results-redaction.test.ts
     - test/action-results-bounds.test.ts
     - test/the-console-draws-the-graph-it-computes.test.ts
-    - scripts/test-tier-manifest.json
   status: queued
   priority: 1
   rationale: |
@@ -69,7 +68,7 @@
     - claim: "filters, cursor, count, and response bytes are bounded before ledger rows reach the caller"
       proof: "grep: action-results route enforces bounded filters and explicit unavailable states in test/action-results-bounds.test.ts"
     - claim: "the route is actually mounted and named in the public contract"
-      proof: "grep: /v1/action-results in src/lib/panel-graph.ts"
+      proof: "grep: /v1/action-results in openapi/daemon.yaml"
     - claim: "the new projection module is called by the daemon's panel-graph assembly rather than being reachable only from its own tests"
       proof: "grep: buildActionResultsRoute( in src/lib/panel-graph.ts"
   falsifier: |
@@ -86,8 +85,10 @@
     separate core task supplies an authorized executor and durable receipt path. This separation
     keeps the automated flow moving without inventing an action engine at the UI boundary.
     Amendment 2026-09-22: the implementation's mounted-route registration changes the existing
-    graph-shape census, and the repository's tier manifest records the new tests. Both are part of
-    this task's executable integration surface and are declared here so the implementation can keep
-    the route census and generated test metadata honest without an undeclared scope overrun. The
-    source implementation remains responsible for the route behavior and executable assertions;
-    this amendment only records the files that its integration surface necessarily changes.
+    graph-shape census changes. The route-shape fixture is part of this task's executable
+    integration surface and is declared here so the implementation can keep the route census
+    honest without an undeclared scope overrun. The generated test-tier manifest is intentionally shared metadata; its ownership remains with the generated-file gate rather than one implementation task. The source implementation remains responsible for route behavior and
+    executable assertions; this amendment only records the fixture that its integration surface
+    necessarily changes.
+    Amendment 2026-09-22 public-contract: the literal route path proof now points to
+    openapi/daemon.yaml; panel-graph wiring remains a separate criterion.

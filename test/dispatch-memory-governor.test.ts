@@ -15,7 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -174,10 +174,21 @@ test("W1-T1038: the probe reads meminfo not the cgroup limit", () => {
     "a cgroup-shaped file must not parse as a meminfo reading",
   );
 
-  // The default argument reads the REAL /proc/meminfo and returns a plausible positive figure —
-  // proving the probe's default source is the real host file, not a stub.
-  const real = readAvailableMemoryMib();
-  assert.ok(Number.isFinite(real) && real > 0, `expected a real positive MiB figure, got ${real}`);
+  // The default argument reads the REAL /proc/meminfo — proving the probe's default source is the
+  // real host file, not a stub. Where procfs exists (linux, CI, the fleet) that read returns a
+  // plausible positive figure. Where it does not (darwin), the SAME default call must fail naming
+  // /proc/meminfo: that still proves the default source is the real host path, and it proves the
+  // probe never invents a figure when the file is missing. Asserted on both hosts, never skipped.
+  if (existsSync("/proc/meminfo")) {
+    const real = readAvailableMemoryMib();
+    assert.ok(Number.isFinite(real) && real > 0, `expected a real positive MiB figure, got ${real}`);
+  } else {
+    assert.throws(
+      () => readAvailableMemoryMib(),
+      (e: NodeJS.ErrnoException) => e.code === "ENOENT" && /\/proc\/meminfo/.test(String(e.message)),
+      "with no procfs, the default source must still be /proc/meminfo — and must throw, not produce a number",
+    );
+  }
 });
 
 // ── acceptance: the check is re-consulted per lane rather than hoisted above the loop ──────────

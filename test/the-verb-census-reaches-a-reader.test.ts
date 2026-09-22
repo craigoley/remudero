@@ -327,7 +327,23 @@ test("the measurement-cadence daemon hook attaches a verbCensus when called for 
   const root = tmp("rmd-vc-cadence-");
   try {
     mkdirSync(join(root, "state"), { recursive: true }); // no ledger archive: the corpus refuses
-    const hooks = buildMeasurementCadenceDaemonHooks({ config: { root } as Config, now: () => new Date("2026-08-25T12:00:00Z") });
+    // The run closure stays REAL (no `run`/`check`); only its two GitHub-facing leaves are pinned
+    // offline, the same seams test/measurement-cadence.test.ts already injects. Left live, the
+    // credit projection shells the real `gh` whenever that host is authenticated (the verify-human
+    // rung writes ledger rows into this fixture first, so the "no ledger → empty set" short-circuit
+    // never fires): on an operator machine it returns the whole merged set, the plan-reconcile
+    // rung sees drift over its threshold and tries to force-push a landing branch, and only the
+    // live-write guard stops it. A CI runner with no GH_TOKEN never got that far, so this test's
+    // verdict depended on the host's gh login rather than on the verb census.
+    const hooks = buildMeasurementCadenceDaemonHooks({
+      config: { root } as Config,
+      now: () => new Date("2026-08-25T12:00:00Z"),
+      creditedMergedIds: () => new Set(),
+      planReconcileLand: () => {
+        throw new Error("a verb-census fixture must never reach the plan-reconcile landing bridge");
+      },
+      coverageImprovementReader: () => ({ status: "refused", reason: "no_coverage_merged_artifact", detail: "offline fixture" }),
+    });
     const result = await hooks.runMeasurementCadence();
     assert.ok(result.verbCensus, "the real daemon producer must attach a verbCensus");
     assert.equal(result.verbCensus!.status, "refused", "no ledger archive exists in this fixture — refused, not a fabricated zero");

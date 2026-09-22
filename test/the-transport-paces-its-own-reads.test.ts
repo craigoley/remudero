@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, utimesSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, utimesSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -140,6 +140,11 @@ test("the stamp path matches the hook's own resolution, including the HOME fallb
   assert.equal(ghReadCadenceStampPath({} as NodeJS.ProcessEnv), undefined);
 });
 
+test("the explicit host cache override is shared by the transport and hook", () => {
+  const env = { RMD_GH_CACHE_HOME: "/host/cache", XDG_CACHE_HOME: "/worker/cache", HOME: "/worker" } as NodeJS.ProcessEnv;
+  assert.equal(ghReadCadenceStampPath(env), "/host/cache/remudero/gh-last-read");
+});
+
 // ── (4) ADVISORY BY DEFAULT ─────────────────────────────────────────────────────────────────
 
 test("the floor is advisory by default and refuses only when explicitly enforced", () => {
@@ -267,6 +272,78 @@ test("applyGhReadCadence stamps an allowed read and leaves a write and the budge
     // AN ALLOWED READ DOES — through the DEFAULT stamp io, not a fake.
     applyGhReadCadence(["api", "repos/o/r/pulls/1"], { env, warn: () => {} });
     assert.notEqual(readGhReadCadenceStampMs(stamp), undefined, "an allowed read must stamp");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the shared cadence lock is released and applies a bounded gap to a sibling read", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lock-`));
+  try {
+    const env = { XDG_CACHE_HOME: dir } as NodeJS.ProcessEnv;
+    const stamp = ghReadCadenceStampPath(env) as string;
+    const sleeps: number[] = [];
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.equal(sleeps.some((ms) => ms > 0), false, "a process must not wait on its own freshly written stamp");
+    assert.equal(existsSync(`${stamp}.lock`), false, "the lock must not survive a completed read");
+    stampGhRead(stamp);
+    // Force a distinct mtime so this deterministic sibling simulation cannot round to the same
+    // millisecond as the process-local stamp above.
+    const siblingTime = (Date.now() + 5) / 1000;
+    utimesSync(stamp, siblingTime, siblingTime);
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.ok(sleeps.some((ms) => ms > 0), "a sibling read must observe the bounded shared gap");
+    assert.equal(existsSync(`${stamp}.lock`), false, "the second read must release the lock too");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an explicit zero shared gap skips only the bounded sibling delay", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lock-override-`));
+  try {
+    const env = { XDG_CACHE_HOME: dir, RMD_GH_SHARED_READ_GAP_MS: "0" } as NodeJS.ProcessEnv;
+    const stamp = ghReadCadenceStampPath(env) as string;
+    const sleeps: number[] = [];
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    stampGhRead(stamp);
+    const siblingTime = (Date.now() + 5) / 1000;
+    utimesSync(stamp, siblingTime, siblingTime);
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.equal(sleeps.some((ms) => ms > 0), false, "the explicit zero override must skip the sibling delay");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale shared cadence lock is reclaimed before the read proceeds", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lock-stale-`));
+  try {
+    const env = { XDG_CACHE_HOME: dir } as NodeJS.ProcessEnv;
+    const stamp = ghReadCadenceStampPath(env) as string;
+    const lock = `${stamp}.lock`;
+    mkdirSync(lock, { recursive: true });
+    const stale = (Date.now() - 60_000) / 1000;
+    utimesSync(lock, stale, stale);
+    const sleeps: number[] = [];
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.equal(existsSync(lock), false, "a stale owner cannot hold the shared cadence lock forever");
+    assert.equal(sleeps.length, 0, "a stale lock is reclaimed without waiting for its former owner");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable shared cadence lock fails open after bounded contention", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lock-unreadable-`));
+  try {
+    const env = { XDG_CACHE_HOME: dir, RMD_GH_SHARED_READ_GAP_MS: "0" } as NodeJS.ProcessEnv;
+    const stamp = ghReadCadenceStampPath(env) as string;
+    mkdirSync(join(dir, "remudero"), { recursive: true });
+    symlinkSync("missing-lock-target", `${stamp}.lock`);
+    const sleeps: number[] = [];
+    assert.doesNotThrow(() => applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} }));
+    assert.ok(sleeps.length > 0, "unreadable contention still uses the bounded retry path before failing open");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

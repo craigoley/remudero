@@ -1,0 +1,60 @@
+- id: W1-T4075
+  title: "EVERY DAEMON RESTART FREEZES THE LOOP 85-99 S ON ITS FIRST SWEEP AND EVERY WARM SWEEP STILL BLOCKS 30-50 S UNSEEN — 62-170 synchronous gh spawns per pass at 5% CPU or less: move the tick's reads to a worker-hosted, generation-bound read plane and report loop delay as a distribution"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T4051, W1-T3109, W1-T4046, W1-T4041]
+  files: [src/lib/read-plane.ts, src/lib/read-plane.worker.ts, src/run-task.ts, src/lib/daemon.ts, test/the-tick-reads-run-off-the-event-loop.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 (loop-lag rows, 4-day union, and a replay of the live code in the daemon container with a spawn
+    and Atomics.wait spy).
+    (1) Five of six sweep-phase `daemon.loop_lag` overruns (18:20 99 s, 18:58 93 s, 19:22 81 s, 20:30 106 s, 20:58 95 s)
+        are sweep #0 of a freshly restarted daemon: the credit phase (`buildCreditCandidates`) took 84.5-98.6 s cold vs
+        7.0-8.5 s warm. Cold replay: 107 synchronous gh calls in 47.1 s — 91 `pulls/N/files` — with 1.8 s of CPU.
+        `changedFiles` is memoised per gateway lifetime, so every restart starts cold. The sixth (19:25, 70 s) is a
+        first-pass branch reap (96 branches, 40.1 s) plus a 20.5 s draft hook.
+    (2) The 19:31 168 s overrun also contained 50 s of `runMeasurementCadence()` running synchronously before returning
+        its promise, besides the board-review check W1-T4051 fixed.
+    (3) Warm sweeps block too, below the sampler's 60 s floor: 0 of 509 plan-filing -> post-fix gaps (p50 29 s, p90 52 s)
+        contain any timer-driven row, and 155 of 266 sweep-phase `daemon.alive` rows fire < 1 s after
+        `sweep.fix_capacity:full` — timers released at once when the synchronous prefix ends. buildOpenPrViews plus the
+        post-fix check asked for 62 synchronous calls per sweep at 10 open PRs (~2.1 s CPU in 41 s).
+    (4) #6569 (merged) adds a cross-process read lock whose wait is `Atomics.wait` on the calling thread, even inside
+        the async transport — up to 1.5 s more frozen loop per read while serve or reviewers are reading.
+    (5) The time is spent WAITING on child processes, not computing; the reads just happen on the loop's thread.
+  design: |
+    (i) One long-lived worker_thread owns the warm gateway, the pacer and the caches, runs today's synchronous READ code
+        unchanged, and publishes an immutable per-tick snapshot tagged with a generation: open-PR rows and views, the tick
+        projection, board-review items. Sweep, board review, credit, escalation and draft readiness read ONE generation.
+        src/lib/read-plane.ts `startReadPlane()` is called by daemonCommand. Node's "don't block the event loop" offload;
+        the generation makes one source of fact per tick, closing the class W1-T4051 and W1-T3109 patch one site at a time.
+    (ii) Reads only: no write, push, merge or review leaves the main thread.
+    (iii) A crashed or unavailable worker degrades the tick to today's inline reads and ledgers `read_plane.inline` —
+          it heals itself and no PR is stuck.
+    (iv) `changedFiles` persists through the board snapshot so a restart is warm.
+    (v) `daemon.alive` carries `loop_delay_max_ms`, `loop_delay_p99_ms` and `sync_spawn_ms` from
+        `perf_hooks.monitorEventLoopDelay` — a distribution, always reported, no threshold; lag rows add
+        `last_step_before_block`.
+    Land W1-T3109 (one shared open-PR read) first if it is still queued; the read plane then hosts its producer.
+  acceptance:
+    - claim: "the tick's reads run in the worker while a main-thread timer keeps firing"
+      proof: 'grep: test("W1-T4075: the tick reads run off the main thread while a timer keeps firing" in test/the-tick-reads-run-off-the-event-loop.test.ts'
+    - claim: "one generation serves sweep, board review, credit and escalation with a single open-PR read"
+      proof: 'grep: test("W1-T4075: one generation serves sweep and board review and credit with one open-PR read" in test/the-tick-reads-run-off-the-event-loop.test.ts'
+    - claim: "a crashed read-plane worker degrades to inline reads and still disposes every PR"
+      proof: 'grep: test("W1-T4075: a crashed read-plane worker degrades to inline reads and disposes every PR" in test/the-tick-reads-run-off-the-event-loop.test.ts'
+    - claim: "daemon alive reports the loop-delay maximum of a block shorter than the poll interval"
+      proof: 'grep: test("W1-T4075: daemon alive reports the loop delay of a block shorter than the interval" in test/the-tick-reads-run-off-the-event-loop.test.ts'
+    - claim: "the daemon starts the read plane"
+      proof: 'grep: startReadPlane( in src/run-task.ts'
+  falsifier: |
+    After deploy, a sweep-phase `daemon.alive` still landing within 1 s of `fix_capacity:full` on sweep #0, or a warm
+    sweep's `loop_delay_max_ms` above a few seconds, means it has not worked.

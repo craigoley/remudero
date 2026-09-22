@@ -1,0 +1,44 @@
+- id: W1-T4073
+  title: "THE FIX RUNG DISPATCHES FROM THE DAEMON'S BOOT PLAN, SO A WORKER BUILT A SUPERSEDED TEST FILE THE OPERATOR HAD TO REVERT — the plan reloads only between main-loop iterations and long inline fix rounds kept it 27 minutes stale: resolve files and acceptance at the PR head before rendering the prompt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T3557, W1-T4051]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/the-fix-rung-reads-its-contract-at-the-pr-head.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-22.
+    (1) Daemon pid 75605 booted 19:18:34 on c4269e117; its first `daemon.plan_reloaded` was 20:16:39. The plan reloads
+        between main-loop iterations (src/lib/daemon.ts), and inline fix rounds of ~13-18 min kept the loop from getting
+        there.
+    (2) The #6630 fix round began ~19:54 from `fixRungTaskFor(plan, ...)` with `plan` = `activePlanRef.current`, still
+        the boot plan, whose W1-T4051 record named `test/the-board-review-check-does-not-freeze-the-loop.test.ts`;
+        #6627 (merged 19:26:37) had replaced it. The PR's own head already contained #6627.
+    (3) `renderFixPrompt` puts `task.files` in the worker's declared scope; the worker created the superseded file and the
+        harness committed it (3b1ae4cee); the operator reverted it (25e3655fd).
+    (4) The same stale plan made 4 real W1-T tasks look synthetic to the fix rung (W1-T3910, W1-T3934, W1-T3762,
+        W1-T4042; 11-28 min lag). `resolvePlanCriteriaAtHead` (W1-T3557) exists but is wired only at re-review.
+  design: |
+    (i) At dispatch, the fix rung resolves the task's files and acceptance from the plan AT THE PR'S HEAD — the head it
+        is repairing — through the existing head-bound resolver, not from the daemon's snapshot.
+    (ii) The prompt, the scope guard and the harness commit all read that one resolved contract.
+    (iii) An unreadable head contract stands the round down with a named reason; it never falls back to the snapshot.
+  acceptance:
+    - claim: "a task record amended after boot reaches the fix prompt"
+      proof: 'grep: test("W1-T4073: a record amended after boot reaches the fix prompt" in test/the-fix-rung-reads-its-contract-at-the-pr-head.test.ts'
+    - claim: "a task absent from the snapshot but present at the head is not synthetic"
+      proof: 'grep: test("W1-T4073: a task absent from the snapshot but present at head is not synthetic" in test/the-fix-rung-reads-its-contract-at-the-pr-head.test.ts'
+    - claim: "an unreadable head contract stands the round down"
+      proof: 'grep: test("W1-T4073: an unreadable head contract stands the round down" in test/the-fix-rung-reads-its-contract-at-the-pr-head.test.ts'
+    - claim: "the prompt, scope guard and commit share one contract"
+      proof: 'grep: test("W1-T4073: the prompt and scope guard and commit share one contract" in test/the-fix-rung-reads-its-contract-at-the-pr-head.test.ts'
+  falsifier: |
+    Pass the snapshot contract and the first renders the superseded file name. Fall back on an unreadable head and the
+    third goes red.

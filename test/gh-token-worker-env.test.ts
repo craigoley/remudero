@@ -22,9 +22,13 @@ import { billingMode, buildWorkerEnv, isBillingClean } from "../src/lib/env.js";
 
 const FAKE_GH = "gho_FAKE_NOT_A_REAL_TOKEN_0000000000000000";
 
-/** The production call shape: `spawnWorker` always passes `home` and `shell` from config. */
+/** The production call shape: `spawnWorker` always passes `home`, `shell`, and the instance cache from config. */
 function productionEnv(parent: NodeJS.ProcessEnv) {
-  return buildWorkerEnv({}, parent, { home: "/opt/rmd/worker-home-run1", shell: "/bin/bash" });
+  return buildWorkerEnv({}, parent, {
+    home: "/opt/rmd/worker-home-run1",
+    shell: "/bin/bash",
+    xdgCacheHome: "/opt/rmd/state/cache",
+  });
 }
 
 test("GH_TOKEN reaches the worker child through the production call shape", () => {
@@ -37,6 +41,12 @@ test("nothing is invented: a parent with no GH_TOKEN yields a child with no GH_T
   // or a macOS run (where the credential is a file, not a variable) would grow a phantom one.
   const child = productionEnv({ PATH: "/usr/bin", HOME: "/home/node" });
   assert.equal("GH_TOKEN" in child, false, "absent in the parent must stay absent in the child");
+});
+
+test("the production worker keeps HOME private while sharing the GitHub cadence cache", () => {
+  const child = productionEnv({ PATH: "/usr/bin", HOME: "/home/node", XDG_CACHE_HOME: "/home/node/.cache" });
+  assert.equal(child.HOME, "/opt/rmd/worker-home-run1");
+  assert.equal(child.XDG_CACHE_HOME, "/opt/rmd/state/cache");
 });
 
 test("GH_TOKEN does NOT weaken the ANTHROPIC_* refusal — a stray ANTHROPIC_ key still throws", () => {

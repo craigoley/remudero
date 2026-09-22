@@ -13,7 +13,7 @@ raw: "Architect triage failed to convert the approved console-proof planning
   console successor."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/6575
 summary:
