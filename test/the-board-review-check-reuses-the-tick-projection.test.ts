@@ -15,11 +15,11 @@
 // that the daemon actually wires it.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildBoardReviewDaemonHooks, type BoardReviewItemsIo } from "../src/run-task.js";
+import { boardReviewHooksForTick, buildBoardReviewDaemonHooks, type BoardReviewItemsIo } from "../src/run-task.js";
 import type { BoardItem } from "../src/lib/board-review.js";
 import type { Config } from "../src/lib/config.js";
 import type { OpenPrRest } from "../src/lib/open-prs-rest.js";
@@ -146,12 +146,46 @@ void test("W1-T4051: no projection degrades escalations, not reconciliation", ()
 });
 
 void test("W1-T4051: the daemon wires the board review to its tick projection", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const start = source.indexOf("export async function daemonCommand(");
-  assert.ok(start >= 0, "control: daemonCommand is in run-task.ts");
-  const body = source.slice(start, source.indexOf("\nexport ", start + 1));
-  const call = body.slice(body.indexOf("buildBoardReviewDaemonHooks("), body.indexOf("buildBoardReviewDaemonHooks(") + 200);
-  assert.ok(call.startsWith("buildBoardReviewDaemonHooks("), "control: daemonCommand builds the board-review hooks");
-  assert.match(call, /projection: \(\) => lastProj\b/);
-  assert.match(call, /plan: \(\) => activePlanRef\.current\b/);
+  // BEHAVIOUR, not source text: `boardReviewHooksForTick` is the exact call daemonCommand makes (that
+  // call site is pinned by test/board-review-wiring.test.ts, whose subject is the source). Given the
+  // tick's providers, the hooks it returns read them and never derive their own.
+  const root = tmpRoot();
+  try {
+    let projectPlanCalls = 0;
+    let projectionCalls = 0;
+    let reconciled: readonly BoardItem[] | undefined;
+    const hooks = boardReviewHooksForTick(
+      { root } as unknown as Config,
+      {
+        projection: () => {
+          projectionCalls++;
+          return tickProjection();
+        },
+        plan: () => TICK_PLAN,
+      },
+      {
+        policy: POLICY,
+        now: () => NOW,
+        itemsIo: {
+          resolveOwnerRepo: () => ({ owner: "o", repo: "r" }),
+          fetchOpenPrs: () => OPEN_PRS,
+          projectPlan: () => {
+            projectPlanCalls++;
+            return new Map();
+          },
+          now: () => NOW,
+        },
+        reconcile: (opts) => {
+          reconciled = opts.items;
+          return { retiredProposalIds: [], retired: [] };
+        },
+      },
+    );
+    hooks.checkBoardReview();
+    assert.equal(projectionCalls, 1);
+    assert.equal(projectPlanCalls, 0);
+    assert.equal(reconciled?.find((item) => item.id === "#6612")?.unhandledEscalations, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

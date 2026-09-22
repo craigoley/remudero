@@ -25319,6 +25319,17 @@ export function buildIntakeRungsDaemonHooks(deps: {
  * design calls out as otherwise unreachable ("a board whose findings have all cleared trips no
  * depth arm at all, so it never fires again and the dead rows sit forever").
  */
+/** W1-T4051: the daemon's board-review hooks, bound to the projection and plan THIS tick already
+ *  derived. `daemonCommand` calls exactly this, so what the tests assert of it is what the daemon runs;
+ *  the call site itself is pinned by test/board-review-wiring.test.ts. `deps` is for tests only. */
+export function boardReviewHooksForTick(
+  config: Config,
+  tick: { projection: () => Map<string, StatusProjection> | undefined; plan: () => Plan },
+  deps: Omit<NonNullable<Parameters<typeof buildBoardReviewDaemonHooks>[0]>, "config" | "projection" | "plan"> = {},
+): ReturnType<typeof buildBoardReviewDaemonHooks> {
+  return buildBoardReviewDaemonHooks({ ...deps, config, projection: tick.projection, plan: tick.plan });
+}
+
 export function buildBoardReviewDaemonHooks(deps: {
   check?: () => BoardReviewCadenceDecision;
   run?: () => Promise<BoardReviewReport>;
@@ -30195,7 +30206,7 @@ export async function daemonCommand(
   // W1-T4051: handed THIS tick's projection and plan — the same `lastProj` `isOpenPr` and `openPrCount`
   // read — so the check never derives a second one on a cold gateway (was ~120 s of synchronous `gh`).
   const boardReviewHooks = target.isSelf
-    ? buildBoardReviewDaemonHooks({ config, projection: () => lastProj, plan: () => activePlanRef.current })
+    ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
     : undefined;
   // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
   // its marker and ledger live under this harness checkout. The pair itself still targets the
