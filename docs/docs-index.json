@@ -674,6 +674,12 @@
       "grepHint": "Recon: per-tool approval (W1-T3668)"
     },
     {
+      "path": "docs/recon/the-polled-404.md",
+      "title": "The polled 404 — a real `gh` 404, silently caught, that leaks anyway (W1-T3679)",
+      "summary": "METHOD, STATED UP FRONT. This repo (checked out here as a worktree) has no live shell into the",
+      "grepHint": "The polled 404 — a real `gh` 404, silently caught, that leaks anyway (W1-T3679)"
+    },
+    {
       "path": "docs/repo-dashboard-research.md",
       "title": "Repo dashboard research",
       "summary": "Checked 2026-09-19 against public product documentation. This is a design input for the",
