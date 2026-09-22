@@ -5856,6 +5856,16 @@ async function runReview(args: {
       testTheater: false, summary: "identical review decision is already in flight",
       floorDegraded: false, capped: true, keywordOnly: true, planOnly: planOnlyDiff(diff),
     };
+    log("review.stood_down", {
+      context: REVIEW_CONTEXT,
+      state: held.state,
+      head_sha: headSha,
+      pr_url: prUrl,
+      review_decision_digest: decisionDigest,
+      decision_verdict: held,
+      reviewer_outcome: "not_attempted_decision_in_flight",
+      ...reviewLedgerReasonFields({ decisionDisposition: "in_flight" }),
+    });
     return { ...held, headSha, reviewerOutcome: "not_attempted_decision_in_flight", reviewDecisionDigest: decisionDigest, decisionDisposition: "in_flight" };
   }
   try {
@@ -6272,7 +6282,7 @@ async function runReview(args: {
     // directly rather than only readable from prose, so a degraded verdict
     // never again says only "unavailable". See degradedReasonLedgerFields's
     // own doc for why this is a shared function, not hand-copied fields.
-    ...degradedReasonLedgerFields(args.materializationFailure),
+    ...reviewLedgerReasonFields({ decisionDisposition, materializationFailure: args.materializationFailure }),
     // W1-T185 (criterion 5): `capped` — computed UNCONDITIONALLY, never forcing
     // `state`/`floor_state` (CAPPED IS NOT FAIL); consequential only via the
     // SEPARATE auto-merge arming path (decideAutoMergeArm, below), which
@@ -16262,6 +16272,14 @@ export function reviewPostedDescription(
     : verdict.summary;
 }
 
+/** Manual review cause annotation; an in-flight claim is not a missing PR-head checkout. */
+export function reviewVerdictAnnotation(
+  verdict: Pick<ReviewVerdict, "keywordOnly"> & Partial<Pick<ReviewRunResult, "decisionDisposition">>,
+): string {
+  if (verdict.decisionDisposition === "in_flight") return "HELD: identical review decision is already in flight";
+  return verdict.keywordOnly ? "KEYWORD-ONLY: no proof was executed (no PR-head checkout)" : "";
+}
+
 /** The `review.posted` ledger line's degraded-reason fields (W1-T233) —
  * mirrors {@link reviewLedgerLegibilityFields}'s pattern: one function the
  * real log call AND a unit test both read the SAME two fields through, so
@@ -16275,6 +16293,34 @@ export function degradedReasonLedgerFields(materializationFailure?: Materializat
     degraded_reason: materializationFailure?.message,
     degraded_reason_class: materializationFailure?.errorClass,
   };
+}
+
+/** Stable, countable causes for review degradation or a held decision. */
+export function reviewLedgerReasonFields(args: {
+  decisionDisposition?: ReviewRunResult["decisionDisposition"];
+  materializationFailure?: MaterializationFailure;
+}): {
+  review_reason?: "decision_in_flight" | "materialization_failure";
+  review_reason_detail?: string;
+  decision_disposition?: "in_flight";
+  degraded_reason?: string;
+  degraded_reason_class?: MaterializationErrorClass;
+} {
+  if (args.decisionDisposition === "in_flight") {
+    return {
+      review_reason: "decision_in_flight",
+      review_reason_detail: "identical review decision is already in flight",
+      decision_disposition: "in_flight",
+    };
+  }
+  if (args.materializationFailure) {
+    return {
+      review_reason: "materialization_failure",
+      review_reason_detail: `${args.materializationFailure.errorClass}: ${args.materializationFailure.message}`,
+      ...degradedReasonLedgerFields(args.materializationFailure),
+    };
+  }
+  return {};
 }
 
 /**
@@ -17317,7 +17363,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   console.log(
     `\nremudero-review=${verdict.state} ${verdict.codeFreshnessWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
       (verdict.codeFreshnessWithheld ? ` — ${verdict.codeFreshnessWithheld}` : "") +
-      (verdict.keywordOnly ? " — KEYWORD-ONLY: no proof was executed (no PR-head checkout)" : "") +
+      (reviewVerdictAnnotation(verdict) ? ` — ${reviewVerdictAnnotation(verdict)}` : "") +
       // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
