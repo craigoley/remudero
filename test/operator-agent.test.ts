@@ -143,15 +143,35 @@ test("operator-agent routes keep reads separate from writes and persist proposal
 test("unit test: operator-agent reads use the refreshed memory snapshot without a synchronous union read", async () => {
   const { ledgerPath, proposal } = fixture();
   const memory: OperatorAgentMemorySource = {
-    current: () => ({ state: "ready", asOf: "2026-09-21T00:00:00.000Z", rows: [{ step: OPERATOR_AGENT_PROPOSAL_STEP, proposal }] }),
+    current: () => ({
+      state: "ready",
+      asOf: "2026-09-21T00:00:00.000Z",
+      rows: [
+        { step: OPERATOR_AGENT_PROPOSAL_STEP, proposal },
+        {
+          step: "panel.operator_agent_decision",
+          proposal_id: proposal.proposalId,
+          decision: "accepted",
+          at: proposal.createdAt,
+          note: "The queue signal is strong enough to review.",
+        },
+        {
+          step: "panel.operator_agent_outcome",
+          proposal_id: proposal.proposalId,
+          outcome: { summary: "Queue latency fell after the pool change.", helped: true, observedAt: proposal.createdAt },
+        },
+      ],
+    }),
     record: () => assert.fail("a read must not record or rescan the ledger"),
   };
 
   await withService(ledgerPath, async (base) => {
     const response = await get(base, READ_TOKEN);
     assert.equal(response.status, 200);
-    const body = (await response.json()) as { proposals: OperatorAgentProposal[] };
+    const body = (await response.json()) as { proposals: Array<OperatorAgentProposal & { status: string; outcome?: { helped?: boolean } }> };
     assert.deepEqual(body.proposals.map((item) => item.proposalId), [proposal.proposalId]);
+    assert.equal(body.proposals[0]?.status, "accepted");
+    assert.equal(body.proposals[0]?.outcome?.helped, true);
   }, undefined, memory);
 });
 

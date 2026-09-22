@@ -216,6 +216,25 @@ test("unit test: operator-agent memory refresh includes rotated and live ledger 
   }
 });
 
+test("unit test: legacy analytics snapshots receive an empty ready memory read model before freezing", async () => {
+  const observed = deriveAnalyticsSnapshot([], "2026-08-14T01:00:00.000Z");
+  // Checkpoints written before W1-T4001 have no process-owned memory property. Recreate that
+  // wire shape by spreading the non-enumerable field away, then let the cache compatibility path
+  // attach the empty ready read model before publication.
+  const legacy = { ...observed } as AnalyticsSnapshot;
+  const cache = createAnalyticsSnapshotCache({
+    stateDir: "/unused",
+    readSnapshot: async () => legacy,
+    schedule: () => ({ unref() {}, cancel() {} }),
+  });
+
+  await cache.refresh();
+  const published = cache.current();
+  assert.equal(published.operatorAgentMemory.state, "ready");
+  assert.deepEqual(published.operatorAgentMemory.rows, []);
+  assert.equal(Object.prototype.propertyIsEnumerable.call(published, "operatorAgentMemory"), false);
+});
+
 test("streamed analytics: a corrupt archive is skipped, best-effort, never a crash", async () => {
   const dir = tmpStateDir("rmd-analytics-corrupt-");
   try {
