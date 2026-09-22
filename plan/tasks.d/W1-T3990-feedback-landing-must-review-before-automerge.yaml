@@ -60,7 +60,7 @@
     - claim: "an already-open landing PR converges through review to one auto-merge arm"
       proof: "unit test: an existing landing PR missing review is repaired before merge"
     - claim: "the production landing path reaches the shared review producer rather than a second raw status writer"
-      proof: "grep: reviewCommand in src/run-task.ts"
+      proof: "grep: requestLandingReview in src/run-task.ts"
   falsifier: |
     Remove the review handoff or move auto-merge ahead of it: the fresh-landing ordering test must
     fail because `gh pr merge --auto` is observed without the current-head review event. Make the
