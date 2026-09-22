@@ -13,7 +13,7 @@
     - test/a-durable-plan-filing-credit-is-revalidated.test.ts
   origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
   plan_refs: ["W1-T1004", "W1-T3067", "W1-T3414", "W1-T3990", "W1-T3993"]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED 2026-09-22 on the core daemon. W1-T3990's actual implementation was excluded from

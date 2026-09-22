@@ -29,7 +29,7 @@ const REPO_ROOT = join(__dirname, "..");
  *  fakeSpawn does (that suite's fixtures name every call up front; this one would be unreadably
  *  long if it had to). Duplicated locally per that suite's own file-scoping convention. */
 function recordingSpawn(map: Record<string, { status: number; stdout?: string; stderr?: string }> = {}) {
-  const calls: { file: string; args: string[]; opts?: { cwd?: string; input?: string } }[] = [];
+  const calls: { file: string; args: string[]; opts?: { cwd?: string; input?: string; env?: NodeJS.ProcessEnv } }[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
     const key = [file, ...args].join(" ");
@@ -58,6 +58,40 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 /** What every diff-consuming step must now name. */
 const PINNED_RANGE = `${PINNED_BASE_SHA}...HEAD`;
+
+function lintPlanParityCall(calls: ReturnType<typeof recordingSpawn>["calls"]) {
+  const call = calls.find((entry) => entry.file === "npm" && entry.args.includes("lint-plan"));
+  assert.ok(call, "expected the lint-plan parity child to run");
+  return call;
+}
+
+test("W1-T4026: lint-plan parity leaf receives CI semantics", () => {
+  const { spawn, calls } = recordingSpawn();
+  runCiParity(REPO_ROOT, { spawn });
+
+  const lintPlan = lintPlanParityCall(calls);
+  assert.deepEqual(lintPlan.args, ["run", "--silent", "lint-plan", "--", "--base", PINNED_BASE_SHA]);
+  assert.equal(lintPlan.opts?.cwd, REPO_ROOT);
+  assert.equal(lintPlan.opts?.env?.CI, "1");
+});
+
+test("W1-T4026: lint-plan CI semantics do not widen to another parity leaf", () => {
+  const { spawn, calls } = recordingSpawn();
+  runCiParity(REPO_ROOT, { spawn });
+
+  lintPlanParityCall(calls);
+  const sibling = calls.find((entry) => entry.file === "npm" && entry.args.includes("assertion-discrimination"));
+  assert.ok(sibling, "expected an unrelated npm parity child to run");
+  assert.equal(sibling.opts?.env?.CI, undefined, "CI must stay confined to the lint-plan leaf");
+});
+
+test("W1-T4026: lint-plan CI semantics retain the self-sync scrub", () => {
+  const { spawn, calls } = recordingSpawn();
+  runCiParity(REPO_ROOT, { spawn });
+
+  const lintPlan = lintPlanParityCall(calls);
+  assert.equal(lintPlan.opts?.env?.RMD_SELF_SYNC_DONE, undefined);
+});
 
 // ── acceptance 1: every ci.yml job has a parity entry, mirrored or excluded-with-reason ─────
 

@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   status: queued
   attempts: 0
@@ -45,8 +45,10 @@
   acceptance:
     - claim: "CODEOWNERS names the gate-config paths rather than every path, so a code-owner requirement would be path-scoped"
       proof: "unit test: test/codeowners-is-path-scoped.test.ts"
-    - claim: "the operator confirms the branch-protection flip and records the observed effect on one gate PR and one ordinary PR"
-      proof: "demonstration: enable require_code_owner_reviews on main, then observe that a PR touching .github/workflows/ waits for review while a PR touching only src/ still merges autonomously"
+    - claim: "CODEOWNERS does NOT match an ordinary source path, which is the falsifier a bare `*` would defeat"
+      proof: "unit test: an ordinary source path has no code owner"
+    - claim: "every path the required-checks matrix is defined in IS matched, so narrowing did not drop a gate file on the floor"
+      proof: "unit test: every gate config path has a code owner"
   falsifier: |
     CLOSE THIS TASK if `require_code_owner_reviews` is already enabled on main AND CODEOWNERS no
     longer reads `*`. Re-derive both with one read each:
@@ -57,3 +59,35 @@
     SCOPE FENCE: the repo-side half (CODEOWNERS) is the only part a worker may land. The
     branch-protection flip is an operator action on GitHub — outward-facing, affects every open
     PR, and is deliberately left as the `verify: human` half of this record.
+
+  note: |
+    OPERATOR RULING 2026-09-22 — FLIP IT. BUILD THIS. The gate-integrity cluster's approved half
+    was approved on 2026-09-11 and has sat parked since; the operator re-affirms it.
+
+    WHY THIS ONE IS SAFE TO UNPARK WHEN ITS THREE SIBLINGS WERE BACKLOGGED. The refused option in
+    W1-T204 was "require a human review", because it would put the operator on every autonomous
+    merge and end the autonomy. THIS IS THE OPPOSITE SHAPE. A code-owner requirement fires ONLY
+    when an owned path changes. Narrowing CODEOWNERS from `*` to the gate-config paths means an
+    ordinary PR keeps merging unattended and only a PR that edits the gates waits for a human —
+    which is the one case where waiting is the point. Autonomy is preserved on every path that
+    matters and removed on exactly the path the fleet must not be judge of.
+
+    THE ORDER IS LOAD-BEARING AND MUST NOT BE INVERTED. Narrow CODEOWNERS FIRST, then enable
+    `require_code_owner_reviews`. Enabling it while CODEOWNERS still reads `*  @craigoley` demands
+    the operator's review on EVERY pull request — the refused option, arrived at by accident. A
+    build that flips the protection before the ownership file lands has shipped the thing this
+    task exists to avoid.
+
+    PROVE THE NARROWING DISCRIMINATES BEFORE THE PROTECTION GOES ON. `test/codeowners-is-path-scoped.test.ts`
+    must fail if CODEOWNERS matches an ordinary source path and pass only when it matches the gate
+    config paths — an assertion that a path IS owned is not enough, because `*` satisfies it. The
+    falsifier is a path that must be UNOWNED.
+
+    THE PROTECTION FLIP IS THE OPERATOR'S STEP AND IS DELIBERATELY NOT AN ACCEPTANCE CRITERION.
+    The original criterion 2 declared a `demonstration:` proof, which `proof-dialect` refuses on a
+    verify:auto task and `headless-fitness` refuses for naming an operator action — both correctly,
+    because no harness can enable `require_code_owner_reviews` for itself. THE TASK THEREFORE SHIPS
+    THE HALF A MACHINE CAN PROVE: CODEOWNERS narrowed, with a test whose falsifier is an UNOWNED
+    ordinary source path (a bare `*` passes "is owned" and fails that one). The operator enables
+    `require_code_owner_reviews` on `main` AFTER this merges — that order is the ruling above — and
+    records the before/after protection read at that time.

@@ -1695,7 +1695,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       // runStep would leave the top-level arm covered by nothing.
       const base = requirePinnedBase(repoRoot, spawn);
       const lint = runStep("lint-plan:ci-parity", () =>
-        shellOut(spawn, "npm run --silent lint-plan -- --base <pinned origin/main>", "npm", ["run", "--silent", "lint-plan", "--", "--base", base], { cwd: repoRoot }),
+        shellOut(
+          spawn,
+          "npm run --silent lint-plan -- --base <pinned origin/main>",
+          "npm",
+          ["run", "--silent", "lint-plan", "--", "--base", base],
+          { cwd: repoRoot, env: { CI: "1" } },
+        ),
       );
       return [refresh, lint];
     },

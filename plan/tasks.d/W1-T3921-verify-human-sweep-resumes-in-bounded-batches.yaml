@@ -11,7 +11,7 @@
   origin: "oper#verify-human-sweep-enospc-2026-09-21"
   plan_refs: [W1-T3188, W1-T3916]
   files: [src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts, docs/cli-reference.md]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-21: after W1-T3916 routed the judge to the enabled Codex provider, a live

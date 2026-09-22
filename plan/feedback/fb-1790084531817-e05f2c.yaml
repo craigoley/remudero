@@ -1,0 +1,43 @@
+id: fb-1790084531817-e05f2c
+ts: 2026-09-22T13:42:11.817Z
+raw: "NOTHING ENFORCES THE THIRD EDIT OF A NEW DOCTRINE RULE, AND THE CODEX LANE
+  IS THE ONE THAT PAYS — falsified directly on 2026-09-22, not inferred.
+  CLAUDE.md's maintenance paragraph states that a new rule is THREE edits: the
+  headline bullet with its pointer, the body file it names, and the agents-md
+  regeneration. Two of those are gated --
+  test/the-doctrine-index-points-at-every-body.test.ts fails on a dangling
+  pointer and on a body whose opening headline does not match the index
+  byte-for-byte (both observed failing BY NAME this session, subtests 8 and 9,
+  then restored to 19/19). THE THIRD IS PROSE. THE FALSIFICATION: with AGENTS.md
+  stashed at its pre-rule content and CLAUDE.md carrying the new rule,
+  test/the-codex-lane-auto-loads-no-doctrine.test.ts reads 4 pass / 0 fail --
+  BYTE-IDENTICAL to the run against the regenerated tree. The same command on
+  the same suite is its own control: it cannot distinguish a fresh AGENTS.md
+  from a stale one. WHY THIS IS NOT TIDINESS: a dispatched worker never loads
+  CLAUDE.md at all (spawnWorker passes settingSources empty, the SDK isolation
+  mode, which needs project), and commit eb0fb1928 (feat(codex): prefer
+  generated agents project doc, PR 5176) made the Codex lane read the GENERATED
+  doc. So AGENTS.md is not a copy of the index -- for one whole lane it IS the
+  index, and a missed regeneration silently ships a rule to the interactive lane
+  and not to Codex. THE COST IS ALREADY OBSERVED: PR 6562 shipped two of the
+  three edits, and the fleet spent a repair commit b2fe14ae8 closing it. The
+  loop caught it, which is good, and it caught it AFTER the push, which is the
+  cost. PROPOSED REMEDY, ONE TEST AND NO NEW SCRIPT: a test that runs
+  scripts/generate-agents-md.mjs into a TEMP directory and asserts byte-equality
+  with the committed AGENTS.md. It must NOT write into the repo -- a
+  self-healing test hides the drift it exists to report -- and its falsifier is
+  to append a line to CLAUDE.md without regenerating and watch it go red. Prove
+  that before calling it done: an assertion over always-present chrome can never
+  fail. FALSIFYING CHECK: if a gate outside test/ already compares them -- a CI
+  step or a ratchet -- this is already enforced and the only finding is that
+  CLAUDE.md should cite it by name. Check .github/workflows and scripts/ before
+  building anything."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

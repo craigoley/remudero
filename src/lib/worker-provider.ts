@@ -783,6 +783,19 @@ export interface OpenWeightModelSelection {
   capability: CodexModelTier;
   /** Present only when the fit gate ran, so a ledger row can distinguish "held" from "not checked". */
   estimatedTokens?: number;
+  /**
+   * THE REST OF THE LADDER, in order, after {@link model} — every remaining candidate that also
+   * holds the context. The selector already walks the ladder for CONTEXT FIT; it never walked it
+   * for FAILURE, so one unusable deployment killed the run outright.
+   *
+   * MEASURED over the live ledger: 22,356 `openweight_error` runs, 21,942 of them (98%) on a
+   * single deployment, across three days — while two other candidates sat configured in the same
+   * row and were never tried.
+   *
+   * EMPTY IS THE NORMAL CASE and means exactly "no alternative holds this prompt", not "no
+   * alternative exists" — the context gate has already removed any that cannot.
+   */
+  alternatives: readonly string[];
 }
 
 export interface OpenWeightSelectionOptions {
@@ -827,12 +840,15 @@ export function selectOpenWeightModel(
   const safe = candidates.filter((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
   if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
   if (promptBytes === undefined) {
-    return { model: safe[0]!, effort: requestedEffort ?? "default", capability };
+    return { model: safe[0]!, effort: requestedEffort ?? "default", capability, alternatives: safe.slice(1) };
   }
   const estimatedTokens = openWeightEstimatedTokens(promptBytes);
-  const model = safe.find((candidate) => openWeightDeploymentHolds(candidate, estimatedTokens));
+  const holds = safe.filter((candidate) => openWeightDeploymentHolds(candidate, estimatedTokens));
+  const model = holds[0];
   if (!model) throw new OpenWeightRequestTooLargeError({ estimatedTokens, capability, considered: safe });
-  return { model, effort: requestedEffort ?? "default", capability, estimatedTokens };
+  // The tail is every OTHER candidate that also holds this prompt — the fit gate has already
+  // removed the ones that cannot, so a caller walking this list can never widen the context rule.
+  return { model, effort: requestedEffort ?? "default", capability, estimatedTokens, alternatives: holds.slice(1) };
 }
 
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {

@@ -2,12 +2,13 @@
   title: "THE BRANCH REAPER COMPUTES A PER-BRANCH REASON FOR ALL 143 BRANCHES AND THEN DISCARDS IT — `planBranchReap` writes `plan.reasons[name]` for every branch including `closed_unmerged`, and NOTHING prints it, ledgers it, or names the 28 held branches; separately, NO DELETION PATH EXISTS ANYWHERE IN `src/`, so the 107 branches it calls deletable are never deleted by anything"
   repo: remudero
   depends_on: []
-  type: manual
-  verify: human
+  type: implement
+  verify: auto
   principles: {tdd: strict}
   risk: high
-  budget_usd: 0.00
-  files: [src/run-task.ts, plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml]
+  band_meaning: span
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/branch-reap-names-what-it-holds.test.ts]
   origin: "operator-brief#reaper-closed-pr-blindness-2026-08-28"
   plan_refs: ["W1-T2246", "W1-T2247", "W1-T2397", "W1-T2429", "W1-T2387", "W1-T447"]
   status: queued
@@ -124,22 +125,14 @@
     record is legal here ONLY because this is `verify: human`; `rule15-filing` refuses that for a
     `verify: auto` task, and any later conversion must drop the self-reference in the same edit.
   acceptance:
-    - claim: "the record leads with the brief's mechanism being falsified rather than restating it"
-      proof: "grep: THE BRIEF'S STATED MECHANISM IS FALSIFIED in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
-    - claim: "the discarded per-branch reason is named as the first real finding"
-      proof: "grep: WHAT IS REAL, AND IT IS TWO SEPARATE THINGS in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
-    - claim: "the absence of any deletion path is recorded as the larger of the two"
-      proof: "grep: THERE IS NO DELETION PATH IN THIS CODEBASE in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
-    - claim: "the summary label is shown to be derived by subtraction rather than read"
-      proof: "grep: BY SUBTRACTION — a claim the classifier itself never made in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
-    - claim: "the dispatch-blocking count is reported as zero rather than assumed"
-      proof: "grep: THE FINDING IS THEREFORE A REPORTING GAP in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
-    - claim: "both candidates are priced and neither is proposed as automatic"
-      proof: "grep: THE TWO ARE NOT ALTERNATIVES ON EQUAL FOOTING in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
-    - claim: "reaping on closed alone is explicitly excluded"
-      proof: "grep: IS NOT ONE OF THEM AND MUST NOT BE READ INTO THIS RECORD in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
-    - claim: "the vacuous open-PR surfaces are reported rather than scored as evidence"
-      proof: "grep: TWO SURFACES HAVE NO CONTROL AND THAT IS REPORTED in plan/tasks.d/W1-T2445-branch-reaper-reports-counts-not-names.yaml"
+    - claim: "the reaper prints the HELD branch names, not only the held count and the undetermined names"
+      proof: "unit test: the reaper prints the names it holds"
+    - claim: "the branch_reap.dry_run ledger row carries the per-branch reason map that planBranchReap already computes and today discards"
+      proof: "unit test: the dry-run row carries a reason for every branch"
+    - claim: "a branch classified closed_unmerged is reported by name with that reason, so the reason survives the trip to the ledger rather than collapsing into a count"
+      proof: "unit test: closed_unmerged reaches the ledger as a reason and not a tally"
+    - claim: "this change adds no deletion path: the reaper still reports and deletes nothing"
+      proof: "unit test: reporting the names does not add a deletion path"
   falsifier: |
     If a later run of `rmd reap-branches` ever reports a branch in `hold` whose per-head PR state is
     `closed`, then `planBranchReap`'s ordering has changed and the brief's original mechanism is
@@ -151,3 +144,23 @@
     a gate on something real, and its pricing here is obsolete. And if the dispatch-blocking count
     ever reads above zero for a branch with NO open PR, the reporting gap has become a throttle and
     the question stops being a preference.
+
+  note: |
+    OPERATOR RULING 2026-09-22 — PRINT AND LEDGER THE REASONS; BUILD NO DELETION PATH. Of the two
+    halves this shard measured, the operator takes the FREE one. `planBranchReap` already computes
+    `plan.reasons[name]` for all 143 branches and throws it away: surfacing it is rendering work
+    over a value that exists, costs nothing, and destroys nothing.
+
+    THE BUILD. (1) Print the held branch NAMES beside the counts, not only the `undetermined`
+    names. (2) Carry the per-branch reason map into the `branch_reap.dry_run` ledger row, which
+    today holds five integers and no reason at all. That is the whole scope.
+
+    THE DELETION PATH IS DECLINED FOR NOW, AND THE REASON IS NOT TIMIDITY. The shard's second and
+    larger finding — `git grep` for a deletion idiom over `src/` and `scripts/` returns ZERO, so
+    107 deletable branches persist because nothing acts on the report — is CORRECT and stays on
+    the record. But a first deletion path is an irreversible write over a set that has never once
+    been reviewed by name. Ship the naming first; the named report is the review that a deletion
+    path needs and does not currently have. Whoever proposes deletion later cites THIS report.
+
+    verify flipped human -> auto on this ruling: the question asked was which half to build, and
+    it is answered.

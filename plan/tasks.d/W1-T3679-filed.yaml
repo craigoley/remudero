@@ -10,7 +10,7 @@
   files: [docs/recon/the-polled-404.md]
   origin: oper#gap-sweep-2026-09-16
   plan_refs: ["W1-T3657"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16 across the three live instances, over the same 30 minutes:

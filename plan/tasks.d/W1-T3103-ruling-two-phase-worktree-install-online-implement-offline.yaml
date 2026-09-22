@@ -93,3 +93,36 @@
     they discriminate: they can only pass once the ruling is written.
     THIS SHARD CORRECTS ITS OWN BRIEF: the bubblewrap floor is `deploy/Dockerfile` REQ 8, NOT
     `hooks/deny-floor.sh`, which contains no such string.
+
+    OPERATOR RULING 2026-09-22 — TAKE (b), THE ALLOWLIST PROXY, AND DO THE MEASUREMENT FIRST.
+    The shard deliberately offered no recommendation because it had not measured how many implement
+    turns touch the network. That measurement is now the FIRST deliverable of the follow-on work,
+    not a precondition for the ruling — because (b) is the option that is correct whatever the
+    number turns out to be.
+
+    WHY (b) RATHER THAN (a). Option (a) removes the network namespace during implement, which is
+    strictly stronger and strictly more disruptive: `gh` runs OUTSIDE the sandbox via
+    `excludedCommands` today, so every lane that shells it mid-implement fails — and it fails as
+    ENETUNREACH deep inside a tool rather than as a diagnosable refusal. This fleet's whole
+    direction is unattended flow; an exposure fix that converts working lanes into opaque hangs
+    trades a real capability for a hypothetical attacker. (b) confines egress to an allowlist,
+    degrades to a readable proxy denial, and needs nobody to classify which steps need a network.
+
+    (b) IS NOT GREENFIELD, AND THAT IS HALF THE REASON. W1-T1289 is filed at `status: blocked` and
+    its subject is exactly this: `settings/worker.json` declares four allowlisted domains under a
+    sandbox marked `enabled` and `failIfUnavailable`, and NOTHING IN THE TREE ENFORCES THEM. So
+    the declared boundary already exists and is a lie. RULING FOR (b) IS A RULING TO UNBLOCK
+    W1-T1289 and give that declaration an enforcement owner — `src/lib/containment.ts`,
+    `settings/worker.json`, `test/egress-enforcement-owner.test.ts`, as it already names.
+
+    WHAT BECOMES OF (a): IT IS DEFERRED, NOT KILLED, AND THE MEASUREMENT IS ITS TRIGGER. Count the
+    implement turns that actually touch the network over a real window. If the answer is near
+    zero, (a) becomes cheap and should be re-argued on that number. If it is material, (a) is
+    correctly declined and the allowlist is the ceiling. Either way the number is worth having,
+    and it converts a preference into evidence — which is what this shard asked for.
+
+    THE TOKEN STAYS IN ENV UNDER THIS RULING, AND THAT IS ACKNOWLEDGED RATHER THAN HIDDEN. (b)
+    does not remove `GH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` from the implement phase. An
+    allowlisted host is still reachable by a compromised turn. The operator is accepting that
+    residual exposure in exchange for keeping every `gh`-shelling lane working, and a later ruling
+    may revisit it on the measurement above.

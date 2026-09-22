@@ -74,7 +74,7 @@
   origin: oper#n3-watch-2026-08-05
   plan_refs: ["§4B", "W1-T341"]
   files: [src/lib/deployer.ts, test/deployer.test.ts]
-  status: queued
+  status: merged
   pr: 1392                 # merged PR #1392 (a1f067c) already implements this fix; deriveStatus
                             # rung (b) — see plan/tasks.yaml header and src/lib/status.ts:1228.
   attempts: 0

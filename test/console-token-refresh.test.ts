@@ -413,6 +413,11 @@ if [ "\${1:-}" = "network" ] && [ "\${2:-}" = "inspect" ]; then
   if [[ " $* " == *" --format "* ]]; then printf '%s\\n' 'cloudflared '; fi
   exit 0
 fi
+if [ "\${1:-}" = "pull" ]; then
+  # The launcher now preflights the exact image before replacement; this fake models
+  # a successful registry pull so the existing credential assertions can proceed.
+  exit 0
+fi
 if [ "\${1:-}" = "inspect" ] && [ "\${2:-}" = "remudero-daemon" ]; then
   case "$*" in
     *Config.Env*)

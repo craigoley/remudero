@@ -14,7 +14,7 @@
   # dispatches). decideSweepArm reads the live ledger alone, which holds 211 review.posted
   # rows against 82,574 in the union. Absent priority sorts LAST, which is why it has waited.
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     TWO DIFFERENT FACTS ARRIVE AS ONE `undefined`, AND THE SAFE ANSWER TO EACH IS THE OPPOSITE OF

@@ -13,7 +13,7 @@
     - test/serve-image-preflight.test.ts
   origin: "operator-followup#serve-rollout-2026-09-22"
   plan_refs: [W1-T1010, W1-T3863]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED 2026-09-22 on the Azure serve host during the operator-agent rollout: the first

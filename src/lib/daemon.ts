@@ -37,6 +37,10 @@ import {
   type MergedSet,
   type NextRunnableOpts,
   runBranchTaskIds,
+  parsePushedRunRefs,
+  stillBlockedByPushedRunBranch,
+  type PushedRunRef,
+  type PlanOnlyRunBranchReceipt,
   type OpenPrCheck,
   tallyDispatchFilters,
   type IdleReasonBucket,
@@ -646,6 +650,14 @@ export type DaemonFreshness =
  *  case and changes nothing: every existing caller that returns `void` still satisfies this type. */
 export interface SweepCycleOutcome {
   reviewerCodeStale?: { oldSha: string; newSha: string };
+  /** W1-T4002 — the bounded set of CURRENT plan-only filing receipts THIS pass's full sweep
+   *  positively proved (sweep.ts's `planOnlyRunBranchReceipts`, built from the SAME `OpenPrView[]`
+   *  the sweep already read — no second GitHub call). Consulted by the tick's OWN dispatch-options
+   *  builder below, in the SAME tick, so a raw pushed-run-branch guard can release the exact
+   *  matching tip a proven plan-only filing occupies rather than blocking the real implementation
+   *  forever. Absent/empty on a tick that ran no sweep (or proved no receipts) changes nothing:
+   *  every observed run branch keeps blocking exactly as it did before this task. */
+  planOnlyRunBranchReceipts?: readonly PlanOnlyRunBranchReceipt[];
 }
 
 /** The recoverable-class subset of an idle tick's dispatch-filter tally: the classes that could clear
@@ -3182,9 +3194,12 @@ export async function runDaemon(
     const circuitBrokenThisTick: string[] = [];
     // One branch sweep per tick, resolved before the options object so the closure below is a
     // set-membership test rather than a round trip per candidate (W1-T916).
-      const pushedRunBranches = deps.readPushedRunBranches
-        ? runBranchTaskIds(deps.readPushedRunBranches())
-        : undefined;
+      const pushedRunBranchesRaw = deps.readPushedRunBranches?.();
+      const pushedRunBranches = pushedRunBranchesRaw !== undefined ? runBranchTaskIds(pushedRunBranchesRaw) : undefined;
+      const pushedRunRefs: readonly PushedRunRef[] = pushedRunBranchesRaw !== undefined ? parsePushedRunRefs(pushedRunBranchesRaw) : [];
+      // W1-T4002 — THIS TICK'S OWN full sweep already proved these, if it ran one; see
+      // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
+      const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       isOpenPr: deps.isOpenPr,
@@ -3218,7 +3233,35 @@ export async function runDaemon(
       // injected and the parse hoisted (W1-T916).
       ...(pushedRunBranches
         ? {
-            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id),
+            // W1-T4002: `stillBlockedByPushedRunBranch` is the SAME predicate drain.ts's own
+            // selection loops apply — see that function's doc. Before returning, name every
+            // OTHERWISE-blocking ref this tick's receipts released, so the collision an operator
+            // sees is explicit rather than a silent non-block.
+            hasPushedRunBranch: (id: string) => {
+              const refsForTask = pushedRunRefs.filter((r) => r.taskId === id);
+              const stillBlocked = stillBlockedByPushedRunBranch(
+                id,
+                pushedRunBranches,
+                undefined,
+                pushedRunRefs,
+                planOnlyReceiptsThisTick,
+              );
+              if (!stillBlocked && refsForTask.length > 0) {
+                for (const ref of refsForTask) {
+                  const receipt = planOnlyReceiptsThisTick.find((r) => r.ref === ref.ref && r.sha === ref.sha);
+                  if (receipt) {
+                    log("dispatch.run_branch_exception", {
+                      task: id,
+                      reason: "plan-filing-run-branch-exception",
+                      ref: ref.ref,
+                      sha: ref.sha,
+                      pr_number: receipt.prNumber,
+                    });
+                  }
+                }
+              }
+              return stillBlocked;
+            },
             // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
             // row, which has three emitters and no reader.
             onSkipRunBranch: (t: Task) =>

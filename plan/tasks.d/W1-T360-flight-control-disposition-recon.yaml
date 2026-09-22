@@ -54,7 +54,36 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T20", "W1-T21", "W1-T22", "§4B"]
   files: [docs/flight-control-disposition.md]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-22 BY OPERATOR RULING — THE RECON'S CENTRAL UNKNOWN WAS ANSWERED WITHOUT IT,
+  # AND THE ANSWER REVERSES THE RECON'S OWN PREMISE. This task existed to establish whether the
+  # worker stream can be evaluated MID-RUN at all, calling that "unestablished" and pricing the
+  # wiring as a streaming spawn restructure. IT IS NOW ESTABLISHED, BY READING THE SOURCE:
+  # `collectWorkerResult` (src/lib/worker.ts) drives `for await (const raw of messages)` over the
+  # LIVE stream, classifies every block in that one pass, and already emits per-message events to
+  # an `opts.streamObserver` hook — which has a live consumer, `workerStateSensor.observer`, wired
+  # at src/run-task.ts. THE SEAM EXISTS AND IS OCCUPIED. There is no restructure to price, so the
+  # recon's deliverable is moot and the disposition can be ruled directly.
+  #
+  # THE DISPOSITION, RULED 2026-09-22: SPLIT THE STACK. It was filed as one disposition covering
+  # both layers because a judge with no trip is meaningless. That reasoning holds for the judge and
+  # not for the predicates.
+  #   RETIRE flight-judge (src/lib/flight-judge.ts). Layer 2 is an LLM spend per trip whose job is
+  #   already done post-hoc by risk-score.ts / risk-judge.ts at the arm gate, and every run is
+  #   already bounded by max_turns and budget_usd. Retiring it removes nothing that runs today.
+  #   REPURPOSE flight-signals (src/lib/flight-signals.ts). Wire the three predicates whose inputs
+  #   the live observer already carries — repeatedToolCallPredicate, errorSignatureLoopPredicate,
+  #   stallTimeoutPredicate — onto the existing streamObserver seam. They are DETERMINISTIC, cost
+  #   no tokens, and fire mid-run, which is precisely the capability the shard said retiring would
+  #   kill permanently. burnRate, diffGrowth and scopeDrift need facts the observer does not carry
+  #   and stay unwired; they are covered by W1-T3056's unwired-export detector rather than deleted
+  #   on a guess.
+  #   W1-T21 and W1-T22 become the implementing tasks for the repurpose half and are NOT withdrawn.
+  #
+  # NOT DONE HERE: the wiring, the deletion, and the MASTER-PLAN §4B transcription. Each is its own
+  # task citing this ruling. This record is withdrawn because its QUESTION is answered, not because
+  # its subject is closed.
   attempts: 0
   note: "verify:human — ruling-shaped by the W1-T353 rule's own logic (the deliverable recommends a
     subsystem's fate); isDispatchEligible parks it for the operator, which is the design.

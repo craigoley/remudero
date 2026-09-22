@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: medium
   budget_usd: 10.00
@@ -104,3 +104,38 @@
     first draft had already drifted while this was being written — the blocked-review issue opened
     against #4298 was still open during the recon and had closed at 21:06:43Z before filing — which
     is the reason this paragraph is here rather than a tidier count.
+
+    OPERATOR RULING 2026-09-22 — A RENUMBER RIDES ALONE IN ITS OWN PULL REQUEST, AND IT GETS A
+    FAST LANE. This answers the question the shard asked (WHERE does a renumber land) without
+    disturbing the rule that already exists (WHO renumbers — the loser of a race).
+
+    THE RULE. A rename of `plan/tasks.d/*.yaml` is its own pull request. It carries no `src/`, no
+    `test/`, no other task's filing. This is candidate (i) — the plan-aware sibling of rule 25,
+    keyed to RENAMES rather than edits, which is the narrow reading the 2026-09-06 instance
+    actually supports.
+
+    THE FAST LANE, WHICH IS THE HALF THAT MAKES THE RULE SURVIVABLE. The shard's own objection is
+    the binding one and it is answered here rather than waved past: #4298 carried four id moves
+    because main was unloadable and an open PR that merges main to stay green INHERITS whatever
+    repair is in flight. A ride-alone rule without relief converts a 31-minute plan outage into a
+    31-minute freeze on every open branch. SO: a rename-only pull request — one whose entire diff
+    is renames under `plan/tasks.d/` with no content change to any renamed file and no other path
+    — is exempted from the full check matrix and merges on the plan lint alone. Nothing it can
+    touch is reachable by any other gate; running twenty-three check-runs to re-prove that is the
+    latency that caused the entanglement in the first place.
+
+    WHAT THE FAST LANE MUST PROVE BEFORE IT SHIPS, AND THIS IS PART OF THE RULING. The
+    rename-only predicate must be a real discriminator, not a name: it passes on a pure-rename
+    diff and REFUSES a diff that renames a shard and also edits one byte of anything. Prove the
+    refusal by fault injection, not by reading the code. A fast lane that admits a content change
+    is a hole in the gate matrix, which is a strictly worse defect than the one being fixed.
+
+    THE MEASUREMENTS IN (iii) ARE NO LONGER PRECONDITIONS. How often a plan rename rides with
+    `src/`, and whether a refusal would have refused a clean PR, were asked because nobody had
+    ruled. The operator has ruled; collect them afterwards as efficacy evidence, and if a
+    rename-only refusal turns out to refuse PRs that merged cleanly, bring that number back and
+    the rule gets re-argued on it.
+
+    CANDIDATE (ii), DO NOTHING, IS DECLINED. Strict branch protection removes many repairs before
+    they exist, but it removes the COLLISION, not the RENAME, and a rename still conflicts with
+    every branch holding that file.

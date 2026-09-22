@@ -147,7 +147,7 @@
   origin: "oper#wire-the-access-jwt-grant-2026-08-18"
   plan_refs: ["W1-T531", "W1-T404", "W1-T371"]
   files: [src/lib/serve.ts, src/lib/config.ts, test/serve-access-jwt-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THREE BRIEFING FIGURES ARE CORRECTED HERE RATHER THAN CARRIED. FIRST AND MOST IMPORTANT:

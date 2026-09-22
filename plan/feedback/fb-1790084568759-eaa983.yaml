@@ -1,0 +1,43 @@
+id: fb-1790084568759-eaa983
+ts: 2026-09-22T13:42:48.759Z
+raw: "THE TASK-ID EXISTENCE GATE DOES NOT SCAN plan/, SO A PLAN RECORD MAY CITE
+  AN ID THAT RESOLVES NOWHERE — read from the gate's own header, not guessed.
+  scripts/task-id-existence-check.mjs states its scan roots default to src and
+  deploy, and that test/ is excluded by construction because its fixture ids are
+  synthetic. plan/ is named in that script only as a SOURCE of declarations
+  (plan/tasks.yaml, plan/tasks.d) and never as a scanned corpus. So the one
+  place task ids are cited most densely -- rationale, design, note and falsifier
+  prose inside shards -- is unchecked. MEASURED LOCALLY 2026-09-22 at 64f0e5fd9,
+  pure filesystem read, no network: 2092 declared ids across plan/tasks.yaml and
+  plan/tasks.d/*.yaml; 2185 distinct W1-T ids cited anywhere under plan/; 128
+  cited but declared in NO plan record. POSITIVE CONTROL: W1-T360 appears in
+  both the cited set and the declared set, so the extractor can see its corpus
+  and the anchor is not silently matching nothing. WARNING, AND IT IS THE
+  IMPORTANT HALF: THE 128 IS A CANDIDATE SET, NOT A FINDING. The gate's own rule
+  is that a reservation ref (refs/rmd-id/W1-T-n) is an equally valid claim, and
+  the reservation namespace was UNREADABLE at measurement time -- GitHub's
+  SECONDARY rate limit was in force, returning HTTP 403 on
+  repos/craigoley/remudero/pulls while gh api rate_limit read core 5000/5000
+  with 0 used. A large fraction of the 128 will resolve to a reservation.
+  COMPLETING THE MEASUREMENT AGAINST refs/rmd-id/* IS THE FIRST DELIVERABLE, and
+  if the residue is small or entirely pre-allocator, the honest outcome is a
+  baseline entry and no gate change. AND WHAT THIS WOULD NOT HAVE CAUGHT, SAID
+  UP FRONT SO NOBODY OVERSELLS IT: the same session's W1-T360 note cited W1-T21
+  and W1-T22, both of which EXIST and are declared -- the error was that they do
+  not do what the note claimed (W1-T21 IS the flight judge the ruling retires,
+  and W1-T22 already ships as risk-score.ts / risk-judge.ts). An EXISTENCE check
+  cannot catch a citation that resolves but misdescribes, and no mechanical
+  check can. This finding is narrower than the mistake that prompted it and says
+  so. PROPOSED REMEDY IF THE RESIDUE IS REAL: widen the existing gate's scan
+  roots to include plan/, reusing its baseline mechanism for pre-allocator ids.
+  Do NOT add a second gate -- one existence checker with a wider corpus is the
+  cheap shape, and the script already takes --dir."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

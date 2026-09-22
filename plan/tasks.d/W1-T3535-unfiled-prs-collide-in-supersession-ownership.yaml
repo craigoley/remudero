@@ -11,7 +11,7 @@
   files: [src/run-task.ts, scripts/test-tier-manifest.json, test/unfiled-prs-do-not-supersede-each-other.test.ts]
   origin: "operator-session#pr-queue-2026-09-13"
   plan_refs: ["W1-T3388", "W1-T920", "W1-T2384", "W1-T2846"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE LIVE PR QUEUE ON 2026-09-13. PR #5411 and PR #5412 were independent

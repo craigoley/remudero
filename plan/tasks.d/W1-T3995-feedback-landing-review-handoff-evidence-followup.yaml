@@ -15,7 +15,7 @@
     - test/feedback-landing-union-writer.test.ts
   origin: "followup#5317-feedback-landing-review-evidence-2026-09-21"
   plan_refs: [W1-T530, W1-T913, W1-T3990, W1-T3992]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED on current origin/main a8eb8bca4532bdf91ed306b9a36fc3738a09c956: the open

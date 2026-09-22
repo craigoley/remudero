@@ -122,7 +122,7 @@
   origin: "oper#dispatch-never-reads-a-tasks-repo-2026-08-18"
   plan_refs: ["W1-T471", "W12-T1"]
   files: [src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/dispatch-repo-guard.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     TWO BRIEFING FIGURES ARE CORRECTED HERE RATHER THAN CARRIED. `isDispatchEligible` has FIVE

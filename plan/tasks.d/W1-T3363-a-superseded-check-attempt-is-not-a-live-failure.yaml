@@ -10,7 +10,7 @@
     - src/lib/sweep.ts
     - test/a-superseded-check-attempt-is-not-a-live-failure.test.ts
   origin: "sweep-forensics#2026-09-10-queue-day"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "a check with a later successful attempt on the same head is not reported as a live failure"

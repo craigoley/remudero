@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 20.00
   risk: medium
@@ -201,3 +201,36 @@
     clear, each with a control qualified for that surface and none disqualified, including a
     count-per-head sweep over 128 live heads where this id read 0 while the control read 2. The
     clone was confirmed unshallow first, so the history surfaces are not pre-horizon false negatives.
+
+    OPERATOR RULING 2026-09-22 — TAKE (a): RETIRE THE VOCABULARY, KEEP THE REASONING. Replace each
+    of the fifteen citations with the argument it stands for. The population is small and
+    enumerable — 15 citations across 10 files — and in most of them the work is already done.
+
+    THE RULING SURVIVES THIS SHARD'S OWN CORRECTION, AND THAT NEEDS SAYING BECAUSE THE CORRECTION
+    LOOKS LIKE IT REVERSES THE ARGUMENT. The shard originally recommended (a) on the ground that
+    option (b) could not be executed without inventing text for Laws 1, 3 and 5. The 2026-08-23
+    correction removes that ground: the document SURVIVES, 21,665 bytes, sha256 `91eadd51…`, in the
+    original authoring working tree. So (b) is now executable. IT IS STILL DECLINED, FOR A
+    DIFFERENT AND BETTER REASON THAN THE ONE THAT NO LONGER HOLDS.
+
+    THE REASON IS THE CIRCULARITY, WHICH RECOVERY DOES NOT CURE. Nine citations reason FROM Law 5
+    and not one states it; `W1-T1259` quotes `rule-efficacy.ts`'s own doc comment as the authority
+    for the law that governs `rule-efficacy.ts`. That happened WHILE the text existed somewhere —
+    it was caused by citation-by-number, not by the file being missing. Restoring the file gives
+    the numbers a referent and leaves every future citation free to go circular again the moment
+    the referent drifts out of reach. A rule that must be looked up is a rule that will be
+    paraphrased; Law 4 already survives as three divergent wordings, drifting inside the tracked
+    tree while the authoritative copy existed.
+
+    SO: RECOVER THE FILE AS HISTORY, NOT AS LAW. Bring `state/research-laws-and-gaps-2026-08-05.md`
+    and its three siblings into version control as a dated historical artifact under a path that
+    is plainly archival, with the sha256 recorded so a later reader can verify it is the measured
+    file. Do NOT promote it to a governing document, do NOT create `LAWS.md`, and do NOT add a
+    numbered-law vocabulary anywhere. Every rewritten citation states its own rule inline and may
+    cite the archive for provenance — never as authority.
+
+    THE PRECEDENT IS ALREADY IN THE TREE. `710b18b5` (#1587) moved P48's surviving evidence into
+    `MASTER-PLAN.md` precisely so it would not rest on a `state/` path. Same remedy shape, same
+    reason.
+
+    PREVENTION IS STILL W1-T1263's AND IS NOT RE-FILED HERE.

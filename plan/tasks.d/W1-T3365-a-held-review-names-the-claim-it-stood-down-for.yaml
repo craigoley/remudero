@@ -10,7 +10,7 @@
     - src/run-task.ts
     - test/a-held-review-names-the-claim-it-stood-down-for.test.ts
   origin: "sweep-forensics#2026-09-10-queue-day"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "a review that stood down for an in-flight decision says so, rather than reporting an absent PR-head checkout"

@@ -3722,6 +3722,29 @@ export interface OpenPrView {
   reviewInputDigest?: string;
 }
 
+/** W1-T4002 — the bounded set of CURRENT plan-only filing receipts this full sweep pass positively
+ *  proved: an exact head ref + head sha whose PR {@link OpenPrView.isPlanFiling} read `true` from a
+ *  POSITIVE classification source (`"emitter-ledger"` or `"github-files"` — see run-task.ts's
+ *  `classifyPlanFiling`; `"unreadable"` and `"not-plan-only"` never set `isPlanFiling`, so they can
+ *  never appear here). Consumed by drain.ts's `unmatchedRunRefsRemainBlocking` to release ONLY the
+ *  exact matching run-branch tip a raw `ls-remote` guard would otherwise keep blocking forever — the
+ *  W1-T3996 collision this task recovers. NEVER A NEW GITHUB READ: every input here already lives on
+ *  the `OpenPrView[]` `buildOpenPrViews` built for this same pass (run-task.ts). A PR missing either
+ *  `headRefName` or `headSha` contributes no receipt, which is the fail-toward-still-blocking
+ *  posture this whole exception exists to preserve. */
+export function planOnlyRunBranchReceipts(
+  prs: readonly OpenPrView[],
+): readonly { ref: string; sha: string; prNumber: number }[] {
+  const receipts: { ref: string; sha: string; prNumber: number }[] = [];
+  for (const pr of prs) {
+    if (pr.isPlanFiling !== true) continue;
+    if (pr.planFilingSource !== "emitter-ledger" && pr.planFilingSource !== "github-files") continue;
+    if (pr.headRefName === undefined || pr.headSha === undefined) continue;
+    receipts.push({ ref: pr.headRefName, sha: pr.headSha, prNumber: pr.prNumber });
+  }
+  return receipts;
+}
+
 /** The disposition derived for one PR, plus a stated human reason. */
 export interface DispositionResult {
   disposition: Disposition;

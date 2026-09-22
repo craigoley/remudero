@@ -10,7 +10,7 @@
     - scripts/diff-coverage.mjs
     - test/an-inert-coverage-waiver-is-named.test.ts
   origin: "sweep-forensics#2026-09-10-queue-day"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "a c8-style waiver on a line this gate reports is named as inert rather than ignored in silence"
