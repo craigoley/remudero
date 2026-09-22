@@ -14,6 +14,8 @@ import {
   buildDrainPreview,
   buildRundown,
   nextRunnable,
+  parsePushedRunRefs,
+  planOnlyRunBranchReceipt,
   plannedSequence,
   renderRundown,
   renderSummary,
@@ -21,11 +23,15 @@ import {
   runBranchTaskIds,
   runDrain,
   runnableCandidates,
+  stillBlockedByPushedRunBranch,
+  unmatchedRunRefsRemainBlocking,
   type CuratedSelection,
   type DrainDeps,
   type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
+  type PlanOnlyRunBranchReceipt,
+  type PushedRunRef,
 } from "../src/lib/drain.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { deriveStatus, type GitHub } from "../src/lib/status.js";
@@ -1710,4 +1716,228 @@ test("W1-T916: the daemon dispatch path carries the same supplier", async () => 
   const skip = lines.find((l) => l.extra.reason === "run-branch-already-pushed");
   assert.ok(skip, "riding the same existing dispatch.skipped row, not a new step");
   assert.equal(skip?.extra.task, "A");
+});
+
+// ── W1-T4002 — A PROVEN PLAN-ONLY run-<id>- FILING MUST NOT SUPPRESS ITS OWN REAL BUILD ────────
+//
+// The raw `hasPushedRunBranch` guard above sees only a branch spelling: `run-<id>-<epochMs>`
+// exists on origin, so `<id>` is refused, full stop — even when the SAME full sweep pass already
+// proved that exact ref/sha is a plan-only filing, never an implementation. These tests pin the
+// narrow, exact-head exception: a CURRENT plan-only receipt releases only the ONE matching tip,
+// a changed sha or a second unmatched ref keeps the guard blocking, and no receipt at all is
+// byte-identical to today (W1-T916's tests above, untouched).
+
+function receipt(ref: string, sha: string, prNumber = 1): PlanOnlyRunBranchReceipt {
+  return { ref, sha, prNumber };
+}
+
+test("W1-T4002: parsePushedRunRefs keeps the exact ref AND sha, unlike runBranchTaskIds' bare id reduction", () => {
+  const raw = "shaA\trefs/heads/run-W1-T999-1790040200000\nshaB\trefs/heads/run-W1-T998-1790040200000\n";
+  const refs = parsePushedRunRefs(raw);
+  assert.deepEqual(
+    [...refs],
+    [
+      { taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaA" },
+      { taskId: "W1-T998", ref: "run-W1-T998-1790040200000", sha: "shaB" },
+    ],
+  );
+});
+
+test("W1-T4002: a bare ref line (no tab) parses with sha undefined, which can never match a receipt", () => {
+  const refs = parsePushedRunRefs("run-W1-T999-1790040200000");
+  assert.deepEqual([...refs], [{ taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: undefined }]);
+  assert.equal(planOnlyRunBranchReceipt(refs[0], [receipt("run-W1-T999-1790040200000", "shaA")]), false);
+});
+
+test("W1-T4002: planOnlyRunBranchReceipt matches ONLY the exact ref+sha pair", () => {
+  const receipts = [receipt("run-W1-T999-1790040200000", "shaA")];
+  assert.equal(
+    planOnlyRunBranchReceipt({ taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaA" }, receipts),
+    true,
+    "exact ref+sha match",
+  );
+  assert.equal(
+    planOnlyRunBranchReceipt({ taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaB" }, receipts),
+    false,
+    "FALSIFIER: a changed sha on the same ref loses the receipt",
+  );
+  assert.equal(
+    planOnlyRunBranchReceipt({ taskId: "W1-T999", ref: "run-W1-T999-1790040300000", sha: "shaA" }, receipts),
+    false,
+    "a different ref never matches even with the same sha",
+  );
+});
+
+test("W1-T4002: unmatchedRunRefsRemainBlocking releases only when EVERY observed ref matches", () => {
+  const matchedReceipt = [receipt("run-W1-T999-1790040200000", "shaA")];
+  assert.equal(unmatchedRunRefsRemainBlocking([], matchedReceipt), false, "nothing pushed ⇒ nothing to block on");
+  assert.equal(
+    unmatchedRunRefsRemainBlocking([{ taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaA" }], matchedReceipt),
+    false,
+    "the ONE observed ref matches the ONE receipt ⇒ released",
+  );
+  // FALSIFIER (from this task's own falsifier text): a SECOND, unmatched ref for the same task id
+  // must keep the guard blocking even though the first ref matches a receipt.
+  assert.equal(
+    unmatchedRunRefsRemainBlocking(
+      [
+        { taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaA" },
+        { taskId: "W1-T999", ref: "run-W1-T999-1790040300000", sha: "shaZ" },
+      ],
+      matchedReceipt,
+    ),
+    true,
+    "a second, unmatched ref for the SAME task id keeps this task blocking",
+  );
+  // FALSIFIER: an empty receipt list (no positive sweep classification, or one removed) must
+  // restore the ordinary blocking skip.
+  assert.equal(
+    unmatchedRunRefsRemainBlocking([{ taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaA" }], []),
+    true,
+    "no receipt at all ⇒ still blocking, exactly today's behavior",
+  );
+});
+
+test("W1-T4002: stillBlockedByPushedRunBranch — the one decision every selection site shares", () => {
+  const pushed = new Set(["W1-T999"]);
+  const refs: PushedRunRef[] = [{ taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaA" }];
+  const receipts = [receipt("run-W1-T999-1790040200000", "shaA")];
+  assert.equal(stillBlockedByPushedRunBranch("W1-T999", undefined, undefined, refs, receipts), false, "no branch sweep at all ⇒ not blocking");
+  assert.equal(stillBlockedByPushedRunBranch("W1-T998", pushed, undefined, refs, receipts), false, "nothing pushed for THIS task id ⇒ not blocking");
+  assert.equal(
+    stillBlockedByPushedRunBranch("W1-T999", pushed, undefined, refs, receipts),
+    false,
+    "a proven plan-only receipt for the exact tip releases the guard",
+  );
+  assert.equal(
+    stillBlockedByPushedRunBranch("W1-T999", pushed, undefined, refs, []),
+    true,
+    "with no receipts the raw guard blocks exactly as before this task",
+  );
+  const changedShaRefs: PushedRunRef[] = [{ taskId: "W1-T999", ref: "run-W1-T999-1790040200000", sha: "shaB" }];
+  assert.equal(
+    stillBlockedByPushedRunBranch("W1-T999", pushed, undefined, changedShaRefs, receipts),
+    true,
+    "FALSIFIER: a changed remote tip immediately loses the exception",
+  );
+  const closedUnmerged = new Set(["W1-T999"]);
+  assert.equal(
+    stillBlockedByPushedRunBranch("W1-T999", pushed, closedUnmerged, refs, []),
+    false,
+    "the pre-existing closed-and-unmerged exclusion (W1-T1207) still releases independently",
+  );
+});
+
+test("W1-T4002: nextRunnable selects a task whose only pushed ref exactly matches a plan-only receipt", () => {
+  const plan = fixturePlan();
+  const refs: PushedRunRef[] = [{ taskId: "A", ref: "run-A-1790040200000", sha: "shaA" }];
+  const receipts = [receipt("run-A-1790040200000", "shaA")];
+  const hasPushedRunBranch = (id: string) =>
+    stillBlockedByPushedRunBranch(id, new Set(["A"]), undefined, refs, receipts);
+  assert.equal(nextRunnable(plan, NONE_MERGED, { hasPushedRunBranch })?.id, "A", "the exact matching tip is released");
+});
+
+test("W1-T4002: runDrain releases the exact matching plan-only run-branch tip and dispatches the real build", async () => {
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      readPushedRunBranches: () => "shaA\trefs/heads/run-A-1790040200000",
+      readPlanOnlyRunBranchReceipts: () => [receipt("run-A-1790040200000", "shaA", 6501)],
+      runOne: async (id) => {
+        ran.push(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["A"], "the proven plan-only receipt released the real build");
+  const exception = lines.find((l) => l.step === "dispatch.run_branch_exception");
+  assert.ok(exception, "runDrain ledgers the release too, not only the daemon path");
+  assert.equal(exception?.extra.reason, "plan-filing-run-branch-exception");
+  assert.equal(exception?.extra.task, "A");
+  assert.equal(exception?.extra.pr_number, 6501);
+  assert.ok(
+    !lines.some((l) => l.extra.reason === "run-branch-already-pushed"),
+    "and no run-branch refusal fires for the released task",
+  );
+});
+
+test("W1-T4002: runDrain — a second unmatched ref for the SAME task id keeps blocking", async () => {
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      readPushedRunBranches: () =>
+        "shaA\trefs/heads/run-A-1790040200000\nshaZ\trefs/heads/run-A-1790040300000",
+      readPlanOnlyRunBranchReceipts: () => [receipt("run-A-1790040200000", "shaA", 6501)],
+      runOne: async (id) => {
+        ran.push(id);
+        return okResult(id);
+      },
+      log: () => {},
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "the second, unmatched ref keeps A blocked despite the first ref's receipt");
+  assert.deepEqual(ran, ["D"], "D dispatches instead, exactly as the ordinary run-branch guard would");
+});
+
+test("W1-T4002: runDaemon releases the exact matching plan-only tip via this tick's own sweep outcome", async () => {
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const merged = new Set<string>();
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      readPushedRunBranches: () => "shaA\trefs/heads/run-A-1790040200000",
+      sweep: async () => ({ planOnlyRunBranchReceipts: [receipt("run-A-1790040200000", "shaA", 6509)] }),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+      sleep: async () => {},
+    },
+    { max: 1 },
+  );
+  assert.ok(ran.includes("A"), "the SAME tick's sweep-proved receipt released A for dispatch");
+  const exception = lines.find((l) => l.step === "dispatch.run_branch_exception");
+  assert.ok(exception, "the release is ledgered under its own distinct reason, never a silent omission");
+  assert.equal(exception?.extra.reason, "plan-filing-run-branch-exception");
+  assert.equal(exception?.extra.task, "A");
+  assert.equal(exception?.extra.pr_number, 6509);
+});
+
+test("W1-T4002: runDaemon — no sweep outcome this tick means the raw guard still blocks (fails closed)", async () => {
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  const merged = new Set<string>();
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      readPushedRunBranches: () => "shaA\trefs/heads/run-A-1790040200000",
+      // No `sweep` dep at all this tick — no receipts are ever available.
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: () => {},
+      sleep: async () => {},
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "with no sweep-proved receipt the daemon refuses A exactly as before this task");
+  assert.deepEqual(ran, ["D"]);
 });
