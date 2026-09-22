@@ -17062,9 +17062,14 @@ export function makeLandingReviewRequest(
     }
     void runReviewCommand(match[1]!, ["--repo", repoSlug], { executionMode: "deterministic" }).then(
       (code) => {
-        if (code !== 0) log("feedback.landing_review.failed", { pr_url: prUrl, exit_code: code });
+        if (code !== 0) log("feedback.landing_review.failed", { pr_url: prUrl, exit_code: code, retryable: true });
       },
-      (error) => log("feedback.landing_review.failed", { pr_url: prUrl, error: String((error as Error)?.message ?? error) }),
+      (error) =>
+        log("feedback.landing_review.failed", {
+          pr_url: prUrl,
+          error: String((error as Error)?.message ?? error),
+          retryable: true,
+        }),
     );
   };
 }

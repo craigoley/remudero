@@ -811,7 +811,7 @@ test("makeLandingReviewRequest: a review that settles NON-zero logs the exit cod
   const request = makeLandingReviewRequest(log, runReviewCommand, "o/r");
   request("https://github.com/o/r/pull/20");
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events, [["feedback.landing_review.failed", { pr_url: "https://github.com/o/r/pull/20", exit_code: 7 }]]);
+  assert.deepEqual(events, [["feedback.landing_review.failed", { pr_url: "https://github.com/o/r/pull/20", exit_code: 7, retryable: true }]]);
 });
 
 test("makeLandingReviewRequest: a rejected review command logs the error, never throws synchronously", async () => {
@@ -824,7 +824,10 @@ test("makeLandingReviewRequest: a rejected review command logs the error, never 
   assert.doesNotThrow(() => request("https://github.com/o/r/pull/21"));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(events, [
-    ["feedback.landing_review.failed", { pr_url: "https://github.com/o/r/pull/21", error: "review command spawn failed" }],
+    [
+      "feedback.landing_review.failed",
+      { pr_url: "https://github.com/o/r/pull/21", error: "review command spawn failed", retryable: true },
+    ],
   ]);
 });
 

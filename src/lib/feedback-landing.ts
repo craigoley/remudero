@@ -693,6 +693,22 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
  * operator ran `rmd review` by hand (#5317/W1-T3990). Keeping the bridge at "open or reuse" also
  * makes a failed review retryable without a duplicate merge arm.
  */
+function handoffLandingReview(
+  prUrl: string,
+  requestReview?: LandingReviewRequest,
+): string | undefined {
+  try {
+    const pending = requestReview?.(prUrl);
+    if (pending) {
+      void Promise.resolve(pending).then(undefined, () => undefined);
+    }
+  } catch (e) {
+    const reason = String((e as Error)?.message ?? e);
+    return `review handoff failed for ${prUrl}: ${reason}`;
+  }
+  return undefined;
+}
+
 function ensurePrOpen(
   kind: LandingKind,
   gh: GhExec,
@@ -701,16 +717,8 @@ function ensurePrOpen(
 ): { prUrl?: string; error?: string } {
   const existing = findPendingLandingPr({ gh, identity: kind });
   if (existing) {
-    try {
-      const pending = requestReview?.(existing);
-      if (pending) {
-        void Promise.resolve(pending).then(undefined, () => undefined);
-      }
-    } catch (e) {
-      const reason = String((e as Error)?.message ?? e);
-      return { prUrl: existing, error: `review handoff failed for ${existing}: ${reason}` };
-    }
-    return { prUrl: existing };
+    const error = handoffLandingReview(existing, requestReview);
+    return error ? { prUrl: existing, error } : { prUrl: existing };
   }
 
   const body = kind.prBody(unlanded);
@@ -738,15 +746,8 @@ function ensurePrOpen(
   // Do not call `gh pr merge` here. The shared daemon sweep owns the review -> arm transition;
   // this producer's responsibility ends once the landing PR is open and discoverable.
   if (prUrl) {
-    try {
-      const pending = requestReview?.(prUrl);
-      if (pending) {
-        void Promise.resolve(pending).then(undefined, () => undefined);
-      }
-    } catch (e) {
-      const reason = String((e as Error)?.message ?? e);
-      return { prUrl, error: `review handoff failed for ${prUrl}: ${reason}` };
-    }
+    const error = handoffLandingReview(prUrl, requestReview);
+    return error ? { prUrl, error } : { prUrl };
   }
   return { prUrl };
 }
