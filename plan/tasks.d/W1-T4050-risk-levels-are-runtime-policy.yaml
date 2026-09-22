@@ -1,0 +1,52 @@
+- id: W1-T4050
+  title: "RISK LEVELS ARE HARD-CODED, NOT CONFIGURED — the risk judge's confidence threshold is a literal and the verify-human release has no switch; make both runtime policy the console can surface (operator request, BACKLOGGED)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 90
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator-request#risk-levels-in-the-console-2026-09-22"
+  plan_refs: ["W1-T3188", "W1-T3143"]
+  files:
+    - src/lib/risk-judge.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - test/risk-levels-are-runtime-policy.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE OPERATOR'S WORDS: "I don't want strictness, I want risk levels and rules that can be
+    configured in the console." BACKLOGGED BY HIS OWN RULING on 2026-09-22 — filed at `priority: 90`
+    so it stays visible in the plan and dispatches only once higher-priority work drains. It is not
+    parked: nothing here needs him before it can be built.
+
+    WHAT IS HARD-CODED TODAY, READ AT 855dcb0b6. planRiskJudgeAction (src/lib/risk-judge.ts) escalates
+    below DEFAULT_CONFIDENCE_THRESHOLD = 0.7, a module literal. plan/policy.yaml carries sweep, drain,
+    retro, headroom and launchd sections and no risk section at all. The verify-human release arm
+    (the risk-judged `ratify.approved` path) has no switch an operator can reach without a PR.
+  design: |
+    (i) A `risk:` SECTION in plan/policy.yaml: the confidence threshold, and an enable switch for the
+    verify-human release arm. Absent reads as today's behaviour exactly — 0.7, and releases enabled —
+    so the section is additive and ships safe.
+    (ii) THREAD IT to every planRiskJudgeAction caller that runs unattended, reusing
+    RiskJudgeConfig.confidenceThreshold, which already exists and is simply never fed from policy.
+    (iii) LIVE RE-READ, NOT BOOT-TIME. A policy the daemon memoises at startup is a policy the console
+    cannot change; read it per tick, the way the headroom governor's flag is read.
+    (iv) THE CONSOLE SURFACE IS A FOLLOW-UP IN remudero-console, filed once this ships the values it
+    will display. This task makes them configurable; that one makes them visible and editable.
+  acceptance:
+    - claim: "an absent risk section reproduces today's behaviour exactly, threshold 0.7 and releases enabled"
+      proof: 'grep: test("W1-T4050: an absent risk section changes nothing" in test/risk-levels-are-runtime-policy.test.ts'
+    - claim: "a configured confidence threshold is the one the unattended risk judge applies"
+      proof: 'grep: test("W1-T4050: the configured threshold is the one applied" in test/risk-levels-are-runtime-policy.test.ts'
+    - claim: "disabling the verify-human release stops releases and falls back to proposals"
+      proof: 'grep: test("W1-T4050: a disabled release stages proposals instead" in test/risk-levels-are-runtime-policy.test.ts'
+    - claim: "the policy is re-read per tick rather than frozen at daemon start"
+      proof: 'grep: test("W1-T4050: a policy change takes effect without a restart" in test/risk-levels-are-runtime-policy.test.ts'
+  falsifier: |
+    CLOSE IF plan/policy.yaml already carries a risk section feeding planRiskJudgeAction at build
+    time. At 855dcb0b6 it does not.

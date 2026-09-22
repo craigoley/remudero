@@ -1,0 +1,62 @@
+- id: W1-T4047
+  title: "RETRO PROPOSALS BECOME RECORDS — plan/proposals.d/*.yaml with a machine-readable status and an executable falsifier, loaded and linted like shards (W1-T3102 ruling (a))"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator-ruling#W1-T3102-2026-09-22"
+  plan_refs: ["W1-T3102", "W1-T2458"]
+  files:
+    - src/lib/plan-proposals.ts
+    - src/run-task.ts
+    - test/proposals-are-records.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE OPERATOR RULED THAT RETRO PROPOSALS ARE RECORDS (DECISIONS.md, 2026-09-22, W1-T3102): option
+    (a) first — one file per proposal under plan/proposals.d/, each carrying a machine-readable
+    `status:` and an EXECUTABLE falsifier in the shard dialect — then (b), routing through
+    updateProposalRegistry. The deciding property was REFUTABILITY: a proposal ranked inside a
+    MASTER-PLAN sentence cannot be asked whether it is still true, and the corpus only grows because
+    nothing can retire an entry except a human editing prose.
+
+    THE CORPUS HAS MOVED SINCE THE RULING WAS FILED, AND THE NUMBER IS RE-DERIVED RATHER THAN CARRIED.
+    W1-T3102 counted 31 live proposals at a0b6ba81e. At 855dcb0b6 the MASTER-PLAN '## Retro proposals'
+    section carries 21 `- **P<N>` bullets (grep -c '^- \*\*\(★ \)\?P[0-9]' MASTER-PLAN.md). The ruling
+    does not depend on the count; the migration does, so it must be re-read at build time.
+
+    THIS TASK BUILDS THE RECORD TYPE, NOT THE MIGRATION. The 21 existing proposals move in W1-T4048,
+    whose corrected retro prompt writes records; keeping the migration out of this diff keeps it
+    src/test-only and away from rule 15's plan-plus-code refusal.
+  design: |
+    (i) A LOADER, `loadProposalRecords`, in src/lib/plan-proposals.ts: read plan/proposals.d/*.yaml into typed records
+    { id (P<N>), title, status (open | adopted | refuted | superseded), falsifier, rank?, source? }.
+    Refuse (never guess) a malformed record, a duplicate id, or a status outside the enum — the same
+    fail-closed posture loadPlan takes for shards.
+    (ii) THE FALSIFIER IS EXECUTABLE. Validate it with the SAME proof-dialect parser shards use
+    (parseWhitelistedProof), so `unit test:` and `grep:` mean exactly what they mean in a task, and a
+    prose falsifier is refused rather than stored.
+    (iii) LINT IT WHERE SHARDS ARE LINTED. `rmd lint-plan` loads plan/proposals.d/ beside the task
+    shards and reports a malformed proposal as a violation. An ABSENT directory is not a violation —
+    the migration has not happened yet when this ships.
+    (iv) NOT IN SCOPE: migrating the existing proposals, changing retroPrompt, or routing through the
+    registry. Each is its own task citing the ruling.
+  acceptance:
+    - claim: "a well-formed proposal record loads with its status and executable falsifier"
+      proof: 'grep: test("W1-T4047: a well-formed proposal record loads with its status and falsifier" in test/proposals-are-records.test.ts'
+    - claim: "a proposal whose falsifier is prose rather than the proof dialect is refused, never stored"
+      proof: 'grep: test("W1-T4047: a prose falsifier is refused" in test/proposals-are-records.test.ts'
+    - claim: "a status outside the enum and a duplicate proposal id are both refused"
+      proof: 'grep: test("W1-T4047: an unknown status or a duplicate id is refused" in test/proposals-are-records.test.ts'
+    - claim: "rmd lint-plan actually calls the proposal loader, so a malformed record is reported"
+      proof: "grep: loadProposalRecords( in src/run-task.ts"
+    - claim: "an absent plan/proposals.d directory is not a lint violation"
+      proof: 'grep: test("W1-T4047: an absent proposals directory is not a violation" in test/proposals-are-records.test.ts'
+  falsifier: |
+    CLOSE IF a proposal record type already exists: `ls plan/proposals.d` and grep src/ for a loader
+    of that path. At 855dcb0b6 neither exists. CLOSE ALSO IF the operator reverses W1-T3102's ruling
+    in DECISIONS.md.
