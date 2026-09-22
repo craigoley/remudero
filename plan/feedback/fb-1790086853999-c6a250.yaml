@@ -13,10 +13,11 @@ raw: "Architect triage failed to convert the approved console-proof planning
   console successor."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

@@ -1,0 +1,76 @@
+- id: W1-T4038
+  title: "TRIAGE'S RELINT RETRY DISCARDS A PROPOSED SCOPE ON REPAIR — the run() callback wired into runRelintLoop (src/run-task.ts's triage lane) re-derives decideTriage from ONLY the current attempt's transcript, so a repair round that fixes the flagged files but omits a fresh PROPOSED: line collapses filed() to false and the whole scope is thrown away with no PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    THE INCIDENT (TRIAGE-fb-1790082750747-07ee12-1790086041678, cited by feedback#fb-1790086853999-c6a250).
+    Attempt 1 of the triage relint loop emitted W1-T4035 through W1-T4037 with a PROPOSED verdict;
+    `lintFiledTasks` rejected the filing (a `status: open` violation). `runRelintLoop` (src/lib/relint.ts)
+    folded the violations into `filedTaskRelintPrompt` and re-spawned. Attempt 2's worker repaired the
+    flagged files but its transcript carried no ALREADY_DECIDED:/AMBIGUOUS:/PROPOSED: line — the repair
+    prompt says "fix EVERY blocking violation ... then print your verdict line again" but does not make
+    that a hard requirement the caller enforces.
+
+    THE MECHANISM. `run-task.ts`'s `run` callback (the triage lane's `runRelintLoop` argument) does,
+    every attempt, independently:
+        const verdict = parseTriageVerdict(workerTranscript(worker));
+        return { decision: decideTriage({ verdict, changedFiles }), changedFiles };
+    On attempt 2, `verdict` parses to `null`, so `decideTriage` returns `action: "error"`
+    (`cause: "unparseable_verdict"`) even though the files on disk are a valid, now-repaired PROPOSED
+    filing. `runRelintLoop`'s `filed: (r) => r.decision.action === "propose"` then reads `false` for
+    this round, so the loop takes the `not-filed` exit: `violations = []`, `stop = "not-filed"`, and
+    the loop returns immediately with attempt 2's ERROR decision as `loop.decision`. Back in
+    `triageCommandLocked`, `loop.violations.length === 0` skips the relint-refusal branch entirely,
+    lands on `decision.action === "error"`, and returns 1 with "leaving no PR" — silently discarding a
+    scope that GROUND/RESEARCH/PROPOSE already cleared and that a human-readable repair had just fixed.
+
+    THE FIX, THREE PARTS (matching the feedback verbatim).
+    (1) VALIDATE TASK SCHEMA BEFORE FIRST EMISSION: `lintFiledTasks`/`lintTask` already run after
+    attempt 1's spawn; nothing today checks the SHAPE of a freshly-parsed task (does it have `status`,
+    is `status` a value the linter accepts) before that first relint round is even counted as a
+    filing — a task that fails to load or parse should surface as a `plan-load`-shaped violation on
+    attempt 1, not silently ride into a repair round that then loses the verdict thread.
+    (2) PRESERVE THE REQUIRED FINAL VERDICT ACROSS REPAIR: the triage `run` callback must not let a
+    repair attempt's `decideTriage` result regress from `propose` to `error` on `unparseable_verdict`
+    alone when the ONLY thing missing is the restated verdict line and the diff still matches the
+    original PROPOSED scope — either the repair prompt's contract must be enforced (retry within the
+    relint round on a missing verdict line, bounded, before falling through) or the caller must carry
+    the last known-good `propose` decision forward when a repair attempt's files still satisfy it.
+    (3) CARRY THE ORIGINALLY PROPOSED TASK SET INTO THE RETRY: `filedTaskRelintPrompt` already restricts
+    the repair to `filedIds`, but the loop's OWN state does not remember attempt 1's `decision.detail`/
+    `changedFiles` for use if attempt 2 legitimately fixes the files without repeating full prose —
+    thread that state through explicitly rather than reconstructing it from a transcript that may not
+    restate it.
+
+    REGRESSION COVERAGE REQUIRED. A deterministic test reproducing exactly the two-attempt path: attempt
+    1 emits a PROPOSED verdict whose filed task fails relint with a `status: open`-shaped violation;
+    attempt 2's synthetic worker transcript repairs the file (relint now clean) but emits NO verdict
+    line at all. Assert the loop's outcome is a `propose` decision (not silently discarded to `error`)
+    and that `filed()`/`lint()` are still exercised on attempt 2's repaired files. Also cover the
+    console-target proof roots that prompted the underlying blocked run: a case where the initially
+    proposed task's acceptance proof targets a non-core suite root the linter's dialect must still
+    resolve rather than downgrade to dead proof, so this shard's regression exercises the same class of
+    proof the blocked successor (feedback#fb-1790082750747-07ee12) needs.
+
+    FILES. `src/lib/relint.ts` (`runRelintLoop`'s `filed`/state-carry contract) and `src/run-task.ts`
+    (the triage lane's `run` callback that currently re-derives `decideTriage` from a bare per-attempt
+    transcript) are the only write sites; the new suite is its own file so the existing relint-loop
+    coverage in `test/relint-loop.test.ts` stays untouched and this defect's regression lives where a
+    reviewer will find it named for the incident.
+  acceptance:
+    - claim: "a repair attempt that fixes the flagged files but omits a fresh verdict line still yields a propose decision instead of being discarded as an error"
+      proof: "unit test: test/triage-relint-retry-preserves-verdict.test.ts"
+    - claim: "the repaired attempt's files are still relinted (not skipped as not-filed) before the loop decides it is clean"
+      proof: "unit test: test/triage-relint-retry-preserves-verdict.test.ts"
+    - claim: "a proposed task's acceptance proof targeting a non-core suite root is preserved through the retry rather than downgraded to dead proof"
+      proof: "unit test: test/triage-relint-retry-preserves-verdict.test.ts"
+  risk: high
+  origin: "feedback#fb-1790086853999-c6a250"
+  plan_refs: ["W1-T41", "W1-T2212", "W1-T286"]
+  files: [src/lib/relint.ts, src/run-task.ts, test/triage-relint-retry-preserves-verdict.test.ts]
+  status: queued
+  attempts: 0
