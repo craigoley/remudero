@@ -295,6 +295,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
+  envEntry("RMD_GH_READ_BURST", "Overrides the GitHub read burst this process grants inside the shared cadence floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
