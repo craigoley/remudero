@@ -157,6 +157,10 @@ test("a host-level figure is not repeated per instance", () => {
   const launcher = readFileSync(SCRIPT, "utf8");
   const hostHealthNames = ["diskFreeBytes", "rateLimitRemaining", "lastPollAgeMs", "pollIntervalMs"];
 
+  // This assertion makes the host/instance boundary test discriminating: the host-level rule is
+  // only meaningful once the launcher has an explicit instance route to keep from duplicating.
+  assert.match(launcher, /INSTANCE_NAME="\$\{RMD_SERVE_INSTANCE:-\}"/);
+
   // Host health is fetched once by the console's host-control read. The gateway launcher must not
   // manufacture a per-instance copy by passing host measurements through Docker environment or
   // instance state. This protects the already-shipped console boundary while the three gateways
