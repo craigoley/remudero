@@ -19569,9 +19569,10 @@ type CiFailureWindowReader = {
 export async function loadCiFailureWindowAsync(
   days: number,
   reader: CiFailureWindowReader,
+  clock: Clock = systemClock,
 ): Promise<CiFailureCorpusInput> {
   const self = resolveOwnerRepo();
-  const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const sinceMs = clock.now() - days * 24 * 60 * 60 * 1000;
   const rows = (await reader.read([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
@@ -19603,8 +19604,8 @@ export async function loadCiFailureWindowAsync(
         let response = 0;
         const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
         if (rollup !== undefined) commit.rollup = rollup;
-      } catch {
-        }
+      } catch { // unreadable check-runs/status: leave commit.rollup unset, matching rollupAtSha's contract
+      }
       try {
         const changed = await reader.read(["api", `repos/${self.owner}/${self.repo}/commits/${sha}`]) as
           | { files?: Array<{ filename?: string }> }
@@ -19612,7 +19613,7 @@ export async function loadCiFailureWindowAsync(
         if (Array.isArray(changed?.files)) {
           commit.changedFiles = changed.files.map((file) => file.filename ?? "").filter((file) => file.length > 0);
         }
-      } catch {
+      } catch { // unreadable commit diff: leave changedFiles unset, never [] ("changed nothing")
       }
       commits.push(commit);
     }
