@@ -7,6 +7,7 @@ import {
   armAndLogOutcome,
   armIfVerdictPermits,
   armReportPhrase,
+  priorArmOnHead,
   armAutoMerge,
   armAutoMergeDetailed,
   armFailureAction,
@@ -217,7 +218,7 @@ test("no lane logs a bare unconditional automerge.armed anywhere across run-task
 
 // ── 4-8: PER SITE — each lane reads the outcome ─────────────────────────────────────
 test("SITE dep-review reads the arm outcome rather than discarding it", () => {
-  const w = laneWindow("`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`");
+  const w = laneWindow("`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome, priorArm)}: ${view.url}`");
 
   // W1-T2258: this lane already held `view.headRefOid` (the SAME head its own review.posted
   // line just above was keyed to) — threaded onto the arm row as the 6th positional arg so
@@ -231,7 +232,7 @@ test("SITE dep-review reads the arm outcome rather than discarding it", () => {
 });
 
 test("SITE retro reads the arm outcome and passes runId, never the literal RETRO", () => {
-  const w = laneWindow("`retro PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 30);
+  const w = laneWindow("`retro PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 31);
 
   assert.match(
     w,
@@ -246,7 +247,7 @@ test("SITE retro reads the arm outcome and passes runId, never the literal RETRO
 });
 
 test("SITE triage reads the arm outcome rather than discarding it", () => {
-  const w = laneWindow("`triage PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 22);
+  const w = laneWindow("`triage PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 24);
 
   assert.match(w, /armAndLogOutcome\(prUrl, taskId, log, undefined, undefined, armHeadSha\)/);
   assert.match(w, /armHeadSha = readHeadShaRest\(prUrl\)/, "W1-T2258: the head sha is recovered, not guessed");
@@ -254,7 +255,7 @@ test("SITE triage reads the arm outcome rather than discarding it", () => {
 });
 
 test("SITE plan reads the arm outcome rather than discarding it", () => {
-  const w = laneWindow("`plan PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 22);
+  const w = laneWindow("`plan PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 24);
 
   assert.match(w, /armAndLogOutcome\(prUrl, taskId, log, undefined, undefined, armHeadSha\)/);
   assert.match(w, /armHeadSha = readHeadShaRest\(prUrl\)/, "W1-T2258: the head sha is recovered, not guessed");
@@ -262,7 +263,7 @@ test("SITE plan reads the arm outcome rather than discarding it", () => {
 });
 
 test("SITE approve reads the arm outcome rather than discarding it", () => {
-  const w = laneWindow("`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${result.prUrl}`", 26);
+  const w = laneWindow("`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${result.prUrl}`", 28);
 
   assert.match(w, /armAndLogOutcome\(result\.prUrl, `PR-\$\{prNum\}`, log, undefined, undefined, armHeadSha\)/);
   assert.match(w, /armHeadSha = readHeadShaRest\(result\.prUrl\)/, "W1-T2258: the head sha is recovered, not guessed");
@@ -762,4 +763,99 @@ test("impl-FR: repeated dispositions of the SAME unchanged PR open exactly one i
   });
   assert.equal(rec.created.length, 2, "a new head sha is a distinct state and gets its own issue");
   rmSync(tmp, { recursive: true, force: true });
+});
+
+// ── W1-T968: THE ARM REPORT ANSWERS ABOUT THE CALL WHILE THE OPERATOR IS ASKING ABOUT THE PR ──
+// `armReportPhrase` was a pure function of the ONE outcome the most recent call returned. The
+// review lane already arms and already ledgers `automerge.armed` (with `head_sha`) on a full
+// PASS; a later, redundant `armAndLogOutcome` call against the SAME already-armed PR then issues
+// a second `gh pr merge --auto`, which `attemptArm` classifies as `arm-error-ignored` — a real
+// outcome `armOutcomeArmed` correctly reads as "this call armed nothing". The console line built
+// from that outcome alone answers about the CALL, not the PULL REQUEST the operator asked about.
+// `priorArmOnHead` is the read that lets `armReportPhrase` answer about the PR instead.
+
+test("W1-T968: a prior arm on this head reports armed despite an arm error ignored", () => {
+  const PR_URL = "https://github.com/craigoley/remudero/pull/968";
+  const HEAD = "a968a968a968a968a968a968a968a968a968a968";
+  const lines = [{ step: "automerge.armed", pr_url: PR_URL, head_sha: HEAD, lane: "review" }];
+
+  const priorArm = priorArmOnHead(lines, PR_URL, HEAD);
+
+  assert.equal(priorArm, true, "sanity: the predicate finds the review-lane row already on the ledger");
+  assert.equal(
+    armReportPhrase("arm-error-ignored", priorArm),
+    "armed (arm-error-ignored)",
+    "a PR the review lane armed seconds ago must still read as armed, whatever this redundant call returned",
+  );
+});
+
+test("W1-T968: no prior arm reports not armed", () => {
+  const PR_URL = "https://github.com/craigoley/remudero/pull/968";
+  const HEAD = "b968b968b968b968b968b968b968b968b968b968";
+  const lines: Array<Record<string, unknown>> = [];
+
+  const priorArm = priorArmOnHead(lines, PR_URL, HEAD);
+
+  assert.equal(priorArm, false);
+  assert.equal(
+    armReportPhrase("arm-error-ignored", priorArm),
+    "NOT armed (arm-error-ignored)",
+    "an ordinary refusal with genuinely no prior arm must still print NOT armed",
+  );
+});
+
+test("W1-T968: a prior arm on a different head reports not armed", () => {
+  const PR_URL = "https://github.com/craigoley/remudero/pull/968";
+  const OLD_HEAD = "c968c968c968c968c968c968c968c968c968c968";
+  const NEW_HEAD = "d968d968d968d968d968d968d968d968d968d968";
+  const lines = [{ step: "automerge.armed", pr_url: PR_URL, head_sha: OLD_HEAD, lane: "review" }];
+
+  const priorArm = priorArmOnHead(lines, PR_URL, NEW_HEAD);
+
+  assert.equal(priorArm, false, "an arm recorded against a STALE head must not be claimed for a new one (design iii)");
+  assert.equal(armReportPhrase("arm-error-ignored", priorArm), "NOT armed (arm-error-ignored)");
+});
+
+test("W1-T968: head unavailable with a prior arm on this head reports armed", () => {
+  const PR_URL = "https://github.com/craigoley/remudero/pull/968";
+  const HEAD = "e968e968e968e968e968e968e968e968e968e968";
+  const lines = [{ step: "automerge.armed", pr_url: PR_URL, head_sha: HEAD, lane: "review" }];
+
+  // `head-unavailable` is returned when armAutoMerge's OWN internal `deps.headSha` throws — a
+  // DIFFERENT, independent REST read from the `armHeadSha` every call site already recovers
+  // best-effort for the console line (rationale point 6: this outcome lies exactly like
+  // arm-error-ignored, since a failed head read says nothing about whether the PR is armed).
+  const priorArm = priorArmOnHead(lines, PR_URL, HEAD);
+
+  assert.equal(
+    armReportPhrase("head-unavailable", priorArm),
+    "armed (head-unavailable)",
+    "both lying outcomes named in rationale point 6 are corrected by the same read, not by an outcome list",
+  );
+});
+
+test("W1-T968: automerge armed is registered in the decision relevant ledger steps", () => {
+  assert.equal(
+    DECISION_RELEVANT_LEDGER_STEPS.has("automerge.armed"),
+    true,
+    "a rotation must not be free to archive the exact row priorArmOnHead reads (design v)",
+  );
+});
+
+// ── design (vi): the falsifier is a TRIPLE, all three in one invocation ─────────────
+// An always-armed predicate passes the first case below and fails the second; a never-armed
+// predicate does the reverse; a head-blind predicate passes both and fails the third.
+test("W1-T968: priorArmOnHead discriminates a real prior arm, no arm, and a different-head arm", () => {
+  const PR_URL = "https://github.com/craigoley/remudero/pull/968";
+  const HEAD = "1968196819681968196819681968196819681968";
+  const OTHER_HEAD = "2968296829682968296829682968296829682968";
+  const armedRow = { step: "automerge.armed", pr_url: PR_URL, head_sha: HEAD };
+
+  assert.equal(priorArmOnHead([armedRow], PR_URL, HEAD), true, "a real prior arm on THIS head reads true");
+  assert.equal(priorArmOnHead([], PR_URL, HEAD), false, "no row at all reads false — refutes an always-true predicate");
+  assert.equal(
+    priorArmOnHead([armedRow], PR_URL, OTHER_HEAD),
+    false,
+    "a row recorded against a DIFFERENT head reads false — refutes a head-blind predicate",
+  );
 });
