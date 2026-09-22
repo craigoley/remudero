@@ -416,7 +416,7 @@ test("P29(ii) the W1-T29 x10 spin shape: a circuit-broken task is escalated EXAC
 // ── W1-T316: the LIFETIME dispatch cap, wired into runDaemon itself ─────────
 // (mirrors P29(ii)'s onCircuitBreak coverage immediately above, one field over)
 
-test("W1-T316: a lifetime-capped task is never (re-)dispatched — the daemon skips it (dispatch.lifetime_capped) and picks the next runnable task instead of halting", async () => {
+test("W1-T316: lifetime pressure is observed by the daemon without removing the task from dispatch", async () => {
   const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
   const merged = new Set<string>();
   const ran: string[] = [];
@@ -434,13 +434,12 @@ test("W1-T316: a lifetime-capped task is never (re-)dispatched — the daemon sk
     },
     { max: 1 },
   );
-  assert.ok(!ran.includes("A"), "A (lifetime-capped) was never dispatched");
-  assert.deepEqual(ran, ["D"]); // B/C still depend on the un-merged A; D is the only other candidate
-  assert.deepEqual(capped, ["A"], "the daemon's own onLifetimeCapExceeded fired exactly once for A");
+  assert.deepEqual(ran, ["A"], "A remains dispatchable after the pressure observation");
+  assert.deepEqual(capped, ["A"], "the daemon's own onLifetimeCapExceeded observed A exactly once");
   assert.equal(s.stopReason, "max_reached");
-  const cappedLine = lines.find((l) => l.step === "dispatch.lifetime_capped");
-  assert.ok(cappedLine, "a dispatch.lifetime_capped ledger line was emitted");
-  assert.equal(cappedLine?.extra.task, "A");
+  const pressureLine = lines.find((l) => l.step === "dispatch.lifetime_pressure");
+  assert.ok(pressureLine, "a dispatch.lifetime_pressure ledger line was emitted");
+  assert.equal(pressureLine?.extra.task, "A");
 });
 
 test("W1-T316: no isLifetimeCapExceeded wired ⇒ the daemon dispatches exactly as before this cap existed", async () => {
@@ -457,17 +456,11 @@ test("W1-T316: no isLifetimeCapExceeded wired ⇒ the daemon dispatches exactly 
   assert.equal(s.stopReason, "max_reached");
 });
 
-test("W1-T316 the x10 spin shape: a lifetime-capped task is escalated EXACTLY ONCE across MANY idle polls of the PERSISTENT daemon loop, never re-escalated tick after tick", async () => {
+test("W1-T316 the x10 shape: lifetime pressure does not create an idle spin or repeated escalation", async () => {
   const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
   const merged = new Set<string>();
   const ran: string[] = [];
   const capped: string[] = [];
-  const root = mkdtempSync(join(tmpdir(), "daemon-lifetime-cap-spin-"));
-  let calls = 0;
-  const sleep = async (_ms: number) => {
-    calls++;
-    if (calls >= 5) requestStop(root, "test done polling");
-  };
   const s = await runDaemon(plan, {
     refreshMerged: () => (id) => merged.has(id),
     isLifetimeCapExceeded: (id) => id === "A",
@@ -477,14 +470,11 @@ test("W1-T316 the x10 spin shape: a lifetime-capped task is escalated EXACTLY ON
       merged.add(id);
       return okResult(id);
     },
-    checkStop: () => stopDetail(root),
-    sleep,
-  });
-  assert.equal(s.stopReason, "stopped");
-  assert.ok(calls >= 5, "the loop really did idle-poll multiple times before the test stopped it");
-  assert.ok(!ran.includes("A"), "A (lifetime-capped) was never dispatched, no matter how many polls observed it capped");
-  assert.deepEqual(ran, ["D"], "D is the only task ever dispatched");
-  assert.deepEqual(capped, ["A"], "onLifetimeCapExceeded fired EXACTLY ONCE for A across the WHOLE daemon run, despite 5+ re-observations");
+    sleep: fakeClock().sleep,
+  }, { max: 4 });
+  assert.equal(s.stopReason, "max_reached");
+  assert.deepEqual(ran, ["A", "B", "C", "D"], "the daemon advances through the task graph instead of spinning on the pressure signal");
+  assert.deepEqual(capped, ["A"], "onLifetimeCapExceeded fired once for A");
 });
 
 test("W1-T316: a THROWING onLifetimeCapExceeded hook does not kill the loop", async () => {

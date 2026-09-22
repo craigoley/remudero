@@ -194,7 +194,7 @@ test("W1-T172 acceptance 2: an OPEN-PR task and a circuit-broken task are exclud
   assert.ok(lines.some((l) => l.step === "dispatch.circuit_broken" && l.extra.task === "C"));
 });
 
-test("W1-T316 acceptance 2: a lifetime-capped task is excluded from EVERY lane — concurrency never double-dispatches and never spins a capped task", async () => {
+test("W1-T316 acceptance 2: lifetime pressure is visible to EVERY lane without blocking concurrency", async () => {
   const plan = fixturePlan(); // A(a.ts) B(b.ts) C(c.ts) D(a.ts, overlaps A)
   const merged = new Set<string>();
   const ran: string[] = [];
@@ -217,12 +217,11 @@ test("W1-T316 acceptance 2: a lifetime-capped task is excluded from EVERY lane �
     { laneCount: 3, max: 4 },
   );
   assert.ok(!ran.includes("B"), "B (open PR, W1-T80) was never dispatched by any lane, on any pass");
-  assert.ok(!ran.includes("C"), "C (lifetime-capped, W1-T316) was never dispatched by any lane, on any pass");
-  assert.deepEqual(ran.sort(), ["A", "D"]);
+  assert.deepEqual(ran.sort(), ["A", "C", "D"], "C remains dispatchable and D still waits for the overlapping A lane");
   assert.equal(s.stopReason, "no_runnable");
   assert.deepEqual(capped, ["C"], "onLifetimeCapExceeded fired exactly once for C");
   assert.ok(lines.some((l) => l.step === "dispatch.skipped" && l.extra.task === "B"));
-  assert.ok(lines.some((l) => l.step === "dispatch.lifetime_capped" && l.extra.task === "C"));
+  assert.ok(lines.some((l) => l.step === "dispatch.lifetime_pressure" && l.extra.task === "C"));
 });
 
 // ── acceptance 3: lane-local block semantics ─────────────────────────────────
