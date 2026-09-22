@@ -75,6 +75,119 @@ export function runBranchTaskIds(lsRemoteOutput: string): ReadonlySet<string> {
   return ids;
 }
 
+/** W1-T4002 — one parsed row from the SAME `git ls-remote --heads origin 'run-*'` output
+ *  {@link runBranchTaskIds} reduces straight to a task-id set. This keeps the exact branch name
+ *  and, when the line carried one, its head sha — the two fields the plan-only exception below
+ *  must compare, because a bare task-id membership test cannot tell a real implementation branch
+ *  apart from a proven plan-only filing that merely happens to share the id's spelling. `sha` is
+ *  `undefined` for a bare-ref/bare-branch line (no tab), which can never match a receipt (see
+ *  {@link planOnlyRunBranchReceipt}) and so never releases the guard — the same fail-toward-
+ *  blocking posture {@link runBranchTaskIds} already has for an unparseable line. */
+export interface PushedRunRef {
+  taskId: string;
+  ref: string;
+  sha?: string;
+}
+
+/** Parses the raw `ls-remote` output into {@link PushedRunRef} rows, one per recognizable
+ *  `run-<id>-<epochMs>` line. INVARIANT: same one-read-per-pass discipline as
+ *  {@link runBranchTaskIds} — callers parse the SAME string both ways rather than reading twice. */
+export function parsePushedRunRefs(lsRemoteOutput: string): readonly PushedRunRef[] {
+  const refs: PushedRunRef[] = [];
+  for (const rawLine of lsRemoteOutput.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const hasTab = line.includes("\t");
+    const sha = hasTab ? line.split("\t")[0] : undefined;
+    const rawRef = hasTab ? line.split("\t")[1] : line;
+    const branch = rawRef.replace(/^refs\/heads\//, "");
+    const taskId = taskIdFromRunBranch(branch);
+    if (taskId !== undefined) refs.push({ taskId, ref: branch, sha });
+  }
+  return refs;
+}
+
+/** W1-T4002 — an EXACT `run-<id>-<epochMs>` head ref + head sha that the SAME full sweep pass
+ *  positively classified as a plan-only filing (`OpenPrView.isPlanFiling === true`, from a
+ *  POSITIVE classification source — see sweep.ts's {@link planOnlyRunBranchReceipts} producer,
+ *  never inferred here). Keyed by BOTH fields on purpose: a later push to the same branch name
+ *  changes the sha and therefore loses the receipt, which is exactly the "a changed remote tip
+ *  immediately loses that exception" invariant this task's design requires. */
+export interface PlanOnlyRunBranchReceipt {
+  ref: string;
+  sha: string;
+  prNumber: number;
+}
+
+/** True only when `ref` exactly matches one of `receipts` on BOTH the branch name and the sha — a
+ *  ref with no observed sha (a bare `ls-remote` line) never matches, and neither does a ref whose
+ *  sha has moved on since the receipt was proven. This is the one-branch, exact-head admission the
+ *  task's falsifier turns on and off. */
+export function planOnlyRunBranchReceipt(ref: PushedRunRef, receipts: readonly PlanOnlyRunBranchReceipt[]): boolean {
+  if (ref.sha === undefined) return false;
+  return receipts.some((r) => r.ref === ref.ref && r.sha === ref.sha);
+}
+
+/** W1-T4002 — true when task `taskId`'s raw run-branch guard must STAY BLOCKING: at least one of
+ *  its currently observed refs (already filtered to `taskId` by the caller) has no matching
+ *  {@link planOnlyRunBranchReceipt}. An empty `refs` array means nothing is pushed for this task at
+ *  all, which is not this guard's concern (`false` — never blocking on nothing). A SECOND,
+ *  unmatched ref for the same task id — the falsifier's "add a second unmatched run-W1-T999-*
+ *  ref" case — keeps this `true` even when the first ref matches a receipt: the exception releases
+ *  the exact matching tip, never every branch that merely shares the task's id. */
+export function unmatchedRunRefsRemainBlocking(
+  refs: readonly PushedRunRef[],
+  receipts: readonly PlanOnlyRunBranchReceipt[],
+): boolean {
+  if (refs.length === 0) return false;
+  return refs.some((ref) => !planOnlyRunBranchReceipt(ref, receipts));
+}
+
+/** W1-T4002 — the ONE decision {@link runDrain}, {@link runDrainLanes} AND daemon.ts's own
+ *  dispatch-options builder all make for `hasPushedRunBranch(taskId)`: still blocked when a raw
+ *  pushed branch exists for `taskId`, its PR is not CLOSED-AND-UNMERGED (W1-T1207's existing
+ *  exclusion), and the plan-only exception above does not release every ref currently observed for
+ *  it. Exported and shared rather than reimplemented per caller, so "daemon selection and bounded
+ *  drain selection" (this task's own design note) cannot answer the same collision differently. */
+export function stillBlockedByPushedRunBranch(
+  taskId: string,
+  pushedRunBranches: ReadonlySet<string> | undefined,
+  closedUnmergedRunBranches: ReadonlySet<string> | undefined,
+  pushedRunRefs: readonly PushedRunRef[],
+  planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[],
+): boolean {
+  if (pushedRunBranches === undefined || !pushedRunBranches.has(taskId)) return false;
+  if (closedUnmergedRunBranches?.has(taskId)) return false;
+  const refsForTask = pushedRunRefs.filter((r) => r.taskId === taskId);
+  return unmatchedRunRefsRemainBlocking(refsForTask, planOnlyReceipts);
+}
+
+/** W1-T4002 — ledgers the narrow released collision, once per matched ref, under a distinct
+ *  `plan-filing-run-branch-exception` reason (the SAME reason daemon.ts's own dispatch-options
+ *  builder names), so an operator can tell "a proven plan-only filing released this tip" from "no
+ *  branch read happened" rather than reading a silent non-block. Called only for a task whose
+ *  `stillBlockedByPushedRunBranch` answer is `false` AND which actually had a pushed ref — i.e. the
+ *  exception, not an absent branch, is what released it. */
+export function logPlanOnlyRunBranchException(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  taskId: string,
+  refs: readonly PushedRunRef[],
+  receipts: readonly PlanOnlyRunBranchReceipt[],
+): void {
+  for (const ref of refs) {
+    const match = receipts.find((r) => r.ref === ref.ref && r.sha === ref.sha);
+    if (match) {
+      log("dispatch.run_branch_exception", {
+        task: taskId,
+        reason: "plan-filing-run-branch-exception",
+        ref: ref.ref,
+        sha: ref.sha,
+        pr_number: match.prNumber,
+      });
+    }
+  }
+}
+
 /** Task ids whose `run-<id>-<epochMs>` branch belongs to a CLOSED AND UNMERGED pull request, parsed
  *  from one batched, paginated `pulls?state=closed` sweep (W1-T1207). INVARIANT: only this one state
  *  is named — GitHub deletes a MERGED PR's head so it never reaches {@link runBranchTaskIds}'s sweep,
@@ -966,6 +1079,13 @@ export interface DrainDeps {
    *  false dispatch races a live run. Optional. */
   // Why: the five operator-closed exclusions that motivated it (W1-T1207) — docs/forensics/drain.md.
   readClosedRunBranchPrs?: () => string;
+  /** W1-T4002 — the bounded set of CURRENT plan-only filing receipts the SAME full sweep pass this
+   *  selection is deciding for already proved, when a caller has one to offer — see sweep.ts's
+   *  `planOnlyRunBranchReceipts` for the producer and {@link unmatchedRunRefsRemainBlocking} for the
+   *  consumer. Read once per pass, alongside `readPushedRunBranches`, never per candidate. NO READER
+   *  WIRED (the plain `rmd drain` command runs no full sweep to draw one from) means every pushed run
+   *  branch keeps blocking exactly as before this task — never a silently permissive default. */
+  readPlanOnlyRunBranchReceipts?: () => readonly PlanOnlyRunBranchReceipt[];
   /** W1-T2286: the same {@link ObservedScopeByTask} threaded to {@link
    *  NextRunnableOpts.observedByTask} for the pack step AND to `partitionByFileOverlap`'s direct call
    *  in {@link runDrainLanes} — one dependency read twice, so the pack and the partition never
@@ -1088,14 +1208,19 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   // dispatch. A run can open its PR after this snapshot and before the next selection; retaining
   // the old set across that boundary recreates the stale-absent duplicate-build window.
   let pushedRunBranches: ReadonlySet<string> | undefined;
+  let pushedRunRefs: readonly PushedRunRef[] = [];
   let closedUnmergedRunBranches: ReadonlySet<string> | undefined;
+  // W1-T4002: the exception's own evidence, re-read alongside the branch sweep above so a receipt
+  // never outlives the pass that proved it.
+  let planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[] = [];
   const refreshRunBranchState = (): void => {
-    pushedRunBranches = deps.readPushedRunBranches
-      ? runBranchTaskIds(deps.readPushedRunBranches())
-      : undefined;
+    const raw = deps.readPushedRunBranches?.();
+    pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
+    pushedRunRefs = raw !== undefined ? parsePushedRunRefs(raw) : [];
     closedUnmergedRunBranches = deps.readClosedRunBranchPrs
       ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
       : undefined;
+    planOnlyReceipts = deps.readPlanOnlyRunBranchReceipts?.() ?? [];
   };
   refreshRunBranchState();
   while (attempted.length < max) {
@@ -1186,6 +1311,8 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
 
     const currentPushedRunBranches = pushedRunBranches;
     const currentClosedUnmergedRunBranches = closedUnmergedRunBranches;
+    const currentPushedRunRefs = pushedRunRefs;
+    const currentPlanOnlyReceipts = planOnlyReceipts;
     const skipOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
@@ -1204,11 +1331,24 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // (and refreshed after non-merged work), so this closure is a set-membership test and never
       // a per-candidate round trip. W1-T1207: a branch keeps blocking unless its PR is CLOSED AND
       // UNMERGED. With no reader injected both are undefined and the old behavior is unchanged.
+      // W1-T4002: `stillBlockedByPushedRunBranch` folds in the plan-only exception — see its own
+      // doc for why this is the ONE decision both selection loops make.
       ...(currentPushedRunBranches
         ? {
-            hasPushedRunBranch: (id: string) =>
-              currentPushedRunBranches.has(id) &&
-              (currentClosedUnmergedRunBranches === undefined || !currentClosedUnmergedRunBranches.has(id)),
+            hasPushedRunBranch: (id: string) => {
+              const stillBlocked = stillBlockedByPushedRunBranch(
+                id,
+                currentPushedRunBranches,
+                currentClosedUnmergedRunBranches,
+                currentPushedRunRefs,
+                currentPlanOnlyReceipts,
+              );
+              if (!stillBlocked) {
+                const refsForTask = currentPushedRunRefs.filter((r) => r.taskId === id);
+                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts);
+              }
+              return stillBlocked;
+            },
             // RIDES THE EXISTING ROW (W1-T534): `dispatch.skipped` with its own reason, never a new
             // step. The task is not marked done and burns no strike — it is offered again once the
             // branch is gone, so this is a skip and never a terminal state.
@@ -1400,14 +1540,19 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // dispatch. A run can open its PR after this snapshot and before the next selection; retaining
   // the old set across that boundary recreates the stale-absent duplicate-build window.
   let pushedRunBranches: ReadonlySet<string> | undefined;
+  let pushedRunRefs: readonly PushedRunRef[] = [];
   let closedUnmergedRunBranches: ReadonlySet<string> | undefined;
+  // W1-T4002: the exception's own evidence, re-read alongside the branch sweep above so a receipt
+  // never outlives the pass that proved it.
+  let planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[] = [];
   const refreshRunBranchState = (): void => {
-    pushedRunBranches = deps.readPushedRunBranches
-      ? runBranchTaskIds(deps.readPushedRunBranches())
-      : undefined;
+    const raw = deps.readPushedRunBranches?.();
+    pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
+    pushedRunRefs = raw !== undefined ? parsePushedRunRefs(raw) : [];
     closedUnmergedRunBranches = deps.readClosedRunBranchPrs
       ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
       : undefined;
+    planOnlyReceipts = deps.readPlanOnlyRunBranchReceipts?.() ?? [];
   };
   refreshRunBranchState();
   while (attempted.length < max) {
@@ -1502,6 +1647,8 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
 
     const currentPushedRunBranches = pushedRunBranches;
     const currentClosedUnmergedRunBranches = closedUnmergedRunBranches;
+    const currentPushedRunRefs = pushedRunRefs;
+    const currentPlanOnlyReceipts = planOnlyReceipts;
     const skipOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
@@ -1520,11 +1667,24 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       // (and refreshed after non-merged work), so this closure is a set-membership test and never
       // a per-candidate round trip. W1-T1207: a branch keeps blocking unless its PR is CLOSED AND
       // UNMERGED. With no reader injected both are undefined and the old behavior is unchanged.
+      // W1-T4002: `stillBlockedByPushedRunBranch` folds in the plan-only exception — see its own
+      // doc for why this is the ONE decision both selection loops make.
       ...(currentPushedRunBranches
         ? {
-            hasPushedRunBranch: (id: string) =>
-              currentPushedRunBranches.has(id) &&
-              (currentClosedUnmergedRunBranches === undefined || !currentClosedUnmergedRunBranches.has(id)),
+            hasPushedRunBranch: (id: string) => {
+              const stillBlocked = stillBlockedByPushedRunBranch(
+                id,
+                currentPushedRunBranches,
+                currentClosedUnmergedRunBranches,
+                currentPushedRunRefs,
+                currentPlanOnlyReceipts,
+              );
+              if (!stillBlocked) {
+                const refsForTask = currentPushedRunRefs.filter((r) => r.taskId === id);
+                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts);
+              }
+              return stillBlocked;
+            },
             // RIDES THE EXISTING ROW (W1-T534): `dispatch.skipped` with its own reason, never a new
             // step. The task is not marked done and burns no strike — it is offered again once the
             // branch is gone, so this is a skip and never a terminal state.
