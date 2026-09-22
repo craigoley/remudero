@@ -1500,3 +1500,31 @@ githubEventWake:
 #       verdict: notify
 #       note: "the class the operator is watching, once measured"
 armCalibrationBands: []
+
+# W1-T4050 — RISK LEVELS ARE RUNTIME POLICY, not a source literal. OPERATOR'S WORDS: "I don't
+# want strictness, I want risk levels and rules that can be configured in the console."
+#
+# BOTH ROWS ARE OPTIONAL, AND ABSENT REPRODUCES TODAY'S BEHAVIOUR EXACTLY — this section (and
+# each row within it) is additive, never a behaviour change on its own:
+#   - `confidenceThreshold` absent ⇒ 0.7, `src/lib/risk-judge.ts`'s own
+#     `DEFAULT_CONFIDENCE_THRESHOLD`, unchanged.
+#   - `verifyHumanReleaseEnabled` absent ⇒ `true` — `rmd approve <verify:human task>` releases
+#     directly, exactly as it does today.
+#
+# READ LIVE, NEVER BOOT-TIME-MEMOIZED: `src/lib/risk-judge.ts`'s `readRiskPolicy` re-reads and
+# re-parses this file on every call (the same per-call `loadPolicy(policyPath(repoRoot))` shape
+# this file's other consumers already use), unlike `loadDefaultPolicy`'s process-lifetime cache
+# — a merged edit here governs the very next unattended risk judgment or `rmd approve`, no
+# daemon restart. Intentionally NOT threaded through `src/lib/policy.ts`'s `validatePolicy`
+# (W1-T4050's declared scope excludes that file): an unrecognized top-level key is simply
+# ignored by that loader, so this section coexists with the rest of this file without touching
+# its schema.
+risk:
+  confidenceThreshold:
+    value: 0.7
+    origin: "lifted:src/lib/risk-judge.ts:593 (DEFAULT_CONFIDENCE_THRESHOLD, as measured at 855dcb0b6)"
+    min: 0
+    max: 1
+  verifyHumanReleaseEnabled:
+    value: true
+    origin: "net-new"
