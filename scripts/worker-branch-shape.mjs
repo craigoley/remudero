@@ -175,6 +175,23 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
   }
 
   const planOnly = isPlanOnlyDiff(changedFiles);
+  // A plan-only filing normally makes no build claim (W1-T2530), but a filing whose added shard
+  // id is ALSO the exact id its run-<id>- head claims would manufacture the head-branch merge
+  // credit that plan-only exemption is meant to avoid (W1-T3994). Refuse only that intersection:
+  // a non-run plan filing and a real implementation on its correctly-shaped run branch remain
+  // valid below.
+  const selfCreditingPlanFiling = planOnly ? [...shardIds].filter((id) => headRefIds.has(id)) : [];
+  if (selfCreditingPlanFiling.length > 0) {
+    return {
+      ok: false,
+      defect: "plan-filing-run-credit",
+      message:
+        `REFUSED — this plan-only filing adds ${selfCreditingPlanFiling.join(", ")} while its head ref "${headRef}" ` +
+        `uses that same id's run-<taskId>-<epochMs> shape, which is a durable implementation-credit input. ` +
+        `Use a non-run filing branch; a plan-only filing must not create merge credit for the shard it introduces.`,
+    };
+  }
+
   // A shard-only id is exempt exactly when the diff is plan-only — see this function's doc above.
   const requiresShape = claimed.filter((id) => trailerIds.has(id) || headRefIds.has(id) || !planOnly);
   const exemptByPlanOnlyFiling = claimed.filter((id) => !requiresShape.includes(id));

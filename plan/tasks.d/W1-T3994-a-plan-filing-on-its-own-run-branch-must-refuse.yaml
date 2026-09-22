@@ -1,0 +1,60 @@
+- id: W1-T3994
+  title: "A PLAN-ONLY FILING ON run-<its-own-id>- IS CREDITED AS A BUILD — the branch-shape gate exempts every plan-only shard before checking whether its head itself manufactures the merge-credit identity"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files:
+    - scripts/worker-branch-shape.mjs
+    - test/a-worker-branch-must-be-shaped-for-dispatch.test.ts
+  origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
+  plan_refs: ["W1-T2530", "W1-T3067", "W1-T3990", "W1-T3993"]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED 2026-09-22: plan PR #6468 added W1-T3990's shard on
+    run-W1-T3990-1790031507231. It carried no trailer and changed only plan scope, so the
+    branch-shape gate correctly recognized it as a filing but incorrectly treated the run-shaped
+    head as harmless. The merge-credit projection later read that same branch form as positive
+    implementation ownership and permanently suppressed W1-T3990's actual build.
+
+    W1-T3993 repairs the durable-credit recovery path for existing records. This task prevents
+    new records at the author-time boundary. A plan-only filing remains exempt from the requirement
+    to USE a run-shaped branch. It is not exempt from the prohibition on using the exact run shape
+    for the task record it introduces, because that spelling is itself a durable implementation
+    credit input. The concern is a self-intersection of the added shard id and head-ref id, not
+    any branch containing the word "run" or a filing for some other task.
+  design: |
+    In evaluateWorkerBranchShape, after identifying a non-empty plan-only diff, compute the
+    intersection of shardTaskIds and headRefTaskIds. If an added shard's own id is named by a
+    run-<that-id>- head, refuse with a dedicated plan-filing-run-credit defect that names the id
+    and directs the author to use a non-run filing branch. Keep the W1-T2530 exemption unchanged
+    for an ordinary plan-only filing on a non-run ref, and keep the existing run-shape acceptance
+    for a real non-plan-only implementation. Do not infer from a subject or trailer; the added
+    shard and exact head-ref identity are the only inputs. Do not edit src/ in this PR: this is an
+    instrument-surface prevention gate, deliberately separate from W1-T3993's status recovery.
+  acceptance:
+    - claim: "a plan-only filing on run-<its-own-id>- is refused before it can create a head-branch merge credit"
+      proof: "unit test: a plan-only filing on its own run branch is refused"
+    - claim: "a plan-only filing on a non-run branch remains exempt, preserving the W1-T2530 filing carve-out"
+      proof: "unit test: a plan-only filing on a non-run branch remains exempt"
+    - claim: "a non-plan implementation on its correctly shaped run branch still passes"
+      proof: "unit test: a non-plan implementation on its correctly shaped run branch still passes"
+    - claim: "the new refusal is an explicit plan-filing-run-credit outcome rather than a generic unshaped-branch error"
+      proof: "grep: plan-filing-run-credit in scripts/worker-branch-shape.mjs"
+  falsifier: |
+    Give evaluateWorkerBranchShape an added W1-T999 shard, a plan-only changed-file list, and
+    headRef run-W1-T999-1790031507231. Before the fix it returns the plan-only exemption; remove
+    the self-intersection refusal and the new test must return to that false OK. Change the ref to
+    codex/file-W1-T999 or add src/example.ts to the changed files: both controls must preserve
+    their current allowed and correctly-shaped outcomes, proving the boundary is not a ban on
+    filings or run branches generally.
+  note: |
+    reservation hand-off: none; this plan-only filing intentionally uses a non-run branch and no
+    Remudero-Task trailer. The implementation must use run-W1-T3994-<epochMs> after this filing
+    merges. Rule 25 is deliberate: W1-T3994 changes only the instrument surface and its direct
+    test, while W1-T3993 separately repairs the src/lib/status.ts recovery path.

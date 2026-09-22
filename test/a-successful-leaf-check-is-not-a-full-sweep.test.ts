@@ -146,6 +146,9 @@ test("shadow mode writes a marker for every currently accepted check while emitt
       successful_leaf: 1,
       unknown: 0,
       aggregate_names: { "ci-gate": 0, ci: 0 },
+      aggregate_head_shas: [],
+      aggregate_head_sha_missing: 0,
+      aggregate_head_sha_overflow: 0,
     });
     assert.deepEqual(summary(logs[1]), {
       mode: "shadow",
@@ -154,6 +157,9 @@ test("shadow mode writes a marker for every currently accepted check while emitt
       successful_leaf: 0,
       unknown: 0,
       aggregate_names: { "ci-gate": 1, ci: 0 },
+      aggregate_head_shas: [],
+      aggregate_head_sha_missing: 1,
+      aggregate_head_sha_overflow: 0,
     });
     assert.deepEqual(summary(logs[2]), {
       mode: "shadow",
@@ -162,6 +168,9 @@ test("shadow mode writes a marker for every currently accepted check while emitt
       successful_leaf: 0,
       unknown: 0,
       aggregate_names: { "ci-gate": 0, ci: 0 },
+      aggregate_head_shas: [],
+      aggregate_head_sha_missing: 0,
+      aggregate_head_sha_overflow: 0,
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -240,6 +249,9 @@ test("enforce mode suppresses successful leaves without a marker, while aggregat
       successful_leaf: 1,
       unknown: 0,
       aggregate_names: { "ci-gate": 1, ci: 0 },
+      aggregate_head_shas: [],
+      aggregate_head_sha_missing: 1,
+      aggregate_head_sha_overflow: 0,
     });
     assert.deepEqual(summary(logs[1]), {
       mode: "enforce",
@@ -248,6 +260,9 @@ test("enforce mode suppresses successful leaves without a marker, while aggregat
       successful_leaf: 0,
       unknown: 0,
       aggregate_names: { "ci-gate": 0, ci: 0 },
+      aggregate_head_shas: [],
+      aggregate_head_sha_missing: 0,
+      aggregate_head_sha_overflow: 0,
     });
     assert.equal(summary(logs[2]), undefined);
     assert.deepEqual(summary(logs[3]), {
@@ -257,6 +272,9 @@ test("enforce mode suppresses successful leaves without a marker, while aggregat
       successful_leaf: 0,
       unknown: 1,
       aggregate_names: { "ci-gate": 0, ci: 0 },
+      aggregate_head_shas: [],
+      aggregate_head_sha_missing: 0,
+      aggregate_head_sha_overflow: 0,
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

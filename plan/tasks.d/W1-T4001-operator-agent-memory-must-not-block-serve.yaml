@@ -1,0 +1,73 @@
+- id: W1-T4001
+  title: "OPERATOR-AGENT HISTORY MUST NOT RESCAN THE FULL LEDGER ON EVERY REQUEST — reuse the serve-owned refresh and keep durable decisions available under the console read ceiling"
+  repo: remudero
+  depends_on: [W1-T3623, W1-T3795]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - src/lib/operator-agent.ts
+    - src/lib/analytics-route.ts
+    - src/lib/serve.ts
+    - test/operator-agent.test.ts
+    - test/analytics-route.test.ts
+    - test/serve.shell-ux.test.ts
+  origin: "followup#1584-agent-read-ceiling-2026-09-22"
+  plan_refs: [W1-T3623, W1-T3795]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED on the live remudero instance after the console operator-agent implementation shipped:
+    GET /v1/operator-agent/proposals took approximately 15 seconds and GET
+    /v1/operator-agent/settings took approximately 10 seconds from the Azure serve process, while
+    GET /v1/analytics returned in approximately 2.7 seconds. The operator-agent routes each call
+    readLedgerUnionRecordsSync directly, so a console page that requests analytics plus history
+    plus settings concurrently makes the single-threaded daemon spend its read window rescanning
+    the rotated ledger. The console's bounded 5-second transport then reports the optional agent
+    reads unavailable, and accept/reject cannot complete even though analytics is healthy.
+
+    The live console now sequences critical analytics before those optional reads and is honest
+    about durable settings/history being unavailable. That is a containment fix, not the durable
+    solution: a restart or a quiet period can still force every operator-agent read through the
+    full corpus. Ledger durability must remain the source of truth; this task owns the serving
+    path and must not weaken the client timeout or label a cold cache as verified.
+  design: |
+    Reuse the serve-owned background ledger refresh rather than starting a synchronous union scan
+    from each operator-agent request. The refreshed process-owned value must include the bounded
+    operator-agent proposal, decision, outcome, and settings records needed to reconstruct the
+    existing history/settings responses. A request reads that value synchronously and returns an
+    explicit state when the first refresh has not completed; it never waits on the scan. After an
+    operator-agent write, invalidate or update the in-memory value so read-after-write remains
+    correct without reopening the full corpus on the request path.
+
+    Preserve the existing ledger union across live and rotated files, idempotency, validation,
+    expiry, and conservative defaults. Preserve the existing analytics cache timeout and refresh
+    cadence. Bound retained memory and redact fields not needed by the operator-agent response;
+    prompts, bearer tokens, and arbitrary ledger excerpts must not enter the cache or wire payload.
+    Add tests for the cold/unavailable state, background refresh serving without a synchronous
+    read, read-after-write, rotation coverage, and the route assembly wiring.
+  acceptance:
+    - claim: "operator-agent reads return from the serve-owned snapshot without synchronously scanning the ledger"
+      proof: "unit test: operator-agent reads use the refreshed memory snapshot without a synchronous union read"
+    - claim: "a cold snapshot is explicit and never presented as verified empty history"
+      proof: "unit test: a cold operator-agent snapshot is unavailable rather than an observed empty ledger"
+    - claim: "a decision or settings write is visible on the next read without waiting for the periodic refresh"
+      proof: "unit test: operator-agent writes invalidate the snapshot for read-after-write"
+    - claim: "the real serve assembly wires one shared operator-agent refresh into all six routes"
+      proof: "unit test: serve assembly shares the operator-agent refresh across read and write routes"
+    - claim: "the durable reader still covers both the live ledger and supported rotations"
+      proof: "unit test: operator-agent memory refresh includes rotated and live ledger rows"
+  falsifier: |
+    Replace the cached reader with a direct readLedgerUnionRecordsSync call in any GET route: the
+    no-synchronous-read test must fail. Start the route before the first refresh and return an empty
+    verified history: the cold-state test must fail. Append a decision or scoped setting and omit
+    invalidation: the read-after-write test must fail. Remove a rotated proposal row: the union
+    coverage test must fail. Make the cache retain prompts or bearer identity: the bounded-memory
+    and redaction assertions must fail.
+  note: |
+    This is the core follow-up for console PR #1584 and keeps the console's existing critical-read
+    sequencing as a safe containment layer. The implementation PR must carry
+    Remudero-Task: W1-T4001; this filing stays trailer-free.
