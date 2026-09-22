@@ -82,3 +82,42 @@ test("a decision is read from the LABELLED line, not from prose mentioning the w
   const v = parseVerifyHumanVerdict("I considered whether to automate this, but it needs a person.");
   assert.equal(v.decision, "needs_operator");
 });
+
+/**
+ * THE TWO TESTS BELOW PIN THE SAME INVARIANTS AS THE TWO ABOVE, ON THE PATH THIS PR OPENED.
+ *
+ * An invariant asserted on the OLD path ("an invented decision is still refused", "absent and
+ * prose-only still fail open") holds identically at the merge base — `proof-discrimination` grades
+ * exactly that shape `executed_stale`, and it is right to: a proof that passes on both trees
+ * establishes nothing about this change. The invariant is still worth pinning, so it is pinned
+ * HERE as a conjunction whose other half is a decorated verdict that fails open at the base.
+ *
+ * That makes these strictly STRONGER than a bare restatement, not weaker: a widening regression
+ * would live in the decoration path, which is the one place the tests above never exercise.
+ */
+
+test("the vocabulary did not widen with the decoration — a decorated INVENTED decision is still refused", () => {
+  // Half one is this PR's change: at the merge base a bold label fails open and this read is
+  // `needs_operator`, so the test cannot pass there.
+  assert.equal(parseVerifyHumanVerdict(`**VERIFY_HUMAN_DECISION:** automate\n${R}`).decision, "automate");
+  // Half two is the invariant, now asserted THROUGH the decoration rather than beside it.
+  for (const bad of ["**approve**", "`yes`", '"release_it"', "**AUTOMATE_NOW**", "proceed"]) {
+    const v = parseVerifyHumanVerdict(`**VERIFY_HUMAN_DECISION:** ${bad}\n${R}`);
+    assert.equal(v.decision, "needs_operator", `decorated ${bad} must fail open, not be accepted`);
+  }
+});
+
+test("failing open survived the decoration path — an EMPTY decorated label still reaches an operator", () => {
+  // Half one: a decorated verdict now parses, which is false at the merge base.
+  assert.equal(parseVerifyHumanVerdict(`**VERIFY_HUMAN_DECISION:** backlog\n${R}`).decision, "backlog");
+  // Half two: tolerance must not have turned an empty or prose-only rendering into a decision.
+  // A label whose value is nothing but MORE decoration is the shape this change newly reaches.
+  for (const text of [
+    "**VERIFY_HUMAN_DECISION:**",
+    "**VERIFY_HUMAN_DECISION:** ****",
+    "- **VERIFY_HUMAN_DECISION:** ``",
+    "**I considered whether to automate this**, but it needs a person",
+  ]) {
+    assert.equal(parseVerifyHumanVerdict(text).decision, "needs_operator", `"${text}" must never auto-release`);
+  }
+});
