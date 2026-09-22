@@ -14,6 +14,7 @@
   files:
     - src/lib/risk-judge.ts
     - src/run-task.ts
+    - src/lib/verify-human-release.ts
     - plan/policy.yaml
     - test/risk-levels-are-runtime-policy.test.ts
   status: queued
@@ -28,11 +29,15 @@
     below DEFAULT_CONFIDENCE_THRESHOLD = 0.7, a module literal. plan/policy.yaml carries sweep, drain,
     retro, headroom and launchd sections and no risk section at all. The verify-human release arm
     (the risk-judged `ratify.approved` path) has no switch an operator can reach without a PR.
+    After W1-T4050 was filed, W1-T4048/#6619 landed the automated release caller in
+    `src/lib/verify-human-release.ts`; that caller is part of this task's behavior and must be
+    declared so its policy wiring is reviewable rather than silently outside the task's file set.
   design: |
     (i) A `risk:` SECTION in plan/policy.yaml: the confidence threshold, and an enable switch for the
     verify-human release arm. Absent reads as today's behaviour exactly — 0.7, and releases enabled —
     so the section is additive and ships safe.
-    (ii) THREAD IT to every planRiskJudgeAction caller that runs unattended, reusing
+    (ii) THREAD IT to every planRiskJudgeAction caller that runs unattended, including the
+    automated verify-human release path in `src/lib/verify-human-release.ts`, reusing
     RiskJudgeConfig.confidenceThreshold, which already exists and is simply never fed from policy.
     (iii) LIVE RE-READ, NOT BOOT-TIME. A policy the daemon memoises at startup is a policy the console
     cannot change; read it per tick, the way the headroom governor's flag is read.
