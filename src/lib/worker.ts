@@ -119,6 +119,8 @@ import {
   type ProviderSelection,
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
+  OpenWeightUnsupportedResponseFormatError,
+  type OpenWeightModelSelection,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -1709,6 +1711,57 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
  *  — never a value asserted independently of it. */
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
+/**
+ * Run an open-weight spawn, and on a DEPLOYMENT CAPABILITY REFUSAL try the next rung of the ladder
+ * rather than failing the run.
+ *
+ * MEASURED over the live ledger: 22,356 `openweight_error` runs, 21,942 of them (98%) on ONE
+ * deployment across three days — while two other candidates sat configured in the SAME ladder row
+ * and were never tried. `selectOpenWeightModel` already walks the ladder for CONTEXT FIT; nothing
+ * walked it for FAILURE, so a single unusable deployment took the whole run.
+ *
+ * ONE TRIGGER — the only failure that cannot succeed on a retry of the SAME deployment.
+ * `OpenWeightUnsupportedResponseFormatError` names the deployment and what it could not honour,
+ * and its own message prescribes this remedy. Everything else is deliberately NOT walked: a
+ * timeout or truncated reply may be transient and walking turns a blip into a second charge
+ * against `dailyCapUsd`; a too-large request already consulted the fit gate; auth and cap refusals
+ * recur on every rung. Walking those spends real money to learn nothing.
+ *
+ * BOUNDED BY THE LADDER: one attempt per remaining candidate, over a list the context gate already
+ * filtered — it can neither loop nor widen the context rule.
+ */
+export async function runOpenWeightWalkingLadder(
+  run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
+  selection: OpenWeightModelSelection,
+): Promise<WorkerResult> {
+  const rungs = [selection.model, ...selection.alternatives];
+  let lastRefusal: unknown;
+  for (const [index, model] of rungs.entries()) {
+    try {
+      const result = await run({ ...selection, model });
+      result.routedModel = model;
+      return result;
+    } catch (err) {
+      if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
+      lastRefusal = err;
+      const next = rungs[index + 1];
+      // NAME THE FALL-THROUGH. A silent downgrade would make a run that landed on rung 3
+      // indistinguishable from one that led there, and the point of this walk is that the record
+      // can say which deployments were unusable and why.
+      console.error(JSON.stringify({
+        event: "worker.openweight.rung_refused",
+        deployment: model,
+        reason: err.message.slice(0, 200),
+        next: next ?? null,
+        rung: index + 1,
+        of: rungs.length,
+      }));
+      if (!next) break;
+    }
+  }
+  throw lastRefusal;
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   try {
@@ -2091,8 +2144,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
-      const result = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, openWeight);
-      result.routedModel = openWeight.model;
+      // WALK THE LADDER ON A CAPABILITY REFUSAL, NEVER ON ANYTHING ELSE (see `runOpenWeightWalkingLadder`).
+      const result = await runOpenWeightWalkingLadder(
+        (selection) => runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection),
+        openWeight,
+      );
       result.selectionAssignmentId = selectionAssignmentId;
       return result;
     } finally {
