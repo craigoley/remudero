@@ -2658,9 +2658,13 @@ export async function runDaemon(
       }
     }
 
-    // W1-T2972: same tick discipline and best-effort contract as the two cadences above, on its own
-    // row and marker. It stages MARKED, PARKED shards through the isolated landing bridge; a fire
-    // spends the cadence budget before the potentially slow corpus read.
+    // W1-T3997: CI learning is self-improvement, never a prerequisite for reconciling the PR queue.
+    // The corpus walks recent PRs, commits, check rollups and changed-file records; awaiting that
+    // walk here once held sweep/review/arm/dispatch for the entire read. It uses the SAME detached
+    // registry as retro and triage, so a freshness restart drains it with bounded, ledger-visible
+    // abandonment rather than cutting it off invisibly. The runner records the cadence fire before
+    // its first yield and releases that fire on an unreadable corpus, preserving its own crash-loop
+    // guard while letting this iteration continue.
     if (deps.checkCiLearningCadence) {
       let ciLearningDecision: MeasurementCadenceDecision | undefined;
       try {
@@ -2669,23 +2673,43 @@ export async function runDaemon(
         log("ci_learning_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
       }
       if (ciLearningDecision?.fire) {
-        log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
-        if (deps.runCiLearningCadence) {
-          try {
-            const result = await deps.runCiLearningCadence();
-            // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
-            log("ci_learning_cadence.ran", {
-              status: result.status,
-              drafts: result.draftCount,
-              excluded: result.excludedCount,
-              unreadable: result.unreadableCount,
-              filed: result.filedCount,
-              skipped: result.skippedCount,
-              refused: result.refusedCount,
-              lesson_recurrences: result.lessonRecurrences,
-            });
-          } catch (e) {
-            log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+        if (deps.runCiLearningCadence && detachedActionInFlight("ci-learning")) {
+          log("ci_learning_cadence.already_detached", {
+            reason: ciLearningDecision.reason,
+            refusal: "ci-learning action already in flight",
+          });
+        } else {
+          log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
+          if (deps.runCiLearningCadence) {
+            const reason = ciLearningDecision.reason;
+            try {
+              const work = deps.runCiLearningCadence();
+              detachSweepAction(
+                work
+                  .then((result) => {
+                    // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
+                    log("ci_learning_cadence.ran", {
+                      status: result.status,
+                      drafts: result.draftCount,
+                      excluded: result.excludedCount,
+                      unreadable: result.unreadableCount,
+                      filed: result.filedCount,
+                      skipped: result.skippedCount,
+                      refused: result.refusedCount,
+                      lesson_recurrences: result.lessonRecurrences,
+                    });
+                  })
+                  .catch((e) => {
+                    log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+                  }),
+                { actionKind: "ci-learning", taskId: "DAEMON" },
+              );
+              log("ci_learning_cadence.detached", { reason });
+            } catch (e) {
+              // Keep the cadence rung best-effort even for a legacy/injected runner that throws
+              // before it can return its promise. Production reaches its first await at the corpus read.
+              log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+            }
           }
         }
       } else if (ciLearningDecision) {

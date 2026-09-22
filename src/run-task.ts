@@ -19560,6 +19560,73 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
   return { prs };
 }
 
+/**
+ * The daemon's CI-learning reader. It preserves {@link loadCiFailureWindow}'s corpus shape and
+ * unreadable-versus-clean distinction, but performs every GitHub observation through the async
+ * transport and explicitly yields between PR and commit units. The report-only CLI retains the
+ * synchronous reader above; only the daemon needs to keep the event loop available while a large
+ * corpus is collected (W1-T3997).
+ */
+export async function loadCiFailureWindowAsync(
+  days: number,
+  deps: {
+    read: (args: string[]) => Promise<unknown>;
+    yieldBetweenObservation: () => Promise<void>;
+  },
+): Promise<CiFailureCorpusInput> {
+  const self = resolveOwnerRepo();
+  const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const rows = (await deps.read([
+    "api",
+    `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
+  ])) as Array<{ number?: number; updated_at?: string }>;
+  const prs: CorpusPr[] = [];
+  for (const row of rows ?? []) {
+    if (row.number === undefined) continue;
+    if (row.updated_at && Date.parse(row.updated_at) < sinceMs) continue;
+    await deps.yieldBetweenObservation();
+    let shas: string[];
+    try {
+      const commits = (await deps.read([
+        "api",
+        `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`,
+      ])) as Array<{ sha?: string }>;
+      shas = (commits ?? []).map((commit) => commit.sha ?? "").filter((sha) => sha.length > 0);
+    } catch {
+      continue; // Preserve the synchronous reader's skip: an unreadable commit list is not a clean PR.
+    }
+    const commits: CorpusPr["commits"] = [];
+    for (const sha of shas) {
+      await deps.yieldBetweenObservation();
+      const commit: CorpusPr["commits"][number] = { sha };
+      try {
+        const responses = [
+          await deps.read(checkRunsRestArgs(self.owner, self.repo, sha)),
+          await deps.read(combinedStatusRestArgs(self.owner, self.repo, sha)),
+        ];
+        let response = 0;
+        const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
+        if (rollup !== undefined) commit.rollup = rollup;
+      } catch {
+        // Keep rollup absent: collectCiFailureCorpus records it as UNREADABLE rather than green.
+      }
+      try {
+        const changed = await deps.read(["api", `repos/${self.owner}/${self.repo}/commits/${sha}`]) as
+          | { files?: Array<{ filename?: string }> }
+          | undefined;
+        if (Array.isArray(changed?.files)) {
+          commit.changedFiles = changed.files.map((file) => file.filename ?? "").filter((file) => file.length > 0);
+        }
+      } catch {
+        // Preserve undefined: a failed changed-file read is never represented as an empty diff.
+      }
+      commits.push(commit);
+    }
+    prs.push({ number: row.number, commits });
+  }
+  return { prs };
+}
+
 /** Paths one commit changed; `undefined` on a failed read — never `[]`, which would read as "this
  *  commit changed nothing" and make a repair delta look empty. */
 export function commitChangedFiles(
@@ -28912,7 +28979,7 @@ export function buildCiLearningDaemonHooks(deps: {
   ratifications?: Ratifications;
   now?: () => Date;
   /** Injected so a test drives the whole rung with ZERO network; production reads the real window. */
-  loadWindow?: (days: number) => CiFailureCorpusInput;
+  loadWindow?: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
   /** Injected so a test drives lesson outcomes without the real plan; production reads only the
    *  machine filer's own shard directory. */
   loadLessons?: () => FiledCiLessonsRead;
@@ -28941,7 +29008,13 @@ export function buildCiLearningDaemonHooks(deps: {
     runCiLearningCadence: buildCiLearningCadenceRunner({
       root: configFor().root,
       checkoutRoot: deps.checkoutRoot ?? repoRoot,
-      loadWindow: (days) => (deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days)),
+      loadWindow: (days) =>
+        deps.loadWindow
+          ? deps.loadWindow(days)
+          : loadCiFailureWindowAsync(days, {
+              read: ghJsonAsync,
+              yieldBetweenObservation: () => yieldingSleep(0),
+            }),
       loadLessons: deps.loadLessons,
       fileShards: deps.fileShards,
       planOrigins: deps.planOrigins,
@@ -28978,7 +29051,7 @@ export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResul
 export function buildCiLearningCadenceRunner(deps: {
   root: string;
   checkoutRoot: string;
-  loadWindow: (days: number) => CiFailureCorpusInput;
+  loadWindow: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
   loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
   fileShards?: typeof fileCiLearningShards;
   landShards?: typeof landCiLearningShards;
@@ -28998,7 +29071,7 @@ export function buildCiLearningCadenceRunner(deps: {
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     let corpus: ReturnType<typeof collectCiFailureCorpus>;
     try {
-      corpus = collectCiFailureCorpus(deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS));
+      corpus = collectCiFailureCorpus(await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS));
     } catch (e) {
       // NO WORK WAS DONE, so the allowance is returned rather than spent. Rethrown, never swallowed:
       // the caller's `ci_learning_cadence.run_failed` row is how this becomes visible.
