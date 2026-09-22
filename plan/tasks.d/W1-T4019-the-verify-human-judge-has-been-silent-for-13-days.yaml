@@ -1,0 +1,92 @@
+- id: W1-T4019
+  title: "THE JUDGE BUILT TO DECIDE WHETHER A SHARD STILL NEEDS THE OPERATOR HAS PRODUCED NO VERDICT IN 13 DAYS WHILE ITS CADENCE FIRES DAILY — and it emits no summary row, so \"judged nothing\" and \"saw nothing\" are indistinguishable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/measurement-cadence.ts]
+  origin: oper#fleet-health-2026-09-22
+  plan_refs: ["W1-T3188", "W1-T3271", "W1-T4014"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3188 built exactly the thing the operator asked for again on 2026-09-22. Its own header
+    records the original direction, verbatim:
+
+        "We've talked about adding an llm as a judge for the verify human shards to make sure they
+         actually need me, then surface them through the inbox."
+
+    The judge exists (`lib/verify-human-judge.ts`), returns
+    `needs_operator | automate | backlog`, has a CLI verb (`rmd verify-human-sweep`), and is
+    wired into the 24h measurement cadence via `defaultVerifyHumanCadenceResult`.
+
+    MEASURED ON THE FLEET, 2026-09-22:
+
+        verify_human.judged rows, live ledger                0
+        verify_human.judged rows, all 422 archives         224
+        newest verdict of any kind                  2026-09-09
+        measurement_cadence.ran fires                      115
+        newest cadence fire                2026-09-22T07:22:13Z  (today)
+
+    THE CADENCE FIRES DAILY AND THE JUDGE PRODUCES NOTHING. Thirteen days, every day, silently.
+
+    AND THE SILENCE CANNOT BE DIAGNOSED FROM THE LEDGER, WHICH IS THE DEFECT THIS TASK FIXES.
+    `verifyHumanCadence` emits exactly ONE row shape — a per-shard `verify_human.judged`. It
+    writes nothing when `opts.shards` is empty, nothing when `due` is empty, and nothing on the
+    `status: "clear"` path. So all of these are byte-identical to an outside reader:
+
+        the cadence never reached the verify-human half
+        it reached it and saw zero parked shards
+        it saw 73 parked shards and judged none due
+        it judged some and the rows rotated out
+
+    The first is a wiring bug, the second a plan-read bug, the third correct behaviour, the fourth
+    a non-event. They demand different fixes and nothing distinguishes them. THAT is the same class
+    W1-T3756/#6010 just closed for freshness — four answers collapsed into one silence — and it is
+    recurring here in a different rung.
+
+    A LIVE SWEEP PROVES THE JUDGE ITSELF IS HEALTHY, SO THE DEFECT IS IN THE CADENCE PATH, NOT THE
+    JUDGE. Run by hand on 2026-09-22, `rmd verify-human-sweep` found 73 parked shards and began
+    returning substantive verdicts immediately:
+
+        W1-T235  automate        "PR #102's symlink fix has merged; the operator already decided
+                                  this approach is acceptable"
+        W1-T204  needs_operator  "Deliverable #3 requires operator verification that the
+                                  implementation is path-scoped"
+        W2-T2    backlog         "W1-T27 has not merged, and the task's first deliverable cannot
+                                  execute"
+
+    Two of the first six judged `automate` — shards that genuinely no longer need a person and
+    have been waiting anyway.
+
+    THE OTHER HALF OF THE EVIDENCE, AND IT IS WHY THIS MATTERS NOW: the judge has never seen the
+    CI-learning population. Of the 56 shards it judged on 2026-09-09, NONE carry an id at or above
+    W1-T3500; the 41 machine-authored CI-learning shards all landed from 2026-09-16 onward. So the
+    backlog the operator is being asked to rule on is precisely the backlog the judge has never
+    been asked about.
+
+    SCOPE, AND THE BOUNDARY THAT MUST HOLD: make the cadence's verify-human pass SAY WHAT IT SAW —
+    a summary row carrying parked/due/judged counts and, when zero, which of the four states above
+    produced the zero. Do NOT give the cadence power to flip `verify:` or edit a shard; W1-T3188
+    withheld that deliberately ("a judge that could tidy the plan would have been handed rule-15
+    powers by the back door"), and that boundary is not in question here. A verdict is a ROUTING
+    signal; releasing remains a person's act, and Law 5 requires only that the record carry its
+    author class — not that a human rule on each item.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add — the only way past
+    `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
+
+  acceptance:
+    - claim: "a verify-human cadence pass records what it saw even when it judges nothing"
+      proof: "unit test: W1-T4019: a pass that judges nothing still says what it saw"
+    - claim: "an empty parked list is distinguishable from a list where nothing was due"
+      proof: "unit test: W1-T4019: empty and not-due are different rows"
+    - claim: "the cadence still cannot edit a shard or flip its verify field"
+      proof: "unit test: W1-T4019: the cadence performs no plan edit"
+  note: |
+    reservation hand-off: plan/file-vh-cadence-1790076888 -> plan/file-vh-cadence-1790076888
+
+    Minted on the filing branch, which `rmd next-task-id` now requires.
