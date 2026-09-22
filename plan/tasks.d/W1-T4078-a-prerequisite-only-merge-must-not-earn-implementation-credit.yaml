@@ -1,0 +1,67 @@
+- id: W1-T4078
+  title: "A PREREQUISITE-ONLY MERGE CAN EARN IMPLEMENTATION CREDIT FROM ITS MACHINE TRAILER — the console-parity split for W1-T3685 carried the task trailer in the squash commit even though its PR body said it carried only the instrument, so the sweep closed the real board build against the prerequisite"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#W1-T3685-credit-loop-2026-09-22"
+  plan_refs: [W1-T3063, W1-T3067, W1-T3731, W1-T3685]
+  files:
+    - src/run-task.ts
+    - test/credit-candidates-ride-the-plan-projection.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 against current origin/main. PR #5886 is merged with subject
+    `feat(console-parity): pre-register the board verb's cli-only reason (W1-T3685)` and its
+    squash commit carries `Remudero-Task: W1-T3685`, but the PR body explicitly says it is a
+    prerequisite split and "This PR carries ONLY the instrument". The merged credit projection
+    sees the commit trailer, classifies the subject as an implementation, and the sweep then
+    closes the real implementation PR #6655 as already merged. #6655 was not the instrument: it
+    carries the board verb and its own implementation tests.
+
+    This is a distinct gap from W1-T3731's open-PR supersession arithmetic and from W1-T3067's
+    path-based plan-only refusal. The prerequisite's files are scripts, not plan paths, so a
+    plan-only predicate cannot identify it. Broadening the filing-subject regex would also be
+    wrong: ordinary `feat` and `chore` implementation subjects are valid credit evidence, and
+    W1-T3067 records measured false negatives from treating subjects as ground truth.
+  design: |
+    (i) Preserve the existing three-valued filing-subject predicate and ordinary commit-trailer
+    credit. Add one narrow, explicit body predicate for the measured Rule-25 shape: a readable PR
+    body must name the task as a prerequisite split and state that it carries only the instrument.
+    This is negative evidence for implementation, not a new positive credit path.
+
+    (ii) Carry the already-batched merged PR body into the credit-candidate mapping. When the body
+    is unavailable, preserve today's answer: the predicate must return unknown rather than infer a
+    prerequisite. When the two explicit prerequisite markers are present, set
+    `creditIsImplementation` to false even if the squash commit's machine trailer and subject
+    would otherwise pass.
+
+    (iii) Keep the repair subtract-only. A normal implementation with a commit trailer and no
+    prerequisite markers still earns credit; an unreadable body never manufactures a refusal and
+    never manufactures a credit. Add a regression test for the actual #5886 shape and a positive
+    control for the ordinary implementation shape.
+  acceptance:
+    - claim: "a readable prerequisite-only PR cannot earn implementation credit from a machine trailer"
+      proof: 'grep: test("W1-T4078: an instrument-only prerequisite cannot earn merge credit" in test/credit-candidates-ride-the-plan-projection.test.ts'
+    - claim: "an ordinary implementation with a commit trailer still earns credit"
+      proof: 'grep: test("W1-T4078: a normal implementation with a commit trailer still earns credit" in test/credit-candidates-ride-the-plan-projection.test.ts'
+    - claim: "an unreadable prerequisite body preserves unknown evidence rather than inventing a refusal"
+      proof: 'grep: test("W1-T4078: an unreadable prerequisite body preserves unknown evidence" in test/credit-candidates-ride-the-plan-projection.test.ts'
+    - claim: "the prerequisite refusal is wired through the real credit-candidate builder"
+      proof: 'grep: test("W1-T4078: the real credit builder refuses the merged prerequisite" in test/credit-candidates-ride-the-plan-projection.test.ts'
+  falsifier: |
+    WITH THE NEW BODY REFUSAL REMOVED, the #5886-shaped fixture must again carry
+    `creditIsImplementation: true` and the real builder must again propose that merged candidate.
+    A positive-control implementation must remain credited in both versions. If either direction
+    changes together, the repair is classifying the subject rather than the measured prerequisite
+    evidence and must not ship.
+  note: |
+    The task id was reserved on origin as `refs/rmd-id/W1-T4078` from the operator checkout after
+    both scope-time checks returned no run branch and no merged PR trailer. The reservation was
+    forced past a local pre-push gate only because this shared checkout contains an unreadable
+    cross-user `test/mutants-*` directory; CI remains the authoritative full gate.
