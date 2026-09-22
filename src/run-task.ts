@@ -1710,10 +1710,17 @@ export function buildSweepEffects(
     }),
   );
   const reviewFallbackRunner =
-    deps.reviewRunner ?? ((_prNumber: number, _isPlanFiling?: boolean) => reviewCommand(String(_prNumber), ["--repo", deps.repo]));
+    deps.reviewRunner ??
+    ((_prNumber: number, isPlanFiling?: boolean) => {
+      const args = ["--repo", deps.repo];
+      const opts = { executionMode: "semantic" as const, planOnlyFiling: isPlanFiling };
+      return deps.reviewCommandImpl
+        ? deps.reviewCommandImpl(String(_prNumber), args, opts)
+        : reviewerCodeGate.call(String(_prNumber), args, opts);
+    });
   const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
-    // A base move still needs fresh proof discrimination; the existing deterministic review path
-    // is the safe fallback until a proof-only runner can be exposed without duplicating review.ts.
+    // A base move still needs fresh proof discrimination; the existing semantic review path is
+    // the safe fallback until a proof-only runner can be exposed without duplicating review.ts.
     if (mode.kind !== "reuse") {
       deps.log("sweep.review_reuse_discrimination_fallback", {
         pr_number: pr.prNumber,
