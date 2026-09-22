@@ -36216,9 +36216,7 @@ export function buildSweepHook(
     // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
     // idling on code that already paid for a verdict it could never publish.
     let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
-    // W1-T4002: this pass's own plan-only filing receipts, if any this tick's sweep proves — see
-    // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why the daemon's dispatch options
-    // consult this SAME tick's value rather than a stale or re-derived one.
+    // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
