@@ -8437,7 +8437,7 @@ test("buildSweepHook: the daemon sweep closure runs EVERY rung — incl. the esc
 });
 
 test("W1-T4002: buildSweepHook returns this pass's complete plan-only run-branch receipt", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "gh-sweephook-plan-filing-"));
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-sweephook-plan-filing-`));
   const root = mkdtempSync(join(tmpdir(), "rmd-sweephook-plan-filing-"));
   const prUrl = "https://github.com/o/r/pull/900";
   const script = `#!/usr/bin/env node
