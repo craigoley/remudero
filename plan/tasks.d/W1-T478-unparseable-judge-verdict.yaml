@@ -142,11 +142,11 @@
     should escalate at all — it should, and this task keeps that."
   acceptance:
     - claim: "an unparseable judge response is distinguishable from a genuine high-risk finding"
-      proof: "unit test: test/risk-judge.test.ts"
+      proof: "unit test: W1-T478: realRiskJudge's exhausted-retry verdict is distinguishable from a genuine high-risk finding — availability + confidence 0, not confidence 1"
     - claim: "the text that failed to parse is recorded on the decision row under a length cap"
-      proof: "unit test: test/risk-judge.test.ts"
+      proof: "unit test: W1-T478: the exhausted-retry verdict carries the raw text that failed to parse, under REPORT_EXCERPT_CAP"
     - claim: "a parse failure still escalates and still withdraws the arm"
-      proof: "unit test: test/risk-judge.test.ts"
+      proof: "unit test: W1-T478: an exhausted parse failure reaches the escalation arm and never the proceed arm"
   origin: recon#unparseable-risk-verdict-2026-08-14
   plan_refs: ['W1-T454', 'W1-T248']
   files: [src/lib/risk-judge.ts, test/risk-judge.test.ts]
