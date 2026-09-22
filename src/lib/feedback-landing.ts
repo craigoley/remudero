@@ -1296,7 +1296,7 @@ function readPendingCiLearningInputs(stateRoot: string, shardRelDir: string): La
   }));
 }
 
-function ciLearningMainOrigins(git: GitExec): Set<string> {
+function ciLearningMainOrigins(shardRelDir: string, git: GitExec): Set<string> {
   const origins = new Set<string>();
   const output = git([
     "grep",
@@ -1306,7 +1306,7 @@ function ciLearningMainOrigins(git: GitExec): Set<string> {
     "^[[:space:]]*origin:[[:space:]]*[^#]+",
     "origin/main",
     "--",
-    "plan/tasks.d",
+    shardRelDir,
   ]);
   for (const line of output.split(/\r?\n/)) {
     const raw = line.replace(/^[ \t]*origin:[ \t]*/, "").trim();
@@ -1317,7 +1317,7 @@ function ciLearningMainOrigins(git: GitExec): Set<string> {
 }
 
 function acknowledgeMergedCiLearningShards(stateRoot: string, shardRelDir: string, git: GitExec): void {
-  const mainOrigins = ciLearningMainOrigins(git);
+  const mainOrigins = ciLearningMainOrigins(shardRelDir, git);
   for (const relPath of ciLearningPendingRelPaths(stateRoot, shardRelDir)) {
     try {
       const queuedPath = ciLearningPendingAbsPath(stateRoot, relPath);
