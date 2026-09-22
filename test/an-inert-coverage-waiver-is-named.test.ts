@@ -25,7 +25,7 @@ test("the inert-waiver message names the diff-cov directive", () => {
   assert.match(result, new RegExp(`diff-cov: ${DIFF_COV_DIRECTIVES.join(" or ")}`));
 });
 
-test("an honoured diff-cov directive still waives its region", () => {
+test("a honoured diff-cov directive still waives its region", () => {
   const { ranges, errors } = computeBoundaryRanges(
     [
       "// diff-cov: process-boundary — re-exec glue",
