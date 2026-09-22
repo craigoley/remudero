@@ -69,7 +69,7 @@ async function walk(
   return { error: last, attempts };
 }
 
-test("a capability refusal walks to the next rung and lands there", () => {
+test("a capability refusal walks to the next rung and lands there — PR6555 ladder repair", () => {
   return walk(["a-model", "b-model", "c-model"], async (m) => {
     if (m === "a-model") throw new OpenWeightUnsupportedResponseFormatError(m, "json_object");
     return { text: "ok" };
@@ -79,7 +79,7 @@ test("a capability refusal walks to the next rung and lands there", () => {
   });
 });
 
-test("A TIMEOUT DOES NOT WALK — it may be transient, and walking would double-charge the cap", () => {
+test("A TIMEOUT DOES NOT WALK — it may be transient, and walking would double-charge the cap — PR6555 ladder repair", () => {
   return walk(["a-model", "b-model"], async (m) => {
     if (m === "a-model") throw new OpenWeightRequestTimeoutError(1000, m);
     return { text: "ok" };
@@ -98,7 +98,7 @@ test("an unrelated error does not walk either", () => {
   });
 });
 
-test("every rung refusing surfaces the LAST refusal, never a silent success", () => {
+test("every rung refusing surfaces the LAST refusal, never a silent success — PR6555 ladder repair", () => {
   return walk(["a-model", "b-model"], async (m) => {
     throw new OpenWeightUnsupportedResponseFormatError(m, "json_object");
   }).then((r) => {
