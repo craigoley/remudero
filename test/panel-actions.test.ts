@@ -32,6 +32,7 @@ import { runDrain, type DrainDeps } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { appendLedger } from "../src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W3-T5: human-in-the-loop panel actions (MASTER-PLAN §7) ────────────────────────────────
 //
@@ -898,7 +899,7 @@ test("both /v1/drain/kick and /v1/drain/run are write-scoped: a read token gets 
 // ── Selected-repository PR repair controls (W1-T3989) ────────────────────────
 
 test("confirmed PR actions write durable attributed requests for the daemon, without running a worker in the HTTP process", async () => {
-  const root = mkdtempSync(join(tmpdir(), "panel-pr-action-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}panel-pr-action-`));
   const deps = depsFor(root);
   await withService(deps, async (base) => {
     const res = await postHigh(base, "/v1/pr-actions", WRITE_TOKEN, { action: "fix", prNumber: 259 });
@@ -923,7 +924,7 @@ test("confirmed PR actions write durable attributed requests for the daemon, wit
 });
 
 test("POST /v1/pr-actions rejects malformed or unconfirmed bodies before any request marker is written", async () => {
-  const root = mkdtempSync(join(tmpdir(), "panel-pr-action-bad-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}panel-pr-action-bad-`));
   await withService(depsFor(root), async (base) => {
     for (const body of [
       {},
