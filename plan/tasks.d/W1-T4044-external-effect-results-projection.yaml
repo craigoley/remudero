@@ -87,8 +87,6 @@
     Amendment 2026-09-22: the implementation's mounted-route registration changes the existing
     graph-shape census changes. The route-shape fixture is part of this task's executable
     integration surface and is declared here so the implementation can keep the route census
-    honest without an undeclared scope overrun. The generated test-tier manifest is intentionally
-    shared metadata and remains governed by its own generated-file gate rather than being owned by
-    one implementation task. The source implementation remains responsible for route behavior and
+    honest without an undeclared scope overrun. The generated test-tier manifest is intentionally shared metadata; its ownership remains with the generated-file gate rather than one implementation task. The source implementation remains responsible for route behavior and
     executable assertions; this amendment only records the fixture that its integration surface
     necessarily changes.
