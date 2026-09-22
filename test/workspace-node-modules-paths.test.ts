@@ -261,7 +261,7 @@ test("linkWorkspaceNodeModules covers an occupied destination and a failed symli
   }
 });
 
-function seedCloneWithWorkspace(clone: string): void {
+function seedWorkspaceInstall(clone: string): void {
   mkdirSync(clone, { recursive: true });
   execFileSync("git", ["-C", clone, "init", "--quiet", "--initial-branch", "main"]);
   execFileSync("git", ["-C", clone, "config", "user.email", "probe@example.invalid"]);
@@ -283,7 +283,7 @@ test("worktreeAdd wires a non-empty workspace-link result through its own ledger
   const clone = join(root, "clone");
   const wt = join(root, "wt");
   try {
-    seedCloneWithWorkspace(clone);
+    seedWorkspaceInstall(clone);
     const logs: Array<[string, Record<string, unknown> | undefined]> = [];
     worktreeAdd(clone, wt, "run-wspaths-cov-1", "main", { log: (step, extra) => logs.push([step, extra]) });
 
