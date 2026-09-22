@@ -60,6 +60,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.**
 - **Decoding rule citations — where each family canonically lives.**
+- **Take the cheap candidate a record prices beside a costly one — and name what the costly one
+  now waits for.**
 - **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.**
 - **CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:**
 - **`gh pr create` may die on API quota; git push is unaffected.**
