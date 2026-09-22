@@ -359,6 +359,20 @@ synthesis:
   triage:      { model: sonnet,        effort: low,  max_turns: 400, context_budget: 180000 }
   inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000, provider: cash }
 
+# ── The step-up mount (operator ruling 2026-09-22) ──────────────────────────────
+# "Sol and Opus are okay to use whenever Luna or Sonnet can't do the work, but I would prefer that
+# we try Luna and Sonnet for most tasks." Every worker row below stays at the sonnet ceiling. This
+# row is used ONLY for a task's last attempt after that tier has already failed it: the
+# diagnose-informed implement attempt (two implement strikes, then a diagnose) and the fix rung's
+# final fresh strike. `opus` resolves through the router like any frontier request -- Claude Opus
+# when Claude has headroom (`provider_preference`), Codex gpt-6-sol only when it does not. The
+# loader keeps it strictly below the Architect's tier, so plan authorship still outranks it.
+step_up:
+  model: opus
+  effort: high
+  max_turns: 400
+  context_budget: 180000
+
 # ── The flight-judge mount (Layer 2, W1-T21 — MASTER-PLAN §4B) ─────────────────
 # The advisory process-judge a Layer-1 trip (flight-signals.ts, W1-T20) spawns
 # with FRESH context. It must ride a HIGHER tier than the worker it supervises
