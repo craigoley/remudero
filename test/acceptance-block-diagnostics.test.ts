@@ -281,7 +281,7 @@ test("W1-T1097: the zero-criteria refusal names the offending line", () => {
   }
 });
 
-test("W1-T1097: healthy and truncating bodies keep the exit codes they have today", () => {
+test("W1-T1097: healthy and truncating bodies keep their exit codes", () => {
   const good = tmpFile(UNWRAPPED);
   const bad = tmpFile(WRAPPED);
   const noHeader = tmpFile(NO_HEADER);
