@@ -1,0 +1,70 @@
+- id: W1-T4007
+  title: "MAKE THE SOFTWARE FACTORY REVIEWABLE AS CODE — versioned flows, roles, tools, harness, routing, triggers, scorers, environments, and reversible promotion"
+  repo: remudero
+  depends_on: [W1-T3853, W1-T3855, W1-T3896, W1-T3956, W1-T3958]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:warp-software-factory-2026-09-22"
+  plan_refs: ["§Self-improvement", "§Credential boundary", "W1-T3853", "W1-T3896", "W1-T3956", "W1-T3958"]
+  files:
+    - src/lib/factory-definition.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - test/factory-definition.test.ts
+    - test/factory-definition-wiring.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Warp's Software Factory work reframes engineering from operating isolated interactive agents to
+    building a versioned machine that can triage, specify, implement, review, verify, ship, and
+    monitor changes. Its factory-as-code and open-infrastructure material make the key product
+    insight concrete: the workflow definition, model/harness choice, integrations, benchmarks, and
+    rollback state must be inspectable and reproducible, not hidden in a dashboard or a person's
+    prompt history.
+
+    RMD now has the ingredients in separate contracts: experiment records, bounded actions, the
+    cross-repo manifest, named triggers, and benchmark-gated routing pools. The missing composition
+    is a single immutable factory revision that answers which flow, roles/skills, MCP or tool
+    profile, runner/harness, model policy, trigger, scorer, integration, and environment produced a
+    run. Without that revision, a successful self-improvement claim cannot be replayed or safely
+    rolled back.
+
+    Research references: https://www.warp.dev/blog/open-infrastructure-for-building-a-software-factory,
+    https://www.warp.dev/blog/the-factory-stack, and
+    https://www.warp.dev/blog/software-factory-build-guide. These are design inputs, not a claim
+    that RMD should copy Warp's hosted execution model.
+  design: |
+    Add a versioned `factory-definition-v1` manifest with a stable factory id and revision, named
+    flow, task class, roles/skills, tool and MCP allowlist, runner/harness identity, model/effort or
+    routing-pool policy, trigger id, scorer/benchmark set, integration ids, environment identity,
+    capability tier, and rollback predecessor. Store references and hashes, never secrets, raw
+    prompts, credentials, or arbitrary executable instructions.
+
+    Validate the manifest against existing capability grants, trigger/action contracts, routing-pool
+    readiness, experiment policy, and cross-repo compatibility before admission. Revisions are
+    immutable, diffable, reviewable, and explicitly promotable or rolled back. Every bounded run
+    records the resolved factory revision and unavailable inputs; a missing definition, stale
+    dependency, or failed validation refuses or stays unknown rather than silently using a local
+    default. The manifest is a composition layer, not a second scheduler, policy engine, or action
+    authority.
+  acceptance:
+    - claim: "factory-definition-v1 records an immutable revision for flow, role, tool/MCP, harness, routing, trigger, scorer, integration, environment, and rollback identity"
+      proof: "grep: W1-T4007 criterion 1 in test/factory-definition.test.ts"
+    - claim: "manifest validation refuses missing or incompatible capabilities, stale dependencies, secrets, raw prompts, and arbitrary executable instructions"
+      proof: "grep: W1-T4007 criterion 2 in test/factory-definition.test.ts"
+    - claim: "promotion and rollback create linked revisions without rewriting prior definitions, and every run retains the resolved factory revision or an explicit unavailable reason"
+      proof: "grep: W1-T4007 criterion 3 in test/factory-definition.test.ts"
+    - claim: "the real serving path resolves a factory revision rather than leaving the definition module test-only"
+      proof: "grep: resolveFactoryDefinition( in src/lib/serve.ts"
+    - claim: "the public daemon contract names factory-definition-v1 and its immutable revision and rollback fields"
+      proof: "grep: factory-definition-v1 in openapi/daemon.yaml"
+  falsifier: |
+    Change a factory without changing its revision, replay a run without its factory identity,
+    promote a candidate whose tool or routing dependency is unavailable, accept a secret or raw
+    instruction in the manifest, or turn an invalid definition into a healthy default. The
+    corresponding proof must fail.
+  note: "This is the factory-as-code composition layer above existing trigger, action, routing, and experiment contracts; it does not create a remote shell or autonomous promotion path. reservation hand-off: run-W1-T4007-<epochMs>"

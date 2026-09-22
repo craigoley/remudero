@@ -1,0 +1,70 @@
+- id: W1-T4009
+  title: "SCORE THE FACTORY FROM BOUNDED RUN EVIDENCE — redacted traces, reproducible scorers, sampled feedback, and non-authoritative improvement proposals"
+  repo: remudero
+  depends_on: [W1-T3852, W1-T3882, W1-T3898, W1-T4007, W1-T4008]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "research:warp-software-factory-2026-09-22"
+  plan_refs: ["§Self-improvement", "§Credential boundary", "W1-T3852", "W1-T3882", "W1-T3898", "W1-T4008"]
+  files:
+    - src/lib/factory-scoring.ts
+    - src/lib/operator-agent.ts
+    - src/lib/analytics-route.ts
+    - openapi/daemon.yaml
+    - test/factory-scoring.test.ts
+    - test/factory-observer.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Warp's scoring and observer material closes the loop that most agent products leave open: retain
+    enough run trace and artifact evidence to score quality, efficiency, and verbosity; compare exact
+    configurations on real tasks; then let an observer suggest a factory change. Its important
+    governance detail is that scorers are scheduled against retained data and the observer proposes
+    configuration improvements—the system is tuned through evidence rather than silently mutating
+    itself.
+
+    RMD has a trust-evaluation loop, bounded activity/artifacts, replay/shadow/canary policy, and
+    outcome-to-plan follow-up. The missing bridge is a redacted scoring dataset and a reproducible
+    observer projection that can distinguish a failed run from an unobserved run and turn a measured
+    pattern into a human-reviewable experiment without retaining raw prompts or granting the scorer
+    authority.
+
+    Research references: https://www.warp.dev/blog/using-llm-as-a-judge-scoring-to-measure-your-software-factory
+    and https://www.warp.dev/blog/warp-factory-benchmarks. Warp's benchmark results are not imported
+    as RMD evidence.
+  design: |
+    Add a bounded `factory-score-bundle-v1` derived from the activity/workstream projection and
+    factory-efficiency records. It may retain redacted tool/MCP event metadata, artifact identifiers
+    and hashes, spec/conformance references, review and verification outcomes, scorer inputs, and
+    bounded evidence links. It must exclude raw prompts, transcripts, credentials, full command
+    arguments, hidden browser state, and unbounded model prose. Every bundle names retention,
+    redaction, factory revision, source freshness, and the run or artifact joins it could not make.
+
+    Define versioned scorers with dimensions, sampling strategy, corpus/window, judge identity,
+    calibration or human-feedback provenance, and reproducible inputs. Scorer outage, insufficient
+    sample, disagreement, and unavailable evidence remain explicit. An observer may group repeated
+    failure modes or cost-quality regressions and emit one bounded proposal linked to the exact
+    evidence and experiment baseline; it cannot change factory config, route a live run, approve an
+    action, or promote a candidate. Human review and W1-T3853 promotion evidence remain required.
+  acceptance:
+    - claim: "factory-score-bundle-v1 retains only bounded redacted trace and artifact evidence with factory revision, run identity, provenance, freshness, retention, and redaction metadata"
+      proof: "grep: W1-T4009 criterion 1 in test/factory-scoring.test.ts"
+    - claim: "scorers declare dimension, version, sample, corpus/window, judge identity, and calibration or human-feedback provenance"
+      proof: "grep: W1-T4009 criterion 2 in test/factory-scoring.test.ts"
+    - claim: "raw prompts, transcripts, credentials, full command arguments, hidden browser state, and unbounded model prose are rejected or redacted"
+      proof: "grep: W1-T4009 criterion 3 in test/factory-scoring.test.ts"
+    - claim: "scorer outage, insufficient sample, disagreement, and unjoined evidence remain explicit and cannot become a passing score"
+      proof: "grep: W1-T4009 criterion 4 in test/factory-scoring.test.ts"
+    - claim: "the observer emits an evidence-linked bounded proposal without changing live factory configuration, capability, routing, or approval state"
+      proof: "grep: scoreFactoryRun( in src/lib/operator-agent.ts"
+    - claim: "the public daemon contract names factory-score-bundle-v1 and non-authoritative observer proposals"
+      proof: "grep: factory-score-bundle-v1 in openapi/daemon.yaml"
+  falsifier: |
+    Score an unobserved run as healthy, retain a raw prompt or credential, let an LLM judge invent
+    missing evidence, propose a config change without a reproducible baseline, or apply an observer
+    proposal to a live flow. The corresponding proof must fail.
+  note: "This is a bounded observer loop above W1-T3882 and W1-T3853, not autonomous self-modification or a transcript archive. reservation hand-off: run-W1-T4009-<epochMs>"
