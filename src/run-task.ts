@@ -33025,9 +33025,6 @@ export function currentStrikeRegimeFor(lines: Array<Record<string, unknown>>, ta
  */
 export type StrikeRegime = "executed" | "keyword_only";
 
-/** The empty-input decision is evidence, not an inference from a failed proof search. */
-export const EMPTY_CRITERIA_REGIME_REASON = "an empty criteria array is not evidence of keyword noise";
-
 /**
  * W1-T4033 — THE REGIME A STRIKE IS SPENT UNDER, DERIVED FROM THE EVIDENCE IT WAS DISPATCHED
  * AGAINST. `criteria.some(...)` asks "did any proof execute", which is the right question ONLY
