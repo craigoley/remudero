@@ -211,6 +211,32 @@ test("an eligible cell explores only inside the declared bounded fraction and na
   assert.equal(outside.reason, "outside-fraction");
 });
 
+test("exploration never explores UP: a step-up arm served by Opus or Sol is never a routine task's runner-up", () => {
+  // Operator ruling 2026-09-22. Step-up attempts ride the implement lane, so their Opus and Sol
+  // runs appear as arms in the same cell a Sonnet task explores.
+  for (const [provider, servedModel] of [["claude", "opus"], ["codex", "gpt-5.6-sol"]] as const) {
+    const upward = cells();
+    upward[0].arms = [
+      arm("implement::medium::src", "claude", "claude-sonnet-5", "high", 200),
+      arm("implement::medium::src", provider, servedModel, "high", 50),
+    ];
+    const decision = exploreMount({
+      cells: upward,
+      mounts: mounts(),
+      taskType: "implement",
+      risk: "medium",
+      taskClass: "src",
+      currentMount,
+      runId: `run-upward-${servedModel}`,
+      taskId: "W1-T3095",
+      enabledProviders: ["claude", "codex"],
+      sampleUnit: MOUNT_EXPLORATION_POLICY.fraction / 2,
+    });
+    assert.equal(decision.kind, "refusal", `${provider}:${servedModel}`);
+    if (decision.kind === "refusal") assert.equal(decision.reason, "runner-up-unavailable");
+  }
+});
+
 test("risk:high and the Architect/judge lanes are excluded with the applied exclusion named", () => {
   const high = exploreMount({
     cells: [],

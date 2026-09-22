@@ -8702,6 +8702,8 @@ export async function runFixRung(opts: {
   /** The failing implement worker's session id — resumed on strike 1. */
   initialSessionId: string;
   mount: Mount;
+  /** The final fresh strike's mount (`step_up:`); absent keeps every strike on {@link mount}. */
+  stepUpMount?: Mount;
   settingsFile: string;
   config: Config;
   budgetUsd: number;
@@ -10186,14 +10188,17 @@ export async function runFixRung(opts: {
     // all written before the executor shipped.
     const verdictRegime = strikeRegimeForDispatch(review.criteria);
 
+    // The final fresh strike steps up: the fix mount has already failed this PR at least once.
+    const strikeMount = opts.stepUpMount && round === "fresh" && attempt >= opts.strikeCap ? opts.stepUpMount : opts.mount;
+    if (strikeMount !== opts.mount) deps.log("fix.step_up", { strike: attempt, from: opts.mount.model, to: strikeMount.model });
     const fixArgs: SpawnWorkerArgs = {
       cwd: opts.worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile: opts.settingsFile,
-      model: opts.mount.model,
-      mountProvider: opts.mount.provider,
-      effort: opts.mount.effort,
-      maxTurns: opts.mount.maxTurns,
+      model: strikeMount.model,
+      mountProvider: strikeMount.provider,
+      effort: strikeMount.effort,
+      maxTurns: strikeMount.maxTurns,
       maxBudgetUsd: opts.budgetUsd,
       config: opts.config,
       prompt,
@@ -12714,6 +12719,8 @@ export function resolveRunMounts(
    * table, so — like `reviewerMount`/`fixMount` — this is never optional/try-caught.
    */
   diagnoseMount: Mount;
+  /** The last-attempt mount (`step_up:` in mounts.yaml); absent keeps every attempt on its own mount. */
+  stepUpMount?: Mount;
   /**
    * impl-BP — the RECON stage's own mount (`routes.recon`, task_type "recon" × risk × class).
    *
@@ -12772,6 +12779,7 @@ export function resolveRunMounts(
     reviewerMount: resolveMount(mountsTable, "reviewer", task.risk),
     fixMount: resolveMount(mountsTable, "fix", task.risk),
     diagnoseMount: resolveMount(mountsTable, "diagnose", task.risk),
+    ...(mountsTable.step_up ? { stepUpMount: mountsTable.step_up } : {}),
     reconMount,
     taskClass,
     mountClass: mountResolution.resolvedClass,
@@ -13826,7 +13834,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // checkout — resolution + the loud class-fallback ledgering live in
   // resolveRunMounts (exported, above) so every branch, including the fallback a
   // COMPLETE committed table can never reach, is unit-covered with fixture tables.
-  const { mount, reviewerMount, fixMount, diagnoseMount, reconMount, taskClass, mountClass } = resolveRunMounts(
+  const { mount, reviewerMount, fixMount, diagnoseMount, stepUpMount, reconMount, taskClass, mountClass } = resolveRunMounts(
     repoRoot,
     task,
     log,
@@ -14728,6 +14736,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
     let impl!: WorkerResult;
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
+      // The diagnose-informed attempt is the LAST one before the task goes to a human, and it only
+      // happens after the implement mount has failed twice: that attempt steps up (operator ruling
+      // 2026-09-22 — Opus and Sol are for work the Sonnet/Luna tier could not do).
+      const attemptMount = findings && stepUpMount ? stepUpMount : implementMount;
+      if (attemptMount !== implementMount) log("implement.step_up", { from: implementMount.model, to: attemptMount.model });
       impl = account(
         // `spawn` (opts.spawn ?? the real spawnWorker, exactly like the recon dispatch
         // above) — not the raw spawnWorker import. Zero behavior change on the real path
@@ -14742,10 +14755,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
           // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
           // needed >61 turns — docs/archive/DIAGNOSIS.md), an order of magnitude above expected.
-          model: implementMount.model,
-          mountProvider: implementMount.provider,
-          effort: implementMount.effort,
-          maxTurns: implementMount.maxTurns,
+          model: attemptMount.model,
+          mountProvider: attemptMount.provider,
+          effort: attemptMount.effort,
+          maxTurns: attemptMount.maxTurns,
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config: implementConfig,
@@ -14794,7 +14807,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           runId,
           rung: "implement",
           text: workerTranscript(impl),
-          model: implementMount.model,
+          model: attemptMount.model,
           verdict: impl.subtype,
           headSha: implHeadShaForArchive,
         },
@@ -15543,6 +15556,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         worktreePath,
         initialSessionId: impl.sessionId,
         mount: fixMount,
+        ...(stepUpMount ? { stepUpMount } : {}),
         settingsFile,
         config,
         budgetUsd,
