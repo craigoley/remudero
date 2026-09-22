@@ -381,6 +381,32 @@ export function paceGhEntry<T>(
 /** SHARED with `hooks/deny-floor.sh` rule 9's default. The two must agree or the windows diverge. */
 export const DEFAULT_GH_READ_CADENCE_S = 180;
 
+/**
+ * How many further reads ONE enforce-mode invocation may make after its first read is admitted.
+ *
+ * WHY A BURST EXISTS AT ALL. `withGhTransportFloor`'s own doc calls it a "standalone" command
+ * wrapper, and the per-read floor only makes sense under that assumption: one invocation, one read.
+ * `rmd review` — the ONLY command wrapped in enforce mode — makes TWELVE reads (measured on a live
+ * invocation, 2026-09-22). So the floor refused the verb's own second read four seconds in, every
+ * time, and the verb could never complete. It protected nothing: its sole caller was the only thing
+ * it ever refused, and the documented escape (`RMD_GH_TRANSPORT_FLOOR=advisory`) disables the floor
+ * for the WHOLE process, which is a strictly broader relaxation than the verb needs.
+ *
+ * WHAT THE FLOOR IS ACTUALLY FOR, AND WHAT THIS PRESERVES. GitHub's secondary limit counts request
+ * CADENCE, and the hazard the floor was built against is a POLLING LOOP — `hooks/deny-floor.sh`
+ * says so in its own words ("a run of cheap reads trips it", "a wait is the operator's to
+ * schedule"). Spacing between INVOCATIONS is what defeats a polling loop; spacing between the reads
+ * inside one bounded verb defeats only the verb. So the first read of an invocation is still gated
+ * at the full window, and only then is a burst granted.
+ *
+ * THE SIZE IS A SEPARATION, NOT A TUNING. The two populations are a bounded verb (12 reads,
+ * measured) and an unbounded loop (hundreds). Any value between them separates them, so this is set
+ * at 32 — well over 2.5x the only measured need, and small enough that a runaway loop is refused
+ * within seconds. It is deliberately NOT fitted to 12: a bound sitting exactly on the observed
+ * value fires the first time a healthy caller does one more read than it did last week.
+ */
+export const DEFAULT_GH_READ_BURST = 32;
+
 /** The `search` limiter — a separate bucket with its own, far lower ceiling. */
 export const GH_SEARCH_BUCKET = "search";
 
@@ -457,6 +483,27 @@ export function ghArgvBucketHint(args: readonly string[]): string | undefined {
  * (`${XDG_CACHE_HOME:-$HOME/.cache}/remudero/gh-last-read`) so the two surfaces share one window.
  * `undefined` when neither variable is set — the caller then paces nothing and allows the call.
  */
+/**
+ * The burst this process grants, overridable with `RMD_GH_READ_BURST` for an operator running a
+ * verb that legitimately needs more. A non-numeric or negative value falls back to the default
+ * rather than disabling the floor, so a typo can never read as "unlimited".
+ */
+export function ghReadBurst(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.RMD_GH_READ_BURST);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_GH_READ_BURST;
+}
+
+/**
+ * The burst belongs to the FLOOR SCOPE, not to the process.
+ *
+ * `undefined` means "no scope is open", and then nothing bursts — a direct `applyGhReadCadence`
+ * call behaves exactly as it did before this existed. That is deliberate: scoping the burst to
+ * `withGhTransportFloorMode`'s dynamic extent is what makes "one invocation is one burst" true by
+ * construction rather than by a counter nobody remembers to clear. A process-global counter leaked
+ * between callers the first time it was tried, which is how this shape was found.
+ */
+let ghReadBurstScope: { remaining: number } | undefined;
+
 export function ghReadCadenceStampPath(env: NodeJS.ProcessEnv = process.env, bucket?: string): string | undefined {
   const root = env.XDG_CACHE_HOME ?? (env.HOME !== undefined ? `${env.HOME}/.cache` : undefined);
   if (root === undefined || root === "") return undefined;
@@ -485,9 +532,14 @@ async function withGhTransportFloorMode<T>(
 ): Promise<T> {
   const previous = env.RMD_GH_TRANSPORT_FLOOR;
   if (previous === undefined) env.RMD_GH_TRANSPORT_FLOOR = mode;
+  // One invocation is one burst. Saved and restored like the env var above so a nested scope
+  // cannot hand its parent a budget the parent never earned.
+  const previousScope = ghReadBurstScope;
+  ghReadBurstScope = { remaining: 0 };
   try {
     return await fn();
   } finally {
+    ghReadBurstScope = previousScope;
     if (previous === undefined) delete env.RMD_GH_TRANSPORT_FLOOR;
     else env.RMD_GH_TRANSPORT_FLOOR = previous;
   }
@@ -579,14 +631,23 @@ export class GhReadCadenceRefusal extends RmdError {
   readonly ageS: number;
   readonly windowS: number;
   readonly bucket: string;
-  constructor(decision: GhReadCadenceDecision, bucket: string) {
+  readonly burstRemaining: number;
+  constructor(decision: GhReadCadenceDecision, bucket: string, burstRemaining = 0) {
+    const waitS = Math.max(0, decision.windowS - (decision.ageS ?? 0));
     super(
       "usage",
       1,
       `gh read cadence floor: a read-shaped call ${decision.ageS}s after the last one on the ${bucket} limiter ` +
-        `(floor ${decision.windowS}s, W1-T3297) — this limit counts cadence, not volume, so a full budget says nothing`,
-      { ageS: decision.ageS ?? 0, windowS: decision.windowS, bucket },
+        `(floor ${decision.windowS}s, W1-T3297) — this limit counts cadence, not volume, so a full budget says nothing. ` +
+        // THE RECOVERY RIDES ON THE REFUSAL. Without it the operator sees a stack trace and no way
+        // forward, and the obvious guess — re-running — SPENDS another read and re-stamps the
+        // window, so trying harder makes it strictly worse. Both exits are named here instead.
+        `This is the FIRST read of this invocation, so no burst applies: wait ${waitS}s, or re-run ` +
+        `with RMD_GH_TRANSPORT_FLOOR=advisory to pace rather than refuse. Re-running sooner spends ` +
+        `another read and restarts the ${decision.windowS}s window.`,
+      { ageS: decision.ageS ?? 0, windowS: decision.windowS, bucket, waitS, burstRemaining },
     );
+    this.burstRemaining = burstRemaining;
     this.name = "GhReadCadenceRefusal";
     this.ageS = decision.ageS ?? 0;
     this.windowS = decision.windowS;
@@ -629,15 +690,26 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   const readStampMs = deps.readStampMs ?? readGhReadCadenceStampMs;
   const stamp = deps.stamp ?? stampGhRead;
   const now = deps.nowMs ?? systemClock.now;
+  const isWrite = ghArgvIsWrite(args);
+  const isExempt = ghArgvIsCadenceExempt(args);
+  const burstAllowed = !isWrite && !isExempt && (ghReadBurstScope?.remaining ?? 0) > 0;
   const decision = ghReadCadenceDecision({
-    isWrite: ghArgvIsWrite(args),
-    isExempt: ghArgvIsCadenceExempt(args),
+    isWrite,
+    isExempt,
     nowMs: now(),
     lastReadMs: readStampMs(stampPath),
     mode: resolveGhTransportFloorMode(env),
   });
-  if (!decision.allow) throw new GhReadCadenceRefusal(decision, bucket ?? "core");
-  if (decision.paced && !ghCadenceAdvisoryEmitted) {
+  // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
+  // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
+  // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
+  if (burstAllowed && ghReadBurstScope) ghReadBurstScope.remaining -= 1;
+  else if (!decision.allow) throw new GhReadCadenceRefusal(decision, bucket ?? "core", 0);
+  // GRANTED ONLY BY AN ADMITTED, GATED READ, AND ONLY INSIDE AN OPEN SCOPE. An exempt call
+  // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
+  // that would otherwise be refused.
+  else if (!isWrite && !isExempt && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
+  if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
     ghCadenceAdvisoryEmitted = true;
     const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
     warn(

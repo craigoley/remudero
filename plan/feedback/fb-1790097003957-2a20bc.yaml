@@ -1,0 +1,12 @@
+id: fb-1790097003957-2a20bc
+ts: 2026-09-22T17:10:03.957Z
+raw: "TWO GATES DISAGREE ABOUT WHICH SURFACE CARRIES A TASK IDENTITY, AND THE DISAGREEMENT COSTS A FULL CI ROUND EVERY TIME — observed 2026-09-22 on PRs 6573 and 6574, both times, not inferred. `head-identity-gate` passed on both with the message \"identified on both surfaces: the head commit's Remudero-Task trailer and its run-shaped head ref\". The SAME heads then failed `acceptance-author-gate` with \"REFUSED (no-header) — no `## Acceptance` header and no `Remudero-Task:` trailer\". Both commits carried `Remudero-Task: W1-T4033` / `W1-T4034` in the COMMIT MESSAGE. scripts/acceptance-author-gate.mjs reads `pull_request.body` off the event payload and nothing else (its own header says \"NO API CALL\", and `readEvent` pulls only `pr.body` and the author login), so a trailer in the commit is invisible to it while being sufficient for the identity gate. An author who satisfies one gate has no way to learn they have not satisfied the other except by spending a CI cycle. CANDIDATE REMEDIES, CHEAP FIRST. (a) NAME THE SURFACE IN THE REFUSAL: the message already lists both remedies; it could add that the trailer must be in the PR BODY specifically and that a commit trailer does not count. Pure text, no behaviour change, removes the dead end. (b) READ THE SAME SURFACES THE IDENTITY GATE READS: the event payload already carries `pull_request.head.ref`, so a run-shaped head ref could satisfy the author gate exactly as it satisfies head-identity, with no API call added. (c) Leave the split deliberate and document it in docs/review-gate.md, if the two gates are meant to answer different questions. FALSIFYING CHECK: open a PR whose body has no `## Acceptance` block and no trailer, but whose head commit carries `Remudero-Task:` and whose branch is `run-<id>-<epoch>`; if acceptance-author-gate passes, this report is wrong and the surfaces already agree."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
