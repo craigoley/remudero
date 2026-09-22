@@ -11,8 +11,8 @@
     - src/lib/drain.ts
   origin: "operator-session#two-lanes-one-task-2026-09-16"
   plan_refs: ["W1-T2429", "W1-T3219"]
-  status: queued
-  priority: 2
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
     reservation hand-off: plan/verb-audit-1789573000 -> plan/dup-dispatch-1789576000
