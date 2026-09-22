@@ -65,7 +65,7 @@ export async function releaseAutomatedShard(
   try {
     risk = await deps.riskJudge(buildFilingRiskJudgeInput(task));
   } catch (e) {
-    return unavailable(`the risk judge threw: ${String((e as Error)?.message ?? e)}`);
+    return { kind: "unavailable", reason: `the risk judge threw: ${String((e as Error)?.message ?? e)}` };
   }
   // `"available"` is also a legal value, so presence alone is not the signal — only the explicit
   // "unavailable" marker means no LLM decision was reached.
