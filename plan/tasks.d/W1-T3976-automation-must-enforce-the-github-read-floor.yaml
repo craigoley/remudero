@@ -12,7 +12,7 @@
   origin: "operator-session#review-admission-and-github-cadence-2026-09-21"
   note: "reservation hand-off: unknown -> file-W1-T3976-1790022675000"
   plan_refs: [W1-T3297, W1-T529, W1-T3969]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The transport already has the right shared stamp and an explicit `enforce` mode, but its

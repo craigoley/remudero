@@ -11,7 +11,7 @@
   files: [src/lib/task-linter.ts, scripts/acceptance-author-gate.mjs, test/a-credited-build-reconciles-declared-test-path.test.ts]
   origin: oper#squeeze-session-2026-09-17
   plan_refs: ["W1-T3730", "W1-T3727"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #5941, and it is the direct cause of an operator merging a PR by hand.

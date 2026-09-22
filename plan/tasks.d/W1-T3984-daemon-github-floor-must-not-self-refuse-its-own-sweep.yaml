@@ -56,7 +56,7 @@
     daemon handler call with the generic strict wrapper: the run-task grep proof must fail. Set an
     explicit `enforce` environment in the fixture and it must still be observed inside the daemon
     boundary; a fix that silently overrides an operator choice is invalid.
-  status: queued
+  status: merged
   attempts: 0
   origin: oper#observed-satellite-self-refusal-after-w1-t3976-2026-09-21
   note: |

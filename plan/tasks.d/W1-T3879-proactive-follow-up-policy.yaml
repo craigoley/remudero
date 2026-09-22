@@ -20,7 +20,7 @@
     - test/follow-up-policy-stops.test.ts
     - test/follow-up-policy-delivery.test.ts
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Instinct's reported magic is not only completing a request; it notices dropped threads and

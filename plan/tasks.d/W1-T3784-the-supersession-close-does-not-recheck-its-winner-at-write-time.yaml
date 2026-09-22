@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-supersession-close-rechecks-the-winner.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE LIVE QUEUE, 2026-09-19. Two independent workers opened the

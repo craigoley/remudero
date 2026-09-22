@@ -54,7 +54,7 @@
     the hook half if hooks already read a reassignable plan binding. After implementation, restore
     local-path loading and then boot-plan capture separately; their respective acceptance tests
     must fail. Do not substitute a restart for either proof.
-  status: queued
+  status: merged
   attempts: 0
   note: |
     High risk is the daemon control-loop boundary, not a claim that the change is large. It is

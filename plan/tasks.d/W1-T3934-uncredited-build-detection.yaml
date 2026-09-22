@@ -11,7 +11,7 @@
   origin: "operator-follow-up#needs-me-false-positive-2026-09-21"
   plan_refs: [W1-T2392, W1-T1041]
   files: [src/lib/status.ts, test/uncredited-build-detection.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on origin/main 27b39e94: `rmd status --json` surfaces W1-T1041 in

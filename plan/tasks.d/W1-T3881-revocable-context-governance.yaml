@@ -20,7 +20,7 @@
     - test/context-governance-receipts.test.ts
     - test/context-governance-restart.test.ts
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A persistent assistant becomes more useful as it remembers preferences, prior decisions, and

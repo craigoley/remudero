@@ -11,7 +11,7 @@
   origin: human
   plan_refs: ["W1-T425", "W1-T3762"]
   files: [src/lib/analytics-route.ts, src/lib/operator-agent-proof.ts, test/analytics-route.test.ts, test/operator-agent-proof.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main 948173f3: run-task.ts:5902-5927 writes per-criterion `proof_exec`

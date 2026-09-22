@@ -11,7 +11,7 @@
   files: [src/lib/task-linter.ts, src/run-task.ts, test/plan-only-new-task-diagnostics.test.ts]
   origin: "feedback#fb-1789845848265-8919ba"
   plan_refs: ["W1-T2967", "W1-T2835", "W1-T3218", "W1-T310", "W1-T3719"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     INCIDENT. PR #6127 was plan-only and auto-merged while `rmd lint-plan --base origin/main`

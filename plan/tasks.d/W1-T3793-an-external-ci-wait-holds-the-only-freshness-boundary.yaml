@@ -10,7 +10,7 @@
   files: [src/lib/daemon.ts, src/run-task.ts]
   origin: "recon#core-stale-behind-external-ci-wait-2026-09-19"
   plan_refs: ["W1-T12a", "W1-T143", "W1-T147", "W1-T151", "W1-T160", "W1-T249", "W1-T254", "W1-T988", "W1-T1211", "W1-T2379", "W1-T2865", "W1-T3116", "W1-T3756"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE LIVE CORE DAEMON, 2026-09-19. After an operator-authorized restart, the

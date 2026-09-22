@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, src/lib/serve.ts, test/cold-status-reads-return-within-the-client-budget.test.ts]
   origin: "feedback#fb-1789955906700-8768c6"
   plan_refs: ["W1-T3192", "W1-T3415", "W1-T2811"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     REPORTED 2026-09-21 against authenticated production. Board and Needs-you first reads abort

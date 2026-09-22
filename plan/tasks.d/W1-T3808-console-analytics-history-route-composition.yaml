@@ -11,7 +11,7 @@
   origin: "feedback#fb-1789845640231-c117a2"
   plan_refs: ["W1-T477", "W1-T3623"]
   files: [src/lib/analytics-timeseries.ts, src/lib/analytics-route.ts, test/console-analytics-history-route.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Replaces W1-T3804 and the historical half of W1-T3806. The five supported historical metric

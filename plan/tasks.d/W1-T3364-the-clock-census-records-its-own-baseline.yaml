@@ -10,7 +10,7 @@
     - scripts/clock-signature-ratchet.mjs
     - test/the-clock-census-records-its-own-baseline.test.ts
   origin: "sweep-forensics#2026-09-10-queue-day"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "the clock-signature baseline has a generator that writes the row it measured, like its two sibling ratchets"

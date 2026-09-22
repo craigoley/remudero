@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/sweep.test.ts]
   origin: "fleet-incident#pr-6153-external-success-after-ledger-failure-2026-09-20"
   plan_refs: ["W1-T230", "W1-T2299", "W1-T2860"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on core PR #6153. The daemon posted an authoritative

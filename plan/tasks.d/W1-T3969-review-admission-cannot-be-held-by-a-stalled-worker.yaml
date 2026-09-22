@@ -15,7 +15,7 @@
     - test/review-status-pending.test.ts
   origin: "operator-session#review-posting-root-cause-2026-09-21"
   plan_refs: [W1-T3647, W1-T3622, W1-T3961, W1-T3226]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

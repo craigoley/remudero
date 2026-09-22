@@ -14,7 +14,7 @@
     - test/host-capability-fixtures.test.ts
   origin: "operator-session#pr-6272-followup-2026-09-20"
   plan_refs: ["W1-T3364", "W1-T2997", "W1-T3853"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

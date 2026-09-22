@@ -10,7 +10,7 @@
   files: [src/lib/escalate.ts, test/escalate.test.ts]
   origin: "recon#console-issue-51-comment-cap-2026-09-19"
   plan_refs: ["W1-T974"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on remudero-console issue #51. The task was already credited by its

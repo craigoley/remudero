@@ -13,7 +13,7 @@
     - test/feedback-landing.test.ts
   origin: architect
   plan_refs: ["W1-T243", "W1-T990", "§5B", "§7B"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

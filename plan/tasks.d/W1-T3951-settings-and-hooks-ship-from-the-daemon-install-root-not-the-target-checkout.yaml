@@ -48,7 +48,7 @@
     - test/worktree-base-observability.test.ts
   origin: feedback#fb-1789961451233-8554de
   plan_refs: ["fb-1789955524334-18bbf0", "fb-1789961451233-8554de"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     GROUNDED at this triage pass. `src/lib/repo-location.ts`'s `repoRoot` is `resolveRepoRoot(argv,

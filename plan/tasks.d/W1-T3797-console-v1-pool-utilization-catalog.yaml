@@ -11,7 +11,7 @@
   origin: human
   plan_refs: ["§12", "W1-T3762"]
   files: [src/lib/operator-agent-capacity.ts, test/operator-agent-capacity.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main 948173f3: daemon.ts:596-809 sizes admitted lanes from SweepPolicy.wipLimit

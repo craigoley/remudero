@@ -74,7 +74,7 @@
   origin: human
   plan_refs: [W1-T3414, W1-T1060, W1-T3658]
   files: [scripts/acceptance-author-gate.mjs]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3734-6-three-findings

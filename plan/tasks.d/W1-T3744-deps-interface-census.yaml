@@ -10,7 +10,7 @@
   origin: "#5940 — coverage-ratchet refused a PR adding one injected seam (158 -> 159); filed by that PR's author, who considered the evasion below before paying with a real consolidation instead"
   plan_refs: [W1-T2894]
   files: [test/deps-interface-census.test.ts, scripts/deps-interface-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS TASK SERVES W1-T2894, IT DOES NOT ARGUE WITH IT. That task built the census precisely so

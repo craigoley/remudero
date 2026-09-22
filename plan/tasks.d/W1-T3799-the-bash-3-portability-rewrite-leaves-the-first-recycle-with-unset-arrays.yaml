@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh]
   origin: "recon#core-preflight-recycle-first-run-2026-09-19"
   plan_refs: ["W1-T2598", "W1-T3595"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON ORIGIN/MAIN, 2026-09-19. The real W1-T2598 recycle-wait fixture's default Docker

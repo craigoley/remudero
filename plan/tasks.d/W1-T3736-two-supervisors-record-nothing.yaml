@@ -74,7 +74,7 @@
   origin: human
   plan_refs: [W1-T3733, W1-T3732, W1-T3596]
   files: [src/lib/deployer.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3734-6-three-findings

@@ -11,7 +11,7 @@
   files: [src/run-task.ts, src/lib/sweep.ts, src/lib/ledger.ts, test/a-commit-refused-fix-round-is-not-a-success.test.ts]
   origin: architect
   plan_refs: ["W1-T1110", "W1-T1127", "W1-T3727", "W1-T3849", "W1-T127"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

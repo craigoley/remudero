@@ -10,7 +10,7 @@
   files: [src/lib/self-sync.ts, src/lib/daemon.ts]
   origin: oper#squeeze-session-2026-09-18
   plan_refs: ["W1-T2964", "W1-T2965", "W1-T3245", "W1-T3755"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THE LIVE FLEET, 2026-09-18. The daemon process ran from 00:35 to 05:50 UTC.

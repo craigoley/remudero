@@ -11,7 +11,7 @@
   origin: human
   plan_refs: ["W1-T424"]
   files: [src/lib/operator-agent-outcomes.ts, test/operator-agent-outcomes.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main 948173f3: src/lib/verdict-calibration.ts:399-553 already computes

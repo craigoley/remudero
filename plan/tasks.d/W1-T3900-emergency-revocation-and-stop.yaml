@@ -21,7 +21,7 @@
     - test/emergency-control-running.test.ts
     - test/emergency-control-clear.test.ts
     - test/emergency-control-receipts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Profiles, capability grants, and agent handoffs already have individual revocation paths. Incident

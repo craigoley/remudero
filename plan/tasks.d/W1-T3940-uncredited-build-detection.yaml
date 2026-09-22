@@ -11,7 +11,7 @@
     - test/uncredited-build-detection.test.ts
   origin: "operator-session#needs-me-review-2026-09-21"
   plan_refs: [W1-T2392, W1-T3934, W1-T3939, W1-T13]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> run-W1-T3940-1789982932584

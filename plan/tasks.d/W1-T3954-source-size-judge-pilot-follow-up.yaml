@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 45.00
-  status: queued
+  status: merged
   attempts: 0
   files:
     - src/lib/gate-posture.ts

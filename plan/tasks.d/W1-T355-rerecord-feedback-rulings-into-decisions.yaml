@@ -55,7 +55,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T352", "W1-T353", "§4"]
   files: [DECISIONS.md]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:human — this is a ruling-shaped task (files: [DECISIONS.md]) and the deliverable is
     the permanent record of OPERATOR authority; the operator judges the transcription's fidelity.

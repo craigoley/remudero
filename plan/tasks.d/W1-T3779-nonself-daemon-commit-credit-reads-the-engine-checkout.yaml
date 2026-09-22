@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/nonself-commit-trailer-credit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED while diagnosing the console daemon's CONSOLE-T12 loop on 2026-09-19. Console PR #40

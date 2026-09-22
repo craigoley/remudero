@@ -10,7 +10,7 @@
   files: [src/lib/dispatch-repair.ts, src/run-task.ts, test/a-refused-task-is-repaired-not-re-attempted.test.ts]
   origin: "recon#console-CONSOLE-T12-escalation-loop-2026-09-19"
   plan_refs: ["W1-T3657"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED from the console daemon ledger before its task-record repairs landed.

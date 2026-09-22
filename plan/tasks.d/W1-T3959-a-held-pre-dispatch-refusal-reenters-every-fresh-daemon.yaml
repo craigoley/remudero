@@ -16,7 +16,7 @@
     - test/a-refused-task-is-repaired-not-re-attempted.test.ts
   origin: "operator-session#three-daemon-follow-up-2026-09-21"
   plan_refs: ["W1-T3657", "W1-T3565", "W1-T2397", "W1-T3820"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON remudero-console, 2026-09-21. UI-T41 has a persisted

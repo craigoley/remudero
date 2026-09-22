@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, src/run-task.ts, src/lib/ledger-union.ts]
   origin: oper#squeeze-session-2026-09-18
   plan_refs: ["W1-T2423", "W1-T3523", "W1-T271"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THE LIVE LEDGER, 2026-09-18. Since the daemon restarted onto working code, it has

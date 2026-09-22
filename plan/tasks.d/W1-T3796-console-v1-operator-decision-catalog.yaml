@@ -11,7 +11,7 @@
   origin: human
   plan_refs: ["§7", "§7B"]
   files: [src/lib/operator-agent-decisions.ts, test/operator-agent-decisions.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main 948173f3: panel-actions.ts:407-434 writes panel.manual_approved for

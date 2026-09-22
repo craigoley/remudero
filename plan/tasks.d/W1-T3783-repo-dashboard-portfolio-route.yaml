@@ -17,7 +17,7 @@
     - packages/api-client/src/client.ts
     - test/repo-dashboard-route.test.ts
     - test/api-client-client.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at the filing base c2bcff0259c01f4143902050a7c17c8b8268352c: the dashboard's repo

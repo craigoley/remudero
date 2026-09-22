@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/nonself-feedback-landing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the Azure site daemon on 2026-09-19. Its engine checkout is

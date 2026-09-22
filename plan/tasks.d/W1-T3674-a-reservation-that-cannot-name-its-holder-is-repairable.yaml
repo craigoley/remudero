@@ -10,7 +10,7 @@
   files: [src/lib/task-id-reservation.ts, test/a-reservation-that-cannot-name-its-holder-is-repairable.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3640", "W1-T3648", "W1-T3091"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED IN ONE EVENING, 2026-09-16. Four lanes lost an id, each a different way, and in every

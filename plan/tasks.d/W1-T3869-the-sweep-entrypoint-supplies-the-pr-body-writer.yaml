@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts]
   origin: architect
   plan_refs: ["W1-T3283", "W1-T2948", "W1-T2890"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

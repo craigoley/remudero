@@ -11,7 +11,7 @@
   origin: "operator-follow-up#verify-human-automation-2026-09-21"
   plan_refs: [W1-T3188, W1-T3921, W1-T3906]
   files: [src/lib/verify-human-judge.ts, src/lib/measurement-cadence.ts, src/run-task.ts, test/a-verify-human-shard-is-judged.test.ts, test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on origin/main after W1-T3188 and W1-T3921: `VerifyHumanDecision` has exactly two

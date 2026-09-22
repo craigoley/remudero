@@ -53,7 +53,7 @@
     a runnable fresh tree. Replace the fail-closed arm with an in-process call and the wrong-code
     control must fail. These controls distinguish safe recovery from merely suppressing the visible
     `already exists` error.
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: run-W1-T3959-1790003022000 -> chore/file-W1-T3962-fresh-reviewer-runtime

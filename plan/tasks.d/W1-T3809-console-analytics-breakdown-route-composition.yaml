@@ -11,7 +11,7 @@
   origin: "feedback#fb-1789845640231-c117a2"
   plan_refs: ["W1-T477", "W1-T3795"]
   files: [src/lib/analytics-breakdowns.ts, src/lib/analytics-route.ts, test/console-analytics-breakdown-route.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Replaces W1-T3805 and the breakdown half of W1-T3806. Existing retained evidence can classify

@@ -10,7 +10,7 @@
   files: [src/lib/worker-provider.ts]
   origin: "recon#console-api-t28-resumed-fix-read-only-2026-09-19"
   plan_refs: ["W1-T2748", "W1-T3727"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE LIVE CONSOLE FLEET, 2026-09-19. The API-T28 implementation PR #455 failed

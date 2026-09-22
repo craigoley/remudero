@@ -18,7 +18,7 @@
     - test/the-hook-spawns-no-test-suite.test.ts
   origin: "operator-session#board-wide-red-2026-09-11"
   plan_refs: ["W1-T2738", "W1-T3059", "W1-T3072", "W1-T3225", "W1-T3414", "W1-T3422"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on #5170's repair chain, not inferred from a title: adding the `squash-trailer-gate`

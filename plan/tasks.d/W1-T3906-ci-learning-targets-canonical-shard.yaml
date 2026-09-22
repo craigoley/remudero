@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   risk: high
-  status: queued
+  status: merged
   attempts: 0
   files: [src/lib/measurement-cadence.ts, src/run-task.ts, test/ci-learning-safe-landing.test.ts]
   origin: "operator-follow-up#ci-learning-2026-09-20"

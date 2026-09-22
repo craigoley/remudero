@@ -10,7 +10,7 @@
   files: [src/lib/worker.ts]
   origin: "2026-09-20 — measured on this container's plan/questions.ndjson while auditing the escalation path"
   plan_refs: []
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     SCOPE FIRST, SO THIS IS NOT OVERSTATED. plan/questions.ndjson is GITIGNORED and untracked, so

@@ -11,7 +11,7 @@
   files: [src/lib/analytics-route.ts, test/console-analytics-contract-gap.test.ts]
   origin: "feedback#fb-1789960088703-d1ca77"
   plan_refs: ["W1-T3623", "W1-T3884"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Observed live 2026-09-21 (feedback fb-1789960088703-d1ca77, echoing the same gap independently

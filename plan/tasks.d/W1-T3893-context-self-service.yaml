@@ -26,7 +26,7 @@
     - packages/api-client/src/schema.d.ts
     - scripts/test-tier-manifest.json
     - test/route-wiring.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3881 gives retained context provenance, purpose, retention, revocation, and deletion semantics.

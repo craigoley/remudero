@@ -20,7 +20,7 @@
     - test/action-reconciliation-drift.test.ts
     - test/action-reconciliation-retry.test.ts
     - test/action-reconciliation-redaction.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3855 already supplies idempotency, dry-run, rollback, and a durable action receipt. A receipt

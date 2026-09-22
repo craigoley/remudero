@@ -11,7 +11,7 @@
   origin: "operator-follow-up#needs-me-stale-blocked-2026-09-21"
   plan_refs: [W1-T2392, W1-T3934, W1-T3938]
   files: [src/lib/status.ts, test/uncredited-build-detection.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on origin/main 96a76ef0 after W1-T3938's plan filing. The live status board still

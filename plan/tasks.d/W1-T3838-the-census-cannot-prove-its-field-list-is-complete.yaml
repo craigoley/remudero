@@ -10,7 +10,7 @@
   files: [scripts/expiring-fixture-census.mjs]
   origin: "fleet-incident#operator-agent-expiresat-2026-09-20"
   plan_refs: ["W1-T3334", "W1-T3388", "W1-T3655", "W1-T3270"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-20, and the census gave zero warning for a fixture that had been scheduled to
