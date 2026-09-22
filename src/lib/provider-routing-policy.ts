@@ -450,11 +450,7 @@ export function resolveProviderRoutingPolicy(
   };
 }
 
-/**
- * The policy one spawn's auction runs under. The operator's explicit preference always wins; only
- * an `automatic` policy takes the requested capability's declared preference
- * (`capabilities.provider_preference`, .remudero/mounts.yaml), and only for a routable provider.
- */
+/** An operator's explicit preference wins; only an `automatic` policy takes the capability's own. */
 export function policyForCapability(
   policy: EffectiveProviderRoutingPolicy,
   capability: string | undefined,
