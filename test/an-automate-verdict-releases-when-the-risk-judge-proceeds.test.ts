@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { verifyHumanCadence } from "../src/lib/measurement-cadence.js";
 import { RELEASE_LEDGER_STEP, releasedTaskIds } from "../src/lib/plan.js";
 import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { approveParkedTask } from "../src/run-task.js";
+import { approveParkedTask, routeVerifyHumanBacklog } from "../src/run-task.js";
 import {
   VERIFY_HUMAN_RELEASE_ESCALATED_STEP,
   VERIFY_HUMAN_RELEASE_UNAVAILABLE_STEP,
@@ -268,6 +268,26 @@ test("THE CADENCE never re-judges or re-releases a task that is already released
   assert.deepEqual(c.judged, []);
   assert.deepEqual(c.released, []);
   assert.deepEqual(result.released, []);
+});
+
+test("THE ROUTER backfills an EARLIER automate verdict through its release arm", async () => {
+  const released: string[] = [];
+  const result = await routeVerifyHumanBacklog([SHARD], {
+    judge: async () => {
+      throw new Error("a settled verdict must not be re-judged");
+    },
+    priorVerdicts: new Map([[observedStateKey(SHARD), AUTOMATE]]),
+    stageProposal: () => assert.fail("a released shard stages no proposal"),
+    appendRow: () => {},
+    runId: "ROUTE",
+    release: async () => {
+      released.push(SHARD.id);
+      return { kind: "released", reason: "low risk" };
+    },
+  });
+  assert.deepEqual(released, [SHARD.id]);
+  assert.deepEqual(result.released, [SHARD.id]);
+  assert.deepEqual(result.judged, 0);
 });
 
 // ── approveParkedTask: the row, and the dispatcher reading it ─────────────────────────────────────
