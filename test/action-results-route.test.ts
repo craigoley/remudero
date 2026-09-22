@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -73,6 +73,31 @@ test("unit test: action-results route preserves every reconciliation state", () 
   assert.deepEqual(new Set(projection.results?.map((item) => item.reconciliationState)), new Set(STATES));
 });
 
+test("unit test: action-results route preserves validated partial-success paths", () => {
+  const partial = result("partially-applied", "action-partial");
+  partial.partialSuccess = { satisfied: ["status"], unsatisfied: ["credential"] };
+  const projection = buildActionResultsProjection(ledger([{
+    step: "external_effect.reconciled",
+    task_id: "W1-T3899",
+    external_effect: partial,
+  }]));
+  assert.equal(projection.state, "verified");
+  assert.deepEqual(projection.results?.[0]?.partialSuccess, partial.partialSuccess);
+});
+
+test("unit test: action-results route refuses unserialisable connector-shaped evidence", () => {
+  const cyclic = result("applied", "action-cycle");
+  const snapshot = cyclic.preconditionSnapshot as Record<string, unknown>;
+  snapshot.self = snapshot;
+  const projection = buildActionResultsProjection(ledger([{
+    step: "external_effect.reconciled",
+    task_id: "W1-T3899",
+    external_effect: cyclic,
+  }]));
+  assert.equal(projection.state, "unavailable");
+  assert.equal(projection.reason, "malformed-external-effect");
+});
+
 test("unit test: action-results route is mounted as a read-scoped route", () => {
   const routes = buildPanelReadRoutes({
     root: "/tmp/repo",
@@ -99,12 +124,19 @@ test("unit test: action-results route reports an unavailable source instead of a
     assert.equal(captured.json().state, "unavailable");
     assert.equal(captured.json().reason, "ledger-unavailable");
 
+    const directoryPath = join(root, "ledger-directory");
+    mkdirSync(directoryPath, { recursive: true });
+    const failedRead = responseCapture();
+    buildActionResultsRoute(directoryPath).handler({ url: "/v1/action-results" } as never, failedRead.response, { params: {} });
+    assert.equal(failedRead.json().state, "unavailable");
+    assert.equal(failedRead.json().reason, "ledger-unavailable");
+
     mkdirSync(join(root, "state"), { recursive: true });
     writeFileSync(missingLedger, "{not-json}\n");
     const partial = responseCapture();
     buildActionResultsRoute(missingLedger).handler({ url: "/v1/action-results" } as never, partial.response, { params: {} });
     assert.equal(partial.json().state, "unavailable");
   } finally {
-    // The temporary directory is owned by this test process and is intentionally left to the OS temp cleaner.
+    rmSync(root, { recursive: true, force: true });
   }
 });
