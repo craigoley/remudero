@@ -71,7 +71,7 @@ test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending vi
 });
 
 test("semantic review worker carries an idle-activity watchdog", () => {
-  const start = runTaskSrc.indexOf("clockBound: { boundMs: args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon }");
+  const start = runTaskSrc.indexOf("clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon }");
   assert.ok(start > -1, "the semantic reviewer spawn must use the existing worker-abandon policy");
 });
 

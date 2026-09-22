@@ -5914,6 +5914,10 @@ async function runReview(args: {
           reviewerVerdictContract(criteria.length);
         const stopTelemetry = args.workerTelemetry?.startPolling();
         let reviewer: WorkerResult;
+        const reviewerClockBound =
+          args.reviewerClockBoundMs === undefined
+            ? { clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon } }
+            : { clockBound: { boundMs: args.reviewerClockBoundMs } };
         try {
           reviewer = args.account(
             await (args.reviewerSpawnWorker ?? spawnWorker)({
@@ -5946,7 +5950,7 @@ async function runReview(args: {
             // watchdog as dispatch workers so a provider/SDK stall cannot hold the decision claim
             // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
             // a terminal verdict when this bound trips.
-            clockBound: { boundMs: args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon },
+            ...reviewerClockBound,
             streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
