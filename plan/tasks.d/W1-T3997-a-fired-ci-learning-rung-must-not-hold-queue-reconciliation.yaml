@@ -53,7 +53,7 @@
     - claim: "an unreadable CI-learning corpus releases its cadence fire and reports the failure without treating missing evidence as a successful lesson"
       proof: "unit test: an unreadable detached ci-learning corpus releases its fire"
     - claim: "the daemon has an explicit CI-learning detached-action path rather than awaiting the cadence runner inline"
-      proof: "grep: ci-learning in src/lib/daemon.ts"
+      proof: "unit test: W1-T3997: a runner that throws before returning a promise remains a visible best-effort failure"
   falsifier: |
     Hold the asynchronous CI-learning corpus promise after the fire and drive one
     daemon tick with a runnable task and a sweep recorder. Before the fix, the
