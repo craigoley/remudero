@@ -15,6 +15,7 @@ import {
   decisionRecordRelPath,
   findPendingLandingPr,
   landFeedback,
+  landPlanReconcileShards,
   recordDecision,
 } from "../src/lib/feedback-landing.js";
 import { checkCliFreshness } from "../src/lib/self-sync.js";
@@ -357,6 +358,34 @@ test("findPendingLandingPr: gh unavailable/unauthenticated resolves to undefined
     throw new Error("gh: command not found");
   };
   assert.equal(findPendingLandingPr({ gh }), undefined);
+});
+
+test("W1-T3970: plan reconciliation uses the resolved layout and its own landing branch", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh, calls } = fakeGh("https://github.com/o/r/pull/3970");
+  try {
+    const result = withLiveWritesAllowed(() =>
+      landPlanReconcileShards(
+        root,
+        [{ relPath: "plan/tasks.d/W1-T3970.yaml", content: "- id: W1-T3970\n  status: merged\n" }],
+        { gh, targetRepository: { owner: "o", repo: "r" }, landingOwner: "measurement-cadence" },
+      ),
+    );
+    assert.equal(result.landed, true);
+    assert.deepEqual(result.files, ["plan/tasks.d/W1-T3970.yaml"]);
+    const create = calls.find((args) => args[0] === "pr" && args[1] === "create");
+    assert.ok(create, "the plan-reconcile bridge must open a PR");
+    const head = create![create!.indexOf("--head") + 1];
+    assert.match(head, /^plan-reconcile-/);
+    assert.match(
+      execFileSync("git", ["--git-dir", bareOrigin, "show", `${head}:plan/tasks.d/W1-T3970.yaml`], { encoding: "utf8" }),
+      /status: merged/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bareOrigin, { recursive: true, force: true });
+  }
 });
 
 // ── Acceptance claim 4: the exit-2 message distinguishes pending-landing from genuinely unknown ──
