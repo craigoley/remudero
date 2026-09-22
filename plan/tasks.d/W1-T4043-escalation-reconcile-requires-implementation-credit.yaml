@@ -13,7 +13,7 @@
     - test/cross-target-credit-evidence.test.ts
   origin: "operator-session#needs-human-reconcile-false-close-2026-09-22"
   plan_refs: ["W1-T3063", "W1-T3084", "W1-T3873", "W1-T3996", "W1-T974"]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED 2026-09-22: the escalation-lifecycle reconciler auto-closed remudero issue #6587 for

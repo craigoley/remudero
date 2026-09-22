@@ -130,7 +130,7 @@
   origin: "oper#ci-log-poisons-escalation-dedup-2026-08-18"
   plan_refs: ["W1-T195", "W1-T210", "W1-T138", "W1-T345"]
   files: [src/lib/escalate.ts, test/escalate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     src/run-task.ts IS DELIBERATELY NOT DECLARED, AND THAT IS A SCOPE DECISION WITH A REASON RATHER
