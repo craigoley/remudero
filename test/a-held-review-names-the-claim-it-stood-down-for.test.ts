@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { ghStubPath } from "./helpers/gh-stub.js";
 import { claimReviewDecision, reviewDecisionDigest } from "../src/lib/review.js";
 import {
   reviewLedgerReasonFields,
@@ -13,24 +14,6 @@ import {
 const HEAD_SHA = "abc1234def5678";
 const PR_URL = "https://github.com/acme/remudero/pull/1";
 const DIFF = "diff --git a/README.md b/README.md";
-
-function writeGhStub(binDir: string): void {
-  writeFileSync(
-    join(binDir, "gh"),
-    `#!/bin/sh
-case "$1 $2" in
-  "api "*)
-    case "$*" in
-      *pulls/*) echo '{"number":1,"html_url":"${PR_URL}","updated_at":"t","body":"","head":{"ref":"run-W1-T3365-1790054788234","sha":"${HEAD_SHA}"}}' ;;
-      *) echo '{}' ;;
-    esac ;;
-  "pr diff") printf '%s' '${DIFF}' ;;
-  *) exit 0 ;;
-esac
-`,
-    { mode: 0o755 },
-  );
-}
 
 test("a held verdict's description names the in-flight decision", () => {
   const annotation = reviewVerdictAnnotation({ keywordOnly: true, decisionDisposition: "in_flight" });
@@ -68,12 +51,21 @@ test("the two causes carry different ledger reasons", async () => {
   assert.deepEqual(reviewLedgerReasonFields({ decisionDisposition: "computed" }), {});
 
   const root = mkdtempSync(join(tmpdir(), "rmd-held-review-"));
-  const binDir = mkdtempSync(join(tmpdir(), "rmd-held-review-bin-"));
+  const binDir = ghStubPath(`#!/bin/sh
+case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"${PR_URL}","updated_at":"t","body":"","head":{"ref":"run-W1-T3365-1790054788234","sha":"${HEAD_SHA}"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") printf '%s' '${DIFF}' ;;
+  *) exit 0 ;;
+esac
+`);
   const oldPath = process.env.PATH;
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
-  writeGhStub(binDir);
-  process.env.PATH = `${binDir}:${oldPath}`;
+  process.env.PATH = `${binDir}:${oldPath ?? ""}`;
   const claim = await claimReviewDecision({
     ledgerPath,
     taskId: "W1-T3365",
