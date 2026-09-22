@@ -37,15 +37,17 @@ const SCRIPT_URL = pathToFileURL(SCRIPT).href;
 const mod = (await import(SCRIPT_URL)) as {
   REPO_ROOT: string;
   CLASSES: { PLAN_ONLY: string; DOCS_ONLY: string; SOURCE: string };
+  COVERAGE_CLASSES: { PLAN_ONLY: string; DOCS_ONLY: string; SOURCE: string; TEST_ONLY: string };
   isDocsPath: (path: string) => boolean;
   parseChangedFiles: (rawText: string) => string[];
   classify: (files: unknown) => { class: string; reason: string };
+  classifyCoverage: (files: unknown) => { class: string; reason: string };
   hasRepoRootConstant: (content: string) => boolean;
   namesPlanOrDocsPath: (content: string) => boolean;
   planReadingSuiteFiles: (root?: string) => string[];
   main: (argv: string[]) => void;
 };
-const { CLASSES, classify, hasRepoRootConstant, isDocsPath, namesPlanOrDocsPath, parseChangedFiles, planReadingSuiteFiles } = mod;
+const { CLASSES, COVERAGE_CLASSES, classify, classifyCoverage, hasRepoRootConstant, isDocsPath, namesPlanOrDocsPath, parseChangedFiles, planReadingSuiteFiles } = mod;
 
 function tmpFileList(lines: string[]): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-diff-class-"));
@@ -149,6 +151,25 @@ test("acceptance 3: classify([]) is SOURCE, not PLAN_ONLY", () => {
   const result = classify([]);
   assert.equal(result.class, CLASSES.SOURCE);
   assert.match(result.reason, /empty/i);
+});
+
+test("coverage classification: an all-test diff is TEST_ONLY and mixed source is SOURCE", () => {
+  assert.equal(classifyCoverage(["test/fast-lane-classifier.test.ts", "test/fixtures/example.json"]).class, COVERAGE_CLASSES.TEST_ONLY);
+  assert.equal(classifyCoverage(["test/fast-lane-classifier.test.ts", "src/lib/plan-scope.ts"]).class, COVERAGE_CLASSES.SOURCE);
+});
+
+test("coverage classification: plan/docs and empty diffs preserve existing fail-closed classes", () => {
+  assert.equal(classifyCoverage(["plan/tasks.yaml"]).class, CLASSES.PLAN_ONLY);
+  assert.equal(classifyCoverage(["docs/ci.md"]).class, CLASSES.DOCS_ONLY);
+  assert.equal(classifyCoverage([]).class, CLASSES.SOURCE);
+  const list = tmpFileList(["test/fast-lane-classifier.test.ts"]);
+  try {
+    const result = runCli(["--coverage-class", "--changed-files", list.path]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.stdout.trim(), COVERAGE_CLASSES.TEST_ONLY);
+  } finally {
+    list.cleanup();
+  }
 });
 
 test("acceptance 3 (CLI): an empty --changed-files file classifies as SOURCE", () => {
@@ -310,7 +331,7 @@ test("acceptance 6: coverage-ratchet classifies with bare Node before its depend
   const classifyRun = steps[classifyIndex].run ?? "";
   const installRun = steps[installIndex].run ?? "";
   const chromiumRun = steps[chromiumIndex].run ?? "";
-  assert.match(classifyRun, /node scripts\/diff-class\.mjs --changed-files/, "classification must use bare Node before npm ci");
+  assert.match(classifyRun, /node scripts\/diff-class\.mjs (?:--coverage-class )?--changed-files/, "classification must use bare Node before npm ci");
   assert.doesNotMatch(classifyRun, /--import tsx/, "classification must not require a package-installed loader");
   for (const run of [installRun, chromiumRun]) {
     assert.match(run, /CLASS="\$\{\{ steps\.classify\.outputs\.class \}\}"/, "the expensive step must read the canonical class output");
