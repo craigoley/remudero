@@ -32,7 +32,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
-import { automergeHoldFromLedger } from "./review.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -137,11 +136,9 @@ export interface LandFeedbackOpts {
    */
   gh?: GhExec;
   /**
-   * W1-T1000002 — the same hold reader the sweep's arm path consults
-   * ({@link import("./review.js").automergeHoldFromLedger}), so this file's one arm-origin site
-   * ({@link ensurePrOpen}) honours a standing operator hold instead of arming around it. Omitted:
-   * arms exactly as before this task (fail open).
-   * Why: docs/forensics/feedback-landing.md#landfeedbackopts_ledgerlines.
+   * Legacy compatibility seam retained for callers that already pass the daemon ledger reader.
+   * Review and auto-merge are now owned by the shared post-review sweep; this bridge never uses
+   * the reader to arm a fresh PR before review.
    */
   ledgerLines?: () => Array<Record<string, unknown>>;
   /** Repository the landing PR is opened against. Omitted: resolved from this checkout's origin. */
@@ -504,13 +501,6 @@ function landingKind(
   return { ...template, ...layoutIdentity };
 }
 
-/** Anchors on `/pull/<n>`, mirroring `prUrlTarget` (run-task.ts) — duplicated locally since this
- *  file must not import run-task.ts. Returns `undefined`, never a guess, on any non-PR URL. */
-function landingPrNumberFromUrl(prUrl: string): number | undefined {
-  const m = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
-  return m ? Number(m[1]) : undefined;
-}
-
 /** The tree the landing branch carries on the remote, or `null` when that can't be determined —
  *  `null` means "push", never "skip", so an unreadable ref degrades to unconditional-push. */
 function remoteBranchTree(git: GitExec, branch: string): string | null {
@@ -694,14 +684,17 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
  * that succeeded but whose `gh pr create` failed still gets a PR on a later call (W1-T530).
  * Never pushes itself; the caller already decided that.
  *
- * An already-open PR is a one-call no-op (`gh pr list` only): auto-merge arms only in the call
- * that creates the PR, never re-armed later, so a quiet poll never re-issues `gh pr merge`.
+ * An already-open PR is a one-call no-op (`gh pr list` only). This bridge deliberately does NOT
+ * arm auto-merge: the daemon's shared post-review lane must first produce the current-head
+ * `remudero-review` verdict, then its normal arm path may enable auto-merge. Arming here used to
+ * create a race in which a freshly landed PR had no review context and could sit blocked until an
+ * operator ran `rmd review` by hand (#5317/W1-T3990). Keeping the bridge at "open or reuse" also
+ * makes a failed review retryable without a duplicate merge arm.
  */
 function ensurePrOpen(
   kind: LandingKind,
   gh: GhExec,
   unlanded: string[],
-  ledgerLines?: () => Array<Record<string, unknown>>,
 ): { prUrl?: string; error?: string } {
   const existing = findPendingLandingPr({ gh, identity: kind });
   if (existing) return { prUrl: existing };
@@ -728,19 +721,8 @@ function ensurePrOpen(
     // Push already succeeded — only opening the PR failed; a later call or a human `gh pr create` can pick it up.
     return { error: `\`gh pr create\` failed for ${kind.branch}: ${String((e as Error)?.message ?? e)}` };
   }
-  if (prUrl) {
-    // Consults the same hold reader as LandFeedbackOpts.ledgerLines documents above.
-    const prNumber = landingPrNumberFromUrl(prUrl);
-    const hold = ledgerLines && prNumber !== undefined ? automergeHoldFromLedger(ledgerLines(), prNumber) : undefined;
-    if (!hold) {
-      try {
-        assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-        gh(["pr", "merge", prUrl, "--auto", "--squash", ...landingRepoArgs(kind)]);
-      } catch {
-        // Best-effort — the ci + remudero-review gate decides either way (Standing rule 3B).
-      }
-    }
-  }
+  // Do not call `gh pr merge` here. The shared daemon sweep owns the review -> arm transition;
+  // this producer's responsibility ends once the landing PR is open and discoverable.
   return { prUrl };
 }
 
@@ -766,7 +748,6 @@ function finishLanding(
   build: LandingTreeBuild,
   rebuild: () => LandingTreeBuild,
   env: NodeJS.ProcessEnv,
-  ledgerLines?: () => Array<Record<string, unknown>>,
 ): LandFeedbackResult {
   // W1-T3561: fold a build's refusals onto a result — never onto the tree/files it names, so a
   // refused record can never ride into an armed auto-merge PR by construction (criterion 4).
@@ -778,7 +759,7 @@ function finishLanding(
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
-    const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, ledgerLines);
+    const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded);
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
   }
 
@@ -824,7 +805,7 @@ function finishLanding(
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
-      const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded, ledgerLines);
+      const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded);
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
     }
     try {
@@ -848,7 +829,7 @@ function finishLanding(
     build = retried;
   }
 
-  const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, ledgerLines);
+  const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded);
   if (error) {
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
     return withRefused(
@@ -951,7 +932,7 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.ledgerLines));
+    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env));
   } catch (e) {
     return withAcknowledgement({ landed: false, files: [], error: String((e as Error)?.message ?? e) });
   } finally {
@@ -1128,7 +1109,7 @@ function landContent(
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.ledgerLines);
+    return finishLanding(kind, git, gh, initialBuild, rebuild, env);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {

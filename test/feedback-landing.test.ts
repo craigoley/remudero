@@ -144,7 +144,11 @@ test("W1-T243 END-TO-END: a captured entry is invisible on origin/main until lan
   // ...and gh was asked to open exactly one PR for it (never a `git push` straight to main).
   assert.equal(createCount(), 1);
   assert.ok(calls.some((c) => c[0] === "pr" && c[1] === "create" && c.includes(LANDING_BRANCH) && c.includes("main")));
-  assert.ok(calls.some((c) => c[0] === "pr" && c[1] === "merge"), "auto-merge is armed — GitHub does the merging, not this code");
+  assert.equal(
+    calls.some((c) => c[0] === "pr" && c[1] === "merge"),
+    false,
+    "the landing bridge leaves auto-merge to the shared review lane",
+  );
 
   // Simulate the gate merging the PR (ci + remudero-review green) — a real fast-forward, since
   // the landing commit's parent IS origin/main's prior tip.
@@ -602,7 +606,7 @@ test("landFeedback: `gh pr create` throwing a NON-Error value (no `.message`) st
   assert.match(result.error ?? "", /gh: command not found, no message property at all/);
 });
 
-test("landFeedback: `gh pr merge` throwing is swallowed (best-effort auto-merge arm) — still landed:true with the PR url", () => {
+test("landFeedback: opening a fresh landing PR does not arm auto-merge before the shared review lane", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -611,12 +615,12 @@ test("landFeedback: `gh pr merge` throwing is swallowed (best-effort auto-merge 
   const gh = (args: string[]): string => {
     if (args[0] === "pr" && args[1] === "list") return "[]";
     if (args[0] === "pr" && args[1] === "create") return "Creating pull request\nhttps://github.com/o/r/pull/13\n";
-    if (args[0] === "pr" && args[1] === "merge") throw new Error("simulated: auto-merge arming failed");
+    if (args[0] === "pr" && args[1] === "merge") throw new Error("unexpected pre-review auto-merge arm");
     throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
   };
 
   const result = withLiveWritesAllowed(() => landFeedback(root, { gh }));
-  assert.equal(result.landed, true, "a failed best-effort auto-merge arm must never turn a successful push+PR into a failure");
+  assert.equal(result.landed, true, "a successful push and PR creation remain landed");
   assert.equal(result.prUrl, "https://github.com/o/r/pull/13");
 });
 
