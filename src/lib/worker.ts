@@ -32,9 +32,11 @@ import {
   workerHomeDir,
   workerShell,
   workerZdotdir,
+  workerModel,
   type Config,
   type WorkerProviderId,
 } from "./config.js";
+import { assertModelAllowed } from "./model-gate.js";
 import { usageSnapshotFromSdk } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -2148,8 +2150,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       args.model,
       args.effort,
       Buffer.byteLength(args.prompt ?? "", "utf8"),
-      { cashSqueezed: args.cashSqueezed === true },
+      { cashSqueezed: args.cashSqueezed === true, modelApprovals: config.modelApprovals },
     );
+    assertModelAllowed(openWeight.model, config);
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "cash",
       model: openWeight.model,
@@ -2309,9 +2312,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // `disallowedTools: undefined`, a different object for the SDK (W1-T2591).
     if (args.disallowedTools && args.disallowedTools.length > 0) options.disallowedTools = [...args.disallowedTools];
     if (args.resumeSessionId) options.resume = args.resumeSessionId;
-    const routedClaudeModel = claudeHealthRoute?.routedModel ?? args.model;
-    if (args.model) options.model = args.model;
-    if (routedClaudeModel && routedClaudeModel !== args.model) options.model = routedClaudeModel;
+    // Never unnamed: the CLI's own default is Opus with a 1M context (measured 2026-09-22), not the worker tier.
+    const routedClaudeModel = claudeHealthRoute?.routedModel ?? args.model ?? workerModel(config);
+    assertModelAllowed(routedClaudeModel, config);
+    options.model = routedClaudeModel;
     if (args.effort) options.effort = args.effort as Options["effort"];
     if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
     if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;

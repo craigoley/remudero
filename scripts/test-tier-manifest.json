@@ -386,6 +386,7 @@
     "test/assistant-evaluation-promotion.test.ts": 0,
     "test/assistant-evaluation-redaction.test.ts": 0,
     "test/assistant-evaluation-replay.test.ts": 0,
+    "test/astra-and-fable-never-run-without-human-permission.test.ts": 0,
     "test/attribution-unreadable-branch.test.ts": 885,
     "test/audit-is-preregistered-as-cli-only.test.ts": 0,
     "test/authority-ratchet.test.ts": 405,
