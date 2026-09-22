@@ -2801,6 +2801,14 @@ export interface EscalationState {
  * concealing the row. Unknown or absent verdicts deliberately remain durable: only the proven
  * pre-dispatch refusal is re-admittable.
  *
+ * W1-T3979: `blocked_inflight` is a live scheduling DEFERRAL, not a failure — it means a real
+ * worker was already running when this dispatch was contested, never that the task itself did
+ * anything wrong. An OLDER daemon (before this task) durably recorded that contention through the
+ * same `dispatch.blocked_independent` step; that row is retained here for forensics but, like
+ * `blocked_illformed`, must never durably exclude the task once the live lock it describes has
+ * released. daemon.ts (the producer, after this task) no longer writes this row for a fresh
+ * `blocked_inflight` result at all — this arm only re-admits a HISTORICAL row from before that fix.
+ *
  * W1-T3978: a shell-less implement can leave a producer-owned refusal after substantive edits.
  * That exact terminal class gets one pending retry marker. The marker makes the task eligible
  * until the retry's `run.start`; after that start the marker is spent, so a second refusal stays
@@ -2810,7 +2818,7 @@ export function latestIndependentFailureBlock(
   taskId: string,
   index?: LedgerIndex,
 ): boolean {
-  let last: "run" | "blocked" | "admission_refused" | undefined;
+  let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | undefined;
   let harnessRefusal = false;
   let retryPending = false;
   let retrySpent = false;
@@ -2836,7 +2844,12 @@ export function latestIndependentFailureBlock(
         harnessRefusal = true;
         if (runId) harnessRefusalRuns.add(runId);
       }
-      last = line.verdict === "blocked_illformed" ? "admission_refused" : "blocked";
+      last =
+        line.verdict === "blocked_illformed"
+          ? "admission_refused"
+          : line.verdict === "blocked_inflight"
+            ? "inflight_deferral"
+            : "blocked";
     } else if (
       line.step === "dispatch.harness_commit_retry" &&
       line.original_refusal === "harness_commit_refused" &&
