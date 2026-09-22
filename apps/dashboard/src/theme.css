@@ -7,6 +7,12 @@
   --fg: #e6edf3;
   --fg-dim: #8b949e;
   --grid: #232b36;
+  /* --grid is the DECORATIVE rule: table lines, panel edges. It is 1.15:1 against the
+     surfaces it sits on, which is fine for a hairline and fails WCAG 2.2 SC 1.4.11 for a
+     CONTROL, whose boundary or fill must reach 3:1. --edge is that boundary, and is the
+     lowest blue-grey in this ramp clearing 3:1 on every surface here (3.47 on --bg, 3.18
+     on --panel, 3.27 on the card, 3.00 on the alert). Controls take --edge; rules keep --grid. */
+  --edge: #626a78;
   --accent: #4cc2ff;
   --blocked: #f85149;
   --running: #3fb950;
@@ -52,7 +58,7 @@ body {
 }
 button {
   min-height: 28px;
-  border: 1px solid var(--grid);
+  border: 1px solid var(--edge);
   border-radius: 4px;
   background: var(--panel);
   color: var(--fg);
@@ -60,6 +66,13 @@ button {
   padding: 3px 8px;
 }
 button:disabled { color: var(--fg-dim); }
+/* An operator drives this board from the keyboard. Before this, no control styled :focus at all —
+   focus fell to the user agent's own ring over a near-black ground. --accent is 9.43:1 on --bg, far
+   above the 3:1 SC 1.4.11 asks of a focus indicator, and :focus-visible keeps it off mouse clicks. */
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .app { padding: 12px; max-width: 1100px; margin: 0 auto; }
 .work, .overview, .now, .series { background: var(--panel); border: 1px solid var(--grid); border-radius: 6px; padding: 10px; margin: 10px 0; }
 .work h2, .overview h2, .now h2, .series figcaption { font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-dim); margin: 0 0 8px; }
@@ -130,7 +143,7 @@ button:disabled { color: var(--fg-dim); }
 .repo-list__toolbar p { margin: 4px 0 0; }
 .repo-list__filters { display: flex; gap: 10px; flex-wrap: wrap; padding: 8px 0 14px; border-top: 1px solid var(--grid); border-bottom: 1px solid var(--grid); margin-bottom: 14px; }
 .repo-list__filters label, .wizard-form label, .settings-panel label { display: grid; gap: 5px; color: var(--fg-dim); font-size: 11px; }
-input, select { min-height: 30px; border: 1px solid var(--grid); border-radius: 4px; background: var(--bg); color: var(--fg); font: inherit; padding: 4px 7px; }
+input, select { min-height: 30px; border: 1px solid var(--edge); border-radius: 4px; background: var(--bg); color: var(--fg); font: inherit; padding: 4px 7px; }
 .repo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px; }
 .repo-card { display: grid; gap: 12px; min-width: 0; padding: 12px; border: 1px solid var(--grid); border-radius: 6px; background: #111821; }
 .repo-card__name { display: block; border: 0; padding: 0; background: transparent; color: var(--fg); font-size: 16px; font-weight: 700; text-align: left; }

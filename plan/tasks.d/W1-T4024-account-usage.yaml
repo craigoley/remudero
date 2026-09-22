@@ -1,0 +1,86 @@
+- id: W1-T4024
+  title: "THE CONSOLE CANNOT ANSWER 'HOW MUCH RUNWAY DO I HAVE AND WHAT HAS CASH COST ME' — the account strip reads one subscription's windows, codex headroom has no reader at all, and the cash lane appears ZERO times in the rendered page"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: medium
+  origin: "operator ask 2026-09-22: a way to see headroom across linked subscriptions and what the cash lane has cost"
+  plan_refs: [W1-T3726]
+  files: [src/lib/account-usage.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t4024-runway-panel
+  rationale: |
+    MEASURED 2026-09-22 against the rendered console (345,405 bytes fetched from a live serve):
+
+      headroom       13 occurrences
+      usage          56 occurrences
+      spend          73 occurrences
+      subscription    1 occurrence
+      cash            0 occurrences
+
+    The fleet spends on THREE lanes — `claude` and `codex` are subscriptions, `cash` is metered
+    Azure pay-as-you-go. The live ledger attributes runs to all three (`"provider":"claude"` 183,
+    `"provider":"cash"` 96, `"provider":"codex"` 60) and carries `cost_usd` per run. The console
+    surfaces the first and neither of the others.
+
+    (1) ONE SUBSCRIPTION, NOT THE LINKED SET. `lib/account-usage.ts` reads `~/.claude.json`'s
+        `cachedUsageUtilization` — a single Anthropic account's five-hour and weekly windows. It is
+        careful and honest about what it shows (it refuses a reading whose `accountUuid` does not
+        match, and states that it measures COMBINED burn rather than the fleet's share). It simply
+        answers for one lane of three.
+
+    (2) CODEX HEADROOM HAS NO READER. Nothing in src/ reads a codex rate-limit or usage figure.
+        This is not a rendering gap — the number does not exist anywhere in the process, so the
+        panel must say so rather than draw an empty gauge that reads as "plenty left".
+
+    (3) CASH IS INVISIBLE AND IT IS THE ONE THAT BILLS. A subscription window refills; a cash run
+        is money. `cost_usd` is recorded per run with its `provider` and `model`, so the number is
+        derivable today — nothing surfaces it. The operator's question, verbatim, was how much has
+        been spent on the cash lane, and the console cannot answer it at all.
+
+    (4) THE THREE ARE ONE QUESTION. "Can I keep going?" is answered by subscription headroom AND
+        cash burn together: a fleet at 90% of its weekly window with a cash divert armed is in a
+        very different position from one at 90% with no divert. Splitting them across two places,
+        or omitting one, is what makes the question unanswerable now.
+  design: |
+    (i) ONE READING PER LANE, EACH WITH ITS OWN HONEST UNIT. A subscription lane reports WINDOW
+        UTILISATION (what refills, and when). The cash lane reports MONEY SPENT over a stated
+        period. They are not the same quantity and must not share an axis or a gauge — a
+        percentage next to a dollar figure invites the reading that one is "cheaper".
+
+    (ii) A LANE WITH NO READER SAYS SO, AND IS NOT DRAWN AS ZERO. Codex has no usage source today.
+         An absent reading renders as "not instrumented", never as an empty bar — this repo has
+         already paid for a board that rendered a missing input as a confident value (W1-T3755).
+
+    (iii) EVERY FIGURE CARRIES ITS AS-OF. `cachedUsageUtilization` has a `fetchedAtMs` and can be
+          stale; a cash total is only as complete as the ledger window it summed. Both state the
+          instant they describe, so a frozen number is visibly frozen.
+
+    (iv) CASH SPEND IS SUMMED OVER A NAMED WINDOW, NOT "ALL TIME". The ledger compacts and rotates,
+         so an all-time total would silently shrink as history ages out — a falling spend figure
+         that means nothing changed. The window is stated and bounded by what the ledger actually
+         still holds.
+
+    NOT IN SCOPE: instrumenting codex usage (its own task once a source exists), changing any
+    routing or divert decision, and redesigning the console's other panels.
+  acceptance:
+    - claim: "the cash lane's spend over a named window is derivable from ledger rows and returned by the reading"
+      proof: "unit test: cash spend is summed over a named window"
+    - claim: "a lane with no usage reader renders as not-instrumented rather than as an empty or zero gauge"
+      proof: "unit test: an uninstrumented lane is not drawn as zero"
+    - claim: "subscription utilisation and cash money are reported as distinct units, never merged into one figure"
+      proof: "unit test: window utilisation and money are separate units"
+    - claim: "every figure carries the instant it describes, so a stale reading is visibly stale"
+      proof: "unit test: each reading carries its as-of"
+  falsifier: |
+    Render codex as 0% and the second assertion goes red — that is the reading this task exists to
+    prevent, and it is the one a gauge component does by default. Sum cash spend with no window and
+    the first goes red, because a compacting ledger makes an all-time total fall on its own. Merge
+    the two into a single "budget used" percentage and the third goes red, which is the shape that
+    looks tidiest on a dashboard and is the least honest. Drop the as-of and a frozen cache reads
+    identical to a fresh one, which the fourth catches.
