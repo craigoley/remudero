@@ -18,8 +18,8 @@ code behind each confirms the exclusion is sound rather than assumed:
   it only matches a doc comment) — there is no ref for it to 404 on, in any repo.
 - **Repo reachability.** Every read this recon traces below targets a repo the rationale already
   confirmed answers `GET /repos/{owner}/{repo}` with 200.
-- **The board gateway's own two reads.** `src/lib/status.ts`'s `attemptFetch` (PR list, ~line
-  4194) and `issueIndex` (labelled-issue list, ~line 4124) are the ONLY two GitHub reads that write
+- **The board gateway's own two reads.** `src/lib/status.ts`'s `attemptFetch` (PR list, line
+  4194) and `issueIndex` (labelled-issue list, line 4124) are the ONLY two GitHub reads that write
   `board_gateway.fetch_ok` / `board_gateway.issue_fetch_ok`, and BOTH explicitly pass
   `stdio: ["ignore", "pipe", "pipe"]` (or `"ignore"` for stderr) to `ghExec` — verified below, this
   shape cannot leak to the real process stderr even on failure. The rationale's ledger correlation
