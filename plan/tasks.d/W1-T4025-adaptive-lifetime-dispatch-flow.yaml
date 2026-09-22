@@ -15,6 +15,7 @@
   attempts: 0
   note: |
     reservation hand-off: unknown -> run-W1-T4025-1790077962
+    reservation hand-off: unknown -> file-t4025-adaptive-lifetime-dispatch
   rationale: |
     OBSERVED in the live queue on 2026-09-22: W1-T3363 is halted by the lifetime dispatch cap and
     still carries a needs-human escalation (#6517), even though the operator direction is now to
