@@ -7,7 +7,7 @@
  * settle until the assertion has proved the rest of the tick proceeded.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,8 +15,14 @@ import { test } from "node:test";
 import { runDaemon } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
-import { loadCiFailureWindowAsync, buildCiLearningCadenceRunner, type RunResult } from "../src/run-task.js";
+import {
+  loadCiFailureWindowAsync,
+  buildCiLearningCadenceRunner,
+  buildCiLearningDaemonHooks,
+  type RunResult,
+} from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "../src/lib/config.js";
 
 const YAML = `
 - id: A
@@ -193,4 +199,34 @@ test("W1-T3997: asynchronous CI-learning collection yields between unreadable an
   assert.equal(yields, 5, "the reader yields once per eligible PR and once per observed commit");
   assert.ok(calls.some((request) => request.includes("pulls/12/commits")), "control: the unreadable PR branch executed");
   assert.ok(calls.some((request) => request.includes("check-runs")), "control: the unreadable rollup branch executed");
+});
+
+test("W1-T3997: the daemon's own production wiring reaches the real async reader, not just a test double", async () => {
+  // Every OTHER test above drives buildCiLearningCadenceRunner directly, or supplies its own
+  // loadWindow to buildCiLearningDaemonHooks — neither exercises the wiring's own fallback
+  // (buildCiLearningDaemonHooks with no injected loadWindow), which is what production runs.
+  // Injecting only the transport (readJson, the same seam shape PollDeps.readJson already takes)
+  // reaches that real fallback with zero network, rather than standing in for it entirely.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3997-wiring-`));
+  try {
+    const requests: string[] = [];
+    const hooks = buildCiLearningDaemonHooks({
+      config: { root } as Config,
+      checkoutRoot: root,
+      planOrigins: [],
+      readJson: async (args) => {
+        requests.push(args.join(" "));
+        return [];
+      },
+    });
+    const result = await hooks.runCiLearningCadence();
+
+    assert.equal(result.draftCount, 0, "an empty real-reader window drafts nothing");
+    assert.ok(
+      requests.some((request) => request.includes("pulls?state=all")),
+      "the production wiring's own fallback reached the injected transport, never a stand-in loadWindow",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
