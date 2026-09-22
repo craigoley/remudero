@@ -158,6 +158,8 @@ test("the loader refuses a preference for cash or for a capability the ladder do
     assert.throws(() => loadMounts(join(root, "cash.yaml")), /must be "claude" or "codex"/);
     writeFileSync(join(root, "unknown.yaml"), raw.replace("    frontier: claude\n", "    genius: claude\n"));
     assert.throws(() => loadMounts(join(root, "unknown.yaml")), MountsError);
+    writeFileSync(join(root, "scalar.yaml"), raw.replace("  provider_preference:\n    frontier: claude\n", "  provider_preference: claude\n"));
+    assert.throws(() => loadMounts(join(root, "scalar.yaml")), /must be a mapping of capability -> provider/);
     writeFileSync(join(root, "absent.yaml"), raw.replace("  provider_preference:\n    frontier: claude\n", ""));
     assert.equal(loadMounts(join(root, "absent.yaml")).capabilities?.providerPreference, undefined);
   } finally {
