@@ -71,6 +71,10 @@ export interface ShardUnderJudgement {
    * it exists to close.
    */
   evidence?: string;
+  /** Optional caller-owned observation identity for a different judged population. The ordinary
+   * verify:human queue keeps its historical deps/citation key; adaptive follow-up callers include
+   * the material runtime evidence that should re-open a settled decision. */
+  observationKey?: string;
 }
 
 /**
@@ -105,7 +109,7 @@ const VALID_DECISIONS = new Set<VerifyHumanDecision>(["needs_operator", "automat
  * changes daily and would re-ask everything every day, which is the cost this key exists to avoid.
  */
 export function observedStateKey(shard: ShardUnderJudgement): string {
-  return `${shard.id}:deps=${shard.depsAllMerged ? 1 : 0}:cited=${shard.citedInSrc ? 1 : 0}`;
+  return shard.observationKey ?? `${shard.id}:deps=${shard.depsAllMerged ? 1 : 0}:cited=${shard.citedInSrc ? 1 : 0}`;
 }
 
 /** True when this shard's CURRENT observed state already has a real answer. A FAILED verdict is
@@ -288,6 +292,8 @@ export function proposalFromJudgedShard(shard: ShardUnderJudgement, verdict: Ver
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
       `Cited in src/: ${shard.citedInSrc ? "yes" : "no"}.\n\n` +
+      `Evidence: ${shard.evidence ?? "(none supplied)"}\n` +
+      `Judge provenance: decision=${verdict.decision}; observed_state=${observedStateKey(shard)}.\n\n` +
       `Nothing about the shard has been changed — this is a routing verdict, not a plan edit.`,
     evidenceAnchors: [],
   };
@@ -304,6 +310,8 @@ export function automationProposalFromJudgedShard(shard: ShardUnderJudgement, ve
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
       `Cited in src/: ${shard.citedInSrc ? "yes" : "no"}.\n\n` +
+      `Evidence: ${shard.evidence ?? "(none supplied)"}\n` +
+      `Judge provenance: decision=${verdict.decision}; observed_state=${observedStateKey(shard)}.\n\n` +
       `This is an automation candidate only. The existing inbox/draft flow owns the next step; ` +
       `the shard, plan records, release rows, and merge gates remain unchanged.`,
     evidenceAnchors: [],

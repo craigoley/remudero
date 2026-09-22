@@ -268,6 +268,9 @@ export interface NextRunnableOpts {
   isLifetimeCapExceeded?: (taskId: string) => boolean;
   /** Called once per task excluded by the lifetime cap — mirrors `onCircuitBreak`'s contract. */
   onLifetimeCapExceeded?: (task: Task) => void;
+  /** W1-T4025: records repeated attributable work for an asynchronous judge/follow-up route. It
+   * never changes eligibility; the old cap callback remains an observation compatibility seam. */
+  onLifetimePressure?: (task: Task) => void;
   /** Called once per task declined by one of the formerly-silent conditions, with the first-match
    *  reason (see {@link tallyDispatchFilters}). Observation only: it changes no task's eligibility. */
   onFiltered?: (task: Task, reason: DispatchFilterReason) => void;
@@ -598,7 +601,9 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   // task that merges a genuine no-op each time resets the streak count and trips nothing else.
   if (opts.isLifetimeCapExceeded?.(t.id)) {
     opts.onLifetimeCapExceeded?.(t);
-    return false;
+    opts.onLifetimePressure?.(t);
+    // W1-T4025: the lifetime count is now a sensor. Repeated work is routed through the existing
+    // judge/proposal flow after selection; it is never a terminal dispatch refusal.
   }
   const openPrNumber = opts.isOpenPr?.(t.id);
   if (openPrNumber !== undefined) {
@@ -1106,6 +1111,9 @@ export interface DrainDeps {
   /** Called once per task excluded by the lifetime cap — mirrors `onCircuitBreak`'s contract, so
    *  this exclusion is never a silent skip. */
   onLifetimeCapExceeded?: (task: Task) => void;
+  /** W1-T4025: async adaptive follow-up routing for repeated attributable work. It runs after the
+   * current selection/dispatch settles, so no healthy PR waits on the judge. */
+  onLifetimePressure?: (tasks: readonly Task[]) => Promise<void>;
   /** W1-T317 (wiring `checkCostGovernor`, sweep.ts): THE DAILY COST CEILING, re-derived each call.
    *  One answer per tick rather than per task, so it is consulted directly in the loop beside
    *  `checkStop`/`checkPause`/headroom. INVARIANT: never consulted from `runSweep` or its deps —
@@ -1191,9 +1199,19 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   // tripped would be re-escalated on every tick, violating "exactly one escalation". This set bounds
   // the CALLBACK to the first observation; the predicate still excludes the task every tick.
   const circuitEscalated = new Set<string>();
-  // LIFETIME CAP ESCALATION DEDUP (W1-T316), mirroring `circuitEscalated` above: bounds the
-  // callback to the first observation; the predicate itself still runs every tick.
-  const lifetimeCapEscalated = new Set<string>();
+  // W1-T4025: repeated attributable work is observed once per selection and handed to the
+  // asynchronous judge after the current task settles. It never blocks the selected task.
+  const lifetimePressureTasks = new Map<string, Task>();
+  const flushLifetimePressure = async (): Promise<void> => {
+    if (lifetimePressureTasks.size === 0 || deps.onLifetimePressure === undefined) return;
+    const tasks = [...lifetimePressureTasks.values()];
+    lifetimePressureTasks.clear();
+    try {
+      await deps.onLifetimePressure(tasks);
+    } catch (error) {
+      log("dispatch.lifetime_pressure.failed", { tasks: tasks.map((task) => task.id), error: String(error) });
+    }
+  };
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
     // `indeterminateDeclines` is emitted ALWAYS, including as 0. Omitting it when zero would put
@@ -1407,14 +1425,15 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       },
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       // LIFETIME DISPATCH CAP (W1-T316/W1-T271): a legible ledger line every tick, with the
-      // caller's escalation hook fired at most once per task id per drain run.
+      // caller's legacy observation hook fired at most once per task id per drain run.
       onLifetimeCapExceeded: (t) => {
-        log("dispatch.lifetime_capped", { task: t.id });
-        if (!lifetimeCapEscalated.has(t.id)) {
-          lifetimeCapEscalated.add(t.id);
+        log("dispatch.lifetime_pressure", { task: t.id });
+        if (!lifetimePressureTasks.has(t.id)) {
+          lifetimePressureTasks.set(t.id, t);
           deps.onLifetimeCapExceeded?.(t);
         }
       },
+      onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
       // Never re-offer a task this pass already continued past — see the guard in
       // isDispatchEligible for why this cannot rely on `isOpenPr` alone.
       excludeIds: continuedIds,
@@ -1426,7 +1445,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     const next = opts.curated
       ? nextCurated(plan, opts.curated, attempted, isMerged, skipOpts)
       : nextRunnable(plan, isMerged, skipOpts);
-    if (!next) return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
+    if (!next) {
+      await flushLifetimePressure();
+      return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
+    }
 
     log("drain.iteration", { task: next.id, attempted: attempted.length + 1, max });
     attempted.push(next.id);
@@ -1434,8 +1456,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     try {
       result = await deps.runOne(next.id);
     } catch (e) {
+      await flushLifetimePressure();
       return summary("error", `${next.id}: ${String((e as Error)?.message ?? e)}`);
     }
+    await flushLifetimePressure();
     costUsd += result.costUsd;
 
     if (haltsDrain(result)) {
@@ -1519,8 +1543,23 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // Same escalation-dedup contract as the single-lane loop: bounds the CALLBACK to this drain's
   // first observation of each tripped id, across every pass.
   const circuitEscalated = new Set<string>();
-  // Same escalation-dedup contract, for the lifetime cap (W1-T316/W1-T271).
-  const lifetimeCapEscalated = new Set<string>();
+  // Lifetime pressure is a sensor, not a terminal refusal. Keep one task per pass and hand the
+  // bounded set to the adaptive router after the pass so a judge/proposal failure cannot block a
+  // healthy sibling or leave a half-written escalation behind.
+  const lifetimePressureTasks = new Map<string, Task>();
+  const flushLifetimePressure = async (): Promise<void> => {
+    if (lifetimePressureTasks.size === 0 || deps.onLifetimePressure === undefined) return;
+    const tasks = [...lifetimePressureTasks.values()];
+    lifetimePressureTasks.clear();
+    try {
+      await deps.onLifetimePressure(tasks);
+    } catch (error) {
+      log("dispatch.lifetime_pressure.failed", {
+        tasks: tasks.map((task) => task.id),
+        error: String(error),
+      });
+    }
+  };
   // W1-T290: the same bounded-degraded ceiling as the single-lane loop. BOTH sites carry it, or the
   // `--lanes` path stays the latent fail-open this task closes.
   let consecutiveUnreadable = 0;
@@ -1732,12 +1771,14 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       },
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       onLifetimeCapExceeded: (t) => {
-        log("dispatch.lifetime_capped", { task: t.id });
-        if (!lifetimeCapEscalated.has(t.id)) {
-          lifetimeCapEscalated.add(t.id);
+        log("dispatch.lifetime_pressure", { task: t.id });
+        if (!lifetimePressureTasks.has(t.id)) {
+          lifetimePressureTasks.set(t.id, t);
+          // Preserve the legacy telemetry callback for callers that only observe the sensor.
           deps.onLifetimeCapExceeded?.(t);
         }
       },
+      onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
       // PARITY WITH THE SINGLE-LANE LOOP: a task this drain already continued past is never
       // re-offered on a later pass. Wiring one loop and not the other is exactly the drift hazard.
       excludeIds: continuedIds,
@@ -1748,7 +1789,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // hiccup three passes ago that has since cleared.
     indeterminateDeclines = 0;
     const candidates = runnableCandidates(plan, isMerged, passSize, skipOpts);
-    if (candidates.length === 0) return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
+    if (candidates.length === 0) {
+      await flushLifetimePressure();
+      return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
+    }
 
     // PRE-DISPATCH OVERLAP CHECK (W1-T171), across the co-dispatched set: a deferred task is absent
     // from THIS pass and re-considered next tick, by which point the task it collided with is merged
@@ -1760,7 +1804,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // DEFENSIVE, NOT A DISTINCT CAUSE: `partitionByFileOverlap` places its first candidate against an
     // empty `dispatch` unconditionally, so this is empty only when `candidates` was — already returned
     // on above. Given the same detail as the other two, because no overlap story is reachable here.
-    if (dispatchSet.length === 0) return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
+    if (dispatchSet.length === 0) {
+      await flushLifetimePressure();
+      return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
+    }
 
     log("dispatch.concurrent_set", { tasks: dispatchSet.map((t) => t.id), lane_count: laneCount });
 
@@ -1794,7 +1841,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     }
     // Every lane refused ⇒ nothing dispatches, and the pass says so rather than reporting
     // "no_runnable" (there WERE runnable tasks; a governor deferred them).
-    if (admitted.length === 0) return summary("cost_governor_deferred", "every lane deferred by a governor re-checked at dispatch");
+    if (admitted.length === 0) {
+      await flushLifetimePressure();
+      return summary("cost_governor_deferred", "every lane deferred by a governor re-checked at dispatch");
+    }
 
     for (const t of admitted) {
       attempted.push(t.id);
@@ -1808,6 +1858,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // loop below ends in early returns and a row written after it would be skipped exactly when it
     // matters. `allSettled` never rejects, so this line is reachable whenever dispatch happened.
     log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
+    await flushLifetimePressure();
 
     let blocked: { taskId: string; result: RunResult } | undefined;
     let failure: { taskId: string; message: string } | undefined;

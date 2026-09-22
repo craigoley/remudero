@@ -1217,7 +1217,6 @@ import {
   buildCommitTrailerIndex,
   classifyGhFailure,
   createDispatchBreakerCache,
-  DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   deriveStatus,
   evaluateDispatchBreakerCorroboratedDetailed,
   type DispatchBreakerDetail,
@@ -1226,7 +1225,9 @@ import {
   isGhRateLimitError,
   addLifetimeDispatchTallies,
   effectiveLifetimeDispatches,
+  hasRepeatedTaskAttributableLifetimeDispatches,
   lifetimeDispatchTally,
+  taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
   projectPlan,
   readLedgerLines,
@@ -27775,18 +27776,25 @@ export function breakerGateFor(
     return memo.detail;
   };
   const stateFor = (taskId: string) => detailFor(taskId).state;
-  let lifetimeMemo: { taskId: string; exceeded: boolean } | undefined;
+  let lifetimeMemo: { taskId: string; pressure: boolean } | undefined;
   const lifetimeCapExceededFor = (taskId: string) => {
     if (lifetimeMemo?.taskId !== taskId) {
-      // ledger-read-intent: live — archive history is the audited boot projection above; its
-      // fresh incremental overlay accounts for later attempts without materialising the corpus.
-      const tally = auditedLifetimeHistory?.tallyFor(taskId) ?? lifetimeDispatchTally(readLedgerLines(ledgerPath), taskId);
+      // W1-T4025: the old count is now a SENSOR. Archive history is the audited boot projection;
+      // the live ledger contributes only attributable attempts so orphaned workers and capacity
+      // refusals do not spend adaptive pressure. A repeated signal routes through the judge but
+      // never refuses the task here.
+      const live = readLedgerLines(ledgerPath);
+      const liveTally = lifetimeDispatchTally(live, taskId);
+      const attributableLive = taskAttributableLifetimeDispatches(live, taskId);
+      const archived = auditedLifetimeHistory?.tallyFor(taskId) ?? { starts: 0, capacityBlocked: 0 };
       lifetimeMemo = {
         taskId,
-        exceeded: effectiveLifetimeDispatches(tally) >= DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
+        pressure:
+          hasRepeatedTaskAttributableLifetimeDispatches(live, taskId) ||
+          effectiveLifetimeDispatches(addLifetimeDispatchTallies(archived, { starts: attributableLive, capacityBlocked: liveTally.capacityBlocked })) > 1,
       };
     }
-    return lifetimeMemo.exceeded;
+    return lifetimeMemo.pressure;
   };
   return {
     isIndeterminate: (taskId) => stateFor(taskId) === "indeterminate",
@@ -28657,11 +28665,13 @@ async function drainCommand(
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner, repo, ledgerPath, runId }),
-        // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
-        // breakerGate this invocation already holds for the streak breaker above,
-        // never a second cache/read path — see breakerGateFor's doc.
+        // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
+        // drain flushes one bounded batch after the pass and routes it through the existing judge;
+        // a judge/proposal failure is logged and does not hold this or a sibling task.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
-        onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner, repo, ledgerPath, runId }),
+        onLifetimePressure: async (tasks) => {
+          await routeAdaptiveLifetimePressure(tasks, { plan, root: repoRoot, config, ledgerPath, runId });
+        },
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
@@ -30340,11 +30350,19 @@ export async function daemonCommand(
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
-        // breakerGate this invocation already holds for the streak breaker above,
-        // never a second cache/read path — see breakerGateFor's doc.
+        // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
+        // daemon flushes one bounded batch after the pass and routes it through the existing judge;
+        // a judge/proposal failure is logged and does not hold this or a sibling task.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
-        onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        onLifetimePressure: async (tasks) => {
+          await routeAdaptiveLifetimePressure(tasks, {
+            plan: activePlanRef.current,
+            root: repoRoot,
+            config,
+            ledgerPath,
+            runId,
+          });
+        },
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
@@ -39820,6 +39838,68 @@ export interface VerifyHumanRouteResult {
   deferred: string[];
   /** Released to the fleet this pass (automate + risk-judge proceed). Absent reads as none. */
   released?: string[];
+}
+
+/** Production inputs for the adaptive lifetime-pressure follow-up. The route owns no plan or PR
+ * mutation: it only records the judge result and stages the same idempotent inbox proposal used by
+ * `verify-human-sweep`. Keeping this as a separate adapter lets the drain/daemon paths share the
+ * judge without making a pressure signal a hidden blocking gate. */
+export interface AdaptiveLifetimePressureDeps {
+  plan: Plan;
+  root: string;
+  config: Config;
+  ledgerPath: string;
+  runId: string;
+}
+
+/** Route repeated attributable dispatch pressure through the existing three-way LLM judge. */
+export async function routeAdaptiveLifetimePressure(
+  tasks: readonly Task[],
+  deps: AdaptiveLifetimePressureDeps,
+): Promise<VerifyHumanRouteResult> {
+  const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
+  const shards = tasks.map((task): ShardUnderJudgement => {
+    const taskRows = rows.filter((row) => row.task_id === task.id || row.task === task.id);
+    const attributableDispatches = taskAttributableLifetimeDispatches(rows, task.id);
+    const capacityRefusals = taskRows.filter((row) => row.step === "daemon.spawn_infra_blocked").length;
+    const openPrEvidence = taskRows.filter((row) => row.step === "pr.opened").length;
+    const mergeEvidence = taskRows.filter((row) => row.step === "verdict.merged" || (row.step === "verdict" && row.verdict === "merged")).length;
+    const lastOutcome = [...taskRows].reverse().find((row) => typeof row.step === "string");
+    const lastStep = typeof lastOutcome?.step === "string" ? lastOutcome.step : "unavailable";
+    const lastVerdict = typeof lastOutcome?.verdict === "string" ? lastOutcome.verdict : "unavailable";
+    const evidence =
+      `adaptive lifetime pressure: attributable dispatches=${attributableDispatches}; ` +
+      `capacity refusals=${capacityRefusals}; open PR evidence=${openPrEvidence}; ` +
+      `merge evidence=${mergeEvidence}; last step=${lastStep}; last verdict=${lastVerdict}; ` +
+      `current run=${deps.runId}`;
+    return {
+      id: task.id,
+      title: task.title ?? task.id,
+      rationale: "Repeated attributable dispatch pressure was observed; decide whether to automate, backlog, or ask the operator.",
+      acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
+      ageDays: 0,
+      depsAllMerged: (task.depends_on ?? []).every((id) => deps.plan.byId.get(id)?.status === "merged"),
+      citedInSrc: idCitedInSrc(task.id, deps.root),
+      evidence,
+      observationKey:
+        `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
+        `open=${openPrEvidence}:merged=${mergeEvidence}:last=${lastStep}:${lastVerdict}`,
+    };
+  });
+  return routeVerifyHumanBacklog(shards, {
+    judge: realVerifyHumanJudge({
+      mounts: loadMounts(mountsPath(deps.root)),
+      config: deps.config,
+      cwd: deps.root,
+      settingsFile: join(deps.root, "settings", "worker.json"),
+    }),
+    priorVerdicts: priorVerifyHumanVerdicts(rows),
+    maxJudged: tasks.length,
+    stageProposal: (proposal) =>
+      void stageInboxProposalOnce(join(deps.config.root, "state", "inbox-proposals.json"), proposal),
+    appendRow: (row) => appendLedger(deps.ledgerPath, row as LedgerLine),
+    runId: deps.runId,
+  });
 }
 
 /**
