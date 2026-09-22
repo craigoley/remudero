@@ -1022,7 +1022,7 @@ export interface DaemonDeps {
    *  two-bound decision. Optional like its siblings. WITHOUT run-task.ts's producer line these are
    *  undefined and the rung is dead code — the shape #1066 and #2952 shipped, W1-T2959 making three. */
   checkCiLearningCadence?: () => MeasurementCadenceDecision;
-  /** Run one ci-learning tick, returning its draft and state-backed landing counts for the durable
+  /** Run one CI learning tick, returning its draft and state-backed landing counts for the durable
    *  row. Every resulting task remains MARKED/PARKED (`author_class: machine`, `verify: human`);
    *  a throw is best-effort and the tick continues. */
   runCiLearningCadence?: () => Promise<
