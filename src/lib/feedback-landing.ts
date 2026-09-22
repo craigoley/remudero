@@ -103,6 +103,7 @@ const LANDING_AUTHOR_EMAIL = "318611788+remudero-fleet[bot]@users.noreply.github
 
 type GitExec = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => string;
 type GhExec = (args: string[]) => string;
+export type LandingReviewRequest = (prUrl: string) => void | Promise<void>;
 
 export interface LandingRepository {
   owner: string;
@@ -150,6 +151,7 @@ export interface LandFeedbackOpts {
   landingOwner?: string;
   /** Test seam for preserving the self/core identity without reading the caller's cwd. */
   sourceRepository?: LandingRepository;
+  requestReview?: LandingReviewRequest;
 }
 
 export interface LandFeedbackResult {
@@ -695,9 +697,21 @@ function ensurePrOpen(
   kind: LandingKind,
   gh: GhExec,
   unlanded: string[],
+  requestReview?: LandingReviewRequest,
 ): { prUrl?: string; error?: string } {
   const existing = findPendingLandingPr({ gh, identity: kind });
-  if (existing) return { prUrl: existing };
+  if (existing) {
+    try {
+      const pending = requestReview?.(existing);
+      if (pending) {
+        void Promise.resolve(pending).then(undefined, () => undefined);
+      }
+    } catch (e) {
+      const reason = String((e as Error)?.message ?? e);
+      return { prUrl: existing, error: `review handoff failed for ${existing}: ${reason}` };
+    }
+    return { prUrl: existing };
+  }
 
   const body = kind.prBody(unlanded);
   let prUrl: string | undefined;
@@ -723,6 +737,17 @@ function ensurePrOpen(
   }
   // Do not call `gh pr merge` here. The shared daemon sweep owns the review -> arm transition;
   // this producer's responsibility ends once the landing PR is open and discoverable.
+  if (prUrl) {
+    try {
+      const pending = requestReview?.(prUrl);
+      if (pending) {
+        void Promise.resolve(pending).then(undefined, () => undefined);
+      }
+    } catch (e) {
+      const reason = String((e as Error)?.message ?? e);
+      return { prUrl, error: `review handoff failed for ${prUrl}: ${reason}` };
+    }
+  }
   return { prUrl };
 }
 
@@ -748,6 +773,7 @@ function finishLanding(
   build: LandingTreeBuild,
   rebuild: () => LandingTreeBuild,
   env: NodeJS.ProcessEnv,
+  requestReview?: LandingReviewRequest,
 ): LandFeedbackResult {
   // W1-T3561: fold a build's refusals onto a result — never onto the tree/files it names, so a
   // refused record can never ride into an armed auto-merge PR by construction (criterion 4).
@@ -759,7 +785,7 @@ function finishLanding(
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
-    const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded);
+    const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, requestReview);
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
   }
 
@@ -805,7 +831,7 @@ function finishLanding(
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
-      const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded);
+      const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded, requestReview);
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
     }
     try {
@@ -829,7 +855,7 @@ function finishLanding(
     build = retried;
   }
 
-  const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded);
+  const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, requestReview);
   if (error) {
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
     return withRefused(
@@ -932,7 +958,7 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env));
+    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.requestReview));
   } catch (e) {
     return withAcknowledgement({ landed: false, files: [], error: String((e as Error)?.message ?? e) });
   } finally {
@@ -1109,7 +1135,7 @@ function landContent(
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return finishLanding(kind, git, gh, initialBuild, rebuild, env);
+    return finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.requestReview);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {
