@@ -63,11 +63,11 @@
     reviewer will find it named for the incident.
   acceptance:
     - claim: "a repair attempt that fixes the flagged files but omits a fresh verdict line still yields a propose decision instead of being discarded as an error"
-      proof: "unit test: test/triage-relint-retry-preserves-verdict.test.ts"
+      proof: "unit test: a repaired attempt with no fresh verdict line still proposes"
     - claim: "the repaired attempt's files are still relinted (not skipped as not-filed) before the loop decides it is clean"
-      proof: "unit test: test/triage-relint-retry-preserves-verdict.test.ts"
+      proof: "unit test: a repaired attempt's files are relinted, not skipped as not-filed"
     - claim: "a proposed task's acceptance proof targeting a non-core suite root is preserved through the retry rather than downgraded to dead proof"
-      proof: "unit test: test/triage-relint-retry-preserves-verdict.test.ts"
+      proof: "unit test: a non-core suite-root proof survives the retry instead of being downgraded"
   risk: high
   origin: "feedback#fb-1790086853999-c6a250"
   plan_refs: ["W1-T41", "W1-T2212", "W1-T286"]
