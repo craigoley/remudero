@@ -1,0 +1,41 @@
+- id: W1-T4083
+  title: "A RELEASE JUDGE THAT NEVER ESCALATES IS NOT MEASURED — the first live verify-human sweep released 38 of 38 automate verdicts with zero escalations; record what each released task became and alarm when the judge stops discriminating"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#flow-2026-09-22"
+  plan_refs: ["W1-T3143", "W1-T4050"]
+  files:
+    - src/lib/verify-human-release.ts
+    - src/lib/measurement-cadence.ts
+    - test/the-release-judge-is-measured.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 on the fleet: the first real `rmd verify-human-sweep` after #6619 released 38
+    machine-authored ratify.approved rows — every one risk "low", confidence 0.70 to 0.97 (one exactly
+    at the 0.70 threshold), reasons task-specific — and escalated none. That may be correct (the
+    verify-human judge had already screened them), but a gate that says yes 38 times is the "check that
+    passes while comparing nothing" failure until its outcomes are measured. The threshold is now
+    runtime policy (#6638), so evidence has somewhere to go.
+  design: |
+    (i) On the measurement cadence, join each machine release (ratify.approved, author_class machine) to
+    what the task became: merged, still open, failed review/CI, reverted, re-escalated.
+    (ii) Ledger `verify_human.release_audit` with counts, and the confidence of each outcome group.
+    (iii) Alarm (one operator alert per condition) when escalations stay at zero across at least 50
+    releases, or when released tasks fail or revert at more than twice the fleet's base rate.
+  acceptance:
+    - claim: "each machine release is joined to its task's outcome"
+      proof: 'grep: test("W1-T4083: each release is joined to its outcome" in test/the-release-judge-is-measured.test.ts'
+    - claim: "zero escalations across fifty releases raises one alert"
+      proof: 'grep: test("W1-T4083: a judge that never escalates raises one alert" in test/the-release-judge-is-measured.test.ts'
+    - claim: "a release failure rate above twice the base rate raises one alert"
+      proof: 'grep: test("W1-T4083: released tasks failing above the base rate raise one alert" in test/the-release-judge-is-measured.test.ts'
+  falsifier: |
+    CLOSE IF a release outcome audit already runs at build time.

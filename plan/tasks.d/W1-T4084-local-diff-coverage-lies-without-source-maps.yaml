@@ -1,0 +1,39 @@
+- id: W1-T4084
+  title: "LOCAL DIFF-COVERAGE LIES WITHOUT SOURCE MAPS — give the repo one command that measures diff coverage exactly as CI's coverage-ratchet does, so nobody hand-rolls the invocation"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#flow-2026-09-22"
+  plan_refs: ["W1-T1217"]
+  files:
+    - scripts/diff-coverage-local.mjs
+    - package.json
+    - test/local-diff-coverage-matches-ci.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 in one session, both directions: a hand-rolled `node --experimental-test-coverage`
+    without `--enable-source-maps` reported `diff-coverage: OK` for #6634 while CI then blocked
+    src/lib/mounts.ts:510 (genuinely uncovered), and later reported executed run-task.ts lines as
+    uncovered. ci.yml's own comment explains it: without source maps, DA lines are the tsx-transpiled JS
+    lines while SF names the .ts file. A diff against a moved origin/main (`A..B` rather than `A...B`)
+    added a third false BLOCKED.
+  design: |
+    (i) `npm run diff-coverage:local -- <test files…>`: run exactly the coverage flags of ci.yml's
+    "Test with coverage" step (read from ci.yml, not copied, so they cannot drift), then diff
+    `origin/main...HEAD` through scripts/diff-coverage.mjs.
+    (ii) Fail loudly when any changed src file has no SF record (the existing positive control) and
+    print which test files to add.
+  acceptance:
+    - claim: "the local command uses the same coverage flags as ci.yml"
+      proof: 'grep: test("W1-T4084: the local command reads its flags from the CI workflow" in test/local-diff-coverage-matches-ci.test.ts'
+    - claim: "the diff is taken from the merge base"
+      proof: 'grep: test("W1-T4084: the diff is taken from the merge base" in test/local-diff-coverage-matches-ci.test.ts'
+  falsifier: |
+    CLOSE IF a local diff-coverage command mirroring ci.yml already exists.
