@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { systemClock } from "./clock.js";
 import { repoScopedTaskKey } from "./ledger.js";
 
 /**
@@ -542,7 +543,7 @@ export function prActionFilePath(root: string, action: PrActionName, prNumber: n
  * its observed request time but cannot create a second concurrent daemon action.
  */
 export function requestPrAction(root: string, action: PrActionName, prNumber: number, origin: string): PrActionRequest {
-  const request: PrActionRequest = { action, prNumber, origin, requestedAt: new Date().toISOString() };
+  const request: PrActionRequest = { action, prNumber, origin, requestedAt: systemClock.iso() };
   const path = prActionFilePath(root, action, prNumber);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(request, null, 2));
