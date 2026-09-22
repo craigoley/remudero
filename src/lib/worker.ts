@@ -3404,6 +3404,7 @@ function listWorkspaceChildDirs(p: string): string[] {
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
   } catch {
+    // Absent, not a plain file, or unreadable -- all three degrade to "no matches", the documented contract above.
     return [];
   }
 }
@@ -3416,6 +3417,7 @@ function readRawWorkspaceGlobs(repoDir: string, readManifest: (p: string) => str
   try {
     manifest = JSON.parse(readManifest(join(repoDir, "package.json")));
   } catch {
+    // Absent, unreadable, or not valid JSON -- best-effort degrades to "no declared workspaces" rather than throwing.
     return [];
   }
   const raw = (manifest as { workspaces?: unknown } | null)?.workspaces;
@@ -3547,6 +3549,7 @@ export function linkWorkspaceNodeModules(
       symlink(sourceNodeModules, dest);
       results.push({ workspace, outcome: "linked" });
     } catch {
+      // Symlink attempt threw (e.g. EPERM) -- best-effort by contract, so this is a named outcome, never a throw.
       results.push({ workspace, outcome: "failed" });
     }
   }
