@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,4 +62,14 @@ test("confirmed PR actions record one durable request without starting a worker 
     assert.deepEqual(pending[0] && { action: pending[0].action, prNumber: pending[0].prNumber }, { action: "fix", prNumber: 259 });
     assert.ok(Number.isFinite(Date.parse(pending[0]!.requestedAt)));
   });
+});
+
+test("a corrupt PR action marker remains visible for forensics and is never dispatched", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-pr-action-corrupt-"));
+  const marker = join(root, "state", "PR_ACTION_REQUESTED-fix-259.json");
+  mkdirSync(join(root, "state"));
+  writeFileSync(marker, "{not-json", "utf8");
+
+  assert.deepEqual(pendingPrActions(root), []);
+  assert.equal(existsSync(marker), true, "a corrupt request must be withheld, not silently erased");
 });
