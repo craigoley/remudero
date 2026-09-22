@@ -161,7 +161,7 @@ test("W1-T3562: a record whose upstream copy sits earlier in the §7B lifecycle 
 
 // ── Acceptance 3: applying re-lands the union through the ordinary gated PR path ────────────────
 
-test("W1-T3562: applying re-lands a missing-upstream record through the ordinary gated PR path, never a direct push to main or a merge", () => {
+test("W1-T3562: applying re-lands a missing-upstream record through the ordinary gated PR path, never a direct push to main or an inline merge arm", () => {
   const { bareOrigin, clone } = seededOrigin("apply");
   const rootDir = clone();
   writeEntry(rootDir, "fb-apply-1", { status: "new" });
@@ -179,8 +179,8 @@ test("W1-T3562: applying re-lands a missing-upstream record through the ordinary
   assert.equal(result.prUrl, "https://github.com/o/r/pull/703");
   assert.equal(createCount(), 1, "exactly one PR must be created");
   assert.ok(
-    calls.some((c) => c[0] === "pr" && c[1] === "merge"),
-    "an arm attempt (gh pr merge --auto) is expected — arming is not merging",
+    !calls.some((c) => c[0] === "pr" && c[1] === "merge"),
+    "the landing producer must leave review and auto-merge ordering to the shared daemon sweep",
   );
   assert.ok(
     !calls.some((c) => c[0] === "pr" && c[1] === "merge" && c.includes("main")),
