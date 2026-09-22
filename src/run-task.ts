@@ -22351,15 +22351,11 @@ export function buildPlanReconcileProductionInput(deps: {
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
       land: (inputs) => {
-        const landing = deps.land
-          ? deps.land(deps.checkoutRoot, inputs, {
-              targetRepository: resolveOwnerRepo(),
-              landingOwner: "measurement-cadence",
-            })
-          : landPlanReconcileShards(deps.checkoutRoot, inputs, {
-              targetRepository: resolveOwnerRepo(),
-              landingOwner: "measurement-cadence",
-            });
+        const land = deps.land ?? landPlanReconcileShards;
+        const landing = land(deps.checkoutRoot, inputs, {
+          targetRepository: resolveOwnerRepo(),
+          landingOwner: "measurement-cadence",
+        });
         if (!landing.landed || landing.error) {
           throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
         }
