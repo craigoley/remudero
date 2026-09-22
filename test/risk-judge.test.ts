@@ -580,6 +580,23 @@ test("W1-T478: a parse failure still escalates and still withdraws the arm", asy
   assert.equal(action.kind, "escalate", "an unreadable judge response must still fail closed to ESCALATE");
 });
 
+test("W1-T478: an exhausted parse failure reaches the escalation arm and never the proceed arm", async () => {
+  const calls = { escalate: 0 };
+  const spawn = exhaustingSpawn(UNPARSEABLE_JUDGE_TEXT);
+  const judge = realRiskJudge({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 }, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const result = await runRiskJudge(baseInput(), {
+    judge,
+    escalate: async () => {
+      calls.escalate++;
+      return "https://github.com/owner/repo/issues/478";
+    },
+  });
+
+  assert.equal(result.action.kind, "escalate", "the unavailable judge must not silently proceed");
+  assert.equal(calls.escalate, 1, "the orchestration path must withdraw the proceed arm by escalating");
+  assert.equal(result.escalationUrl, "https://github.com/owner/repo/issues/478");
+});
+
 test("W1-T478: runRiskJudge ledgers the excerpt on the risk_judge.decision row under `unparseable_excerpt`", async () => {
   const input = baseInput();
   const log: { step: string; extra?: Record<string, unknown> }[] = [];
