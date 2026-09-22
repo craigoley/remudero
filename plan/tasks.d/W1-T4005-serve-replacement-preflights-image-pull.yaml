@@ -44,13 +44,13 @@
     stub that never exercises the pull or stop/rm ordering cannot pass.
   acceptance:
     - claim: "the target image is pulled before any replacement stop or remove can run"
-      proof: "unit test: test/serve-image-preflight.test.ts"
+      proof: "unit test: serve replacement pulls the exact image before stop or remove"
     - claim: "a failed target image pull exits non-zero and leaves the existing container untouched"
-      proof: "unit test: test/serve-image-preflight.test.ts"
+      proof: "unit test: failed image preflight preserves the existing container"
     - claim: "a successful preflight then replaces the container with the exact same target reference"
-      proof: "unit test: test/serve-image-preflight.test.ts"
+      proof: "unit test: successful image preflight runs the exact target reference"
     - claim: "dry-run remains side-effect-free and does not pull the image"
-      proof: "unit test: test/serve-image-preflight.test.ts"
+      proof: "unit test: dry-run does not pull or mutate the container"
   falsifier: |
     Delete the preflight or move it below the stop/rm block: the failing-pull fixture must either
     record no pull or show stop/rm before the failed pull, and the test must fail. Make the failure
