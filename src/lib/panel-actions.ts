@@ -26,7 +26,7 @@ import {
 import type { Route } from "./service.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
-import { isPaused, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
+import { isPaused, isPrActionName, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
@@ -759,6 +759,51 @@ export function buildDrainNowRoute(deps: Pick<PanelActionDeps, "root" | "ledgerP
   };
 }
 
+// ── POST /v1/pr-actions ────────────────────────────────────────────────────
+// A high-tier, selected-instance action request. This route never runs `rmd fix` or `rmd review`
+// inside the HTTP process; it only records durable intent for the daemon's ordinary poll boundary.
+
+interface PrActionInput {
+  action: "fix" | "review";
+  prNumber: number;
+}
+
+function validatePrAction(body: unknown): { error: string } | PrActionInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  const allowed = new Set(["action", "prNumber"]);
+  const unknown = Object.keys(body).find((key) => !allowed.has(key));
+  if (unknown) return { error: `unknown field ${JSON.stringify(unknown)}` };
+  if (!isPrActionName(body.action)) return { error: "action must be `fix` or `review`" };
+  if (typeof body.prNumber !== "number" || !Number.isSafeInteger(body.prNumber) || body.prNumber <= 0) {
+    return { error: "prNumber must be a positive integer" };
+  }
+  return { action: body.action, prNumber: body.prNumber };
+}
+
+/**
+ * POST /v1/pr-actions — record an operator's bounded repair or review request. The service's
+ * HIGH tier consumes a nonce before this handler runs; no browser can turn a row into a daemon
+ * command without explicit confirmation and the existing token/identity gates.
+ */
+export function buildPrActionRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath">): Route {
+  return {
+    method: "POST",
+    path: "/v1/pr-actions",
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validatePrAction, (input, req, res) => {
+      const origin = bearerTokenId(req);
+      const request = requestPrAction(deps.root, input.action, input.prNumber, origin);
+      appendPanelLedger(deps.ledgerPath, "console.pr_action_requested", `PR-${input.prNumber}`, origin, {
+        action: input.action,
+        pr_number: input.prNumber,
+        requested_at: request.requestedAt,
+      });
+      sendJson(res, 200, { armed: true, action: request.action, prNumber: request.prNumber, requestedAt: request.requestedAt });
+    }),
+  };
+}
+
 // ── POST /v1/merge-hold ─────────────────────────────────────────────────────
 
 interface ConsoleMergeHoldInput {
@@ -845,6 +890,7 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
     buildDrainFeedbackRoute(deps),
     buildKickRoute(deps),
     buildDrainNowRoute(deps),
+    buildPrActionRoute(deps),
     buildMergeHoldRoute(deps),
   ];
 }

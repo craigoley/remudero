@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { daemonCommand } from "../src/run-task.js";
+import type { DaemonDeps } from "../src/lib/daemon.js";
 import {
   bearerTokenId,
   DRAIN_FEEDBACK_VERDICTS,
@@ -16,13 +18,16 @@ import type { GitHub } from "../src/lib/status.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import {
   consumeDrainNow,
+  clearPrAction,
   isPaused,
   isQuietHours,
   isStopped,
   kickFilePath,
+  pendingPrActions,
   pauseDetail,
   pendingKicks,
   requestPause,
+  requestPrAction,
   requestStop,
   setQuietHours,
   stopDetail,
@@ -31,6 +36,7 @@ import { runDrain, type DrainDeps } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { appendLedger } from "../src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W3-T5: human-in-the-loop panel actions (MASTER-PLAN §7) ────────────────────────────────
 //
@@ -253,6 +259,7 @@ test("every panel-actions.ts write route carries its design-(i)-ruled tier", () 
   assert.equal(tierOf("/v1/manual/approve"), "high");
   assert.equal(tierOf("/v1/drain/kick"), "high");
   assert.equal(tierOf("/v1/drain/run"), "high");
+  assert.equal(tierOf("/v1/pr-actions"), "high");
 });
 
 test("no bearer token at all -> 401", async () => {
@@ -893,14 +900,121 @@ test("both /v1/drain/kick and /v1/drain/run are write-scoped: a read token gets 
   assert.equal(consumeDrainNow(root), null);
 });
 
+// ── Selected-repository PR repair controls (W1-T3989) ────────────────────────
+
+test("confirmed PR actions write durable attributed requests for the daemon, without running a worker in the HTTP process", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}panel-pr-action-`));
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await postHigh(base, "/v1/pr-actions", WRITE_TOKEN, { action: "fix", prNumber: 259 });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { armed: boolean; action: string; prNumber: number; requestedAt: string };
+    assert.equal(body.armed, true);
+    assert.equal(body.action, "fix");
+    assert.equal(body.prNumber, 259);
+    assert.ok(Number.isFinite(Date.parse(body.requestedAt)), "receipt carries the durable request time");
+  });
+
+  const pending = pendingPrActions(root);
+  assert.deepEqual(pending.map((request) => [request.action, request.prNumber]), [["fix", 259]]);
+  assert.equal(pending[0].origin, bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN}` } } as any));
+
+  const request = readLedgerLines(deps.ledgerPath).find((line) => line.step === "console.pr_action_requested");
+  assert.ok(request, "the request is attributable in the ledger before the daemon acts");
+  assert.equal(request!.task_id, "PR-259");
+  assert.equal(request!.action, "fix");
+  assert.equal(request!.pr_number, 259);
+  assert.equal(request!.origin, pending[0].origin);
+});
+
+test("PR action markers clear only the named terminal request and report a missing marker", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}panel-pr-action-clear-`));
+  try {
+    requestPrAction(root, "fix", 259, "console-test");
+    assert.equal(clearPrAction(root, "fix", 259), true, "the daemon clears the exact request it finished");
+    assert.deepEqual(pendingPrActions(root), []);
+    assert.equal(clearPrAction(root, "fix", 259), false, "a second clear reports that no marker remains");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("daemonCommand wires selected-repository PR actions to the established fix and review commands", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-pr-action-wire-`));
+  const root = join(home, "Remudero");
+  const planPath = join(home, "tasks.yaml");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  const oldCi = process.env.CI;
+  process.env.HOME = home;
+  process.env.CI = "1";
+  const calls: Array<{ action: string; args: string[] }> = [];
+  let captured: DaemonDeps | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps) => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+      fixCommand: async (args) => {
+        calls.push({ action: "fix", args });
+        return 0;
+      },
+      reviewCommand: async (prNumber, rest) => {
+        calls.push({ action: "review", args: [prNumber, ...(rest ?? [])] });
+        return 7;
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(typeof captured?.runPrAction, "function");
+    const fixed = await captured!.runPrAction!({ action: "fix", prNumber: 259, origin: "console-test", requestedAt: "2026-09-21T00:00:00.000Z" });
+    const reviewed = await captured!.runPrAction!({ action: "review", prNumber: 260, origin: "console-test", requestedAt: "2026-09-21T00:00:01.000Z" });
+    assert.deepEqual(fixed, { outcome: "completed", detail: "fix command accepted PR #259" });
+    assert.deepEqual(reviewed, { outcome: "refused", detail: "review command refused PR #260 (exit 7)" });
+    assert.deepEqual(calls, [
+      { action: "fix", args: ["259", "--repo", "remudero"] },
+      { action: "review", args: ["260", "--repo", "remudero"] },
+    ]);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldCi === undefined) delete process.env.CI;
+    else process.env.CI = oldCi;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("POST /v1/pr-actions rejects malformed or unconfirmed bodies before any request marker is written", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}panel-pr-action-bad-`));
+  await withService(depsFor(root), async (base) => {
+    for (const body of [
+      {},
+      { action: "restart", prNumber: 259 },
+      { action: "fix", prNumber: 0 },
+      { action: "fix", prNumber: 2.5 },
+      { action: "fix", prNumber: 259, extra: true },
+    ]) {
+      const res = await postHigh(base, "/v1/pr-actions", WRITE_TOKEN, body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+    }
+    const unconfirmed = await post(base, "/v1/pr-actions", WRITE_TOKEN, { action: "review", prNumber: 259 });
+    assert.equal(unconfirmed.status, 403, "the HIGH-tier confirmation gate runs before the writer");
+  });
+  assert.deepEqual(pendingPrActions(root), [], "no malformed or unconfirmed body becomes daemon work");
+});
+
 // The console MOUNTS the UP NEXT Run + Drain-now routes (fb-…9daa9b). This used to read
 // `buildPanelActionRoutes(deps)` — the aggregator comparing itself to itself, which is true of a
 // list `serve.ts` never imports and says nothing about what an operator can reach. Asserting it
 // against `buildServeRoutes` keeps the original regression (those two routes must exist) and makes
 // it mean what its title always claimed.
-test("the console's real route table registers the UP NEXT Run + Drain-now routes (fb-…9daa9b)", () => {
+test("the console's real route table registers the UP NEXT and PR action routes (fb-…9daa9b, W1-T3989)", () => {
   const deps = depsFor(mkdtempSync(join(tmpdir(), "panel-routes-")));
   const paths = buildServeRoutes(serveDepsFor(deps)).map((r) => `${r.method} ${r.path}`);
   assert.ok(paths.includes("POST /v1/drain/kick"), "the per-row Run kick route is mounted on the console");
   assert.ok(paths.includes("POST /v1/drain/run"), "the Drain-now route is mounted on the console");
+  assert.ok(paths.includes("POST /v1/pr-actions"), "the selected-repository PR action route is mounted on the console");
 });
