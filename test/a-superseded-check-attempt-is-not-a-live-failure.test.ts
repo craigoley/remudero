@@ -92,7 +92,7 @@ test("the same fixture with the latest attempt listed LAST in the array still re
 
 // ── acceptance 3 — a single failed attempt with no later run is still actionable ─────────────────
 
-test("a check whose only attempt failed, with no later run of the same name, is still reported — the narrowing must not blind the repair path", () => {
+test("W1-T3363 criterion 3: a check whose only attempt failed, with no later run of the same name, is still reported — the narrowing must not blind the repair path", () => {
   const rollup = [{ name: "diff-coverage", conclusion: "FAILURE", startedAt: "2026-09-10T00:00:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/333" }];
   const { fetchAnnotations, fetchJobLog } = recordingFetch();
   const failing = fetchCiFailures("craigoley", "remudero", rollup, 60, { fetchAnnotations, fetchJobLog });
