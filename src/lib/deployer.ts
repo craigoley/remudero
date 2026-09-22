@@ -1195,7 +1195,13 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
     );
     // Restart the console ONLY here: the daemon is verified healthy, so no path can still roll
-    // this sha back (see restartConsole's doc).
+    // this sha back (see restartConsole's doc). ONLY where the console is a launchd job: on the
+    // container fleet it is its own container, and a launchctl call there threw ENOENT after every
+    // healthy recycle (measured 2026-09-22T21:49:58Z, `deploy.ok` then `spawnSync launchctl ENOENT`).
+    if (selection.backend.name === "recycle-container") {
+      deps.log("deploy.console_skipped", { to: short(toHead), reason: `no launchd console job under the ${selection.backend.name} backend` });
+      return { deployed: true, reason: "deployed + healthy", fromHead, toHead, consoleRestarted: false };
+    }
     const con = restartConsole(deps, toHead);
     return {
       deployed: true,

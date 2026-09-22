@@ -225,3 +225,48 @@ test("the real deps read the newest image commit, ask the instance's own image r
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a healthy recycle on the container fleet skips the launchd console restart instead of throwing after deploy.ok", () => {
+  // MEASURED 2026-09-22T21:49:58Z: `deploy.ok`, then `spawnSync launchctl ENOENT` from
+  // kickstartConsole — the console is its own container on this host, not a launchd job.
+  for (const [backend, expectConsole] of [["recycle-container", false], ["launchctl", true]] as const) {
+    const steps: string[] = [];
+    let consoleKicked = 0;
+    const deps = {
+      log: (step: string) => steps.push(step),
+      now: () => NOW,
+      fetch: () => {},
+      installHead: () => "old",
+      runningHead: () => "old",
+      originMain: () => "new",
+      markerPresent: () => true,
+      autoMode: () => false,
+      lastFailedHead: () => undefined,
+      dirtyFiles: () => [],
+      incomingFiles: () => [],
+      discardLocal: () => {},
+      pullFf: () => {},
+      resetHard: () => {},
+      probeIdle: () => ({ workers: 0, inflightLocks: 0, worktreeLocks: 0 }),
+      kickstart: () => {},
+      restartBackends: () => [{ name: backend, probe: () => true, describe: () => backend, restart: () => {} }],
+      waitBootHealth: () => ({ bootObserved: true, crashCount: 0 }),
+      alert: () => {},
+      clearMarker: () => {},
+      kickstartConsole: () => {
+        consoleKicked += 1;
+        if (backend === "recycle-container") throw new Error("spawnSync launchctl ENOENT");
+      },
+      consolePid: () => 1,
+      waitConsoleUp: () => true,
+      alertConsoleOnly: () => {},
+      deferredSince: () => undefined,
+      setDeferredSince: () => {},
+      clearDeferredSince: () => {},
+    } as unknown as DeployDeps;
+    const out = runDeployCycle(deps);
+    assert.equal(out.deployed, true, backend);
+    assert.equal(consoleKicked, expectConsole ? 1 : 0, backend);
+    assert.equal(steps.includes("deploy.console_skipped"), !expectConsole, backend);
+  }
+});
