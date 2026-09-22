@@ -1801,14 +1801,6 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const partition = partitionByFileOverlap(candidates, deps.observedByTask ?? NO_OBSERVED_SCOPE);
     for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
     const dispatchSet = partition.dispatch;
-    // DEFENSIVE, NOT A DISTINCT CAUSE: `partitionByFileOverlap` places its first candidate against an
-    // empty `dispatch` unconditionally, so this is empty only when `candidates` was — already returned
-    // on above. Given the same detail as the other two, because no overlap story is reachable here.
-    if (dispatchSet.length === 0) {
-      await flushLifetimePressure();
-      return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
-    }
-
     log("dispatch.concurrent_set", { tasks: dispatchSet.map((t) => t.id), lane_count: laneCount });
 
     // W1-T342's PER-DISPATCH GOVERNOR GATE, APPLIED PER LANE. The pass-level governor reads far above

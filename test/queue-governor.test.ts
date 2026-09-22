@@ -308,6 +308,17 @@ test("W1-T321 REACHABILITY: drainCommand wires checkQueueGovernor into the Drain
   }
 });
 
+test("W1-T4025 REACHABILITY: drainCommand's adaptive pressure route accepts an empty batch", async () => {
+  const config = queueGovernorFixtureConfig();
+  try {
+    const deps = await captureDrainDeps(config, emptyPlanPath());
+    assert.equal(typeof deps.onLifetimePressure, "function", "drainCommand must wire adaptive pressure");
+    await deps.onLifetimePressure!([]);
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T321 REACHABILITY: daemonCommand wires checkQueueGovernor into the DaemonDeps it hands runDaemon", async () => {
   const { home, planPath } = daemonFixtureHome();
   const oldHome = process.env.HOME;
@@ -315,6 +326,21 @@ test("W1-T321 REACHABILITY: daemonCommand wires checkQueueGovernor into the Daem
   try {
     const deps = await captureDaemonDeps(planPath);
     assert.equal(typeof deps.checkQueueGovernor, "function", "daemonCommand must wire the queue-governor gate");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4025 REACHABILITY: daemonCommand's adaptive pressure route accepts an empty batch", async () => {
+  const { home, planPath } = daemonFixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const deps = await captureDaemonDeps(planPath);
+    assert.equal(typeof deps.onLifetimePressure, "function", "daemonCommand must wire adaptive pressure");
+    await deps.onLifetimePressure!([]);
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
