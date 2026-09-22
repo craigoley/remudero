@@ -11,26 +11,25 @@ import { WorkerAbandonedError } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { loadDefaultPolicy } from "../src/lib/policy.js";
 import { runReview } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-wiring-"));
+  const sourceRepo = gitRepo({ kind: "codex-review-wiring-source", seedCommit: false });
   const binDir = mkdtempSync(join(tmpdir(), "rmd-codex-review-gh-"));
   const oldPath = process.env.PATH;
   try {
-    const sourceDir = join(root, "source");
+    const sourceDir = sourceRepo.dir;
     mkdirSync(join(sourceDir, "src"), { recursive: true });
     const dependencyRoot = join(root, "dependencies");
     mkdirSync(dependencyRoot);
     const physicalDependencyRoot = realpathSync(dependencyRoot);
     symlinkSync(physicalDependencyRoot, join(sourceDir, "node_modules"), "dir");
-    execFileSync("git", ["init", "-q", sourceDir]);
     writeFileSync(join(sourceDir, ".git", "info", "exclude"), "/node_modules\n");
-    execFileSync("git", ["-C", sourceDir, "config", "user.name", "RMD Test"]);
-    execFileSync("git", ["-C", sourceDir, "config", "user.email", "rmd-test@example.invalid"]);
     writeFileSync(join(sourceDir, "src", "example.ts"), "export const fixed = true;\n", "utf8");
-    execFileSync("git", ["-C", sourceDir, "add", "src/example.ts"]);
-    execFileSync("git", ["-C", sourceDir, "commit", "-q", "-m", "fixture"]);
-    const headSha = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    sourceRepo.git("add", "src/example.ts");
+    sourceRepo.git("commit", "-q", "-m", "fixture");
+    const headSha = sourceRepo.git("rev-parse", "HEAD");
     const settingsFile = join(root, "settings.json");
     const ledgerPath = join(root, "ledger.ndjson");
     const workerHome = join(root, "worker-home");
@@ -190,10 +189,11 @@ esac
       "reviews must not allow any external command destination");
     assert.equal(codexArgs.includes("sandbox_workspace_write.network_access=true"), false, "reviews do not gain network access");
     assert.equal(existsSync(codexTmpDir ?? root), false, "the private writable test scratch is reaped after review");
-    assert.equal(execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headSha);
-    assert.equal(execFileSync("git", ["-C", sourceDir, "status", "--porcelain"], { encoding: "utf8" }), "");
+    assert.equal(sourceRepo.git("rev-parse", "HEAD"), headSha);
+    assert.equal(sourceRepo.git("status", "--porcelain"), "");
   } finally {
     process.env.PATH = oldPath;
+    sourceRepo.cleanup();
     rmSync(root, { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
   }
@@ -201,21 +201,19 @@ esac
 
 test("W1-T3960: an abandoned reviewer writes the bound evidence to its ledger row", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-abandoned-"));
+  const sourceRepo = gitRepo({ kind: "codex-review-abandoned-source", seedCommit: false });
   const binDir = mkdtempSync(join(tmpdir(), "rmd-codex-review-abandoned-gh-"));
   const oldPath = process.env.PATH;
   try {
-    const sourceDir = join(root, "source");
+    const sourceDir = sourceRepo.dir;
     mkdirSync(join(sourceDir, "src"), { recursive: true });
     const dependencyRoot = join(root, "dependencies");
     mkdirSync(dependencyRoot);
     symlinkSync(realpathSync(dependencyRoot), join(sourceDir, "node_modules"), "dir");
-    execFileSync("git", ["init", "-q", sourceDir]);
-    execFileSync("git", ["-C", sourceDir, "config", "user.name", "RMD Test"]);
-    execFileSync("git", ["-C", sourceDir, "config", "user.email", "rmd-test@example.invalid"]);
     writeFileSync(join(sourceDir, "src", "example.ts"), "export const fixed = true;\n", "utf8");
-    execFileSync("git", ["-C", sourceDir, "add", "src/example.ts"]);
-    execFileSync("git", ["-C", sourceDir, "commit", "-q", "-m", "fixture"]);
-    const headSha = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    sourceRepo.git("add", "src/example.ts");
+    sourceRepo.git("commit", "-q", "-m", "fixture");
+    const headSha = sourceRepo.git("rev-parse", "HEAD");
     const settingsFile = join(root, "settings.json");
     const ledgerPath = join(root, "ledger.ndjson");
     writeFileSync(settingsFile, "{}", "utf8");
@@ -277,16 +275,17 @@ esac
     });
   } finally {
     process.env.PATH = oldPath;
+    sourceRepo.cleanup();
     rmSync(root, { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
   }
 });
 
 test("W1-T2946 mutation: omitting the disposable review intent restores read-only reviewer argv", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-intent-mutation-"));
+  const rootRepo = gitRepo({ kind: "codex-review-intent-mutation", seedCommit: false });
+  const root = rootRepo.dir;
   const workerHome = mkdtempSync(join(tmpdir(), "rmd-codex-review-intent-home-"));
   try {
-    execFileSync("git", ["init", "-q", root]);
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -326,6 +325,7 @@ test("W1-T2946 mutation: omitting the disposable review intent restores read-onl
     );
     assert.equal(codexArgs.includes("--add-dir"), false, "without the intent the private TMPDIR is not writable");
   } finally {
+    rootRepo.cleanup();
     rmSync(root, { recursive: true, force: true });
     rmSync(workerHome, { recursive: true, force: true });
   }
