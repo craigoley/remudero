@@ -517,6 +517,7 @@
     "test/clone-reap-wiring.test.ts": 999,
     "test/clone-reaper.test.ts": 498,
     "test/code-moved-out-of-a-template-literal-is-still-a-relocation.test.ts": 0,
+    "test/codeowners-is-path-scoped.test.ts": 0,
     "test/codeowners-maintainer.test.ts": 0,
     "test/codeql-quality-intake.test.ts": 0,
     "test/codex-capacity-singleflight.test.ts": 468,

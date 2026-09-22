@@ -1,3 +1,17 @@
-# Remudero code ownership. Every change requires review from the owner.
-# (Repo Issues/Discussions stay OFF until WS-4; CODEOWNERS ships from PR #1.)
-*       @cao825
+# Remudero gate ownership is intentionally path-scoped. Once branch protection
+# enables code-owner reviews, ordinary source and test changes remain autonomous;
+# only the files that define or ratchet the merge gate wait for the owner.
+#
+# Protect this file too: GitHub recommends an owner for CODEOWNERS itself, or an
+# owner could remove the safeguard in the same change that weakens the gates.
+/CODEOWNERS                                      @cao825
+/.github/workflows/                              @cao825
+/plan/policy.yaml                                 @cao825
+/plan/claims.yaml                                 @cao825
+/plan/alert-policy.yaml                           @cao825
+/scripts/claude-md-budget-baseline.json           @cao825
+/scripts/coverage-baseline.json                   @cao825
+/scripts/mutation-baseline.json                   @cao825
+/scripts/cycle-baseline.json                      @cao825
+/scripts/learnings-budget-baseline.json           @cao825
+/scripts/mutation-relevant-paths.json             @cao825
