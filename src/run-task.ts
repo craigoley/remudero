@@ -24418,7 +24418,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         creditedMergedIds: deps.creditedMergedIds ?? (() => defaultCreditedMergedIds(configFor(), repoRoot)),
         land: deps.planReconcileLand,
       });
-      const planReconcileOption = { planReconcile: planReconcile === undefined ? undefined : { ...planReconcile } };
+      const planReconcileOption =
+        planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
