@@ -1,0 +1,64 @@
+- id: W1-T4005
+  title: "SERVE REPLACEMENT REMOVES THE LAST HEALTHY CONTAINER BEFORE PROVING THE TARGET IMAGE IS PULLABLE — a stale registry login turned an image-auth failure into an avoidable console outage"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files:
+    - deploy/serve-container.sh
+    - test/serve-image-preflight.test.ts
+  origin: "operator-followup#serve-rollout-2026-09-22"
+  plan_refs: [W1-T1010, W1-T3863]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED 2026-09-22 on the Azure serve host during the operator-agent rollout: the first
+    `deploy/serve-container.sh --replace` stopped and removed the healthy `remudero-serve`
+    container, then `docker run` failed with `authentication required` while pulling the pinned
+    image. Recovery depended on the old image still being cached locally and required manually
+    recreating the old container. The script's current order is visible in its own source: the
+    destructive stop/rm block runs before the docker run that is the first operation capable of
+    discovering that the registry cannot supply the target image.
+
+    This is a deployment safety defect, not a registry-policy change. A replacement must prove
+    the exact target reference is pullable while the current container remains serving. A failed
+    pull must leave the existing container and its launch configuration untouched; a successful
+    pull must still run the same pinned reference and the existing post-launch reachability checks.
+  design: |
+    After all non-mutating launch validation and before the existing stop/rm block, run a bounded
+    `docker pull "${REF}"` preflight for the exact image reference that will be passed to `docker
+    run`. Suppress registry output that could include implementation-specific details, preserve a
+    concise refusal naming the reference, and exit non-zero on pull failure. This preflight also
+    applies to first boot, so a fresh host never creates a container whose image was not proved
+    available. `--dry-run` remains side-effect-free and must not pull.
+
+    Do not stop, remove, recreate, or restart the current container until the pull succeeds. Do
+    not fall back to a cached image after a failed pull, do not change the image tag or auth
+    contract, and do not weaken the existing banner, network, mount, or token checks. Add an
+    executable Docker-stub fixture that records call order and proves both the failure-preserves
+    container path and the successful exact-reference run path; include positive controls so a
+    stub that never exercises the pull or stop/rm ordering cannot pass.
+  acceptance:
+    - claim: "the target image is pulled before any replacement stop or remove can run"
+      proof: "unit test: serve replacement pulls the exact image before stop or remove"
+    - claim: "a failed target image pull exits non-zero and leaves the existing container untouched"
+      proof: "unit test: failed image preflight preserves the existing container"
+    - claim: "a successful preflight then replaces the container with the exact same target reference"
+      proof: "unit test: successful image preflight runs the exact target reference"
+    - claim: "dry-run remains side-effect-free and does not pull the image"
+      proof: "unit test: dry-run does not pull or mutate the container"
+  falsifier: |
+    Delete the preflight or move it below the stop/rm block: the failing-pull fixture must either
+    record no pull or show stop/rm before the failed pull, and the test must fail. Make the failure
+    arm continue after `docker pull` or replace the failed reference with a cached image: the
+    preservation assertion must fail because a pull refusal is required to leave the live
+    container in place. Add an alternate reference to the run argv: the exact-reference test must
+    fail. Allow dry-run to execute the pull: the no-side-effect test must fail.
+  note: |
+    reservation hand-off: refs/rmd-id/W1-T4005 -> codex/file-w1-t4005-serve-preflight-17900736743N
+    This is a plan-only filing and carries no Remudero-Task trailer. After the filing lands, the
+    implementation session must use run-W1-T4005-<epochMs> and carry the task trailer.
