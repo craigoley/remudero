@@ -357,7 +357,7 @@ test("a landing call that arms auto-merge inline honours the same hold reader as
   );
 });
 
-test("a landing call with NO ledgerLines dep at all still arms — fail-open, unchanged for every pre-existing caller/fixture", () => {
+test("a landing call with NO review handoff dep leaves auto-merge to the shared review sweep", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   const prUrl = "https://github.com/o/r/pull/43";
@@ -367,7 +367,10 @@ test("a landing call with NO ledgerLines dep at all still arms — fail-open, un
     captureFeedback(root, { raw: "an ordinary entry, no hold in play", origin: "cli", land: { gh } }),
   );
 
-  assert.ok(calls.some((c) => c[0] === "pr" && c[1] === "merge"), "no ledgerLines dep means no hold is ever visible — arms as before this task");
+  assert.ok(
+    !calls.some((c) => c[0] === "pr" && c[1] === "merge"),
+    "the landing producer must never arm before the shared review sweep, even without a legacy ledger reader",
+  );
 });
 
 // ── The three arms the hold adds that no fixture above reaches ───────────────────────────────
