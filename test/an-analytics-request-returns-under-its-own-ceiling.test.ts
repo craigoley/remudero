@@ -16,6 +16,7 @@ import {
   deriveAnalyticsSnapshotFromCheckpointedLedger,
   deriveAnalyticsSnapshotFromLedger,
   deriveAnalyticsSnapshotFromStream,
+  readAnalyticsCheckpoint,
   writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
   type AnalyticsTimer,
@@ -584,5 +585,116 @@ test("structurally corrupt analytics checkpoint state falls back to the full uni
     assert.deepEqual(resumed.snapshot, full, "corrupt checkpoint state cannot manufacture an empty aggregate");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("analytics checkpoints resume an archive-only source and hydrate routing buckets", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-analytics-checkpoint-archive-only-"));
+  const archive = join(dir, "ledger.2026-09-21T20-00-00-000Z.ndjson");
+  const rows = [
+    { ts: "2026-09-20T20:00:00.000Z", step: "cli.invoked", verb: "status" },
+    { ts: "2026-09-21T20:00:00.000Z", step: "run.start", run_id: "run-routing", type: "implement" },
+    {
+      ts: "2026-09-21T20:00:01.000Z",
+      step: "worker.assignment",
+      run_id: "run-routing",
+      worker_assignment: {
+        version: 1,
+        id: "assignment-routing",
+        selected: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
+        routing: { mode: "single", selectionPath: "policy" },
+      },
+    },
+    {
+      ts: "2026-09-21T20:00:02.000Z",
+      step: "verdict",
+      run_id: "run-routing",
+      selection_assignment_id: "assignment-routing",
+      success: true,
+      tokens: { input: 10, output: 5, cacheRead: 2, cacheCreation: 1 },
+      total_cost_usd: 0.25,
+      worker_duration_ms: 100,
+    },
+  ];
+  try {
+    writeFileSync(archive, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-09-21T20:03:00.000Z")),
+    );
+    assert.equal(first.checkpoint.source.live, null, "precondition: this fixture has no live ledger");
+    assert.equal(first.snapshot.routingTelemetry.buckets.length, 1);
+    writeAnalyticsCheckpoint(dir, first.checkpoint);
+
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-09-21T20:04:00.000Z")),
+      undefined,
+      first.checkpoint,
+      {
+        operatorAgentOutcomes: {
+          signal: "task-outcomes",
+          status: "measured",
+          policy: { windowDays: 14, overlapRuleDescription: "test fixture" },
+          minPopulationFloor: 1,
+          classes: [{
+            verdictClass: "full-pass",
+            total: 1,
+            revertedCount: 1,
+            followupFixedCount: 1,
+            revertRate: 1,
+            followupFixRate: 1,
+            lanes: "run-task",
+            taskIds: ["W1-T-checkpoint"],
+          }],
+          unmeasurable: [],
+          unmeasurableByCause: {
+            "no-head-sha": 0,
+            "no-review-posted": 0,
+            "merge-sha-unrecoverable": 0,
+            "git-history-unavailable": 0,
+          },
+          armsSeen: 1,
+          armsClassified: 1,
+        },
+      },
+    );
+    assert.deepEqual(resumed.snapshot.routingTelemetry.buckets[0]?.fallbackReasons, []);
+    assert.equal(resumed.snapshot.dimensions.find((dimension) => dimension.key === "outcome")?.buckets.find((bucket) => bucket.key === "reverted")?.count, 1);
+    assert.equal(resumed.snapshot.dimensions.find((dimension) => dimension.key === "outcome")?.buckets.find((bucket) => bucket.key === "follow-up-fix")?.count, 1);
+    assert.equal(readAnalyticsCheckpoint(dir)?.version, 1, "a valid checkpoint is readable after atomic publication");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing analytics state directory is a non-resumable source, not an empty checkpoint", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-analytics-checkpoint-missing-source-"));
+  const missing = join(root, "does-not-exist");
+  try {
+    const result = await deriveAnalyticsSnapshotFromCheckpointedLedger(missing, fixedClock(Date.parse("2026-09-21T20:00:00.000Z")));
+    assert.equal(result.snapshot.asOf, "2026-09-21T20:00:00.000Z");
+    assert.equal(result.checkpoint.source.archives.length, 0);
+    assert.equal(result.checkpoint.source.live, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint writes fail closed when the state path is not a directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-analytics-checkpoint-write-failure-"));
+  const notDirectory = join(root, "state-file");
+  try {
+    writeFileSync(notDirectory, "not a directory\n");
+    writeAnalyticsCheckpoint(notDirectory, {
+      version: 1,
+      source: { archives: [], live: null, lastArchive: null, liveOffset: 0 },
+      tail: [],
+      state: {} as never,
+      snapshot: snapshot(),
+    });
+    assert.equal(readAnalyticsCheckpoint(notDirectory), undefined, "a failed best-effort write does not manufacture a readable checkpoint");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

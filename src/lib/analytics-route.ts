@@ -660,7 +660,7 @@ function checkpointMedian(values: readonly number[]): number | undefined {
   return sorted[Math.floor((sorted.length - 1) / 2)];
 }
 
-function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string | null): LedgerTimeSeries[] {
+function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string): LedgerTimeSeries[] {
   const definitions = [
     ["runs.completed", "Completed runs", "sum"],
     ["tokens.total", "Total tokens", "sum"],
@@ -668,17 +668,6 @@ function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string | nu
     ["cost.modeled.usd", "Modeled cost (USD)", "sum"],
     ["duration.p50.ms", "Run duration p50 (ms)", "p50"],
   ] as const;
-  if (nowIso === null) {
-    return definitions.map(([id, name, aggregation]) => ({
-      id,
-      name,
-      window: "unmeasured",
-      bucketWidth: "1d",
-      aggregation,
-      coverage: "not-collected",
-      points: [],
-    }));
-  }
   const end = Date.parse(`${checkpointDay(nowIso) ?? "1970-01-01"}T00:00:00.000Z`);
   const days = Array.from({ length: CHECKPOINT_HISTORY_BUCKETS }, (_, index) =>
     utcDayFromTimestamp(end - (CHECKPOINT_HISTORY_BUCKETS - index - 1) * CHECKPOINT_DAY_MS),
