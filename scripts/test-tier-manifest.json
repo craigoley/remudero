@@ -58,6 +58,7 @@
     "test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts": 1338,
     "test/a-declared-file-the-diff-never-touches-is-reported.test.ts": 0,
     "test/a-decline-can-be-taken-back.test.ts": 0,
+    "test/a-decorated-verdict-is-still-a-verdict.test.ts": 0,
     "test/a-deferred-follow-up-names-no-filed-id.test.ts": 2505,
     "test/a-denied-scope-claim-is-not-a-claim.test.ts": 1022,
     "test/a-dependabot-head-is-identified-without-a-task.test.ts": 0,
