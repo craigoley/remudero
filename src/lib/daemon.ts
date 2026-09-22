@@ -943,12 +943,12 @@ export interface DaemonDeps {
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
-  pendingPrActions?: () => Array<{ action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string }>;
+  pendingPrActions?: () => Array<{ action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }>;
   /** Clear the request only after its established command reaches a named terminal outcome. */
   clearPrAction?: (action: "fix" | "review", prNumber: number) => void;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
    * commands. It is injected so this scheduler module never grows a second repair implementation. */
-  runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
+  runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
   /** The injected clock, pacing idle polling when nothing is runnable. The real command wires a timer-backed wait;
    * tests inject a fake that resolves immediately, so the loop is provable without a real wall-clock wait. */
   sleep: (ms: number) => Promise<void>;
@@ -1920,6 +1920,75 @@ export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch
  * flagged and skipped, a fixable blocker gets a bounded fix attempt (W1-T174), and a genuine blocker escalates once
  * and parks until its PR ownership materially changes. Idling is an in-process state, never a process exit.
  * Forensics: docs/forensics/daemon.md. */
+/**
+ * W1-T4077 — THE CONSOLE'S "REVIEW NOW" / "FIX NOW", RUN ON THEIR OWN TIMER.
+ *
+ * These requests used to be read once per main-loop iteration and AWAITED there. Measured 2026-09-22: one
+ * iteration began at 19:33 and the next after 20:16, so a nudge could wait ~43 minutes, and a fix nudge then held
+ * dispatch for the length of a fix round. A timer fires during awaited work, so this pump starts a request within one
+ * interval whatever the loop is doing, and never awaits it: each request runs detached, at most once at a time per
+ * (action, PR). The marker is cleared when its run settles, exactly as before, so an unfinished request survives a
+ * restart and is picked up again.
+ */
+export function startPrActionPump(
+  deps: Pick<DaemonDeps, "pendingPrActions" | "runPrAction" | "clearPrAction">,
+  intervalMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { stop: () => void; settled: () => Promise<void> } {
+  const pending = deps.pendingPrActions;
+  const run = deps.runPrAction;
+  if (!pending || !run) return { stop: () => {}, settled: async () => {} };
+  const running = new Set<string>();
+  const inFlight = new Set<Promise<void>>();
+  const tick = (): void => {
+    let requests: ReturnType<typeof pending>;
+    try {
+      requests = pending();
+    } catch (error) {
+      log("console.pr_action_read_failed", { error: String((error as Error)?.message ?? error) });
+      return;
+    }
+    for (const request of requests) {
+      const key = `${request.action}-${request.prNumber}`;
+      if (running.has(key)) continue;
+      running.add(key);
+      const fields = {
+        action: request.action,
+        pr_number: request.prNumber,
+        origin: request.origin,
+        requested_at: request.requestedAt,
+        ...(request.operator ? { operator: request.operator } : {}),
+      };
+      log("console.pr_action_started", fields);
+      const settled: Promise<void> = (async () => {
+        try {
+          const result = await run(request);
+          log(result.outcome === "completed" ? "console.pr_action_completed" : "console.pr_action_refused", {
+            ...fields,
+            ...(result.detail ? { detail: result.detail } : {}),
+          });
+        } catch (error) {
+          log("console.pr_action_failed", { ...fields, error: String((error as Error)?.message ?? error) });
+        } finally {
+          deps.clearPrAction?.(request.action, request.prNumber);
+          running.delete(key);
+        }
+      })();
+      inFlight.add(settled);
+      void settled.finally(() => inFlight.delete(settled));
+    }
+  };
+  const timer = setInterval(tick, Math.max(1, intervalMs));
+  timer.unref?.();
+  tick();
+  return {
+    stop: () => clearInterval(timer),
+    settled: async () => {
+      await Promise.all([...inFlight]);
+    },
+  };
+}
+
 export async function runDaemon(
   plan: Plan,
   deps: DaemonDeps,
@@ -2109,11 +2178,15 @@ export async function runDaemon(
   // own input the same way, so a value below 1 clamps up here rather than producing two disagreeing floors (W1-T343).
   const laneCount = Math.max(1, opts.laneCount ?? 1);
 
+  // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
+  const prActionPumpRef: { stop: () => void } = { stop: () => {} };
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
+    prActionPumpRef.stop();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
   };
+  prActionPumpRef.stop = startPrActionPump(deps, pollIntervalMs, log).stop;
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
@@ -3236,36 +3309,8 @@ export async function runDaemon(
       }
     }
 
-    // Console PR actions use the same durable-marker boundary as an UP NEXT kick, but they do
-    // not select a task or bypass the established PR pipeline. Keep the marker while the bounded
-    // command runs: another click for the same action/PR overwrites one request rather than
-    // starting a concurrent fix or review worker. One action per poll prevents an action burst
-    // from starving the normal sweep and dispatch path.
-    if (deps.pendingPrActions && deps.runPrAction) {
-      const request = deps.pendingPrActions()[0];
-      if (request) {
-        try {
-          const result = await deps.runPrAction(request);
-          log(result.outcome === "completed" ? "console.pr_action_completed" : "console.pr_action_refused", {
-            action: request.action,
-            pr_number: request.prNumber,
-            origin: request.origin,
-            requested_at: request.requestedAt,
-            ...(result.detail ? { detail: result.detail } : {}),
-          });
-        } catch (error) {
-          log("console.pr_action_failed", {
-            action: request.action,
-            pr_number: request.prNumber,
-            origin: request.origin,
-            requested_at: request.requestedAt,
-            error: String((error as Error)?.message ?? error),
-          });
-        } finally {
-          deps.clearPrAction?.(request.action, request.prNumber);
-        }
-      }
-    }
+    // W1-T4077: console PR actions are no longer read here — `startPrActionPump` runs them on their own timer,
+    // detached, so a long iteration can neither delay a nudge nor be held by one.
 
     // Why the daemon is idle. The four eligibility conditions used to decline silently, so a ten-hour
     // idle emitted about 390 bare idle lines and zero dispatch rows: the record could not distinguish

@@ -1033,13 +1033,14 @@ test("console PR action: one durable request reaches the established action seam
     { headroomEnabled: false, max: 1 },
   );
 
-  assert.deepEqual(invoked.map((request) => [request.action, request.prNumber]), [["fix", 259]], "one poll starts at most one bounded action");
-  assert.deepEqual(cleared, [["fix", 259]], "only the completed marker is consumed");
-  assert.deepEqual(actions.map((request) => [request.action, request.prNumber]), [["review", 260]], "later work remains durable for a later poll");
-  const completed = lines.find((line) => line.step === "console.pr_action_completed");
+  // W1-T4077: the PR-action pump starts every pending request detached (one at a time per action and PR), instead
+  // of the main loop starting one per poll and awaiting it — so each request still reaches the seam exactly once.
+  assert.deepEqual(invoked.map((request) => [request.action, request.prNumber]), [["fix", 259], ["review", 260]], "each request reaches the seam once");
+  assert.deepEqual(cleared, [["fix", 259], ["review", 260]], "each marker is consumed only after its outcome");
+  assert.deepEqual(actions, [], "nothing is left pending");
+  const completed = lines.find((line) => line.step === "console.pr_action_completed" && line.extra.pr_number === 259);
   assert.ok(completed, "the daemon records the established-command outcome");
   assert.equal(completed!.extra.action, "fix");
-  assert.equal(completed!.extra.pr_number, 259);
   assert.equal(completed!.extra.origin, "console-operator");
 });
 

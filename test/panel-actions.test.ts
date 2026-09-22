@@ -259,7 +259,7 @@ test("every panel-actions.ts write route carries its design-(i)-ruled tier", () 
   assert.equal(tierOf("/v1/manual/approve"), "high");
   assert.equal(tierOf("/v1/drain/kick"), "high");
   assert.equal(tierOf("/v1/drain/run"), "high");
-  assert.equal(tierOf("/v1/pr-actions"), "high");
+  assert.equal(tierOf("/v1/pr-actions"), "low"); // W1-T4077: operator ruling — review and fix only enter the ordinary pipelines
 });
 
 test("no bearer token at all -> 401", async () => {
@@ -975,7 +975,7 @@ test("daemonCommand wires selected-repository PR actions to the established fix 
     assert.deepEqual(fixed, { outcome: "completed", detail: "fix command accepted PR #259" });
     assert.deepEqual(reviewed, { outcome: "refused", detail: "review command refused PR #260 (exit 7)" });
     assert.deepEqual(calls, [
-      { action: "fix", args: ["259", "--repo", "remudero"] },
+      { action: "fix", args: ["259", "--repo", "remudero", "--requested"] },
       { action: "review", args: ["260", "--repo", "remudero"] },
     ]);
   } finally {
@@ -987,7 +987,7 @@ test("daemonCommand wires selected-repository PR actions to the established fix 
   }
 });
 
-test("POST /v1/pr-actions rejects malformed or unconfirmed bodies before any request marker is written", async () => {
+test("POST /v1/pr-actions rejects malformed bodies before any request marker is written", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}panel-pr-action-bad-`));
   await withService(depsFor(root), async (base) => {
     for (const body of [
@@ -1000,10 +1000,8 @@ test("POST /v1/pr-actions rejects malformed or unconfirmed bodies before any req
       const res = await postHigh(base, "/v1/pr-actions", WRITE_TOKEN, body);
       assert.equal(res.status, 400, JSON.stringify(body));
     }
-    const unconfirmed = await post(base, "/v1/pr-actions", WRITE_TOKEN, { action: "review", prNumber: 259 });
-    assert.equal(unconfirmed.status, 403, "the HIGH-tier confirmation gate runs before the writer");
   });
-  assert.deepEqual(pendingPrActions(root), [], "no malformed or unconfirmed body becomes daemon work");
+  assert.deepEqual(pendingPrActions(root), [], "no malformed body becomes daemon work");
 });
 
 // The console MOUNTS the UP NEXT Run + Drain-now routes (fb-…9daa9b). This used to read
