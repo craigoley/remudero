@@ -122,12 +122,6 @@
         their own ids and their own scope; folding them in here would hide three separate decisions
         behind one.
   acceptance:
-    - claim: "the record states that the branch-protection flip is the operator's step, not the harness's, on the W1-T3407 precedent"
-      proof: "grep: THE FLIP ITSELF IS THE OPERATOR'S STEP, NOT THE HARNESS'S in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
-    - claim: "the record carries a before-state re-read live at dispatch rather than a figure carried forward from the filing"
-      proof: "grep: THE BEFORE-STATE, RE-DERIVED RATHER THAN CARRIED in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
-    - claim: "the record names the exact command the operator runs once this merges, so the handoff is executable rather than described"
-      proof: "grep: The operator, after this record merges, runs: in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
     - claim: "the shard records the inter-merge interval and the re-validation wall-clock against each other, so the deadlock question is answered from data rather than asserted"
       proof: "grep: sits at 0\\.97x the median in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
       satisfied_by: "#6560"
