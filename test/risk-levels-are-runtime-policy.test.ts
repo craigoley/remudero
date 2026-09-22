@@ -210,3 +210,88 @@ test("W1-T4050: the automated release path reads the live risk policy", async ()
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+/**
+ * THE REFUSAL ARMS, ONE TEST PER THROW. `diff-coverage` flagged six throw sites in
+ * `parseRiskPolicy`/`readRiskPolicy` and the `catch` in the production release hook as added
+ * lines with zero covering tests. They are the "fail loud on a typo" half of this feature: a
+ * policy row an operator mistypes must stop the read, never resolve to a default that quietly
+ * re-enables an automated release. A validator whose refusal arm is never executed is a
+ * validator nobody has checked.
+ */
+
+test("W1-T4050: a risk section that is not a mapping is refused", () => {
+  for (const bad of ["a string", 42, ["a", "list"]]) {
+    assert.throws(() => parseRiskPolicy(bad), /'risk' must be a mapping/);
+  }
+});
+
+test("W1-T4050: a number row that is not a mapping, or carries no finite value, is refused", () => {
+  for (const bad of ["0.9", 0.9, [0.9]]) {
+    assert.throws(
+      () => parseRiskPolicy({ confidenceThreshold: bad }),
+      /'risk\.confidenceThreshold' must be a mapping with 'value'\/'origin'/,
+    );
+  }
+  for (const bad of [{ value: "0.9" }, { value: Number.NaN }, { value: Number.POSITIVE_INFINITY }, { origin: "net-new" }]) {
+    assert.throws(
+      () => parseRiskPolicy({ confidenceThreshold: bad }),
+      /'risk\.confidenceThreshold\.value' must be a finite number/,
+    );
+  }
+});
+
+test("W1-T4050: a boolean row that is not a mapping, or carries a non-boolean value, is refused", () => {
+  for (const bad of ["true", true, [true]]) {
+    assert.throws(
+      () => parseRiskPolicy({ verifyHumanReleaseEnabled: bad }),
+      /'risk\.verifyHumanReleaseEnabled' must be a mapping with 'value'\/'origin'/,
+    );
+  }
+  for (const bad of [{ value: "true" }, { value: 1 }, { origin: "net-new" }]) {
+    assert.throws(
+      () => parseRiskPolicy({ verifyHumanReleaseEnabled: bad }),
+      /'risk\.verifyHumanReleaseEnabled\.value' must be a boolean/,
+    );
+  }
+});
+
+test("W1-T4050: a policy.yaml whose root is not a mapping is refused by the live reader", () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4050-badroot-`));
+  const policyFile = join(tmp, "policy.yaml");
+  try {
+    for (const bad of ["just a string\n", "- a\n- list\n"]) {
+      writeFileSync(policyFile, bad, "utf8");
+      assert.throws(() => readRiskPolicy(policyFile), /policy\.yaml must be a mapping/);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4050: an unreadable risk policy makes the release UNAVAILABLE, never a silent release", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4050-unavailable-`));
+  const policyDir = join(tmp, "plan");
+  const policyFile = join(policyDir, "policy.yaml");
+  const ledgerPath = join(tmp, "ledger.ndjson");
+  const task = parked("W1-T1042");
+  const shard = {
+    id: task.id, title: task.title, rationale: "", acceptance: [],
+    ageDays: 1, depsAllMerged: true, citedInSrc: false,
+  };
+  try {
+    mkdirSync(policyDir, { recursive: true });
+    // A typo an operator could really make: the row is a bare scalar, not a value/origin mapping.
+    writeFileSync(policyFile, "risk:\n  confidenceThreshold: 0.7\n", "utf8");
+    const hook = productionVerifyHumanRelease(planOf([parked("W1-T1042")]), tmp, ledgerPath, "RUN-UNAVAIL", {
+      riskJudge: async () => verdict({ confidence: 0.99 }),
+    });
+    const out = await hook(shard, { decision: "automate", reason: "safe" });
+    assert.equal(out.kind, "unavailable", "an unreadable policy must not fall through to a release");
+    assert.match(out.reason, /risk policy unavailable/);
+    assert.match(out.reason, /must be a mapping with 'value'\/'origin'/, "the refusal names the row it could not read");
+    assert.equal(existsSync(ledgerPath), false, "nothing is released while the policy cannot be read");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
