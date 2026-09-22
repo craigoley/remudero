@@ -177,12 +177,7 @@ export interface Mounts {
   escalation_judge?: Mount;
   /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge. */
   verify_human_judge?: Mount;
-  /**
-   * OPTIONAL — the mount a task's LAST attempt rides after lower-tier workers have failed it: the
-   * diagnose-informed implement attempt, and the fix rung's final fresh strike. The one worker
-   * row allowed above the worker ceiling; it must still sit strictly below the Architect's tier.
-   * Absent = every attempt keeps its own mount.
-   */
+  /** OPTIONAL — a task's last attempt after the worker tier failed it; must stay below the Architect. */
   step_up?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
