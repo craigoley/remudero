@@ -1121,6 +1121,7 @@ import {
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
   acceptanceAuthorTimeCheck,
+  acceptanceBlockRegion,
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
@@ -19036,9 +19037,29 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     return okOrStale(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
   }
 
-  // Untrailered (or trailer present but unresolved to any criteria): judged exactly as before —
-  // acceptance criterion 4, no change in verdict or exit code.
-  if (!d.defective) {
+  // Untrailered (or trailer present but unresolved to any criteria): W1-T1097 — the EXIT CODE is
+  // now SOURCED FROM `acceptanceAuthorTimeCheck`, the same predicate the CI gate
+  // (scripts/acceptance-author-gate.mjs) already calls on this body, rather than from `d.defective`
+  // (design item i). `d.defective` is `!headerFound || parsed.length !== bulletsWritten ||
+  // emptyProofs > 0`, and that reads FALSE when the block scan bails before the first bullet:
+  // headerFound is true, bulletsWritten and criteriaParsed both read 0, and 0 === 0, so a body that
+  // resolves NO criteria used to print "OK" and exit 0. `acceptanceAuthorTimeCheck` refuses that
+  // shape ITSELF, via its own `d.criteriaParsed === 0` arm, so this is an exit-code source, not a
+  // new rule (design item v). The printed diagnostic lines below stay exactly what they were
+  // (design item ii); only which predicate decides pass/fail moves.
+  //
+  // `trailerResolves` is passed rather than omitted: `taskId`/`trailerResolved` above already
+  // establish whether THIS body's trailer resolved any criteria via THIS command's own plan load,
+  // and reaching this line means it did not (`trailerResolved` is false whenever we get here).
+  // `acceptanceAuthorTimeCheck` OMITTED-`trailerResolves` accepts ANY anchored trailer at face
+  // value (its own doc: "TRAP: on #2908 a trailer resolved to ZERO ids..."), which would silently
+  // repass this exact unresolved-trailer shape and disagree with the block diagnostics computed
+  // two lines above — so the resolver here answers with the SAME verdict `trailerResolved` already
+  // reached, never a second lookup.
+  const authorCheck = acceptanceAuthorTimeCheck(body, {
+    trailerResolves: (id) => id === taskId && trailerResolved,
+  });
+  if (authorCheck.ok) {
     return okOrStale("OK — the parser resolves exactly what was written, and every proof is non-empty.");
   }
   if (!d.headerFound) {
@@ -19056,13 +19077,49 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
         `truncates everything after it. Keep each claim on ONE line.`,
     );
   }
-  if (d.emptyProofs > 0) {
+  if (d.headerFound && d.truncatedAtBullet === undefined && d.criteriaParsed === 0) {
+    // design item (iii): written FOR this case rather than inherited from
+    // `acceptanceAuthorTimeCheck`'s generic "0 criterion/criteria have no proof" message, which is
+    // confusing here — the real problem is that the scan never recognised a single bullet under the
+    // header. Name the header line and the first line that is not a bullet, so the author can see
+    // exactly where the block broke.
+    console.error(`DEFECTIVE: ${zeroCriteriaOffendingLineMessage(body)}`);
+  } else if (d.emptyProofs > 0) {
     console.error(
       `DEFECTIVE: ${d.emptyProofs} parsed criterion/criteria have an EMPTY proof — a claim with nothing ` +
         `to execute. The proof must be on the immediately-following indented line as \`proof: ...\`.`,
     );
   }
   return 1;
+}
+
+/**
+ * W1-T1097 design item (iii): the zero-criteria refusal names the ACCEPTANCE header's own line and
+ * the first line beneath it that is not a bullet — the exact line
+ * {@link "./lib/review.js".acceptanceBlockRegion} stopped at — rather than a generic "nothing
+ * parsed" message. Line numbers are 1-based, matching what an author sees in an editor.
+ */
+function zeroCriteriaOffendingLineMessage(body: string): string {
+  const region = acceptanceBlockRegion(body);
+  if (!region) {
+    // Cannot happen from the one call site above (`d.headerFound` was already checked true), but
+    // this function has no other invariant to lean on, so it names its own absence rather than
+    // indexing into a region that is not there.
+    return "an Acceptance header was found but ZERO bullets were resolved from it.";
+  }
+  const lines = body.split("\n");
+  const headerLine = lines[region.headerLine]?.trim() ?? "";
+  const offendingIndex = region.endLine;
+  const offendingLine = lines[offendingIndex];
+  const where =
+    offendingLine !== undefined
+      ? `line ${offendingIndex + 1}, "${offendingLine.trim()}", is not a bullet (a bullet starts with "-", "*", or "1.")`
+      : "the body ends immediately after the header, with no bullet ever written";
+  return (
+    `an Acceptance header was found (line ${region.headerLine + 1}, "${headerLine}") but ZERO bullets were ` +
+    `resolved from it — everything below the header is invisible to the parser. The very next thing the parser ` +
+    `saw was ${where}. Add at least one "- claim: ... / proof: ..." bullet directly under the header.`
+  );
 }
 
 // ReceiptCommandDeps/receiptCommand and ReplayCommandOpts/replayCommand moved to
