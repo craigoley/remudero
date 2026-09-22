@@ -636,6 +636,7 @@
     "test/daemon-observability.test.ts": 3798,
     "test/daemon-pause-before-admission.test.ts": 816,
     "test/daemon-plan-freshness.test.ts": 14541,
+    "test/daemon-plan-rebinds-from-main.test.ts": 0,
     "test/daemon-retro-trigger.test.ts": 1360,
     "test/daemon-reviewer-code-freshness-wiring.test.ts": 0,
     "test/daemon-triage-guard-wiring.test.ts": 12272,
