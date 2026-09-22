@@ -10,6 +10,10 @@
   files:
     - src/lib/worker.ts
     - test/worktree-node-modules.test.ts
+    - test/workspace-node-modules-link.test.ts
+    - test/workspace-node-modules-paths.test.ts
+    - test/workspace-node-modules-occupied-destination.test.ts
+    - test/workspace-node-modules-root-baseline.test.ts
   origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
   plan_refs: ["W1-T137", "W1-T2312", "W1-T2777", "W1-T4002"]
   status: queued
@@ -49,13 +53,13 @@
     local tool is attributable to provisioning rather than misdiagnosed as the worker's diff.
   acceptance:
     - claim: "a fresh worker worktree links the installed local dependency of each declared workspace without running npm"
-      proof: "grep: linkWorkspaceNodeModules in src/lib/worker.ts"
+      proof: "unit test: test/workspace-node-modules-link.test.ts"
     - claim: "workspace paths are derived from the source manifest and unsafe path forms are refused before a link is attempted"
-      proof: "grep: workspaceNodeModulesSource in src/lib/worker.ts"
+      proof: "unit test: test/workspace-node-modules-paths.test.ts"
     - claim: "an occupied or unavailable workspace destination remains a named incomplete workspace-node-modules-link outcome"
-      proof: "grep: workspace-node-modules-link in src/lib/worker.ts"
+      proof: "unit test: test/workspace-node-modules-occupied-destination.test.ts"
     - claim: "the root node_modules link and its lockfile-mismatch warning remain the shared-install baseline"
-      proof: "grep: linked-lockfile-mismatch in src/lib/worker.ts"
+      proof: "unit test: test/workspace-node-modules-root-baseline.test.ts"
   falsifier: |
     Create a source fixture whose root node_modules omits a marker package while its declared
     apps/dashboard/node_modules contains it; create the matching fresh worktree. Before the
@@ -69,3 +73,9 @@
     This is a source build after its plan-only filing merges and must use
     run-W1-T4003-<epochMs>. It is independent of the W1-T4002 dispatch-recovery implementation;
     both improve the same fleet without sharing a mutation authority.
+
+    The acceptance proofs use distinct new test-file paths declared in `files:` rather than
+    future-source `grep:` anchors. This filing changes only the task record, so the absent paths
+    are named forward references now and become executable, discriminating evidence when the build
+    creates them. The split prevents one broad test from being treated as proof of every separate
+    safety boundary.
