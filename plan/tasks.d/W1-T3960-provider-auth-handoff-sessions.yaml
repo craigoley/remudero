@@ -17,7 +17,7 @@
     - openapi/daemon.yaml
     - test/provider-auth-sessions.test.ts
     - test/provider-auth-console.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The console needs browser-driven switching between the operator's Claude and Codex subscription

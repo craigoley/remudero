@@ -13,7 +13,7 @@
     - test/plan-resequence-pr-invalidation.test.ts
   origin: "recon#main-expiring-fixture-census-2026-09-21"
   plan_refs: [W1-T3272, W1-T3655]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED on current origin/main 2b65a44c86c729c9223b7c31562e7d185878b3ab. The required

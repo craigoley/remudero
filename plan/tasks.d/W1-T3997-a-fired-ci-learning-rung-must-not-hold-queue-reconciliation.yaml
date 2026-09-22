@@ -14,7 +14,7 @@
     - test/a-fired-ci-learning-must-not-hold-queue-reconciliation.test.ts
   origin: "operator-session#core-daemon-automated-flow-2026-09-22"
   plan_refs: ["W1-T2972", "W1-T2981", "W1-T3297", "W1-T3542"]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED on the core host 2026-09-22: ci_learning_cadence.fired at

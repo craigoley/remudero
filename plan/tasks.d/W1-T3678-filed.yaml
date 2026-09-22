@@ -11,7 +11,7 @@
   files: [deploy/serve-container.sh, test/a-second-instance-serves-its-own-gateway.test.ts]
   origin: oper#instance-scope-audit-2026-09-16
   plan_refs: ["W1-T3623"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR, 2026-09-16: "It would also be good to have more information in the dashboard about
