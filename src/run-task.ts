@@ -19560,23 +19560,23 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
   return { prs };
 }
 
+type CiFailureWindowReader = {
+  read: (args: string[]) => Promise<unknown>;
+  yieldBetweenObservation: () => Promise<void>;
+};
+
 /**
  * The daemon's CI-learning reader. It preserves {@link loadCiFailureWindow}'s corpus shape and
- * unreadable-versus-clean distinction, but performs every GitHub observation through the async
- * transport and explicitly yields between PR and commit units. The report-only CLI retains the
- * synchronous reader above; only the daemon needs to keep the event loop available while a large
- * corpus is collected (W1-T3997).
+ * unreadable-versus-clean distinction while performing every GitHub observation asynchronously;
+ * it explicitly yields between PR and commit units so the daemon stays responsive (W1-T3997).
  */
 export async function loadCiFailureWindowAsync(
   days: number,
-  deps: {
-    read: (args: string[]) => Promise<unknown>;
-    yieldBetweenObservation: () => Promise<void>;
-  },
+  reader: CiFailureWindowReader,
 ): Promise<CiFailureCorpusInput> {
   const self = resolveOwnerRepo();
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
-  const rows = (await deps.read([
+  const rows = (await reader.read([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
   ])) as Array<{ number?: number; updated_at?: string }>;
@@ -19584,10 +19584,10 @@ export async function loadCiFailureWindowAsync(
   for (const row of rows ?? []) {
     if (row.number === undefined) continue;
     if (row.updated_at && Date.parse(row.updated_at) < sinceMs) continue;
-    await deps.yieldBetweenObservation();
+    await reader.yieldBetweenObservation();
     let shas: string[];
     try {
-      const commits = (await deps.read([
+      const commits = (await reader.read([
         "api",
         `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`,
       ])) as Array<{ sha?: string }>;
@@ -19597,12 +19597,12 @@ export async function loadCiFailureWindowAsync(
     }
     const commits: CorpusPr["commits"] = [];
     for (const sha of shas) {
-      await deps.yieldBetweenObservation();
+      await reader.yieldBetweenObservation();
       const commit: CorpusPr["commits"][number] = { sha };
       try {
         const responses = [
-          await deps.read(checkRunsRestArgs(self.owner, self.repo, sha)),
-          await deps.read(combinedStatusRestArgs(self.owner, self.repo, sha)),
+          await reader.read(checkRunsRestArgs(self.owner, self.repo, sha)),
+          await reader.read(combinedStatusRestArgs(self.owner, self.repo, sha)),
         ];
         let response = 0;
         const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
@@ -19611,7 +19611,7 @@ export async function loadCiFailureWindowAsync(
         // Keep rollup absent: collectCiFailureCorpus records it as UNREADABLE rather than green.
       }
       try {
-        const changed = await deps.read(["api", `repos/${self.owner}/${self.repo}/commits/${sha}`]) as
+        const changed = await reader.read(["api", `repos/${self.owner}/${self.repo}/commits/${sha}`]) as
           | { files?: Array<{ filename?: string }> }
           | undefined;
         if (Array.isArray(changed?.files)) {
