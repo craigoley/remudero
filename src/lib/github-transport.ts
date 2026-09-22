@@ -125,6 +125,16 @@ const execFileAsync = promisify(execFile) as (
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
+/**
+ * ONE IN-FLIGHT READ PER EXACT REQUEST. The daemon, review lane, and console can all wake for the
+ * same head at once; without this map each caller reaches the cadence gate independently and the
+ * first allowed caller still leaves a burst of identical subprocesses queued behind it. This is
+ * deliberately transport-local: every async consumer gets the protection without having to agree
+ * on a higher-level cache, and a rejected read is removed in `finally` so an outage never poisons
+ * later attempts.
+ */
+const asyncReadInFlight = new Map<string, Promise<unknown>>();
+
 /** A successful `gh` process whose JSON response cannot be read is a transport failure, not a
  * worker/parser failure. The operation is deliberately reduced to the command family so an error
  * can be logged without carrying request arguments, headers, tokens, or response contents. */
@@ -150,16 +160,37 @@ function parseGhJsonBody(args: string[], body: string): unknown {
 }
 
 export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsync = execFileAsync): Promise<unknown> {
-  // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
-  // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
-  // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
-  if (execAsync === execFileAsync) applyGhReadCadence(args);
-  const { stdout } = await execAsync("gh", args, {
-    encoding: "utf8",
-    maxBuffer: DEFAULT_GH_MAX_BUFFER,
-    timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-  });
-  return parseGhJsonBody(args, stdout);
+  // Injected executors are test/offline seams and may have independent side effects, so only the
+  // real `gh` transport participates in production single-flight coalescing.
+  if (execAsync !== execFileAsync) {
+    const { stdout } = await execAsync("gh", args, {
+      encoding: "utf8",
+      maxBuffer: DEFAULT_GH_MAX_BUFFER,
+      timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+    });
+    return parseGhJsonBody(args, stdout);
+  }
+  const key = JSON.stringify(args);
+  const existing = asyncReadInFlight.get(key);
+  if (existing) return existing;
+  const request = (async (): Promise<unknown> => {
+    // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
+    // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
+    // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
+    applyGhReadCadence(args);
+    const { stdout } = await execAsync("gh", args, {
+      encoding: "utf8",
+      maxBuffer: DEFAULT_GH_MAX_BUFFER,
+      timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+    });
+    return parseGhJsonBody(args, stdout);
+  })();
+  asyncReadInFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
+  }
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
