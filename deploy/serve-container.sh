@@ -529,6 +529,12 @@ if [ ! -w "${SERVE_REPO_DIR}" ]; then
   exit 1
 fi
 
+echo "serve-container: preflight docker pull ${REF}"
+if ! docker pull "${REF}" >/dev/null 2>&1; then
+  echo "serve-container: REFUSING — target image ${REF} could not be pulled; existing container was left untouched." >&2
+  exit 1
+fi
+
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   echo "serve-container: docker stop ${CONTAINER_NAME}"
   docker stop "${CONTAINER_NAME}" >/dev/null
