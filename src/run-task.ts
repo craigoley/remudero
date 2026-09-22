@@ -39791,16 +39791,16 @@ export function productionVerifyHumanRelease(
   checkoutRoot: string,
   ledgerPath: string,
   runId: string,
-  deps: {
+  options: {
     riskJudge?: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
     /** Forwarded to realRiskJudge, so a test drives the REAL construction (mount resolution and
      *  parsing included) without a model call. */
     spawn?: typeof spawnWorker;
   } = {},
 ): VerifyHumanReleaseHook {
-  let judge = deps.riskJudge;
+  let judge = options.riskJudge;
   const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
-    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: deps.spawn });
+    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn });
     return judge(input);
   };
   return (shard, verdict) =>

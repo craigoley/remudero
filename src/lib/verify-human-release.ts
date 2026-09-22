@@ -39,7 +39,7 @@ export interface MachineReleaseProvenance {
   risk_reasons: string[];
 }
 
-export interface VerifyHumanReleaseDeps {
+export interface VerifyHumanReleasePorts {
   /** The record as the plan holds it; undefined when the id resolves to nothing. */
   task: (id: string) => Task | undefined;
   riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
@@ -52,9 +52,9 @@ const unavailable = (reason: string): VerifyHumanReleaseOutcome => ({ kind: "una
 export async function releaseAutomatedShard(
   shard: ShardUnderJudgement,
   verdict: VerifyHumanVerdict,
-  deps: VerifyHumanReleaseDeps,
+  ports: VerifyHumanReleasePorts,
 ): Promise<VerifyHumanReleaseOutcome> {
-  const task = deps.task(shard.id);
+  const task = ports.task(shard.id);
   if (!task) return unavailable(`${shard.id} does not resolve to a plan record`);
   // Checked here as well as in approveParkedTask so the reason names the real cause rather than a
   // write refusal, and so no risk-judge spend is made on a record that cannot be released anyway.
@@ -63,7 +63,7 @@ export async function releaseAutomatedShard(
 
   let risk: RiskJudgeVerdict;
   try {
-    risk = await deps.riskJudge(buildFilingRiskJudgeInput(task));
+    risk = await ports.riskJudge(buildFilingRiskJudgeInput(task));
   } catch (e) {
     return { kind: "unavailable", reason: `the risk judge threw: ${String((e as Error)?.message ?? e)}` };
   }
@@ -74,7 +74,7 @@ export async function releaseAutomatedShard(
   const action = planRiskJudgeAction(risk);
   if (action.kind === "escalate") return { kind: "escalated", reason: action.reason };
 
-  const written = deps.writeRelease(task.id, {
+  const written = ports.writeRelease(task.id, {
     released_by: "verify-human-judge",
     author_class: "machine",
     judge_reason: verdict.reason,
