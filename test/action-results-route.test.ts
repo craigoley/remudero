@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { EXTERNAL_EFFECT_STATES, EXTERNAL_EFFECT_VERSION } from "../src/lib/action-reconciliation.js";
 import { ACTION_RESULTS_CONTRACT_VERSION, buildActionResultsProjection } from "../src/lib/action-results.js";
 import { EXTERNAL_EFFECT_RECONCILED_STEP } from "../src/lib/ledger.js";
@@ -46,7 +47,7 @@ test("unit test: action-results route preserves bounded external-effect projecti
   const result = buildActionResultsProjection({
     ledgerLines: ledgerLines([effectRow()]),
     filters: {},
-    now: () => new Date("2026-09-22T10:05:00.000Z"),
+    clock: fixedClock(Date.parse("2026-09-22T10:05:00.000Z")),
   });
   assert.equal(result.version, ACTION_RESULTS_CONTRACT_VERSION);
   assert.equal(result.state, "verified");

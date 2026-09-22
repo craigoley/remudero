@@ -34,6 +34,7 @@ import {
 import { EXTERNAL_EFFECT_RECONCILED_STEP } from "./ledger.js";
 import { isRecord } from "./panel-actions.js";
 import type { LedgerLines } from "./status.js";
+import { systemClock, type Clock } from "./clock.js";
 
 export const ACTION_RESULTS_CONTRACT_VERSION = "external-action-results-v1" as const;
 
@@ -357,7 +358,8 @@ export function parseActionResultsFilters(params: URLSearchParams): ActionResult
 export interface ActionResultsProjectionInput {
   ledgerLines: LedgerLines;
   filters: ActionResultsFilters;
-  now?: () => Date;
+  /** Shared time seam; production falls back to the daemon wall clock. */
+  clock?: Clock;
   source?: string;
 }
 
@@ -368,7 +370,7 @@ export interface ActionResultsProjectionInput {
  * that one row was skipped.
  */
 export function buildActionResultsProjection(input: ActionResultsProjectionInput): ActionResultsEnvelope {
-  const generatedAt = (input.now?.() ?? new Date()).toISOString();
+  const generatedAt = (input.clock ?? systemClock).iso();
   const source = input.source ?? "rmd:/v1/action-results";
 
   if (!input.ledgerLines.present) {

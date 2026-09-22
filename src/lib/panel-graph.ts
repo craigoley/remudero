@@ -73,6 +73,7 @@ import {
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
+import { systemClock, type Clock } from "./clock.js";
 import {
   ACTION_RESULTS_CONTRACT_VERSION,
   buildActionResultsProjection,
@@ -120,6 +121,8 @@ export interface PanelGraphDeps {
    *  above, the same split lib/serve.ts's `fleetControlRoot` documents.
    *  Why: the config-vs-repo split this once confused — docs/forensics/panel-graph.md */
   inboxRoot: string;
+  /** Shared time seam for newly added projections; omitted callers retain the real wall clock. */
+  clock?: Clock;
   /** The detached-CLI gateway (W1-T193) POST /v1/inbox/approve and /reframe hand off to; see
    *  {@link RatifyCliGateway}. */
   ratify: RatifyCliGateway;
@@ -1079,13 +1082,13 @@ export function buildActionResultsRoute(deps: PanelGraphDeps): Route {
       }
       try {
         const ledgerLines = readLedgerUnionBounded(deps.ledgerPath);
-        sendJson(res, 200, buildActionResultsProjection({ ledgerLines, filters: parsed.filters }));
+        sendJson(res, 200, buildActionResultsProjection({ ledgerLines, filters: parsed.filters, clock: deps.clock }));
       } catch (error) {
         sendJson(res, 503, {
           version: ACTION_RESULTS_CONTRACT_VERSION,
           state: "unavailable",
           source: "rmd:/v1/action-results",
-          generatedAt: new Date().toISOString(),
+          generatedAt: (deps.clock ?? systemClock).iso(),
           reason: "projection-unavailable",
           detail: error instanceof Error ? error.message.slice(0, 240) : "The action-results projection was unavailable.",
         } satisfies ActionResultsEnvelope);
