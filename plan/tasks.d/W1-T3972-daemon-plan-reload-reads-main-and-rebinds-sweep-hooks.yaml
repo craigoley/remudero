@@ -42,7 +42,7 @@
     - claim: "a self reloader returns the exact observed main-ref plan even when its working tree remains old"
       proof: "grep: daemon plan reload reads the observed main ref in test/daemon-plan-rebinds-from-main.test.ts"
     - claim: "the reload path performs no checkout-mutating git command and requests no process exit"
-      proof: "grep: daemon plan reload leaves the checkout untouched in test/daemon-plan-rebinds-from-main.test.ts"
+      proof: "grep: daemon plan reload reads the observed main ref in test/daemon-plan-rebinds-from-main.test.ts"
     - claim: "the next sweep after reload uses the new plan while one sweep pass uses one consistent snapshot"
       proof: "grep: daemon sweep hooks rebind to a reloaded plan in test/daemon-plan-rebinds-from-main.test.ts"
     - claim: "a failed ref load keeps the old plan and retries rather than recording stale content as seen"
