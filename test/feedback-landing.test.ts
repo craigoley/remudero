@@ -624,6 +624,99 @@ test("landFeedback: opening a fresh landing PR does not arm auto-merge before th
   assert.equal(result.prUrl, "https://github.com/o/r/pull/13");
 });
 
+test("feedback landing requests review before arming auto-merge", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-review.yaml"), "id: fb-review\nraw: x\n");
+  const events: string[] = [];
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return "[]";
+    if (args[0] === "pr" && args[1] === "create") {
+      events.push("create");
+      return "Creating pull request\nhttps://github.com/o/r/pull/14\n";
+    }
+    if (args[0] === "pr" && args[1] === "merge") throw new Error("unexpected pre-review auto-merge arm");
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+
+  const result = withLiveWritesAllowed(() =>
+    landFeedback(root, {
+      gh,
+      requestReview: (url) => {
+        events.push(`review:${url}`);
+      },
+    }),
+  );
+  assert.equal(result.landed, true);
+  assert.deepEqual(events, ["create", "review:https://github.com/o/r/pull/14"]);
+});
+
+test("feedback landing review failure is retryable and never arms merge", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-retry.yaml"), "id: fb-retry\nraw: x\n");
+  let reviewAttempts = 0;
+  let creates = 0;
+  let merges = 0;
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return creates > 0 ? JSON.stringify([{ url: "https://github.com/o/r/pull/15" }]) : "[]";
+    if (args[0] === "pr" && args[1] === "create") {
+      creates++;
+      return "Creating pull request\nhttps://github.com/o/r/pull/15\n";
+    }
+    if (args[0] === "pr" && args[1] === "merge") {
+      merges++;
+      return "";
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const requestReview = () => {
+    reviewAttempts++;
+    if (reviewAttempts === 1) throw new Error("reviewer temporarily unavailable");
+  };
+
+  const first = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview }));
+  assert.equal(first.landed, true);
+  assert.match(first.error ?? "", /review handoff failed/);
+  const second = withLiveWritesAllowed(() => landFeedback(root, { gh, requestReview }));
+  assert.equal(second.landed, true);
+  assert.equal(reviewAttempts, 2, "the open PR is retried on the next landing pass");
+  assert.equal(creates, 1, "retry reuses the existing landing PR");
+  assert.equal(merges, 0, "a failed handoff never arms merge");
+});
+
+test("an existing landing PR missing review is repaired before merge", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-existing.yaml"), "id: fb-existing\nraw: x\n");
+  let reviewRequests = 0;
+  let merges = 0;
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/o/r/pull/16" }]);
+    if (args[0] === "pr" && args[1] === "create") throw new Error("must reuse the open landing PR");
+    if (args[0] === "pr" && args[1] === "merge") {
+      merges++;
+      return "";
+    }
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const result = withLiveWritesAllowed(() =>
+    landFeedback(root, {
+      gh,
+      requestReview: (url) => {
+        assert.equal(url, "https://github.com/o/r/pull/16");
+        reviewRequests++;
+      },
+    }),
+  );
+  assert.equal(result.landed, true);
+  assert.equal(reviewRequests, 1);
+  assert.equal(merges, 0, "repair requests review before any merge arm");
+});
+
 test("landFeedback: a git failure that throws a NON-Error value still resolves to landed:false, folding the raw value into `error` (the outer catch's `?? e` fallback)", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-nonerror-git-")); // never even a git repo
   const failingGit = (): string => {
