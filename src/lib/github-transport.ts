@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import type { ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 
@@ -381,6 +381,13 @@ export function paceGhEntry<T>(
 /** SHARED with `hooks/deny-floor.sh` rule 9's default. The two must agree or the windows diverge. */
 export const DEFAULT_GH_READ_CADENCE_S = 180;
 
+/** A short, cross-process transport gap protects the secondary limiter without making a normal
+ * daemon sweep self-refuse after its first read. This is not another 180-second budget window. */
+export const DEFAULT_GH_SHARED_READ_GAP_MS = DEFAULT_GH_PACE_MIN_GAP_MS;
+const GH_CADENCE_LOCK_WAIT_MS = 25;
+const GH_CADENCE_LOCK_MAX_WAIT_MS = 1_000;
+const GH_CADENCE_LOCK_STALE_MS = 30_000;
+
 /** The `search` limiter — a separate bucket with its own, far lower ceiling. */
 export const GH_SEARCH_BUCKET = "search";
 
@@ -454,11 +461,12 @@ export function ghArgvBucketHint(args: readonly string[]): string | undefined {
 
 /**
  * The stamp file, resolved EXACTLY as `hooks/deny-floor.sh` rule 9 resolves it
- * (`${XDG_CACHE_HOME:-$HOME/.cache}/remudero/gh-last-read`) so the two surfaces share one window.
+ * (`${RMD_GH_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/remudero/gh-last-read`) so the two
+ * surfaces share one window, including an explicit host-wide cache override.
  * `undefined` when neither variable is set — the caller then paces nothing and allows the call.
  */
 export function ghReadCadenceStampPath(env: NodeJS.ProcessEnv = process.env, bucket?: string): string | undefined {
-  const root = env.XDG_CACHE_HOME ?? (env.HOME !== undefined ? `${env.HOME}/.cache` : undefined);
+  const root = env.RMD_GH_CACHE_HOME ?? env.XDG_CACHE_HOME ?? (env.HOME !== undefined ? `${env.HOME}/.cache` : undefined);
   if (root === undefined || root === "") return undefined;
   return `${root}/remudero/gh-last-read${bucket === undefined ? "" : `-${bucket}`}`;
 }
@@ -601,12 +609,61 @@ export interface GhReadCadenceDeps {
   nowMs?(): number;
   readStampMs?(path: string | undefined): number | undefined;
   stamp?(path: string | undefined): void;
+  sleepSync?(ms: number): void;
   warn?(line: string): void;
 }
 
 /** ONE LINE PER PROCESS. An advisory that prints on every paced read is noise the daemon's log
  *  would bury, and noise is how a floor stops being read. Reset only for tests. */
 let ghCadenceAdvisoryEmitted = false;
+
+/**
+ * Serialise the read-and-stamp critical section across daemon processes. A process-local pacer
+ * cannot protect two launchd jobs (or a worker and the daemon) from both seeing an old stamp. The
+ * lock is a tiny directory because mkdir is atomic on the filesystems Remudero supports. It is
+ * fail-open after a bounded wait, and stale locks are reclaimed so a killed process cannot freeze
+ * GitHub access permanently.
+ */
+function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void, fn: () => T): T {
+  const lockPath = `${stampPath}.lock`;
+  const startedAt = Date.now();
+  let locked = false;
+  try {
+    mkdirSync(dirname(lockPath), { recursive: true });
+    while (!locked) {
+      try {
+        mkdirSync(lockPath);
+        locked = true;
+        break;
+      } catch {
+        try {
+          const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+          if (ageMs > GH_CADENCE_LOCK_STALE_MS) {
+            rmdirSync(lockPath);
+            continue;
+          }
+        } catch {
+          // The owner may have released the lock between stat and mkdir. Retry immediately.
+        }
+        if (Date.now() - startedAt >= GH_CADENCE_LOCK_MAX_WAIT_MS) break;
+        sleepSync(GH_CADENCE_LOCK_WAIT_MS);
+      }
+    }
+  } catch {
+    // An unwritable cache is already a documented fail-open case; run the call without a lock.
+  }
+  try {
+    return fn();
+  } finally {
+    if (locked) {
+      try {
+        rmdirSync(lockPath);
+      } catch {
+        // Fail open: a cleanup failure must not turn a successful GitHub call into a daemon error.
+      }
+    }
+  }
+}
 
 export function resetGhCadenceAdvisoryForTest(): void {
   ghCadenceAdvisoryEmitted = false;
@@ -629,28 +686,43 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   const readStampMs = deps.readStampMs ?? readGhReadCadenceStampMs;
   const stamp = deps.stamp ?? stampGhRead;
   const now = deps.nowMs ?? systemClock.now;
-  const decision = ghReadCadenceDecision({
-    isWrite: ghArgvIsWrite(args),
-    isExempt: ghArgvIsCadenceExempt(args),
-    nowMs: now(),
-    lastReadMs: readStampMs(stampPath),
-    mode: resolveGhTransportFloorMode(env),
+  const isWrite = ghArgvIsWrite(args);
+  const isExempt = ghArgvIsCadenceExempt(args);
+  const evaluate = (): GhReadCadenceDecision => {
+    const decision = ghReadCadenceDecision({
+      isWrite,
+      isExempt,
+      nowMs: now(),
+      lastReadMs: readStampMs(stampPath),
+      mode: resolveGhTransportFloorMode(env),
+    });
+    if (!decision.allow) throw new GhReadCadenceRefusal(decision, bucket ?? "core");
+    if (decision.paced && !ghCadenceAdvisoryEmitted) {
+      ghCadenceAdvisoryEmitted = true;
+      const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
+      warn(
+        `gh read cadence (advisory, W1-T3297): a read ${decision.ageS}s after the last on the ${bucket ?? "core"} ` +
+          `limiter, under the ${decision.windowS}s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.`,
+      );
+    }
+    return decision;
+  };
+
+  // Writes, budget probes, and calls without a usable cache path need no shared coordination.
+  if (isWrite || isExempt || stampPath === undefined) return evaluate();
+
+  const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
+  return withGhCadenceLock(stampPath, sleepSync, () => {
+    const decision = evaluate();
+    // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
+    // shared gap still protects the secondary limiter across sibling processes without making a
+    // normal sweep self-refuse after its first read.
+    const latest = readStampMs(stampPath);
+    const elapsed = latest === undefined ? undefined : now() - latest;
+    const remaining = latest === undefined ? 0 : DEFAULT_GH_SHARED_READ_GAP_MS - (elapsed ?? 0);
+    if (remaining > 0) sleepSync(remaining);
+    // Stamp only after the gap so a concurrent process observes the completed transport slot.
+    stamp(stampPath);
+    return decision;
   });
-  if (!decision.allow) throw new GhReadCadenceRefusal(decision, bucket ?? "core");
-  if (decision.paced && !ghCadenceAdvisoryEmitted) {
-    ghCadenceAdvisoryEmitted = true;
-    const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
-    warn(
-      `gh read cadence (advisory, W1-T3297): a read ${decision.ageS}s after the last on the ${bucket ?? "core"} ` +
-        `limiter, under the ${decision.windowS}s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.`,
-    );
-  }
-  // STAMPED ONLY ON AN ALLOWED READ, matching hooks/deny-floor.sh: a refusal must not extend its
-  // own window, and a write must not consume the read budget it was never charged against. The
-  // refusal half needs no test of `decision.allow` here — the throw above already returned, so a
-  // `decision.allow &&` guard would be a branch that can never be false, which is dead code that
-  // reads as a covered decision. Enforced by the "a REFUSED read does not extend its own window"
-  // case, which fails if the throw is ever moved below this line.
-  if (!ghArgvIsWrite(args) && !ghArgvIsCadenceExempt(args)) stamp(stampPath);
-  return decision;
 }

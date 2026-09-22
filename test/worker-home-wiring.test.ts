@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { workerCacheDir } from "../src/lib/config.js";
+
 const workerSrc = readFileSync(fileURLToPath(new URL("../src/lib/worker.ts", import.meta.url)), "utf8");
 
 // ── The W1-T18 HOME redirection is WIRED into every worker spawn, not just implemented ──
@@ -28,4 +30,15 @@ test("workerHomeDir is resolved from config, never hardcoded", () => {
 test("workerCacheDir is resolved from config, never from the operator HOME", () => {
   assert.match(workerSrc, /workerCacheDir\(config\)/);
   assert.doesNotMatch(workerSrc, /xdgCacheHome:\s*process\.env\.HOME/);
+});
+
+test("worker transport cache follows the host override before the per-worker HOME", () => {
+  assert.equal(
+    workerCacheDir(
+      { root: "/instance" },
+      { RMD_GH_CACHE_HOME: "/host/cache", XDG_CACHE_HOME: "/worker/cache", HOME: "/worker" },
+    ),
+    "/host/cache",
+  );
+  assert.equal(workerCacheDir({ root: "/instance" }, { HOME: "/host" }), "/host/.cache");
 });

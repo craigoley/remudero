@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, utimesSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, utimesSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -140,6 +140,11 @@ test("the stamp path matches the hook's own resolution, including the HOME fallb
   assert.equal(ghReadCadenceStampPath({} as NodeJS.ProcessEnv), undefined);
 });
 
+test("the explicit host cache override is shared by the transport and hook", () => {
+  const env = { RMD_GH_CACHE_HOME: "/host/cache", XDG_CACHE_HOME: "/worker/cache", HOME: "/worker" } as NodeJS.ProcessEnv;
+  assert.equal(ghReadCadenceStampPath(env), "/host/cache/remudero/gh-last-read");
+});
+
 // ── (4) ADVISORY BY DEFAULT ─────────────────────────────────────────────────────────────────
 
 test("the floor is advisory by default and refuses only when explicitly enforced", () => {
@@ -267,6 +272,23 @@ test("applyGhReadCadence stamps an allowed read and leaves a write and the budge
     // AN ALLOWED READ DOES — through the DEFAULT stamp io, not a fake.
     applyGhReadCadence(["api", "repos/o/r/pulls/1"], { env, warn: () => {} });
     assert.notEqual(readGhReadCadenceStampMs(stamp), undefined, "an allowed read must stamp");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the shared cadence lock is released and applies a bounded gap to a sibling read", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lock-`));
+  try {
+    const env = { XDG_CACHE_HOME: dir } as NodeJS.ProcessEnv;
+    const stamp = ghReadCadenceStampPath(env) as string;
+    const sleeps: number[] = [];
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.equal(existsSync(`${stamp}.lock`), false, "the lock must not survive a completed read");
+    stampGhRead(stamp);
+    applyGhReadCadence(["api", "repos/o/r"], { env, sleepSync: (ms) => sleeps.push(ms), warn: () => {} });
+    assert.ok(sleeps.some((ms) => ms > 0), "a sibling read must observe the bounded shared gap");
+    assert.equal(existsSync(`${stamp}.lock`), false, "the second read must release the lock too");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

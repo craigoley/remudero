@@ -207,9 +207,34 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
     [ -n "$gh_inline" ] && gh_window="$gh_inline"
     case "$gh_window" in ''|*[!0-9]*) gh_window=180 ;; esac
     if [ "$gh_window" -gt 0 ] 2>/dev/null; then
-      gh_state_dir="${XDG_CACHE_HOME:-$HOME/.cache}/remudero"
+      # Match src/lib/github-transport.ts exactly. RMD_GH_CACHE_HOME is the explicit host-wide
+      # override; XDG/HOME remain the normal fallback for existing installs.
+      gh_state_dir="${RMD_GH_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/remudero"
       gh_stamp="$gh_state_dir/gh-last-read"
       mkdir -p "$gh_state_dir" 2>/dev/null || true
+      gh_now="$(date +%s 2>/dev/null || echo 0)"
+      # Serialize the read/check/stamp section with the in-process transport. Without this two
+      # workers can both see an old stamp and both spend the same secondary-limit slot. mkdir is
+      # atomic; failure to acquire within one second is deliberately fail-open. A stale lock from
+      # a killed hook is reclaimed after 30 seconds.
+      gh_lock="$gh_stamp.lock"
+      gh_lock_owned=0
+      gh_lock_started="$gh_now"
+      while ! mkdir "$gh_lock" 2>/dev/null; do
+        gh_lock_mtime="$(stat -c %Y "$gh_lock" 2>/dev/null || true)"
+        case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime="$(stat -f %m "$gh_lock" 2>/dev/null || true)" ;; esac
+        case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime=0 ;; esac
+        gh_now="$(date +%s 2>/dev/null || echo 0)"
+        if [ "$gh_lock_mtime" -gt 0 ] && [ "$gh_now" -gt 0 ] && [ $(( gh_now - gh_lock_mtime )) -gt 30 ]; then
+          rmdir "$gh_lock" 2>/dev/null || true
+          continue
+        fi
+        if [ "$gh_now" -gt 0 ] && [ "$gh_lock_started" -gt 0 ] && [ $(( gh_now - gh_lock_started )) -ge 1 ]; then
+          break
+        fi
+        sleep 0.025
+      done
+      [ -d "$gh_lock" ] && gh_lock_owned=1
       gh_now="$(date +%s 2>/dev/null || echo 0)"
       gh_prev=0
       if [ -f "$gh_stamp" ]; then
@@ -227,6 +252,7 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       if [ "$gh_now" -gt 0 ] && [ "$gh_prev" -gt 0 ]; then
         gh_age=$(( gh_now - gh_prev ))
         if [ "$gh_age" -lt "$gh_window" ]; then
+          [ "$gh_lock_owned" -eq 1 ] && rmdir "$gh_lock" 2>/dev/null || true
           printf 'deny-floor: blocked - a read-shaped `gh` call %ss after the last one (floor %ss, W1-T3275).\n' "$gh_age" "$gh_window" >&2
           printf '  The SECONDARY rate limit counts CADENCE, not volume: a run of cheap reads trips it while\n' >&2
           printf '  `gh api rate_limit` still reads 5000/5000. Report what you already know and stop -- a wait\n' >&2
@@ -237,6 +263,7 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       fi
       # Stamped only on an ALLOWED read, so a refusal never extends its own window.
       : > "$gh_stamp" 2>/dev/null || true
+      [ "$gh_lock_owned" -eq 1 ] && rmdir "$gh_lock" 2>/dev/null || true
     fi
   fi
 fi
