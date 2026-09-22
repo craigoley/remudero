@@ -1,0 +1,60 @@
+- id: W1-T3992
+  title: "FEEDBACK LANDING AUTO-MERGE MUST WAIT FOR THE SHARED REVIEW LANE — follow up the terminal W1-T3990 plan credit with the open-or-reuse implementation"
+  repo: remudero
+  depends_on: [W1-T3990]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/feedback-landing.test.ts
+    - test/feedback-landing-union-writer.test.ts
+  origin: "followup#5317-feedback-landing-review-2026-09-21"
+  plan_refs: [W1-T530, W1-T913, W1-T3990]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED on current origin/main 282d8fea7cd7e378087306f64802de83b9e97715 and in issue #5317:
+    the feedback landing bridge creates or reuses the shared landing PR, then its create path
+    directly calls `gh pr merge --auto --squash` before the shared post-review lane can produce the
+    required current-head `remudero-review` context. W1-T3990's plan filing is already terminally
+    credited by the repository's plan ledger, so this follow-up records the implementation that
+    remains open without amending a merged task's acceptance contract.
+
+    The existing daemon sweep already routes a green PR with no current-head review through the
+    shared `reviewCommand`/`postReviewPending` machinery. The safe repair is therefore to make the
+    synchronous landing bridge stop at open-or-reuse and leave review-to-arm ordering to that one
+    shared lane. This is a flow fix, not a branch-protection weakening or a second status writer.
+  design: |
+    Remove the `gh pr merge --auto --squash` arm from the feedback landing bridge. A newly opened
+    landing PR and an already-open PR must both remain discoverable by the daemon's existing
+    post-review disposition, which produces the current-head review context before its normal arm
+    path can enable auto-merge. Preserve the bridge's best-effort/never-throw contract, operator
+    holds, compare-and-swap landing behavior, and quiet-pass idempotence.
+
+    Keep the existing shared review producer as the only review writer. If review is unavailable,
+    the PR remains open for the normal pending/failure retry and escalation flow; no synthetic pass,
+    duplicate merge arm, or forced landing commit is introduced.
+  acceptance:
+    - claim: "a fresh feedback landing PR is never armed before the shared review lane can run"
+      proof: "grep: auto-merge is NOT armed when this call cannot determine whether the head is the complete pending union in test/feedback-landing-union-writer.test.ts"
+    - claim: "a second landing batch reuses the existing PR without a pre-review merge arm"
+      proof: "grep: a second root's disjoint batch reuses the SAME already-open PR in test/feedback-landing-union-writer.test.ts"
+    - claim: "a quiet feedback landing sweep is idempotent and issues no mutation"
+      proof: "grep: unchanged content still pushes nothing in test/feedback-landing-union-writer.test.ts"
+    - claim: "the daemon's normal post-review flow reaches the shared review producer"
+      proof: "grep: reviewCommand in src/run-task.ts"
+  falsifier: |
+    Restore the `gh pr merge --auto` call inside the landing bridge: the fresh-landing test must
+    fail because the bridge arms before review. Restore a second merge arm on reuse: the disjoint
+    batch test must fail. Restore any quiet-pass mutation: the sweep idempotence test must fail.
+    The shared review producer remains the sole status writer, and its current-head/retry tests are
+    the evidence for review behavior rather than a second landing-local implementation.
+  note: |
+    reservation holder: run-W1-T3992-1790037600000
+    This is a follow-up implementation task because W1-T3990 is terminally credited by the plan
+    filing. Its implementation PR must carry `Remudero-Task: W1-T3992`; this filing stays trailer-free.
