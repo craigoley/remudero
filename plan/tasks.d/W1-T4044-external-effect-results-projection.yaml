@@ -90,3 +90,5 @@
     honest without an undeclared scope overrun. The generated test-tier manifest is intentionally shared metadata; its ownership remains with the generated-file gate rather than one implementation task. The source implementation remains responsible for route behavior and
     executable assertions; this amendment only records the fixture that its integration surface
     necessarily changes.
+    Amendment 2026-09-22 public-contract: the literal route path proof now points to
+    openapi/daemon.yaml; panel-graph wiring remains a separate criterion.
