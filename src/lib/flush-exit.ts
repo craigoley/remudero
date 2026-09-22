@@ -8,12 +8,6 @@
 
 import type { Writable } from "node:stream";
 
-export interface FlushExitDeps {
-  streams?: readonly Writable[];
-  /** Read at call time, so a test that stubs `process.exit` is honoured. */
-  exit?: (code: number) => never;
-}
-
 /** Resolve once every byte already written to `stream` has been handed to the OS — or immediately when
  *  the stream can no longer deliver anything (destroyed, ended, or its reader went away: EPIPE). A reader
  *  that closes early (`rmd … | head`) must never keep the process alive. */
@@ -45,10 +39,20 @@ export function drained(stream: Writable): Promise<void> {
   });
 }
 
-/** Flush stdout and stderr, then exit with `code`. */
-export async function flushThenExit(code: number, deps: FlushExitDeps = {}): Promise<never> {
-  const streams = deps.streams ?? [process.stdout, process.stderr];
-  await Promise.all(streams.map((stream) => drained(stream)));
-  const exit = deps.exit ?? ((c: number) => process.exit(c));
-  return exit(code);
+/**
+ * Flush stdout and stderr, then exit with `code`.
+ *
+ * NO INJECTION SEAM, deliberately. A `FlushExitDeps` shape here was never constructed by anything —
+ * `deps-interface-census` counts all three spellings -- the named shape, the inline object literal
+ * and the `*Seams` alias -- against a
+ * baseline that cannot grow, and its remedy is to reuse a seam or move the wiring to the boundary,
+ * not to rename the shape. There is nothing to reuse: the only other `exit` seams belong to
+ * self-sync and serve. So the wiring stays at the boundary, and it costs no testability — the
+ * substance is {@link drained}, which takes any `Writable`, and the streams are read HERE at call
+ * time, so a test that stubs `process.exit` or replaces a stream is still honoured. The suite that
+ * proves this drives a real child process through a slow pipe rather than stubbing either one.
+ */
+export async function flushThenExit(code: number): Promise<never> {
+  await Promise.all([process.stdout, process.stderr].map((stream) => drained(stream)));
+  return process.exit(code);
 }
