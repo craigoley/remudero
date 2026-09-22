@@ -1378,6 +1378,7 @@
     "test/serve-identity-declaration.test.ts": 1290,
     "test/serve-identity-default-path.test.ts": 1555,
     "test/serve-identity-optout.test.ts": 1016,
+    "test/serve-image-preflight.test.ts": 0,
     "test/serve-incident-timeline.test.ts": 1355,
     "test/serve-launch-uniformity.test.ts": 328,
     "test/serve-orphan-teardown.test.ts": 10138,
