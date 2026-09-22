@@ -75,7 +75,7 @@ test("selectCodexModel marks modelDecision.capabilityFallbackReason ONLY when th
   assert.equal(fallback.modelDecision?.capabilityFallbackReason, "capability-table-unavailable");
   assert.equal(fallback.modelDecision?.requestedModel, "claude-opus-5");
   assert.equal(fallback.modelDecision?.requestedCapability, "balanced", "the exact silent downgrade: frontier resolves to balanced");
-  assert.deepEqual(fallback.modelDecision?.mappedCandidates, ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"]);
+  assert.deepEqual(fallback.modelDecision?.mappedCandidates, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"]);
 
   // A loaded table that simply has no row for this model takes the SAME "balanced" default, but
   // carries no fallback reason — the documented, intended case this must stay distinct from.
@@ -110,11 +110,11 @@ function fakeCodexProcess(): { proc: EventEmitter & { stdin: PassThrough; stdout
 }
 
 const VISIBLE_CODEX_MODELS: CodexModelInfo[] = [
-  { id: "gpt-5.6-terra", defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] },
+  { id: "gpt-6-luna", defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] },
 ];
 const CODEX_HEADROOM = {
   rateLimitsByLimitId: {
-    "gpt-5.6-terra": { limitId: "gpt-5.6-terra", limitName: "gpt-5.6-terra", primary: { usedPercent: 10 } },
+    "gpt-6-luna": { limitId: "gpt-6-luna", limitName: "gpt-6-luna", primary: { usedPercent: 10 } },
   },
 };
 
@@ -139,7 +139,9 @@ test("a Codex worker whose capability table is unreadable still spawns (fail-sof
       model: "claude-opus-5", // a FRONTIER lane — the exact measured production shape
       config: codexConfig,
       providerRouting: {
-        readClaude: async () => ({ provider: "claude", readable: true, windows: [{ name: "session (5h)", usedPercent: 90 }] }),
+        // Below reserve: spawnWorker itself loads the committed table, whose frontier preference
+        // would otherwise keep this Opus lane on Claude.
+        readClaude: async () => ({ provider: "claude", readable: true, windows: [{ name: "session (5h)", usedPercent: 97 }] }),
         // Real `selectCodexModel`, called with `capabilities: undefined` — the table genuinely
         // could not be loaded ANYWHERE it was searched, exactly what `readCodexCapacity` returns
         // in production once both `resolveWorkerCapabilities` and its own `config.root` read fail.
@@ -169,7 +171,7 @@ test("a Codex worker whose capability table is unreadable still spawns (fail-sof
     "balanced",
     "a frontier lane silently served under 'balanced' is exactly the defect W1-T3097 reports",
   );
-  assert.deepEqual(result.codexCapabilityFallback?.candidates, ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"]);
+  assert.deepEqual(result.codexCapabilityFallback?.candidates, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"]);
   assert.ok(result.codexCapabilityFallback?.searchedPaths.length > 0, "names where the table was looked for");
 
   // Criterion 2: a ledger ROW, not merely a field nobody reads — a console-carried JSON line naming
@@ -186,7 +188,7 @@ test("a Codex worker whose capability table is unreadable still spawns (fail-sof
   assert.ok(ledgerEvent, "the fallback must be reported as a ledger row, never silent");
   assert.equal(ledgerEvent?.requested_model, "claude-opus-5");
   assert.equal(ledgerEvent?.capability_used, "balanced");
-  assert.deepEqual(ledgerEvent?.candidates, ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"]);
+  assert.deepEqual(ledgerEvent?.candidates, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"]);
 
   // Criterion 4: the SAME evidence rides the shared per-call ledger telemetry every worker/brain-
   // plane call spreads — so an arm built from `served_model` is attributable, not poisoned.
@@ -225,7 +227,9 @@ test("a Codex worker served BY a real capability table carries no missing-table 
       model: "claude-opus-5",
       config: codexConfig,
       providerRouting: {
-        readClaude: async () => ({ provider: "claude", readable: true, windows: [{ name: "session (5h)", usedPercent: 90 }] }),
+        // Below reserve: the committed table's frontier preference keeps an Opus lane on Claude
+        // whenever Claude has headroom, so Codex is reached here only because Claude has none.
+        readClaude: async () => ({ provider: "claude", readable: true, windows: [{ name: "session (5h)", usedPercent: 97 }] }),
         readCodex: async (_config, request) =>
           selectCodexModel(visibleFrontierModels, frontierHeadroom, codexConfig, request.requestedModel, request.requestedEffort, LADDER),
         tieBreaker: 0,

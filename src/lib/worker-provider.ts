@@ -522,9 +522,9 @@ interface CodexModelListResult {
  * missing routing table degrades no further than it always has rather than blocking dispatch.
  */
 const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
-  balanced: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
-  frontier: ["gpt-5.6-sol", "gpt-5.5"],
+  economy: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
+  balanced: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
+  frontier: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
 };
 const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;
 // Same deployment-id grammar as Codex. The Azure deployment id reaches a URL path, so accepting

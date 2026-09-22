@@ -56,6 +56,7 @@ function select(models: CodexModelInfo[], rateLimits: unknown) {
 test("the real economy/low policy offers Spark first and Luna as its same-capability fallback", () => {
   assert.deepEqual(CAPABILITIES.codex.economy.low, [
     "gpt-5.3-codex-spark",
+    "gpt-6-luna",
     "gpt-5.6-luna",
     "gpt-5.4-mini",
   ]);
@@ -85,18 +86,18 @@ test("Spark stays in economy while balanced rows are Luna-first and frontier rem
   // leads none. `frontier.low` no longer names it alone: a single-candidate row whose only model
   // stops being offered makes Codex read `readable:false`, which silently migrates that lane onto
   // Claude rather than failing loudly. Spark's economy containment below is unchanged.
-  // W1-T3762's bounded balanced-policy experiment leads with Luna, keeps Terra as its immediate
-  // same-capability fallback, and leaves every frontier row Sol-first. The exact shape below is a
+  // 2026-09-22 model change: GPT-6 Luna leads balanced with GPT-5.6 Luna behind it, Terra is
+  // phased out of every Codex row, and frontier is Sol 6 first. The exact shape below is a
   // regression guard against a future stale assertion reverting the committed mount policy.
   assert.deepEqual(CAPABILITIES.codex.balanced, {
-    low: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"],
-    medium: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"],
-    high: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5"],
+    low: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
+    medium: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
+    high: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
   });
   assert.deepEqual(CAPABILITIES.codex.frontier, {
-    low: ["gpt-5.6-sol", "gpt-5.5"],
-    medium: ["gpt-5.6-sol", "gpt-5.5"],
-    high: ["gpt-5.6-sol", "gpt-5.5"],
+    low: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+    medium: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+    high: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
   });
   // A decommissioning model must never LEAD a row, and no row may be single-candidate.
   for (const rows of [CAPABILITIES.codex.balanced, CAPABILITIES.codex.frontier]) {

@@ -50,6 +50,7 @@ tiers:
   sonnet: 2
   opus: 3
   claude-opus-5: 4
+  claude-opus-5-5: 4
   # THE TOP TIER IS NO LONGER CLAUDE-ONLY. An Architect that exists only while the Claude
   # subscription has headroom is a single point of failure, not a fleet -- so the two Azure
   # deployments the fleet already trusts are rankable here and may hold a top-tier seat when
@@ -109,6 +110,7 @@ capabilities:
     # terra answers for a frontier seat under squeeze; luna is a balanced peer of sonnet.
     gpt-5.6-terra: frontier
     gpt-5.6-luna: balanced
+    claude-opus-5-5: frontier
     claude-opus-5: frontier
     claude-opus-4-8: frontier
     claude-opus-4-7: frontier
@@ -121,7 +123,7 @@ capabilities:
   claude_candidates:
     economy:  [claude-haiku-4-5-20251001]
     balanced: [claude-sonnet-5, claude-sonnet-4-6, claude-sonnet-4-5-20250929]
-    frontier: [claude-opus-5, claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5-20251101]
+    frontier: [claude-opus-5-5, claude-opus-5, claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5-20251101]
   # gpt-5.5 IS BEING DECOMMISSIONED (operator notice, 2026-09-14), so it is demoted to a TRAILING
   # fallback in every row it appears in rather than deleted: while it still answers it remains a
   # last resort, and once it stops being offered the eligibility filter drops it with no further
@@ -163,19 +165,44 @@ capabilities:
   # with no further change, on the day the account is offered it. Reordering them would reverse a
   # merged ruling to buy nothing. ONLY `balanced.low` changes here, because only it was BROKEN:
   # a single non-visible candidate leaves the row with no eligible model at all.
+  #
+  # 2026-09-22 MODEL CHANGE (operator direction): GPT-6 Luna replaces GPT-5.6 Luna, Terra is being
+  # phased out, and Sol 6 is used "only if absolutely necessary". MEASURED the same day against this
+  # account's `model/list` from the daemon container: gpt-6-luna, gpt-6-sol and gpt-6-astra (the
+  # account default) are visible, beside gpt-5.6-sol/terra/luna and gpt-5.5. Every model shares ONE
+  # quota bucket (`codex`), so headroom ties and ROW ORDER decides -- a trailing entry really is
+  # reached only when the ones ahead are absent or cannot serve the effort.
+  # - gpt-6-luna LEADS every row gpt-5.6-luna led; gpt-5.6-luna TRAILS it (demoted, not deleted --
+  #   the gpt-5.5 lesson: a row whose only candidate vanishes silently moves the lane to Claude).
+  # - TERRA IS REMOVED from every Codex row. It was last SELECTED on 2026-09-14; every Codex pick
+  #   since 2026-09-19 was Luna. A balanced lane with no eligible Luna now falls to Claude.
+  # - SOL IS NOT ADDED TO balanced: with no Luna, a trailing Sol would win the auction against Claude
+  #   by headroom, which is the opposite of "only if absolutely necessary".
+  # - frontier leads with gpt-6-sol, but `provider_preference` below sends frontier work to Claude
+  #   (Opus 5.5) whenever Claude has headroom, so this row is reached only when Claude is blocked.
+  # gpt-6-astra is deliberately NOT routed: no operator ruling places it yet.
   codex:
     economy:
-      low:    [gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
-      medium: [gpt-5.6-luna, gpt-5.3-codex-spark, gpt-5.4-mini]
-      high:   [gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
+      low:    [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
+      medium: [gpt-6-luna, gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
+      high:   [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
     balanced:
-      low:    [gpt-5.6-luna, gpt-5.6-terra, gpt-5.5]
-      medium: [gpt-5.6-luna, gpt-5.6-terra, gpt-5.5]
-      high:   [gpt-5.6-luna, gpt-5.6-terra, gpt-5.5]
+      low:    [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
+      medium: [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
+      high:   [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
     frontier:
-      low:    [gpt-5.6-sol, gpt-5.5]
-      medium: [gpt-5.6-sol, gpt-5.5]
-      high:   [gpt-5.6-sol, gpt-5.5]
+      low:    [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      medium: [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      high:   [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+  # FRONTIER PREFERS CLAUDE. MEASURED over the retained ledger 2026-09-22: 84 of 127 Opus-requested
+  # runs (retro, retro preflight repair, plan synthesis) were routed to Codex gpt-5.6-sol, because
+  # the auction splits a capability by headroom alone. The operator's direction is Opus 5.5 first
+  # and Sol 6 only if absolutely necessary, so frontier takes Claude whenever Claude has headroom
+  # and the auction (and so Sol) decides only when Claude is below reserve or unreadable. Balanced and
+  # economy stay pure headroom auctions -- Luna carrying that work is the point. An operator's
+  # explicit console preference still wins over this row.
+  provider_preference:
+    frontier: claude
   # W1-T3546: a pay-per-token deployment is selected by explicit mount affinity, never capacity.
   # The data shape mirrors `codex`: capability -> effort -> ordered deployment identifiers.
   # W1-T3598: gpt-5-nano LEADS economy and balanced — cheaper than gpt-oss-120b on both token axes
@@ -234,7 +261,7 @@ capabilities:
       high:   [gpt-5.6-luna, gpt-5.6-terra]
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
-# claude-opus-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY
+# claude-opus-5-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY
 # plan authorship (`rmd plan`'s orchestration + the retro Architect's own worktree-DAG framing)
 # via architectModel(config, mounts) — a mount-table edit here, not a code change.
 #
@@ -259,7 +286,7 @@ capabilities:
 # MPG first-instance ruling (fb-1784921980488-44b355 §4): opus -> Opus 5, launch-day SOTA on
 # knowledge-work evals at unchanged cost.
 architect:
-  model: claude-opus-5
+  model: claude-opus-5-5
   effort: high
   max_turns: 400
   context_budget: 180000
@@ -330,7 +357,7 @@ architect:
 # W1-T3575's runtime cap (src/lib/worker-provider.ts) refuses any paid request before transport
 # until `dailyCapUsd` is configured.
 synthesis:
-  retro:       { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
+  retro:       { model: claude-opus-5-5, effort: high, max_turns: 400, context_budget: 180000 }
   triage:      { model: sonnet,        effort: low,  max_turns: 400, context_budget: 180000 }
   inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000, provider: cash }
 

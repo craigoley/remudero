@@ -151,6 +151,13 @@ export interface CapabilityLadder {
   /** DEPRECATED (W1-T3607): pre-rename spelling of {@link cash}, mirrored by {@link parseCapabilities}
    *  so a caller reading this field directly (bypassing the loader) still resolves the same table. */
   openweight?: Record<string, Record<string, string[]>>;
+  /**
+   * capability -> the subscription provider that capability PREFERS in the auction. The auction
+   * otherwise splits by headroom alone; a preferred provider is taken whenever it has headroom
+   * and the auction decides only when it does not. Applies only while the operator's own policy is
+   * `automatic`. Absent means every capability is a pure headroom auction.
+   */
+  providerPreference?: Record<string, "claude" | "codex">;
 }
 
 /** The whole parsed, validated routing table. */
@@ -497,7 +504,34 @@ function parseCapabilities(
   // caller that constructs a CapabilityLadder-shaped object directly (bypassing this loader) may
   // still read the deprecated `openweight` key — there is exactly one parsed source of truth here,
   // so the two fields can never drift apart.
-  return { ladder, claude, claudeCandidates, codex, ...(cash ? { cash, openweight: cash } : {}) };
+  let providerPreference: Record<string, "claude" | "codex"> | undefined;
+  if (raw.provider_preference !== undefined) {
+    if (!isObject(raw.provider_preference)) {
+      throw new MountsError("'capabilities.provider_preference' must be a mapping of capability -> provider.");
+    }
+    providerPreference = {};
+    for (const [capability, provider] of Object.entries(raw.provider_preference)) {
+      if (!(capability in ladder)) {
+        throw new MountsError(`'capabilities.provider_preference.${capability}' names a capability the ladder does not declare.`);
+      }
+      // `cash` never enters the auction, so it cannot be preferred there.
+      if (provider !== "claude" && provider !== "codex") {
+        throw new MountsError(
+          `'capabilities.provider_preference.${capability}' must be "claude" or "codex", got ${JSON.stringify(provider)}.`,
+        );
+      }
+      providerPreference[capability] = provider;
+    }
+  }
+
+  return {
+    ladder,
+    claude,
+    claudeCandidates,
+    codex,
+    ...(cash ? { cash, openweight: cash } : {}),
+    ...(providerPreference ? { providerPreference } : {}),
+  };
 }
 
 /**
