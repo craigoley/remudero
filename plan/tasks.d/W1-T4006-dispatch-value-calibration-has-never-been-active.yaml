@@ -1,0 +1,73 @@
+- id: W1-T4006
+  title: "THE CLOSURE-VALUE CALIBRATION HAS NEVER ONCE BEEN ACTIVE ON THE TWO DAEMONS THAT LOG IT — 352 consecutive `missing-prior-snapshot` refusals, and the third daemon never logs the step at all, so nobody has ruled on which configuration is correct"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/dispatch-value.ts]
+  origin: oper#fleet-health-2026-09-22
+  plan_refs: ["W1-T3704"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON THE LIVE FLEET, 2026-09-22, across all three daemon state directories:
+
+        remudero  dispatch.value.*  NONE   (the step is never emitted at all)
+        site      dispatch.value.refused:missing-prior-snapshot   265
+        console   dispatch.value.refused:missing-prior-snapshot    87
+
+    Every one of those 352 rows carries the same reason, on every tick, since the step began
+    appearing. `buildDispatchValueContext` (lib/dispatch-value.ts) refuses on
+    `snapshots.length < 2`, and nothing on either daemon has ever supplied a second closure
+    snapshot — so the calibration those rows describe has NEVER ONCE RANKED A DISPATCH.
+
+    THIS IS NOT AN OUTAGE, AND THAT IS PRECISELY WHY IT PERSISTED. The function's own doc is
+    explicit: "A missing prior snapshot refuses the entire calibration and leaves the historic
+    priority/scope/id order untouched." The degradation is BENIGN and SILENT by design — dispatch
+    keeps working on the historic ordering, so no board goes red, no PR sticks, and nothing
+    escalates. I nearly mis-read it as the cause of an idle daemon before reading that doc; it was
+    not. The cost is not breakage, it is that a ranking feature was built, shipped, and has never
+    influenced a single decision.
+
+    THE THIRD DAEMON IS THE SHARPER QUESTION. `remudero` emits NO `dispatch.value` row at all —
+    not a refusal, not a success. So the two configurations differ in a way nobody has ruled on:
+    either the busy daemon never reaches this code path (and the feature is even more inert than
+    the refusals suggest), or it takes a different branch that is silent. Both readings are
+    actionable and they are not the same defect. ANSWER THAT FIRST — the fix depends on it.
+
+    THE CLASS, WHICH THIS REPO KEEPS PAYING FOR: a capability that is correct, tested, wired, and
+    never fed. `reviewReuseVerdict` (W1-T3704) sat inert the same way until its producer was
+    built — its own comment said "Not yet populated by the real gateway" while every call returned
+    the fallback. The recurring signature is a SILENT, BENIGN degradation path: because nothing
+    reddens, nothing surfaces, and the inert feature is indistinguishable from a working one in
+    every dashboard.
+
+    THREE HONEST OUTCOMES, and the task is to pick one on evidence, not to assume the first:
+      (a) THE SNAPSHOTS SHOULD BE PRODUCED. Then build the producer and show the calibration
+          changing a dispatch order it would otherwise have taken.
+      (b) THE FEATURE IS NOT WANTED ON THESE LANES. Then say so in the code and stop emitting a
+          per-tick refusal row that reads like a fault — 352 rows of noise in a ledger whose whole
+          value is that a row means something.
+      (c) IT WAS SUPERSEDED. Then retire it, and record what replaced it.
+
+    DO NOT "FIX" THIS BY MAKING THE REFUSAL LOUDER. A benign degradation that escalates would be
+    strictly worse than one that is quiet — the bound would fire on a healthy condition, which is
+    this repo's most-repeated defect (CLAUDE.md, investigation discipline). What is missing is a
+    RULING, not an alarm.
+
+    FILES NOTE (W1-T3730): `files:` omits the test file the build will add — the only way past
+    `lint-plan`'s `proof-unit-test-unresolvable` on a plan-only filing. The build must add it.
+
+  acceptance:
+    - claim: "the two daemon configurations are reconciled, so a dispatch-value row means the same thing on every lane"
+      proof: "unit test: W1-T4006: every lane agrees on whether dispatch value is calibrated"
+    - claim: "a calibration that cannot run no longer emits a per-tick refusal row"
+      proof: "unit test: W1-T4006: an uncalibratable lane is quiet"
+  note: |
+    reservation hand-off: plan/file-dispatch-value-1790074290 -> plan/file-dispatch-value-1790074290
+
+    Minted on the filing branch itself, which is now what `rmd next-task-id` requires — it refuses
+    to reserve from `main`, since main can never be the filing branch.
