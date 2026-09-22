@@ -17033,6 +17033,37 @@ export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
   }
 }
 
+/**
+ * Builds the {@link LandingReviewRequest} callback `daemonBoot` wires into `sweepFeedbackLanding`
+ * (W1-T3990) — exported so its parse/dispatch/log behaviour is unit-testable without booting the
+ * full daemon. Parses the PR number out of `prUrl`; an unparseable URL logs and returns without
+ * calling `runReviewCommand` at all. Otherwise starts `runReviewCommand` (the SAME review command
+ * the board sweep uses) and NEVER awaits it here — a non-zero exit code or a rejection each log
+ * `feedback.landing_review.failed` on `log`, a settled zero exit code is silent (matching the
+ * board sweep's own logging), and this function itself always returns synchronously, so a slow or
+ * hung review can never block the landing/sweep loop that called it.
+ * Falsifier: test/feedback-landing.test.ts's `makeLandingReviewRequest` cases.
+ */
+export function makeLandingReviewRequest(
+  log: (step: string, extra?: Record<string, unknown>) => unknown,
+  runReviewCommand: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
+  repoSlug: string,
+): LandingReviewRequest {
+  return (prUrl) => {
+    const match = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
+    if (!match) {
+      log("feedback.landing_review.failed", { pr_url: prUrl, reason: "unparseable pull-request URL" });
+      return;
+    }
+    void runReviewCommand(match[1]!, ["--repo", repoSlug], { executionMode: "deterministic" }).then(
+      (code) => {
+        if (code !== 0) log("feedback.landing_review.failed", { pr_url: prUrl, exit_code: code });
+      },
+      (error) => log("feedback.landing_review.failed", { pr_url: prUrl, error: String((error as Error)?.message ?? error) }),
+    );
+  };
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   const {
     fetchView,
@@ -29790,19 +29821,13 @@ export async function daemonCommand(
   // the SAME review command the board sweep uses, so the first landing cannot sit green-but-
   // unreviewed waiting for a human. `reviewCommand` owns its pending-post idempotency and exact
   // head checks; a failed promise is logged and the landing remains open for the next pass.
-  const requestLandingReview: LandingReviewRequest = (prUrl) => {
-    const match = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
-    if (!match) {
-      log("feedback.landing_review.failed", { pr_url: prUrl, reason: "unparseable pull-request URL" });
-      return;
-    }
-    void reviewCommand(match[1]!, ["--repo", `${target.owner}/${target.repo}`], { executionMode: "deterministic" }).then(
-      (code) => {
-        if (code !== 0) log("feedback.landing_review.failed", { pr_url: prUrl, exit_code: code });
-      },
-      (error) => log("feedback.landing_review.failed", { pr_url: prUrl, error: String((error as Error)?.message ?? error) }),
-    );
-  };
+  // W1-T3995: extracted into `makeLandingReviewRequest` (parse/dispatch/log, no daemon-boot
+  // state) so the retry/ordering behaviour above is unit-testable without booting the daemon.
+  const requestLandingReview: LandingReviewRequest = makeLandingReviewRequest(
+    log,
+    reviewCommand,
+    `${target.owner}/${target.repo}`,
+  );
   const sweepFeedbackLandingRung = target.isSelf
     ? () =>
         sweepFeedbackLanding(repoRoot, {
