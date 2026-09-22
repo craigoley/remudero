@@ -1884,6 +1884,19 @@ import {
 } from "./lib/worker.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 
+/** Preserve the watchdog's measured abandonment evidence when the advisory reviewer fails.
+ * The catch arm must publish the values captured by the worker, rather than re-reading policy
+ * after the fact: policy may change between the worker trip and the ledger write. */
+export function reviewerAbandonmentLedgerFields(error: Pick<WorkerAbandonedError, "reasonClass" | "evidence">): Record<string, unknown> {
+  return {
+    reason_class: error.reasonClass,
+    elapsed_ms: error.evidence.elapsedMs,
+    bound_ms: error.evidence.boundMs,
+    last_state: error.evidence.lastState ?? null,
+    last_state_ms: error.evidence.lastStateMs ?? null,
+  };
+}
+
 /** Convert a bounded Codex output failure into the structured fields retained by retro.error. */
 export function retroErrorLedgerFields(error: unknown): Record<string, unknown> | undefined {
   if (!isCodexWorkerOutputLimitError(error)) return undefined;
@@ -5901,6 +5914,9 @@ async function runReview(args: {
           reviewerVerdictContract(criteria.length);
         const stopTelemetry = args.workerTelemetry?.startPolling();
         let reviewer: WorkerResult;
+        const reviewerClockBoundMs =
+          args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon;
+        const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
         try {
           reviewer = args.account(
             await (args.reviewerSpawnWorker ?? spawnWorker)({
@@ -5933,7 +5949,7 @@ async function runReview(args: {
             // watchdog as dispatch workers so a provider/SDK stall cannot hold the decision claim
             // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
             // a terminal verdict when this bound trips.
-            clockBound: { boundMs: args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon },
+            ...reviewerClockBound,
             streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }) : undefined,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
             }),
@@ -5968,6 +5984,9 @@ async function runReview(args: {
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
       reviewerSpawnFailed = true;
+      if (e instanceof WorkerAbandonedError) {
+        log("review.reviewer.abandoned", reviewerAbandonmentLedgerFields(e));
+      }
       if (e instanceof ReviewerSnapshotError) {
         log(`review.reviewer.${e.phase}_error`, { reason: e.reason, error: e.message });
       }
