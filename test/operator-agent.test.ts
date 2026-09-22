@@ -228,6 +228,27 @@ test("unit test: operator-agent memory redacts and retains a decision note", () 
       note: "The bounded evidence supports review.",
     },
   );
+  assert.deepEqual(
+    selectOperatorAgentMemoryRow({
+      step: "panel.operator_agent_outcome",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      outcome: {
+        summary: "The bounded change reduced queue latency.",
+        helped: true,
+        observedAt: "2026-09-22T00:00:00.000Z",
+      },
+      bearer_token_id: "must-not-be-retained",
+    }),
+    {
+      step: "panel.operator_agent_outcome",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      outcome: {
+        summary: "The bounded change reduced queue latency.",
+        helped: true,
+        observedAt: "2026-09-22T00:00:00.000Z",
+      },
+    },
+  );
 });
 
 test("reads the default operator-agent settings when no settings row exists; persists a valid operator-agent settings update in the ledger", async () => {
