@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: medium
   budget_usd: 12.00
@@ -95,3 +95,25 @@
 
     risk:medium — nothing here changes behaviour and the diff is one test file. The band reflects
     that the eventual ruling touches the dispatch-path risk judge, not that this filing does.
+
+    OPERATOR RULING 2026-09-22 — TAKE ENDING (a), WIRE THEM, AND SHIP THE DETECTOR IN (iv) WITH
+    IT. The shard framed (a) as the costlier ending because it needs `DeclaredFileBaseFact`s that
+    nothing produces. It is still the right one, for the reason the shard itself gives: (a)
+    REPLACES AN LLM INFERENCE WITH SET ARITHMETIC. A judge that is told which declared paths the
+    diff does not touch is cheaper AND more reliable than one asked to notice it, and this repo's
+    doctrine prefers a computed fact over an inferred one everywhere else.
+
+    DELETION IS DECLINED. Ending (b) would remove a correct predicate because its caller was never
+    written, which costs the arithmetic permanently to save a maintenance line.
+
+    THE THREE CONSTRAINTS THE SHARD SET ARE PART OF THE RULING, NOT ADVICE. `RISK_JUDGE_TOOLS`
+    stays empty and the judge stays diff-blind (W1-T454). The added prompt line is ONE rendered
+    line and its token cost is stated against the 40,000-token floor W1-T2371 records. The
+    unwired-export detector is scoped to `src/lib/risk-judge.ts` alone — a repo-wide census is a
+    different task and must not ride along.
+
+    IF `DeclaredFileBaseFact` TURNS OUT TO BE MORE THAN A SESSION'S WORK, SPLIT IT AND SAY SO
+    rather than quietly degrading to (b). A partial (a) that renders only the not-touched set —
+    which needs the declared list and the diff, both already in hand — is a legitimate first half;
+    the base-fact half is the second. Shipping the first half alone is compliance with this
+    ruling. Shipping (b) is not.

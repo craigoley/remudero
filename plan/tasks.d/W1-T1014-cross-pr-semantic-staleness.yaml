@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 30.00
   rationale: |
@@ -223,3 +223,24 @@
     NEAR-MISS worth one line — #4301, fixing the collision, picked W1-T2971 off a filename scan
     while the fleet had held refs/rmd-id/W1-T2971 since 19:54:07Z and had already cut a run branch
     against it; that was caught by hand, by nothing automated, which is the same gap in miniature.
+
+    OPERATOR RULING 2026-09-22 — TAKE OPTION (a), `required_status_checks_strict: true`. The
+    operator was shown (a), (b) and the status quo and chose the one that costs ZERO engineering
+    and is already a setting he owns. This shard is UNPARKED on that ruling; what remains is
+    turning the flag on and recording the ceiling that comes with it.
+
+    WHAT THE RULING ACCEPTS, STATED SO NOBODY RE-ARGUES IT LATER. The measurement in (ii) is not
+    disputed and is not being overridden: strict serialises merges at one per re-validation window
+    — 115/day at the p50 window, 67/day at the p90 — and observed demand exceeded the p90 ceiling
+    on 4 of 11 days. THE OPERATOR IS ACCEPTING THAT CEILING. It is the cheaper failure: a merge
+    that waits is recoverable, a semantically stale merge takes six PRs down with it.
+
+    OPTION (b) IS DECLINED, NOT DEFERRED. Re-running CI on every open PR when main advances costs
+    239 CI-hours/day at p90 concurrency and DETECTS rather than PREVENTS — the red still arrives
+    after the merge that caused it, so the blast radius survives the spend. Do not re-file it.
+
+    THE BUILD, AND ITS LIMIT. Flip `required_status_checks.strict` to true on `main` and record
+    the before/after protection read in the PR body. DO NOT also build a queue, a batcher or an
+    auto-rebase to soften the ceiling: if the ceiling actually binds, that is a NEW measurement
+    and a NEW task, and pre-building relief for a cost nobody has yet paid is how this repo has
+    previously shipped a bound that fires on a healthy condition.
