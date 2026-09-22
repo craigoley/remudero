@@ -46,7 +46,7 @@ function goodRaw() {
 
 test("the SHIPPED .remudero/mounts.yaml loads and satisfies the Tier Invariant", () => {
   const m = loadMounts(SHIPPED);
-  assert.equal(m.architect.model, "claude-opus-5-5"); // MPG first-instance ruling (fb-…44b355 §4): opus -> Opus 5; 2026-09-22 model change -> Opus 5.5
+  assert.equal(m.architect.model, "claude-opus-5"); // MPG first-instance ruling (fb-…44b355 §4): opus -> Opus 5
   assert.equal(m.judge.model, "opus");
   // Every worker rides strictly below the Architect tier AND the judge tier —
   // across every class row, not just `src` (W1-T167: the invariant descends

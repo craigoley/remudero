@@ -141,7 +141,7 @@ test("architectLaneShare touches no mount row or configured model: .remudero/mou
 
   const before = readFileSync(mountsPath(repoRoot), "utf8");
   const mountsBefore = loadMounts(mountsPath(repoRoot));
-  assert.equal(mountsBefore.architect.model, "claude-opus-5-5", "the committed architect mount row, unchanged by this shard");
+  assert.equal(mountsBefore.architect.model, "claude-opus-5", "the committed architect mount row, unchanged by this shard");
 
   // Exercise the new code path (buildGather -> architectLaneShare -> render) and
   // confirm the on-disk mount table is byte-for-byte the same afterward.

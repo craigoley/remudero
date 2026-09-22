@@ -69,7 +69,7 @@ test("a table declaring NO squeeze seat loads and behaves exactly as before", ()
   // THE REGRESSION GUARD. The refusal must bite ONLY on the dead field — every live mount row, and
   // the real committed table, must be untouched by it.
   const mounts = validateMounts(table(), {});
-  assert.equal(architectModel(CFG, mounts), "claude-opus-5-5");
+  assert.equal(architectModel(CFG, mounts), "claude-opus-5");
   assert.equal(architectModel({} as unknown as Config), "opus", "the config default still answers with no table");
 });
 
