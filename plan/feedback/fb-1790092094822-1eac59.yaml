@@ -1,0 +1,49 @@
+id: fb-1790092094822-1eac59
+ts: 2026-09-22T15:48:14.822Z
+raw: "A HEAD'S IDENTITY BASIS CAN LAPSE MID-BRANCH, AND THE ONLY REPAIR IS A NEW
+  PULL REQUEST — observed 2026-09-22 on PR 6562, which had to be abandoned and
+  reopened as 6577 by hand. head-identity-gate admits a head four ways: a
+  run-shaped ref, an anchored Remudero-Task trailer, a filing-shaped subject, or
+  -- W1-T3706's fifth form -- a diff in which EVERY path is non-code
+  (NON_CODE_PATH_PATTERNS = .md$, plan/, docs/, learnings/). 6562 opened on
+  branch `doctrine/cheap-candidate-first` carrying three .md files, so the
+  fourth form admitted it and the shipped pre-push gate printed OK. Two commits
+  later the branch carried test/claude-md-budget-ratchet.test.ts and
+  test/the-doctrine-cap-tracks-the-index.test.ts, the diff stopped being all
+  non-code, and the ONLY basis that head had was gone. The gate then refused,
+  correctly: nothing was wrong with the tests, and nothing was wrong with the
+  gate. THE COST IS THAT THE REFUSAL IS UNREPAIRABLE IN PLACE. A pull request's
+  head branch cannot be changed after it is opened, so satisfying the gate meant
+  pushing the same commits to `run-unfiled-<epochMs>`, opening a new PR, and
+  closing the old one with an explanation -- losing the review thread and the
+  check history. Verified before pushing rather than after: the same tree read
+  REFUSED under the old ref and \"OK — identified via its run-shaped head ref\"
+  under the new one. THE AUTOMATABLE PREVENTION IS AT PUSH TIME AND IT IS CHEAP,
+  because the gate is already a local script the pre-push hook already runs.
+  Today the hook answers \"is this head identified NOW\". It should also answer
+  \"does this push REMOVE the only basis on which this head is identified\" --
+  i.e. compute the identity basis before and after, and refuse a push that takes
+  a branch from admitted to refused, naming which form it just lost and the two
+  ways to keep it (rename to run-unfiled-<epochMs> BEFORE opening a PR, or add a
+  trailer). Refusing at push costs one command; refusing at CI costs a PR
+  migration. NOTE THE ORDERING PROPERTY THAT MAKES THIS WORTH BUILDING: the
+  lapse is silent and delayed. The commit that breaks the exemption is not the
+  commit that gets refused -- the gate runs per pull_request event, so the
+  refusal surfaces on a later push or re-run, by which time the PR exists and
+  the repair is expensive. A push-time check is the only place the cheap fix is
+  still available. FALSIFYING CHECK: if the pre-push hook already computes the
+  basis delta, or if head-identity-gate is not part of the shipped pre-push set
+  on every lane, this is a documentation gap rather than a missing check -- read
+  hooks/ and the pre-push wiring before building. ALSO WORTH CONFIRMING: whether
+  the fleet's own push path runs the same pre-push gates, since the two commits
+  that broke 6562 were pushed by the fleet and no refusal was observed at that
+  time."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
