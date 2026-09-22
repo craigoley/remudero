@@ -176,6 +176,26 @@ test("ZDOTDIR defaults nest under the REDIRECTED HOME, not the operator's real o
   assert.equal(child.ZDOTDIR, "/opt/rmd/worker-home/.config/remudero/zdotdir");
 });
 
+test("shared XDG cache is independent from the per-spawn HOME boundary", () => {
+  const child = buildWorkerEnv(
+    {},
+    { PATH: "/usr/bin", HOME: "/Users/operator", XDG_CACHE_HOME: "/Users/operator/.cache" },
+    { home: "/opt/rmd/worker-home-1", xdgCacheHome: "/opt/rmd/state/cache" },
+  );
+  assert.equal(child.HOME, "/opt/rmd/worker-home-1");
+  assert.equal(child.XDG_CACHE_HOME, "/opt/rmd/state/cache");
+  assert.notEqual(child.HOME, child.XDG_CACHE_HOME, "shared transport state must not collapse worker HOME isolation");
+});
+
+test("the instance XDG cache wins over an accidental per-worker extra", () => {
+  const child = buildWorkerEnv(
+    { XDG_CACHE_HOME: "/tmp/test-cache" },
+    { PATH: "/usr/bin", HOME: "/Users/operator" },
+    { home: "/opt/rmd/worker-home-1", xdgCacheHome: "/opt/rmd/state/cache" },
+  );
+  assert.equal(child.XDG_CACHE_HOME, "/opt/rmd/state/cache");
+});
+
 // ── W1-T236: DISABLE_AUTOUPDATER grant (autoupdater-race hazard) ──
 
 test("grants DISABLE_AUTOUPDATER=1 to every worker child, added through the allowlist rather than dropped by it", () => {

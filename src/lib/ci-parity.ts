@@ -1417,13 +1417,6 @@ export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
   // red unexplained and loud; one that over-counts absorbs a real failure). Filed as an
   // observation rather than fixed in passing.
   {
-    file: "test/worker-credential-preflight.test.ts",
-    cause: "darwin-keychain-unprovisioned",
-    count: 2,
-    note: "ensureWorkerKeychain refuses headlessly on an unprovisioned darwin keychain — correct (W1-T235), not a defect",
-    appliesTo: (f) => f.platform === "darwin",
-  },
-  {
     file: "test/fleet-heartbeat.test.ts",
     cause: "bsd-date-control-arm",
     count: 2,
@@ -1448,13 +1441,6 @@ export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
     count: 2,
     note: "UNDIAGNOSED — carried from the census, not re-derived here (W1-T2234 design i); named honestly rather than guessed at",
     appliesTo: (f) => f.platform === "darwin",
-  },
-  {
-    file: "test/dispatch-memory-governor.test.ts",
-    cause: "linux-procfs-absent",
-    count: 1,
-    note: "the probe's cgroup-limit read expects /proc/meminfo, which does not exist on darwin — a platform fact, not a defect",
-    appliesTo: (f) => !f.hasProcMeminfo,
   },
   {
     file: "test/proof-spawner-env-isolation.test.ts",

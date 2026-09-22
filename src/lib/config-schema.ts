@@ -36,6 +36,14 @@ export function canonicalWorkerProviderId(id: string): string {
   return WORKER_PROVIDER_ID_ALIASES[id] ?? id;
 }
 
+/** One operator approval for a human-gated model id. Lives only in the host's config.json. */
+export interface ModelApproval {
+  model: string;
+  approvedBy: string;
+  approvedAt: string;
+  expiresAt?: string;
+}
+
 export interface Config {
   claudeBin: string;
   root: string;
@@ -46,6 +54,8 @@ export interface Config {
   softBudgetThresholdUsd?: number;
   workerModel?: string;
   architectModel?: string;
+  /** Operator approvals for human-gated model families (Astra, Fable). See src/lib/model-gate.ts. */
+  modelApprovals?: ModelApproval[];
   accessTeamDomain?: string;
   accessAudience?: string;
   notifyRecipient?: string;
@@ -230,6 +240,18 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
   configField("softBudgetThresholdUsd", "number", true, 25, "config.json", "Soft notional budget warning threshold.", numberShape),
   configField("workerModel", "string", true, "sonnet", "config.json", "Worker model selector.", stringShape),
   configField("architectModel", "string", true, "opus", "config.json", "Architect model fallback.", stringShape),
+  configField("modelApprovals", "ModelApproval[]", true, undefined, "config.json", "Operator approvals for human-gated models (Astra, Fable).", {
+    kind: "array",
+    element: {
+      kind: "object",
+      fields: [
+        configField("model", "string", false, undefined, "config.json", "Exact approved model id.", stringShape),
+        configField("approvedBy", "string", false, undefined, "config.json", "Who approved it.", stringShape),
+        configField("approvedAt", "string", false, undefined, "config.json", "When it was approved (ISO time).", stringShape),
+        configField("expiresAt", "string", true, undefined, "config.json", "When the approval lapses (ISO time).", stringShape),
+      ],
+    },
+  }),
   configField("accessTeamDomain", "string", true, undefined, "config.json", "Cloudflare Access team domain.", stringShape),
   configField("accessAudience", "string", true, undefined, "config.json", "Cloudflare Access audience tag.", stringShape),
   configField("notifyRecipient", "string", true, "craigoley@gmail.com", "config.json", "Escalation notification recipient.", stringShape),
@@ -296,6 +318,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
   envEntry("RMD_GH_READ_BURST", "Overrides the GitHub read burst this process grants inside the shared cadence floor.", ["src/lib/github-transport.ts"]),
+  envEntry("RMD_GH_SHARED_READ_GAP_MS", "Overrides the short cross-process gap between shared GitHub reads; not a second cadence budget window.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),

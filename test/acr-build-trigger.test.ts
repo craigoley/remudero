@@ -40,7 +40,7 @@ function executableText(value: unknown): string {
 test("a push to main that changes an authoritative baked or build-context path starts the ACR build workflow", () => {
   const push = workflow().on?.push;
   assert.deepEqual(push?.branches, ["main"]);
-  assert.deepEqual(push?.paths, ["deploy/Dockerfile", "deploy/entrypoint.sh", ".dockerignore"]);
+  assert.deepEqual(push?.paths, ["deploy/Dockerfile", "deploy/entrypoint.sh", ".dockerignore", "deploy/package.json", "deploy/package-lock.json", "deploy/codex-requirements.toml"]);
 });
 
 test("a push to main that changes only mounted source paths does not start the ACR build workflow", () => {

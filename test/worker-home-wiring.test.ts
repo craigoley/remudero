@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { workerCacheDir } from "../src/lib/config.js";
+
 const workerSrc = readFileSync(fileURLToPath(new URL("../src/lib/worker.ts", import.meta.url)), "utf8");
 
 // ── The W1-T18 HOME redirection is WIRED into every worker spawn, not just implemented ──
@@ -18,8 +20,25 @@ test("spawnWorker MATERIALIZES the redirected worker-home before building the ch
 test("spawnWorker passes the redirected HOME into buildWorkerEnv (the grant actually reaches the child env)", () => {
   const call = workerSrc.slice(workerSrc.indexOf("buildWorkerEnv(args.env"), workerSrc.indexOf("buildWorkerEnv(args.env") + 400);
   assert.match(call, /home:\s*workerHome/, "buildWorkerEnv must be called with { home: workerHome }");
+  assert.match(call, /xdgCacheHome:\s*workerCacheDir\(config\)/, "worker transport state must use the instance cache, not per-worker HOME");
 });
 
 test("workerHomeDir is resolved from config, never hardcoded", () => {
   assert.match(workerSrc, /workerHomeDir\(config\)/);
+});
+
+test("workerCacheDir is resolved from config, never from the operator HOME", () => {
+  assert.match(workerSrc, /workerCacheDir\(config\)/);
+  assert.doesNotMatch(workerSrc, /xdgCacheHome:\s*process\.env\.HOME/);
+});
+
+test("worker transport cache follows the host override before the per-worker HOME", () => {
+  assert.equal(
+    workerCacheDir(
+      { root: "/instance" },
+      { RMD_GH_CACHE_HOME: "/host/cache", XDG_CACHE_HOME: "/worker/cache", HOME: "/worker" },
+    ),
+    "/host/cache",
+  );
+  assert.equal(workerCacheDir({ root: "/instance" }, { HOME: "/host" }), "/host/.cache");
 });

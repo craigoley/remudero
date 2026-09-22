@@ -75,7 +75,8 @@ test("W1-T3240: a mounted-source commit leaves the image current", () => {
   assert.ok(argv.includes("--"), "the paths must be passed as a pathspec, not as revisions");
   for (const p of IMAGE_BAKED_PATHS) assert.ok(argv.includes(p), `${p} must be in the pathspec`);
   assert.ok(argv.includes("c6baa842..origin/main"), "counted from the IMAGE's sha up to origin/main");
-  assert.deepEqual([...IMAGE_BAKED_PATHS], ["deploy/Dockerfile", "deploy/entrypoint.sh"]);
+  // 2026-09-22: the image's CLI install and Codex requirements are image inputs too (#6625's CLI upgrade).
+  assert.deepEqual([...IMAGE_BAKED_PATHS], ["deploy/Dockerfile", "deploy/entrypoint.sh", ".dockerignore", "deploy/package.json", "deploy/package-lock.json", "deploy/codex-requirements.toml"]);
 
   // And zero means CURRENT, which must not deploy — the mirror of the first case.
   assert.equal(decideDeployTrigger({ ...HEALTHY_CHECKOUT, imageBakedCommitsBehind: 0 }).deploy, false);

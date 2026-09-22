@@ -18,6 +18,7 @@
     - test/action-results-route.test.ts
     - test/action-results-redaction.test.ts
     - test/action-results-bounds.test.ts
+    - test/the-console-draws-the-graph-it-computes.test.ts
   status: queued
   priority: 1
   rationale: |
@@ -59,15 +60,15 @@
     read seam has live evidence.
   acceptance:
     - claim: "the public route returns a typed, bounded projection of external-effect ledger results and preserves their source and freshness"
-      proof: "unit test: action-results route preserves bounded external-effect projections"
+      proof: "grep: action-results route preserves bounded external-effect projections in test/action-results-route.test.ts"
     - claim: "applied, refused, pending, partially-applied, drifted, stale, and unobservable outcomes remain distinct rather than becoming success or zero"
-      proof: "unit test: action-results route preserves every reconciliation state"
+      proof: "grep: action-results route preserves every reconciliation state in test/action-results-route.test.ts"
     - claim: "malformed, oversized, or unreadable evidence degrades to an explicit unavailable state and never exposes raw connector output"
-      proof: "unit test: action-results route never exposes raw connector evidence"
+      proof: "grep: action-results route never exposes raw connector evidence in test/action-results-redaction.test.ts"
     - claim: "filters, cursor, count, and response bytes are bounded before ledger rows reach the caller"
-      proof: "unit test: action-results route enforces bounded filters and explicit unavailable states"
+      proof: "grep: action-results route enforces bounded filters and explicit unavailable states in test/action-results-bounds.test.ts"
     - claim: "the route is actually mounted and named in the public contract"
-      proof: "grep: /v1/action-results in src/lib/panel-graph.ts"
+      proof: "grep: /v1/action-results in openapi/daemon.yaml"
     - claim: "the new projection module is called by the daemon's panel-graph assembly rather than being reachable only from its own tests"
       proof: "grep: buildActionResultsRoute( in src/lib/panel-graph.ts"
   falsifier: |
@@ -83,3 +84,11 @@
     consume this read contract, but its recheck/compensation actions must stay unavailable until a
     separate core task supplies an authorized executor and durable receipt path. This separation
     keeps the automated flow moving without inventing an action engine at the UI boundary.
+    Amendment 2026-09-22: the implementation's mounted-route registration changes the existing
+    graph-shape census changes. The route-shape fixture is part of this task's executable
+    integration surface and is declared here so the implementation can keep the route census
+    honest without an undeclared scope overrun. The generated test-tier manifest is intentionally shared metadata; its ownership remains with the generated-file gate rather than one implementation task. The source implementation remains responsible for route behavior and
+    executable assertions; this amendment only records the fixture that its integration surface
+    necessarily changes.
+    Amendment 2026-09-22 public-contract: the literal route path proof now points to
+    openapi/daemon.yaml; panel-graph wiring remains a separate criterion.

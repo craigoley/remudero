@@ -1,0 +1,45 @@
+- id: W1-T4062
+  title: "THE CONSOLE CANNOT SEE MODEL APPROVALS OR STEP-UPS — publish the operator's human-gated model approvals (read-only) and the routing step-up/preference counts through the status and analytics API, so the console can show what may run and when the router climbed a tier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#smart-router-2026-09-22"
+  plan_refs: ["W1-T4050"]
+  files:
+    - src/lib/analytics-route.ts
+    - src/lib/serve.ts
+    - test/the-console-can-see-approvals-and-step-ups.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Operator rulings 2026-09-22: Astra and Fable never run without human permission, and Opus/Sol
+    are used only when the Sonnet/Luna tier could not do the work. The router now enforces both —
+    approvals live in the host's config.json (`modelApprovals`), the last attempt after a lower-tier
+    failure rides the `step_up:` mount and ledgers `implement.step_up`/`fix.step_up`, and frontier
+    assignments record `routing.capabilityPreference`/`preferenceBypass`. None of it is visible
+    outside the ledger: the operator cannot see which gated models are approved, or how often work
+    climbed to Opus or Sol and whether Sol was reached because Claude was blocked.
+  design: |
+    (i) READ-ONLY approvals: publish each approval's model, approver, approval time and expiry
+    (never anything else from config.json) on the status snapshot. Writing an approval stays a
+    host-side act; a console write path is a separate decision for the operator.
+    (ii) Add step-up counts (implement.step_up, fix.step_up, by target model) and frontier
+    provider-preference outcomes (Claude kept, Sol after bypass) to the routing-v1 analytics
+    aggregate, from the rows those PRs already write.
+    (iii) The remudero-console surface is filed in that repo once this ships the fields.
+  acceptance:
+    - claim: "the status snapshot lists approvals without any other config.json field"
+      proof: 'grep: test("W1-T4062: approvals are published and nothing else from config is" in test/the-console-can-see-approvals-and-step-ups.test.ts'
+    - claim: "an expired approval is published as expired"
+      proof: 'grep: test("W1-T4062: an expired approval is marked expired" in test/the-console-can-see-approvals-and-step-ups.test.ts'
+    - claim: "the routing aggregate counts step-ups by target model"
+      proof: 'grep: test("W1-T4062: step-ups are counted by target model" in test/the-console-can-see-approvals-and-step-ups.test.ts'
+    - claim: "the routing aggregate separates frontier work kept on Claude from Sol reached after a bypass"
+      proof: 'grep: test("W1-T4062: frontier preference outcomes are counted" in test/the-console-can-see-approvals-and-step-ups.test.ts'
+  falsifier: |
+    CLOSE IF the status snapshot already carries modelApprovals and routing-v1 already counts step-ups.

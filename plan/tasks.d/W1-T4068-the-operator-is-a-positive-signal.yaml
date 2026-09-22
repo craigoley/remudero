@@ -1,0 +1,48 @@
+- id: W1-T4068
+  title: "THE OPERATOR IS WHOEVER FORGOT TO SAY WHO THEY WERE — 96% of 541,031 actor:operator rows are the console server, and the never-wired hand-run census would file 51 routines led by deploy-run and test fixtures: stamp actor kind by positive signal, keep tests off the production ledger, then wire the census"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T2697]
+  files: [src/lib/ledger.ts, src/run-task.ts, src/lib/hand-run-census.ts, test/setup/tmp-hygiene.ts, test/the-operator-is-a-positive-signal.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED (ledger union).
+    (1) `deriveLedgerActor` (src/lib/ledger.ts) returns "operator" whenever neither the worker nor the daemon marker is
+        set; only `daemonCommand` marks itself. Of 541,031 `actor:operator` rows, 520,143 (96%) come from the console
+        server (`SERVE-*` run ids, `github.wake.*`); then CLI calls, host `DEPLOY-*` runs (6,951 `cli.invoked
+        verb=deploy-run` on host "Remudero" — the daemon host) and in-container review/sweep lanes.
+    (2) Tests write to production: `logCliInvocation` (src/run-task.ts) appends to `ledgerPathFor(loadConfig())`, so
+        suites that call `main()` in-process leave `cli.invoked` rows (243 with `--no-such-verb`/`not-a-real-verb`).
+    (3) The hand-run census never runs: its cadence caller passes no `handRunCensus`; 0 `hand_run.census_proposed`
+        rows ever. Replayed read-only over today's rows it would propose 51 "routines", topped by
+        `deploy-run > deploy.skip` (2,462 sessions) and test-fixture verbs.
+    (4) Operator-authored PRs are 357 of 727 merged 09-15..22 (49%); no ledger row records authorship.
+  design: |
+    (i) Attribution by POSITIVE signal: every long-running entry point stamps its kind — `service` (serve),
+        `host_automation` (deploy-run), `daemon`, `worker`, `test`; `operator_human` requires a TTY, `operator_ai` a
+        Claude session marker. No stamp reads as `unknown`, never `operator`.
+    (ii) Tests never reach the production ledger: the shared test setup points config and state at a temporary root,
+         and `appendLedger` refuses a production path when the actor is `test`.
+    (iii) Wire the census to read only `operator_human` and `operator_ai`; it refuses rather than files when its input
+          is mostly non-human. It stays proposal-only and deduplicated by signature.
+    (iv) PR authorship (`author_kind` on merge rows) is a follow-up, named here, not in scope.
+  acceptance:
+    - claim: "serve and deploy-run stamp their own kinds and never operator"
+      proof: 'grep: test("W1-T4068: serve and deploy-run stamp service and host_automation never operator" in test/the-operator-is-a-positive-signal.test.ts'
+    - claim: "a process with no terminal and no session marker stamps unknown"
+      proof: 'grep: test("W1-T4068: a process with no TTY and no session marker stamps unknown" in test/the-operator-is-a-positive-signal.test.ts'
+    - claim: "main under the test setup writes no row to the production ledger"
+      proof: 'grep: test("W1-T4068: main under the test setup writes nothing to the production ledger" in test/the-operator-is-a-positive-signal.test.ts'
+    - claim: "the cadence runs the census and the census ignores non-human kinds"
+      proof: 'grep: test("W1-T4068: the cadence passes handRunCensus and the census ignores non-human kinds" in test/the-operator-is-a-positive-signal.test.ts'
+  falsifier: |
+    Keep "no marker means operator" and the second goes red. Let a test write the configured ledger and the third goes
+    red. Replay today's union through the wired census: proposing `deploy-run > deploy.skip` means it has failed.

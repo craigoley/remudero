@@ -72,6 +72,14 @@ function refuseSelfSyncEscape(): void {
 
 refuseSelfSyncEscape();
 
+// Coverage runs execute each test file in a separate instrumented process. Those fixture reads
+// never leave the test harness, so making every child wait on the production cross-process gap
+// only turns the coverage timeout into a false transport failure. Keep the production default
+// intact and opt the coverage harness into an explicit zero gap instead.
+if (process.env.NODE_V8_COVERAGE !== undefined) {
+  process.env.RMD_GH_SHARED_READ_GAP_MS ??= "0";
+}
+
 /**
  * DISABLE GIT'S AUTOMATIC BACKGROUND GC FOR EVERY GIT THIS SUITE SPAWNS (W1-T1217).
  *

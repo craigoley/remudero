@@ -81,6 +81,7 @@ import {
   writeDailyCostCeilingOverride,
   type Policy,
 } from "./policy.js";
+import { buildActionResultsRoute } from "./action-results.js";
 import {
   classifyProposal,
   declinedReasonInLedger,
@@ -1751,6 +1752,7 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
 /** Routes that can only read the process-owned plan snapshot. No write route accepts that capability. */
 export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
   return [
+    buildActionResultsRoute(deps.ledgerPath),
     buildOperatorActivityRoute(deps, readPlanSnapshot),
     buildFeedbackInboxRoute(deps),
     buildTraceRoute(deps),

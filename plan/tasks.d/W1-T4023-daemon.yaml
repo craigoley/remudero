@@ -1,19 +1,27 @@
 - id: W1-T4023
   title: "EVERY RECLAIM RUNG IS WIRED TO THE DISPATCH PATH, SO A HOST THAT STOPS DISPATCHING IS NEVER CLEANED AGAIN — the janitor rides `runTaskBody`, and a paused daemon returns at `daemon.pause` before reaching it"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T4022]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 25.00
-  risk: low
+  risk: high
+  band_meaning: span
   origin: "measured 2026-09-22 across both hosts: the Mac mini's daemon has ticked and paused ~97 times without dispatching, so no reclaim rung has run there, while its debris grew untouched"
-  plan_refs: [W1-T411, W1-T2847, W1-T4016]
-  files: [src/lib/daemon.ts]
+  plan_refs: [W1-T411, W1-T2847, W1-T4021, W1-T4022, W1-T4065]
+  files: [src/lib/daemon.ts, src/run-task.ts]
   status: queued
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
+
+    AMENDED 2026-09-22 (oper#followups-research-2026-09-22). Verified: pause skips the sweep (src/lib/daemon.ts), and the
+    lane and disk rungs run only on dispatch — the premise holds. Corrections: the worktree reap already runs every poll
+    (src/run-task.ts); `plan_refs` named W1-T4016/W1-T4017, which do not exist — the work was filed as W1-T4021 (now
+    withdrawn for W1-T4065) and W1-T4022. Hang the rungs on the heartbeat ticker, which keeps running while paused, with
+    their own cadence gate; src/run-task.ts is where they are wired. Land W1-T4022 first, or this only reaches a dead rung
+    more often.
   rationale: |
     MEASURED 2026-09-22 on the Mac mini, whose daemon has been up 8h40m:
 

@@ -88,10 +88,12 @@ test("INERTNESS LOCK: a mounts table with NO recon row degrades to today's behav
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("INERTNESS LOCK: undefined is a SUPPORTED spawn value — worker.ts leaves the option unset", () => {
+test("INERTNESS LOCK: undefined is a SUPPORTED spawn value — an unset model runs the worker tier, an unset effort stays unset", () => {
   const worker = readFileSync(new URL("../src/lib/worker.ts", import.meta.url), "utf8");
 
-  assert.match(worker, /if \(args\.model\) options\.model = args\.model;/, "model is only set when truthy");
+  // Operator ruling 2026-09-22: an unnamed model once left the CLI to choose, and its default is
+  // Opus with a 1M context. An undefined model now resolves to the worker tier instead.
+  assert.match(worker, /args\.model \?\? workerModel\(config\)/, "an unset model falls to the worker tier");
   assert.match(worker, /if \(args\.effort\) options\.effort = args\.effort/, "effort is only set when truthy");
 });
 

@@ -1020,6 +1020,8 @@ import {
 } from "./lib/dispatch-value.js";
 import {
   boundRiskJudgeChangeView,
+  DEFAULT_RISK_POLICY,
+  readRiskPolicy,
   realRiskJudge,
   resolveRiskJudgeMount,
   riskJudgeSpendCollector,
@@ -1028,6 +1030,7 @@ import {
   type RiskJudgeChangeView,
   type RiskJudgeInput,
   type RiskJudgeVerdict,
+  type RiskPolicy,
 } from "./lib/risk-judge.js";
 import { evaluateRiskJudgeDisposition } from "./lib/risk-judge-eval.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -15899,6 +15902,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       headSha: review.headSha,
     };
     const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+    // W1-T4050: LIVE, per-run read of `plan/policy.yaml`'s `risk:` section — never memoized
+    // (unlike `loadDefaultPolicy`), so an operator's merged policy edit governs the very next
+    // unattended risk judgment with no daemon restart. Absent section ⇒ DEFAULT_RISK_POLICY,
+    // reproducing the pre-existing hard-coded 0.7 exactly.
+    const riskPolicy = readRiskPolicy(policyPath(repoRoot));
     // W1-T1031: fetch the ACTUAL change view (bounded, REST-sourced — see `changeView`'s own
     // doc) and attach it to the input the real judge is given, right before it runs. A throw
     // from `changeView(prUrl)` here (an unparseable prUrl, a failed REST call) is deliberately
@@ -15964,6 +15972,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }, {
       // Judge unavailability is recorded, while the deterministic gates remain authoritative.
       judgeUnavailableAction: "proceed",
+      // W1-T4050: the configured threshold (plan/policy.yaml's `risk.confidenceThreshold`,
+      // read live above) is the one this unattended caller applies — no longer the module's
+      // own DEFAULT_CONFIDENCE_THRESHOLD literal, unreachable from outside risk-judge.ts.
+      confidenceThreshold: riskPolicy.confidenceThreshold,
     });
     if (riskJudgeResult.action.kind === "escalate") {
       log("verdict", {
@@ -23273,6 +23285,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // W1-T1076: `scope` is populated iff `--base` was given, so this branch IS the
         // changed-tasks pass and `duplicateCorpusOpts`' scoped arm is the right one here.
         ...duplicateCorpusOpts(true, task.id, openShardCorpus, shardSlugById),
+        // W1-T1070 (design iii): WARN in the engine (the default, so the 32 shards already
+        // carrying a self-path proof are not refused at dispatch overnight) — BLOCK only here,
+        // in the changed-tasks pass, so a newly filed or edited shard is refused before it
+        // repeats the pattern.
+        proofSelfPath: "block",
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
@@ -25370,6 +25387,17 @@ export function buildIntakeRungsDaemonHooks(deps: {
  * design calls out as otherwise unreachable ("a board whose findings have all cleared trips no
  * depth arm at all, so it never fires again and the dead rows sit forever").
  */
+/** W1-T4051: the daemon's board-review hooks, bound to the projection and plan THIS tick already
+ *  derived. `daemonCommand` calls exactly this, so what the tests assert of it is what the daemon runs;
+ *  the call site itself is pinned by test/board-review-wiring.test.ts. `deps` is for tests only. */
+export function boardReviewHooksForTick(
+  config: Config,
+  tick: { projection: () => Map<string, StatusProjection> | undefined; plan: () => Plan },
+  deps: Omit<NonNullable<Parameters<typeof buildBoardReviewDaemonHooks>[0]>, "config" | "projection" | "plan"> = {},
+): ReturnType<typeof buildBoardReviewDaemonHooks> {
+  return buildBoardReviewDaemonHooks({ ...deps, config, projection: tick.projection, plan: tick.plan });
+}
+
 export function buildBoardReviewDaemonHooks(deps: {
   check?: () => BoardReviewCadenceDecision;
   run?: () => Promise<BoardReviewReport>;
@@ -25386,13 +25414,39 @@ export function buildBoardReviewDaemonHooks(deps: {
   /** Injectable ONLY for tests — production takes the real {@link reconcileBoardReviewReferents}
    *  (W1-T2464). */
   reconcile?: typeof reconcileBoardReviewReferents;
+  /** W1-T4051: the plan projection THIS TICK already derived (`daemonCommand`'s `lastProj`, off its one
+   *  warm, snapshot-backed gateway). Omitted ⇒ the items read derives its own, as before. MEASURED
+   *  2026-09-22: deriving it again on a fresh gateway was 118-122 s of synchronous `gh` calls — 213 PR
+   *  file lists, 55 closed-PR pages, 15 issue pages — on every check, freezing every timer. */
+  projection?: () => Map<string, StatusProjection> | undefined;
+  /** W1-T4051: the plan this tick already loaded (`activePlanRef.current`). Omitted ⇒ read from disk. */
+  plan?: () => Plan;
+  /** Injectable ONLY for tests — the remaining {@link BoardReviewItemsIo} seams (open-PR read, owner/repo). */
+  itemsIo?: BoardReviewItemsIo;
 } = {}): {
   checkBoardReview: () => BoardReviewCadenceDecision & { retiredProposalIds: string[] };
   runBoardReview: () => Promise<BoardReviewReport>;
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
-  const itemsFor = () => (deps.items ?? (() => defaultBoardReviewItems(configFor())))();
+  // NO PROJECTION IS NOT AN EMPTY BOARD: the throw lands in `defaultBoardReviewItems`'s inner catch,
+  // which degrades only the escalation/origin arms — exactly what a failed projection does today — while
+  // the open-PR list still reaches the reconciler and the depth arms.
+  const tickProvided = deps.projection
+    ? {
+        projectPlan: () => {
+          const proj = deps.projection!();
+          if (proj === undefined) throw new Error("no plan projection derived this tick yet");
+          return proj;
+        },
+      }
+    : {};
+  const itemsIo: BoardReviewItemsIo = {
+    ...deps.itemsIo,
+    ...tickProvided,
+    ...(deps.plan ? { loadPlan: () => deps.plan!() } : {}),
+  };
+  const itemsFor = () => (deps.items ?? (() => defaultBoardReviewItems(configFor(), itemsIo)))();
   const reconcile = deps.reconcile ?? reconcileBoardReviewReferents;
   // `deps.check` is an existing full-override seam (no current caller uses it against this
   // function — see test/board-review-wiring.test.ts) — an override bypasses reconciliation
@@ -30220,7 +30274,11 @@ export async function daemonCommand(
   // config.root. WITHOUT THIS LINE `deps.checkBoardReview` is undefined and the whole rung is
   // dead code, which is not a hypothetical here: that is precisely what shipped in #2952 and
   // stayed dead for the eight hours between its merge and this fix.
-  const boardReviewHooks = target.isSelf ? buildBoardReviewDaemonHooks({ config }) : undefined;
+  // W1-T4051: handed THIS tick's projection and plan — the same `lastProj` `isOpenPr` and `openPrCount`
+  // read — so the check never derives a second one on a cold gateway (was ~120 s of synchronous `gh`).
+  const boardReviewHooks = target.isSelf
+    ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
+    : undefined;
   // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
   // its marker and ledger live under this harness checkout. The pair itself still targets the
   // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
@@ -39883,23 +39941,49 @@ export function productionVerifyHumanRelease(
   runId: string,
   options: {
     riskJudge?: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
+    /** Live policy reader. The production callers pass plan/policy.yaml; omitted keeps old tests and callers byte-safe. */
+    riskPolicy?: () => RiskPolicy;
     /** Forwarded to realRiskJudge, so a test drives the REAL construction (mount resolution and
      *  parsing included) without a model call. */
     spawn?: typeof spawnWorker;
   } = {},
 ): VerifyHumanReleaseHook {
   let judge = options.riskJudge;
+  const readCurrentRiskPolicy = options.riskPolicy ?? (() => {
+    try {
+      return readRiskPolicy(policyPath(checkoutRoot));
+    } catch (e) {
+      // Tests and older callers may provide a synthetic checkout with no policy file; preserve
+      // their pre-policy behavior. Malformed or unreadable policy files still fail closed below.
+      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return DEFAULT_RISK_POLICY;
+      throw e;
+    }
+  });
   const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
     judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn });
     return judge(input);
   };
-  return (shard, verdict) =>
-    releaseAutomatedShard(shard, verdict, {
+  return async (shard, verdict) => {
+    let riskPolicy: RiskPolicy;
+    try {
+      riskPolicy = readCurrentRiskPolicy();
+    } catch (e) {
+      return { kind: "unavailable", reason: `risk policy unavailable: ${String((e as Error)?.message ?? e)}` };
+    }
+    return releaseAutomatedShard(shard, verdict, {
       task: (id) => plan.byId.get(id),
       riskJudge,
-      writeRelease: (taskId, provenance) =>
-        approveParkedTask(taskId, { plan, ledgerPath, runId, provenance: { ...provenance } }),
+      riskPolicy,
+      writeRelease: (taskId, provenance, resolvedPolicy) =>
+        approveParkedTask(taskId, {
+          plan,
+          ledgerPath,
+          runId,
+          riskPolicy: resolvedPolicy,
+          provenance: { ...provenance },
+        }),
     });
+  };
 }
 
 export async function verifyHumanSweepCommand(
@@ -40254,6 +40338,31 @@ export function namesATask(token: string): boolean {
   return /^W\d+-T[0-9A-Za-z]+$/.test(token);
 }
 
+/** W1-T4050 — the proposal `approveParkedTask` stages when `risk.verifyHumanReleaseEnabled` is
+ *  `false`, rather than writing the release row directly. Derived from `taskId` alone, so
+ *  naming the same parked task twice while the switch stays off stages one proposal, not two
+ *  (mirrors `verifyHumanProposalId`'s dedup discipline in lib/verify-human-judge.ts). */
+export function verifyHumanReleaseProposalId(taskId: string): string {
+  return `verify-human-release:${taskId}`;
+}
+
+/** W1-T4050 — an ordinary inbox {@link Proposal} standing in for the direct release the policy
+ *  switch just refused. `evidenceAnchors` is EMPTY on purpose, the same reason
+ *  `proposalFromJudgedShard` leaves it empty: this proposal depends on nothing landing, and
+ *  ratifying it goes through the reviewed proposal/PR path rather than tiering READY off a grep. */
+export function verifyHumanReleaseProposal(taskId: string, task: Task): Proposal {
+  return {
+    id: verifyHumanReleaseProposalId(taskId),
+    summary:
+      `${taskId} (${task.title}) is a parked \`verify: human\` task an operator asked to release ` +
+      `via \`rmd approve ${taskId}\`, but \`plan/policy.yaml\`'s \`risk.verifyHumanReleaseEnabled\` ` +
+      `is currently \`false\` — the direct release arm is disabled by policy. Ratifying this ` +
+      `proposal routes the SAME release through the reviewed proposal/PR path instead of the ` +
+      `one-bit ledger write.`,
+    evidenceAnchors: [],
+  };
+}
+
 /**
  * W1-T3216 — RATIFY A PARKED `verify: human` TASK through the pipeline proposals already use.
  *
@@ -40266,6 +40375,14 @@ export function namesATask(token: string): boolean {
  * `verify: human` (it needs no release), one that is blocked or retired, and one ALREADY
  * released — that last returns 0 and writes NO second row, because a second bit is not a second
  * release.
+ *
+ * W1-T4050 — THE VERIFY-HUMAN RELEASE ARM IS NOW RUNTIME POLICY: `deps.riskPolicy` (default
+ * {@link DEFAULT_RISK_POLICY}, `verifyHumanReleaseEnabled: true` — today's behaviour, absent
+ * risk section or absent caller both reproduce it exactly) gates the direct ledger write below.
+ * `false` stops the release and stages {@link verifyHumanReleaseProposal} through
+ * `deps.stageProposal` instead — the operator's bit is still recorded, just routed through the
+ * same reviewed proposal/PR path every other release already goes through, rather than the
+ * one-bit ledger write this function otherwise performs.
  */
 export function approveParkedTask(
   taskId: string,
@@ -40275,11 +40392,13 @@ export function approveParkedTask(
     runId: string;
     ledgerLines?: readonly string[];
     append?: typeof appendLedger;
+    riskPolicy?: RiskPolicy;
+    stageProposal?: (proposal: Proposal) => void;
     /** A MACHINE-written release carries who decided it and why (Law 5: the author class rides
      *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
     provenance?: Record<string, unknown>;
   },
-): { code: number; message: string } {
+): { code: number; message: string; released?: boolean } {
   const task = deps.plan.byId.get(taskId);
   if (!task) return { code: 2, message: `rmd approve: unknown task '${taskId}' — not in the plan` };
   if (task.verify !== "human") {
@@ -40293,7 +40412,19 @@ export function approveParkedTask(
   }
   const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
   if (already.has(taskId)) {
-    return { code: 0, message: `rmd approve: ${taskId} is already released — no second row written` };
+    return { code: 0, released: true, message: `rmd approve: ${taskId} is already released — no second row written` };
+  }
+  const riskPolicy = deps.riskPolicy ?? DEFAULT_RISK_POLICY;
+  if (!riskPolicy.verifyHumanReleaseEnabled) {
+    const proposal = verifyHumanReleaseProposal(taskId, task);
+    (deps.stageProposal ?? (() => {}))(proposal);
+    return {
+      code: 0,
+      released: false,
+      message:
+        `rmd approve: verify-human release is DISABLED by policy (risk.verifyHumanReleaseEnabled: ` +
+        `false) — staged ${proposal.id} as a proposal instead of releasing ${taskId} directly`,
+    };
   }
   (deps.append ?? appendLedger)(deps.ledgerPath, {
     run_id: deps.runId,
@@ -40302,7 +40433,7 @@ export function approveParkedTask(
     released: "verify-human",
     ...(deps.provenance ?? {}),
   });
-  return { code: 0, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
+  return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
 
 /** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring
@@ -40349,6 +40480,11 @@ export async function approveCommand(
       // unique per task, so keying it on the task id is deterministic AND makes the
       // row findable by the very thing it releases.
       runId: `APPROVE-${proposalId}`,
+      // W1-T4050: LIVE read, same as the risk-judge call site — never memoized, so a merged
+      // `plan/policy.yaml` edit governs the very next `rmd approve` with no daemon restart.
+      riskPolicy: readRiskPolicy(policyPath(repoRoot)),
+      stageProposal: (proposal) =>
+        void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
     });
     console.log(outcome.message);
     // CHAINED ONLY ON SUCCESS: guidance attached to a refused release would describe a state the
