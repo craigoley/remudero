@@ -373,3 +373,32 @@ test("unit test: W1-T4025 daemon judge failure is logged without stopping dispat
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("unit test: W1-T4025 daemon flushes pressure before idling on an open PR", async () => {
+  const { plan, dir } = fixturePlan();
+  try {
+    const pressured: string[][] = [];
+    let stopped = false;
+    const summary = await runDaemon(
+      plan,
+      {
+        refreshMerged: () => (() => false) as MergedSet,
+        isLifetimeCapExceeded: () => true,
+        isOpenPr: () => 143,
+        onLifetimePressure: async (tasks: readonly Task[]) => {
+          pressured.push(tasks.map((task) => task.id));
+        },
+        runOne: async (taskId: string) => okResult(taskId),
+        checkStop: () => (stopped ? "test complete" : undefined),
+        sleep: async () => {
+          stopped = true;
+        },
+      } as unknown as DaemonDeps,
+      { max: 1 },
+    );
+    assert.equal(summary.stopReason, "stopped");
+    assert.deepEqual(pressured, [["T4025-A", "T4025-B"]], "pressure is routed before the daemon idles on the open-PR guard");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
