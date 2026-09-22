@@ -864,6 +864,7 @@ import {
   type MeasurementCadenceDecision,
   buildPlanReconcileCadenceInput,
   type PlanReconcileCadenceOpts,
+  type PlanReconcileCadenceInputOptions,
   type PlanReconcileShardRecord,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
@@ -22339,12 +22340,11 @@ export function defaultCreditedMergedIds(
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
  * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
-export function buildPlanReconcileProductionInput(deps: {
-  checkoutRoot: string;
-  readShards: () => readonly PlanReconcileShardRecord[];
-  creditedMergedIds: () => ReadonlySet<string>;
+export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land"> {
   land?: typeof landPlanReconcileShards;
-}): PlanReconcileCadenceOpts | undefined {
+}
+
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileCadenceOpts | undefined {
   try {
     return buildPlanReconcileCadenceInput({
       checkoutRoot: deps.checkoutRoot,

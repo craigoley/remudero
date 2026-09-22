@@ -1483,16 +1483,18 @@ export interface PlanReconcileShardRecord {
   text: string;
 }
 
-/** W1-T3970: adapt the production shard/credit readers to the pure cadence reducer. The caller
- * owns the landing bridge; this adapter only maps task ids back to repo-relative shard paths and
- * carries the one credit projection into the reducer. */
-export function buildPlanReconcileCadenceInput(deps: {
+export interface PlanReconcileCadenceInputOptions {
   checkoutRoot: string;
   readShards: () => readonly PlanReconcileShardRecord[];
   creditedMergedIds: () => ReadonlySet<string>;
   land: (inputs: readonly { relPath: string; content: string }[]) => void;
   threshold?: number;
-}): PlanReconcileCadenceOpts {
+}
+
+/** W1-T3970: adapt the production shard/credit readers to the pure cadence reducer. The caller
+ * owns the landing bridge; this adapter only maps task ids back to repo-relative shard paths and
+ * carries the one credit projection into the reducer. */
+export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOptions): PlanReconcileCadenceOpts {
   const records = [...deps.readShards()];
   const byId = new Map(records.map((record) => [record.taskId, record.path]));
   const credited = new Set(deps.creditedMergedIds());
