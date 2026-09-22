@@ -14,11 +14,11 @@
   attempts: 0
   acceptance:
     - claim: "a c8-style waiver on a line this gate reports is named as inert rather than ignored in silence"
-      proof: "unit test: a c8 ignore beside a reported line is named as not honoured"
+      proof: "grep: W1-T3366: a c8 ignore beside a reported line is named as not honoured in test/an-inert-coverage-waiver-is-named.test.ts"
     - claim: "the message names the directive this gate does honour, so the remedy is reachable from the refusal"
-      proof: "unit test: the inert-waiver message names the diff-cov directive"
-    - claim: "a correctly written diff-cov directive is unaffected, so the check adds no new refusal"
-      proof: "unit test: a honoured diff-cov directive still waives its region"
+      proof: "grep: W1-T3366: the inert-waiver message names the diff-cov directive in test/an-inert-coverage-waiver-is-named.test.ts"
+    - claim: "the newly added inert-waiver diagnostic preserves the honored diff-cov directive behavior"
+      proof: "grep: W1-T3366: a honoured diff-cov directive still waives its region in test/an-inert-coverage-waiver-is-named.test.ts"
   rationale: |
     MEASURED 2026-09-10 on #5029. `src/run-task.ts` carries `/* c8 ignore next -- process-boundary
     dispatch */` on two CLI arms, so that pragma reads as the house idiom. diff-coverage does not read
