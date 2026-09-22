@@ -206,6 +206,115 @@ test("unit test: W1-T4025 adaptive follow-up does not block a healthy PR", async
   }
 });
 
+test("unit test: W1-T4025 single-lane judge failure is logged after a successful dispatch", async () => {
+  const { plan, dir } = fixturePlan();
+  try {
+    const failures: string[] = [];
+    const summary = await runDrain(
+      plan,
+      {
+        refreshMerged: () => (() => false) as MergedSet,
+        isLifetimeCapExceeded: () => true,
+        onLifetimePressure: async () => {
+          throw new Error("judge unavailable");
+        },
+        runOne: async (taskId) => okResult(taskId),
+        log: (step: string, extra: Record<string, unknown> = {}) => {
+          if (step === "dispatch.lifetime_pressure.failed") failures.push(String(extra.error));
+        },
+      },
+      { max: 1 },
+    );
+    assert.deepEqual(summary.attempted, ["T4025-A"]);
+    assert.deepEqual(failures, ["Error: judge unavailable"], "the failed follow-up is visible but does not block the task");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unit test: W1-T4025 single-lane pressure still flushes when the worker throws", async () => {
+  const { plan, dir } = fixturePlan();
+  try {
+    let pressureCalls = 0;
+    const summary = await runDrain(
+      plan,
+      {
+        refreshMerged: () => (() => false) as MergedSet,
+        isLifetimeCapExceeded: () => true,
+        onLifetimePressure: async () => {
+          pressureCalls++;
+        },
+        runOne: async () => {
+          throw new Error("worker failed");
+        },
+      },
+      { max: 1 },
+    );
+    assert.equal(summary.stopReason, "error");
+    assert.equal(pressureCalls, 1, "pressure is flushed even on the worker-error path");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unit test: W1-T4025 lane judge failure is logged without blocking either sibling", async () => {
+  const { plan, dir } = fixturePlan();
+  try {
+    const failures: string[] = [];
+    const mergedIds = new Set<string>();
+    const summary = await runDrain(
+      plan,
+      {
+        refreshMerged: () => (id: string) => mergedIds.has(id),
+        isLifetimeCapExceeded: () => true,
+        onLifetimePressure: async () => {
+          throw new Error("lane judge unavailable");
+        },
+        runOne: async (taskId) => {
+          mergedIds.add(taskId);
+          return okResult(taskId);
+        },
+        log: (step: string, extra: Record<string, unknown> = {}) => {
+          if (step === "dispatch.lifetime_pressure.failed") failures.push(String(extra.error));
+        },
+      },
+      { laneCount: 2, max: 2 },
+    );
+    assert.deepEqual(summary.merged.sort(), ["T4025-A", "T4025-B"]);
+    assert.deepEqual(failures, ["Error: lane judge unavailable", "Error: lane judge unavailable"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unit test: W1-T4025 flushes pressure when every lane is deferred", async () => {
+  const { plan, dir } = fixturePlan();
+  try {
+    const pressured: string[][] = [];
+    let governorCalls = 0;
+    const summary = await runDrain(
+      plan,
+      {
+        refreshMerged: () => (() => false) as MergedSet,
+        isLifetimeCapExceeded: () => true,
+        onLifetimePressure: async (tasks) => {
+          pressured.push(tasks.map((task) => task.id));
+        },
+        checkCostGovernor: () => {
+          governorCalls++;
+          return governorCalls === 1 ? undefined : { deferred: true, observedDayCostUsd: 206, ceilingUsd: 150 };
+        },
+        runOne: async (taskId) => okResult(taskId),
+      },
+      { laneCount: 2, max: 2 },
+    );
+    assert.equal(summary.stopReason, "cost_governor_deferred");
+    assert.deepEqual(pressured, [["T4025-A", "T4025-B"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("unit test: W1-T4025 daemon wiring routes pressure after a healthy dispatch", async () => {
   const { plan, dir } = fixturePlan();
   try {
@@ -229,6 +338,37 @@ test("unit test: W1-T4025 daemon wiring routes pressure after a healthy dispatch
     );
     assert.deepEqual(summary.merged, ["T4025-A"]);
     assert.deepEqual(pressured, [["T4025-A", "T4025-B"]], "the selection sensor can route the bounded candidate batch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unit test: W1-T4025 daemon judge failure is logged without stopping dispatch", async () => {
+  const { plan, dir } = fixturePlan();
+  try {
+    const failures: string[] = [];
+    const mergedIds = new Set<string>();
+    const summary = await runDaemon(
+      plan,
+      {
+        refreshMerged: () => (id: string) => mergedIds.has(id),
+        isLifetimeCapExceeded: () => true,
+        onLifetimePressure: async () => {
+          throw new Error("daemon judge unavailable");
+        },
+        runOne: async (taskId: string) => {
+          mergedIds.add(taskId);
+          return okResult(taskId);
+        },
+        sleep: async () => {},
+        log: (step: string, extra: Record<string, unknown> = {}) => {
+          if (step === "dispatch.lifetime_pressure.failed") failures.push(String(extra.error));
+        },
+      } as unknown as DaemonDeps,
+      { max: 1 },
+    );
+    assert.deepEqual(summary.merged, ["T4025-A"]);
+    assert.deepEqual(failures, ["daemon judge unavailable"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
