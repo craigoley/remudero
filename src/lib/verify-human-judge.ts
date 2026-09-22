@@ -386,3 +386,122 @@ export function realVerifyHumanJudge(opts: {
     return parseVerifyHumanVerdict(result.text);
   };
 }
+
+// ── THE RELEASE ARM (the operator's 2026-09-22 ruling, twice) ────────────────────────────────────
+//
+// Until this, an `automate` verdict staged an inbox PROPOSAL — "deliberately a proposal, not a
+// release" — so a shard the judge read as safe still waited for the operator to ratify it, which is
+// the outcome the judge exists to remove. The operator ruled that the judge may "flip the verify
+// based on the judge findings and either continue or escalate", and then: "implement the change and
+// see what happens when it runs".
+//
+// THE RELEASE IS NOT A PLAN EDIT. W1-T3206 already built the one legal path: a `ratify.approved`
+// ledger row, which `isDispatchEligible` honours for a `verify: human` task, leaving the record
+// byte-identical. A machine writing that row carries its author class on the row (Law 5: a record
+// launders authority UNLESS the author class rides it), and every release first needs a filing-time
+// risk judge to say PROCEED — so "automated" never means "unjudged".
+//
+// Everything below is PURE over injected hooks. The implementation that spawns the risk judge and
+// writes the row lives in verify-human-release.ts, imported only by run-task.ts, so neither routing
+// loop gains a dependency edge that could close a cycle.
+
+/** What one attempted release concluded. `unavailable` means NO decision was reached — a missing
+ *  record, a risk judge that returned no verdict, or a write that did not land — and is never read
+ *  as either a release or a refusal. */
+export type VerifyHumanReleaseOutcome =
+  | { kind: "released"; reason: string }
+  | { kind: "escalated"; reason: string }
+  | { kind: "unavailable"; reason: string };
+
+export type VerifyHumanReleaseHook = (
+  shard: ShardUnderJudgement,
+  verdict: VerifyHumanVerdict,
+) => Promise<VerifyHumanReleaseOutcome>;
+
+/** Ledgered when the risk judge ESCALATES a shard the verify-human judge wanted to automate. Keyed by
+ *  the observed state, so the same state is escalated once, not re-judged on every tick. */
+export const VERIFY_HUMAN_RELEASE_ESCALATED_STEP = "verify_human.release_escalated";
+/** Ledgered when a release was attempted and reached no decision — retried on the next tick. */
+export const VERIFY_HUMAN_RELEASE_UNAVAILABLE_STEP = "verify_human.release_unavailable";
+
+/** Observed-state keys whose automate verdict the risk judge already escalated. */
+export function releaseEscalatedKeys(rows: readonly Record<string, unknown>[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (row?.step !== VERIFY_HUMAN_RELEASE_ESCALATED_STEP) continue;
+    if (typeof row.observed_state === "string" && row.observed_state) out.add(row.observed_state);
+  }
+  return out;
+}
+
+/**
+ * THE BACKFILL. A shard judged `automate` BEFORE the release arm existed has a cached verdict for its
+ * observed state, so it is never due for judging again — and without this it would sit in the inbox
+ * forever, exactly as before. Pure: which shards hold a settled automate verdict that was neither
+ * released nor escalated for the state it was taken against.
+ */
+export function awaitingRelease(
+  shards: readonly ShardUnderJudgement[],
+  priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>,
+  releasedIds: ReadonlySet<string>,
+  escalatedKeys: ReadonlySet<string>,
+): ShardUnderJudgement[] {
+  return shards.filter((shard) => {
+    if (releasedIds.has(shard.id)) return false;
+    const key = observedStateKey(shard);
+    const prior = priorVerdicts.get(key);
+    return prior?.decision === "automate" && !prior.judgeFailed && !escalatedKeys.has(key);
+  });
+}
+
+export interface ApplyAutomateHooks {
+  release?: VerifyHumanReleaseHook;
+  stageProposal: (proposal: Proposal) => void;
+  appendRow: (row: Record<string, unknown>) => void;
+  runId: string;
+}
+
+/**
+ * One `automate` verdict, routed. Returns which result bucket it belongs in, so both routing loops
+ * (the daemon cadence and `rmd verify-human-sweep`) share ONE implementation of continue-or-escalate.
+ *
+ *   released    — the risk judge said proceed and the release row landed; nothing is staged, because
+ *                 nothing is waiting on anyone.
+ *   needsOperator — the risk judge ESCALATED: the shard becomes an operator proposal carrying the risk
+ *                 judge's own reason, and the escalation is ledgered so this state is asked once.
+ *   automated   — no release hook, or no decision reached: the prior behaviour, unchanged.
+ */
+export async function applyAutomateVerdict(
+  shard: ShardUnderJudgement,
+  verdict: VerifyHumanVerdict,
+  hooks: ApplyAutomateHooks,
+): Promise<"released" | "needsOperator" | "automated"> {
+  if (!hooks.release) {
+    hooks.stageProposal(automationProposalFromJudgedShard(shard, verdict));
+    return "automated";
+  }
+  const outcome = await hooks.release(shard, verdict);
+  if (outcome.kind === "released") return "released";
+  if (outcome.kind === "escalated") {
+    hooks.appendRow({
+      run_id: hooks.runId,
+      task_id: shard.id,
+      step: VERIFY_HUMAN_RELEASE_ESCALATED_STEP,
+      observed_state: observedStateKey(shard),
+      reason: outcome.reason,
+    });
+    hooks.stageProposal(
+      proposalFromJudgedShard(shard, { decision: "needs_operator", reason: `the risk judge escalated this release: ${outcome.reason}` }),
+    );
+    return "needsOperator";
+  }
+  hooks.appendRow({
+    run_id: hooks.runId,
+    task_id: shard.id,
+    step: VERIFY_HUMAN_RELEASE_UNAVAILABLE_STEP,
+    observed_state: observedStateKey(shard),
+    reason: outcome.reason,
+  });
+  hooks.stageProposal(automationProposalFromJudgedShard(shard, verdict));
+  return "automated";
+}
