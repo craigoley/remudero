@@ -1,4 +1,4 @@
-- id: W1-T4017
+- id: W1-T4022
   title: "THE OBJECT REAPER'S THREE REFUSALS ARE ALL NEAR-PERMANENTLY TRUE ON A WORKING FLEET, SO THE OBJECT STORE IS NEVER COMPACTED — each refusal is individually correct, and their conjunction is a gate that a busy host can never pass"
   repo: remudero
   depends_on: []
@@ -13,7 +13,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: unknown -> file-t4017-the-object-reaper-can-never-run
+    reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
   rationale: |
     MEASURED 2026-09-22. `git count-objects -vH` on the Azure host's shared store:
 

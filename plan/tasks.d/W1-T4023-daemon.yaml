@@ -1,4 +1,4 @@
-- id: W1-T4020
+- id: W1-T4023
   title: "EVERY RECLAIM RUNG IS WIRED TO THE DISPATCH PATH, SO A HOST THAT STOPS DISPATCHING IS NEVER CLEANED AGAIN — the janitor rides `runTaskBody`, and a paused daemon returns at `daemon.pause` before reaching it"
   repo: remudero
   depends_on: []
@@ -13,7 +13,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: unknown -> file-t4020-reclaim-rides-dispatch
+    reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
   rationale: |
     MEASURED 2026-09-22 on the Mac mini, whose daemon has been up 8h40m:
 

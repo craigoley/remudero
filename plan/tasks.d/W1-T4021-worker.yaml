@@ -1,4 +1,4 @@
-- id: W1-T4016
+- id: W1-T4021
   title: "A LANE THAT LOSES ITS GIT REGISTRATION IS INVISIBLE TO THE REAPER FOREVER — the reaper's only candidate source is git's own worktree registration, so an orphaned lane directory is unreachable by construction and nothing else reclaims it"
   repo: remudero
   depends_on: []
@@ -13,7 +13,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: unknown -> file-t4016-orphaned-lanes-are-invisible
+    reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
   rationale: |
     MEASURED 2026-09-22 on the Azure host, clearing by hand:
 
