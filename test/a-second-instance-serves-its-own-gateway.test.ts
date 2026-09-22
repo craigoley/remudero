@@ -154,19 +154,18 @@ test("a gateway answers only for the instance it was launched for", () => {
 });
 
 test("a host-level figure is not repeated per instance", () => {
-  const launcher = readFileSync(SCRIPT, "utf8");
-  const hostHealthNames = ["diskFreeBytes", "rateLimitRemaining", "lastPollAgeMs", "pollIntervalMs"];
-
-  // This assertion makes the host/instance boundary test discriminating: the host-level rule is
-  // only meaningful once the launcher has an explicit instance route to keep from duplicating.
-  assert.match(launcher, /INSTANCE_NAME="\$\{RMD_SERVE_INSTANCE:-\}"/);
-
-  // Host health is fetched once by the console's host-control read. The gateway launcher must not
-  // manufacture a per-instance copy by passing host measurements through Docker environment or
-  // instance state. This protects the already-shipped console boundary while the three gateways
-  // remain independently addressable.
-  for (const name of hostHealthNames) {
-    assert.doesNotMatch(launcher, new RegExp(`(?:RMD_|--env|-e ).*${name}`), `${name} must stay a host-level read`);
+  const root = fixture();
+  try {
+    const result = runServe(root, "site");
+    assert.equal(result.status, 0, `${stdout(result)}\n${stderr(result)}`);
+    const launch = stdout(result);
+    assert.match(readFileSync(SCRIPT, "utf8"), /INSTANCE_NAME="\$\{RMD_SERVE_INSTANCE:-\}"/);
+    const hostHealthNames = ["diskFreeBytes", "rateLimitRemaining", "lastPollAgeMs", "pollIntervalMs"];
+    for (const name of hostHealthNames) {
+      assert.doesNotMatch(launch, new RegExp(name), `${name} must stay a host-level read`);
+    }
+    assert.equal((launch.match(/-v .*:\/home\/node\/Remudero(?:\s|$)/g) ?? []).length, 1);
+  } finally {
+    rmSync(root.root, { recursive: true, force: true });
   }
-  assert.equal((launcher.match(/-v "\$\{STATE_DIR\}:\$\{STATE_MOUNT_DEST\}"/g) ?? []).length, 1);
 });
