@@ -1,0 +1,124 @@
+- id: W1-T4033
+  title: "EVERY FIX STRIKE IN THE LEDGER IS TAGGED keyword_only AND THEREFORE AMNESTIED — a ci-log round has no review criteria by construction, `[].some()` returns false, and the strike cap has never bound on a CI-red fix loop: derive the regime from the evidence the round was dispatched against, not from an empty criteria array"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    THE MEASUREMENT, AND WHY IT IS UNAMBIGUOUS. Every `fix.dispatch` row in the live ledger
+    (/home/node/Remudero/state/ledger.ndjson, read 2026-09-22) carries `verdict_regime:
+    "keyword_only"`. Not most — ALL of them, 200 of 200, counted by `mode`/`verdict_regime` pair:
+
+        180  ci-log/keyword_only
+         10  merge-conflict/keyword_only
+          8  reviewer-unmet/keyword_only
+          1  body-coverage/keyword_only
+          1  body-repair/keyword_only
+
+    ZERO rows read `executed`. The control is the same query's own denominator: the tally is built
+    from every `fix.dispatch` row in the file, so an `executed` row could not have been filtered out.
+
+    (1) WHAT THAT COSTS, MEASURED ON THE RUNNING FLEET. Over a 12-hour window of daemon stdout:
+    91 fix dispatches, 76 of them refused by the harness with no commit produced (84%). The strike
+    numbers those dispatches printed:
+
+        153  "strike 1/2"
+         11  "strike 1/1"
+          4  "strike 2/2"
+
+    `strike 1/2` means `pr.priorStrikes` read ZERO at dispatch time. It read zero 153 times. The
+    cap that exists to terminate a futile fix loop has effectively never advanced. PR #6513
+    (W1-T3901) alone absorbed ~12 dispatches and 7 base refreshes in 90 minutes, each refused,
+    each re-dispatched on the next pass.
+
+    (2) THE MECHANISM, END TO END. `runFixRung` (src/run-task.ts) tags each strike:
+
+        const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
+          ? "executed"
+          : "keyword_only";
+
+    A ci-log round is dispatched BECAUSE CI IS RED, and the reviewer only ever runs once CI is
+    green — so `review` is the placeholder verdict this rung started with and `review.criteria` is
+    EMPTY. `[].some(...)` is `false` by definition, so the round is tagged `keyword_only`. The same
+    holds for a merge-conflict round. That is 190 of the 200 rows above.
+
+    The read side then amnesties exactly those rows. `priorStrikesFor` (src/run-task.ts):
+
+        if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
+
+    and `currentStrikeRegimeFor` returns `"executed"` whenever the task's latest `review.posted`
+    row shows any proof that is not `not_executable`. W1-T3901's latest such row reads
+    `proof_exec=["exec_error","exec_error","exec_error","not_yet_built"]` — three executed proofs,
+    so the regime is `executed`, so every ci-log strike it ever spent is skipped. priorStrikes
+    reads 0 forever. THE LOOP CANNOT TERMINATE.
+
+    (3) WHY THE AMNESTY IS RIGHT AND THE TAG IS WRONG. The amnesty (W1-T199) exists for a real
+    reason, stated in its own doc: a strike "spent when no proof could execute is a strike against
+    KEYWORD NOISE", and historical rows predate the executor entirely. That argument is sound for a
+    `reviewer-unmet` round whose every proof was `not_executable`. IT DOES NOT DESCRIBE A CI-LOG
+    ROUND AT ALL. A ci-log strike is dispatched against a named failing check; a merge-conflict
+    strike against a real conflicting file list. That is evidence, not keyword overlap. The bug is
+    not the amnesty — it is that an EMPTY criteria array is being read as "no proof executed" when
+    it actually means "this round was never judged against criteria in the first place".
+
+    (4) THE FIX IS THE EMPTY CASE AND NOTHING ELSE. `[].some(p)` is `false`, which is exactly how an
+    unjudged round acquires the tag reserved for a judged-and-noisy one. Splitting that case out
+    leaves every round that HAS criteria byte-for-byte unchanged — including the 8 `reviewer-unmet`
+    and 1 `body-coverage` rows above, which keep their `keyword_only` tag and keep their amnesty.
+    Only the 190 rounds dispatched against non-criteria evidence change, and they change to the tag
+    that makes the cap bind on them.
+
+    (5) WHAT LANDING THIS DOES. A ci-log fix loop spends strike 1, then strike 2, then hits
+    `DISPOSITION_RULES`' exhaustion row (`priorStrikes >= policy.strikeCap`) and escalates to
+    blocked-ambiguous with a named reason — instead of re-dispatching a worker every pass forever.
+    The strike cap is already written, already policy-bound (`sweep.strikeCap` value 2), and already
+    rendered in the stand-down text. This shard does not add a bound; IT MAKES THE EXISTING BOUND
+    READABLE, which is why it is small.
+
+    (6) NOT A THRESHOLD CHANGE. `policy.strikeCap` is untouched, `fixCeilingInForce` is untouched,
+    `fixDispatchBudget` is untouched, and the amnesty rule in `priorStrikesFor` is untouched. The
+    only edit is which regime a strike is TAGGED with at the moment it is spent.
+
+    FILES. src/run-task.ts holds both the write site (the `verdictRegime` computation, twice — the
+    ordinary dispatch and the body-repair arm) and `priorStrikesFor`/`strikeRegimeOf`/
+    `currentStrikeRegimeFor`, so the new pure helper and its two call sites are all in that file.
+    The suite is new: this repo sends a coverage-load-bearing test to its own file, and the existing
+    strike-accounting coverage does not reach the empty-criteria case (which is precisely why the
+    defect shipped).
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. All four criteria take the `unit test:` form; each title is
+    plain prose with no comma and no regex metacharacter, and each was checked against test/ for a
+    zero match before being written here. The fifth is doc-shaped and takes a `grep:` on one physical
+    line against this shard's own rationale, with the pattern carrying no " in " substring and no
+    unescaped dot.
+
+    THIS FILING CARRIES NO TRAILER AND SITS ON A chore/ BRANCH, not `run-W1-T4033-*` — both of those
+    surfaces credit a task as IMPLEMENTED on merge, and a plan-only filing must not.
+  acceptance:
+    - claim: "a fix round dispatched with no review criteria is tagged as spent against executed evidence"
+      proof: 'grep: test("W1-T4033: a fix round with no review criteria is not tagged keyword only" in test/the-strike-regime-of-an-unjudged-round.test.ts'
+    - claim: "a fix round whose criteria all failed to execute keeps the keyword only tag and keeps its amnesty"
+      proof: 'grep: test("W1-T4033: a round whose every proof is unexecutable stays keyword only" in test/the-strike-regime-of-an-unjudged-round.test.ts'
+    - claim: "a fix round with at least one executed proof is still tagged executed exactly as before"
+      proof: 'grep: test("W1-T4033: a round with one executed proof is still tagged executed" in test/the-strike-regime-of-an-unjudged-round.test.ts'
+    - claim: "a ci-log strike now counts toward the cap under the executed regime instead of being amnestied"
+      proof: 'grep: test("W1-T4033: a ci-log strike counts toward the cap under the executed regime" in test/the-strike-regime-of-an-unjudged-round.test.ts'
+    - claim: "the new regime helper records why an empty criteria set is not keyword noise"
+      proof: "grep: an empty criteria array is not evidence of keyword noise in src/run-task.ts"
+  risk: high
+  origin: "oper#fix-strike-regime-amnesty-2026-09-22"
+  plan_refs: ["W1-T199", "W1-T2452", "W1-T2788", "W1-T127"]
+  files: [src/run-task.ts, test/the-strike-regime-of-an-unjudged-round.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  note: |
+    RESERVATION HAND-OFF, RECORDED BECAUSE THE MINT COULD NOT RECORD IT. `rmd next-task-id` reserved
+    this id from the daemon's own checkout, which sits on a DETACHED HEAD, so the reservation ref
+    recorded `branch=unknown` — parseable, but unreadable AS A CLAIM, which is the exact shape
+    `task-id-existence` refuses. That is the ordinary fleet case, not an anomaly: the daemon takes an
+    id before the run branch exists, and W1-T3601/W1-T3602 (#5612) are the gate's own cited examples.
+    The escape is granted only where the reservation recorded a value to hand off FROM, and it did.
+    The filing branch below is the real holder, named on its own physical line so nothing trails it.
+    reservation hand-off: unknown -> chore/file-t4033-t4034
