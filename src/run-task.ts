@@ -23285,6 +23285,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // W1-T1076: `scope` is populated iff `--base` was given, so this branch IS the
         // changed-tasks pass and `duplicateCorpusOpts`' scoped arm is the right one here.
         ...duplicateCorpusOpts(true, task.id, openShardCorpus, shardSlugById),
+        // W1-T1070 (design iii): WARN in the engine (the default, so the 32 shards already
+        // carrying a self-path proof are not refused at dispatch overnight) — BLOCK only here,
+        // in the changed-tasks pass, so a newly filed or edited shard is refused before it
+        // repeats the pattern.
+        proofSelfPath: "block",
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter

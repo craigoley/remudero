@@ -364,7 +364,7 @@
   "src/lib/task-class.ts": 37,
   "src/lib/task-id-reservation.ts": 250,
   "src/lib/task-id.ts": 500,
-  "src/lib/task-linter.ts": 1250,
+  "src/lib/task-linter.ts": 1300,
   "src/lib/tier.ts": 67,
   "src/lib/time-window.ts": 250,
   "src/lib/tmp.ts": 250,
