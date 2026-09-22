@@ -831,6 +831,7 @@
     "test/followup-rotation-idempotency.test.ts": 774,
     "test/followup-routing-has-a-consumer.test.ts": 1118,
     "test/followup-settled-question-arm.test.ts": 1155,
+    "test/frontier-work-prefers-opus-and-gpt-6-leads-codex.test.ts": 0,
     "test/fs-race-alerts.test.ts": 1453,
     "test/full-sweep-fix-head-of-line.test.ts": 1180,
     "test/gate-posture-production-adapter.test.ts": 0,

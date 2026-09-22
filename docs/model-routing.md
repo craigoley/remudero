@@ -2,8 +2,25 @@
 
 ## Decision
 
-Codex balanced work now prefers `gpt-5.6-luna`, then `gpt-5.6-terra`. Frontier work still
-prefers Sol. The cash provider keeps its own ordered deployments because that ordering is based on
+**2026-09-22 model change.** Opus 5.5 replaces Opus 5, GPT-6 Luna replaces GPT-5.6 Luna, and Terra
+is phased out:
+
+- Frontier work (`opus`, `claude-opus-5`) **prefers Claude**: it runs on Claude Opus whenever the
+  Claude subscription has headroom, and reaches Codex `gpt-6-sol` only when Claude is below
+  reserve or unreadable (`capabilities.provider_preference` in `.remudero/mounts.yaml`). Before
+  this, the auction split frontier work by headroom alone, and 84 of 127 Opus-requested runs went
+  to `gpt-5.6-sol`.
+- Codex economy and balanced work leads with `gpt-6-luna`; `gpt-5.6-luna` trails as a fallback.
+  Terra is in no Codex row, and Sol is deliberately not added to the balanced rows.
+- Every assignment an automatic auction decided under that preference records
+  `routing.capabilityPreference`; a Sol fallback also records `routing.preferenceBypass`.
+- The cash (Azure) ladder is unchanged: GPT-6 models reach the Codex subscription before Azure.
+- `gpt-6-astra` is visible on the account (and is its default) but is not routed.
+- Opus 5.5 lands separately: the fleet image's Claude CLI (2.1.276) refuses `claude-opus-5-5` with
+  "version 2.1.280 or newer is required", so the Opus 5.5 pins wait for the image rebuilt by #6625.
+
+The earlier decision follows. Codex balanced work preferred `gpt-5.6-luna`, then `gpt-5.6-terra`.
+Frontier work still preferred Sol. The cash provider keeps its own ordered deployments because that ordering is based on
 measured task shapes, context limits, and per-request receipts rather than subscription capacity.
 
 This is a policy experiment, not a claim that Luna is universally the strongest reasoning model.

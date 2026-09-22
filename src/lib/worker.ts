@@ -122,9 +122,11 @@ import {
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
   type OpenWeightModelSelection,
+  codexCapabilityForRequestedModel,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
+  policyForCapability,
   selectWorkerProviderForPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
@@ -325,6 +327,8 @@ export interface WorkerSelectionAssignment {
     tightestRemainingPercent?: number;
     allocationSharePercent?: number;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
+    /** Present when the requested capability's declared preference governed an automatic auction. */
+    capabilityPreference?: { capability: string; provider: WorkerProviderId };
   };
   candidates: Array<{
     provider: WorkerProviderId;
@@ -1355,6 +1359,7 @@ export function workerSelectionAssignment(
     };
     selection?: ProviderSelection;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
+    capabilityPreference?: { capability: string; provider: WorkerProviderId };
   },
 ): WorkerSelectionAssignment {
   const selected = input.capacity;
@@ -1386,6 +1391,7 @@ export function workerSelectionAssignment(
         ? { allocationSharePercent: input.selection.allocationSharePercent }
         : {}),
       ...(input.preferenceBypass ? { preferenceBypass: input.preferenceBypass } : {}),
+      ...(input.capabilityPreference ? { capabilityPreference: input.capabilityPreference } : {}),
     },
     candidates: (input.capacities ?? (selected ? [selected] : [])).slice(0, 8).map(selectionCandidateSnapshot),
   };
@@ -1825,6 +1831,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   let routedClaudeSelection: ProviderSelection | undefined;
   let routedClaudeCapacities: ProviderCapacity[] | undefined;
   let routedClaudePreferenceBypass: { provider: WorkerProviderId; reason: string } | undefined;
+  let routedCapabilityPreference: { capability: string; provider: WorkerProviderId } | undefined;
   if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
     const capacity = unavailableClaudeCapacity(claudeHealthRoute);
     try {
@@ -1900,9 +1907,15 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let selection: ProviderSelection;
     let preferenceBypass: ProviderRoutingWriteInput["preferenceBypass"];
     try {
+      const auction = policyForCapability(
+        routingPolicy,
+        args.model && capabilities ? codexCapabilityForRequestedModel(capabilities, args.model) : undefined,
+        capabilities?.providerPreference,
+      );
+      routedCapabilityPreference = auction.capabilityPreference;
       const routed = selectWorkerProviderForPolicy(
         capacities,
-        routingPolicy,
+        auction.policy,
         args.providerRouting?.tieBreaker ?? providerTieBreaker++,
       );
       selection = routed.selection;
@@ -1977,6 +1990,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         event: "worker.provider.selected",
         provider: selection.provider,
         preference: routingPolicy.preference,
+        ...(routedCapabilityPreference ? { capability_preference: routedCapabilityPreference } : {}),
         ...(preferenceBypass ? { preference_bypass: preferenceBypass } : {}),
         tightest_remaining_percent: selection.tightestRemainingPercent,
         ...(selection.allocationWeight !== undefined ? { allocation_weight: selection.allocationWeight } : {}),
@@ -2024,6 +2038,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         policy: routingPolicy,
         selection,
         preferenceBypass,
+        capabilityPreference: routedCapabilityPreference,
       });
       let measurement: ProviderWindowMeasurement | undefined;
       try {
@@ -2352,6 +2367,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       policy: routingPolicy,
       selection: routedClaudeSelection,
       preferenceBypass: routedClaudePreferenceBypass,
+      capabilityPreference: routedCapabilityPreference,
     });
 
     try {
