@@ -1302,6 +1302,7 @@
     "test/review-provider-provenance.test.ts": 2975,
     "test/review-resolves-criteria-at-the-prs-own-head.test.ts": 1486,
     "test/review-rest-transport.test.ts": 1691,
+    "test/review-reuse-discrimination-outcome.test.ts": 0,
     "test/review-skips-spawn-on-plan-only.test.ts": 1832,
     "test/review-status-gate.test.ts": 1486,
     "test/review-status-pending.test.ts": 5933,
