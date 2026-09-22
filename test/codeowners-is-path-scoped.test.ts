@@ -39,7 +39,7 @@ function ownsPath(entries: CodeownersEntry[], path: string): string[] {
   return matching.at(-1)?.owners ?? [];
 }
 
-test("CODEOWNERS names every gate-config path without a blanket wildcard", () => {
+test("every gate config path has a code owner", () => {
   const entries = readCodeowners();
   const patterns = entries.map(({ pattern }) => pattern);
 
