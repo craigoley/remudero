@@ -177,6 +177,13 @@ export interface Mounts {
   escalation_judge?: Mount;
   /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge. */
   verify_human_judge?: Mount;
+  /**
+   * OPTIONAL — the mount a task's LAST attempt rides after lower-tier workers have failed it: the
+   * diagnose-informed implement attempt, and the fix rung's final fresh strike. The one worker
+   * row allowed above the worker ceiling; it must still sit strictly below the Architect's tier.
+   * Absent = every attempt keeps its own mount.
+   */
+  step_up?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
    *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
@@ -586,6 +593,12 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     raw.escalation_judge === undefined ? undefined : parseMount(raw.escalation_judge, "escalation_judge", tiers, efforts);
   const verifyHumanJudge =
     raw.verify_human_judge === undefined ? undefined : parseMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts);
+  const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
+  if (stepUp && tiers[stepUp.model] >= tiers[architect.model]) {
+    throw new MountsError(
+      `'step_up' (${stepUp.model}, tier ${tiers[stepUp.model]}) must sit strictly below the Architect (${architect.model}, tier ${tiers[architect.model]}).`,
+    );
+  }
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -610,7 +623,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), synthesis, routes };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }
