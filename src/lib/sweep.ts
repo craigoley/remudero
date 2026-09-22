@@ -55,11 +55,19 @@ import {
   cappedOverrideFromLedger,
   decideAutoMergeArm,
   isCriterionRefusal,
+  judgeReview,
   parseAcceptanceBlock,
+  parseWhitelistedProof,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
 } from "./review.js";
-import type { ArmDecision, AutomergeHold, CriterionVerdict } from "./review.js";
+import type {
+  ArmDecision,
+  AutomergeHold,
+  CriterionVerdict,
+  ProofExecutor,
+  ReviewVerdict,
+} from "./review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -113,6 +121,103 @@ export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merg
 // W1-T2340: declared in a leaf module so open-prs-rest.ts's producer imports it without closing
 // an open-prs-rest <-> sweep cycle. See workflow-run.ts's own doc.
 export type { WorkflowRunObservation } from "./workflow-run.js";
+
+export interface ReviewReuseDiscriminationInput {
+  prior: ReviewVerdict;
+  diff: string;
+  report: string;
+  headCheckoutDir: string;
+  baseCheckoutDir: string;
+  baseUnreadablePaths?: ReadonlySet<string>;
+  baseIsCheckout?: boolean;
+  addedTestFiles?: ReadonlySet<string>;
+  taskDeclaredFiles?: string[];
+  execProof?: ProofExecutor;
+}
+
+export type ReviewReuseDiscriminationResult =
+  | { ok: true; verdict: ReviewVerdict }
+  | { ok: false; reason: string };
+
+export function discriminateReviewReuse(
+  input: ReviewReuseDiscriminationInput,
+): ReviewReuseDiscriminationResult {
+  const criteria: AcceptanceCriterion[] = input.prior.criteria.map((criterion) => ({
+    claim: criterion.claim,
+    proof: criterion.proof,
+  }));
+  if (criteria.length === 0) return { ok: false, reason: "prior verdict has no criteria" };
+  if (criteria.some((criterion) => !criterion.claim.trim() || !criterion.proof.trim())) {
+    return { ok: false, reason: "prior verdict has an unreadable criterion or proof" };
+  }
+  if (!input.headCheckoutDir || !input.baseCheckoutDir) {
+    return { ok: false, reason: "PR-head or merge-base checkout is unavailable" };
+  }
+
+  const computed = judgeReview(criteria, {
+    diff: input.diff,
+    report: input.report,
+    semantic: input.prior.criteria.map((criterion) => (criterion.met ? undefined : false)),
+    headCheckoutDir: input.headCheckoutDir,
+    baseCheckoutDir: input.baseCheckoutDir,
+    baseUnreadablePaths: input.baseUnreadablePaths,
+    baseIsCheckout: input.baseIsCheckout,
+    addedTestFiles: input.addedTestFiles,
+    execProof: input.execProof,
+    taskDeclaredFiles: input.taskDeclaredFiles,
+  });
+
+  const unreadable = computed.criteria.find(
+    (criterion) =>
+      criterion.proof_exec === "exec_error" ||
+      criterion.proof_exec === "base_unreadable" ||
+      criterion.proof_skip === "runner-absent" ||
+      criterion.proof_skip === "incomplete-run" ||
+      criterion.proof_skip === "runtime-broken" ||
+      criterion.proof_skip === "no-exec-context",
+  );
+  if (unreadable) {
+    return {
+      ok: false,
+      reason: `proof evidence unreadable for ${unreadable.claim}: ${unreadable.proof_skip ?? unreadable.proof_exec}`,
+    };
+  }
+
+  for (const criterion of criteria) {
+    const whitelisted = parseWhitelistedProof(criterion.proof);
+    if (whitelisted?.kind === "test" && input.baseIsCheckout !== true) {
+      return { ok: false, reason: `unit-test base discrimination is unavailable for ${criterion.claim}` };
+    }
+  }
+
+  const notObserved = computed.criteria.find(
+    (criterion) => criterion.proof_exec !== "executed_pass" && criterion.proof_exec !== "executed_fail" && criterion.proof_exec !== "executed_stale",
+  );
+  if (notObserved) {
+    return { ok: false, reason: `proof discrimination did not produce an observed result for ${notObserved.claim}` };
+  }
+
+  const criteriaWithPriorFailures = computed.criteria.map((criterion, index) => {
+    const prior = input.prior.criteria[index];
+    if (!prior || prior.met) return criterion;
+    return {
+      ...criterion,
+      met: false,
+      reason: `${criterion.reason} — prior criterion failure preserved during proof-only discrimination`,
+    };
+  });
+  const preservedFailure = input.prior.state === "failure";
+  return {
+    ok: true,
+    verdict: {
+      ...computed,
+      criteria: criteriaWithPriorFailures,
+      state: preservedFailure || criteriaWithPriorFailures.some((criterion) => !criterion.met) ? "failure" : computed.state,
+      floorState: preservedFailure ? "failure" : computed.floorState,
+      summary: preservedFailure ? input.prior.summary : computed.summary,
+    },
+  };
+}
 
 /**
  * The escalation's TASK IDENTITY for one open PR — pure, so the mint itself is testable without

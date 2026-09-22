@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  discriminateReviewReuse,
   judgeReview,
   type ProofExecutor,
   type ReviewVerdict,
@@ -12,7 +11,7 @@ import {
 import { appendLedger } from "../src/lib/ledger.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { buildSweepEffects } from "../src/run-task.js";
-import type { OpenPrView, ReviewReuseInputs } from "../src/lib/sweep.js";
+import { discriminateReviewReuse, type OpenPrView, type ReviewReuseInputs } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 const CRITERION = {
