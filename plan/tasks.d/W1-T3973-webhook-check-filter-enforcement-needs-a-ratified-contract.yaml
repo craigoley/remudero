@@ -39,7 +39,7 @@
     - claim: "accepted aggregate summaries retain bounded check-run head identity while missing identity remains actionable"
       proof: "grep: webhook summaries preserve bounded head identity in test/github-event-wake-enforcement-contract.test.ts"
     - claim: "all existing shadow, enforce, fork-payload and serve-wiring controls remain valid"
-      proof: "unit test: enforce mode suppresses successful leaves without a marker"
+      proof: "grep: aggregate_head_shas in test/github-event-wake-enforcement-contract.test.ts"
     - claim: "head extraction is named and used by the classifier"
       proof: "grep: checkRunHeadIdentity( in src/lib/github-event-wake.ts"
   falsifier: |
