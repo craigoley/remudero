@@ -111,7 +111,7 @@
   origin: "oper#fix-strike-regime-amnesty-2026-09-22"
   plan_refs: ["W1-T199", "W1-T2452", "W1-T2788", "W1-T127"]
   files: [src/run-task.ts, test/the-strike-regime-of-an-unjudged-round.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RESERVATION HAND-OFF, RECORDED BECAUSE THE MINT COULD NOT RECORD IT. `rmd next-task-id` reserved

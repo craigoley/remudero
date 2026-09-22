@@ -150,7 +150,7 @@
   origin: recon#unparseable-risk-verdict-2026-08-14
   plan_refs: ['W1-T454', 'W1-T248']
   files: [src/lib/risk-judge.ts, test/risk-judge.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2
     subsystems while risk<high and `files:` spans `src/lib/` and `test/`. The band is Rule 19's SPAN,
