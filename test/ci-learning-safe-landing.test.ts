@@ -197,7 +197,7 @@ test("W1-T3492 criterion 1: scheduled CI-learning stages outside the checkout an
   );
 });
 
-test("W1-T3492 criterion 2: pending CI-learning bytes survive transport failure, retry, and acknowledge only after merge", () => {
+test("W1-T3754: an unchanged shard produces no landing entry", () => {
   const bareOrigin = makeBareOrigin();
   const checkout = cloneRoot(bareOrigin);
   const root = stateRoot();
@@ -260,6 +260,39 @@ test("W1-T3492 criterion 2: pending CI-learning bytes survive transport failure,
   );
   assert.equal(afterMerge.filed.length, 0, "merged pending bytes need no new landing");
   assert.deepEqual(pendingFiles(root), [], "the queue is removed only after origin/main has the identical blob");
+});
+
+test("W1-T3754: a landing reconciles against main, never overwrites it", () => {
+  const bareOrigin = makeBareOrigin();
+  const checkout = cloneRoot(bareOrigin);
+  const root = stateRoot();
+  const origin = "ci-learning:4321:renamed";
+  const canonical = ciLearningShardYaml(draft(origin), "W1-T9010");
+  mkdirSync(join(checkout, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9010-canonical.yaml"), canonical, "utf8");
+  git(checkout, "add", "-A");
+  git(checkout, "commit", "--quiet", "-m", "chore: add canonical CI learning");
+  git(checkout, "push", "--quiet", "origin", "main");
+
+  const queuedDir = join(root, "state", "ci-learning-pending", "plan", "tasks.d");
+  mkdirSync(queuedDir, { recursive: true });
+  writeFileSync(join(queuedDir, "W1-T9011-stale.yaml"), canonical, "utf8");
+  const { gh } = fakeGh("https://github.com/o/r/pull/3754");
+  const result = withLiveWritesAllowed(() =>
+    landCiLearningShards([], checkout, {
+      stateRoot: root,
+      mintTaskId: () => {
+        throw new Error("already-durable origin must not mint");
+      },
+      planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
+      gh,
+    }),
+  );
+
+  assert.deepEqual(result.filed, [], "an origin already on main needs no new landing PR");
+  assert.deepEqual(pendingFiles(root), [], "the stale filename is removed after origin-level reconciliation");
 });
 
 test("W1-T3492 criterion 3: a second scheduled firing reuses a pending finding instead of minting a duplicate id", async () => {
