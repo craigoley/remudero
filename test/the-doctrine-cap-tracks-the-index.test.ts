@@ -99,7 +99,10 @@ test("W1-T3341 (1, falsifier): the PRE-MIGRATION cap would fail this suite — t
 test("W1-T3341 (2): the ratchet passes on the committed CLAUDE.md at the new cap", () => {
   const out = execFileSync(process.execPath, [RATCHET], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.match(out, new RegExp(`cap ${baseline().capBytes} bytes`));
-  assert.match(out, /OK -- CLAUDE\.md is at or under the size budget cap/);
+  // The absolute cap can pass while the separate §8A net-byte rule routes fold debt. Keep this
+  // criterion about the cap itself; asserting the overall OK line made the test reject the
+  // intended non-blocking self-improvement flow.
+  assert.doesNotMatch(out, /CLAUDE\.md is \d+ bytes > cap \d+ bytes/);
 });
 
 test("W1-T3341 (2, falsifier): a file ONE BYTE over the cap is refused, and the refusal names both figures", () => {

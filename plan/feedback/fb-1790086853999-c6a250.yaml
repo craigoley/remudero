@@ -13,10 +13,25 @@ raw: "Architect triage failed to convert the approved console-proof planning
   console successor."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6575
+summary:
+  headline: Triage verdict lost in repair loop—task unfiled
+  what_happened: Triage attempt 1 emitted warnings but failed status validation.
+    Attempt 2 fixed files but lost the required verdict, so the entire task
+    scope was discarded.
+  decision: Add schema validation before first emission, preserve verdict through
+    repair loops, carry task set forward, and implement regression tests
+  options:
+    - label: Apply all fixes and regression tests
+      consequence: Fixes root cause, prevents recurrence, but blocks PR-action
+        successor until complete
+    - label: File task manually, defer relint fixes
+      consequence: Unblocks blocker immediately, but leaves regression gap and future risk
+    - label: Apply fixes without tests, re-run triage
+      consequence: Faster than full fix but higher chance of repeated failure
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

@@ -94,7 +94,12 @@ test("claude-md-budget-ratchet CLI: a malformed capBytes never prints a cap figu
 test("the REAL committed CLAUDE.md is currently within the recorded size budget cap", () => {
   const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /OK -- CLAUDE.md is at or under the size budget cap/);
+  // The absolute cap and §8A's per-change net-byte rule are separate contracts. A current
+  // change may be routed as fold debt and still be below the absolute cap; this assertion owns
+  // only the cap named by the test, not the unrelated route consequence.
+  const output = `${result.stdout}${result.stderr}`;
+  assert.match(output, /CLAUDE\.md is \d+ bytes \(cap \d+ bytes\)/);
+  assert.doesNotMatch(output, /CLAUDE\.md is \d+ bytes > cap \d+ bytes/);
 });
 
 // THE ZERO-HEADROOM INVARIANT WAS RETIRED ON 2026-08-22 AND IS REPLACED, NOT DELETED.

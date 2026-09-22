@@ -92,10 +92,10 @@ function baseDeps(clock: WakeClock, overrides: Partial<DaemonDeps> = {}): Daemon
   };
 }
 
-test("a GitHub wake starts a restricted review pass while measurement is still unresolved", async () => {
+test("a GitHub wake starts a restricted review pass while an inline cadence is unresolved", async () => {
   const clock = new WakeClock();
-  const measurement = deferred<never>();
-  let measurementStarted = false;
+  const digest = deferred<never>();
+  let digestStarted = false;
   let stopped = false;
   let lightPasses = 0;
   let daemon: Promise<unknown> | undefined;
@@ -104,10 +104,10 @@ test("a GitHub wake starts a restricted review pass while measurement is still u
       fixturePlan(),
       baseDeps(clock, {
         checkStop: () => (stopped ? "fixture complete" : undefined),
-        checkMeasurementCadence: () => ({ fire: true, reason: "fixture" }),
-        runMeasurementCadence: () => {
-          measurementStarted = true;
-          return measurement.promise;
+        checkDigestCadence: () => ({ fire: true, reason: "fixture" }),
+        runDigestCadence: () => {
+          digestStarted = true;
+          return digest.promise;
         },
         sweepLight: async () => {
           lightPasses++;
@@ -115,13 +115,13 @@ test("a GitHub wake starts a restricted review pass while measurement is still u
       }),
     );
 
-    await eventually(() => measurementStarted && clock.waiting, "measurement started without an inter-phase review wait");
+    await eventually(() => digestStarted && clock.waiting, "the inline cadence started without an inter-phase review wait");
     clock.wake();
     await eventually(() => lightPasses === 1, "the event wake did not start the restricted pass");
-    assert.equal(measurementStarted, true, "precondition: measurement remains the phase holding the main loop");
+    assert.equal(digestStarted, true, "precondition: the inline cadence remains the phase holding the main loop");
   } finally {
     stopped = true;
-    measurement.resolve({} as never);
+    digest.resolve({} as never);
     await eventually(() => clock.waiting || daemon === undefined, "the clock did not return to its bounded wait after the pass");
     clock.timeout();
     await daemon;
@@ -167,9 +167,9 @@ test("the same review clock remains live while board review is unresolved", asyn
 
 test("wakes during an active pass coalesce to one non-overlapping follow-up", async () => {
   const clock = new WakeClock();
-  const measurement = deferred<never>();
+  const digest = deferred<never>();
   const firstPass = deferred<void>();
-  let measurementStarted = false;
+  let digestStarted = false;
   let stopped = false;
   let calls = 0;
   let inFlight = 0;
@@ -180,10 +180,10 @@ test("wakes during an active pass coalesce to one non-overlapping follow-up", as
       fixturePlan(),
       baseDeps(clock, {
         checkStop: () => (stopped ? "fixture complete" : undefined),
-        checkMeasurementCadence: () => ({ fire: true, reason: "fixture" }),
-        runMeasurementCadence: () => {
-          measurementStarted = true;
-          return measurement.promise;
+        checkDigestCadence: () => ({ fire: true, reason: "fixture" }),
+        runDigestCadence: () => {
+          digestStarted = true;
+          return digest.promise;
         },
         sweepLight: async () => {
           calls++;
@@ -198,7 +198,7 @@ test("wakes during an active pass coalesce to one non-overlapping follow-up", as
       }),
     );
 
-    await eventually(() => measurementStarted && clock.waiting, "the review clock never started waiting");
+    await eventually(() => digestStarted && clock.waiting, "the review clock never started waiting");
     clock.wake();
     await eventually(() => calls === 1 && inFlight === 1, "the first light pass did not start");
     clock.wake();
@@ -211,7 +211,7 @@ test("wakes during an active pass coalesce to one non-overlapping follow-up", as
   } finally {
     stopped = true;
     firstPass.resolve();
-    measurement.resolve({} as never);
+    digest.resolve({} as never);
     await eventually(() => clock.waiting || daemon === undefined, "the clock did not reach its stoppable wait");
     clock.timeout();
     await daemon;
@@ -222,8 +222,8 @@ test("wakes during an active pass coalesce to one non-overlapping follow-up", as
 for (const control of ["STOP", "PAUSE"] as const) {
   test(`${control} prevents new inter-phase review admission while a pending wake survives`, async () => {
     const clock = new WakeClock();
-    const measurement = deferred<never>();
-    let measurementStarted = false;
+    const digest = deferred<never>();
+    let digestStarted = false;
     let held = true;
     let stopped = false;
     let lightPasses = 0;
@@ -233,12 +233,12 @@ for (const control of ["STOP", "PAUSE"] as const) {
         fixturePlan(),
         baseDeps(clock, {
           checkStop: () =>
-            stopped ? "fixture complete" : control === "STOP" && held && measurementStarted ? "held" : undefined,
-          checkPause: () => (control === "PAUSE" && held && measurementStarted ? "held" : undefined),
-          checkMeasurementCadence: () => ({ fire: true, reason: "fixture" }),
-          runMeasurementCadence: () => {
-            measurementStarted = true;
-            return measurement.promise;
+            stopped ? "fixture complete" : control === "STOP" && held && digestStarted ? "held" : undefined,
+          checkPause: () => (control === "PAUSE" && held && digestStarted ? "held" : undefined),
+          checkDigestCadence: () => ({ fire: true, reason: "fixture" }),
+          runDigestCadence: () => {
+            digestStarted = true;
+            return digest.promise;
           },
           sweepLight: async () => {
             lightPasses++;
@@ -246,7 +246,7 @@ for (const control of ["STOP", "PAUSE"] as const) {
         }),
       );
 
-      await eventually(() => measurementStarted && clock.waiting, "the held phase never started its review clock");
+      await eventually(() => digestStarted && clock.waiting, "the held phase never started its review clock");
       clock.wake();
       await eventually(() => clock.waiting, "the held wake was not retained for a later clock tick");
       assert.equal(lightPasses, 0, `${control} must be rechecked immediately before review admission`);
@@ -256,7 +256,7 @@ for (const control of ["STOP", "PAUSE"] as const) {
     } finally {
       held = false;
       stopped = true;
-      measurement.resolve({} as never);
+      digest.resolve({} as never);
       await eventually(() => clock.waiting || daemon === undefined, "the clock did not reach its stoppable wait");
       clock.timeout();
       await daemon;

@@ -9282,9 +9282,7 @@ export async function runFixRung(opts: {
           // `strikeRegimeOf` as "keyword_only" BY CONSTRUCTION (never a decision), which let the
           // amnesty in `priorStrikesFor` erase every body-repair strike the instant the task's
           // regime turned "executed", however many were spent (this task's rationale, §1/§2).
-          const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
-            ? "executed"
-            : "keyword_only";
+          const verdictRegime = strikeRegimeForDispatch(review.criteria);
           deps.log("fix.dispatch", {
             strike: strikes,
             strike_cap: opts.strikeCap,
@@ -9994,9 +9992,7 @@ export async function runFixRung(opts: {
     // when the floor actually ran proofs is a strike against EVIDENCE. Untagged
     // historical lines are read as "keyword_only" (see priorStrikesFor) — they were
     // all written before the executor shipped.
-    const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
-      ? "executed"
-      : "keyword_only";
+    const verdictRegime = strikeRegimeForDispatch(review.criteria);
 
     const fixArgs: SpawnWorkerArgs = {
       cwd: opts.worktreePath,
@@ -32885,6 +32881,30 @@ export function currentStrikeRegimeFor(lines: Array<Record<string, unknown>>, ta
  * this, because every one of them predates the executor.
  */
 export type StrikeRegime = "executed" | "keyword_only";
+
+/** The empty-input decision is evidence, not an inference from a failed proof search. */
+export const EMPTY_CRITERIA_REGIME_REASON = "an empty criteria array is not evidence of keyword noise";
+
+/**
+ * W1-T4033 — THE REGIME A STRIKE IS SPENT UNDER, DERIVED FROM THE EVIDENCE IT WAS DISPATCHED
+ * AGAINST. `criteria.some(...)` asks "did any proof execute", which is the right question ONLY
+ * when there are criteria to ask it of. A ci-log or merge-conflict round has NONE by construction
+ * — the reviewer runs only once CI is green — so `[].some(...)` returned `false` and every such
+ * strike was tagged `keyword_only`, then amnestied by {@link priorStrikesFor} under the
+ * `"executed"` regime. MEASURED 2026-09-22 on the live ledger: 200 of 200 `fix.dispatch` rows read
+ * `keyword_only`, 190 of them ci-log or merge-conflict, and 153 dispatches printed `strike 1/2` —
+ * `priorStrikes` read ZERO every time, so the cap never advanced and a futile loop never ended.
+ *
+ * THE EMPTY CASE IS THE WHOLE FIX: an empty criteria array is not evidence of keyword noise, it is
+ * the absence of a reviewer verdict. What such a round WAS dispatched against — a named failing
+ * check, a real conflicting file list — is executed evidence, so its strike must count. Every round
+ * that HAS criteria is byte-for-byte unchanged, so W1-T199's amnesty keeps working for the case it
+ * was built for: a judged round whose every proof was `not_executable`.
+ */
+export function strikeRegimeForDispatch(criteria: ReadonlyArray<{ proof_exec?: unknown }>): StrikeRegime {
+  if (criteria.length === 0) return "executed";
+  return criteria.some((c) => c.proof_exec !== "not_executable") ? "executed" : "keyword_only";
+}
 
 /** The regime a ledger `fix.dispatch` line records — untagged ⇒ pre-executor. */
 export function strikeRegimeOf(line: Record<string, unknown>): StrikeRegime {

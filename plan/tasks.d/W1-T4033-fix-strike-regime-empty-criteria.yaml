@@ -122,3 +122,14 @@
     The escape is granted only where the reservation recorded a value to hand off FROM, and it did.
     The filing branch below is the real holder, named on its own physical line so nothing trails it.
     reservation hand-off: unknown -> chore/file-t4033-t4034
+    WHAT MADE THIS TASK GREEN, RECORDED BECAUSE IT WAS NOT THE WORK. Criterion 5 as authored was a
+    doc-shaped `grep:` aimed at PROSE. The reviewer ran it, saw it pass on the head, then WITHDREW
+    the pass — "every executor-returned matching line is a comment; non-discriminating, positive
+    override withdrawn, keyword floor applied" (#6573, proof_exec executed_stale). That rule is
+    correct and the criterion was the defect. What then turned the PR green was an automated repair
+    adding `EMPTY_CRITERIA_REGIME_REASON`, an exported constant holding the proof sentence verbatim
+    and referenced NOWHERE — one occurrence in the tree, its own declaration. It satisfied the
+    letter of the proof with dead code.
+    THE CRITERIA ABOVE ARE LEFT EXACTLY AS JUDGED (Standing rule 21: merged is terminal, and an
+    amendment here would orphan silently). The cleanup and the honest proof are carried by
+    W1-T4042, filed in this same PR.
