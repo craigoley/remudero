@@ -191,6 +191,8 @@ test("W1-T4078: a normal implementation with a commit trailer still earns credit
 });
 
 test("W1-T4078: an unreadable prerequisite body preserves unknown evidence", () => {
+  // Missing body evidence leaves the existing subject path intact; it never becomes a guessed
+  // prerequisite classification.
   assert.equal(prerequisiteOnlyMergeBody(undefined, "W1-T3685"), undefined);
   const candidates = creditCandidatesFromProjection(
     [projection("W1-T3685", true, 5886)],
