@@ -955,6 +955,56 @@ export interface components {
       safeToComplete: boolean;
       reason?: string;
     };
+    /** One bounded, redacted external-effect-v1 reconciliation result. */
+    ActionResultItem: {
+      version: "external-effect-v1";
+      runId: string;
+      taskId: string;
+      /** When this reconciliation was ledgered, not when the connector was observed. */
+      recordedAt: string;
+      originatingActionId: string;
+      originatingReceiptId: string;
+      capabilityGrantId: string;
+      connector: string;
+      targetIdentity: string;
+      requestedOperation: string;
+      expectedPostconditions: (ExternalEffectPostcondition)[];
+      observation: {
+        status: "fresh" | "stale" | "unavailable";
+        observedAt?: string;
+        ageMs?: number;
+        maxAgeMs: number;
+      };
+      reconciliationState: "applied" | "refused" | "pending" | "partially-applied" | "drifted" | "stale" | "unobservable";
+      partialSuccess?: {
+        satisfied: (string)[];
+        unsatisfied: (string)[];
+      };
+      retryPath: {
+        kind: "none" | "retry" | "compensation";
+        allowed: boolean;
+        reason: string;
+        attemptNumber?: number;
+      };
+      /** Opaque digest of redacted connector evidence; raw provider output is never stored. */
+      evidenceReference: string;
+      safeToComplete: boolean;
+      reason?: string;
+    };
+    /** GET /v1/action-results's bounded, source-labeled read projection. An absent or corrupt ledger, or a projection failure, is reported `unavailable` and carries no `items` -- never a healthy empty array. */
+    ActionResultsResult: {
+      version: "external-action-results-v1";
+      state: "verified" | "unavailable";
+      source: string;
+      generatedAt: string;
+      cursor?: string;
+      items?: (ActionResultItem)[];
+      truncated?: boolean;
+      /** Ledger rows that matched the reconciliation step but failed this route's own redaction/shape allowlist -- never included, always counted. */
+      rejected?: number;
+      reason?: string;
+      detail?: string;
+    };
     /** The bounded provider-auth-v1 browser projection. Provider credentials, credential homes, raw app-server payloads, and transcripts never cross this boundary. */
     ProviderAuthProjection: {
       version: "provider-auth-v1";
@@ -1141,6 +1191,16 @@ export interface paths {
     get: {
       responses: {
           "200": OperatorActivityResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/action-results": {
+    get: {
+      responses: {
+          "200": ActionResultsResult;
+          "400": Error;
           "401": Error;
           "403": Error;
         };

@@ -74,6 +74,12 @@ import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
 import {
+  ACTION_RESULTS_CONTRACT_VERSION,
+  buildActionResultsProjection,
+  parseActionResultsFilters,
+  type ActionResultsEnvelope,
+} from "./action-results.js";
+import {
   clearDailyCostCeilingOverride,
   loadDefaultPolicy,
   PolicyError,
@@ -1046,6 +1052,48 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
   };
 }
 
+// ── GET /v1/action-results — the external-effect result projection (W1-T4044) ─────────────────
+
+/**
+ * GET /v1/action-results[?state=&connector=&taskId=&runId=&changedSince=&limit=] — read-scoped.
+ * Backed by the daemon's own bounded ledger reader ({@link readLedgerUnionBounded}, the same
+ * primitive {@link buildOperatorActivityRoute} above already uses), this is the ONLY public
+ * projection of W1-T3899's `external_effect.reconciled` ledger rows: every reconciliation state
+ * (`applied`/`refused`/`pending`/`partially-applied`/`drifted`/`stale`/`unobservable`) stays
+ * distinct, raw connector evidence is never exposed (lib/action-results.ts redacts a second
+ * time), and a corrupt/absent/oversized/malformed read degrades to an explicit `unavailable` or
+ * `400`, never a healthy empty array. It executes no connector call, no recheck, and no
+ * compensation — those remain a later task's executor contract (see the task's `design` note).
+ */
+export function buildActionResultsRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "GET",
+    path: "/v1/action-results",
+    scope: "read",
+    handler: (req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const parsed = parseActionResultsFilters(url.searchParams);
+      if (!parsed.ok) {
+        sendJson(res, 400, { error: "invalid_request", detail: parsed.detail });
+        return;
+      }
+      try {
+        const ledgerLines = readLedgerUnionBounded(deps.ledgerPath);
+        sendJson(res, 200, buildActionResultsProjection({ ledgerLines, filters: parsed.filters }));
+      } catch (error) {
+        sendJson(res, 503, {
+          version: ACTION_RESULTS_CONTRACT_VERSION,
+          state: "unavailable",
+          source: "rmd:/v1/action-results",
+          generatedAt: new Date().toISOString(),
+          reason: "projection-unavailable",
+          detail: error instanceof Error ? error.message.slice(0, 240) : "The action-results projection was unavailable.",
+        } satisfies ActionResultsEnvelope);
+      }
+    },
+  };
+}
+
 // ── Per-section filed/merged counts (W1-T376) ──────────────────────────────────────────────
 //
 // plan_refs is polymorphic — a ref is one of five kinds; only the section-shaped ones resolve
@@ -1752,6 +1800,7 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
 export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
   return [
     buildOperatorActivityRoute(deps, readPlanSnapshot),
+    buildActionResultsRoute(deps),
     buildFeedbackInboxRoute(deps),
     buildTraceRoute(deps),
     buildDrainPreviewRoute(deps, readPlanSnapshot),

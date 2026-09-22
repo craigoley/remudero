@@ -2763,6 +2763,150 @@ components:
         reason:
           type: string
 
+    # ── W1-T4044 (external-action-results-v1) — GET /v1/action-results's public, redacted
+    # read projection of the ExternalEffect rows above. Deliberately narrower than ExternalEffect
+    # itself: preconditionSnapshot/observedState/idempotencyKey are never returned here, only the
+    # identity, reconciliation state, freshness, retry path, safe-to-complete meaning, and the
+    # opaque evidenceReference pointer.
+    ActionResultItem:
+      type: object
+      description: One bounded, redacted external-effect-v1 reconciliation result.
+      required:
+        - version
+        - runId
+        - taskId
+        - recordedAt
+        - originatingActionId
+        - originatingReceiptId
+        - capabilityGrantId
+        - connector
+        - targetIdentity
+        - requestedOperation
+        - expectedPostconditions
+        - observation
+        - reconciliationState
+        - retryPath
+        - evidenceReference
+        - safeToComplete
+      properties:
+        version:
+          type: string
+          enum: [external-effect-v1]
+        runId:
+          type: string
+        taskId:
+          type: string
+        recordedAt:
+          type: string
+          format: date-time
+          description: When this reconciliation was ledgered, not when the connector was observed.
+        originatingActionId:
+          type: string
+        originatingReceiptId:
+          type: string
+        capabilityGrantId:
+          type: string
+        connector:
+          type: string
+        targetIdentity:
+          type: string
+        requestedOperation:
+          type: string
+        expectedPostconditions:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/ExternalEffectPostcondition"
+        observation:
+          type: object
+          required: [status, maxAgeMs]
+          properties:
+            status:
+              type: string
+              enum: [fresh, stale, unavailable]
+            observedAt:
+              type: string
+              format: date-time
+            ageMs:
+              type: number
+            maxAgeMs:
+              type: number
+        reconciliationState:
+          type: string
+          enum: [applied, refused, pending, partially-applied, drifted, stale, unobservable]
+        partialSuccess:
+          type: object
+          required: [satisfied, unsatisfied]
+          properties:
+            satisfied:
+              type: array
+              maxItems: 50
+              items: { type: string }
+            unsatisfied:
+              type: array
+              maxItems: 50
+              items: { type: string }
+        retryPath:
+          type: object
+          required: [kind, allowed, reason]
+          properties:
+            kind:
+              type: string
+              enum: [none, retry, compensation]
+            allowed:
+              type: boolean
+            reason:
+              type: string
+            attemptNumber:
+              type: integer
+        evidenceReference:
+          type: string
+          description: Opaque digest of redacted connector evidence; raw provider output is never stored.
+        safeToComplete:
+          type: boolean
+        reason:
+          type: string
+
+    ActionResultsResult:
+      type: object
+      description: >
+        GET /v1/action-results's bounded, source-labeled read projection. An absent or corrupt
+        ledger, or a projection failure, is reported `unavailable` and carries no `items` --
+        never a healthy empty array.
+      required:
+        - version
+        - state
+        - source
+        - generatedAt
+      properties:
+        version:
+          type: string
+          enum: [external-action-results-v1]
+        state:
+          type: string
+          enum: [verified, unavailable]
+        source:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+        cursor:
+          type: string
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/ActionResultItem"
+        truncated:
+          type: boolean
+        rejected:
+          type: integer
+          description: Ledger rows that matched the reconciliation step but failed this route's own redaction/shape allowlist -- never included, always counted.
+        reason:
+          type: string
+        detail:
+          type: string
+
     ProviderAuthProjection:
       type: object
       description: >
@@ -3298,6 +3442,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperatorActivityResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/action-results:
+    get:
+      summary: Read the bounded, redacted external-effect reconciliation projection.
+      description: >
+        Read-only external-action-results-v1 composition over W1-T3899's
+        `external_effect.reconciled` ledger rows, backed by the daemon's own bounded ledger
+        reader. Every reconciliation state (applied/refused/pending/partially-applied/drifted/
+        stale/unobservable) stays distinct; raw connector evidence, a daemon URL, a credential, a
+        connector payload, an observed measurement, and a compensation instruction are never
+        accepted from or returned to the caller. An unreadable, corrupt, or oversized ledger read
+        is explicit `unavailable`, never a healthy empty array. This route performs no
+        reconciliation, connector call, recheck, or compensation of its own.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [applied, refused, pending, partially-applied, drifted, stale, unobservable]
+        - name: connector
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: taskId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: runId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: changedSince
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Action-results projection, including the explicit unavailable state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResultsResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
