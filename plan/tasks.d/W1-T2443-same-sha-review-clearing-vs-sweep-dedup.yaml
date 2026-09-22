@@ -2,12 +2,13 @@
   title: "NOTHING HERE IS A DEFECT — A SAME-SHA REVIEW FAILURE WAS CLEARED BY A HAND-RUN `rmd review` WHILE THE SWEEP DEDUPED THIRTEEN RE-POSTS, AND THE TWO RULES THAT GOVERN THAT MOMENT POINT OPPOSITE WAYS: the post-review dedup exists so a stale verdict is cleared by A NEW HEAD, while W1-T2299's row 3.6 exists so A REPAIRED BODY can reach the reviewer WITHOUT one — the operator must rule on which wins"
   repo: remudero
   depends_on: []
-  type: manual
-  verify: human
+  type: implement
+  verify: auto
   principles: {tdd: strict}
   risk: high
-  budget_usd: 0.00
-  files: [src/lib/sweep.ts, plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml]
+  band_meaning: span
+  budget_usd: 12.00
+  files: [src/lib/sweep.ts, test/a-repaired-body-is-a-new-review-input.test.ts]
   origin: "operator-brief#same-sha-review-clearing-2026-08-28"
   plan_refs: ["W1-T2299", "W1-T254", "W1-T1213", "W1-T2427", "W1-T413", "W1-T203", "W1-T990", "W1-T2442"]
   status: queued
@@ -151,20 +152,14 @@
     warnings rather than to a violation. A future task that converts this record to `verify: auto`
     must drop the self-reference in the same edit.
   acceptance:
-    - claim: "the record states in its first sentence that nothing here is a defect"
-      proof: "grep: NOTHING IN THIS RECORD IS A DEFECT in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
-    - claim: "the operator question is stated and left unanswered by this filing"
-      proof: "grep: THIS SHARD RECORDS THE QUESTION AND in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
-    - claim: "the population figure is recorded together with the reason it cannot answer the question"
-      proof: "grep: THAT FIGURE DOES NOT ANSWER THE QUESTION in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
-    - claim: "the unreadable second corpus is reported rather than scored as a zero"
-      proof: "grep: AND THE SECOND CORPUS IS UNREADABLE FROM HERE in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
-    - claim: "the reviewer identity is recorded as a documented dark fallback and not a failure"
-      proof: "grep: AND THE DENY-FLOOR DID NOT FAIL in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
-    - claim: "the four surfaces owned by other tasks are named as out of scope"
-      proof: "grep: ALL FOUR ARE BACKLOGGED BY OPERATOR RULING in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
-    - claim: "the risk band is justified as a Rule 19 span reading rather than blast radius"
-      proof: "grep: is the SPAN reading and carries NO claim in plan/tasks.d/W1-T2443-same-sha-review-clearing-vs-sweep-dedup.yaml"
+    - claim: "the post-review dedup key includes a digest of the PR body, so a repaired body is a NEW input rather than a suppressed re-post"
+      proof: "unit test: a repaired body is a new review input"
+    - claim: "an UNCHANGED body on the same head is still deduped forever, so the stand-down that makes an unattended fleet tractable is preserved"
+      proof: "unit test: an unchanged body is still suppressed forever"
+    - claim: "row 3.6 (VERDICT OVERTAKEN BY ACTIVITY) is reachable on its own stated case — a body repair on an unchanged sha now reaches the reviewer without a hand-run verb"
+      proof: "unit test: a body repair on an unchanged sha reaches the reviewer"
+    - claim: "the change re-keys the dedup and does not weaken, bypass or remove the escape hatch, which still invokes the same deterministic judge"
+      proof: "unit test: re-keying does not add a bypass"
   falsifier: |
     If a reading of the FLEET corpus shows that the sweep's post-review dedup has ever been cleared
     on an unchanged sha WITHOUT an operator running a verb by hand, then row 3.6 is reachable on its
@@ -176,3 +171,43 @@
     and conversely, if the union of BOTH corpora still shows exactly one instance, then a policy
     change argued from it is the n=1 shape this repo has declined before, and leaving the
     composition alone is itself a defensible ruling.
+
+  note: |
+    OPERATOR RULING 2026-09-22 — Q1 IS ANSWERED **YES**, AND THE ANSWER GOES FURTHER THAN THE
+    QUESTION: THE SWEEP SHOULD DO IT ITSELF RATHER THAN WAIT FOR A HAND-RUN VERB.
+
+    THE RULING ON THE QUESTION AS ASKED. The documented escape hatch MAY clear a same-sha failure
+    the sweep is deduping. `rmd review <n>` invokes the same deterministic `judgeReview`, never a
+    bypass and never a `--force`; it re-judged a repaired body and passed it honestly, and had the
+    body not been repaired it would have failed again. Nothing about that composition is unsafe.
+    The dedup's purpose is to stop a verdict being RE-POSTED, not to make a corrected input
+    permanently unjudgeable.
+
+    AND THEREFORE ROW 3.6 IS MADE REACHABLE, WHICH IS THE PART THAT MATTERS. The shard states the
+    tension exactly: row 3.6 admits the head because the body was edited after the verdict, then
+    the action gate declines because a verdict was already delivered for `taskId@headSha`.
+    THE KEY IS THE DEFECT. A body edit produces a new input and must produce a new key. Re-key the
+    dedup on the body digest as well as the head sha, so a repaired body is a re-judgeable input
+    and an unchanged body is still suppressed forever. That preserves the safety property the
+    dedup exists for — no unattended re-post storm — while removing the case where thirteen
+    consecutive cycles correctly decline to do the one thing that would have unblocked the PR.
+
+    ⚠ THE n=1 OBJECTION IS WITHDRAWN ON EVIDENCE FROM A CORPUS THIS SHARD COULD NOT READ. The
+    record says its true population is not measurable from one host and warns against a policy
+    change argued from a single instance. That warning was right and is now satisfied from
+    elsewhere: the operator-side feedback record `fb-8d6b8c` / PR #779 documents the SAME class
+    from the other direction — a review-failing PR the sweep could not fix-dispatch, disposed as
+    a fix strike every poll with ZERO dispatches, recovered only by a human rewriting the body and
+    running `rmd review` by hand. That is a hand-run verb clearing a same-sha failure the sweep
+    was actively declining, and it is a DIFFERENT instance from #3219. n is at least 2, from two
+    independent corpora, and the shape is a silent stall rather than a rare coincidence.
+
+    WHAT STAYS OUT OF SCOPE, EXACTLY AS THIS RECORD LISTED. No reviewer credential is
+    provisioned (W1-T203), no app_id pin (W1-T2442), no branch-protection or `enforce_admins`
+    change, and the escape hatch is not removed. The reviewer identity reading `cao825` is the
+    documented dark fallback and is not a defect. The deny-floor's silence is by design — the
+    orchestrator's poster calls `gh` via `execFileSync` and never reaches a Bash hook.
+
+    verify flipped human -> auto on this ruling. `files:` must gain nothing beyond `src/lib/sweep.ts`
+    and this record; a converter to `verify: auto` was warned to drop the self-reference, and it is
+    retained here deliberately because this record is still the deliverable's own documentation.
