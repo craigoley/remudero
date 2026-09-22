@@ -36,7 +36,7 @@ function planOf(tasks: Task[]): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) } as unknown as Plan;
 }
 
-test('W1-T4050: an absent risk section changes nothing', () => {
+test("W1-T4050: an absent risk section changes nothing", () => {
   // (i): parsing an absent `risk:` section reproduces DEFAULT_RISK_POLICY exactly — 0.7 and
   // releases enabled, the SAME values the pre-existing hard-coded literal and the always-on
   // release path already produced.
@@ -71,7 +71,7 @@ test('W1-T4050: an absent risk section changes nothing', () => {
   assert.equal(written[0]![1].step, RELEASE_LEDGER_STEP);
 });
 
-test('W1-T4050: the configured threshold is the one applied', () => {
+test("W1-T4050: the configured threshold is the one applied", () => {
   // A `risk.confidenceThreshold` row raised above the module default changes which verdicts
   // escalate — the SAME verdict/confidence pair reads differently once the configured value,
   // not the 0.7 literal, is what `planRiskJudgeAction` is handed.
@@ -95,7 +95,7 @@ test('W1-T4050: the configured threshold is the one applied', () => {
   assert.equal(atLoweredThreshold.kind, "proceed", "0.6 fails the 0.7 default but clears the configured 0.5");
 });
 
-test('W1-T4050: a disabled release stages proposals instead', () => {
+test("W1-T4050: a disabled release stages proposals instead", () => {
   // (design i/iii): `risk.verifyHumanReleaseEnabled: false` stops `approveParkedTask` from
   // writing the direct `ratify.approved` row and routes the SAME release through a staged
   // proposal instead — the operator's bit is still recorded, just via the reviewed path.
@@ -135,7 +135,7 @@ test('W1-T4050: a disabled release stages proposals instead', () => {
   assert.equal(written2.length, 1, "enabled once more, the direct release fires again");
 });
 
-test('W1-T4050: a policy change takes effect without a restart', () => {
+test("W1-T4050: a policy change takes effect without a restart", () => {
   // (design iii): LIVE RE-READ, NOT BOOT-TIME. `readRiskPolicy` must re-read and re-parse the
   // file on every call — a process that cached it at first read (the `loadDefaultPolicy` shape
   // this task deliberately does NOT reuse) would still report the OLD value after a merged
