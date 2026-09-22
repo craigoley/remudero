@@ -1,4 +1,6 @@
+import { systemClock } from "./clock.js";
 import type { Config, ModelApproval } from "./config-schema.js";
+import { RmdError } from "./errors.js";
 
 /**
  * Model families no lane may run without a human's permission (operator ruling, 2026-09-22):
@@ -27,23 +29,29 @@ export function modelApproved(model: string, approvals: readonly ModelApproval[]
     (approval.expiresAt === undefined || Date.parse(approval.expiresAt) > now));
 }
 
-export class HumanGatedModelError extends Error {
+/** Adopts the shared envelope (src/lib/errors.ts) rather than extending Error directly, which the
+ *  error-subclass census holds at a recorded ceiling. `usage` is the kind: the remedy is an edit to
+ *  the operator's config.json, the same family as {@link RepoLayoutError}. */
+export class HumanGatedModelError extends RmdError {
   constructor(readonly model: string, readonly family: string) {
     super(
+      "usage",
+      1,
       `model ${model} is in the human-gated ${family} family and has no operator approval: ` +
         `add { model, approvedBy, approvedAt } to modelApprovals in config.json to allow it`,
+      { model, family },
     );
     this.name = "HumanGatedModelError";
   }
 }
 
 /** True when a model may run: it is not gated, or an operator approved it. */
-export function modelAllowed(model: string | undefined, config: Pick<Config, "modelApprovals">, now = Date.now()): boolean {
+export function modelAllowed(model: string | undefined, config: Pick<Config, "modelApprovals">, now = systemClock.now()): boolean {
   return humanGatedFamily(model) === undefined || modelApproved(model!, config.modelApprovals, now);
 }
 
 /** The launch-point check: throws before any process is spawned for an unapproved gated model. */
-export function assertModelAllowed(model: string | undefined, config: Pick<Config, "modelApprovals">, now = Date.now()): void {
+export function assertModelAllowed(model: string | undefined, config: Pick<Config, "modelApprovals">, now = systemClock.now()): void {
   const family = humanGatedFamily(model);
   if (family !== undefined && !modelApproved(model!, config.modelApprovals, now)) {
     throw new HumanGatedModelError(model!, family);
