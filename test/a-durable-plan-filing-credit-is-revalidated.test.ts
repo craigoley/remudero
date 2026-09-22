@@ -154,6 +154,40 @@ test("W1-T3996 criterion 3b: a durable head-branch credit with an unreadable pat
   assert.equal(proj.prNumber, 7001);
 });
 
+// CRITERION 3 IS A CONJUNCTION, AND ITS PROOF NAMES THE CONJUNCTION. 3a and 3b above each drive one
+// half from its own store; the criterion claims BOTH shapes survive, so this drives them together
+// from ONE store in ONE projection pass — an implementation credit whose paths the map reports, and
+// an unreadable credit the map has no entry for. Neither 3a's nor 3b's title carries the proof's
+// literal text, and `unit test:` matches a title as a LITERAL substring, so without this test the
+// proof resolves to zero tests and the criterion silently degrades to the keyword floor.
+test("W1-T3996 criterion 3: durable implementation and unreadable-path credits remain merged", () => {
+  const implTask = "W9-T3996-3c-impl";
+  const unreadableTask = "W9-T3996-3c-unreadable";
+  let store: CreditStore = {};
+  store = recordCredit(store, implTask, { source: "head-branch", prUrl: "u/7002", prNumber: 7002, prState: "MERGED" });
+  store = recordCredit(store, unreadableTask, { source: "head-branch", prUrl: "u/7003", prNumber: 7003, prState: "MERGED" });
+
+  // ONE map, covering only the implementation PR. 7003 is absent, which is the "unreadable" half:
+  // no opinion about a PR's paths is never grounds to uncredit it.
+  const deps = {
+    ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
+    github: forbidPrReads(),
+    readLedger: () => [],
+    readCreditStore: () => store,
+    mergedPathsByPr: new Map([[7002, IMPLEMENTATION_PATHS]]),
+  };
+
+  const impl = deriveStatus(task(implTask), deps);
+  assert.equal(impl.merged, true, "a genuine implementation's durable credit must survive revalidation");
+  assert.equal(impl.source, "head-branch");
+  assert.equal(impl.prNumber, 7002);
+
+  const unreadable = deriveStatus(task(unreadableTask), deps);
+  assert.equal(unreadable.merged, true, "a path map with no entry for the PR must never uncredit a durable entry");
+  assert.equal(unreadable.source, "head-branch");
+  assert.equal(unreadable.prNumber, 7003);
+});
+
 test("W1-T3996: a durable TRAILER credit is not re-checked against the path map — it was already vetted at write time", () => {
   const taskId = "W9-T3996-4";
   let store: CreditStore = {};
