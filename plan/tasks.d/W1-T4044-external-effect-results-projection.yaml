@@ -88,4 +88,6 @@
     Amendment 2026-09-22: the implementation's mounted-route registration changes the existing
     graph-shape census, and the repository's tier manifest records the new tests. Both are part of
     this task's executable integration surface and are declared here so the implementation can keep
-    the route census and generated test metadata honest without an undeclared scope overrun.
+    the route census and generated test metadata honest without an undeclared scope overrun. The
+    source implementation remains responsible for the route behavior and executable assertions;
+    this amendment only records the files that its integration surface necessarily changes.
