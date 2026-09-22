@@ -1832,6 +1832,7 @@ export function buildSweepEffects(
                   review_reused: false,
                   review_discriminated: true,
                   requested_review_mode: mode.kind,
+                  // W1-T3901 effective_review_mode records the actual review cost path.
                   effective_review_mode: "proof-only-discrimination",
                   discriminated_from_head_sha: mode.judgedHeadSha,
                   discrimination_result: verdict.state,
