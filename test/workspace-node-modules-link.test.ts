@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { deriveWorkspacePaths, linkWorkspaceNodeModules } from "../src/lib/worker.js";
+import {
+  deriveWorkspacePaths,
+  linkWorkspaceNodeModules,
+  workspaceNodeModulesIncomplete,
+  worktreeAdd,
+} from "../src/lib/worker.js";
 
 // W1-T4003: `linkWorktreeNodeModules` (src/lib/worker.ts) links ONLY the root `node_modules`.
 // This fleet's real npm layout can leave a workspace's own dependency nested under ITS OWN
@@ -132,6 +138,126 @@ test("linkWorkspaceNodeModules reports no workspaces at all for a repo with no p
     const worktreePath = join(root, "worktree");
     mkdirSync(worktreePath, { recursive: true });
     assert.deepEqual(linkWorkspaceNodeModules(repoDir, worktreePath), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── COVERAGE COMPLETENESS (W1-T4003 round 2) ──────────────────────────────────────────────────
+// CI's `coverage-ratchet` shards `test/**/*.test.ts` across four independent jobs by DURATION,
+// not by which source file a test touches, and each shard's own "Diff coverage" step blocks on
+// its OWN partial lcov -- never the union of all four. This file's five sibling proof files
+// (task acceptance criteria 1-4 plus the pre-existing root baseline) land in FOUR DIFFERENT
+// shards, so a branch exercised only by one of them still reads as wholly uncovered added code
+// in the other three. The tests below add no new PROOF of any acceptance criterion (each is
+// already proven by its own dedicated file) -- they exist only so THIS file, wherever it lands,
+// independently reaches every line this task added to src/lib/worker.ts.
+
+test("deriveWorkspacePaths, real listDirs default, degrades an absent wildcard parent to no matches (coverage completeness)", () => {
+  const root = tmp("wslink-cov-absentparent-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "fixture", workspaces: ["packages/*"] }));
+    // No `packages/` directory at all -- the real (non-overridden) listDirs default must hit its
+    // own ENOENT branch and degrade to no matches, not throw.
+    assert.deepEqual(deriveWorkspacePaths(repoDir), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("linkWorkspaceNodeModules degrades to no workspaces when the source has no readable package.json (coverage completeness)", () => {
+  const root = tmp("wslink-cov-nomanifest-");
+  try {
+    const repoDir = join(root, "source"); // deliberately no package.json written at all
+    mkdirSync(repoDir, { recursive: true });
+    const worktreePath = join(root, "worktree");
+    mkdirSync(worktreePath, { recursive: true });
+    assert.deepEqual(linkWorkspaceNodeModules(repoDir, worktreePath), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("linkWorkspaceNodeModules covers a non-wildcard safe glob, an unsafe glob, an occupied destination, and a failed symlink together (coverage completeness)", () => {
+  const root = tmp("wslink-cov-sweep-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(
+      join(repoDir, "package.json"),
+      JSON.stringify({ name: "fixture", workspaces: ["../outside", "apps/dashboard", "packages/thing"] }),
+    );
+    const worktreePath = join(root, "worktree");
+
+    // "apps/dashboard": a non-wildcard safe glob (the `else { safe.add(glob) }` branch, never
+    // exercised by this file's wildcard-only tests above) whose worktree destination is OCCUPIED.
+    mkdirSync(join(repoDir, "apps", "dashboard", "node_modules"), { recursive: true });
+    mkdirSync(join(worktreePath, "apps", "dashboard", "node_modules"), { recursive: true });
+
+    // "packages/thing": another non-wildcard safe glob whose destination is FREE, but the
+    // injected `symlink` throws -- the named "failed" outcome, never a thrown exception.
+    mkdirSync(join(repoDir, "packages", "thing", "node_modules"), { recursive: true });
+    mkdirSync(join(worktreePath, "packages", "thing"), { recursive: true });
+
+    const eperm = Object.assign(new Error("EPERM: operation not permitted, symlink"), { code: "EPERM" });
+    const results = linkWorkspaceNodeModules(repoDir, worktreePath, {
+      symlink: () => {
+        throw eperm;
+      },
+    });
+
+    assert.deepEqual(
+      results.sort((a, b) => a.workspace.localeCompare(b.workspace)),
+      [
+        { workspace: "../outside", outcome: "unsafe-path" },
+        { workspace: "apps/dashboard", outcome: "occupied" },
+        { workspace: "packages/thing", outcome: "failed" },
+      ],
+    );
+    assert.equal(workspaceNodeModulesIncomplete(results), true);
+    assert.equal(workspaceNodeModulesIncomplete([{ workspace: "apps/dashboard", outcome: "linked" }]), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A throwaway git clone with a workspace declared, matching what `seedClone` in
+ *  test/workspace-node-modules-root-baseline.test.ts builds -- duplicated here (not imported)
+ *  because this task's declared file scope has no shared test-support module, and this shard
+ *  needs its OWN real `worktreeAdd` call to reach the wiring lines that gate the workspace
+ *  ledger line on a non-empty result. */
+function seedCloneWithWorkspace(clone: string): void {
+  mkdirSync(clone, { recursive: true });
+  execFileSync("git", ["-C", clone, "init", "--quiet", "--initial-branch", "main"]);
+  execFileSync("git", ["-C", clone, "config", "user.email", "probe@example.invalid"]);
+  execFileSync("git", ["-C", clone, "config", "user.name", "probe"]);
+  writeFileSync(join(clone, "package.json"), JSON.stringify({ name: "fixture", workspaces: ["apps/*"] }));
+  writeFileSync(join(clone, ".gitignore"), "node_modules\n");
+  mkdirSync(join(clone, "apps", "dashboard"), { recursive: true });
+  writeFileSync(join(clone, "apps", "dashboard", "package.json"), JSON.stringify({ name: "dashboard" }));
+  execFileSync("git", ["-C", clone, "add", "-A"]);
+  execFileSync("git", ["-C", clone, "commit", "--no-verify", "--quiet", "-m", "chore: seed"]);
+  execFileSync("git", ["-C", clone, "remote", "add", "origin", clone]);
+  execFileSync("git", ["-C", clone, "fetch", "origin", "--quiet"]);
+  mkdirSync(join(clone, "apps", "dashboard", "node_modules", "marker-pkg"), { recursive: true });
+  writeFileSync(join(clone, "apps", "dashboard", "node_modules", "marker-pkg", "index.js"), "module.exports = 1;\n");
+}
+
+test("worktreeAdd wires a non-empty workspace-link result through its own ledger line (coverage completeness)", () => {
+  const root = tmp("wslink-cov-worktreeadd-");
+  const clone = join(root, "clone");
+  const wt = join(root, "wt");
+  try {
+    seedCloneWithWorkspace(clone);
+    const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+    worktreeAdd(clone, wt, "run-wslink-cov-1", "main", { log: (step, extra) => logs.push([step, extra]) });
+
+    const workspaceLog = logs.find(([step]) => step === "worktree.workspace_node_modules");
+    assert.ok(workspaceLog, "a non-empty workspace-link result must reach the ledger");
+    assert.deepEqual(workspaceLog?.[1]?.results, [{ workspace: "apps/dashboard", outcome: "linked" }]);
+    assert.equal(workspaceLog?.[1]?.incomplete, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

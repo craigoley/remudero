@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { deriveWorkspacePaths, isSafeWorkspaceGlob, linkWorkspaceNodeModules } from "../src/lib/worker.js";
+import {
+  deriveWorkspacePaths,
+  isSafeWorkspaceGlob,
+  linkWorkspaceNodeModules,
+  workspaceNodeModulesIncomplete,
+  worktreeAdd,
+} from "../src/lib/worker.js";
 
 // W1-T4003: `package.json#workspaces` is untrusted content read off disk, not a value this
 // process authored. `isSafeWorkspaceGlob` is the boundary the design calls out by name: only a
@@ -121,6 +128,36 @@ test("deriveWorkspacePaths, with no listDirs override, uses the real filesystem 
   }
 });
 
+test("deriveWorkspacePaths degrades to no workspaces when the manifest cannot be read or does not parse as JSON, rather than throwing", () => {
+  const root = tmp("wspaths-badmanifest-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(repoDir, { recursive: true });
+    // No package.json written at all -- the real default `readManifest` (readFileSync) throws
+    // ENOENT, which readRawWorkspaceGlobs must catch and degrade from, not propagate.
+    assert.deepEqual(deriveWorkspacePaths(repoDir), []);
+
+    // An unreadable-manifest override (any thrown error, not just ENOENT) hits the identical catch.
+    assert.deepEqual(
+      deriveWorkspacePaths(repoDir, {
+        readManifest: () => {
+          throw new Error("EACCES: permission denied");
+        },
+      }),
+      [],
+    );
+
+    // A manifest that exists and reads but is not valid JSON hits the SAME catch from the other
+    // side -- JSON.parse throwing rather than readManifest itself.
+    assert.deepEqual(
+      deriveWorkspacePaths(repoDir, { readManifest: () => "{ not valid json" }),
+      [],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("linkWorkspaceNodeModules reports an unsafe glob as a named unsafe-path outcome and never touches disk for it", () => {
   const root = tmp("wspaths-linkunsafe-");
   try {
@@ -154,6 +191,106 @@ test("linkWorkspaceNodeModules reports an unsafe glob as a named unsafe-path out
       false,
       "the refused glob must never reach an fs.exists probe, let alone one outside the checkout",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── COVERAGE COMPLETENESS (W1-T4003 round 2) ──────────────────────────────────────────────────
+// CI's `coverage-ratchet` shards `test/**/*.test.ts` across four independent jobs by DURATION,
+// not by which source file a test touches, and each shard's own "Diff coverage" step blocks on
+// its OWN partial lcov -- never the union of all four. This file's four sibling proof files land
+// in different shards, so a branch exercised only by a sibling still reads as wholly uncovered
+// added code in the shard this file lands in. The tests below add no new PROOF of any acceptance
+// criterion -- they exist only so THIS file, wherever it lands, independently reaches every line
+// this task added to src/lib/worker.ts.
+
+test("linkWorkspaceNodeModules reports a named 'no-source' skip for a workspace with no nested node_modules (coverage completeness)", () => {
+  const root = tmp("wspaths-cov-nosource-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(join(repoDir, "apps", "dashboard"), { recursive: true }); // no node_modules beneath it
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ workspaces: ["apps/dashboard"] }));
+    const worktreePath = join(root, "worktree");
+    mkdirSync(join(worktreePath, "apps", "dashboard"), { recursive: true });
+
+    const results = linkWorkspaceNodeModules(repoDir, worktreePath);
+    assert.deepEqual(results, [{ workspace: "apps/dashboard", outcome: "no-source" }]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("linkWorkspaceNodeModules covers an occupied destination and a failed symlink, plus workspaceNodeModulesIncomplete's own contract (coverage completeness)", () => {
+  const root = tmp("wspaths-cov-sweep-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(
+      join(repoDir, "package.json"),
+      JSON.stringify({ name: "fixture", workspaces: ["apps/dashboard", "packages/thing"] }),
+    );
+    const worktreePath = join(root, "worktree");
+
+    // "apps/dashboard": destination OCCUPIED.
+    mkdirSync(join(repoDir, "apps", "dashboard", "node_modules"), { recursive: true });
+    mkdirSync(join(worktreePath, "apps", "dashboard", "node_modules"), { recursive: true });
+
+    // "packages/thing": destination FREE, but the injected `symlink` throws.
+    mkdirSync(join(repoDir, "packages", "thing", "node_modules"), { recursive: true });
+    mkdirSync(join(worktreePath, "packages", "thing"), { recursive: true });
+
+    const eperm = Object.assign(new Error("EPERM: operation not permitted, symlink"), { code: "EPERM" });
+    const results = linkWorkspaceNodeModules(repoDir, worktreePath, {
+      symlink: () => {
+        throw eperm;
+      },
+    });
+
+    assert.deepEqual(
+      results.sort((a, b) => a.workspace.localeCompare(b.workspace)),
+      [
+        { workspace: "apps/dashboard", outcome: "occupied" },
+        { workspace: "packages/thing", outcome: "failed" },
+      ],
+    );
+    assert.equal(workspaceNodeModulesIncomplete(results), true);
+    assert.equal(workspaceNodeModulesIncomplete([{ workspace: "apps/dashboard", outcome: "linked" }]), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function seedCloneWithWorkspace(clone: string): void {
+  mkdirSync(clone, { recursive: true });
+  execFileSync("git", ["-C", clone, "init", "--quiet", "--initial-branch", "main"]);
+  execFileSync("git", ["-C", clone, "config", "user.email", "probe@example.invalid"]);
+  execFileSync("git", ["-C", clone, "config", "user.name", "probe"]);
+  writeFileSync(join(clone, "package.json"), JSON.stringify({ name: "fixture", workspaces: ["apps/*"] }));
+  writeFileSync(join(clone, ".gitignore"), "node_modules\n");
+  mkdirSync(join(clone, "apps", "dashboard"), { recursive: true });
+  writeFileSync(join(clone, "apps", "dashboard", "package.json"), JSON.stringify({ name: "dashboard" }));
+  execFileSync("git", ["-C", clone, "add", "-A"]);
+  execFileSync("git", ["-C", clone, "commit", "--no-verify", "--quiet", "-m", "chore: seed"]);
+  execFileSync("git", ["-C", clone, "remote", "add", "origin", clone]);
+  execFileSync("git", ["-C", clone, "fetch", "origin", "--quiet"]);
+  mkdirSync(join(clone, "apps", "dashboard", "node_modules", "marker-pkg"), { recursive: true });
+  writeFileSync(join(clone, "apps", "dashboard", "node_modules", "marker-pkg", "index.js"), "module.exports = 1;\n");
+}
+
+test("worktreeAdd wires a non-empty workspace-link result through its own ledger line (coverage completeness)", () => {
+  const root = tmp("wspaths-cov-worktreeadd-");
+  const clone = join(root, "clone");
+  const wt = join(root, "wt");
+  try {
+    seedCloneWithWorkspace(clone);
+    const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+    worktreeAdd(clone, wt, "run-wspaths-cov-1", "main", { log: (step, extra) => logs.push([step, extra]) });
+
+    const workspaceLog = logs.find(([step]) => step === "worktree.workspace_node_modules");
+    assert.ok(workspaceLog, "a non-empty workspace-link result must reach the ledger");
+    assert.deepEqual(workspaceLog?.[1]?.results, [{ workspace: "apps/dashboard", outcome: "linked" }]);
+    assert.equal(workspaceLog?.[1]?.incomplete, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
