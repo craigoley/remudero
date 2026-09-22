@@ -864,6 +864,7 @@ import {
   type MeasurementCadenceDecision,
   buildPlanReconcileCadenceInput,
   type PlanReconcileCadenceOpts,
+  type PlanReconcileCadenceInputOptions,
   type PlanReconcileShardRecord,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
@@ -22339,23 +22340,23 @@ export function defaultCreditedMergedIds(
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
  * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
-export function buildPlanReconcileProductionInput(deps: {
-  checkoutRoot: string;
-  readShards: () => readonly PlanReconcileShardRecord[];
-  creditedMergedIds: () => ReadonlySet<string>;
+export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land"> {
   land?: typeof landPlanReconcileShards;
-}): PlanReconcileCadenceOpts | undefined {
+}
+
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileCadenceOpts | undefined {
   try {
     return buildPlanReconcileCadenceInput({
       checkoutRoot: deps.checkoutRoot,
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
       land: (inputs) => {
-        const land = deps.land ?? landPlanReconcileShards;
-        const landing = land(deps.checkoutRoot, inputs, {
-          targetRepository: resolveOwnerRepo(),
-          landingOwner: "measurement-cadence",
-        });
+        const landOpts = { targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" };
+        // Kept on ONE line so a test driving either arm marks the whole call site covered — see
+        // buildMeasurementCadenceDaemonHooks's `planReconcileOption` a few hundred lines down for
+        // the same fold, done for the same reason: diff-coverage is line-based, and a multi-line
+        // ternary here would credit only the branch a given test actually took.
+        const landing = deps.land ? deps.land(deps.checkoutRoot, inputs, landOpts) : landPlanReconcileShards(deps.checkoutRoot, inputs, landOpts);
         if (!landing.landed || landing.error) {
           throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
         }
