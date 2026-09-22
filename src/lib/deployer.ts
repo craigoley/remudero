@@ -749,6 +749,11 @@ function short(sha: string): string {
 const CONSOLE_UP_ATTEMPTS = 15;
 const CONSOLE_UP_DELAY_MS = 2000;
 
+/** The deploy tick's transient ref-lock retry budget. Keep this separate from the entrypoint's
+ * boot budget: the tick is a bounded supervisor attempt, not an indefinite fetch loop. */
+const FETCH_LOCK_RETRY_MAX = 3;
+const FETCH_LOCK_RETRY_PAUSE_MS = 250;
+
 // ── The orchestrated cycle (all side effects injected) ─────────────────────────
 
 export interface DeployDeps {
@@ -1392,8 +1397,30 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
+  const log = o.log ?? buildDeployLogger(ledgerPath);
   const windowMs = o.healthWindowMs ?? 45_000;
   const pollMs = o.healthPollMs ?? 3_000;
+
+  const isRefLockFailure = (error: unknown): boolean => {
+    const e = error as { stderr?: unknown; message?: unknown } | null;
+    return /cannot lock ref|unable to update local ref/i.test(`${String(e?.stderr ?? "")}\n${String(e?.message ?? error)}`);
+  };
+
+  const fetchWithRefLockRetry = (): void => {
+    for (let attempt = 1; attempt <= FETCH_LOCK_RETRY_MAX; attempt += 1) {
+      try {
+        git(["fetch", "origin", "--quiet"]);
+        if (attempt > 1) {
+          log("deploy.fetch_recovered", { attempt, max_attempts: FETCH_LOCK_RETRY_MAX, reason: "ref-lock" });
+        }
+        return;
+      } catch (error) {
+        if (!isRefLockFailure(error) || attempt === FETCH_LOCK_RETRY_MAX) throw error;
+        log("deploy.fetch_retry", { attempt, max_attempts: FETCH_LOCK_RETRY_MAX, reason: "ref-lock" });
+        sleep(FETCH_LOCK_RETRY_PAUSE_MS);
+      }
+    }
+  };
 
   const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(ledgerPath, sinceMs);
 
@@ -1482,10 +1509,10 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   };
 
   return {
-    log: o.log ?? buildDeployLogger(ledgerPath),
+    log,
     now: () => Date.now(),
     fetch: () => {
-      git(["fetch", "origin", "--quiet"]);
+      fetchWithRefLockRetry();
     },
     installHead: () => git(["rev-parse", "HEAD"]).trim(),
     originMain: () => git(["rev-parse", "origin/main"]).trim(),
