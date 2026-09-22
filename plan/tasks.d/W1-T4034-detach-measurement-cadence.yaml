@@ -1,0 +1,124 @@
+- id: W1-T4034
+  title: "REVIEW ADMISSION ONLY RUNS INSIDE A SWEEP PASS AND A SWEEP PASS ONLY RUNS ONCE PER DAEMON ITERATION — an iteration measured 21.5 minutes and two green PRs waited 42 and 29 minutes for a one-second review: detach the measurement cadence, the loop's last long inline await, the way retro and auto-triage and ci-learning already are"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    THE SYMPTOM AS THE OPERATOR SAW IT. PR #6561 opened 12:59:29Z and was reviewed 13:41:17Z — 42
+    minutes. PR #6564 opened 13:12:40Z, reviewed 13:41:17Z — 29 minutes. Both were fully green on
+    all 46 checks the whole time, both passed on the first attempt, and the review itself took
+    TWENTY-ONE SECONDS (`review-PR6561-1790084455181`: pending_posted 13:40:59.691, posted
+    13:41:09.145). Nothing about the PRs was slow. The lane simply did not run.
+
+    (1) THE SWEEP IS NOT THE BOTTLENECK, AND THIS WAS THE FIRST HYPOTHESIS TO DIE. A sweep pass
+    completes in about one second, measured on three consecutive passes from their own ledger rows:
+    13:17:12.867→13:17:13.068, 13:18:02.340→13:18:03.220, 13:19:22.439→13:19:23.175. `rmd sweep
+    --dry-run` against the same 7 open PRs reports `post-review 2 · wait 5` — the classifier had
+    ALREADY decided both PRs needed review. And `deps.detachFixWait` is set true on every production
+    composition (`withFullSweepRepairAdmission`, and both light-pass shapes), so the fix rung's CI
+    wait is already off the walk. THE FIX RUNG WAS NOT HOLDING THE REVIEW LANE.
+
+    (2) WHAT ACTUALLY HELD IT: THE DAEMON ITERATION. `sweep.pass` rows tagged
+    `run=DAEMON-1790081891181` stop at 13:19:23.175 and do not resume until 13:40:53.809 — 21.5
+    MINUTES WITH NO SWEEP. Reviews are dispatched only from inside `runSweep`'s post-loop drain
+    (`orderedReviews`, sweep.ts), so for those 21.5 minutes no review could be admitted no matter
+    how eligible it was. The moment the next pass ran, both PRs were reviewed within 24 seconds.
+
+    (3) THE LONGEST IDENTIFIED AWAIT IN THAT ITERATION, AND THE ONE THAT IS OUT OF PATTERN.
+    `src/lib/daemon.ts` awaits the measurement cadence INLINE:
+
+        const result = await deps.runMeasurementCadence();          // line ~2580
+
+    Its three siblings in the same loop do not. `runCiLearningCadence`, the retro and the auto-triage
+    all take the established shape — guard on `detachedActionInFlight(kind)`, then
+    `detachSweepAction(work.then(log ran).catch(log failed), { actionKind, taskId: "DAEMON" })` — and
+    `DetachedActionKind` is already `"fix-dispatch" | "retro" | "auto-triage" | "ci-learning"`, a
+    registry whose own doc calls it "a DAEMON-LIFETIME seam" and names the retro as "the loop's other
+    long await". The measurement cadence is the one long await that never joined it.
+
+    IT IS NOT A SHORT CALL. Its verify-human leg alone ran 13:11:07.580→13:19:45.345 — 8 minutes 38
+    seconds across 72 `verify_human.judged` rows under run id
+    `VERIFY-HUMAN-CADENCE-2026-09-22T13:09:53.723Z`, a run id minted INSIDE
+    `runMeasurementCadence`'s own body (src/run-task.ts). After that leg it still runs the plan
+    reconcile, the proof-debt input and `runMeasurementCadenceReport`. All of it inside the await.
+
+    (4) WHAT THIS SHARD DOES NOT CLAIM. Detaching this cadence does not by itself account for all
+    21.5 minutes, and pretending otherwise would be the easy overclaim. The iteration also passed
+    through `ledger_compaction.fired` (13:33:10), `daemon.headroom` (13:37:58), a triage that
+    checked out 4,798 files (13:38:12) and a task dispatch (13:39:58), with silent stretches between
+    them. `measurement_cadence.fired`/`.ran` rows are absent from both the live ledger and stdout for
+    this window, so the await's exact end is NOT directly observed and is not asserted here. WHAT IS
+    OBSERVED is that the cadence's own verify-human leg consumed 8m38s inside an inline await, that
+    no sweep ran during the surrounding 21.5 minutes, and that this is the only long await of its
+    class still on the critical path. That makes it the correct first cut and a measurable one — it
+    is not represented as the whole of the latency.
+
+    (5) WHY DETACH RATHER THAN RESCHEDULE OR BOUND. The cadence is already best-effort by contract
+    ("a fired run never gates dispatch, fails a check or changes a verdict", W1-T1259), so nothing
+    downstream reads its result synchronously — the `await` buys the loop nothing and costs it the
+    cadence's entire duration. Detaching adds no timer, no threshold and no new schedule: it reuses
+    `detachSweepAction`, whose drain already runs at the freshness exit, so a fired cadence still
+    completes and still ledgers its own row. The `detachedActionInFlight` guard is what keeps a slow
+    run from stacking a second one — the same protection ci-learning already relies on.
+
+    (6) THE FOLLOW-ON THIS DELIBERATELY DOES NOT SWALLOW. The general statement — review admission
+    should not be gated on the daemon's iteration cadence at all — is larger than one await and
+    belongs in its own shard once this one's effect is measured. Filing it here would make this
+    task span the loop AND the review lane, which is exactly the rule-19 span the linter refuses.
+
+    FILES. src/lib/daemon.ts holds the inline await and the three detached siblings to mirror.
+    src/lib/sweep.ts holds `DetachedActionKind`, which gains one member so the registry can name
+    this action. The suite is new: the existing daemon-cadence coverage asserts the cadence FIRES,
+    never that the loop is free to continue while it runs, which is why an inline await survived.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four `unit test:` criteria, each title plain prose with no
+    comma and no regex metacharacter, each checked against test/ for a zero match first. One `grep:`
+    on a single physical line whose pattern carries no " in " substring and no unescaped dot.
+
+    THIS FILING CARRIES NO TRAILER AND SITS ON A chore/ BRANCH, not `run-W1-T4034-*`.
+  acceptance:
+    - claim: "the measurement cadence is handed to the detached action registry instead of awaited inline"
+      proof: 'grep: test("W1-T4034: the measurement cadence does not block the daemon iteration" in test/the-measurement-cadence-does-not-block-the-loop.test.ts'
+    - claim: "a second cadence run is refused while the first has not settled"
+      proof: 'grep: test("W1-T4034: a second measurement cadence is refused while the first is unsettled" in test/the-measurement-cadence-does-not-block-the-loop.test.ts'
+    - claim: "a detached cadence still ledgers its own completion row"
+      proof: 'grep: test("W1-T4034: a detached measurement cadence still ledgers that it ran" in test/the-measurement-cadence-does-not-block-the-loop.test.ts'
+    - claim: "a cadence that throws is caught and never takes the daemon loop down"
+      proof: 'grep: test("W1-T4034: a throwing measurement cadence never fails the daemon loop" in test/the-measurement-cadence-does-not-block-the-loop.test.ts'
+    - claim: "the detached cadence site records that the sweep keeps its turn while it runs"
+      proof: "grep: the cadence runs detached so the sweep keeps its turn in src/lib/daemon.ts"
+  risk: high
+  origin: "oper#review-lane-starved-by-daemon-iteration-2026-09-22"
+  plan_refs: ["W1-T2379", "W1-T2981", "W1-T1259", "W1-T2744"]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/the-measurement-cadence-does-not-block-the-loop.test.ts, scripts/test-tier-manifest.json]
+  status: blocked
+  retirement: withdrawn
+  attempts: 0
+  note: |
+    RESERVATION HAND-OFF, RECORDED BECAUSE THE MINT COULD NOT RECORD IT. `rmd next-task-id` reserved
+    this id from the daemon's own checkout, which sits on a DETACHED HEAD, so the reservation ref
+    recorded `branch=unknown` — parseable, but unreadable AS A CLAIM, which is the exact shape
+    `task-id-existence` refuses. That is the ordinary fleet case, not an anomaly: the daemon takes an
+    id before the run branch exists, and W1-T3601/W1-T3602 (#5612) are the gate's own cited examples.
+    The escape is granted only where the reservation recorded a value to hand off FROM, and it did.
+    The filing branch below is the real holder, named on its own physical line so nothing trails it.
+    reservation hand-off: unknown -> chore/file-t4033-t4034
+    WITHDRAWN 2026-09-22 — THE SYMPTOM WAS REAL, THIS ROOT CAUSE WAS NOT. This shard blamed the
+    measurement cadence's inline await at daemon.ts:2580 for starving review admission. Three
+    measurements killed it.
+    (i) The inter-phase review clock is LIVE across that cadence by construction — started at
+    daemon.ts:2516, first stopped at 2868, with the cadence at ~2578 between them — so had the
+    cadence been the blocker the light pass would still have run. It did not.
+    (ii) `lightPassActionable` admits `post-review` unconditionally, so a live light pass would
+    have reviewed the waiting PRs.
+    (iii) The cadence is not what held the loop: `daemon.alive` stopped at 13:05:54Z, BEFORE the
+    cadence fired, and the review clock, the heartbeat and the sweep all went silent together while
+    the process stayed alive and later continued.
+    Detaching the cadence also breaks a deliberate mechanism: W1-T2852's suite asserts "measurement
+    remains the phase holding the main loop" and drives a restricted review pass from a GitHub wake
+    DURING it. Five of its tests fail against the detach, and bending them to fit would have
+    destroyed the design they encode.
+    SUPERSEDED BY W1-T4041, which instruments the loop instead of guessing at it.
