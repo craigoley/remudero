@@ -30,6 +30,11 @@
     reads raw daemon state would either show an empty healthy result or create a second source of
     truth; both would keep the queue blocked for the wrong reason.
 
+    This also follows the observed false-positive escalation lifecycle close: a plan-only merge
+    was temporarily treated as implementation credit and closed a live escalation before the
+    implementation had shipped. The projection must therefore expose source and evidence state
+    without allowing a plan-only or incomplete result to masquerade as applied implementation.
+
     This is a small unblocker with a hard boundary: expose the already-owned, redacted result
     projection and nothing that executes a connector. Recheck and compensation remain core-owned
     execution work and are not implied by a successful read; until their executor contract exists,
