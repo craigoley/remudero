@@ -14,11 +14,11 @@
   attempts: 0
   acceptance:
     - claim: "a check with a later successful attempt on the same head is not reported as a live failure"
-      proof: "unit test: a check whose latest attempt passed is absent from the actionable failures"
+      proof: "grep: test(\"a check whose latest attempt succeeded is absent from the actionable failures in test/a-superseded-check-attempt-is-not-a-live-failure.test.ts"
     - claim: "the attempt that is reported is the latest for that check name, not the first encountered"
-      proof: "unit test: the reported attempt is the most recent for its check name"
+      proof: "grep: test(\"the reported attempt is the most recent for its check name in test/a-superseded-check-attempt-is-not-a-live-failure.test.ts"
     - claim: "a check whose only attempt failed is still reported, so the narrowing does not blind the repair path"
-      proof: "unit test: a single failed attempt with no later run is still actionable"
+      proof: "grep: test(\"W1-T3363 criterion 3: a check whose only attempt failed, with no later run of the same name in test/a-superseded-check-attempt-is-not-a-live-failure.test.ts"
   rationale: |
     MEASURED 2026-09-10, twice in one hour.
     
