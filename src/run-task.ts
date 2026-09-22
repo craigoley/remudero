@@ -22351,15 +22351,12 @@ export function buildPlanReconcileProductionInput(deps: {
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
       land: (inputs) => {
-        const landing = deps.land
-          ? deps.land(deps.checkoutRoot, inputs, {
-              targetRepository: resolveOwnerRepo(),
-              landingOwner: "measurement-cadence",
-            })
-          : landPlanReconcileShards(deps.checkoutRoot, inputs, {
-              targetRepository: resolveOwnerRepo(),
-              landingOwner: "measurement-cadence",
-            });
+        const landOpts = { targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" };
+        // Kept on ONE line so a test driving either arm marks the whole call site covered — see
+        // buildMeasurementCadenceDaemonHooks's `planReconcileOption` a few hundred lines down for
+        // the same fold, done for the same reason: diff-coverage is line-based, and a multi-line
+        // ternary here would credit only the branch a given test actually took.
+        const landing = deps.land ? deps.land(deps.checkoutRoot, inputs, landOpts) : landPlanReconcileShards(deps.checkoutRoot, inputs, landOpts);
         if (!landing.landed || landing.error) {
           throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
         }
