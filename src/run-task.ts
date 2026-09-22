@@ -14849,7 +14849,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // decision on lines no test can reach without driving this entire dispatch — which is what
     // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
     // request must be exercised, not reasoned about from outside.
-    let harnessCommitRefusalReason: string | undefined;
+    const harnessCommitRefusalState: { reason?: string } = {};
     commitCount = harnessCommitForShellLessWorker({
       harnessOwnsGit,
       commitCount,
@@ -14858,10 +14858,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       declaredPaths: task.files ?? [],
       log,
       say,
-      onRefusal: (reason) => {
-        harnessCommitRefusalReason = reason;
-      },
+      onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
     });
+    const harnessCommitRefusalReason = harnessCommitRefusalState.reason;
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && commitCount === 0;
 
     if (!prUrl && commitCount === 0) {
@@ -34497,6 +34496,13 @@ export function harnessCommitForShellLessWorker(
   }
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
+}
+
+/** Keep the run-body refusal state callback independently executable for the harness path. */
+export function createHarnessCommitRefusalRecorder(state: { reason?: string }): (reason: string) => void {
+  return (reason) => {
+    state.reason = reason;
+  };
 }
 
 /** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is

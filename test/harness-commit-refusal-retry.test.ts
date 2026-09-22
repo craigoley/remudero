@@ -6,6 +6,7 @@ import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import { latestIndependentFailureBlock } from "../src/lib/status.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import {
+  createHarnessCommitRefusalRecorder,
   harnessCommitForShellLessWorker,
   noPrVerdict,
   type RunResult,
@@ -66,6 +67,12 @@ function refusedResult(runId: string): RunResult {
     harnessCommitRefusalReason: "no anchored COMMIT_MESSAGE line in the report",
   } as RunResult;
 }
+
+test("the run-body refusal recorder preserves the producer's exact reason", () => {
+  const state: { reason?: string } = {};
+  createHarnessCommitRefusalRecorder(state)("commit bridge declined the worker edits");
+  assert.equal(state.reason, "commit bridge declined the worker edits");
+});
 
 test("the producer-owned helper refusal becomes a distinct terminal classification", () => {
   let refusal: string | undefined;
