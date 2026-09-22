@@ -100,10 +100,12 @@ test("the two causes carry different ledger reasons", async () => {
       runId: "held-review-test",
     });
     assert.equal(verdict.decisionDisposition, "in_flight");
+    assert.equal(reviewVerdictAnnotation(verdict), "HELD: identical review decision is already in flight");
     const stoodDown = lines.find((line) => line.step === "review.stood_down");
     assert.ok(stoodDown, "the held branch must write a ledger row");
     assert.equal(stoodDown.extra.review_reason, held.review_reason);
     assert.equal(stoodDown.extra.review_reason_detail, held.review_reason_detail);
+    assert.equal(stoodDown.extra.decision_disposition, "in_flight");
   } finally {
     if (claim.kind === "owned") claim.release();
     process.env.PATH = oldPath;
