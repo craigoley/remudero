@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { declaredConsoleRoutes } from "./helpers/declared-routes.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { drainNowFilePath, kickFilePath, pauseFilePath, quietHoursFilePath, stopFilePath } from "../src/lib/fleet-control.js";
+import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietHoursFilePath, stopFilePath } from "../src/lib/fleet-control.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -202,6 +202,7 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/escalation/mark-handled",
   "POST /v1/drain/kick",
   "POST /v1/drain/run",
+  "POST /v1/pr-actions",
   "POST /v1/questions/answer",
   "POST /v1/policy/daily-cost-ceiling",
   "POST /v1/policy/daily-cost-ceiling/clear",
@@ -290,7 +291,7 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
 const TAILNET_CAP = "remudero:console";
 
 /** HIGH-tier routes also need the server-issued second factor — confirm, then replay with it. */
-const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"]);
+const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run", "/v1/pr-actions"]);
 
 async function post(
   base: string,
@@ -462,6 +463,23 @@ test("POST /v1/drain/run drops the DRAIN_REQUESTED marker under fleetControlRoot
     assertNothingUnder(h.questionsRoot, "questionsRoot");
 
     assert.equal(ledgerSteps(h.ledgerPath).filter((s) => s.step === "console.drain_requested").length, 1);
+  });
+});
+
+test("POST /v1/pr-actions writes one bounded request under fleetControlRoot, not questionsRoot", async () => {
+  await withProductionServer(async (h) => {
+    const res = await post(h.base, "/v1/pr-actions", { action: "fix", prNumber: 259 });
+    assert.equal(res.status, 200);
+    const receipt = await res.json() as { armed: boolean; action: string; prNumber: number; requestedAt: string };
+    assert.deepEqual({ armed: receipt.armed, action: receipt.action, prNumber: receipt.prNumber }, { armed: true, action: "fix", prNumber: 259 });
+    assert.ok(Number.isFinite(Date.parse(receipt.requestedAt)));
+    assert.deepEqual(
+      pendingPrActions(h.fleetRoot).map(({ action, prNumber }) => ({ action, prNumber })),
+      [{ action: "fix", prNumber: 259 }],
+      "the durable intent must land at the daemon's fleet-control root",
+    );
+    assert.deepEqual(pendingPrActions(h.questionsRoot), [], "the request must not be written under questionsRoot");
+    assert.equal(ledgerSteps(h.ledgerPath).filter((step) => step.step === "console.pr_action_requested").length, 1);
   });
 });
 

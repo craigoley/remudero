@@ -1003,6 +1003,76 @@ test("console drain-now: consuming DRAIN_REQUESTED ledgers console.drain_consume
   assert.equal(consumed!.extra.origin, "console-drain-1", "the drain line names the console as actor");
 });
 
+test("console PR action: one durable request reaches the established action seam once, is attributed, and is cleared only after its named outcome", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const invoked: Array<{ action: string; prNumber: number; origin: string }> = [];
+  const cleared: Array<[string, number]> = [];
+  let actions = [
+    { action: "fix" as const, prNumber: 259, origin: "console-operator", requestedAt: "2026-09-21T00:00:00.000Z" },
+    { action: "review" as const, prNumber: 260, origin: "console-operator", requestedAt: "2026-09-21T00:01:00.000Z" },
+  ];
+
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      pendingPrActions: () => actions,
+      runPrAction: async (request) => {
+        invoked.push(request);
+        return { outcome: "completed", detail: "existing fix command accepted the PR" };
+      },
+      clearPrAction: (action, prNumber) => {
+        cleared.push([action, prNumber]);
+        actions = actions.filter((request) => request.action !== action || request.prNumber !== prNumber);
+      },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+
+  assert.deepEqual(invoked.map((request) => [request.action, request.prNumber]), [["fix", 259]], "one poll starts at most one bounded action");
+  assert.deepEqual(cleared, [["fix", 259]], "only the completed marker is consumed");
+  assert.deepEqual(actions.map((request) => [request.action, request.prNumber]), [["review", 260]], "later work remains durable for a later poll");
+  const completed = lines.find((line) => line.step === "console.pr_action_completed");
+  assert.ok(completed, "the daemon records the established-command outcome");
+  assert.equal(completed!.extra.action, "fix");
+  assert.equal(completed!.extra.pr_number, 259);
+  assert.equal(completed!.extra.origin, "console-operator");
+});
+
+test("console PR action: a named refusal is ledgered and consumed without turning into a daemon crash loop", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const cleared: Array<[string, number]> = [];
+  let actions = [{ action: "review" as const, prNumber: 259, origin: "console-operator", requestedAt: "2026-09-21T00:00:00.000Z" }];
+
+  const summary = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      pendingPrActions: () => actions,
+      runPrAction: async () => ({ outcome: "refused", detail: "PR is not eligible for a second review" }),
+      clearPrAction: (action, prNumber) => {
+        cleared.push([action, prNumber]);
+        actions = [];
+      },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+
+  assert.equal(summary.stopReason, "max_reached", "a refused operator request is not a process failure");
+  assert.deepEqual(cleared, [["review", 259]], "a named refusal cannot retry forever");
+  const refused = lines.find((line) => line.step === "console.pr_action_refused");
+  assert.ok(refused);
+  assert.match(String(refused!.extra.detail), /not eligible/);
+});
+
 test("headroom exhaustion resumes ON ITS OWN once the underlying window actually resets — no exit either side", async () => {
   // Proves acceptance criterion (a): "the daemon does not exit at all... it
   // RESUMES after the clock passes resets_at". readUsage is a fresh call

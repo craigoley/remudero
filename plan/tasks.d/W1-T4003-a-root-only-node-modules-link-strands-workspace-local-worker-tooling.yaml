@@ -1,0 +1,75 @@
+- id: W1-T4003
+  title: "A ROOT-ONLY node_modules LINK STRANDS WORKSPACE-LOCAL WORKER TOOLING — a freshly cut worktree resolves its root CLI but cannot resolve a dependency npm installed beneath apps/dashboard, so a worker can fail before its diff is evaluated"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files: [src/lib/worker.ts, test/worktree-node-modules.test.ts, test/workspace-node-modules-link.test.ts, test/workspace-node-modules-paths.test.ts, test/workspace-node-modules-occupied-destination.test.ts, test/workspace-node-modules-root-baseline.test.ts]
+  origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
+  plan_refs: ["W1-T137", "W1-T2312", "W1-T2777", "W1-T4002"]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED 2026-09-22: linkWorktreeNodeModules creates only
+    <worktree>/node_modules -> <source>/node_modules. The current npm layout places
+    @vitejs/plugin-react beneath apps/dashboard/node_modules, not under the root node_modules.
+    In a linked worktree, Vite resolves from the worktree's apps/dashboard directory, finds no
+    nested install, follows the root link, and cannot find that plugin. The production daemon
+    install has the nested package, while its live reviewer worktrees have only the root link.
+    A clean local install makes the real dashboard build pass; the root-only linked form makes
+    the same build fail before worker-authored code is involved.
+
+    Running npm ci in a worker worktree is explicitly unsafe: it follows the root link and can
+    empty the donor install, the outage class W1-T2312 was created to prevent. This is not a
+    request to install per worker or to hoist a package manually. The already-approved shared
+    dependency model must make each declared workspace's installed local dependency visible at
+    the corresponding path in the worktree.
+  design: |
+    Retain the root node_modules link and its lockfile-mismatch observation unchanged. Add a
+    bounded sibling helper that reads the source checkout's declared workspace paths, accepts
+    only normalized relative paths and a one-segment wildcard expansion, and considers only a
+    matching workspace directory that exists in both source and fresh worktree. For each source
+    workspace with an actual nested node_modules directory, create
+    <worktree>/<workspace>/node_modules -> <source>/<workspace>/node_modules when and only when
+    the destination is absent. An absent source nested install is a named skip; an occupied or
+    unreadable destination is never overwritten, never deleted, and is named as an incomplete
+    workspace-link outcome rather than silently claimed healthy.
+
+    Use the source manifest rather than a hard-coded apps/dashboard list so packages/* follows
+    the same discipline. Do not support absolute paths, parent traversal, recursive globs, or
+    arbitrary filesystem walks. Reuse the existing node_modules git exclusion (which already
+    covers any directory of that name), preserve best-effort worktree creation, and do not add an
+    npm invocation, network request, or provider routing behavior. Surface the aggregate
+    workspace-link result through the existing worker worktree observability path so a missing
+    local tool is attributable to provisioning rather than misdiagnosed as the worker's diff.
+  acceptance:
+    - claim: "a fresh worker worktree links the installed local dependency of each declared workspace without running npm"
+      proof: "unit test: test/workspace-node-modules-link.test.ts"
+    - claim: "workspace paths are derived from the source manifest and unsafe path forms are refused before a link is attempted"
+      proof: "unit test: test/workspace-node-modules-paths.test.ts"
+    - claim: "an occupied or unavailable workspace destination remains a named incomplete workspace-node-modules-link outcome"
+      proof: "unit test: test/workspace-node-modules-occupied-destination.test.ts"
+    - claim: "the root node_modules link and its lockfile-mismatch warning remain the shared-install baseline"
+      proof: "unit test: test/workspace-node-modules-root-baseline.test.ts"
+  falsifier: |
+    Create a source fixture whose root node_modules omits a marker package while its declared
+    apps/dashboard/node_modules contains it; create the matching fresh worktree. Before the
+    helper, resolving the marker from the worktree dashboard fails. After it, the resolution
+    reaches the source nested install without any package-manager call. Delete the nested-link
+    helper and the fixture must fail again. Seed an occupied destination and an unsafe
+    ../outside workspace value: both must leave their paths untouched and report incomplete,
+    proving the repair neither overwrites worker state nor escapes the checkout.
+  note: |
+    reservation hand-off: codex/file-w1-t4002-plan-1790042400000 -> codex/file-w1-t4003-workspace-deps-1790045000000
+    This is a source build after its plan-only filing merges and must use
+    run-W1-T4003-<epochMs>. It is independent of the W1-T4002 dispatch-recovery implementation;
+    both improve the same fleet without sharing a mutation authority.
+
+    The acceptance proofs use distinct new test-file paths declared in `files:` rather than
+    future-source `grep:` anchors. This filing changes only the task record, so the absent paths
+    are named forward references now and become executable, discriminating evidence when the build
+    creates them. The split prevents one broad test from being treated as proof of every separate
+    safety boundary.
