@@ -317,7 +317,7 @@
   "src/lib/ratification.ts": 72,
   "src/lib/reachability.ts": 101,
   "src/lib/recap.ts": 48,
-  "src/lib/receipt.ts": 135,
+  "src/lib/receipt.ts": 145,
   "src/lib/relay-client.ts": 101,
   "src/lib/relint.ts": 97,
   "src/lib/replay-harness.ts": 76,

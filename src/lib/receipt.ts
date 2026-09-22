@@ -76,10 +76,23 @@ export interface ReceiptPredicate {
     pr: { branch: ReceiptField<string> };
     learnings: { injected_ids: ReceiptField<string[]> };
     implement: {
+      /** WHICH FLEET LANE BILLED THIS RUN — `claude`, `codex` or `cash`. `model` is the REQUEST,
+       *  not the fact: one `sonnet` request is served by a subscription or diverted to cash by
+       *  auction headroom, and those runs differ in cost, failure mode and trust. Absent with a
+       *  reason on a run predating provider routing — never defaulted to `claude`, which would
+       *  attribute every diverted run to a lane that never ran it. */
+      provider: ReceiptField<string>;
       model: ReceiptField<string>;
       effort: ReceiptField<string>;
       num_turns: ReceiptField<number>;
       cost_usd: ReceiptField<number>;
+      /** The worker's own terminal verdict. Distinct from `review.reviewer_outcome`, which judges
+       *  the DIFF: this judges the RUN. Only the reviewer's verdict cannot separate "the worker
+       *  failed" from "it succeeded and the work was rejected" — opposite repairs. */
+      verdict: ReceiptField<string>;
+      /** The SDK/adapter session this run spawned with — the join key back to the worker
+       *  instance, and the only field here not derivable from another. */
+      session_id: ReceiptField<string>;
     };
     review: { reviewer_outcome: ReceiptField<string> };
     merge: {
@@ -281,6 +294,10 @@ export function buildReceipt(ledgerLines: readonly ReceiptLedgerLine[], opts: Bu
             : absent(noLineReason(STEP.learningsInjected, taskId)),
       },
       implement: {
+        provider:
+          implementDone && typeof implementDone.provider === "string"
+            ? present(implementDone.provider)
+            : absent(noLineReason(STEP.implementDone, taskId)),
         model:
           implementDone && typeof implementDone.model === "string"
             ? present(implementDone.model)
@@ -296,6 +313,14 @@ export function buildReceipt(ledgerLines: readonly ReceiptLedgerLine[], opts: Bu
         cost_usd:
           implementDone && typeof implementDone.cost_usd === "number"
             ? present(implementDone.cost_usd)
+            : absent(noLineReason(STEP.implementDone, taskId)),
+        verdict:
+          implementDone && typeof implementDone.verdict === "string"
+            ? present(implementDone.verdict)
+            : absent(noLineReason(STEP.implementDone, taskId)),
+        session_id:
+          implementDone && typeof implementDone.session_id === "string"
+            ? present(implementDone.session_id)
             : absent(noLineReason(STEP.implementDone, taskId)),
       },
       review: {
