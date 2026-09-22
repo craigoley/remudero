@@ -292,8 +292,27 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
           reason: "live-only signal; historical queue and provider trends are not collected",
         },
       },
+      // W1-T4024: the per-provider view, cold. Explicitly NOT PROBED with no accounts — a cold
+      // refresh must never produce a provider reading, which is exactly what this test guards.
+      accounts: {
+        state: "not-probed",
+        reason: "no process-owned provider snapshot is available",
+        accounts: [],
+      },
     },
     timeSeries: cold.timeSeries,
+    // W1-T4024: cash spend, cold. NOT COLLECTED with no windows — never a $0 that reads as "nothing
+    // spent". Asserted field-for-field so a cold payload that invents a figure still fails here.
+    spend: {
+      cash: {
+        state: "not-collected",
+        unit: "usd",
+        asOf: null,
+        coverage: "implement workers only: fix-rung workers record no provider, so their cash spend cannot be attributed",
+        windows: [],
+        reason: "no ledger-union refresh has completed yet",
+      },
+    },
   });
   assert.ok(Object.isFrozen(cold), "the process-owned value is immutable");
   await cache.refresh();

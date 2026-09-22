@@ -28,7 +28,39 @@ export interface LiveAnalyticsMetrics {
       remaining: LiveMetric;
       trend: LiveNotCollected;
     };
+    /** W1-T4024 — every subscription window the daemon last observed, per provider. */
+    accounts: LiveProviderAccounts;
   };
+}
+
+/**
+ * W1-T4024 — ONE SUBSCRIPTION WINDOW, AS THE DAEMON LAST OBSERVED IT. `usedPercent` and
+ * `remainingPercent` are ABSENT, never 0 or 100, when the reading carried no finite figure: a
+ * missing number drawn as "empty" or "full" is the reading this repo has already paid for (W1-T3755).
+ */
+export interface LiveProviderWindow {
+  name: string;
+  usedPercent?: number;
+  remainingPercent?: number;
+  /** ISO instant the window refills. A numeric `resetsAt` is omitted rather than guessed at, because
+   *  the capacity readers do not agree on seconds versus milliseconds. */
+  resetsAt?: string;
+}
+
+export interface LiveProviderAccount {
+  provider: string;
+  /** Present only when the snapshot carried one. Codex readings carry none today; it is never invented. */
+  accountLabel?: string;
+  readable: boolean;
+  reason?: string;
+  windows: LiveProviderWindow[];
+}
+
+export interface LiveProviderAccounts {
+  state: LiveMetric["state"];
+  asOf?: string;
+  reason?: string;
+  accounts: LiveProviderAccount[];
 }
 
 export interface LiveStatusSnapshot {
@@ -44,9 +76,11 @@ export interface LiveProviderSnapshot {
   observedAt?: string;
   selected?: { tightestRemainingPercent?: number };
   providers?: Array<{
+    provider?: string;
+    accountLabel?: string;
     readable?: boolean;
     reason?: "capacity-unreadable" | "authentication-unavailable" | "capacity-unavailable";
-    windows?: Array<{ usedPercent?: number }>;
+    windows?: Array<{ name?: string; usedPercent?: number; resetsAt?: string | number }>;
   }>;
 }
 
@@ -66,6 +100,7 @@ export function emptyLiveAnalyticsMetrics(): LiveAnalyticsMetrics {
         remaining: { state: "not-probed", reason: "no process-owned provider snapshot is available" },
         trend: { ...NOT_COLLECTED_TREND },
       },
+      accounts: { state: "not-probed", reason: "no process-owned provider snapshot is available", accounts: [] },
     },
   };
 }
@@ -132,7 +167,61 @@ export function adaptLiveAnalyticsMetrics(input: {
       metrics.provider.allowance.remaining = { state: "observed", value: remaining, asOf: provider.observedAt };
     }
   }
+  metrics.provider.accounts = providerAccounts(input.provider);
   return metrics;
+}
+
+/**
+ * W1-T4024 — EVERY PROVIDER'S WINDOWS, NOT THE SELECTED PROVIDER'S TIGHTEST ONE.
+ *
+ * `allowance.remaining` answers one question — how much room does the lane the router just picked
+ * have — and returns `selected.tightestRemainingPercent`. Measured 2026-09-22 against the live
+ * snapshot it read 58 (claude's weekly window) while codex sat at 70% used; codex appeared nowhere,
+ * so the console overstated headroom and named no lane. That scalar is unchanged here because routing
+ * and existing consumers read it. This adds the per-provider view beside it, projected from the SAME
+ * already-captured snapshot: no provider probe and no credential read.
+ */
+function providerAccounts(snapshot: LiveProviderSnapshot | undefined): LiveProviderAccounts {
+  if (!snapshot || snapshot.state === "not-probed" || snapshot.freshness === "not-probed") {
+    return {
+      state: "not-probed",
+      ...(snapshot?.observedAt ? { asOf: snapshot.observedAt } : {}),
+      reason: snapshot ? "provider capacity was not probed" : "no process-owned provider snapshot is available",
+      accounts: [],
+    };
+  }
+  const accounts: LiveProviderAccount[] = [];
+  for (const entry of snapshot.providers ?? []) {
+    const provider = typeof entry.provider === "string" && entry.provider.length > 0 ? entry.provider : undefined;
+    if (!provider) continue;
+    const windows: LiveProviderWindow[] = [];
+    for (const window of entry.windows ?? []) {
+      const name = typeof window.name === "string" && window.name.length > 0 ? window.name : undefined;
+      if (!name) continue;
+      const resetsAt = typeof window.resetsAt === "string" && Number.isFinite(Date.parse(window.resetsAt)) ? window.resetsAt : undefined;
+      windows.push({
+        name,
+        ...(finite(window.usedPercent) ? { usedPercent: window.usedPercent, remainingPercent: Math.max(0, 100 - window.usedPercent) } : {}),
+        ...(resetsAt ? { resetsAt } : {}),
+      });
+    }
+    accounts.push({
+      provider,
+      ...(typeof entry.accountLabel === "string" && entry.accountLabel.length > 0 ? { accountLabel: entry.accountLabel } : {}),
+      readable: entry.readable === true,
+      ...(entry.reason ? { reason: entry.reason } : {}),
+      windows,
+    });
+  }
+  const unreadable = snapshot.state === "unknown" || snapshot.freshness === "unknown";
+  const state: LiveMetric["state"] = snapshot.freshness === "stale" ? "stale" : unreadable ? "unreadable" : "observed";
+  return {
+    state,
+    ...(snapshot.observedAt ? { asOf: snapshot.observedAt } : {}),
+    ...(state === "stale" ? { reason: "provider snapshot exceeded its freshness bound" } : {}),
+    ...(state === "unreadable" ? { reason: providerReason(snapshot) ?? "provider snapshot is unreadable" } : {}),
+    accounts,
+  };
 }
 
 export default adaptLiveAnalyticsMetrics;
