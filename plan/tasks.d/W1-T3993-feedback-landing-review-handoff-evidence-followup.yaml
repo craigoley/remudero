@@ -1,0 +1,55 @@
+- id: W1-T3993
+  title: "FEEDBACK LANDING REVIEW HANDOFF NEEDS CURRENT-HEAD EVIDENCE — follow up the queued W1-T3992 implementation with non-stale proofs for retry and ordering"
+  repo: remudero
+  depends_on: [W1-T3992]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/feedback-landing.test.ts
+    - test/feedback-landing-union-writer.test.ts
+  origin: "followup#5317-feedback-landing-review-evidence-2026-09-21"
+  plan_refs: [W1-T530, W1-T913, W1-T3990, W1-T3992]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED on current origin/main a8eb8bca4532bdf91ed306b9a36fc3738a09c956: the open
+    implementation PR for the feedback landing review handoff has added retry/order tests, but
+    W1-T3992's original grep proofs already match the base tree and therefore cannot certify the
+    implementation diff. This successor keeps the safety gate intact by naming proof titles and a
+    new production handoff symbol that are absent from main and present on the implementation
+    head. It does not amend the terminal W1-T3990 filing or treat a keyword-only match as proof.
+
+    The implementation remains scoped to the existing shared review producer and preserves the
+    bridge's never-throw/open-or-reuse behavior. A failed handoff must remain retryable, and a
+    fresh or reused landing PR must not arm auto-merge before review is requested.
+  design: |
+    Use the implementation already present on the open feedback-landing PR. The review contract
+    for this successor is deliberately evidence-shaped: execute the three newly added retry/order
+    tests against the PR head, and verify the daemon's requestLandingReview handoff reaches the
+    shared reviewCommand path. Do not add a second status writer, a capped override, or a plan
+    edit beside the source diff.
+  acceptance:
+    - claim: "a fresh landing requests review before any merge arm"
+      proof: "grep: review:https://github\\.com/o/r/pull/14 in test/feedback-landing.test.ts"
+    - claim: "a failed review handoff is retryable and never arms merge"
+      proof: "grep: reviewer temporarily unavailable in test/feedback-landing.test.ts"
+    - claim: "an existing landing PR receives a repairable review request without a merge arm"
+      proof: "grep: must reuse the open landing PR in test/feedback-landing.test.ts"
+    - claim: "the daemon handoff invokes the shared review producer"
+      proof: "grep: requestLandingReview in src/run-task.ts"
+  falsifier: |
+    Remove the requestReview call or restore a pre-review gh pr merge arm: at least one of the
+    three ordering/retry tests must fail. Remove requestLandingReview from the daemon wiring: the
+    grep proof must fail. Make the review callback fail once: the next call must reuse the same PR,
+    remain landed, and issue no merge arm.
+  note: |
+    reservation holder: run-W1-T3993-1790038368482
+    This is a proof-focused successor because W1-T3992's grep phrases are already present on the
+    base tree. Its implementation PR must carry Remudero-Task: W1-T3993; this filing stays
+    trailer-free.
