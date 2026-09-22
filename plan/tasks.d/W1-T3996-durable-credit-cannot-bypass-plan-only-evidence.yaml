@@ -1,0 +1,71 @@
+- id: W1-T3996
+  title: "A DURABLE HEAD-BRANCH CREDIT CAN BYPASS PLAN-ONLY EVIDENCE — once a plan filing on a run-shaped branch writes merge-credit.json, later projections return before the filing guards and suppress the implementation forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/status.ts
+    - test/a-durable-plan-filing-credit-is-revalidated.test.ts
+  origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
+  plan_refs: ["W1-T1004", "W1-T3067", "W1-T3414", "W1-T3990", "W1-T3993"]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED 2026-09-22 on the core daemon. W1-T3990's actual implementation was excluded from
+    dispatch because state/merge-credit.json held a head-branch credit for plan PR #6468. That PR
+    introduced W1-T3990's shard only, but its head was run-W1-T3990-1790031507231. The ordinary
+    live-credit paths correctly reject a plan-only filing when merged paths are available; the
+    durable-credit fast path returns before either of those guards. The false record therefore
+    survives every later sweep and makes a task whose code never shipped read terminally merged.
+
+    W1-T3993 is a separate feedback-landing review-handoff evidence follow-up; it does not own
+    merge-credit state, durable invalidation, or src/lib/status.ts. This task is the recovery of
+    the generic false-credit mechanism exposed by its run-shaped filing, so the two must remain
+    distinct even though they share the same initiating incident.
+
+    This is not a request to distrust all durable credit. The cache is the right accelerator for
+    real implementation merges, and unreadable merge-path evidence must retain its current
+    fail-toward-the-status-quo posture. The defect is precisely a durable head-branch entry whose
+    own merged PR is mechanically observed to be plan-only, not a broad reclassification of
+    plan-text deliverables or a manual rewrite of merge history.
+  design: |
+    Revalidate a legacy durable head-branch credit against the same bounded merged-path evidence
+    used by the live trailer path whenever that evidence is in hand. If its recorded PR is a
+    non-empty plan-only changeset, the credit is refused before it can mark the task merged and
+    before it can suppress dispatch. Persist a subtract-only invalidation or equivalent durable
+    quarantine so later callers that do not hold the path map cannot resurrect the known-bad
+    credit. Keep a path-unreadable or non-plan-only durable credit behavior unchanged, preserve
+    trailer credit precedence, and do not manufacture a merge credit from any new input.
+
+    The decision must remain observable with the exact PR and reason that caused it. Do not use a
+    subject, branch-name spelling, task status field, or an operator override as a proxy for the
+    merge diff. The same current merged-path record that proves a normal live filing is plan-only
+    is the only evidence allowed to invalidate its durable sibling.
+  acceptance:
+    - claim: "a durable head-branch credit for a merged plan-only filing is refused rather than marking the filed task merged"
+      proof: "unit test: a durable head-branch filing credit is rejected by the merged path evidence"
+    - claim: "the rejection is durable, so a later projection without the merged-path map cannot resurrect the known plan-only filing credit"
+      proof: "unit test: an invalidated durable filing credit stays uncredited without a path reread"
+    - claim: "a durable head-branch credit for a non-plan-only implementation and an unreadable path map retain their existing merged result"
+      proof: "unit test: durable implementation and unreadable-path credits remain merged"
+    - claim: "the invalidation is tied to the recorded merged PR and names the plan-only reason rather than inferring from branch shape"
+      proof: "grep: durable-credit-plan-only in src/lib/status.ts"
+  falsifier: |
+    Seed a durable head-branch entry for a task whose recorded PR has a non-empty plan-only merge
+    path list. Before the fix, deriveStatus returns merged without consulting those paths. Remove
+    the new revalidation/invalidation arm and that case must return merged again. Conversely,
+    substitute src/lib/example.ts for the plan path or omit the path map entirely: either case
+    must remain merged, proving this is neither a blanket cache eviction nor a fabricated reading.
+  note: |
+    reservation hand-off: codex/file-w1-t3994-run-shaped-filing-1790038 -> codex/file-w1-t3993-durable-credit-17900380553N
+
+    This plan-only filing intentionally uses a non-run branch and no Remudero-Task trailer. The
+    implementation must use run-W1-T3996-<epochMs> after this filing merges. W1-T3990's stale
+    durable credit is the concrete recovery case, but this task repairs
+    the generic durable-cache bypass rather than editing a merged PR or claiming an operator
+    credit override.
