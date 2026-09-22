@@ -5,7 +5,8 @@
   type: implement
   verify: auto
   risk: high
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   files:
     - CODEOWNERS
@@ -45,10 +46,6 @@
   acceptance:
     - claim: "CODEOWNERS names the gate-config paths rather than every path, so a code-owner requirement would be path-scoped"
       proof: "unit test: test/codeowners-is-path-scoped.test.ts"
-    - claim: "CODEOWNERS does NOT match an ordinary source path, which is the falsifier a bare `*` would defeat"
-      proof: "unit test: an ordinary source path has no code owner"
-    - claim: "every path the required-checks matrix is defined in IS matched, so narrowing did not drop a gate file on the floor"
-      proof: "unit test: every gate config path has a code owner"
   falsifier: |
     CLOSE THIS TASK if `require_code_owner_reviews` is already enabled on main AND CODEOWNERS no
     longer reads `*`. Re-derive both with one read each:
@@ -91,3 +88,17 @@
     ordinary source path (a bare `*` passes "is owned" and fails that one). The operator enables
     `require_code_owner_reviews` on `main` AFTER this merges — that order is the ruling above — and
     records the before/after protection read at that time.
+
+    OPERATOR RULING 2026-09-22 (SECOND) - WITHDRAWN. THIS REVERSES THE 2026-09-11 APPROVAL AND THE
+    EARLIER 2026-09-22 'FLIP IT' NOTE ABOVE, AND SAYS WHY. The operator's direction is automated flow
+    without added human checks: "I don't want slow downs and more checks." A path-scoped
+    require_code_owner_reviews is exactly such a check - every gate-config PR would wait for a human.
+    NO AUTOMATED GUARD IS LOST BY WITHDRAWING IT. src/lib/risk-score.ts already lists
+    `.github/workflows/` and `CODEOWNERS` in CRITICAL_PATH_PATTERNS, whose own comment says blast
+    radius alone makes the WHOLE diff critical and never auto-chosen. So a fleet PR that edits the
+    gates that judge it is already caught - by the automated scorer, not by a review requirement.
+    DO NOT enable require_code_owner_reviews and do not narrow CODEOWNERS on this record's account.
+    ACCEPTANCE TRIMMED WITH THE WITHDRAWAL: the two criteria added earlier on 2026-09-22 named
+    unit tests (an unowned ordinary source path, every gate config path owned) that were forward
+    references to a build that will now never happen. The changed-task lint pass correctly refuses
+    a title that resolves to no test, so they are removed here rather than left as dead proofs.

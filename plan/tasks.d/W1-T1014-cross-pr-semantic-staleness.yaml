@@ -272,3 +272,15 @@
     and records the after-read (the same GET, re-run) wherever he tracks the ceiling from (ii) —
     this shard's acceptance does not gate on that read because, per the same precedent, a task at
     `verify: auto` cannot name an operator action as its own proof.
+
+    OPERATOR RULING 2026-09-22 (SECOND) - THE STRICT FLIP IS DECLINED. DO NOT RUN THE PATCH ABOVE.
+    This reverses the earlier same-day ruling that took option (a). The operator's direction is
+    "I don't want slow downs and more checks", and the measurement in (ii) is exactly that trade:
+    strict serialises merges at one per re-validation window - about 115/day at the p50 window and
+    67/day at the p90 - below observed demand on 4 of 11 days. `required_status_checks.strict`
+    therefore STAYS false, and the handoff paragraph above is superseded, not pending.
+    THE RESIDUAL IS ACCEPTED, NOT HIDDEN: without strict, a semantically stale merge (the #2157 /
+    #2155 shape) can still turn main red after both PRs were individually green. The duplicate-id
+    sub-class the 2026-09-06 addendum measured is separately covered by the atomic id reservation
+    (W1-T3091) and task-id-existence, which refuse the collision before merge. Option (b) remains
+    declined for the cost recorded in (iv).
