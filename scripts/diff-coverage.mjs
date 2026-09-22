@@ -745,11 +745,21 @@ export function isExternalToolSpawnLine(text) {
   return false;
 }
 
-export function formatBlockingViolation(violation, added) {
+export function isAdjacentC8Ignore(sourceText, line) {
+  if (!sourceText || line < 1) return false;
+  const lines = sourceText.split('\n');
+  const adjacent = [lines[line - 1], lines[line - 2]].filter((text) => text !== undefined);
+  return adjacent.some((text) => /\bc8\s+ignore\s+(?:next(?:\s+\d+)?|start|stop)\b/.test(text));
+}
+
+export function formatBlockingViolation(violation, added, sourceText = '') {
   const idx = violation.lastIndexOf(':');
   const file = violation.slice(0, idx);
   const line = Number(violation.slice(idx + 1));
   const text = added.get(file)?.get(line) ?? '';
+  if (isAdjacentC8Ignore(sourceText, line)) {
+    return `${violation} -- c8 ignore waiver is not honoured; use // diff-cov: ${DIFF_COV_DIRECTIVES.join(' or ')}`;
+  }
   if (isExternalToolSpawnLine(text)) return `${violation} -- ${EXTERNAL_TOOL_SPAWN_REMEDY}`;
   return violation;
 }
@@ -833,6 +843,7 @@ function main(argv) {
   // Resolve process-boundary/type-only ranges only for files with an uncovered added line.
   const filesWithViolations = new Set(rawViolations.map((v) => v.slice(0, v.lastIndexOf(':'))));
   const rangesByFile = new Map();
+  const sourceTextByFile = new Map();
   const directiveErrors = [];
   for (const file of filesWithViolations) {
     let text;
@@ -841,6 +852,7 @@ function main(argv) {
     } catch {
       continue; // file not on disk (renamed/deleted) -- nothing to exempt, violation stands
     }
+    sourceTextByFile.set(file, text);
     const { ranges, errors } = computeBoundaryRanges(text);
     const typeOnlyRanges = computeTypeOnlyRanges(text);
     const allRanges = [...ranges, ...typeOnlyRanges];
@@ -890,7 +902,9 @@ function main(argv) {
       'BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, ' +
       'or only for re-exec/exit glue use a process-boundary directive, even ' +
       'though the aggregate coverage-ratchet floor may still be satisfied:';
-    const blockingDetails = blocking.map((v) => formatBlockingViolation(v, added));
+    const blockingDetails = blocking.map((v) =>
+      formatBlockingViolation(v, added, sourceTextByFile.get(v.slice(0, v.lastIndexOf(':'))) ?? ''),
+    );
     console.error(`diff-coverage: ${headline}`);
     for (const v of blockingDetails) console.error(`  - ${v}`);
     emitCiReport('diff-coverage', formatCiReport('diff-coverage', headline, blockingDetails), { blocked: true });
