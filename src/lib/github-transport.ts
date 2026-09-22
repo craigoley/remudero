@@ -700,7 +700,7 @@ const ghCadenceOwnStampMs = new Map<string, number>();
  */
 function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void, fn: () => T): T {
   const lockPath = `${stampPath}.lock`;
-  const startedAt = Date.now();
+  const startedAt = systemClock.now();
   let locked = false;
   try {
     mkdirSync(dirname(lockPath), { recursive: true });
@@ -711,7 +711,7 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
         break;
       } catch {
         try {
-          const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+          const ageMs = systemClock.now() - statSync(lockPath).mtimeMs;
           if (ageMs > GH_CADENCE_LOCK_STALE_MS) {
             rmdirSync(lockPath);
             continue;
@@ -719,7 +719,7 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
         } catch {
           // The owner may have released the lock between stat and mkdir. Retry immediately.
         }
-        if (Date.now() - startedAt >= GH_CADENCE_LOCK_MAX_WAIT_MS) break;
+        if (systemClock.now() - startedAt >= GH_CADENCE_LOCK_MAX_WAIT_MS) break;
         sleepSync(GH_CADENCE_LOCK_WAIT_MS);
       }
     }
