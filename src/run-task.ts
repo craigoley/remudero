@@ -39905,13 +39905,17 @@ export async function routeAdaptiveLifetimePressure(
  * must read it when it FIRES. Capturing `activePlanRef.current` eagerly would pin the first tick's
  * projection for the life of the process.
  */
-export function productionLifetimePressureHook(deps: {
+type ProductionLifetimePressureHookInputs = {
   plan: () => Plan;
   root: string;
   config: Config;
   ledgerPath: string;
   runId: string;
-}): (tasks: readonly Task[]) => Promise<void> {
+};
+
+export function productionLifetimePressureHook(
+  deps: ProductionLifetimePressureHookInputs,
+): (tasks: readonly Task[]) => Promise<void> {
   return async (tasks) => {
     await routeAdaptiveLifetimePressure(tasks, {
       plan: deps.plan(),
