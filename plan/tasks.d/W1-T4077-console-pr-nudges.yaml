@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator ask 2026-09-22: a button to get a stalled PR reviewed, and one to dispatch a fix worker for a red PR the daemon is not fixing"
   plan_refs: [W1-T404, W1-T913, W1-T4045]
-  files: [src/lib/panel-actions.ts, src/lib/daemon.ts, src/run-task.ts, plan/policy.yaml, test/console-pr-nudges.test.ts, test/panel-actions.test.ts, test/route-wiring.test.ts, scripts/test-tier-manifest.json]
+  files: [src/lib/panel-actions.ts, src/lib/fleet-control.ts, src/lib/daemon.ts, src/run-task.ts, test/console-pr-nudges.test.ts, test/panel-actions.test.ts, test/route-wiring.test.ts, scripts/test-tier-manifest.json]
   status: queued
   attempts: 0
   rationale: |
@@ -43,8 +43,9 @@
           else is unchanged — a merged or closed PR is refused, the fix rung's branch claim keeps one worker per branch,
           the daily cost ceiling applies, and a PR with no failure evidence is refused with its reason. The strike
           ledger is not reset; the row records `operator_requested: true`.
-    (iv) `plan/policy.yaml` gains `consolePrActions: {review: true, fix: true}`; a switched-off action is refused at
-         the route with that reason.
+    (iv) An action is switched off by a state marker, `state/CONSOLE_PR_ACTION_OFF-review` or `-fix` — the same
+         instant, no-PR pattern as PAUSE (a typed policy row would need schema, provenance and census work for one
+         boolean). A switched-off action is refused at the route with that reason; both are on by default.
     (v) The route records an operator name the console passes in `x-remudero-operator` (display-only audit, never an
         authorisation input) beside the token origin.
   acceptance:
