@@ -1,0 +1,24 @@
+id: fb-1790073971414-50e853
+ts: 2026-09-22T10:46:11.414Z
+raw: "Console daemon Architect triage is blocked before task filing: invoking
+  /app/bin/rmd triage from /home/node/Remudero/repos/remudero-console calls
+  renderWorkerSettings with templatePath
+  /home/node/Remudero/repos/remudero-console/settings/worker.json, which does
+  not exist. The packaged daemon has the safe non-secret template at
+  /app/settings/worker.json; config.root is /home/node/Remudero and no
+  installRoot override exists, so the effective install-root resolution is
+  incorrectly bound to the target repo or command cwd. Resolve the
+  template/hooks from the daemon install root independent of target repo;
+  preserve repo-local runtime state outputs; add a multi-repo regression proving
+  core, console, and site triage/render settings work without copying settings
+  into each product repo. This blocks console feedback fb-1790073555301-380245
+  from becoming an implementation task."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
