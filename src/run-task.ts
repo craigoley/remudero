@@ -24490,25 +24490,33 @@ export function stageInboxProposalOnce(registryPath: string, proposal: Proposal)
 }
 
 export async function defaultVerifyHumanCadenceResult(
-  root: string,
+  /**
+   * THE CHECKOUT, NOT `config.root` — different directories on every fleet host. `config.root` is
+   * the STATE volume; plan/, mounts and settings live in the CHECKOUT beneath it. The state root
+   * reads `<state>/plan/tasks.yaml`, which does not exist: `loadPlan` throws, the catch below
+   * turns it into a `refused` the caller discards, and the pass is SILENT. Measured on the fleet:
+   * zero `verify_human.judged` rows for 13 days while the cadence fired daily. The sibling
+   * `coverageImprovement` in the same call object already passes `repoRoot`.
+   */
+  repoRoot: string,
   config: Config,
   runId: string,
   clock: Clock = systemClock,
 ): Promise<VerifyHumanCadenceResult> {
   try {
-    const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+    const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
     const ledgerPath = ledgerPathFor(config);
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     return await verifyHumanCadence({
-      shards: parkedVerifyHumanShards(plan, root, clock),
+      shards: parkedVerifyHumanShards(plan, repoRoot, clock),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
       judge: realVerifyHumanJudge({
-        mounts: loadMounts(mountsPath(root)),
+        mounts: loadMounts(mountsPath(repoRoot)),
         config,
-        cwd: root,
-        settingsFile: join(root, "settings", "worker.json"),
+        cwd: repoRoot,
+        settingsFile: join(repoRoot, "settings", "worker.json"),
       }),
       stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
@@ -24596,7 +24604,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
-      const verifyHuman = await defaultVerifyHumanCadenceResult(root, configFor(), verifyHumanRunId, cadenceClock);
+      // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
+      // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
+      const verifyHuman = await defaultVerifyHumanCadenceResult(repoRoot, configFor(), verifyHumanRunId, cadenceClock);
       // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
       // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
       // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
