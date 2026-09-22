@@ -140,4 +140,13 @@ test("dry-run does not pull or mutate the container", () => {
   assert.ok(!result.calls.includes("stop remudero-serve"));
   assert.ok(!result.calls.includes("rm remudero-serve"));
   assert.ok(!result.calls.some((call) => call.startsWith("run ")));
+
+  // Keep the no-op contract coupled to the replacement path's positive control: this
+  // proof must fail against the merge base, where the new image preflight is absent.
+  const replacement = fixture({ existingContainer: true, replace: true });
+  assert.equal(replacement.result.status, 0, replacement.result.stderr);
+  const pullIndex = replacement.calls.findIndex((call) => call === `pull ${replacement.ref}`);
+  const stopIndex = replacement.calls.findIndex((call) => call === "stop remudero-serve");
+  assert.notEqual(pullIndex, -1, "replacement must pull the exact image");
+  assert.ok(stopIndex > pullIndex, `replacement must pull before stop: ${replacement.calls.join(" | ")}`);
 });
