@@ -1,0 +1,67 @@
+- id: W1-T4026
+  title: "`rmd preflight --ci-parity` still reports a false-red lint-plan on a feature branch — its parent is freshness-exempt, but the child it uses to mirror CI is not given CI's own guard semantics"
+  repo: remudero
+  depends_on: [W1-T2769]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/preflight-ci-parity.test.ts
+  origin: "operator-session#automatic-flow-followup-2026-09-22"
+  plan_refs: ["W1-T2769", "W1-T294"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-22 on the W1-T4004 feature branch. `rmd preflight --ci-parity`
+    reaches `runCiParity`, refreshes and pins the base correctly, then invokes its `lint-plan`
+    mirror as `npm run --silent lint-plan -- --base <pinned origin/main>` without `CI` in that
+    child's environment. `preflight` itself is correctly in W1-T2769's
+    `READ_ONLY_FRESHNESS_EXEMPT_VERBS`, but the child re-enters `main()` as `lint-plan`, which
+    remains correctly subject to the ordinary freshness gate. The result is a false red before
+    linting begins: `rmd has diverged from origin/main ... refusing to auto-sync`.
+
+    The same branch and pinned base return exit 0 when only that child is given `CI=1`; its
+    actual result is `rmd lint-plan: 0 task(s) checked ... 0 failing`. GitHub's lint-plan job
+    already has the CI environment, so this is a local parity defect rather than a proposal to
+    weaken the freshness boundary.
+
+    W1-T2769 remains correct and must not be reopened: it exempts the parent preflight verb and
+    scrubs `RMD_SELF_SYNC_DONE` from every child. The residual is narrower. A child that is
+    deliberately mirroring one CI job needs that job's CI guard; arbitrary parity children must
+    not silently acquire CI behavior, because doing so could hide a real local-only distinction.
+  design: |
+    At the existing `lint-plan:ci-parity` leaf only, pass an explicit child environment with
+    `CI=1`, preserving the default spawn's merge over the host environment and its existing
+    `RMD_SELF_SYNC_DONE` scrub. Do not export `CI` at the parent process, do not add an exemption
+    for `lint-plan`, and do not change the fast gate: each of those would change a broader
+    boundary than the one CI-parity is meant to reproduce.
+
+    Keep the current refresh/pinned-base sequence and command argv byte-for-byte other than the
+    leaf environment. The regression fixture must inspect the real `PreflightSpawn` options and
+    prove that the lint-plan leaf receives `CI=1`, that an unrelated parity leaf has no injected
+    CI value, and that the existing self-sync guard remains absent from the child. A removed
+    environment arm must make the lint-plan assertion fail; a broadened wrapper that gives CI to
+    all children must make the isolation assertion fail.
+  acceptance:
+    - claim: "the ci-parity lint-plan leaf runs with CI semantics while retaining the exact pinned-base argv"
+      proof: "unit test: W1-T4026: lint-plan parity leaf receives CI semantics"
+    - claim: "the CI environment injection is confined to lint-plan and does not change unrelated parity children"
+      proof: "unit test: W1-T4026: lint-plan CI semantics do not widen to another parity leaf"
+    - claim: "the preflight child still scrubs RMD_SELF_SYNC_DONE rather than carrying an operator bypass into a nested command"
+      proof: "unit test: W1-T4026: lint-plan CI semantics retain the self-sync scrub"
+  falsifier: |
+    Delete the lint-plan leaf's explicit CI environment and rerun the named test: its lint-plan
+    environment assertion must fail. Then move that environment into a shared spawn wrapper and
+    rerun: the unrelated-leaf assertion must fail. Restoring the narrow leaf arm returns the
+    named test to zero failures.
+  note: |
+    Reservation branch: chore/file-preflight-ci-parity-residual.
+    Scope-time checks at filing: `git ls-remote --heads origin 'run-W1-T4026-*'` returned no
+    active implementation branch; the exact merged-PR trailer query returned `[]`. A distinct
+    open-head subject sweep found only W1-T2769's already-merged parent concern, not this
+    residual child-environment defect. Rule 25: this task changes a product module and its
+    ordinary test only; no instrument surface is combined with it.
