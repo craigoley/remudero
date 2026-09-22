@@ -19565,11 +19565,7 @@ type CiFailureWindowReader = {
   yieldBetweenObservation: () => Promise<void>;
 };
 
-/**
- * The daemon's CI-learning reader. It preserves {@link loadCiFailureWindow}'s corpus shape and
- * unreadable-versus-clean distinction while performing every GitHub observation asynchronously;
- * it explicitly yields between PR and commit units so the daemon stays responsive (W1-T3997).
- */
+// Async CI-learning reader: preserve the synchronous corpus shape while yielding between reads.
 export async function loadCiFailureWindowAsync(
   days: number,
   reader: CiFailureWindowReader,
@@ -19608,8 +19604,7 @@ export async function loadCiFailureWindowAsync(
         const rollup = rollupAtSha(self.owner, self.repo, sha, () => responses[response++]);
         if (rollup !== undefined) commit.rollup = rollup;
       } catch {
-        // Keep rollup absent: collectCiFailureCorpus records it as UNREADABLE rather than green.
-      }
+        }
       try {
         const changed = await reader.read(["api", `repos/${self.owner}/${self.repo}/commits/${sha}`]) as
           | { files?: Array<{ filename?: string }> }
@@ -19618,7 +19613,6 @@ export async function loadCiFailureWindowAsync(
           commit.changedFiles = changed.files.map((file) => file.filename ?? "").filter((file) => file.length > 0);
         }
       } catch {
-        // Preserve undefined: a failed changed-file read is never represented as an empty diff.
       }
       commits.push(commit);
     }
