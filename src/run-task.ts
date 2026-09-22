@@ -29034,6 +29034,11 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Test seams for the already-established selected-repository PR commands. Production keeps
+     *  the real `fixCommand`/`reviewCommand`; composition tests replace only the command boundary
+     *  so the daemon wiring can be exercised without a GitHub or worker side effect. */
+    fixCommand?: (args: string[]) => Promise<number>;
+    reviewCommand?: (prNumber: string, args: string[]) => Promise<number>;
     runTask?: typeof runTask;
     /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
      * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
@@ -29141,6 +29146,8 @@ export async function daemonCommand(
   const reviewerCodeRecovery = reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha);
   const buildSweepHook: DaemonSweepHookBuilder = deps.buildSweepHook ?? daemonDefaultBuildSweepHook;
   const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
+  const runFixCommand = deps.fixCommand ?? fixCommand;
+  const runReviewCommand = deps.reviewCommand ?? reviewCommand;
 
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
   // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
@@ -29948,8 +29955,8 @@ export async function daemonCommand(
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];
           const exitCode = request.action === "fix"
-            ? await fixCommand(args)
-            : await reviewCommand(String(request.prNumber), ["--repo", target.repo]);
+            ? await runFixCommand(args)
+            : await runReviewCommand(String(request.prNumber), ["--repo", target.repo]);
           return exitCode === 0
             ? { outcome: "completed", detail: `${request.action} command accepted PR #${request.prNumber}` }
             : { outcome: "refused", detail: `${request.action} command refused PR #${request.prNumber} (exit ${exitCode})` };
