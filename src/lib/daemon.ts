@@ -790,15 +790,14 @@ export interface DaemonDeps {
    * Called once per task whose circuit breaker trips this tick — the real command escalates ONE (deduped) needs-human
    * issue naming the loop, mirroring `escalateBlock` below. */
   onCircuitBreak?: (task: Task) => void;
-  /** 
-   * W1-T316 (wiring W1-T271's own predicate): THE LIFETIME DISPATCH CAP (status.ts's `isLifetimeDispatchCapExceeded`,
-   * ledger-derived — `run.start` lines counted across the task's WHOLE history, never reset by a `pr.opened` line,
-   * unlike `isCircuitTripped`'s own count). Optional — omitted, dispatch behaves exactly as before this cap existed. */
+  /**
+   * W1-T4025: repeated attributable lifetime work is an adaptive pressure signal, not a terminal
+   * cap. The predicate is consulted by selection and must never itself refuse a task. */
   isLifetimeCapExceeded?: (taskId: string) => boolean;
-  /** 
-   * Called once per task excluded because its lifetime dispatch cap is exceeded — mirrors `onCircuitBreak`'s
-   * legibility contract, so this exclusion is never a silent skip. */
+  /** Legacy observation hook for callers that still record the pressure sensor. */
   onLifetimeCapExceeded?: (task: Task) => void;
+  /** Async adaptive judge/follow-up route, flushed after the current selection/dispatch settles. */
+  onLifetimePressure?: (tasks: readonly Task[]) => Promise<void>;
   /** The daily cost ceiling, re-derived from the ledger each call. One answer per tick, so it is consulted directly in
    * the loop; a defined return means defer, and the deferral is an in-process idle heartbeat rather than drain.ts's
    * outright stop. Never consulted from the sweep hooks: stranding in-flight work to save money is a worse failure
@@ -2033,9 +2032,23 @@ export async function runDaemon(
   // CALLBACK to the first observation of each task id this run; the predicate itself is still
   // consulted, and still excludes the task, every tick (P29(ii)).
   const circuitEscalated = new Set<string>();
-  // Same per-run escalation-dedup contract, for the lifetime cap (W1-T316/W1-T271) — the
-  // predicate itself is still consulted (and still excludes the task) every tick.
-  const lifetimeCapEscalated = new Set<string>();
+  // W1-T4025: lifetime pressure is a sensor. Keep one task per tick for the asynchronous judge;
+  // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
+  const lifetimePressureTasks = new Map<string, Task>();
+  const lifetimePressureObserved = new Set<string>();
+  const flushLifetimePressure = async (): Promise<void> => {
+    if (lifetimePressureTasks.size === 0 || deps.onLifetimePressure === undefined) return;
+    const tasks = [...lifetimePressureTasks.values()];
+    lifetimePressureTasks.clear();
+    try {
+      await deps.onLifetimePressure(tasks);
+    } catch (error) {
+      log("dispatch.lifetime_pressure.failed", {
+        tasks: tasks.map((task) => task.id),
+        error: String((error as Error)?.message ?? error),
+      });
+    }
+  };
   // Spawn-infra escalation dedup, content-keyed on the failure's own reason text rather than task id:
   // the vanished-binary class blocks dispatch identically for every task, so task-id keying would
   // re-escalate once per distinct task hitting the same cause (W1-T113 part iii).
@@ -3400,12 +3413,12 @@ export async function runDaemon(
         }
       },
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
-      // Lifetime dispatch cap: a legible ledger line every tick it is consulted, with the escalation hook
-      // bounded to once per task id for this run, mirroring the breaker above (W1-T316, W1-T271).
+      // W1-T4025: the legacy callback remains telemetry-compatible, while the adaptive route is
+      // collected separately and flushed only after this tick's selection/dispatch settles.
       onLifetimeCapExceeded: (t) => {
-        log("dispatch.lifetime_capped", { task: t.id });
-        if (!lifetimeCapEscalated.has(t.id)) {
-          lifetimeCapEscalated.add(t.id);
+        log("dispatch.lifetime_pressure", { task: t.id });
+        if (!lifetimePressureObserved.has(t.id)) {
+          lifetimePressureObserved.add(t.id);
           try {
             deps.onLifetimeCapExceeded?.(t);
           } catch (e) {
@@ -3413,6 +3426,7 @@ export async function runDaemon(
           }
         }
       },
+      onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
       isIndependentFailureBlocked: (taskId) =>
         independentFailureBlocksThisRun.has(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true,
       isTerminalPreDispatchRefusalHeld: (task) =>
@@ -3556,6 +3570,7 @@ export async function runDaemon(
     if (dispatchSet.length === 0) {
       // Unlike drain.ts, where nothing runnable is a terminal stop, the daemon is persistent: new work can
       // land later, so it paces itself with the injected clock and keeps polling.
+      await flushLifetimePressure();
       ticks++;
       log("daemon.idle", { tick: ticks, poll_interval_ms: pollIntervalMs });
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
@@ -3752,6 +3767,7 @@ export async function runDaemon(
       admitted.push(t);
     }
     if (admitted.length === 0) {
+      await flushLifetimePressure();
       ticks++;
       logDispatchGovernorDefer(deferredVerdict!, ticks);
       if (await stopInterphaseReviewClock()) continue;
@@ -3798,6 +3814,7 @@ export async function runDaemon(
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.
     log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
+    await flushLifetimePressure();
     await stopTicker();
     restartInterphaseReviewClock();
 
