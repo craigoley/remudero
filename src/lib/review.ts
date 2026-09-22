@@ -2629,7 +2629,19 @@ export function judgeCriterion(
             // convention writes a `unit test:` proof as PROSE describing behaviour, see {@link
             // looksLikeProseDescription} — OR genuine test theater, a proof naming a specific, fabricated test
             // (W1-T161/#349). Told apart by a deterministic shape check, never by re-running or calling a model.
-            if (looksLikeProseDescription(whitelisted.label)) {
+            // W1-T4003: the grep dialect has the same plan-only forward-reference shape as `unit test:`. The
+            // executor returns `no-match` when a filing names a future symbol in an already-existing declared file;
+            // without this arm the proof falls through to `executed_fail` before the sibling grep arm below can
+            // recognise it. Keep the condition bound to `grepForwardReferenceTarget`, which is itself gated on
+            // `planOnlyDiff` and the task shard's declared files, so an implementation head remains fail-closed.
+            if (grepForwardReferenceTarget !== undefined) {
+              proofExec = "not_yet_built";
+              proofSkip = "forward-reference";
+              reason =
+                `${reason} — NOTE: proof greps ${grepForwardReferenceTarget}, declared in this diff's own ` +
+                `plan shard \`files:\` while this diff changes no source — a forward reference to wiring ` +
+                `not yet built, not a failure; keyword floor applied`;
+            } else if (looksLikeProseDescription(whitelisted.label)) {
               // A prose paraphrase, not a bare name: NOT a failing test. Degrade to `not_executable`, the keyword
               // floor standing as computed, and ANNOTATE why, so an author sees "names no matching test" rather than
               // a misleading "executed and FAILED" — a false block on green, test-passing code.

@@ -57,6 +57,28 @@ test("acceptance 1 — a filing whose proof names a test the implementation will
   assert.match(verdict.reason, /forward reference to work not yet built/);
 });
 
+test("W1-T4003: a plan-only grep proof for a future symbol is forward-reference, not executed_fail", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w4003-grep-"));
+  mkdirSync(join(dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(dir, "src", "lib", "drain.ts"), "export const existing = true;\n");
+  const verdict = judgeCriterion(
+    {
+      claim: "the future drain receipt is wired",
+      proof: "grep: planOnlyRunBranchReceipt in src/lib/drain.ts",
+    },
+    new Set(),
+    undefined,
+    {
+      cwd: dir,
+      forwardReferenceFiles: new Set(["src/lib/drain.ts"]),
+      planOnlyDiff: true,
+    },
+  );
+  assert.equal(verdict.proof_exec, "not_yet_built");
+  assert.equal(verdict.proof_skip, "forward-reference");
+  assert.match(verdict.reason, /forward reference to wiring not yet built/);
+});
+
 test("acceptance 1 — end-to-end through judgeReview: the SAME diff that adds the shard exempts its own forward-referenced proof, and a report that substantiates it PASSES", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w456-a-e2e-"));
   const diff = [
