@@ -55,6 +55,7 @@
     The shared review producer remains the sole status writer, and its current-head/retry tests are
     the evidence for review behavior rather than a second landing-local implementation.
   note: |
+    reservation hand-off: run-W1-T3991-1790034800000 -> run-W1-T3992-1790037600000
     reservation holder: run-W1-T3992-1790037600000
     This is a follow-up implementation task because W1-T3990 is terminally credited by the plan
     filing. Its implementation PR must carry `Remudero-Task: W1-T3992`; this filing stays trailer-free.
