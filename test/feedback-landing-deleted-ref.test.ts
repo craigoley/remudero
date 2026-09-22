@@ -295,7 +295,7 @@ test("unit test: unreadable landing content refuses without fresh create — con
   const first = withLiveWritesAllowed(() => landFeedback(root, { gh: gh1 }));
   assert.equal(first.landed, true);
   assert.equal(createCount1(), 1);
-  assert.equal(mergeCount1(), 1, "sanity: the first PR was armed, exactly as before this task");
+  assert.equal(mergeCount1(), 0, "sanity: the first PR remains awaiting the shared review lane");
 
   // The branch genuinely EXISTS on the remote (unlike every other test in this file) — `ls-remote`
   // truthfully reports presence, and the follow-up `ls-tree` read of its pending content fails
