@@ -66,7 +66,7 @@ test("array order does not matter: the success-after-failure fixture reads healt
 
 // ── acceptance 2 — the reported attempt is the LATEST for that name, not the first encountered ──
 
-test("when a check fails twice under the same name, the reported attempt is the LATEST by startedAt — identified by its OWN jobId, listed FIRST in the array", () => {
+test("the reported attempt is the most recent for its check name, identified by its OWN jobId — here the latest attempt is also listed FIRST in the array", () => {
   const rollup = [
     { name: "diff-coverage", conclusion: "FAILURE", startedAt: "2026-09-10T00:10:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/222" },
     { name: "diff-coverage", conclusion: "FAILURE", startedAt: "2026-09-10T00:00:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/111" },
@@ -78,7 +78,7 @@ test("when a check fails twice under the same name, the reported attempt is the 
   assert.deepEqual(jobLogCalls, ["222"], "the log read itself must target the latest attempt's job id, not the earlier one's");
 });
 
-test("the same fixture with the latest attempt listed LAST in the array still reports its jobId, not the first-encountered one", () => {
+test("the reported attempt is the most recent for its check name even when that latest attempt is listed LAST in the array, not the first-encountered one", () => {
   const rollup = [
     { name: "diff-coverage", conclusion: "FAILURE", startedAt: "2026-09-10T00:00:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/111" },
     { name: "diff-coverage", conclusion: "FAILURE", startedAt: "2026-09-10T00:10:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/222" },
