@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import type { Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
 import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -591,6 +593,107 @@ export interface RiskJudgeConfig {
 }
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
+
+// ── W1-T4050: risk levels are RUNTIME POLICY, not a source literal ─────────────────────────
+//
+// OPERATOR'S WORDS: "I don't want strictness, I want risk levels and rules that can be
+// configured in the console." Before this, `DEFAULT_CONFIDENCE_THRESHOLD` above was the ONLY
+// value `planRiskJudgeAction` ever saw (no caller fed `config.confidenceThreshold`, though the
+// field already existed), and the verify-human release arm (`approveParkedTask`, run-task.ts)
+// had no switch reachable without a source PR.
+//
+// `plan/policy.yaml`'s OPTIONAL `risk:` section is this task's runtime knob. It is deliberately
+// NOT threaded through `src/lib/policy.ts`'s `validatePolicy`/`Policy` (out of this task's
+// declared file scope) — {@link readRiskPolicy} parses it directly, independently of that
+// schema, so an old build that has never heard of `risk:` still loads this file untouched
+// (`validatePolicy` never reads `raw.risk`) and this section stays purely additive.
+
+/** `plan/policy.yaml`'s `risk:` section, resolved. Absent (or an absent field within a present
+ *  section) reads as exactly today's behaviour: {@link DEFAULT_CONFIDENCE_THRESHOLD} and the
+ *  verify-human release arm enabled. */
+export interface RiskPolicy {
+  confidenceThreshold: number;
+  /** Whether `approveParkedTask` (run-task.ts) may write the `ratify.approved` release row
+   *  directly. `false` stops the direct release and stages a proposal instead — the SAME
+   *  reviewed proposal/PR path every other release already goes through. */
+  verifyHumanReleaseEnabled: boolean;
+}
+
+/** Today's behaviour, verbatim — what an absent `risk:` section (or an absent field within a
+ *  present one) resolves to. */
+export const DEFAULT_RISK_POLICY: RiskPolicy = {
+  confidenceThreshold: DEFAULT_CONFIDENCE_THRESHOLD,
+  verifyHumanReleaseEnabled: true,
+};
+
+function boundedNumberRow(path: string, raw: unknown, fallback: number): number {
+  if (raw === undefined) return fallback;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'.`);
+  }
+  const { value } = raw as Record<string, unknown>;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`policy.yaml: '${path}.value' must be a finite number, got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+
+function booleanRow(path: string, raw: unknown, fallback: boolean): boolean {
+  if (raw === undefined) return fallback;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'.`);
+  }
+  const { value } = raw as Record<string, unknown>;
+  if (typeof value !== "boolean") {
+    throw new Error(`policy.yaml: '${path}.value' must be a boolean, got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+
+/**
+ * Parse an already-yaml-parsed `plan/policy.yaml` mapping's OPTIONAL `risk:` section. Pure — no
+ * I/O. An absent section resolves to {@link DEFAULT_RISK_POLICY} exactly; a PRESENT section
+ * defaults each field INDIVIDUALLY, so filling in one field later cannot silently reset a
+ * sibling that was already tuned. A present-but-malformed field throws — the same "fail loud on
+ * a typo" discipline `src/lib/policy.ts`'s own `numberField`/`booleanField` apply to every other
+ * row in this file.
+ */
+export function parseRiskPolicy(raw: unknown): RiskPolicy {
+  if (raw === undefined) return { ...DEFAULT_RISK_POLICY };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("policy.yaml: 'risk' must be a mapping.");
+  }
+  const section = raw as Record<string, unknown>;
+  return {
+    confidenceThreshold: boundedNumberRow(
+      "risk.confidenceThreshold",
+      section.confidenceThreshold,
+      DEFAULT_RISK_POLICY.confidenceThreshold,
+    ),
+    verifyHumanReleaseEnabled: booleanRow(
+      "risk.verifyHumanReleaseEnabled",
+      section.verifyHumanReleaseEnabled,
+      DEFAULT_RISK_POLICY.verifyHumanReleaseEnabled,
+    ),
+  };
+}
+
+/**
+ * LIVE READ of `plan/policy.yaml`'s `risk:` section straight off disk — deliberately never
+ * memoized (unlike `src/lib/policy.ts`'s `loadDefaultPolicy`, which caches for the process's
+ * whole lifetime): a policy a daemon caches at boot is a policy the console cannot change
+ * without a restart. Every call re-reads and re-parses the file, the SAME per-call
+ * `loadPolicy(policyPath(repoRoot))` shape run-task.ts's other policy-gated call sites already
+ * use (see e.g. its `policyFor = () => loadPolicy(policyPath(repoRoot))` seams) — so a merged
+ * `plan/policy.yaml` edit takes effect on the very next call, no restart.
+ */
+export function readRiskPolicy(policyYamlPath: string): RiskPolicy {
+  const raw = parseYaml(readFileSync(policyYamlPath, "utf8"));
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("policy.yaml must be a mapping.");
+  }
+  return parseRiskPolicy((raw as Record<string, unknown>).risk);
+}
 
 /** Wraps a judge-produced reason with its true evidence basis, BY CONSTRUCTION (W1-T454):
  *  issue #1723 printed inferences in the grammar of observations against a diff that

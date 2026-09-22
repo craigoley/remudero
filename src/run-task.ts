@@ -1020,6 +1020,8 @@ import {
 } from "./lib/dispatch-value.js";
 import {
   boundRiskJudgeChangeView,
+  DEFAULT_RISK_POLICY,
+  readRiskPolicy,
   realRiskJudge,
   resolveRiskJudgeMount,
   riskJudgeSpendCollector,
@@ -1028,6 +1030,7 @@ import {
   type RiskJudgeChangeView,
   type RiskJudgeInput,
   type RiskJudgeVerdict,
+  type RiskPolicy,
 } from "./lib/risk-judge.js";
 import { evaluateRiskJudgeDisposition } from "./lib/risk-judge-eval.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -15899,6 +15902,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       headSha: review.headSha,
     };
     const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+    // W1-T4050: LIVE, per-run read of `plan/policy.yaml`'s `risk:` section — never memoized
+    // (unlike `loadDefaultPolicy`), so an operator's merged policy edit governs the very next
+    // unattended risk judgment with no daemon restart. Absent section ⇒ DEFAULT_RISK_POLICY,
+    // reproducing the pre-existing hard-coded 0.7 exactly.
+    const riskPolicy = readRiskPolicy(policyPath(repoRoot));
     // W1-T1031: fetch the ACTUAL change view (bounded, REST-sourced — see `changeView`'s own
     // doc) and attach it to the input the real judge is given, right before it runs. A throw
     // from `changeView(prUrl)` here (an unparseable prUrl, a failed REST call) is deliberately
@@ -15964,6 +15972,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }, {
       // Judge unavailability is recorded, while the deterministic gates remain authoritative.
       judgeUnavailableAction: "proceed",
+      // W1-T4050: the configured threshold (plan/policy.yaml's `risk.confidenceThreshold`,
+      // read live above) is the one this unattended caller applies — no longer the module's
+      // own DEFAULT_CONFIDENCE_THRESHOLD literal, unreachable from outside risk-judge.ts.
+      confidenceThreshold: riskPolicy.confidenceThreshold,
     });
     if (riskJudgeResult.action.kind === "escalate") {
       log("verdict", {
@@ -40295,6 +40307,31 @@ export function namesATask(token: string): boolean {
   return /^W\d+-T[0-9A-Za-z]+$/.test(token);
 }
 
+/** W1-T4050 — the proposal `approveParkedTask` stages when `risk.verifyHumanReleaseEnabled` is
+ *  `false`, rather than writing the release row directly. Derived from `taskId` alone, so
+ *  naming the same parked task twice while the switch stays off stages one proposal, not two
+ *  (mirrors `verifyHumanProposalId`'s dedup discipline in lib/verify-human-judge.ts). */
+export function verifyHumanReleaseProposalId(taskId: string): string {
+  return `verify-human-release:${taskId}`;
+}
+
+/** W1-T4050 — an ordinary inbox {@link Proposal} standing in for the direct release the policy
+ *  switch just refused. `evidenceAnchors` is EMPTY on purpose, the same reason
+ *  `proposalFromJudgedShard` leaves it empty: this proposal depends on nothing landing, and
+ *  ratifying it goes through the reviewed proposal/PR path rather than tiering READY off a grep. */
+export function verifyHumanReleaseProposal(taskId: string, task: Task): Proposal {
+  return {
+    id: verifyHumanReleaseProposalId(taskId),
+    summary:
+      `${taskId} (${task.title}) is a parked \`verify: human\` task an operator asked to release ` +
+      `via \`rmd approve ${taskId}\`, but \`plan/policy.yaml\`'s \`risk.verifyHumanReleaseEnabled\` ` +
+      `is currently \`false\` — the direct release arm is disabled by policy. Ratifying this ` +
+      `proposal routes the SAME release through the reviewed proposal/PR path instead of the ` +
+      `one-bit ledger write.`,
+    evidenceAnchors: [],
+  };
+}
+
 /**
  * W1-T3216 — RATIFY A PARKED `verify: human` TASK through the pipeline proposals already use.
  *
@@ -40307,6 +40344,14 @@ export function namesATask(token: string): boolean {
  * `verify: human` (it needs no release), one that is blocked or retired, and one ALREADY
  * released — that last returns 0 and writes NO second row, because a second bit is not a second
  * release.
+ *
+ * W1-T4050 — THE VERIFY-HUMAN RELEASE ARM IS NOW RUNTIME POLICY: `deps.riskPolicy` (default
+ * {@link DEFAULT_RISK_POLICY}, `verifyHumanReleaseEnabled: true` — today's behaviour, absent
+ * risk section or absent caller both reproduce it exactly) gates the direct ledger write below.
+ * `false` stops the release and stages {@link verifyHumanReleaseProposal} through
+ * `deps.stageProposal` instead — the operator's bit is still recorded, just routed through the
+ * same reviewed proposal/PR path every other release already goes through, rather than the
+ * one-bit ledger write this function otherwise performs.
  */
 export function approveParkedTask(
   taskId: string,
@@ -40316,6 +40361,8 @@ export function approveParkedTask(
     runId: string;
     ledgerLines?: readonly string[];
     append?: typeof appendLedger;
+    riskPolicy?: RiskPolicy;
+    stageProposal?: (proposal: Proposal) => void;
     /** A MACHINE-written release carries who decided it and why (Law 5: the author class rides
      *  the record). Absent — the operator's own `rmd approve` — the row is byte-identical to before. */
     provenance?: Record<string, unknown>;
@@ -40335,6 +40382,17 @@ export function approveParkedTask(
   const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
   if (already.has(taskId)) {
     return { code: 0, message: `rmd approve: ${taskId} is already released — no second row written` };
+  }
+  const riskPolicy = deps.riskPolicy ?? DEFAULT_RISK_POLICY;
+  if (!riskPolicy.verifyHumanReleaseEnabled) {
+    const proposal = verifyHumanReleaseProposal(taskId, task);
+    (deps.stageProposal ?? (() => {}))(proposal);
+    return {
+      code: 0,
+      message:
+        `rmd approve: verify-human release is DISABLED by policy (risk.verifyHumanReleaseEnabled: ` +
+        `false) — staged ${proposal.id} as a proposal instead of releasing ${taskId} directly`,
+    };
   }
   (deps.append ?? appendLedger)(deps.ledgerPath, {
     run_id: deps.runId,
@@ -40390,6 +40448,11 @@ export async function approveCommand(
       // unique per task, so keying it on the task id is deterministic AND makes the
       // row findable by the very thing it releases.
       runId: `APPROVE-${proposalId}`,
+      // W1-T4050: LIVE read, same as the risk-judge call site — never memoized, so a merged
+      // `plan/policy.yaml` edit governs the very next `rmd approve` with no daemon restart.
+      riskPolicy: readRiskPolicy(policyPath(repoRoot)),
+      stageProposal: (proposal) =>
+        void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
     });
     console.log(outcome.message);
     // CHAINED ONLY ON SUCCESS: guidance attached to a refused release would describe a state the

@@ -1330,6 +1330,7 @@
     "test/risk-judge-scrubbing.test.ts": 0,
     "test/risk-judge-wiring.test.ts": 326,
     "test/risk-judge.test.ts": 1010,
+    "test/risk-levels-are-runtime-policy.test.ts": 0,
     "test/risk-override-reader-refusals.test.ts": 249,
     "test/risk-override-record.test.ts": 1688,
     "test/risk-score.test.ts": 1326,
