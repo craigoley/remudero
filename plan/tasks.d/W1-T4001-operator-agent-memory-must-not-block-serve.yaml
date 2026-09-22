@@ -1,4 +1,4 @@
-- id: W1-T3996
+- id: W1-T4001
   title: "OPERATOR-AGENT HISTORY MUST NOT RESCAN THE FULL LEDGER ON EVERY REQUEST — reuse the serve-owned refresh and keep durable decisions available under the console read ceiling"
   repo: remudero
   depends_on: [W1-T3623, W1-T3795]
@@ -70,4 +70,4 @@
   note: |
     This is the core follow-up for console PR #1584 and keeps the console's existing critical-read
     sequencing as a safe containment layer. The implementation PR must carry
-    Remudero-Task: W1-T3996; this filing stays trailer-free.
+    Remudero-Task: W1-T4001; this filing stays trailer-free.
