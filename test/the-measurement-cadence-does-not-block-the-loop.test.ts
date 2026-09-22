@@ -68,6 +68,7 @@ function daemonDeps(lines: string[], merged: Set<string>, extra: Record<string, 
 test("W1-T4034: the measurement cadence does not block the daemon iteration", { timeout: 2_000 }, async () => {
   assert.equal(detachedActionInFlight("measurement-cadence"), false, "precondition: no cadence leaked in from another test");
   const lines: string[] = [];
+  const detachedRows: Record<string, unknown>[] = [];
   let release: () => void = () => {};
   const blocked = new Promise<void>((resolve) => { release = resolve; });
 
@@ -75,10 +76,15 @@ test("W1-T4034: the measurement cadence does not block the daemon iteration", { 
   // await below could not return until `release()` ran, so this call would hit its own timeout.
   await runDaemon(fixturePlan(), daemonDeps(lines, new Set(), {
     runMeasurementCadence: async () => { await blocked; return cadenceResult(); },
+    log: (step: string, extra?: Record<string, unknown>) => {
+      lines.push(step);
+      if (step === "measurement_cadence.detached") detachedRows.push(extra ?? {});
+    },
   }), { max: 1 });
 
   assert.ok(lines.includes("measurement_cadence.fired"), "control: the cadence really fired this tick");
   assert.ok(lines.includes("measurement_cadence.detached"), "the fired cadence is detached rather than awaited inline");
+  assert.equal(detachedRows[0]?.flow, "the cadence runs detached so the sweep keeps its turn", "the detached site records why the sweep remains free");
   assert.ok(!lines.includes("measurement_cadence.ran"), "and it has NOT completed — the iteration finished ahead of it");
 
   release();

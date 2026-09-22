@@ -2597,6 +2597,7 @@ export async function runDaemon(
           log("measurement_cadence.already_detached", {
             reason: decision.reason,
             refusal: "measurement-cadence action already in flight",
+            flow: "the cadence runs detached so the sweep keeps its turn",
           });
         } else {
           log("measurement_cadence.fired", { reason: decision.reason });
@@ -2616,7 +2617,10 @@ export async function runDaemon(
                   }),
                 { actionKind: "measurement-cadence", taskId: "DAEMON" },
               );
-              log("measurement_cadence.detached", { reason: decision.reason });
+              log("measurement_cadence.detached", {
+                reason: decision.reason,
+                flow: "the cadence runs detached so the sweep keeps its turn",
+              });
             } catch (e) {
               // A SYNCHRONOUS throw from the hook itself, before any promise exists to detach.
               log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
