@@ -13,7 +13,7 @@
     - test/the-ratified-baseline-ratchet-repair-has-a-production-executor.test.ts
   origin: "operator-session#automatic-flow-followup-2026-09-22"
   plan_refs: ["W1-T2998", "W1-T3015", "W1-T3289"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

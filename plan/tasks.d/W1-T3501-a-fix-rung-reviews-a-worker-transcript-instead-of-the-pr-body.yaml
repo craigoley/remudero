@@ -11,7 +11,7 @@
   files: [src/run-task.ts, test/fix-rung-report-provenance.test.ts]
   origin: "operator-session#dropped-follow-ups-daemon-and-queue-2026-09-13"
   plan_refs: ["W1-T256", "W1-T1254", "W1-T2293"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on PR #5289, head b05d6bd74bdf28531c36c4c8fddcf64c51890785. Its CI gate and
