@@ -25370,6 +25370,17 @@ export function buildIntakeRungsDaemonHooks(deps: {
  * design calls out as otherwise unreachable ("a board whose findings have all cleared trips no
  * depth arm at all, so it never fires again and the dead rows sit forever").
  */
+/** W1-T4051: the daemon's board-review hooks, bound to the projection and plan THIS tick already
+ *  derived. `daemonCommand` calls exactly this, so what the tests assert of it is what the daemon runs;
+ *  the call site itself is pinned by test/board-review-wiring.test.ts. `deps` is for tests only. */
+export function boardReviewHooksForTick(
+  config: Config,
+  tick: { projection: () => Map<string, StatusProjection> | undefined; plan: () => Plan },
+  deps: Omit<NonNullable<Parameters<typeof buildBoardReviewDaemonHooks>[0]>, "config" | "projection" | "plan"> = {},
+): ReturnType<typeof buildBoardReviewDaemonHooks> {
+  return buildBoardReviewDaemonHooks({ ...deps, config, projection: tick.projection, plan: tick.plan });
+}
+
 export function buildBoardReviewDaemonHooks(deps: {
   check?: () => BoardReviewCadenceDecision;
   run?: () => Promise<BoardReviewReport>;
@@ -25386,13 +25397,39 @@ export function buildBoardReviewDaemonHooks(deps: {
   /** Injectable ONLY for tests — production takes the real {@link reconcileBoardReviewReferents}
    *  (W1-T2464). */
   reconcile?: typeof reconcileBoardReviewReferents;
+  /** W1-T4051: the plan projection THIS TICK already derived (`daemonCommand`'s `lastProj`, off its one
+   *  warm, snapshot-backed gateway). Omitted ⇒ the items read derives its own, as before. MEASURED
+   *  2026-09-22: deriving it again on a fresh gateway was 118-122 s of synchronous `gh` calls — 213 PR
+   *  file lists, 55 closed-PR pages, 15 issue pages — on every check, freezing every timer. */
+  projection?: () => Map<string, StatusProjection> | undefined;
+  /** W1-T4051: the plan this tick already loaded (`activePlanRef.current`). Omitted ⇒ read from disk. */
+  plan?: () => Plan;
+  /** Injectable ONLY for tests — the remaining {@link BoardReviewItemsIo} seams (open-PR read, owner/repo). */
+  itemsIo?: BoardReviewItemsIo;
 } = {}): {
   checkBoardReview: () => BoardReviewCadenceDecision & { retiredProposalIds: string[] };
   runBoardReview: () => Promise<BoardReviewReport>;
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
-  const itemsFor = () => (deps.items ?? (() => defaultBoardReviewItems(configFor())))();
+  // NO PROJECTION IS NOT AN EMPTY BOARD: the throw lands in `defaultBoardReviewItems`'s inner catch,
+  // which degrades only the escalation/origin arms — exactly what a failed projection does today — while
+  // the open-PR list still reaches the reconciler and the depth arms.
+  const tickProvided = deps.projection
+    ? {
+        projectPlan: () => {
+          const proj = deps.projection!();
+          if (proj === undefined) throw new Error("no plan projection derived this tick yet");
+          return proj;
+        },
+      }
+    : {};
+  const itemsIo: BoardReviewItemsIo = {
+    ...deps.itemsIo,
+    ...tickProvided,
+    ...(deps.plan ? { loadPlan: () => deps.plan!() } : {}),
+  };
+  const itemsFor = () => (deps.items ?? (() => defaultBoardReviewItems(configFor(), itemsIo)))();
   const reconcile = deps.reconcile ?? reconcileBoardReviewReferents;
   // `deps.check` is an existing full-override seam (no current caller uses it against this
   // function — see test/board-review-wiring.test.ts) — an override bypasses reconciliation
@@ -30220,7 +30257,11 @@ export async function daemonCommand(
   // config.root. WITHOUT THIS LINE `deps.checkBoardReview` is undefined and the whole rung is
   // dead code, which is not a hypothetical here: that is precisely what shipped in #2952 and
   // stayed dead for the eight hours between its merge and this fix.
-  const boardReviewHooks = target.isSelf ? buildBoardReviewDaemonHooks({ config }) : undefined;
+  // W1-T4051: handed THIS tick's projection and plan — the same `lastProj` `isOpenPr` and `openPrCount`
+  // read — so the check never derives a second one on a cold gateway (was ~120 s of synchronous `gh`).
+  const boardReviewHooks = target.isSelf
+    ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
+    : undefined;
   // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
   // its marker and ledger live under this harness checkout. The pair itself still targets the
   // sandbox by default through runWipeTestPair/resolveWipeTestTarget.

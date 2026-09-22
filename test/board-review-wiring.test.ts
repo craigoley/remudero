@@ -484,7 +484,13 @@ void test("daemonCommand actually names the pair in its DaemonDeps literal", () 
   // The producer/consumer seam cannot be reached from a unit test without booting a real daemon
   // against a real GitHub, so the seam is pinned where it lives: in the text of the call site.
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(src, /const boardReviewHooks = target\.isSelf \? buildBoardReviewDaemonHooks\(\{ config \}\) : undefined;/);
+  // W1-T4051: daemonCommand CONSTRUCTS the hooks through `boardReviewHooksForTick`, bound to its own
+  // tick projection and plan — the helper's behaviour is asserted in
+  // test/the-board-review-check-reuses-the-tick-projection.test.ts; its call site is pinned here.
+  assert.match(
+    src,
+    /const boardReviewHooks = target\.isSelf\s*\?\s*boardReviewHooksForTick\(config, \{ projection: \(\) => lastProj, plan: \(\) => activePlanRef\.current \}\)\s*:\s*undefined;/,
+  );
   assert.match(src, /checkBoardReview: boardReviewHooks\?\.checkBoardReview,/);
   assert.match(src, /runBoardReview: boardReviewHooks\?\.runBoardReview,/);
   const daemon = readFileSync(new URL("../src/lib/daemon.ts", import.meta.url), "utf8");
