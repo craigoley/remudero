@@ -54,13 +54,13 @@
     PR, delete branches, or broaden this into a status-model rewrite.
   acceptance:
     - claim: "a merged head-branch plan-only amendment cannot produce a merged escalation-reconcile candidate"
-      proof: "grep: creditSubjectIsImplementation in src/run-task.ts"
+      proof: "unit test: W1-T4043: a merged plan-only head-branch filing stays live for the escalation reconciler"
     - claim: "a merged head-branch implementation with readable subject still produces a merged escalation-reconcile candidate"
-      proof: "unit test: W1-T3063: the subject predicate is three-valued, never two"
+      proof: "unit test: W1-T4043: a genuine implementation head-branch merge remains auto-resolvable"
     - claim: "an unreadable implementation subject is indeterminate rather than an automatic close"
-      proof: "unit test: W1-T3084: undefined and false both decline"
+      proof: "unit test: W1-T4043: missing implementation evidence leaves the escalation indeterminate"
     - claim: "the reconciler keeps its bounded local merge-subject evidence in the same pass rather than adding per-issue network reads"
-      proof: "grep: readMergeSubjectsByPr(evidenceRoot) in src/run-task.ts"
+      proof: "grep: reconcileImplementationEvidence in src/run-task.ts"
   falsifier: |
     Seed the same task and issue with a merged plan-only head-branch PR. Before this guard the
     builder returns derived.merged=true and runEscalationReconcile closes the issue; after it the
