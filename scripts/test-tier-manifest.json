@@ -1596,6 +1596,7 @@
     "test/the-proof-gate-runs-at-home.test.ts": 0,
     "test/the-quotation-guard-covers-one-arm-of-four.test.ts": 1179,
     "test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts": 0,
+    "test/the-ratified-baseline-ratchet-repair-has-a-production-executor.test.ts": 0,
     "test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts": 972,
     "test/the-reclaim-survives-a-find-without-printf.test.ts": 0,
     "test/the-recovery-path-merges-into-a-shared-checkout.test.ts": 2598,

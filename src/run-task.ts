@@ -1640,6 +1640,7 @@ export function buildSweepEffects(
   | "releaseStaleRed"
   | "releaseBaseCausedStandDown"
   | "selectAdaptiveReviewWidth"
+  | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
 > & {
   /**
