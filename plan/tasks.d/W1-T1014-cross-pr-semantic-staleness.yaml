@@ -244,3 +244,26 @@
     auto-rebase to soften the ceiling: if the ceiling actually binds, that is a NEW measurement
     and a NEW task, and pre-building relief for a cost nobody has yet paid is how this repo has
     previously shipped a bound that fires on a healthy condition.
+
+    DISPATCH 2026-09-22 — THE FLIP ITSELF IS THE OPERATOR'S STEP, NOT THE HARNESS'S, BY THE SAME
+    RULING BATCH'S OWN PRECEDENT. #6560 unparked W1-T1014 and W1-T3407 together, and W1-T3407's
+    own note is explicit about its sibling live-protection PATCH: "THE PROTECTION FLIP IS THE
+    OPERATOR'S STEP AND IS DELIBERATELY NOT AN ACCEPTANCE CRITERION... no harness can enable
+    [it] for itself." `required_status_checks.strict` is the same shape of change — an outward-
+    facing, repo-wide branch-protection PATCH via `gh api`, affecting every open PR the moment it
+    lands, with no revert-by-file-diff. This run does not execute it, for the reason W1-T3407
+    already gave and none of W1-T1014's own acceptance criteria depend on: all five are `grep:`
+    proofs against this shard's own text and were already satisfied by #6560, before this run
+    began.
+
+    THE BEFORE-STATE, RE-DERIVED RATHER THAN CARRIED. `gh api repos/craigoley/remudero/branches/
+    main/protection` read live at dispatch, 2026-09-22, still: `required_status_checks: {strict:
+    false, contexts: ["remudero-review","ci-gate"]}`, `enforce_admins: {enabled: false}`. Matches
+    the rationale in (iii) and the 2026-09-06 addendum's re-read; no drift.
+
+    THE HANDOFF. The operator, after this record merges, runs:
+    `gh api -X PATCH repos/craigoley/remudero/branches/main/protection/required_status_checks
+    -f strict=true -f 'contexts[]=remudero-review' -f 'contexts[]=ci-gate'`
+    and records the after-read (the same GET, re-run) wherever he tracks the ceiling from (ii) —
+    this shard's acceptance does not gate on that read because, per the same precedent, a task at
+    `verify: auto` cannot name an operator action as its own proof.
