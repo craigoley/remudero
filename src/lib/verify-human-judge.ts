@@ -55,6 +55,22 @@ export interface ShardUnderJudgement {
   depsAllMerged: boolean;
   /** Whether anything in `src/` cites this id — evidence the work landed under another shard. */
   citedInSrc: boolean;
+  /**
+   * THE SHARD'S OWN EVIDENCE, when it carries any. A machine-filed shard cites a corpus in its
+   * title ("THE ci-gate GATE REFUSED 36 PULL REQUESTS IN THIS WINDOW") and records the corpus in
+   * its record — `ci_learning_prs` on all 42 CI-learning shards — but NONE of them carries a
+   * `rationale`, and `rationale` was the only free text this projection passed. So the judge was
+   * shown a claim about 36 pull requests and no pull requests, and refused it for exactly that:
+   * "references '36 PULL REQUESTS IN THIS WINDOW' without providing the PR list". The refusal was
+   * CORRECT ON ITS INPUT; the input was impoverished.
+   *
+   * BOUNDED ON PURPOSE. These records carry a `note` running to a hundred-plus file paths from a
+   * single repair, and pasting it whole would bury the signal it is supposed to supply. Only a
+   * summary reaches the judge — see `shardEvidence`. Absent stays ABSENT: a shard with no evidence
+   * must look different from one whose evidence was withheld, or this field re-creates the defect
+   * it exists to close.
+   */
+  evidence?: string;
 }
 
 /**
@@ -150,6 +166,7 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
     ``,
     `WHAT IT CLAIMS TO DELIVER:`,
     acceptance,
+    ...(shard.evidence ? [``, `EVIDENCE THE RECORD ITSELF CARRIES:`, shard.evidence] : []),
     ``,
     `Decide — exactly one of:`,
     `  needs_operator — put this in front of him; it is a real ask`,

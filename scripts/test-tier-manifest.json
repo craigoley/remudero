@@ -1568,6 +1568,7 @@
     "test/the-hung-worker-check-counts-real-processes.test.ts": 0,
     "test/the-implement-lane-s-model-lives-on-the-run-not-the-verdict-row.test.ts": 1058,
     "test/the-interactive-lane-pays-the-whole-file.test.ts": 0,
+    "test/the-judge-sees-the-evidence-the-shard-carries.test.ts": 0,
     "test/the-knowledge-budget-measures-what-a-task-pays.test.ts": 0,
     "test/the-ledger-archive-is-compacted-never-truncated.test.ts": 0,
     "test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts": 1375,
