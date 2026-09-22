@@ -18,6 +18,8 @@
     - test/action-results-route.test.ts
     - test/action-results-redaction.test.ts
     - test/action-results-bounds.test.ts
+    - test/the-console-draws-the-graph-it-computes.test.ts
+    - scripts/test-tier-manifest.json
   status: queued
   priority: 1
   rationale: |
@@ -59,13 +61,13 @@
     read seam has live evidence.
   acceptance:
     - claim: "the public route returns a typed, bounded projection of external-effect ledger results and preserves their source and freshness"
-      proof: "unit test: action-results route preserves bounded external-effect projections"
+      proof: "grep: action-results route preserves bounded external-effect projections in test/action-results-route.test.ts"
     - claim: "applied, refused, pending, partially-applied, drifted, stale, and unobservable outcomes remain distinct rather than becoming success or zero"
-      proof: "unit test: action-results route preserves every reconciliation state"
+      proof: "grep: action-results route preserves every reconciliation state in test/action-results-route.test.ts"
     - claim: "malformed, oversized, or unreadable evidence degrades to an explicit unavailable state and never exposes raw connector output"
-      proof: "unit test: action-results route never exposes raw connector evidence"
+      proof: "grep: action-results route never exposes raw connector evidence in test/action-results-redaction.test.ts"
     - claim: "filters, cursor, count, and response bytes are bounded before ledger rows reach the caller"
-      proof: "unit test: action-results route enforces bounded filters and explicit unavailable states"
+      proof: "grep: action-results route enforces bounded filters and explicit unavailable states in test/action-results-bounds.test.ts"
     - claim: "the route is actually mounted and named in the public contract"
       proof: "grep: /v1/action-results in src/lib/panel-graph.ts"
     - claim: "the new projection module is called by the daemon's panel-graph assembly rather than being reachable only from its own tests"
@@ -83,3 +85,9 @@
     consume this read contract, but its recheck/compensation actions must stay unavailable until a
     separate core task supplies an authorized executor and durable receipt path. This separation
     keeps the automated flow moving without inventing an action engine at the UI boundary.
+    Amendment 2026-09-22: the implementation's mounted-route registration changes the existing
+    graph-shape census, and the repository's tier manifest records the new tests. Both are part of
+    this task's executable integration surface and are declared here so the implementation can keep
+    the route census and generated test metadata honest without an undeclared scope overrun. The
+    source implementation remains responsible for the route behavior and executable assertions;
+    this amendment only records the files that its integration surface necessarily changes.
