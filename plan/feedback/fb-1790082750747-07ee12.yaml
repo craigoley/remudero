@@ -1,0 +1,25 @@
+id: fb-1790082750747-07ee12
+ts: 2026-09-22T13:12:30.748Z
+raw: "Cross-repo planning blocker: running rmd plan mode create from
+  remudero-console generated the correct successor scope but plan relint
+  rejected valid console proofs because its unit-test dialect recognizes only
+  core roots test/ and apps/dashboard/src. The console package manifest defines
+  test:unit as vitest run tests/unit and test:e2e as playwright test with
+  testDir tests/e2e; both are real suite roots. The retry then failed the
+  required CLEAR, GRILL, or PROPOSED verdict protocol, so no plan PR was
+  created. Make task-proof resolution and plan relint target-repo aware,
+  deriving supported roots and runners from the selected repository test
+  configuration rather than the core harness. Add a regression that a console
+  plan can carry unit and Playwright coverage without being downgraded to dead
+  proof. Also make planner retry preserve and require a valid verdict after
+  relint repair. This blocks the console PR-action observable-lifecycle
+  successor."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
