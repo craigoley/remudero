@@ -1,0 +1,65 @@
+- id: W1-T4045
+  title: "THE INTER-PHASE REVIEW CLOCK COUNTS TICKS, NOT TIME — every late wake adds a nominal one second, so under a blocked event loop its 60-second review interval stretches to roughly 60 times the block length: take the larger of the tick count and real elapsed time, so a pass is never later than today and prompt under load"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  origin: "oper#review-clock-counts-ticks-2026-09-22"
+  plan_refs: [W1-T2852, W1-T4041, W1-T4046]
+  files: [src/lib/daemon.ts, test/the-review-clock-counts-time-not-ticks.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CLOCK AND ITS ARITHMETIC. `startInterphaseReviewClock` (src/lib/daemon.ts) waits in quanta of
+    `min(pollIntervalMs, 1000)` and decides when to run a restricted review pass like this:
+
+        const result = await wait(quantumMs);
+        if (result === "wake") { … } else { elapsedMs += quantumMs; }
+        if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
+
+    On a timeout it adds the NOMINAL quantum, not the time that actually passed. That is only correct
+    when every wait returns on time.
+
+    (1) THE WAITS DO NOT RETURN ON TIME WHEN THE LOOP IS BLOCKED — MEASURED. W1-T4046 measured one
+        synchronous ledger-union read on the live 389-file corpus blocking the event loop for 9.22 s.
+        A `wait(1000)` issued before such a read resolves ~9 s late and still counts as one second.
+        With pollIntervalMs = 60000 the clock needs SIXTY resolved quanta to run a pass, so under
+        blocking in ~9 s stretches a "60-second" review interval becomes roughly nine minutes.
+
+    (2) THIS IS THE LANE THAT WENT QUIET. On 2026-09-22 the inter-phase clock's last row was
+        `daemon.review_clock.wake_consumed` at 13:19:23.868Z; the main loop kept moving (it wrote rows
+        at 13:19:45, 13:33:10 and 13:37:58) but no review pass ran until the next full sweep at
+        13:40:53Z, and PR #6561 — green at 13:21:55Z — waited 19 minutes. A clock that measured time
+        would have fired on the first loop turn after sixty real seconds.
+
+    (3) THE FIX IS A MAXIMUM, SO IT CANNOT MAKE ANYTHING LATER. Setting
+        `elapsedMs = max(elapsedMs + quantumMs, now - lastPassAtMs)` keeps today's behaviour exactly
+        wherever time does not advance faster than the ticks — including every existing fixture, whose
+        fake clocks are frozen — and fires promptly where it does. The phase ticker is NOT changed: it
+        waits the whole interval in one call, so a block delays it by the block, not by a multiple.
+
+    WHAT THIS DOES NOT DO. It does not unblock the loop — W1-T4046 does that. It makes the review lane
+    stop amplifying whatever blocking remains, which matters because blocking will never be zero.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Three `grep: test("…"` proofs resolve to lines this diff adds
+    and fail at the base ref; one names the new comparison in code. No pattern contains " in ", and
+    every dot is escaped.
+
+    risk: high IS RULE 19'S SPAN, NOT BLAST RADIUS: the change is one expression and one variable.
+  acceptance:
+    - claim: "under a loop that blocks between ticks the clock fires on elapsed time rather than tick count"
+      proof: 'grep: test("W1-T4045: a blocked loop fires the review clock on elapsed time not tick count" in test/the-review-clock-counts-time-not-ticks.test.ts'
+    - claim: "with time frozen the clock still fires after exactly its tick budget as before"
+      proof: 'grep: test("W1-T4045: with time frozen the clock still fires after its tick budget" in test/the-review-clock-counts-time-not-ticks.test.ts'
+    - claim: "a GitHub wake still starts a review pass at once"
+      proof: 'grep: test("W1-T4045: a GitHub wake still starts a pass at once" in test/the-review-clock-counts-time-not-ticks.test.ts'
+    - claim: "the clock compares real elapsed time against its last pass"
+      proof: 'grep: interphaseClock\.now() - lastPassAtMs in src/lib/daemon.ts'
+  falsifier: |
+    Revert to `elapsedMs += quantumMs` alone and the first assertion goes red: six ten-second blocks
+    are sixty real seconds but only six ticks. Replace the maximum with real time alone and the second
+    goes red, because a frozen fixture clock would then never fire an interval pass. Break the wake
+    branch and the third goes red.
