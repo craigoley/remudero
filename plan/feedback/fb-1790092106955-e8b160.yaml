@@ -1,0 +1,47 @@
+id: fb-1790092106955-e8b160
+ts: 2026-09-22T15:48:26.955Z
+raw: "A BRANCH CAN SILENTLY DELETE A MERGED PR'S WIRING WHILE KEEPING THE TEST
+  FOR IT, AND ONLY A FULL COVERAGE RUN NOTICES — observed 2026-09-22 on PR 6571.
+  The branch deleted every reference to `planOnlyRunBranchReceipts` from
+  src/run-task.ts: four occurrences on origin/main, ZERO on the branch, while
+  src/lib/sweep.ts kept its export. That symbol is W1-T4002's wiring, merged as
+  7f4de4d2d (PR 6513), and `git merge-base --is-ancestor 7f4de4d2d HEAD` reads
+  TRUE -- the branch HAD the commit and then removed its effect, which is the
+  squash/rebase phantom-revert shape this repo has recorded before. The tell
+  that it was accidental rather than intended: the branch still carried the
+  test, `W1-T4002: buildSweepHook returns this pass's complete plan-only
+  run-branch receipt`, which failed asserting an array and receiving undefined.
+  WHAT WORKED, AND IT MUST BE SAID BEFORE ANY COMPLAINT: the test caught it, CI
+  went red, and the fleet repaired it unattended in `adf73e5b3 fix(sweep):
+  preserve plan-only receipts`, restoring all four sites. The loop did its job.
+  THE COST IS WHERE IT WAS CAUGHT, NOT WHETHER. The signal was ONE failing test
+  out of 5167 inside coverage-shard (4/4), a job that runs the instrumented
+  suite; the surrounding log is dominated by passing subtests whose names
+  contain the words Error and exit code, so locating it took a targeted grep.
+  Attribution then took a second run on origin/main to establish the test is
+  green there and red on the branch. That is a full coverage cycle plus a human
+  read for a defect whose signature is a pure git fact available in
+  milliseconds. THE CHEAP DETECTOR, AND IT NEEDS NO TEST RUN: for each symbol
+  the diff REMOVES from a file it touches, ask whether that symbol was
+  INTRODUCED by a commit that is an ancestor of the branch but newer than the
+  branch's fork point from main. A removal of something main added after you
+  branched is a revert candidate, and a revert candidate whose TEST the branch
+  still carries is almost certainly accidental. Report it, name the introducing
+  commit, and let the author confirm -- refusing outright would block legitimate
+  deletions. SCOPE HONESTLY: this is a REPORT, not a gate. A deliberate revert
+  is legal and common, so the value is speed of attribution, not refusal, and
+  anyone building it should measure the false-positive rate over a real window
+  of merged PRs before deciding whether it warrants pre-push placement or a PR
+  comment. FALSIFYING CHECK: if a check already compares removed symbols against
+  post-fork-point commits -- unwired-gate, gate-monotonic or the census family
+  are the places to look -- this is already built and the finding is only that
+  its output did not reach the operator during this incident."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
