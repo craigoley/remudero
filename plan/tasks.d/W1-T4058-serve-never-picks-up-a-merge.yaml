@@ -1,0 +1,55 @@
+- id: W1-T4058
+  title: "REMUDERO-SERVE NEVER PICKS UP A MERGE — it ran 13:50Z code for seven hours while main shipped the console's headroom projection, and only a manual container restart delivered it: give serve the daemon's freshness exit so a material advance redeploys it through the entrypoint's own fetch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#serve-staleness-2026-09-22"
+  plan_refs: [W1-T2964, W1-T4024]
+  files: [src/run-task.ts, src/lib/serve.ts, test/serve-restarts-onto-fresh-code.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-22 ON THE AZURE HOST.
+    (1) `remudero-serve` had been up since 13:51:45Z on checkout 7cfb620d (committed 13:50:48Z). By 21:02Z main
+        had merged W1-T4024 (#6628), which adds the `console-signals-v1` projection to src/lib/analytics-route.ts
+        — code that runs IN SERVE, because serve answers /v1/analytics for the console. `grep -c
+        console-signals-v1 src/lib/analytics-route.ts` in the serve container read 0. The console therefore kept
+        showing "not reported" for a feature that had merged and passed review.
+    (2) THE DAEMON DOES NOT HAVE THIS PROBLEM, AND THE DIFFERENCE IS ONE MECHANISM. The daemon checks
+        `checkServiceFreshness` every tick and exits with `DAEMON_EXIT_STALE` (75) on a material advance
+        (`advanceIsMaterial`, W1-T2964); docker's restart policy relaunches it and the entrypoint
+        (`rmd-entrypoint`) fetches and checks out `origin/$REF` before running anything. Serve runs under the
+        same entrypoint with `restart=unless-stopped`, so a restart IS a deploy — verified: `docker restart
+        remudero-serve` at 21:03:58Z brought it up on 36e2636b (current main). Serve simply never asks.
+    (3) HOST AUTOMATION DOES NOT COVER IT. The host's systemd timers are the three fleet watchdogs and
+        rmd-reap-stray; nothing redeploys serve. deploy/serve-container.sh is a manual launcher.
+    (4) THE COST OF A RESTART, MEASURED on that restart: /v1/status timed out (8 s) for ~15 s after boot, the
+        first answer took 7.4 s, then sub-millisecond. A restart is a ~20 s console gap, which is why the design
+        below does not restart on EVERY advance.
+  design: |
+    (i) serve checks freshness on its own interval (not per request), with the SAME `checkServiceFreshness` +
+        `advanceIsMaterial` judgement the daemon uses, and exits with the daemon's stale code on a material
+        advance so the container restart policy and the entrypoint fetch perform the deploy. No new deploy path.
+    (ii) Never mid-response: the exit waits for in-flight requests to settle (the server's own close), bounded by
+         the request timeout serve already enforces.
+    (iii) The ~20 s boot gap is recorded, not hidden: serve ledgers `serve_selfrestart_for_freshness` with old and
+          new sha, and its first answered request after boot, so the gap's real size is a ledger read.
+    (iv) A dirty or unreadable tree is never stale — the same `{ stale: false }` rule the daemon applies — so a
+         restart loop cannot start.
+  acceptance:
+    - claim: "serve exits with the stale code when origin/main advances materially past its boot sha"
+      proof: 'grep: test("W1-T4058: a material advance restarts serve" in test/serve-restarts-onto-fresh-code.test.ts'
+    - claim: "an immaterial advance, a dirty tree or an unreadable check never restarts serve"
+      proof: 'grep: test("W1-T4058: an immaterial or unreadable advance keeps serve running" in test/serve-restarts-onto-fresh-code.test.ts'
+    - claim: "the exit waits for in-flight requests"
+      proof: 'grep: test("W1-T4058: serve drains in-flight requests before the stale exit" in test/serve-restarts-onto-fresh-code.test.ts'
+  falsifier: |
+    Never check freshness in serve and the first assertion goes red. Treat any advance, or an unreadable
+    check, as stale and the second goes red. Exit without closing the server and the third goes red.
+  note: |
+    reservation hand-off: chore/file-flow-and-review-findings -> chore/file-serve-freshness
