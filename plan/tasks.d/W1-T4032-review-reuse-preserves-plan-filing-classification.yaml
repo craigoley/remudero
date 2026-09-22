@@ -12,6 +12,8 @@
   plan_refs: ["W1-T3505", "W1-T3798"]
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: unknown -> codex/file-W1-T4032-review-fallback
   rationale: |
     The sweep's ordinary post-review runner passes `pr.isPlanFiling` into the review command,
     but the review-reuse/discrimination fallback in `src/run-task.ts` accepts that flag and then
