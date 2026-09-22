@@ -21,7 +21,8 @@
     The close comment named #6603 and said the task was merged. #6603 changed only plan/acceptance
     records and was the accepted repair for the implementation PR's proof contract; it did not
     build W1-T974. The issue was reopened immediately and remains the genuine human receipt until
-    #6579 lands.
+    #6579 lands. This is the observed false-positive escalation lifecycle close that the
+    self-healing implementation must prevent without blocking the eventual automatic close.
 
     SOURCE CHAIN. buildEscalationReconcileCandidates() calls deriveStatus() and passes any
     proj.merged directly to runEscalationReconcile(), which closes the issue. The ordinary credit
