@@ -42,7 +42,7 @@ function task(id: string): Task {
 /** Every PR-record method throws — reaching an assertion below is itself the proof that a result
  *  came from the durable store and the injected path map, never a live GitHub read. Used only for
  *  the cases the durable rung must resolve WITHOUT falling through to anything live. */
-function forbiddingGithub(): GitHub {
+function forbidPrReads(): GitHub {
   const guard = (name: string) => {
     throw new Error(`W1-T3996: unexpected live PR-record read via GitHub.${name}`);
   };
@@ -58,7 +58,7 @@ function forbiddingGithub(): GitHub {
 /** A gateway that genuinely has NOTHING for this task on any live rung — used for the REFUSAL
  *  cases, where the durable rung is EXPECTED to fall through and let every rung below re-decide
  *  (the whole point: refusing durable credit must reopen dispatch, not merely hide a flag). */
-function noEvidenceGithub(): GitHub {
+function noLiveEvidence(): GitHub {
   return {
     prByRef: () => null,
     findMergedByTrailer: () => null,
@@ -79,9 +79,9 @@ test("W1-T3996 criterion 1: a durable head-branch credit for a merged plan-only 
   const written: CreditStore[] = [];
   const proj = deriveStatus(task(taskId), {
     ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
-    // Falls through once refused (see design note above `noEvidenceGithub`), so every rung below
+    // Falls through once refused (see design note above `noLiveEvidence`), so every rung below
     // must genuinely have nothing to say — proving the refusal, not merely a fixture gap.
-    github: noEvidenceGithub(),
+    github: noLiveEvidence(),
     readLedger: () => [],
     readCreditStore: () => store,
     writeCreditStore: (s) => written.push(s),
@@ -108,7 +108,7 @@ test("W1-T3996 criterion 2: an invalidated durable filing credit stays uncredite
   // `git log` per pass, not guaranteed on every derivation.
   const proj = deriveStatus(task(taskId), {
     ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
-    github: noEvidenceGithub(),
+    github: noLiveEvidence(),
     readLedger: () => [],
     readCreditStore: () => store,
     writeCreditStore: () => {},
@@ -125,7 +125,7 @@ test("W1-T3996 criterion 3a: a durable head-branch credit for a non-plan-only im
 
   const proj = deriveStatus(task(taskId), {
     ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
-    github: forbiddingGithub(),
+    github: forbidPrReads(),
     readLedger: () => [],
     readCreditStore: () => store,
     mergedPathsByPr: new Map([[7000, IMPLEMENTATION_PATHS]]),
@@ -144,7 +144,7 @@ test("W1-T3996 criterion 3b: a durable head-branch credit with an unreadable pat
   // No `mergedPathsByPr` supplied at all — "unreadable" is "no opinion", never grounds to uncredit.
   const proj = deriveStatus(task(taskId), {
     ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
-    github: forbiddingGithub(),
+    github: forbidPrReads(),
     readLedger: () => [],
     readCreditStore: () => store,
   });
@@ -165,7 +165,7 @@ test("W1-T3996: a durable TRAILER credit is not re-checked against the path map 
   // BOTH sources.
   const proj = deriveStatus(task(taskId), {
     ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
-    github: forbiddingGithub(),
+    github: forbidPrReads(),
     readLedger: () => [],
     readCreditStore: () => store,
     mergedPathsByPr: new Map([[8000, PLAN_ONLY_FILING_PATHS]]),
