@@ -45,6 +45,15 @@ test("unit test: action-results route enforces bounded filters and explicit unav
   assert.ok(Buffer.byteLength(JSON.stringify(projection), "utf8") <= ACTION_RESULTS_MAX_RESPONSE_BYTES);
 });
 
+test("unit test: action-results route rejects a malformed partialSuccess shape without crashing", () => {
+  const malformed = row(0);
+  const externalEffect = malformed.external_effect as Record<string, unknown>;
+  externalEffect.partialSuccess = { satisfied: "not-an-array", unsatisfied: [] };
+  const projection = buildActionResultsProjection(ledger([malformed]));
+  assert.equal(projection.state, "unavailable");
+  assert.equal(projection.reason, "malformed-external-effect");
+});
+
 test("unit test: action-results route rejects caller-owned measurements and out-of-range limits", () => {
   let status = 0;
   let body = "";
