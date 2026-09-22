@@ -9,10 +9,13 @@
  */
 import assert from "node:assert/strict";
 import type { ServerResponse } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { adaptLiveAnalyticsMetrics, type LiveProviderSnapshot } from "../src/lib/analytics-live-metrics.js";
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { buildAnalyticsRoute, createAnalyticsSnapshotCache, deriveAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
 
 const NOW = "2026-09-22T18:00:00.000Z";
 
@@ -201,4 +204,31 @@ test("W1-T4024: the console-v1 envelope is unchanged", async () => {
   await route.handler({ url: "/v1/analytics?projectionVersion=console-v1" } as never, res, { params: {} });
   assert.deepEqual(JSON.parse(body()), JSON.parse(JSON.stringify(base.consoleV1)),
     "console-v1 must stay byte-identical: the new signals travel in their own projection");
+});
+
+test("W1-T4024: a refreshed snapshot freezes every provider window", async () => {
+  // A refresh freezes whatever the reader returns. A snapshot carrying real provider accounts (a
+  // checkpoint written after W1-T4024, or a reader that merges live metrics) must come back frozen
+  // down to each window — the cold/derived path alone never carries accounts, so this is the arm
+  // that exercises the per-account freeze.
+  const base = deriveAnalyticsSnapshot([], NOW);
+  const snapshot = structuredClone(base) as AnalyticsSnapshot;
+  (snapshot as { dimensions: unknown }).dimensions = structuredClone(base.dimensions);
+  (snapshot as { drilldowns: unknown }).drilldowns = structuredClone(base.drilldowns);
+  snapshot.provider.accounts = adaptLiveAnalyticsMetrics({ provider: liveSnapshot() }).provider.accounts;
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-w1t4024-freeze-"));
+  try {
+    const cache = createAnalyticsSnapshotCache({ stateDir, readSnapshot: () => snapshot });
+    await cache.refresh();
+    const accounts = cache.current().provider.accounts;
+    assert.equal(accounts.accounts.length, 2, "control: the refreshed value carries both providers");
+    assert.ok(Object.isFrozen(accounts) && Object.isFrozen(accounts.accounts));
+    for (const account of accounts.accounts) {
+      assert.ok(Object.isFrozen(account), `${account.provider} is frozen`);
+      assert.ok(Object.isFrozen(account.windows), `${account.provider}.windows is frozen`);
+      for (const window of account.windows) assert.ok(Object.isFrozen(window), `${account.provider}/${window.name} is frozen`);
+    }
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });
