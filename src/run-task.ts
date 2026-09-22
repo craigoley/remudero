@@ -28975,10 +28975,7 @@ export function buildCiLearningDaemonHooks(deps: {
   now?: () => Date;
   /** Injected so a test drives the whole rung with ZERO network; production reads the real window. */
   loadWindow?: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
-  /** W1-T3997: the transport `loadWindow`'s own production fallback shells out through — same
-   *  seam shape `PollDeps.readJson` already takes. Lets a test reach the REAL (never a stand-in
-   *  `loadWindow`) fallback wiring below with zero network, by injecting only the transport;
-   *  production leaves it unset and gets the real {@link ghJsonAsync}. */
+  /** Test seam for CI-learning's production JSON transport; the default remains {@link ghJsonAsync}. */
   readJson?: (args: string[]) => Promise<unknown>;
   /** Injected so a test drives lesson outcomes without the real plan; production reads only the
    *  machine filer's own shard directory. */
