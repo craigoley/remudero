@@ -26,7 +26,7 @@ function tmp(prefix: string): string {
 /** A minimal source checkout: just `package.json` declaring `workspaces`. Each workspace's own
  *  directory (and whether it gets a nested `node_modules`) is seeded separately below, since
  *  which combinations matter differs per test. */
-function seedSourceRepo(root: string, workspaces: string[]): string {
+function writeWorkspaceManifest(root: string, workspaces: string[]): string {
   const repoDir = join(root, "source");
   mkdirSync(repoDir, { recursive: true });
   writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "fixture", workspaces }));
@@ -47,7 +47,7 @@ function seedWorkspaceDir(repoDir: string, workspace: string, withNodeModules: b
 test("linkWorkspaceNodeModules links a declared workspace's nested install by symlink, no npm involved", () => {
   const root = tmp("wslink-");
   try {
-    const repoDir = seedSourceRepo(root, ["apps/*"]);
+    const repoDir = writeWorkspaceManifest(root, ["apps/*"]);
     seedWorkspaceDir(repoDir, "apps/dashboard", true);
     const worktreePath = join(root, "worktree");
     // A fresh worktree gets git-tracked content (package.json here) but NOT the gitignored
@@ -73,7 +73,7 @@ test("linkWorkspaceNodeModules links a declared workspace's nested install by sy
 test("linkWorkspaceNodeModules falsifier: deleting the helper's effect makes resolution fail again", () => {
   const root = tmp("wslink-falsify-");
   try {
-    const repoDir = seedSourceRepo(root, ["apps/*"]);
+    const repoDir = writeWorkspaceManifest(root, ["apps/*"]);
     seedWorkspaceDir(repoDir, "apps/dashboard", true);
     const worktreePath = join(root, "worktree");
     mkdirSync(join(worktreePath, "apps", "dashboard"), { recursive: true });
@@ -92,7 +92,7 @@ test("linkWorkspaceNodeModules falsifier: deleting the helper's effect makes res
 test("linkWorkspaceNodeModules expands a wildcard workspace glob using the source manifest, not a hard-coded list", () => {
   const root = tmp("wslink-wild-");
   try {
-    const repoDir = seedSourceRepo(root, ["packages/*"]);
+    const repoDir = writeWorkspaceManifest(root, ["packages/*"]);
     seedWorkspaceDir(repoDir, "packages/api-client", false);
     seedWorkspaceDir(repoDir, "packages/daemon-client-smoke", true);
     const worktreePath = join(root, "worktree");
@@ -117,7 +117,7 @@ test("linkWorkspaceNodeModules expands a wildcard workspace glob using the sourc
 test("linkWorkspaceNodeModules skips a workspace absent from the worktree (declared in source only)", () => {
   const root = tmp("wslink-absent-");
   try {
-    const repoDir = seedSourceRepo(root, ["apps/*"]);
+    const repoDir = writeWorkspaceManifest(root, ["apps/*"]);
     seedWorkspaceDir(repoDir, "apps/dashboard", true);
     const worktreePath = join(root, "worktree");
     mkdirSync(worktreePath, { recursive: true }); // no apps/dashboard at all in the worktree
@@ -228,7 +228,7 @@ test("linkWorkspaceNodeModules covers a non-wildcard safe glob, an unsafe glob, 
  *  because this task's declared file scope has no shared test-support module, and this shard
  *  needs its OWN real `worktreeAdd` call to reach the wiring lines that gate the workspace
  *  ledger line on a non-empty result. */
-function seedCloneWithWorkspace(clone: string): void {
+function seedWorkspaceInstall(clone: string): void {
   mkdirSync(clone, { recursive: true });
   execFileSync("git", ["-C", clone, "init", "--quiet", "--initial-branch", "main"]);
   execFileSync("git", ["-C", clone, "config", "user.email", "probe@example.invalid"]);
@@ -250,7 +250,7 @@ test("worktreeAdd wires a non-empty workspace-link result through its own ledger
   const clone = join(root, "clone");
   const wt = join(root, "wt");
   try {
-    seedCloneWithWorkspace(clone);
+    seedWorkspaceInstall(clone);
     const logs: Array<[string, Record<string, unknown> | undefined]> = [];
     worktreeAdd(clone, wt, "run-wslink-cov-1", "main", { log: (step, extra) => logs.push([step, extra]) });
 
