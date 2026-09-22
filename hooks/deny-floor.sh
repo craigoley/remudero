@@ -225,6 +225,7 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
         case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime="$(stat -f %m "$gh_lock" 2>/dev/null || true)" ;; esac
         case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime=0 ;; esac
         gh_now="$(date +%s 2>/dev/null || echo 0)"
+        [ "$gh_now" -gt 0 ] 2>/dev/null || break
         if [ "$gh_lock_mtime" -gt 0 ] && [ "$gh_now" -gt 0 ] && [ $(( gh_now - gh_lock_mtime )) -gt 30 ]; then
           rmdir "$gh_lock" 2>/dev/null || true
           continue
