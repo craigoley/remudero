@@ -101,9 +101,9 @@ raw: >-
   that produced them is the thing worth not repeating. (1) THE CORPUS AXIS IS NOT THE
   EXCLUDING FILTER. Measured by running discoverCensusCandidates against the live tree and re-
   applying both filters: the CURRENT gate population (ls-files AND src/) is 41 files; a
-  WIDENED one (ls-files AND (src/ OR plan/)) is also 41. The corpus widening this record
-  proposes ADDS EXACTLY ZERO files. There is nothing to build. (2) THE EXCLUDING AXIS IS THE
-  IDIOM, AND THE SELF-PATH CENSUS IS DISCOVERED AS A CANDIDATE. Run against the real tree,
+  WIDENED one (ls-files AND (src/ OR plan/)) is also 41. The corpus widening this record proposes
+  ADDS EXACTLY ZERO files. There is nothing to build. (2) THE EXCLUDING AXIS IS THE IDIOM. The
+  self-path census is discovered as a candidate. Run against the real tree,
   test/a-shards-proof-cannot-target-its-own-file.test.ts appears in discoverCensusCandidates
   with idiom=dir-walk and walks=[src/]. It is filtered by the ls-files idiom clause, never by
   the corpus clause. So NEVER SEEN is false: it is seen, classified, and deliberately not
@@ -119,8 +119,8 @@ raw: >-
   scripts census:self-path-proof and census:wall-clock-bound really are absent from
   FAST_GATE_STEPS while six census siblings are present; both really do run in 1s against 0-1s
   for the admitted six; and the cost really was paid on PR 6596, where a plan-only overreach
-  was caught only after a full instrumented shard. THE REAL OPTION IS SMALLER THAN THIS RECORD
-  IMAGINED and does not touch discovery at all: FAST_GATE_STEPS already carries hand-declared
+  was caught only after a full instrumented shard. THE REAL OPTION IS SMALLER THAN THIS RECORD IMAGINED
+  and does not touch discovery at all: FAST_GATE_STEPS already carries hand-declared
   non-census entries (claims, jscpd, cli-reference:check, lint-plan:fast), so one more 1s step
   could be declared beside them without widening any axis or adding anything to
   CENSUS_POPULATION. Whether a census-named script may be a non-projected step is UNVERIFIED
