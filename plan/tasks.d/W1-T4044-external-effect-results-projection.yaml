@@ -68,6 +68,8 @@
       proof: "unit test: action-results route enforces bounded filters and explicit unavailable states"
     - claim: "the route is actually mounted and named in the public contract"
       proof: "grep: /v1/action-results in src/lib/panel-graph.ts"
+    - claim: "the new projection module is called by the daemon's panel-graph assembly rather than being reachable only from its own tests"
+      proof: "grep: buildActionResultsRoute( in src/lib/panel-graph.ts"
   falsifier: |
     Seed the ledger with one row for every external-effect state plus raw connector fields. The
     route must preserve the state machine and safe-to-complete meaning while omitting raw fields.
