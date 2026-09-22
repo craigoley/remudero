@@ -12,8 +12,10 @@ import {
   buildAnalyticsRoute,
   createAnalyticsSnapshotCache,
   deriveAnalyticsSnapshot,
+  deriveAnalyticsSnapshotFromCheckpointedLedger,
   deriveAnalyticsSnapshotFromLedger,
   deriveAnalyticsSnapshotFromStream,
+  writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
 } from "../src/lib/analytics-route.js";
 import { fiveLedgerBackedHistoricalSeries, generateFiveLedgerBackedHistoricalSeries } from "../src/lib/analytics-timeseries.js";
@@ -445,6 +447,19 @@ test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to th
     const actual = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse(now)));
 
     assert.deepEqual(actual, expected, "streaming changes retention, not any of the four analytics answers");
+
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse(now)));
+    writeAnalyticsCheckpoint(dir, first.checkpoint);
+    const resumedLine = '{"ts":"2026-08-14T00:04:00.000Z","task_id":"W1-T2","run_id":"R2","step":"run.start"}';
+    writeLive(dir, [invoked, verdict, resumedLine]);
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(
+      dir,
+      fixedClock(Date.parse("2026-08-14T03:01:00.000Z")),
+      undefined,
+      first.checkpoint,
+    );
+    const fullAfterResume = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-08-14T03:01:00.000Z")));
+    assert.deepEqual(resumed.snapshot, fullAfterResume, "the checkpointed replay remains identical after a live-tail append");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

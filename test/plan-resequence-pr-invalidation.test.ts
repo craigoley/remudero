@@ -115,6 +115,7 @@ function conflictDisposition(over: Partial<OpenPrView> = {}) {
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 0,
+      // expiring-fixture: exempt -- compared only against in test/plan-resequence-pr-invalidation.test.ts; suite supplies explicit NOW
       lastActivityAt: "2026-09-14T14:59:00.000Z",
       headSha: "b".repeat(40),
       autoMergeArmed: false,

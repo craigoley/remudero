@@ -60,7 +60,7 @@ export function readBaseline(text, path = "clock-signature-baseline.json") {
   return parsed;
 }
 
-export function main(argv) {
+export function main(argv, deps = {}) {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -106,9 +106,12 @@ export function main(argv) {
 
   try {
     const serialized = `${JSON.stringify(next, null, 2)}\n`;
-    if (readFileSync(baselinePath, "utf8") !== serialized) writeFileSync(baselinePath, serialized);
+    if (readFileSync(baselinePath, "utf8") !== serialized) {
+      (deps.writeFileSync ?? writeFileSync)(baselinePath, serialized, "utf8");
+    }
   } catch (error) {
-    console.error(`clock-signature-ratchet: could not write ${baselinePath}: ${String(error?.message ?? error)}`);
+    const code = typeof error?.code === "string" ? `${error.code}: ` : "";
+    console.error(`clock-signature-ratchet: could not write ${baselinePath}: ${code}${String(error?.message ?? error)}`);
     return 2;
   }
   console.log(`clock-signature-ratchet: recorded ${Object.keys(next).length} row(s)`);

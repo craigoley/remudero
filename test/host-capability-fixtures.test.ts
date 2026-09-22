@@ -135,36 +135,6 @@ const CHMOD_REMEDY =
  *   unidentified-commit — a real-git file that commits with no `user.name`/`user.email`/`GIT_AUTHOR_*`
  */
 const DECLARED: readonly Declared[] = [
-  // ── chmod: root bypasses read/write denial, so these change meaning at uid 0 ────────────────
-  {
-    kind: "chmod",
-    file: "the-clock-census-records-its-own-baseline.test.ts",
-    key: "0o555",
-    count: 1,
-    reason:
-      "W1-T3364: makes the baseline directory non-writable so the clock-signature ratchet's real " +
-      "write-failure catch returns code 2. The test intentionally exercises a permission failure; " +
-      "on uid 0 the chmod is vacuous, but the runner pole is non-root and the assertion remains loud.",
-  },
-  {
-    kind: "chmod",
-    file: "the-clock-census-records-its-own-baseline.test.ts",
-    key: "0o444",
-    count: 1,
-    reason:
-      "W1-T3364: makes the baseline file read-only inside the non-writable directory so the " +
-      "clock-signature ratchet cannot replace it and must report the recording failure. This is " +
-      "an intentional permission fixture; uid 0 bypass is documented rather than hidden.",
-  },
-  {
-    kind: "chmod",
-    file: "the-clock-census-records-its-own-baseline.test.ts",
-    key: "0o644",
-    count: 1,
-    reason:
-      "W1-T3364: restores the baseline file's normal mode during fixture teardown after the " +
-      "read-only write-failure probe. It is paired with the declared 0o444 site above.",
-  },
   {
     kind: "chmod",
     file: "worktree-reap-liveness.test.ts",
@@ -564,6 +534,15 @@ test("the walk really READ the tree — it saw hundreds of files and every decla
   assert.ok(corpus.length > 400, `the walk must see the whole suite, saw ${corpus.length}`);
   const sites = corpus.flatMap((c) => scanForHostCapability(c.file, c.text));
   assert.ok(sites.length >= DECLARED.reduce((n, d) => n + d.count, 0), "every declared site must be observed");
+});
+
+test("W1-T3902 clock-ratchet failure coverage has no host-capability chmod fixture in test/host-capability-fixtures.test.ts", () => {
+  const clockFixture = readFileSync(join(TEST_DIR, "the-clock-census-records-its-own-baseline.test.ts"), "utf8");
+  assert.doesNotMatch(clockFixture, /chmodSync\(/);
+  assert.deepEqual(
+    DECLARED.filter((site) => site.file === "the-clock-census-records-its-own-baseline.test.ts"),
+    [],
+  );
 });
 
 test("the floor holds: no test file commits through real git with no identity anywhere in it", () => {

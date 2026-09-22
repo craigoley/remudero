@@ -252,7 +252,9 @@ test("W1-T3920 criterion 3: stale-blocked refresh requires an armed non-conflict
 
 test("W1-T3920 criterion 4: ordinary distance refresh retains its threshold and bound", () => {
   const inside = pr({ prNumber: 4835, headSha: "inside" });
+  // expiring-fixture: exempt -- compared only against in test/an-open-pr-does-not-rot-while-it-waits.test.ts; suite injects frozen NOW
   const older = pr({ prNumber: 4836, headSha: "older", lastActivityAt: "2026-09-09T08:00:00Z" });
+  // expiring-fixture: exempt -- compared only against in test/an-open-pr-does-not-rot-while-it-waits.test.ts; suite injects frozen NOW
   const younger = pr({ prNumber: 4837, headSha: "younger", lastActivityAt: "2026-09-09T10:00:00Z" });
   const distances = new Map([[4835, 10], [4836, 11], [4837, 12]]);
   assert.deepEqual(openPrsBehindMain([inside], distances, POLICY), []);

@@ -307,17 +307,36 @@ function listedChangedFiles(body: string): string[] | undefined {
   }
   return out;
 }
+
+/**
+ * W1-T3362 — does this diff CONTRIBUTE the task's own plan shard for `taskId`?
+ * That is exactly the refusal condition of the shipped `files-and-credits-the-same-task` gate
+ * (`filingSelfCreditCheck`, lib/review.ts): a PR that introduces a task's record cannot be that task's
+ * implementation, so a `Remudero-Task: <taskId>` trailer on it is a self-credit. Path-only, like
+ * {@link filingAcceptanceCriteria}'s shard lookup, so producer and gate agree on what "the shard" is.
+ */
+export function diffContributesTaskShard(taskId: string, files: readonly string[]): boolean {
+  return files.some(
+    (f) => f.startsWith(PLAN_TASK_SHARD_PREFIX) && f.slice(PLAN_TASK_SHARD_PREFIX.length).startsWith(`${taskId}-`),
+  );
+}
+
 export interface PlanPrBodyOpts {
   /** Free-text intro prose (may itself be multi-line/multi-paragraph). */
   intro: string;
   /** Rendered via {@link renderAcceptanceBlock} — always the last thing before an optional trailer, so the
    *  block's bullets are never interrupted. */
   criteria: AcceptanceCriterion[];
-  /** Omit for a plan-FILING PR — see the file header's invariant. */
+  /** Omit for a plan-FILING PR — see the file header's invariant. W1-T3362: a `taskId` whose shard this same
+   *  diff contributes (see `addedFiles` / `changedFiles`) is dropped rather than emitted, since the shipped gate
+   *  refuses that self-credit — the producer must not write a body its own gate rejects. */
   taskId?: string;
   /** The diff this body describes, rendered via {@link renderChangedFilesBlock} instead of restated in
-   *  prose. Optional; omitting it leaves the output byte-identical. */
+   *  prose. Optional; omitting it leaves the output byte-identical unless `taskId` names a shard listed here. */
   changedFiles?: readonly string[];
+  /** W1-T3362: the paths the diff ADDS, when the caller knows them apart from modifications — a plan-only PR
+   *  that merely EDITS an existing shard still legitimately credits it. Defaults to `changedFiles`. */
+  addedFiles?: readonly string[];
   /** W1-T2807: who is speaking, what the reviewer can do, and why it matters. All optional and independent;
    *  omitting any leaves the body byte-identical, and an explicit `null` on `whatToDo` records "nothing to do" rather than silence. */
   speaker?: string;
@@ -331,6 +350,8 @@ export interface PlanPrBodyOpts {
  */
 export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
   const { intro, criteria, taskId, changedFiles } = opts;
+  // W1-T3362: never credit a task whose record this same diff adds — `filingSelfCreditCheck` refuses it.
+  const selfCredit = taskId !== undefined && diffContributesTaskShard(taskId, opts.addedFiles ?? changedFiles ?? []);
   // Order is load-bearing: the changed-files block sits above the Acceptance block, and the narrative slots
   // render inside the intro region, above both. Nothing goes below the acceptance bullets — one interposed
   // line breaks parseAcceptanceBlock and fails closed.
@@ -338,7 +359,7 @@ export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
   const parts = [[intro.trim(), narrative].filter((part) => part !== "").join("\n\n")];
   if (changedFiles !== undefined) parts.push("", renderChangedFilesBlock(changedFiles));
   parts.push("", renderAcceptanceBlock(criteria));
-  if (taskId) parts.push("", `Remudero-Task: ${taskId}`);
+  if (taskId && !selfCredit) parts.push("", `Remudero-Task: ${taskId}`);
   return `${parts.join("\n")}\n`;
 }
 

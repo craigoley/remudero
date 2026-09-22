@@ -429,6 +429,9 @@ export interface DeriveDeps {
    *  {@link defaultCreditStorePath}. Injectable so a test, or a caller sharing one store across many
    *  ledger directories, can point elsewhere. */
   creditStorePath?: string;
+  /** A whole-plan consumer that already owns its task scope can suppress the independent
+   *  taskless-escalation projection. Omitted preserves the normal board projection. */
+  skipTasklessEscalations?: boolean;
   /** W1-T2970 — path to the credit override record. Defaults to {@link defaultCreditOverridePath}
    *  off `ledgerPath`, so no caller must supply it for the rung to be live. */
   creditOverridePath?: string;
@@ -3354,7 +3357,7 @@ export function projectPlan(
   // TASK-LESS ESCALATIONS (W1-T283): the loop above is a function of plan.tasks ALONE, so an escalation whose
   // `task_id` names no plan task had no row to attach to — the panel read "nothing needs you" while dozens were
   // open. A SECOND, INDEPENDENT source. An id the plan DOES own is skipped.
-  for (const taskId of taskIdsWithEscalationLines(ledgerLinesOnce, ledgerIndex)) {
+  for (const taskId of effectiveDeps.skipTasklessEscalations ? [] : taskIdsWithEscalationLines(ledgerLinesOnce, ledgerIndex)) {
     if (plan.byId.has(taskId)) continue;
     const escalation = resolveEscalation(ledgerLinesOnce, taskId, effectiveDeps.github, ledgerIndex);
     if (!escalation) continue; // confirmed closed (or otherwise resolved) — no row, same as above.

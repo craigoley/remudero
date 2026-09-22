@@ -1,0 +1,67 @@
+- id: W1-T3989
+  title: "A selected-repository console can see an actionable pull request but cannot request the daemon's bounded fix or remudero-review path, so expose two confirmed, durable PR action intents that the normal poller consumes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 90.00
+  origin: human
+  plan_refs: ["W1-T76", "W1-T95", "W1-T404", "W1-T500", "CONSOLE-T18", "API-T51"]
+  files: [src/lib/fleet-control.ts, src/lib/panel-actions.ts, src/lib/daemon.ts, src/lib/serve.ts, src/run-task.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/panel-actions.test.ts, test/daemon.test.ts, test/pr-action-request.test.ts, test/pr-action-route.test.ts]
+  rationale: |
+    The daemon already derives every open pull request's exact-head disposition, review state and
+    worker telemetry. It also has two bounded operator verbs: `rmd fix <pr>` reuses the normal
+    capped fix rung, and `rmd review <pr>` posts the required remudero-review through the normal
+    reviewer path. Neither verb is reachable from the private React console. An operator can see a
+    red PR but must leave the console to request a repair; a checks-green PR awaiting only
+    remudero-review has the same gap.
+
+    This is not permission for Vercel or a browser to shell into Azure. The existing console
+    `drain/kick` design is the precedent: a confirmed API write records a bounded intent under the
+    instance state root; the daemon consumes it at a poll boundary, runs the established command,
+    and writes its own outcome. The request and consumption must be durable and attributable, while
+    the existing fix/review preconditions retain the final authority.
+  design: |
+    Add one high-tier POST route that accepts only a positive PR number and one of `fix` or
+    `review`. It writes a per-action, per-PR marker with the bearer-token hash and request time,
+    and appends a `console.pr_action_requested` ledger record. The marker is idempotent for the
+    same action and PR, cannot traverse the state directory, and is never a shell command or raw
+    output transcript.
+
+    Thread a peek-and-clear marker seam through the daemon. At a normal poll boundary it consumes
+    at most one request, logs whether it started, refused or failed, and calls only the existing
+    `fixCommand` / review command with the daemon's selected repository. A request never bypasses
+    fix strikes, review locks, required-check state, worktree ownership, pause/stop ownership or
+    auto-merge policy. Unknown, malformed, terminal or already-active requests are named and
+    cleared/refused rather than retried forever.
+
+    Mount the route through the real serve assembler and document its confirmation requirement and
+    receipt shape. The browser-facing console will use this instance-bound contract; this task
+    never accepts a repository path, daemon URL, host command, credential, or arbitrary argv from
+    a caller.
+  acceptance:
+    - claim: "a confirmed fix or review request writes one bounded durable intent and a ledger birth record with the hashed caller identity"
+      proof: "unit test: test/pr-action-request.test.ts"
+    - claim: "malformed action names and PR numbers are refused before a marker or ledger write"
+      proof: "unit test: test/pr-action-route.test.ts"
+    - claim: "the normal daemon poll consumes at most one request and invokes the existing selected-repository fix or review path"
+      proof: "unit test: console PR action: one durable request reaches the established action seam once"
+    - claim: "a named action refusal is logged, consumed, and cannot turn into a crash-loop retry"
+      proof: "unit test: console PR action: a named refusal is ledgered and consumed without turning into a daemon crash loop"
+    - claim: "the real service mounts the high-tier PR action route"
+      proof: "grep: buildPrActionRoute in src/lib/serve.ts"
+  falsifier: |
+    Replace the marker writer with a shell spawn, remove the high-tier nonce, accept an arbitrary
+    repository or argv, or dispatch two requests in one poll: the route or daemon proofs must fail.
+    Stub the fix/review command rather than invoking the established injected seam and the command
+    wiring proof must fail. A request that advances past a strike cap is a regression, not success.
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> run-W1-T3989-1790030000001
+    Reservation: refs/rmd-id/W1-T3989 was claimed before this shard was written. High risk is intentional:
+    this crosses authenticated spend-causing control, daemon polling and reviewer/fix ownership; the
+    implementation is bounded to the existing command paths.
