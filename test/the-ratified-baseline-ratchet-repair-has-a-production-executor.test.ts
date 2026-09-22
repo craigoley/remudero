@@ -55,11 +55,14 @@ interface ExecutorCalls {
 interface ExecutorOptions {
   liveHead?: string;
   liveBranch?: string;
+  missingLiveHead?: boolean;
+  missingLiveBranch?: boolean;
   ghError?: Error;
   registeredOwner?: string;
   registeredOwnerError?: Error;
+  fixBranchClaimError?: Error;
   statuses?: Record<string, number>;
-  states?: BaselineRatchetWorktreeState[];
+  states?: Array<BaselineRatchetWorktreeState | undefined>;
   packageScripts?: Readonly<Record<string, string>>;
   commitResult?: { changed?: boolean; sha?: string };
   createWorktreeError?: Error;
@@ -100,13 +103,20 @@ function buildProductionExecutor(root: string, options: ExecutorOptions = {}) {
       calls.ghReads++;
       assert.deepEqual(args, ["pr", "view", ratchetPr().prUrl, "--json", "headRefName,headRefOid,body"]);
       if (options.ghError) throw options.ghError;
-      return { headRefName: options.liveBranch ?? BRANCH, headRefOid: options.liveHead ?? HEAD, body: "Remudero-Task: W1-T4004\n" };
+      return {
+        ...(options.missingLiveBranch ? {} : { headRefName: options.liveBranch ?? BRANCH }),
+        ...(options.missingLiveHead ? {} : { headRefOid: options.liveHead ?? HEAD }),
+        body: "Remudero-Task: W1-T4004\n",
+      };
     },
     registeredWorktreeOwnerImpl: () => {
       if (options.registeredOwnerError) throw options.registeredOwnerError;
       return options.registeredOwner;
     },
-    fixBranchClaimKeyImpl: () => "W1-T4004-ratchet-claim",
+    fixBranchClaimKeyImpl: () => {
+      if (options.fixBranchClaimError) throw options.fixBranchClaimError;
+      return "W1-T4004-ratchet-claim";
+    },
     createFixRungWorktreeImpl: () => {
       if (options.createWorktreeError) throw options.createWorktreeError;
     },
@@ -174,6 +184,37 @@ test("W1-T4004: production executor repairs an admitted baseline without dispatc
   }
 });
 
+test("W1-T4004: production executor records both ratified baselines in one guarded repair", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4004-both-"));
+  try {
+    const { effects, calls } = buildProductionExecutor(root, {
+      states: [
+        { headSha: HEAD, changedPaths: [] },
+        { headSha: HEAD, changedPaths: ["scripts/comment-load-baseline.json", "scripts/source-size-baseline.json"] },
+      ],
+    });
+    const pr = ratchetPr({
+      redRequiredChecks: ["comment-load-ratchet", "source-size-baseline:legacy"],
+      ciFailures: [
+        { name: "comment-load-ratchet", logTail: "record the baseline" },
+        { name: "source-size-baseline:legacy", logTail: "record the baseline" },
+      ],
+    });
+
+    assert.equal(await effects.repairRecordableRatchet!(pr, ratifiedBaselineRatchetRepairFor(pr)!), true);
+    assert.deepEqual(calls.generators, [
+      "comment-load-ratchet",
+      "comment-load-signal",
+      "source-size-baseline:legacy",
+      "source-size-signal",
+    ]);
+    assert.equal(calls.commits, 1);
+    assert.deepEqual(calls.pushes, [{ stdio: "ignore", expectedHeadSha: "c".repeat(40) }]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4004: baseline repair admission is independent from conflict regeneration", () => {
   assert.deepEqual(Object.keys(RATIFIED_BASELINE_RATCHET_REPAIRS).sort(), ["comment-load-ratchet", "source-size-baseline:legacy"]);
   const nonBaseline = ratchetPr({
@@ -199,7 +240,7 @@ test("W1-T4004: a changed head declines the repair before any generator or push"
   }
 });
 
-test("W1-T4004: production executor names each unsafe pre-write refusal and never pushes", async () => {
+test("W1-T4004: production executor names each unsafe refusal and only pushes on success", async () => {
   const cases: ReadonlyArray<{
     name: string;
     options?: ExecutorOptions;
@@ -207,14 +248,20 @@ test("W1-T4004: production executor names each unsafe pre-write refusal and neve
     reason: string;
   }> = [
     { name: "unratified script", scripts: ["source-size-signal"], reason: "unratified_script_set" },
+    { name: "duplicate script", scripts: ["comment-load-ratchet", "comment-load-ratchet"], reason: "unratified_script_set" },
     { name: "unreadable live head", options: { ghError: new Error("GitHub unavailable") }, reason: "live_head_unreadable" },
+    { name: "missing live branch", options: { missingLiveBranch: true }, reason: "live_head_missing" },
+    { name: "missing live sha", options: { missingLiveHead: true }, reason: "live_head_missing" },
     { name: "unowned head", options: { liveBranch: "human-branch" }, reason: "unowned_head" },
+    { name: "registered worktree owner", options: { registeredOwner: "/tmp/owned-worktree" }, reason: "registered_worktree_owner" },
     { name: "unreadable registered owner", options: { registeredOwnerError: new Error("git failed") }, reason: "registered_worktree_owner_unreadable" },
+    { name: "branch claim error", options: { fixBranchClaimError: new Error("lock failed") }, reason: "executor_error" },
     {
       name: "moved or dirty worktree",
       options: { states: [{ headSha: MOVED_HEAD, changedPaths: [] }] },
       reason: "worktree_head_or_cleanliness_mismatch",
     },
+    { name: "unreadable worktree", options: { states: [undefined] }, reason: "worktree_unreadable" },
     {
       name: "missing signal script",
       options: { packageScripts: { "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs" } },
@@ -226,15 +273,31 @@ test("W1-T4004: production executor names each unsafe pre-write refusal and neve
       reason: "worktree_head_changed_before_commit",
     },
     {
+      name: "generator made no change",
+      options: { states: [{ headSha: HEAD, changedPaths: [] }, { headSha: HEAD, changedPaths: [] }] },
+      reason: "generator_made_no_change",
+    },
+    {
       name: "generator wrote outside the ratified baseline",
       options: { states: [{ headSha: HEAD, changedPaths: [] }, { headSha: HEAD, changedPaths: ["scripts/unrelated.json"] }] },
       reason: "unexpected_generated_path",
     },
+    { name: "signal failed", options: { statuses: { "comment-load-signal": 1 } }, reason: "signal_failed" },
     { name: "empty generator commit", options: { commitResult: { changed: false } }, reason: "generator_commit_empty" },
+    { name: "missing commit sha", options: { commitResult: { changed: true, sha: "" } }, reason: "generator_commit_empty" },
+    { name: "push failed", options: { pushError: new Error("push unavailable") }, reason: "executor_error" },
     {
       name: "executor or cleanup failure",
       options: { createWorktreeError: new Error("worktree unavailable"), removeWorktreeError: new Error("cleanup unavailable") },
       reason: "executor_error",
+    },
+    {
+      name: "cleanup failure after refusal",
+      options: {
+        states: [{ headSha: HEAD, changedPaths: [] }, { headSha: HEAD, changedPaths: [] }],
+        removeWorktreeError: new Error("cleanup unavailable"),
+      },
+      reason: "generator_made_no_change",
     },
   ];
   for (const refusal of cases) {
@@ -243,7 +306,11 @@ test("W1-T4004: production executor names each unsafe pre-write refusal and neve
       const { effects, calls } = buildProductionExecutor(root, refusal.options);
       assert.equal(await effects.repairRecordableRatchet!(ratchetPr(), refusal.scripts ?? ["comment-load-ratchet"]), false, refusal.name);
       assert.equal(declineReason(calls), refusal.reason, refusal.name);
-      assert.deepEqual(calls.pushes, [], `${refusal.name} must not push a branch`);
+      assert.deepEqual(
+        calls.pushes,
+        refusal.options?.pushError ? [{ stdio: "ignore", expectedHeadSha: "c".repeat(40) }] : [],
+        `${refusal.name} push behavior`,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
