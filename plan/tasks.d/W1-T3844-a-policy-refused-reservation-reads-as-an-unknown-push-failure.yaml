@@ -10,7 +10,7 @@
   files: [src/lib/task-id-reservation.ts]
   origin: "2026-09-20 — an agent session could not mint any task id for ~40 minutes and filed two shards with unclaimed ids as a result"
   plan_refs: ["W1-T1055", "W1-T3091"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-20 in a Claude Code remote session. `rmd next-task-id` (reserving by default

@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/fix-branch-checkout-serialization.test.ts]
   origin: "fleet-incident#pr-6154-dirty-abandoned-fix-owner-2026-09-19"
   plan_refs: ["W1-T2952", "W1-T3170"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the core Azure daemon on 2026-09-20. PR #6154 is red and its

@@ -13,7 +13,7 @@
     - test/feedback-landing-deleted-ref.test.ts
   origin: architect
   plan_refs: ["W1-T3560", "W1-T3559", "W1-T3561", "W1-T530", "W1-T191", "§7B"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

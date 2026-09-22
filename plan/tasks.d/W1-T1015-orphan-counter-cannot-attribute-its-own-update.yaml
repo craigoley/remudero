@@ -127,7 +127,7 @@
   origin: "recon#sweep-rebase-orphan-attribution-2026-08-18"
   plan_refs: ["W1-T520", "W1-T528", "W1-T983"]
   files: [src/run-task.ts, src/lib/ledger.ts, test/review-orphan-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET UP FRONT. Design item (i) is a JUDGEMENT about join soundness across two

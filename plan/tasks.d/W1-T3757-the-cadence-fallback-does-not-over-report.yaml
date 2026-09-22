@@ -10,7 +10,7 @@
   origin: "measured 2026-09-18 on the live board — both CADENCE rows reading stale are false alarms, and they are exactly the two rows lacking a policyKey"
   plan_refs: [W1-T436]
   files: [src/lib/status-board.ts, test/the-cadence-fallback-does-not-over-report.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3757-cadence-fallback-over-reports

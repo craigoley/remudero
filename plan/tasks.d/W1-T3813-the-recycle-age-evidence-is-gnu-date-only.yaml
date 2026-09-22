@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh]
   origin: "recon#core-preflight-recycle-first-run-2026-09-19"
   plan_refs: ["W1-T2598", "W1-T3595", "W1-T3799"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE MACOS BASH-3.2 HOST, 2026-09-19. `oldest_inflight_age_s` reads each lock's

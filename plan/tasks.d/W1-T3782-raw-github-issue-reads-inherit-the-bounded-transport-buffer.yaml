@@ -13,7 +13,7 @@
   files:
     - src/lib/github-transport.ts
     - test/github-transport.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the console daemon, 2026-09-19: `escalation.dedup_unreadable` repeatedly

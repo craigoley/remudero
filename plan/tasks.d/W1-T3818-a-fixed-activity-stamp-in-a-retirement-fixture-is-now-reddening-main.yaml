@@ -10,7 +10,7 @@
   files: [test/retired-task-open-pr-disposition.test.ts]
   origin: "recon#main-expiring-fixture-census-2026-09-19"
   plan_refs: ["W1-T3272", "W1-T3445", "W1-T3655"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED from the failed main CI run 35475615764 on 2026-09-19. The required

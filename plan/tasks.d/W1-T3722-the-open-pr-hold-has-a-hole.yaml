@@ -82,7 +82,7 @@
   origin: human
   plan_refs: [W1-T3688, W1-T80, W1-T177]
   files: [src/lib/drain.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Supersedes W1-T3688's DIAGNOSIS, not its incident. W1-T3688 should be retired or amended by the

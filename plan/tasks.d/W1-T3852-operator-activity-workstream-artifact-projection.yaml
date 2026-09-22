@@ -14,7 +14,7 @@
     - src/lib/panel-graph.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on public main 089af54ccefc4a38c3666c632e1a8a3eb93d6992: the daemon already has the

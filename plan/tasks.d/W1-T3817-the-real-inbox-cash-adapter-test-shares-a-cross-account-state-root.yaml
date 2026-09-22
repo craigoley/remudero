@@ -10,7 +10,7 @@
   files: [test/an-open-weight-provider-rides-the-capability-ladder.test.ts]
   origin: "recon#local-preflight-openweight-allowance-state-2026-09-19"
   plan_refs: ["W1-T3569", "W1-T3666", "W1-T3607"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on current origin/main under the active local account. The real

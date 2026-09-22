@@ -13,7 +13,7 @@
     - test/a-worker-branch-must-be-shaped-for-dispatch.test.ts
   origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
   plan_refs: ["W1-T2530", "W1-T3067", "W1-T3990", "W1-T3993"]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED 2026-09-22: plan PR #6468 added W1-T3990's shard on

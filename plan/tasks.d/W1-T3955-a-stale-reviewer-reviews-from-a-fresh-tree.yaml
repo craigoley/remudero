@@ -10,7 +10,7 @@
   budget_usd: 1.00
   files: [src/run-task.ts, test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts]
   origin: field-recon-2026-09-21
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the live core daemon at 2026-09-21T11:20:46Z. A stale reviewer correctly

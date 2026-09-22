@@ -11,7 +11,7 @@
   origin: "feedback#fb-1789845640231-c117a2"
   plan_refs: ["W1-T3623", "W1-T2704"]
   files: [src/lib/analytics-live-metrics.ts, src/lib/analytics-route.ts, src/lib/serve.ts, test/console-analytics-live-route.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Replaces W1-T3802 and W1-T3803 after the merged analytics plan was found to stop at pure

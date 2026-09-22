@@ -13,7 +13,7 @@
     - test/gh-json-unreadable-dispatch.test.ts
   origin: "recon#core-daemon-empty-json-fatal-2026-09-19"
   plan_refs: ["W1-T2896", "W1-T3165"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE LIVE CORE DAEMON, 2026-09-19. After W1-T3722 had pushed

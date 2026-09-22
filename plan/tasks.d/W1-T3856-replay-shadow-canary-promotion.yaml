@@ -15,7 +15,7 @@
     - src/lib/operator-agent.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3853 makes an experiment falsifiable, but a record alone does not create a self-improvement

@@ -11,7 +11,7 @@
   files: [src/run-task.ts, src/lib/daemon.ts, src/lib/status.ts, src/lib/ledger.ts, scripts/test-tier-manifest.json, test/harness-commit-refusal-retry.test.ts]
   origin: "operator-session#three-daemon-followup-2026-09-21"
   plan_refs: ["W1-T12a", "W1-T75", "W1-T115", "W1-T143", "W1-T147", "W1-T151", "W1-T160", "W1-T298", "W1-T3565", "W1-T3696", "W1-T3793", "W1-T3868", "W1-T465", "W1-T2910"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

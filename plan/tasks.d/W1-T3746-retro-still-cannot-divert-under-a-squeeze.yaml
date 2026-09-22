@@ -10,7 +10,7 @@
   files: [src/run-task.ts]
   origin: oper#squeeze-session-2026-09-17
   plan_refs: ["W1-T3727", "W1-T3696", "W1-T3726", "W1-T3731"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3727 declared BOTH committing lanes — retro and alert_fix. PR #5941 built the alert_fix

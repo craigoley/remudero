@@ -60,7 +60,7 @@
   origin: human
   plan_refs: [W1-T3739, W1-T3648]
   files: [src/lib/task-id-reservation.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3741-43-the-last-three

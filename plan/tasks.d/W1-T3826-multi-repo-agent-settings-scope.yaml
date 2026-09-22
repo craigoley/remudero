@@ -27,5 +27,5 @@
     - test/operator-agent-settings-scope-read.test.ts
     - test/operator-agent-settings-scope-write.test.ts
     - test/operator-agent-settings-scope-fallback.test.ts
-  status: queued
+  status: merged
   attempts: 0

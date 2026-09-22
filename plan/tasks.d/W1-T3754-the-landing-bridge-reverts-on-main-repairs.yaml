@@ -10,7 +10,7 @@
   files: [src/lib/feedback-landing.ts, src/run-task.ts]
   origin: oper#squeeze-session-2026-09-17
   plan_refs: ["W1-T2959", "W1-T3542"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #5967, 2026-09-18. The PR carried 15 shard entries. Eleven were MODIFIES, and

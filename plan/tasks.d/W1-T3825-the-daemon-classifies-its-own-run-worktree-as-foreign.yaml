@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/fix-branch-checkout-serialization.test.ts]
   origin: "fleet-incident#console-pr-1349-clean-abandoned-run-owner-2026-09-19"
   plan_refs: ["W1-T2952", "W1-T3170", "W1-T3822"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the console Azure daemon on 2026-09-19. PR #1349 is green on

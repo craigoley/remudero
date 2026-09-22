@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/retro-acceptance-repair.test.ts, test/retro-marker-atomic.test.ts]
   origin: "recon#retro-6158-acceptance-fallback-2026-09-19"
   plan_refs: ["W1-T136", "W1-T3066", "W1-T908"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the live core daemon on 2026-09-19. `repairRetroAcceptanceBlock`

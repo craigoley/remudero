@@ -48,7 +48,7 @@
     head identity under another name. After implementation, make missing-ratification validation
     unconditionally accept and remove the extractor separately; the corresponding tests must fail.
     Do not activate enforce in this task, rebase #6429, or write a retrospective reader here.
-  status: queued
+  status: merged
   attempts: 0
   note: |
     High risk is required because this spans webhook admission, policy authority and evidence used

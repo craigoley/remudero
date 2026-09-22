@@ -11,7 +11,7 @@
   files: [deploy/host-update.sh, test/agent-history-does-not-fill-the-root-disk.test.ts]
   origin: "preflight#macos-find-printf-2026-09-20"
   plan_refs: ["W1-T3626", "W1-T3612"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the macOS operator host with /usr/bin/find: the agent-history suite's four

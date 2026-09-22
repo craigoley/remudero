@@ -20,7 +20,7 @@
     - test/consequence-policy-confirmation.test.ts
     - test/consequence-policy-approval.test.ts
     - test/consequence-policy-receipts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3878 and W1-T3883 correctly keep financial and destructive actions human-gated, while

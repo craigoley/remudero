@@ -10,7 +10,7 @@
   origin: "measured 2026-09-18 on the live fleet while auditing a persistent STALE line that turned out to be a missing input, not a stale daemon"
   plan_refs: [W1-T3245, W1-T244, W1-T3756]
   files: [src/lib/ledger.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3755-running-head-expires

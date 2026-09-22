@@ -20,7 +20,7 @@
     - test/agent-delegation-human-gates.test.ts
     - test/agent-delegation-receipts.test.ts
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Personal agents are beginning to coordinate across people and services. That can remove tedious

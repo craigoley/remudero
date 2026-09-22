@@ -10,7 +10,7 @@
   files: [src/run-task.ts]
   origin: oper#three-daemon-health-2026-09-19
   plan_refs: ["W1-T3758", "W1-T3523", "W1-T271"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the fleet host at origin/main `5af79224b69066af509c12580c123d38601481d1`,

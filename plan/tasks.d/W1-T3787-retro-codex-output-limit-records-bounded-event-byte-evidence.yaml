@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/worker-provider.test.ts
     - test/run-task.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the live remudero daemon, 2026-09-19: the detached automated

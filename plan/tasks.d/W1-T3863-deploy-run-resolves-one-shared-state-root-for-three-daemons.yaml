@@ -131,7 +131,7 @@
     - deploy/install-host-units.sh
     - test/deploy-run-state-root-override.test.ts
     - test/instance-launchers-pass-their-own-state-root.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `files:` names no test path, deliberately: `proof-unit-test-unresolvable` refuses a filing

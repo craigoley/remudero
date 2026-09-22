@@ -10,7 +10,7 @@
   files: [scripts/expiring-fixture-census.mjs]
   origin: "2026-09-20 -- a session verifying main's health after #6213 read this output as green and had to be corrected by re-running under CENSUS_MAIN_BRANCH_RUN"
   plan_refs: ["W1-T3655", "W1-T3388"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS TASK DOES NOT ARGUE WITH W1-T3655. That task made an inherited crossing reported but not

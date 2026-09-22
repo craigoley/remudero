@@ -80,7 +80,7 @@
   origin: oper#generated-docs-drift-source-2026-08-17
   plan_refs: ["#2043", "#2044", "#2046"]
   files: [MASTER-PLAN.md, src/run-task.ts, docs/cli-reference.md]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `verify: human` IS DELIBERATE AND IS NOT NEGOTIABLE. The diff edits MASTER-PLAN.md — the plan

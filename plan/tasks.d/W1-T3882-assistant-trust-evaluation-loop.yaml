@@ -20,7 +20,7 @@
     - test/assistant-evaluation-promotion.test.ts
     - test/assistant-evaluation-redaction.test.ts
     - openapi/daemon.yaml
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Completion rate alone rewards an assistant for acting too aggressively. A trustworthy RMD flow

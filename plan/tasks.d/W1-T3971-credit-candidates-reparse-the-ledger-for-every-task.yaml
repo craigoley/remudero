@@ -59,7 +59,7 @@
     the per-task loop after the implementation: the one-read assertion must fail while the
     equivalence assertion remains green. If the candidate sets differ, stop rather than hiding a
     credit-semantic difference inside a performance refactor.
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Rule 19: high risk is intentional. The files cross status projection and the destructive

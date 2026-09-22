@@ -14,7 +14,7 @@
     - src/run-task.ts
     - plan/credit-overrides.yaml
     - test/cross-target-credit-evidence.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, 2026-09-20. remudero-site PR 107 was a PLAN-ONLY filing: its whole diff introduced the

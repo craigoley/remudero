@@ -17,7 +17,7 @@
     - test/serve.shell-ux.test.ts
   origin: "followup#1584-agent-read-ceiling-2026-09-22"
   plan_refs: [W1-T3623, W1-T3795]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED on the live remudero instance after the console operator-agent implementation shipped:

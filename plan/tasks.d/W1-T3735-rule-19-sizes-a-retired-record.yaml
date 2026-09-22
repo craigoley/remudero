@@ -63,7 +63,7 @@
   origin: human
   plan_refs: [W1-T3099]
   files: [src/lib/task-linter.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3734-6-three-findings

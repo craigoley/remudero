@@ -11,7 +11,7 @@
   files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, src/lib/producer-completeness.ts, src/run-task.ts, test/an-open-pr-does-not-rot-while-it-waits.test.ts, test/sweep-conflicted-disposition.test.ts]
   origin: "operator-session#stale-blocked-automerge-2026-09-20"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T3277", "W1-T520", "W1-T2855"]
-  status: queued
+  status: merged
   attempts: 0
   priority: 1
   rationale: |

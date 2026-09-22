@@ -58,7 +58,7 @@
       proof: "grep: project in src/lib/project-init.ts"
     - claim: "the alert-fix command is a single production entry point that can ledger a named bootstrap refusal"
       proof: "grep: alertFixCommand in src/run-task.ts"
-  status: queued
+  status: merged
   attempts: 0
   origin: oper#observed-console-and-site-alert-policy-absence-2026-09-21
   note: |

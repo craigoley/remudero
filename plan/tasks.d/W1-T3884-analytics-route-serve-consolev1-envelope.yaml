@@ -11,7 +11,7 @@
   files: [src/lib/analytics-route.ts, test/console-analytics-contract-gap.test.ts]
   origin: "feedback#fb-1789932379027-b989eb"
   plan_refs: ["W1-T3623"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Observed live 2026-09-20: buildAnalyticsRoute's GET /v1/analytics handler calls
