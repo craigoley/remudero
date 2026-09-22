@@ -1802,7 +1802,7 @@ export function buildSweepEffects(
                 ownDiffDigest: reuseInputs.currentOwnDiffDigest,
                 mergeBaseSha: reuseInputs.currentMergeBaseSha,
               };
-              const posted = await postReviewStatusGuarded({
+              const discriminationPosted = await postReviewStatusGuarded({
                 owner: deps.owner,
                 repo: deps.repo,
                 sha: pr.headSha,
@@ -1817,7 +1817,7 @@ export function buildSweepEffects(
                 reviewEngineRevision: REVIEW_ENGINE_REVISION,
                 fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
               });
-              if (!posted.posted && !posted.replayed) {
+              if (!discriminationPosted.posted && !discriminationPosted.replayed) {
                 exitCode = 1;
               } else {
                 appendLedger(deps.ledgerPath, {
