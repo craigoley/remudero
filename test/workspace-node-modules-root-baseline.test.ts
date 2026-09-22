@@ -4,7 +4,13 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { linkWorktreeNodeModules, worktreeAdd } from "../src/lib/worker.js";
+import {
+  deriveWorkspacePaths,
+  linkWorkspaceNodeModules,
+  linkWorktreeNodeModules,
+  workspaceNodeModulesIncomplete,
+  worktreeAdd,
+} from "../src/lib/worker.js";
 
 // W1-T4003: the design's own words: "Retain the root node_modules link and its
 // lockfile-mismatch observation unchanged." This file pins that baseline STILL holds with
@@ -138,6 +144,92 @@ test("worktreeAdd's lockfile-mismatch observation on the ROOT link still fires u
     );
     // The workspace link is unaffected by the root mismatch -- it has its own healthy source.
     assert.equal(lstatSync(join(wt, "apps", "dashboard", "node_modules")).isSymbolicLink(), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── COVERAGE COMPLETENESS (W1-T4003 round 2) ──────────────────────────────────────────────────
+// CI's `coverage-ratchet` shards `test/**/*.test.ts` across four independent jobs by DURATION,
+// not by which source file a test touches, and each shard's own "Diff coverage" step blocks on
+// its OWN partial lcov -- never the union of all four. This file's three sibling proof files
+// land in different shards, so a branch exercised only by a sibling still reads as wholly
+// uncovered added code in the shard this file lands in. The tests below add no new PROOF of any
+// acceptance criterion -- they exist only so THIS file (plus test/worktree-node-modules.test.ts,
+// its shard-mate) independently reaches every line this task added to src/lib/worker.ts.
+
+test("deriveWorkspacePaths, real listDirs default, degrades an absent wildcard parent to no matches (coverage completeness)", () => {
+  const root = tmp("baseline-cov-absentparent-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "fixture", workspaces: ["packages/*"] }));
+    // No `packages/` directory at all -- the real listDirs default must hit its own ENOENT
+    // branch and degrade to no matches, not throw, and `deriveWorkspacePaths` itself (never
+    // called by this file's other tests, which all go through `worktreeAdd`) must be reached.
+    assert.deepEqual(deriveWorkspacePaths(repoDir), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("linkWorkspaceNodeModules degrades to no workspaces when the source has no readable package.json (coverage completeness)", () => {
+  const root = tmp("baseline-cov-nomanifest-");
+  try {
+    const repoDir = join(root, "source"); // deliberately no package.json written at all
+    mkdirSync(repoDir, { recursive: true });
+    const worktreePath = join(root, "worktree");
+    mkdirSync(worktreePath, { recursive: true });
+    assert.deepEqual(linkWorkspaceNodeModules(repoDir, worktreePath), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("linkWorkspaceNodeModules covers a non-wildcard safe glob alongside an unsafe glob, a no-source skip, an occupied destination, and a failed symlink together (coverage completeness)", () => {
+  const root = tmp("baseline-cov-sweep-");
+  try {
+    const repoDir = join(root, "source");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(
+      join(repoDir, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        workspaces: ["../outside", "apps/dashboard", "packages/thing", "packages/nosource"],
+      }),
+    );
+    const worktreePath = join(root, "worktree");
+
+    // "apps/dashboard": a non-wildcard safe glob whose destination is OCCUPIED.
+    mkdirSync(join(repoDir, "apps", "dashboard", "node_modules"), { recursive: true });
+    mkdirSync(join(worktreePath, "apps", "dashboard", "node_modules"), { recursive: true });
+
+    // "packages/thing": destination FREE, but the injected `symlink` throws.
+    mkdirSync(join(repoDir, "packages", "thing", "node_modules"), { recursive: true });
+    mkdirSync(join(worktreePath, "packages", "thing"), { recursive: true });
+
+    // "packages/nosource": exists on both sides but has no nested node_modules of its own.
+    mkdirSync(join(repoDir, "packages", "nosource"), { recursive: true });
+    mkdirSync(join(worktreePath, "packages", "nosource"), { recursive: true });
+
+    const eperm = Object.assign(new Error("EPERM: operation not permitted, symlink"), { code: "EPERM" });
+    const results = linkWorkspaceNodeModules(repoDir, worktreePath, {
+      symlink: () => {
+        throw eperm;
+      },
+    });
+
+    assert.deepEqual(
+      results.sort((a, b) => a.workspace.localeCompare(b.workspace)),
+      [
+        { workspace: "../outside", outcome: "unsafe-path" },
+        { workspace: "apps/dashboard", outcome: "occupied" },
+        { workspace: "packages/nosource", outcome: "no-source" },
+        { workspace: "packages/thing", outcome: "failed" },
+      ],
+    );
+    assert.equal(workspaceNodeModulesIncomplete(results), true);
+    assert.equal(workspaceNodeModulesIncomplete([{ workspace: "apps/dashboard", outcome: "linked" }]), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
