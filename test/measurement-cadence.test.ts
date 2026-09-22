@@ -382,6 +382,7 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
         reason: "no_coverage_merged_artifact",
         detail: "offline fixture",
       }),
+      creditedMergedIds: () => new Set(),
     });
 
     const decision = hooks.checkMeasurementCadence();

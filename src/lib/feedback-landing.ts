@@ -90,6 +90,8 @@ const DECISIONS_REL_DIR = "plan/decisions.d";
 export const DECISIONS_LANDING_BRANCH = "decisions-landing";
 /** The one shared PR title/head every decision-record landing call opens or reuses. */
 export const DECISIONS_LANDING_PR_TITLE = "chore(decisions): land pending decision records";
+const PLAN_RECONCILE_LANDING_BRANCH = "plan-reconcile-landing";
+const PLAN_RECONCILE_LANDING_PR_TITLE = "chore(plan): reconcile credited task statuses";
 const CI_LEARNING_PENDING_REL_DIR = "state/ci-learning-pending";
 const CI_LEARNING_SLUG_MAX = 72;
 /** The one shared branch every automated CI-learning shard landing call force-pushes to. */
@@ -108,7 +110,7 @@ export interface LandingRepository {
   repo: string;
 }
 
-type LandingFamily = "feedback" | "decisions" | "ci-learning";
+type LandingFamily = "feedback" | "decisions" | "ci-learning" | "plan-reconcile";
 
 export interface LandingIdentityInput {
   family?: LandingFamily;
@@ -283,6 +285,11 @@ const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; p
     ownedDir: "",
     prTitle: CI_LEARNING_LANDING_PR_TITLE,
   },
+  "plan-reconcile": {
+    branch: PLAN_RECONCILE_LANDING_BRANCH,
+    ownedDir: "",
+    prTitle: PLAN_RECONCILE_LANDING_PR_TITLE,
+  },
 };
 
 function repoKey(repo: LandingRepository): string {
@@ -322,7 +329,12 @@ export function landingIdentity(input: LandingIdentityInput = {}): LandingIdenti
   };
 }
 
-const LEGACY_LANDING_REFS = new Set([LANDING_BRANCH, DECISIONS_LANDING_BRANCH, CI_LEARNING_LANDING_BRANCH]);
+const LEGACY_LANDING_REFS = new Set([
+  LANDING_BRANCH,
+  DECISIONS_LANDING_BRANCH,
+  CI_LEARNING_LANDING_BRANCH,
+  PLAN_RECONCILE_LANDING_BRANCH,
+]);
 const SCOPED_LANDING_REF =
   /^(?:feedback-landing|decisions-landing|ci-learning-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
 
@@ -485,7 +497,11 @@ function landingKind(
     landingOwner: opts.landingOwner,
     sourceRepository: opts.sourceRepository ?? sourceRepositoryFromCwd(),
   });
-  return { ...template, ...identity };
+  const layoutIdentity =
+    template.family === "plan-reconcile"
+      ? { ...identity, ownedDir: relative(root, join(resolveRepoLayout(root).planDir, "tasks.d")) }
+      : identity;
+  return { ...template, ...layoutIdentity };
 }
 
 /** Anchors on `/pull/<n>`, mirroring `prUrlTarget` (run-task.ts) — duplicated locally since this
@@ -1124,6 +1140,24 @@ function landContent(
       }
     }
   }
+}
+
+export function landPlanReconcileShards(
+  root: string,
+  inputs: readonly LandContentInput[],
+  opts: LandFeedbackOpts = {},
+): LandFeedbackResult {
+  const kind = landingKind(
+    {
+      family: "plan-reconcile",
+      commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
+      prBody: (files) => ["Reconciles credited task shards whose decorative status is still queued.", "", "The change is derived from the existing credit projection and staged through the scratch-index landing bridge.", "", "## Acceptance", ...files.map((file) => `- ${file} is reconciled without a daemon checkout write | grep: status: merged in ${file}`)].join("\n"),
+    },
+    root,
+    opts,
+    opts.git ?? defaultGit(root),
+  );
+  return landContent(root, kind, [...inputs], opts);
 }
 
 /** `<root>/plan/decisions.d/<taskId>-<runId>.md` — one file per decision.autochoose resolution,
