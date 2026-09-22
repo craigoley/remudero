@@ -438,20 +438,37 @@ export function resolveGhTransportFloorMode(env: NodeJS.ProcessEnv = process.env
  * Run an unattended automation lane with the read floor explicitly enforced.
  *
  * The transport keeps advisory mode as its library default so injected callers and interactive
- * diagnostics cannot be turned into a hard stop accidentally. Daemon/review CLI handlers use this
- * boundary instead: if the operator did not choose a mode, their whole lifetime is protected from
+ * diagnostics cannot be turned into a hard stop accidentally. Standalone unattended CLI handlers
+ * use this boundary instead: if the operator did not choose a mode, their lifetime is protected from
  * repeated read bursts, while an explicit environment choice remains authoritative. The restore
  * makes this safe for in-process tests and for a caller that runs more than one verb.
  */
-export async function withGhTransportFloor<T>(fn: () => T | Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+async function withGhTransportFloorMode<T>(
+  mode: "advisory" | "enforce",
+  fn: () => T | Promise<T>,
+  env: NodeJS.ProcessEnv,
+): Promise<T> {
   const previous = env.RMD_GH_TRANSPORT_FLOOR;
-  if (previous === undefined) env.RMD_GH_TRANSPORT_FLOOR = "enforce";
+  if (previous === undefined) env.RMD_GH_TRANSPORT_FLOOR = mode;
   try {
     return await fn();
   } finally {
     if (previous === undefined) delete env.RMD_GH_TRANSPORT_FLOOR;
     else env.RMD_GH_TRANSPORT_FLOOR = previous;
   }
+}
+
+/** Run a standalone unattended command with the read floor explicitly enforced by default. */
+export async function withGhTransportFloor<T>(fn: () => T | Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+  return await withGhTransportFloorMode("enforce", fn, env);
+}
+
+/**
+ * Run the long-lived daemon with advisory transport reads unless the operator selected a mode.
+ * Its GhCallPacer remains the per-call rate controller for normal multi-read sweeps.
+ */
+export async function withDaemonGhTransportFloor<T>(fn: () => T | Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+  return await withGhTransportFloorMode("advisory", fn, env);
 }
 
 export interface GhReadCadenceDecision {

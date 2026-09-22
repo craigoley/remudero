@@ -10,7 +10,7 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { ghExec, ghJsonAsync, withGhTransportFloor } from "./lib/github-transport.js";
+import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -43123,7 +43123,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     "daemon",
     async (rest) => {
       await loadHeavyVerb("daemon");
-      return await withGhTransportFloor(() => daemonCommand(rest));
+      return await withDaemonGhTransportFloor(() => daemonCommand(rest));
     },
   ],
   ["daemon-plist", async (rest) => await daemonPlistCommand(rest)],
