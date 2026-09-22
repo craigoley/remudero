@@ -589,11 +589,6 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const verifyHumanJudge =
     raw.verify_human_judge === undefined ? undefined : parseMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts);
   const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
-  if (stepUp && tiers[stepUp.model] >= tiers[architect.model]) {
-    throw new MountsError(
-      `'step_up' (${stepUp.model}, tier ${tiers[stepUp.model]}) must sit strictly below the Architect (${architect.model}, tier ${tiers[architect.model]}).`,
-    );
-  }
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -619,7 +614,19 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   }
 
   const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes };
+  // G-17 FIRST, then the step-up's own rule. The Tier Invariant is the more fundamental of the
+  // two — it is what keeps every worker strictly below the Architect — and a table that violates
+  // it must say so in G-17's own words. Checking the step-up ahead of it MASKED that message:
+  // an Architect dropped to a worker-peer tier reported `'step_up' ... must sit strictly below
+  // the Architect` instead of `Tier Invariant (G-17) violated`, so the test that pins the
+  // invariant's bite (test/the-top-tier-is-not-claude-only.test.ts) read the wrong refusal for
+  // the right violation. Both rules still fire; only their order changed.
   enforceTierInvariant(mounts, opts.thinkingDefault);
+  if (stepUp && tiers[stepUp.model] >= tiers[architect.model]) {
+    throw new MountsError(
+      `'step_up' (${stepUp.model}, tier ${tiers[stepUp.model]}) must sit strictly below the Architect (${architect.model}, tier ${tiers[architect.model]}).`,
+    );
+  }
   return mounts;
 }
 

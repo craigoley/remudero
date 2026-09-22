@@ -779,8 +779,14 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // to :6064/:6125 — the SEVENTH re-derivation, and the same lesson each time: these numbers
   // are a QUERY over the current tree, not a constant, so any diff inserting above the
   // witnesses moves them and the list must be re-derived rather than the test weakened.
-    "armIfVerdictPermits:test/run-task.test.ts:6066:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6127:ledgerLines",
+  // The step-up routing change then added FIFTY net lines ahead of both — a step_up mount
+  // assertion inside the two-strikes-then-diagnose behavioural test, and a new runFixRung case
+  // proving only the FINAL fresh strike steps up — and they moved by exactly fifty, to
+  // :6116/:6177. The EIGHTH re-derivation. Both witnesses are still the SAME two call sites,
+  // the PR-602 and PR-701 fixtures, each still omitting `ledgerLines` while supplying `arm`;
+  // only their coordinates moved, which is precisely what this note has claimed seven times.
+    "armIfVerdictPermits:test/run-task.test.ts:6116:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6177:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(
