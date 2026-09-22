@@ -5914,10 +5914,9 @@ async function runReview(args: {
           reviewerVerdictContract(criteria.length);
         const stopTelemetry = args.workerTelemetry?.startPolling();
         let reviewer: WorkerResult;
-        const reviewerClockBound =
-          args.reviewerClockBoundMs === undefined
-            ? { clockBound: { boundMs: loadDefaultPolicy().values.workerAbandon } }
-            : { clockBound: { boundMs: args.reviewerClockBoundMs } };
+        const reviewerClockBoundMs =
+          args.reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon;
+        const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
         try {
           reviewer = args.account(
             await (args.reviewerSpawnWorker ?? spawnWorker)({
