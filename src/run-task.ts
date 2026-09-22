@@ -4089,14 +4089,54 @@ export function armAndLogOutcome(
 }
 
 /**
+ * W1-T968 — is this exact pull request ARMED on this exact head, per the ledger? PURE over lines
+ * the caller already read, mirroring {@link armRunIdFromLedger} (same step, same `pr_url` key).
+ *
+ * THE DEFECT. {@link armReportPhrase} answered from the ONE outcome the latest call returned. The
+ * review lane (`armIfVerdictPermits`) arms and ledgers `automerge.armed` with `head_sha` on a PASS;
+ * an Architect lane's later, redundant `armAndLogOutcome` then gets `arm-error-ignored`, which
+ * {@link armOutcomeArmed} rightly reads as "this call armed nothing" — so the line printed "NOT
+ * armed" for a PR armed seconds earlier. That rule (lib/sweep.ts) is not re-derived here; this is
+ * a second, independent read of what the ledger already recorded.
+ *
+ * KEYED ON PR + HEAD (design iii): an arm must not survive a re-head, and an absent `headSha` never
+ * falls back to a pr-url-only match — an unkeyable claim answers `false`, which never overstates.
+ *
+ * LAST EVENT WINS. `withdrawArmIfVerdictRefuses` ledgers `automerge.disarmed` on the SAME head when
+ * a later verdict refuses, so "an arm row exists" is not "armed now". That row has `head_sha` and
+ * no `pr_url`, so it matches on the head. `automerge.disarm_skipped` records a withdrawal that left
+ * the arm standing, so it is not one. Rows are read in append order, as `readLedgerLines` returns.
+ */
+export function priorArmOnHead(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prUrl: string,
+  headSha: string | undefined,
+): boolean {
+  if (!headSha) return false;
+  let armed = false;
+  for (const line of lines) {
+    if (line.head_sha !== headSha) continue;
+    if (line.step === "automerge.armed" && line.pr_url === prUrl) armed = true;
+    else if (line.step === "automerge.disarmed" && (line.pr_url === undefined || line.pr_url === prUrl)) armed = false;
+  }
+  return armed;
+}
+
+/**
  * impl-BI — the human-readable half of the same honesty fix. Every one of the five lanes
  * printed a fixed `"… gated + armed …"` to the console whatever happened; `retroCommand`
  * printed "retro PR gated + armed (review success)" 1.2 seconds after the console had already
  * carried `automerge.ledger_refused`. Pure and exported so the assertion is on the STRING,
  * not on a mock's call count.
+ *
+ * W1-T968: gained `priorArmOnThisHead` as a SECOND input, never a re-derivation of the first. The
+ * outcome argument keeps deciding what this CALL did; `priorArmOnThisHead` — computed by
+ * {@link priorArmOnHead} against the ledger — separately answers whether the PULL REQUEST is
+ * already armed regardless of this call. Defaulted to `false` so every existing caller/fixture
+ * that never learned about the ledger keeps its exact prior behavior.
  */
-export function armReportPhrase(outcome: ArmOutcome): string {
-  return armOutcomeArmed(outcome) ? `armed (${outcome})` : `NOT armed (${outcome})`;
+export function armReportPhrase(outcome: ArmOutcome, priorArmOnThisHead = false): string {
+  return armOutcomeArmed(outcome) || priorArmOnThisHead ? `armed (${outcome})` : `NOT armed (${outcome})`;
 }
 
 /**
@@ -17867,7 +17907,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     // W1-T2258: `view.headRefOid` is the SAME head the `review.posted` line just above was keyed
     // to — already in hand, no extra read needed to close the join gap for this lane.
     const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
-    console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), view.url, view.headRefOid);
+    console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome, priorArm)}: ${view.url}`);
     // impl-FR — THE DETECTOR. This lane is the ONLY arm path for a Dependabot PR: the sweep's
     // ordered, first-match-wins DISPOSITION_RULES put `dep-review` above both `mergeable` and
     // `post-review`, and the shared review lane refuses `dependabot/` heads by name. So an arm
@@ -26805,7 +26848,10 @@ async function retroCommand(
     }
     const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
-    say(`retro PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
+    say(`retro PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("retro.error", retroErrorLedgerFields(e) ?? { error: String((e as Error)?.message ?? e) });
@@ -38505,7 +38551,10 @@ async function triageCommandLocked(
     }
     const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
-    say(`triage PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
+    say(`triage PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("triage.error", { error: String((e as Error)?.message ?? e) });
@@ -38920,7 +38969,10 @@ export async function planCommand(
     }
     const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
-    say(`plan PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
+    say(`plan PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("plan.error", { error: String((e as Error)?.message ?? e) });
@@ -40653,7 +40705,10 @@ export async function approveCommand(
     }
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
-    console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), result.prUrl, armHeadSha);
+    console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
     // CHAINED AFTER THE RATIFICATION LANDED, never before: the note describes work that is now
     // really in the plan. Scoped to the proposal id — the docket gathers notes across ALL tasks,
     // so an id that is not a task id still reaches the weekly gather (the task scoping applies to
@@ -40920,8 +40975,11 @@ async function approveBatchCommand(
     }
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
+    // W1-T968: the PR — not merely this call — is what the console line answers about; a
+    // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
+    const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), result.prUrl, armHeadSha);
     console.log(
-      `rmd approve: batch of ${result.accepted.length} gated — ${armReportPhrase(armOutcome)} ` +
+      `rmd approve: batch of ${result.accepted.length} gated — ${armReportPhrase(armOutcome, priorArm)} ` +
         `(review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`,
     );
     return reviewCode;

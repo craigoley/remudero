@@ -17,6 +17,7 @@ import {
 import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { approveRunBranch } from "../src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // PR #954's guard call sites inside `triageCommand` and `planCommand` sat after a
@@ -135,11 +136,28 @@ function makeOrigin(feedbackId?: string): string {
  *  `"FAILURE"` drives `waitForCiGreen` RED on its first poll instead of green, reaching
  *  approveCommand's `ci !== "green"` cleanup branch rather than the review/arm continuation.
  *  `opts.failPrDiff` makes `gh pr diff` (inside `runReview`) exit non-zero — an exception
- *  `reviewCommand` does not itself catch, reaching approveCommand's outer `catch` cleanup. */
+ *  `reviewCommand` does not itself catch, reaching approveCommand's outer `catch` cleanup.
+ *  `opts.prDiffLive` makes `gh pr diff` print the pushed branch's REAL diff against `main`
+ *  instead of nothing — the triage lane's plan-only and provenance guards read it, so an empty
+ *  diff stops that run short of its gate.
+ *
+ *  W1-T968 — `opts.priorArmLedger` reproduces the review lane arming first: the CI poll (which
+ *  every lane makes BEFORE its own review) appends the `automerge.armed` row that lane writes,
+ *  keyed on this PR and the LIVE head, to that ledger. `opts.failDisarm` makes `--disable-auto`
+ *  fail, so the review's withdrawal is ledgered `automerge.disarm_skipped` and the arm STANDS —
+ *  the case where a lane's own refused call must still report the pull request as armed. */
 function writeGhShim(
   dir: string,
   bareOrigin: string,
-  opts: { failPrList?: boolean; matchRealBranch?: boolean; ciConclusion?: string; failPrDiff?: boolean } = {},
+  opts: {
+    failPrList?: boolean;
+    matchRealBranch?: boolean;
+    ciConclusion?: string;
+    failPrDiff?: boolean;
+    prDiffLive?: boolean;
+    priorArmLedger?: string;
+    failDisarm?: boolean;
+  } = {},
 ): void {
   // Resolves to whichever `run-*` branch this test's own gateway most recently pushed to
   // `bareOrigin` — evaluated FRESH on every shim invocation (never cached), so a case fired
@@ -195,13 +213,25 @@ function writeGhShim(
       // W1-T2268 (via waitForCiGreen/pollToGate): REST, never `gh pr view --json
       // statusCheckRollup` — resolved on the FIRST poll (the composed check-runs read), never
       // a real wait.
-      `  *"/check-runs"*) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"${(opts.ciConclusion ?? "SUCCESS").toLowerCase()}"}]}' ;;`,
+      '  *"/check-runs"*)',
+      ...(opts.priorArmLedger
+        ? [
+            `    ${resolveBranch}`,
+            `    sha=$(git -C ${JSON.stringify(bareOrigin)} rev-parse "$branch" 2>/dev/null)`,
+            '    printf \'{"ts":"2026-08-16T00:00:00.000Z","step":"automerge.armed","pr_url":"https://github.com/craigoley/remudero/pull/4242","head_sha":"%s","lane":"review","outcome":"armed"}\\n\' "$sha" >> ' +
+              JSON.stringify(opts.priorArmLedger),
+          ]
+        : []),
+      `    echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"${(opts.ciConclusion ?? "SUCCESS").toLowerCase()}"}]}' ;;`,
       '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
       '  *"--json body"*) echo \'{"body":""}\' ;;',
       opts.failPrDiff
         ? '  *"pr diff"*) echo "gh: transient diff failure" 1>&2; exit 1 ;;'
-        : '  *"pr diff"*) echo "" ;;',
+        : opts.prDiffLive
+          ? `  *"pr diff"*)\n    ${resolveBranch}\n    git -C ${JSON.stringify(bareOrigin)} diff "main...$branch" ;;`
+          : '  *"pr diff"*) echo "" ;;',
       '  *"pr edit"*) exit 0 ;;',
+      ...(opts.failDisarm ? ['  *"--disable-auto"*) echo "GraphQL: could not disable auto-merge (fixture)" 1>&2; exit 1 ;;'] : []),
       "  *) exit 0 ;;",
       "esac",
       "",
@@ -213,6 +243,8 @@ function writeGhShim(
 async function withHarness(
   feedbackId: string | undefined,
   body: (ctx: { configRoot: string; setBranch: (b: string) => void }) => Promise<void>,
+  // Shim options that need the config root (the ledger path lives under it), resolved once it exists.
+  shimOpts?: (configRoot: string) => Parameters<typeof writeGhShim>[2],
 ): Promise<Array<Record<string, unknown>>> {
   const bare = makeOrigin(feedbackId);
   const home = mkdtempSync(join(tmpdir(), "cmdsite-home-"));
@@ -241,7 +273,7 @@ async function withHarness(
     execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
     execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
-    writeGhShim(shimDir, bare);
+    writeGhShim(shimDir, bare, shimOpts?.(configRoot));
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     await body({ configRoot, setBranch: (b) => { process.env.RMD_SHIM_BRANCH = b; } });
@@ -297,6 +329,47 @@ test("GUARDED SITE triage propose-path push: the run reaches the second gitPushR
     /provenance|plan-only|non-plan/i,
     "the run died at a POST-push guard, so the propose-path push had already executed",
   );
+});
+
+// ── W1-T968 — the triage lane's gated report answers about the PULL REQUEST, not the call ──
+// The test above deliberately stops at the post-push guards (the shim's diff is empty). This one
+// hands the shim the branch's REAL diff, and the fixture worker cites its feedback entry in the task
+// it files, exactly as a real triage worker must — so the run clears the plan-only and provenance
+// guards and reaches its gate. The shim then reproduces the production order the batch-approve test
+// above describes: a standing review-lane arm on this head, a failed withdrawal, and this lane's own
+// arm refused. The old phrase, a function of that last outcome alone, printed "NOT armed".
+test("W1-T968: a triage PR reports a standing prior arm as armed although its own arm was refused", async (t) => {
+  const feedbackId = `fb-w1t968-triage-${Date.now()}`;
+  const said: string[] = [];
+  t.mock.method(console, "log", (...args: unknown[]) => {
+    said.push(args.map(String).join(" "));
+  });
+
+  const ledger = await withHarness(
+    feedbackId,
+    async () => {
+      await withLiveWritesAllowed(() => triageCommand([feedbackId], {
+        spawn: async (args: { cwd: string }) => {
+          appendFileSync(join(args.cwd, "plan", "tasks.yaml"), VALID_TASK("W1-T99", `filed from feedback#${feedbackId}`));
+          const b = execFileSync("git", ["-C", args.cwd, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
+          process.env.RMD_SHIM_BRANCH = b;
+          return fakeWorker(`PROPOSED: file W1-T99 for feedback#${feedbackId}`);
+        },
+      })).catch(() => undefined);
+    },
+    (configRoot) => ({ prDiffLive: true, priorArmLedger: join(configRoot, "state", "ledger.ndjson"), failDisarm: true }),
+  );
+
+  const steps = JSON.stringify(ledger.map((l) => l.step));
+  assert.ok(!ledger.some((l) => l.step === "triage.error"), `the run must clear every guard; steps=${steps}`);
+  assert.ok(ledger.some((l) => l.step === "automerge.armed" && l.lane === "review"), `the review lane's arm is on the ledger; steps=${steps}`);
+  assert.ok(ledger.some((l) => l.step === "automerge.disarm_skipped"), `the withdrawal failed, so that arm stands; steps=${steps}`);
+  const ownArm = ledger.filter((l) => l.lane === "operator" && String(l.step).startsWith("automerge."));
+  assert.ok(ownArm.length > 0 && ownArm.every((l) => l.step !== "automerge.armed"), `this lane's own arm armed nothing; steps=${steps}`);
+
+  const gated = said.filter((line) => line.includes("triage PR gated — "));
+  assert.equal(gated.length, 1, `exactly one gated report line; console=${JSON.stringify(said)}`);
+  assert.match(gated[0], /triage PR gated — armed \(/, "the pull request is armed, whatever this lane's own call returned");
 });
 
 // ── run-task.ts:8618 — planCommand's push ────────────────────────────────────────────
@@ -490,6 +563,85 @@ test("GUARDED SITE approve fresh-clone + full drive: ensureRepoDir clones, and t
     const worktrees = existsSync(join(root, "worktrees")) ? readdirSync(join(root, "worktrees")).filter((d) => d.startsWith("run-")) : [];
     assert.deepEqual(worktrees, [], `expected the approve run's own worktree to be removed; found ${JSON.stringify(worktrees)}`);
     // reviewCommand always returns a number; the CLI's own exit code is that number verbatim.
+    assert.equal(typeof code, "number");
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T968 — the report answers about the PULL REQUEST, not the call, on the BATCH path ──
+// `rmd approve P1 P2` routes to approveBatchCommand, whose gated tail no other test reaches. The
+// shim reproduces the production order: the review lane has ALREADY armed this head (its row lands
+// on the CI poll, before this lane's own review), that review's verdict refuses and tries to
+// withdraw, the withdrawal FAILS so the arm stands, and this lane's own redundant arm is refused.
+// The OLD phrase was a function of that last outcome alone and printed "NOT armed" for a PR whose
+// arm is still standing on GitHub.
+test("W1-T968: rmd approve batch reports a standing prior arm as armed although its own arm was refused", async (t) => {
+  const bare = makeOrigin(undefined);
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cmdsite-appbatchhome-`));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cmdsite-appbatchroot-`));
+  const shimDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cmdsite-appbatchshim-`));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  const said: string[] = [];
+  t.mock.method(console, "log", (...args: unknown[]) => {
+    said.push(args.map(String).join(" "));
+  });
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT }, null, 2),
+      "utf8",
+    );
+    process.env.HOME = home;
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    writeGhShim(shimDir, bare, { matchRealBranch: true, priorArmLedger: ledgerPath, failDisarm: true });
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    // Two genuinely DIFFERENT drafts: near-identical ones are refused as duplicates of each other
+    // (the second is skipped), which would drive a batch of one and prove nothing about batching.
+    const shapes = [
+      { id: "P-BATCH-A", title: "rotate stale widget ledgers weekly", file: "src/lib/widget-rotation.ts" },
+      { id: "P-BATCH-B", title: "index gadget registry by owner", file: "src/lib/gadget-index.ts" },
+    ];
+    const drafts: Record<string, unknown> = {};
+    const proposals = shapes.map(({ id, title, file }, i) => {
+      drafts[id] = {
+        proposalId: id,
+        fragmentYaml:
+          `- id: NEW-${i + 1}\n  title: ${title}\n  repo: remudero\n  type: implement\n  verify: human\n` +
+          `  origin: architect\n  files: [${file}]\n`,
+        stampLine: `- ${id} (plan) — RATIFIED -> NEW-${i + 1}.`,
+        anchorFingerprint: "",
+      };
+      return { id, summary: title, evidenceAnchors: [] };
+    });
+    writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals }, null, 2), "utf8");
+    writeFileSync(join(root, "state", "inbox-drafts.json"), JSON.stringify(drafts), "utf8");
+
+    const code = await withLiveWritesAllowed(() =>
+      approveCommand(["P-BATCH-A", "P-BATCH-B"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never }),
+    );
+
+    const ledgerLines = readFileSync(ledgerPath, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const steps = JSON.stringify(ledgerLines.map((l) => l.step));
+    assert.ok(!ledgerLines.some((l) => l.step === "approve.error"), `the batch drive must not throw; steps=${steps}`);
+    // The three facts the phrase has to reconcile, each read off the real ledger:
+    assert.ok(ledgerLines.some((l) => l.step === "automerge.armed" && l.lane === "review"), `the review lane's arm is on the ledger; steps=${steps}`);
+    assert.ok(ledgerLines.some((l) => l.step === "automerge.disarm_skipped"), `the withdrawal failed, so that arm stands; steps=${steps}`);
+    const ownArm = ledgerLines.filter((l) => l.lane === "operator" && String(l.step).startsWith("automerge."));
+    assert.ok(ownArm.length > 0 && ownArm.every((l) => l.step !== "automerge.armed"), `this lane's own arm armed nothing; steps=${steps}`);
+
+    const gated = said.filter((line) => line.startsWith("rmd approve: batch of 2 gated — "));
+    assert.equal(gated.length, 1, `exactly one gated report line; console=${JSON.stringify(said)}`);
+    assert.match(gated[0], /^rmd approve: batch of 2 gated — armed \(/, "the pull request is armed, whatever this lane's own call returned");
     assert.equal(typeof code, "number");
   } finally {
     process.env.HOME = savedHome;
