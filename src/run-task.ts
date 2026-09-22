@@ -1134,6 +1134,7 @@ import {
   cappedReason,
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
+  discriminateReviewReuse,
   resolvePlanCriteriaAtHead,
   type PlanCriteriaAtHeadDivergence,
   type PlanCriteriaAtHeadResult,
@@ -1150,6 +1151,7 @@ import {
   type CappedOverride,
   type CriterionVerdict,
   type CriterionRefusal,
+  type ProofExecutor,
   type ReviewVerdict,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
@@ -1301,6 +1303,7 @@ import {
   type MergeConflictEvidence,
   type OpenPrView,
   type ReviewDispatchMode,
+  type ReviewReuseInputs,
   type RollupCheckEntry,
   type PostFixReverificationSummary,
   type ProofDiscriminationEvidence,
@@ -1336,7 +1339,6 @@ import {
   sweepArmTaskId,
   uncreditableHeadReason,
   creditSubjectIsImplementation,
-  planOnlyRunBranchReceipts,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -1719,16 +1721,157 @@ export function buildSweepEffects(
         ? deps.reviewCommandImpl(String(_prNumber), args, opts)
         : reviewerCodeGate.call(String(_prNumber), args, opts);
     });
+  const reviewRepoDir =
+    deps.repo === (deps.localRepoName ?? resolveOwnerRepo().repo) ? repoRoot : join(deps.config.root, "repos", deps.repo);
+  const materializeReviewReuse =
+    (deps.materializeReviewWorktreeImpl as typeof materializeReviewWorktree | undefined) ?? materializeReviewWorktree;
+  const buildBaseProofReuse =
+    (deps.buildBaseProofDirImpl as typeof buildBaseProofDir | undefined) ?? buildBaseProofDir;
+  const reviewReuseExecProof = deps.reviewReuseExecProofImpl as ProofExecutor | undefined;
   const reviewReuseRunner = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<number> => {
-    // A base move still needs fresh proof discrimination; the existing semantic review path is
-    // the safe fallback until a proof-only runner can be exposed without duplicating review.ts.
-    if (mode.kind !== "reuse") {
+    const fallbackToFullReview = async (reason: string): Promise<number> => {
       deps.log("sweep.review_reuse_discrimination_fallback", {
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
-        ...(mode.kind === "discriminate-only" ? { judged_head_sha: mode.judgedHeadSha } : {}),
+        requested_review_mode: mode.kind,
+        effective_review_mode: "full-review",
+        fallback_reason: reason,
+        ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+    };
+
+    if (mode.kind === "full-review") {
+      return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
+    }
+
+    if (mode.kind === "discriminate-only") {
+      const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
+      const prior = readLedgerLines(deps.ledgerPath)
+        .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
+        .at(-1)?.decision_verdict as ReviewVerdict | undefined;
+      if (
+        !pr.taskId ||
+        !prior ||
+        (prior.state !== "success" && prior.state !== "failure") ||
+        !Array.isArray(prior.criteria) ||
+        reuseInputs.currentOwnDiffDigest === undefined ||
+        reuseInputs.currentMergeBaseSha === undefined
+      ) {
+        return fallbackToFullReview("prior verdict, task identity, or current reuse facts are unreadable");
+      }
+
+      let worktreePath: string | undefined;
+      let baseProof: BaseProofDir | undefined;
+      let fallbackReason: string | undefined;
+      let exitCode: number | undefined;
+      try {
+        const materialized = materializeReviewReuse(deps.config, reviewRepoDir, pr.prNumber, pr.headSha);
+        if (materialized.worktreePath === undefined) {
+          fallbackReason =
+            `PR-head worktree unavailable (${materialized.failure.errorClass}): ${materialized.failure.message}`;
+        } else {
+          worktreePath = materialized.worktreePath;
+          const criteria = prior.criteria.map((criterion) => ({ proof: criterion.proof }));
+          baseProof = buildBaseProofReuse(criteria, worktreePath);
+          if (baseProof.baseCheckoutDir === undefined) {
+            fallbackReason =
+              baseProof.baseWorktreeFailure !== undefined
+                ? `merge-base worktree unavailable: ${baseProof.baseWorktreeFailure}`
+                : "merge-base proof evidence is unavailable";
+          } else {
+            const diff = String(ghExec(["pr", "diff", pr.prUrl], { encoding: "utf8", maxBuffer: 1 << 26 }));
+            const discriminated = discriminateReviewReuse({
+              prior,
+              diff,
+              report: pr.body ?? "",
+              headCheckoutDir: worktreePath,
+              baseCheckoutDir: baseProof.baseCheckoutDir,
+              baseUnreadablePaths: baseProof.baseUnreadablePaths,
+              baseIsCheckout: baseProof.baseIsCheckout,
+              addedTestFiles: baseProof.addedTestFiles,
+              taskDeclaredFiles: deps.plan.byId.get(pr.taskId)?.files,
+              execProof: reviewReuseExecProof,
+            });
+            if (!discriminated.ok) {
+              fallbackReason = discriminated.reason;
+            } else {
+              const verdict: ReviewVerdict = {
+                ...discriminated.verdict,
+                reviewContractDigest: prior.reviewContractDigest,
+                ownDiffDigest: reuseInputs.currentOwnDiffDigest,
+                mergeBaseSha: reuseInputs.currentMergeBaseSha,
+              };
+              const posted = await postReviewStatusGuarded({
+                owner: deps.owner,
+                repo: deps.repo,
+                sha: pr.headSha,
+                state: verdict.state,
+                description: reviewPostedDescription(verdict),
+                taskId: pr.taskId,
+                evidence: reviewEvidenceStrength(verdict.criteria),
+                ledgerPath: deps.ledgerPath,
+                runId: deps.runId,
+                prUrl: pr.prUrl,
+                reviewInputDigest: pr.reviewInputDigest,
+                reviewEngineRevision: REVIEW_ENGINE_REVISION,
+                fetchLifecycle: () => fetchPrLifecycle(pr.prUrl),
+              });
+              if (!posted.posted && !posted.replayed) {
+                exitCode = 1;
+              } else {
+                appendLedger(deps.ledgerPath, {
+                  run_id: deps.runId,
+                  task_id: pr.taskId,
+                  step: "review.posted",
+                  context: REVIEW_CONTEXT,
+                  state: verdict.state,
+                  head_sha: pr.headSha,
+                  pr_url: pr.prUrl,
+                  decision_verdict: verdict,
+                  review_reused: false,
+                  review_discriminated: true,
+                  requested_review_mode: mode.kind,
+                  effective_review_mode: "proof-only-discrimination",
+                  discriminated_from_head_sha: mode.judgedHeadSha,
+                  discrimination_result: verdict.state,
+                  ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
+                  proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+                  ...reviewLedgerLegibilityFields(verdict),
+                });
+                exitCode = 0;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        const reason = `proof-only discrimination errored: ${String((error as Error)?.message ?? error)}`;
+        deps.log("sweep.review_reuse_discrimination_error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
+        fallbackReason = reason;
+      } finally {
+        if (baseProof?.baseIsCheckout && baseProof.baseCheckoutDir !== undefined) {
+          removeBaseProofWorktree(reviewRepoDir, baseProof.baseCheckoutDir, deps.worktreeRemoveImpl);
+        }
+        if (worktreePath !== undefined) {
+          try {
+            (deps.worktreeRemoveImpl ?? worktreeRemove)(reviewRepoDir, worktreePath);
+          } catch (error) {
+            deps.log("sweep.review_reuse_discrimination_cleanup_error", {
+              pr_number: pr.prNumber,
+              head_sha: pr.headSha,
+              error: String((error as Error)?.message ?? error),
+            });
+          }
+        }
+      }
+      if (fallbackReason !== undefined) return fallbackToFullReview(fallbackReason);
+      return exitCode ?? 1;
+    }
+
+    // Exact reuse keeps the existing guarded post path. It never executes proofs because its
+    // identity inputs are unchanged; only base movement reaches the proof-only branch above.
+    if (mode.kind !== "reuse") {
+      return fallbackToFullReview("unknown review reuse mode");
     }
     const prior = readLedgerLines(deps.ledgerPath)
       .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
@@ -1764,6 +1907,8 @@ export function buildSweepEffects(
       pr_url: pr.prUrl,
       decision_verdict: verdict,
       review_reused: true,
+      requested_review_mode: mode.kind,
+      effective_review_mode: "verdict-reuse",
       reused_from_head_sha: mode.judgedHeadSha,
       ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
       proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
@@ -36298,8 +36443,6 @@ export function buildSweepHook(
     // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
     // idling on code that already paid for a verdict it could never publish.
     let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
-    // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
-    let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         pacer,
@@ -36308,8 +36451,6 @@ export function buildSweepHook(
         isMerged,
           readMainPlan: resolvedReadMainPlan,
       });
-      // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
-      thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
@@ -36417,12 +36558,7 @@ export function buildSweepHook(
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
     await draftHook();
-    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0
-      ? {
-          ...(reviewerCodeStale ? { reviewerCodeStale } : {}),
-          planOnlyRunBranchReceipts: thisPassPlanOnlyRunBranchReceipts,
-        }
-      : undefined;
+    return reviewerCodeStale ? { reviewerCodeStale } : undefined;
   };
 }
 

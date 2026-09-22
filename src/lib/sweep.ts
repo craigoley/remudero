@@ -850,6 +850,11 @@ export interface BuildSweepEffectsDeps {
   restRollupForImpl?: SweepRuntimeFn;
   fetchCiFailuresImpl?: SweepRuntimeFn;
   runReviewImpl?: SweepRuntimeFn;
+  /** W1-T3901 — proof-only reuse worktree seams; production defaults live in run-task.ts and
+   * tests replace only the checkout boundaries, never the deterministic proof judge. */
+  materializeReviewWorktreeImpl?: SweepRuntimeFn;
+  buildBaseProofDirImpl?: SweepRuntimeFn;
+  reviewReuseExecProofImpl?: SweepRuntimeFn;
   fetchPrBodyImpl?: SweepRuntimeFn;
   readHeadShaImpl?: SweepRuntimeFn;
   ghLiveHeadImpl?: SweepRuntimeFn;
