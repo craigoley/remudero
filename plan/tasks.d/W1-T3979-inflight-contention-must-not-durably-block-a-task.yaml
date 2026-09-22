@@ -55,15 +55,13 @@
     deletion, timer tuning, provider routing change, or new retry loop is in scope.
   acceptance:
     - claim: "a live blocked_inflight claim is a scheduling deferral and is re-offered without a durable independent block"
-      proof: "unit test: W1-T3979 producer: blocked_inflight writes no durable block and the task stays eligible for a later tick"
+      proof: "grep: W1-T3979 producer: blocked_inflight writes no durable block in test/inflight-contention-does-not-durably-block.test.ts"
+    - claim: "a historical blocked_inflight row is re-admitted while a blocked_review row remains durably blocked"
+      proof: "grep: W1-T3979 reader: a retained blocked_inflight row does not durably block in test/inflight-contention-does-not-durably-block.test.ts"
     - claim: "genuine independent failure handling remains durable and still excludes the task"
-      proof: "unit test: W1-T3979 falsifier: the identical fixture with blocked_review instead of blocked_inflight still durably blocks"
+      proof: "grep: W1-T3979 falsifier: the identical fixture with blocked_review instead of blocked_inflight still durably blocks in test/inflight-contention-does-not-durably-block.test.ts"
     - claim: "the live inflight lock prevents a second worker spawn across repeated daemon ticks"
-      proof: "unit test: W1-T3979 concurrency: a real held inflight lock keeps the worker spawn count at zero across every tick"
-    - claim: "a historical blocked_inflight row is re-admitted"
-      proof: "unit test: W1-T3979 reader: a retained blocked_inflight row does not durably block — admission is restored"
-    - claim: "the same historical fixture with blocked_review remains durably blocked"
-      proof: "unit test: W1-T3979 reader falsifier: the same row with only the verdict changed to blocked_review remains blocked"
+      proof: "grep: W1-T3979 concurrency: a real held inflight lock keeps the worker spawn count at zero across every tick in test/inflight-contention-does-not-durably-block.test.ts"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTING if an actual `blocked_inflight` result already bypasses
     `dispatch.blocked_independent` and status.ts already treats its historical row as a deferral.
