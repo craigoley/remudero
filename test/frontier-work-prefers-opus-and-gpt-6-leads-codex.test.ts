@@ -18,8 +18,8 @@ import {
 } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
 
-// 2026-09-22 model change: GPT-5.6 Luna -> GPT-6 Luna, Terra phased out, and Sol 6 "only if
-// absolutely necessary" behind Claude Opus. Measured before this change: 84 of 127 Opus-requested runs
+// 2026-09-22 model change: Opus 5 -> Opus 5.5, GPT-5.6 Luna -> GPT-6 Luna, Terra phased out, and
+// Sol 6 "only if absolutely necessary". Measured before this change: 84 of 127 Opus-requested runs
 // went to Codex gpt-5.6-sol, because the auction split frontier work by headroom alone.
 
 const REPO_ROOT = join(import.meta.dirname, "..");
@@ -75,6 +75,15 @@ const LIVE_MODELS: CodexModelInfo[] = [
 // One shared bucket for every model, as measured: headroom ties, so row order decides.
 const LIVE_LIMITS = { rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 71, windowDurationMins: 10080 } } } };
 
+test("Opus 5.5 leads the frontier Claude candidates and the Architect and retro ride it", () => {
+  const table = mounts();
+  assert.equal(table.capabilities?.claudeCandidates?.frontier[0], "claude-opus-5-5");
+  assert.equal(table.capabilities?.claudeCandidates?.frontier[1], "claude-opus-5", "Opus 5 trails as a same-capability fallback");
+  assert.equal(table.architect.model, "claude-opus-5-5");
+  assert.equal(table.synthesis.retro.model, "claude-opus-5-5");
+  assert.equal(table.capabilities?.claude["claude-opus-5-5"], "frontier");
+});
+
 test("GPT-6 Luna leads every Codex row GPT-5.6 Luna led, and Terra is in no Codex row", () => {
   const codex = ladder().codex;
   for (const [capability, byEffort] of Object.entries(codex)) {
@@ -97,7 +106,7 @@ test("replayed against the live account, balanced and economy pick GPT-6 Luna an
     ["sonnet", "high", "gpt-6-luna"],
     ["sonnet", "medium", "gpt-6-luna"],
     ["haiku", "low", "gpt-6-luna"],
-    ["claude-opus-5", "high", "gpt-6-sol"],
+    ["claude-opus-5-5", "high", "gpt-6-sol"],
     ["opus", "high", "gpt-6-sol"],
   ] as const) {
     const picked = selectCodexModel(LIVE_MODELS, LIVE_LIMITS, {} as never, model, effort, table);
@@ -246,18 +255,17 @@ async function spawnFrontier(root: string, claudeUsed: number, model = "opus") {
       })();
     }) as never,
   });
-  const expectedClaudeModel = mounts().capabilities?.claudeCandidates?.frontier[0];
-  return { result, assignments, claudeModel, codexSpawned, expectedClaudeModel };
+  return { result, assignments, claudeModel, codexSpawned };
 }
 
-test("an opus lane with Claude headroom runs on Claude Opus and its assignment names the preference", async () => {
+test("an opus lane with Claude headroom runs on claude-opus-5-5 and its assignment names the preference", async () => {
   const root = workerFixtureRoot("rmd-frontier-claude-");
   try {
-    for (const model of ["opus", "claude-opus-5"]) {
+    for (const model of ["opus", "claude-opus-5-5"]) {
       const run = await spawnFrontier(root, 80, model);
       assert.equal(run.codexSpawned, 0, "Codex has 95% headroom and still must not take frontier work");
       assert.equal(run.result.provider, "claude");
-      assert.equal(run.claudeModel, run.expectedClaudeModel);
+      assert.equal(run.claudeModel, "claude-opus-5-5");
       const assignment = run.assignments.at(-1);
       assert.equal(assignment?.selected.provider, "claude");
       assert.deepEqual(assignment?.routing.capabilityPreference, { capability: "frontier", provider: "claude" });
