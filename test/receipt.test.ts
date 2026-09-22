@@ -35,10 +35,13 @@ function fullLedger(): ReceiptLedgerLine[] {
       run_id: RUN_ID,
       task_id: TASK_ID,
       step: "implement.done",
+      provider: "cash",
       model: "claude-opus-4",
       effort: "high",
       num_turns: 42,
       cost_usd: 3.14,
+      verdict: "success",
+      session_id: "sess-9f2c",
     },
     { run_id: RUN_ID, task_id: TASK_ID, step: "pr.opened", pr_url: PR_URL, branch: `run-${TASK_ID}-1755000000000` },
     { run_id: RUN_ID, task_id: TASK_ID, step: "automerge.armed", at: "open", outcome: "armed" },
@@ -74,10 +77,16 @@ test("buildReceipt deterministically assembles the predicate — byte-identical 
     value: ["cache-prefix-bytes", "control-surface-fail-loud-stop-one-shot"],
   });
   assert.deepEqual(a.predicate.implement, {
+    // `provider` is DELIBERATELY not "claude" in this fixture: the same `model` can be served by a
+    // subscription or diverted to the cash adapter, and a receipt that reported only the model
+    // would attribute a diverted run to the subscription that never ran it.
+    provider: { value: "cash" },
     model: { value: "claude-opus-4" },
     effort: { value: "high" },
     num_turns: { value: 42 },
     cost_usd: { value: 3.14 },
+    verdict: { value: "success" },
+    session_id: { value: "sess-9f2c" },
   });
   assert.deepEqual(a.predicate.review.reviewer_outcome, { value: "reviewer_completed" });
   assert.deepEqual(a.predicate.merge, {
