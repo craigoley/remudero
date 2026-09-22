@@ -8,6 +8,7 @@ import { createService } from "../src/lib/service.js";
 import {
   buildOperatorAgentRoutes,
   createOperatorAgentMemorySource,
+  selectOperatorAgentMemoryRow,
   readOperatorAgentHistory,
   OPERATOR_AGENT_PROPOSAL_STEP,
   type OperatorAgentMemorySource,
@@ -206,6 +207,27 @@ test("unit test: operator-agent writes invalidate the snapshot for read-after-wr
     const body = (await response.json()) as { proposals: OperatorAgentProposal[] };
     assert.equal(body.proposals[0]?.proposalId, proposal.proposalId);
   }, undefined, memory);
+});
+
+test("unit test: operator-agent memory redacts and retains a decision note", () => {
+  assert.deepEqual(
+    selectOperatorAgentMemoryRow({
+      step: "panel.operator_agent_decision",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      decision: "accepted",
+      at: "2026-09-21T00:00:00.000Z",
+      note: "The bounded evidence supports review.",
+      bearer_token_id: "must-not-be-retained",
+      prompt: "must-not-be-retained",
+    }),
+    {
+      step: "panel.operator_agent_decision",
+      proposal_id: "operator-agent:repo:scale:queue-pressure",
+      decision: "accepted",
+      at: "2026-09-21T00:00:00.000Z",
+      note: "The bounded evidence supports review.",
+    },
+  );
 });
 
 test("reads the default operator-agent settings when no settings row exists; persists a valid operator-agent settings update in the ledger", async () => {

@@ -221,7 +221,7 @@ test("unit test: legacy analytics snapshots receive an empty ready memory read m
   // Checkpoints written before W1-T4001 have no process-owned memory property. Recreate that
   // wire shape by spreading the non-enumerable field away, then let the cache compatibility path
   // attach the empty ready read model before publication.
-  const legacy = { ...observed } as AnalyticsSnapshot;
+  const legacy = { ...observed, operatorAgentMemory: undefined } as unknown as AnalyticsSnapshot;
   const cache = createAnalyticsSnapshotCache({
     stateDir: "/unused",
     readSnapshot: async () => legacy,
