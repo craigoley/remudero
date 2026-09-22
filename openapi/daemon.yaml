@@ -916,6 +916,149 @@ components:
         rendered:
           type: string
 
+    ExternalActionResult:
+      type: object
+      description: A redacted external-effect reconciliation receipt; connector payloads never cross the daemon boundary.
+      required:
+        - version
+        - originatingActionId
+        - originatingReceiptId
+        - capabilityGrantId
+        - connector
+        - targetIdentity
+        - requestedOperation
+        - preconditionSnapshot
+        - expectedPostconditions
+        - observation
+        - idempotencyKey
+        - reconciliationState
+        - retryPath
+        - evidenceReference
+        - safeToComplete
+      properties:
+        version:
+          type: string
+          enum: [external-effect-v1]
+        originatingActionId:
+          type: string
+        originatingReceiptId:
+          type: string
+        capabilityGrantId:
+          type: string
+        connector:
+          type: string
+        targetIdentity:
+          type: string
+        requestedOperation:
+          type: string
+        preconditionSnapshot:
+          type: object
+          additionalProperties: true
+        expectedPostconditions:
+          type: array
+          items:
+            type: object
+            required: [path, equals]
+            properties:
+              path:
+                type: string
+              equals:
+                type: object
+                additionalProperties: true
+                description: JSON-compatible expected value; scalar values are preserved by the daemon even though the generated client represents this open object conservatively.
+              description:
+                type: string
+        observedState:
+          type: object
+          additionalProperties: true
+        observation:
+          type: object
+          required: [status, maxAgeMs]
+          properties:
+            status:
+              type: string
+              enum: [fresh, stale, unavailable]
+            observedAt:
+              type: string
+              format: date-time
+            ageMs:
+              type: number
+              minimum: 0
+            maxAgeMs:
+              type: number
+              minimum: 0
+        idempotencyKey:
+          type: string
+        reconciliationState:
+          type: string
+          enum: [applied, refused, pending, partially-applied, drifted, stale, unobservable]
+        partialSuccess:
+          type: object
+          required: [satisfied, unsatisfied]
+          properties:
+            satisfied:
+              type: array
+              items:
+                type: string
+            unsatisfied:
+              type: array
+              items:
+                type: string
+        retryPath:
+          type: object
+          required: [kind, allowed, reason]
+          properties:
+            kind:
+              type: string
+              enum: [none, retry, compensation]
+            allowed:
+              type: boolean
+            reason:
+              type: string
+            attemptNumber:
+              type: integer
+              minimum: 1
+        evidenceReference:
+          type: string
+        safeToComplete:
+          type: boolean
+        reason:
+          type: string
+
+    ExternalActionResultsEnvelope:
+      type: object
+      description: Bounded read-only external-action-results-v1 projection. Unavailable source state is explicit and is never represented as a healthy empty list.
+      required:
+        - version
+        - state
+        - source
+        - generatedAt
+      properties:
+        version:
+          type: string
+          enum: [external-action-results-v1]
+        state:
+          type: string
+          enum: [verified, unavailable]
+        source:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+        cursor:
+          type: string
+        results:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/ExternalActionResult"
+        truncated:
+          type: boolean
+        reason:
+          type: string
+        detail:
+          type: string
+
     ProposalDecisionRequest:
       type: object
       description: POST /v1/feedback/decision's body -- accept or reject a `proposed` entry.
@@ -3298,6 +3441,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperatorActivityResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/action-results:
+    get:
+      summary: Read bounded external-effect reconciliation results.
+      description: >
+        Read-only external-action-results-v1 projection over daemon-owned, redacted
+        external-effect receipts. The route never invokes a connector, accepts browser-owned
+        measurements, or turns an unavailable ledger into an empty healthy result.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: taskId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 160
+        - name: actionId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 160
+        - name: changedSince
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: Verified redacted results or an explicit unavailable source state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalActionResultsEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
