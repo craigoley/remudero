@@ -3428,10 +3428,12 @@ function readRawWorkspaceGlobs(repoDir: string, readManifest: (p: string) => str
  * paths) and `unsafe` (the RAW strings {@link isSafeWorkspaceGlob} refused). An unsafe entry is never expanded and never
  * joined onto `repoDir` -- it is returned verbatim so a caller can name it without this function ever having read anything
  * beneath it (a `../outside` entry causes zero filesystem reads here, by construction, not by a caught exception). */
-function resolveWorkspaceGlobs(
-  repoDir: string,
-  deps: { readManifest?: (p: string) => string; listDirs?: (p: string) => string[] } = {},
-): { safe: string[]; unsafe: string[] } {
+type WorkspaceGlobOptions = {
+  readManifest?: (p: string) => string;
+  listDirs?: (p: string) => string[];
+};
+
+function resolveWorkspaceGlobs(repoDir: string, deps: WorkspaceGlobOptions = {}): { safe: string[]; unsafe: string[] } {
   const readManifest = deps.readManifest ?? ((p: string) => readFileSync(p, "utf8"));
   const listDirs = deps.listDirs ?? listWorkspaceChildDirs;
   const globs = readRawWorkspaceGlobs(repoDir, readManifest);
@@ -3459,7 +3461,7 @@ function resolveWorkspaceGlobs(
  * this file (W1-T4003). */
 export function deriveWorkspacePaths(
   repoDir: string,
-  deps: { readManifest?: (p: string) => string; listDirs?: (p: string) => string[] } = {},
+  deps: WorkspaceGlobOptions = {},
 ): string[] {
   return resolveWorkspaceGlobs(repoDir, deps).safe;
 }
@@ -3483,6 +3485,13 @@ export interface WorkspaceNodeModulesResult {
   outcome: WorkspaceNodeModulesOutcome;
 }
 
+type WorkspaceNodeModulesOptions = WorkspaceGlobOptions & {
+  exists?: (p: string) => boolean;
+  /** Throws `ENOENT` when the path is absent; other errors mean its state is unknown. */
+  lstat?: (p: string) => unknown;
+  symlink?: (target: string, path: string) => void;
+};
+
 /** Does `results` include any workspace this run did NOT fully resolve? `"no-source"` is excluded on purpose -- a workspace
  * with no nested install of its own is a normal, complete outcome, not a gap. Only `"occupied"`, `"failed"`, and
  * `"unsafe-path"` leave a worker's tooling possibly unresolved, so those are what the caller's ledger line and any
@@ -3502,15 +3511,7 @@ export function workspaceNodeModulesIncomplete(results: WorkspaceNodeModulesResu
 export function linkWorkspaceNodeModules(
   repoDir: string,
   worktreePath: string,
-  deps: {
-    readManifest?: (p: string) => string;
-    listDirs?: (p: string) => string[];
-    exists?: (p: string) => boolean;
-    /** Throws `ENOENT` when the path is absent -- any OTHER thrown code (e.g. `EACCES`) means the destination's state could
-     * not be verified, which is treated the same as "occupied": never risk linking over something unreadable. */
-    lstat?: (p: string) => unknown;
-    symlink?: (target: string, path: string) => void;
-  } = {},
+  deps: WorkspaceNodeModulesOptions = {},
 ): WorkspaceNodeModulesResult[] {
   const exists = deps.exists ?? existsSync;
   const lstat = deps.lstat ?? lstatSync;
