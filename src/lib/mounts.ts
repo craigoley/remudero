@@ -614,13 +614,8 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   }
 
   const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes };
-  // G-17 FIRST, then the step-up's own rule. The Tier Invariant is the more fundamental of the
-  // two — it is what keeps every worker strictly below the Architect — and a table that violates
-  // it must say so in G-17's own words. Checking the step-up ahead of it MASKED that message:
-  // an Architect dropped to a worker-peer tier reported `'step_up' ... must sit strictly below
-  // the Architect` instead of `Tier Invariant (G-17) violated`, so the test that pins the
-  // invariant's bite (test/the-top-tier-is-not-claude-only.test.ts) read the wrong refusal for
-  // the right violation. Both rules still fire; only their order changed.
+  // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
+  // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);
   if (stepUp && tiers[stepUp.model] >= tiers[architect.model]) {
     throw new MountsError(
