@@ -917,6 +917,7 @@ import {
   loadPlanAtRef,
 } from "./lib/plan.js";
 import { exitCodeFor } from "./lib/errors.js";
+import { flushThenExit } from "./lib/flush-exit.js";
 import {
   DEFAULT_OVERLAP_WARNING_POLICY,
   declarationCountsByPath,
@@ -44160,7 +44161,9 @@ export async function main(
   // process-boundary concerns the task record calls out: the freshness gate above, and the
   // exit code translation right here.
   realDeps();
-  process.exit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
+  // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
+  // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
+  await flushThenExit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
 }
 
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
@@ -44172,7 +44175,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
     // `PlanError` answers with its declared code) instead of hardcoding the generic one for
     // every uncaught throw — a foreign `Error` still falls through to the same code as before.
-    process.exit(exitCodeFor(err));
+    void flushThenExit(exitCodeFor(err));
   });
 }
 
