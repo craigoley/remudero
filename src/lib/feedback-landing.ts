@@ -1296,11 +1296,39 @@ function readPendingCiLearningInputs(stateRoot: string, shardRelDir: string): La
   }));
 }
 
+function ciLearningMainOrigins(shardRelDir: string, git: GitExec): Set<string> {
+  const origins = new Set<string>();
+  const output = git([
+    "grep",
+    "--no-color",
+    "-h",
+    "-E",
+    "^[[:space:]]*origin:[[:space:]]*[^#]+",
+    "origin/main",
+    "--",
+    shardRelDir,
+  ]);
+  for (const line of output.split(/\r?\n/)) {
+    const raw = line.replace(/^[ \t]*origin:[ \t]*/, "").trim();
+    const origin = raw.replace(/\\"/g, '"').replace(/^(['"])(.*)\1$/, "$2").trim();
+    if (origin) origins.add(origin);
+  }
+  return origins;
+}
+
 function acknowledgeMergedCiLearningShards(stateRoot: string, shardRelDir: string, git: GitExec): void {
+  const mainOrigins = ciLearningMainOrigins(shardRelDir, git);
   for (const relPath of ciLearningPendingRelPaths(stateRoot, shardRelDir)) {
     try {
+      const queuedPath = ciLearningPendingAbsPath(stateRoot, relPath);
+      const queued = readFileSync(queuedPath, "utf8");
+      const parsed = ciLearningOriginRead(queued, `pending-ci-learning:${relPath}`);
+      if (parsed.ok && parsed.origin && mainOrigins.has(parsed.origin)) {
+        unlinkSync(queuedPath);
+        continue;
+      }
       const remoteSha = git(["rev-parse", `origin/main:${relPath}`]).trim();
-      const localSha = git(["hash-object", ciLearningPendingAbsPath(stateRoot, relPath)]).trim();
+      const localSha = git(["hash-object", queuedPath]).trim();
       if (remoteSha === localSha) unlinkSync(ciLearningPendingAbsPath(stateRoot, relPath));
     } catch {
       // The queue is durable by default: remove only when fetched origin/main proves the same blob.
