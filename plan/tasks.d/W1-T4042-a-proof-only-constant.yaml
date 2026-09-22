@@ -61,8 +61,8 @@
 
     THIS FILING CARRIES NO TRAILER AND SITS ON A chore/ BRANCH, not `run-W1-T4042-*`.
   acceptance:
-    - claim: "both strike writers derive the regime from the one helper rather than each computing it"
-      proof: 'grep: strikeRegimeForDispatch(review\.criteria) in src/run-task.ts'
+    - claim: "the regime is derived in exactly one place so a second writer cannot drift"
+      proof: 'grep: test("W1-T4042: the regime is derived in exactly one place" in test/the-regime-helper-has-one-derivation.test.ts'
     - claim: "the proof-only constant is no longer exported by the module"
       proof: 'grep: test("W1-T4042: the proof-only constant is no longer exported" in test/the-regime-helper-has-one-derivation.test.ts'
     - claim: "removing it does not change how the helper decides the empty case"
@@ -73,3 +73,15 @@
   files: [src/run-task.ts, test/the-regime-helper-has-one-derivation.test.ts, scripts/test-tier-manifest.json]
   status: queued
   attempts: 0
+  note: |
+    CRITERION 1 REPOINTED BEFORE ANY PUSH, AND WHY THE FIRST FORM COULD NOT WORK. As authored it was
+    `grep: strikeRegimeForDispatch(review\.criteria) in src/run-task.ts` — an INVARIANT, not a change.
+    W1-T4033 landed both call sites, so the pattern reads 2 hits at the merge base as well as at the
+    head. `rmd preflight --proofs` refused it in exactly those terms: "1 of 3 proof(s) pass at BOTH
+    head and 53088a55c; they establish nothing", with the remedy "repoint each at behaviour this diff
+    changes. A control assertion needs a corpus control of its own."
+    THE CLAIM IS STILL WORTH MAKING — a second derivation reappearing is the drift this task guards —
+    so it moves to a census test in the NEW suite, which does not exist at the base ref and therefore
+    discriminates. That test reads the source, asserts exactly two call sites and exactly one
+    `proof_exec !== "not_executable"` comparison (the helper's own), and asserts the file it read was
+    non-empty first, so it can never pass by comparing nothing.
