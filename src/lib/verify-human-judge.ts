@@ -386,3 +386,82 @@ export function realVerifyHumanJudge(opts: {
     return parseVerifyHumanVerdict(result.text);
   };
 }
+
+
+export type VerifyHumanReleaseOutcome =
+  | { kind: "released"; reason: string }
+  | { kind: "escalated"; reason: string }
+  | { kind: "unavailable"; reason: string };
+
+export type VerifyHumanReleaseHook = (
+  shard: ShardUnderJudgement,
+  verdict: VerifyHumanVerdict,
+) => Promise<VerifyHumanReleaseOutcome>;
+
+export const VERIFY_HUMAN_RELEASE_ESCALATED_STEP = "verify_human.release_escalated";
+export const VERIFY_HUMAN_RELEASE_UNAVAILABLE_STEP = "verify_human.release_unavailable";
+
+export function releaseEscalatedKeys(rows: readonly Record<string, unknown>[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (row?.step !== VERIFY_HUMAN_RELEASE_ESCALATED_STEP) continue;
+    if (typeof row.observed_state === "string" && row.observed_state) out.add(row.observed_state);
+  }
+  return out;
+}
+
+export function awaitingRelease(
+  shards: readonly ShardUnderJudgement[],
+  priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>,
+  releasedIds: ReadonlySet<string>,
+  escalatedKeys: ReadonlySet<string>,
+): ShardUnderJudgement[] {
+  return shards.filter((shard) => {
+    if (releasedIds.has(shard.id)) return false;
+    const key = observedStateKey(shard);
+    const prior = priorVerdicts.get(key);
+    return prior?.decision === "automate" && !prior.judgeFailed && !escalatedKeys.has(key);
+  });
+}
+
+export interface ApplyAutomateHooks {
+  release?: VerifyHumanReleaseHook;
+  stageProposal: (proposal: Proposal) => void;
+  appendRow: (row: Record<string, unknown>) => void;
+  runId: string;
+}
+
+export async function applyAutomateVerdict(
+  shard: ShardUnderJudgement,
+  verdict: VerifyHumanVerdict,
+  hooks: ApplyAutomateHooks,
+): Promise<"released" | "needsOperator" | "automated"> {
+  if (!hooks.release) {
+    hooks.stageProposal(automationProposalFromJudgedShard(shard, verdict));
+    return "automated";
+  }
+  const outcome = await hooks.release(shard, verdict);
+  if (outcome.kind === "released") return "released";
+  if (outcome.kind === "escalated") {
+    hooks.appendRow({
+      run_id: hooks.runId,
+      task_id: shard.id,
+      step: VERIFY_HUMAN_RELEASE_ESCALATED_STEP,
+      observed_state: observedStateKey(shard),
+      reason: outcome.reason,
+    });
+    hooks.stageProposal(
+      proposalFromJudgedShard(shard, { decision: "needs_operator", reason: `the risk judge escalated this release: ${outcome.reason}` }),
+    );
+    return "needsOperator";
+  }
+  hooks.appendRow({
+    run_id: hooks.runId,
+    task_id: shard.id,
+    step: VERIFY_HUMAN_RELEASE_UNAVAILABLE_STEP,
+    observed_state: observedStateKey(shard),
+    reason: outcome.reason,
+  });
+  hooks.stageProposal(automationProposalFromJudgedShard(shard, verdict));
+  return "automated";
+}

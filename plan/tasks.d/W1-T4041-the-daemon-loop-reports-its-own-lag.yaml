@@ -95,5 +95,5 @@
   origin: "oper#three-lanes-silent-together-2026-09-22"
   plan_refs: ["W1-T2852", "W1-T1211", "W1-T2379"]
   files: [src/lib/daemon.ts, test/the-daemon-loop-reports-its-own-lag.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0

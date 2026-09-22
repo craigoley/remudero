@@ -65,7 +65,10 @@ import {
   automationProposalFromJudgedShard,
   proposalFromJudgedShard,
   verifyHumanVerdictRow,
+  applyAutomateVerdict,
+  awaitingRelease,
   type ShardUnderJudgement,
+  type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./verify-human-judge.js";
 
@@ -1528,6 +1531,9 @@ export interface VerifyHumanCadenceResult {
   skipped: string[];
   stateChanged: string[];
   ageBandReasks: string[];
+  /** Released to the fleet this cycle: the judge said automate AND the risk judge said proceed.
+   *  Optional so every existing result literal stays valid; absent reads as none. */
+  released?: string[];
   status: "clear" | "judged" | "refused";
   refusedReason?: string;
 }
@@ -1541,6 +1547,13 @@ export interface VerifyHumanCadenceOpts {
   stageProposal: (proposal: Proposal) => void;
   appendRow: (row: Record<string, unknown>) => void;
   runId: string;
+  /** The continue arm. Absent ⇒ an automate verdict stages a proposal exactly as before. */
+  release?: VerifyHumanReleaseHook;
+  /** Task ids already released (`ratify.approved` rows). A released task is never re-judged and
+   *  never re-released — it is the fleet's now, not the operator's. */
+  releasedIds?: ReadonlySet<string>;
+  /** Observed states whose release the risk judge already escalated — asked once, not per tick. */
+  releaseEscalatedKeys?: ReadonlySet<string>;
 }
 
 function verifyHumanAgeBand(ageDays: number): number | undefined {
@@ -1584,7 +1597,9 @@ function verifyHumanDueReason(
  */
 export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<VerifyHumanCadenceResult> {
   const priorAgeBandKeys = opts.priorAgeBandKeys ?? new Set<string>();
+  const releasedIds = opts.releasedIds ?? new Set<string>();
   const due = opts.shards
+    .filter((shard) => !releasedIds.has(shard.id))
     .map((shard) => ({ shard, reason: verifyHumanDueReason(shard, opts.priorVerdicts, priorAgeBandKeys) }))
     .filter((entry): entry is { shard: ShardUnderJudgement; reason: VerifyHumanCadenceDueReason } => entry.reason !== undefined);
   const dueIds = new Set(due.map((entry) => entry.shard.id));
@@ -1598,8 +1613,24 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
     skipped: opts.shards.filter((shard) => !dueIds.has(shard.id)).map((shard) => shard.id),
     stateChanged: due.filter((entry) => entry.reason === "state_changed").map((entry) => entry.shard.id),
     ageBandReasks: due.filter((entry) => entry.reason === "age_band").map((entry) => entry.shard.id),
+    released: [],
     status: due.length === 0 ? "clear" : "judged",
   };
+
+  const automateHooks = { release: opts.release, stageProposal: opts.stageProposal, appendRow: opts.appendRow, runId: opts.runId };
+  const bucketOf = (bucket: "released" | "needsOperator" | "automated"): string[] =>
+    bucket === "released" ? (result.released ??= []) : bucket === "needsOperator" ? result.needsOperator : result.automated;
+
+  // THE BACKFILL: shards judged automate before the release arm existed are never due again, so
+  // without this they would wait in the inbox forever. Only runs when a release hook is wired.
+  if (opts.release) {
+    for (const shard of awaitingRelease(opts.shards, opts.priorVerdicts, releasedIds, opts.releaseEscalatedKeys ?? new Set())) {
+      const prior = opts.priorVerdicts.get(observedStateKey(shard));
+      if (!prior) continue;
+      bucketOf(await applyAutomateVerdict(shard, prior, automateHooks)).push(shard.id);
+    }
+    if ((result.released?.length ?? 0) > 0 && result.status === "clear") result.status = "judged";
+  }
 
   for (const { shard, reason } of due) {
     const verdict = await judgeVerifyHumanShard(shard, { judge: opts.judge });
@@ -1617,8 +1648,7 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
       continue;
     }
     if (verdict.decision === "automate") {
-      opts.stageProposal(automationProposalFromJudgedShard(shard, verdict));
-      result.automated.push(shard.id);
+      bucketOf(await applyAutomateVerdict(shard, verdict, automateHooks)).push(shard.id);
       continue;
     }
     result.backlog.push(shard.id);

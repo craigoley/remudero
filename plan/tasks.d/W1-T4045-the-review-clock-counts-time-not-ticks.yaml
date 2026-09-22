@@ -10,7 +10,7 @@
   origin: "oper#review-clock-counts-ticks-2026-09-22"
   plan_refs: [W1-T2852, W1-T4041, W1-T4046]
   files: [src/lib/daemon.ts, test/the-review-clock-counts-time-not-ticks.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CLOCK AND ITS ARITHMETIC. `startInterphaseReviewClock` (src/lib/daemon.ts) waits in quanta of

@@ -17,7 +17,7 @@
     - test/daemon.test.ts
   origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
   plan_refs: ["W1-T534", "W1-T916", "W1-T2530", "W1-T3067", "W1-T3994", "W1-T3996"]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED 2026-09-22: an open foreign plan filing used the head
