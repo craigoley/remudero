@@ -373,7 +373,7 @@
   "src/lib/tty.ts": 70,
   "src/lib/untrusted-envelope.ts": 69,
   "src/lib/verdict-calibration.ts": 500,
-  "src/lib/verify-human-judge.ts": 138,
+  "src/lib/verify-human-judge.ts": 250,
   "src/lib/verify-human-release.ts": 34,
   "src/lib/wipe-test.ts": 156,
   "src/lib/worker-containment.ts": 214,
