@@ -116,7 +116,7 @@
   origin: "oper#mint-lanes-never-type-the-advisory-2026-08-18"
   plan_refs: ["W1-T917", "W1-T533", "W1-T984"]
   files: [src/run-task.ts, test/mint-lane-overlap-advisory.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     W1-T984 DOES NOT ALREADY COVER THIS, AND IT WAS CHECKED BEFORE FILING RATHER THAN ASSUMED.

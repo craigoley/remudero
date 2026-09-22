@@ -94,3 +94,32 @@
     verify: human because no test can establish that a shape is the right one — only that an entry
     exists. The three grep proofs are absent TODAY by construction (each measured at 0 above), so
     they discriminate: they can only pass once the ruling is written.
+
+    OPERATOR RULING 2026-09-22 — PROPOSALS ARE RECORDS. TAKE (a), THEN (b), IN THAT ORDER, EXACTLY
+    AS THIS SHARD RECOMMENDED.
+
+    (a) FIRST: `plan/proposals.d/*.yaml`, one file per proposal, each carrying a machine-readable
+    `status:` and an EXECUTABLE falsifier in the shard dialect. The deciding property is
+    REFUTABILITY, which no live proposal has: thirty-one proposals ranked in one MASTER-PLAN
+    paragraph cannot be asked whether they are still true. A status and a falsifier are what make
+    that question answerable by an instrument instead of by a human re-reading a sentence.
+
+    (b) SECOND: route them through `updateProposalRegistry`, the writer W1-T2458 already used for
+    followups and which `feedback-docket.ts` already names as its filing route. Second and not
+    first for the shard's own reason — (b) alone would give proposals a QUEUE before it gave them
+    a FALSIFIER, making them easier to act on without making them easier to be wrong about.
+
+    PROPOSALS DO NOT DIFFER FROM FOLLOWUPS IN KIND, ONLY IN LIFETIME. W1-T2458 settled that mined
+    prose becomes records. A followup is consumed once; a proposal carries a standing rank across
+    cycles, which is why it needs its own record type with a status field rather than only an
+    inbox row. That is the whole distinction, and it is why (a) exists at all.
+
+    THE `retroPrompt` / RULE 27 CONTRADICTION IS SETTLED IN FAVOUR OF RULE 27. `retroPrompt`'s
+    instruction 4 ("PROPOSALS ONLY ... Do NOT edit plan/tasks.yaml") enforces a prohibition
+    MASTER-PLAN records as already lifted. The prompt is the stale half and must be corrected to
+    say that the retro writes proposal RECORDS and that automatic filing is permitted under rule
+    27. Leaving it costs another cycle of a worker obeying a rule that no longer exists.
+
+    THE FILES LIMIT STANDS. This task's deliverable is still `DECISIONS.md` alone. A builder who
+    ships `plan/proposals.d/` here has merged a ruling with its migration; the migration is its
+    own task, cites this entry, and lands separately.

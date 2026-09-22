@@ -15,10 +15,11 @@ raw: "Cross-repository semantic-supersession failure: console implementation PR
   uncredited. Add a cross-repo regression reproducing #1581/#1590 semantics."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

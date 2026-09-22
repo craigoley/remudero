@@ -58,7 +58,7 @@
     repository or argv, or dispatch two requests in one poll: the route or daemon proofs must fail.
     Stub the fix/review command rather than invoking the established injected seam and the command
     wiring proof must fail. A request that advances past a strike cap is a regression, not success.
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> run-W1-T3989-1790030000001

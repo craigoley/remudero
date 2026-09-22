@@ -5,6 +5,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -120,6 +121,8 @@ import {
   type ProviderSelection,
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
+  OpenWeightUnsupportedResponseFormatError,
+  type OpenWeightModelSelection,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -1710,6 +1713,57 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
  *  — never a value asserted independently of it. */
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
+/**
+ * Run an open-weight spawn, and on a DEPLOYMENT CAPABILITY REFUSAL try the next rung of the ladder
+ * rather than failing the run.
+ *
+ * MEASURED over the live ledger: 22,356 `openweight_error` runs, 21,942 of them (98%) on ONE
+ * deployment across three days — while two other candidates sat configured in the SAME ladder row
+ * and were never tried. `selectOpenWeightModel` already walks the ladder for CONTEXT FIT; nothing
+ * walked it for FAILURE, so a single unusable deployment took the whole run.
+ *
+ * ONE TRIGGER — the only failure that cannot succeed on a retry of the SAME deployment.
+ * `OpenWeightUnsupportedResponseFormatError` names the deployment and what it could not honour,
+ * and its own message prescribes this remedy. Everything else is deliberately NOT walked: a
+ * timeout or truncated reply may be transient and walking turns a blip into a second charge
+ * against `dailyCapUsd`; a too-large request already consulted the fit gate; auth and cap refusals
+ * recur on every rung. Walking those spends real money to learn nothing.
+ *
+ * BOUNDED BY THE LADDER: one attempt per remaining candidate, over a list the context gate already
+ * filtered — it can neither loop nor widen the context rule.
+ */
+export async function runOpenWeightWalkingLadder(
+  run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
+  selection: OpenWeightModelSelection,
+): Promise<WorkerResult> {
+  const rungs = [selection.model, ...selection.alternatives];
+  let lastRefusal: unknown;
+  for (const [index, model] of rungs.entries()) {
+    try {
+      const result = await run({ ...selection, model });
+      result.routedModel = model;
+      return result;
+    } catch (err) {
+      if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
+      lastRefusal = err;
+      const next = rungs[index + 1];
+      // NAME THE FALL-THROUGH. A silent downgrade would make a run that landed on rung 3
+      // indistinguishable from one that led there, and the point of this walk is that the record
+      // can say which deployments were unusable and why.
+      console.error(JSON.stringify({
+        event: "worker.openweight.rung_refused",
+        deployment: model,
+        reason: err.message.slice(0, 200),
+        next: next ?? null,
+        rung: index + 1,
+        of: rungs.length,
+      }));
+      if (!next) break;
+    }
+  }
+  throw lastRefusal;
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   try {
@@ -2092,8 +2146,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
-      const result = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, openWeight);
-      result.routedModel = openWeight.model;
+      // WALK THE LADDER ON A CAPABILITY REFUSAL, NEVER ON ANYTHING ELSE (see `runOpenWeightWalkingLadder`).
+      const result = await runOpenWeightWalkingLadder(
+        (selection) => runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection),
+        openWeight,
+      );
       result.selectionAssignmentId = selectionAssignmentId;
       return result;
     } finally {
@@ -3324,6 +3381,184 @@ export function linkWorktreeNodeModules(
   return "linked";
 }
 
+/** Is `glob` a workspace pattern this repo's workspace-linking is willing to read? Only a normalized relative path
+ * (`apps/dashboard`) or that SAME shape with exactly one trailing wildcard segment (`apps/*`) qualifies — never an absolute
+ * path, a `..` segment anywhere, a bare/embedded `*` mid-segment, or a recursive glob (`apps/**`). This is the boundary the
+ * design calls out by name: the source is untrusted `package.json` content, and the only filesystem read a workspace value
+ * can ever cause is one `readdir` of the literal parent segment before the wildcard — never an arbitrary walk (W1-T4003). */
+export function isSafeWorkspaceGlob(glob: string): boolean {
+  if (typeof glob !== "string" || glob.length === 0) return false;
+  if (glob.startsWith("/") || glob.startsWith("~")) return false;
+  const segments = glob.split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return false;
+  const wildcardSegments = segments.filter((s) => s.includes("*"));
+  if (wildcardSegments.length === 0) return true;
+  // Exactly one wildcard segment, it must be the LAST segment, and it must be a bare `*` -- rejects `apps/**`,
+  // `a/*/b`, and a partial pattern like `a-*` in the same pass.
+  return wildcardSegments.length === 1 && segments[segments.length - 1] === "*";
+}
+
+/** Default `listDirs`: real subdirectory names directly inside `p`, or `[]` if `p` is absent/unreadable -- a workspace glob
+ * names a package DIRECTORY, never a plain file, and a missing parent degrades to "no matches" rather than throwing. */
+function listWorkspaceChildDirs(p: string): string[] {
+  try {
+    return readdirSync(p, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    // Absent, not a plain file, or unreadable -- all three degrade to "no matches", the documented contract above.
+    return [];
+  }
+}
+
+/** Parse ONLY: the raw `package.json#workspaces` array entries for `repoDir`, unfiltered and unexpanded. Every other
+ * workspace helper below is built on this one function, so "the manifest failed to parse" degrades to `[]` in exactly one
+ * place rather than being reimplemented per caller (W1-T4003). */
+function readRawWorkspaceGlobs(repoDir: string, readManifest: (p: string) => string): string[] {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(readManifest(join(repoDir, "package.json")));
+  } catch {
+    // Absent, unreadable, or not valid JSON -- best-effort degrades to "no declared workspaces" rather than throwing.
+    return [];
+  }
+  const raw = (manifest as { workspaces?: unknown } | null)?.workspaces;
+  return Array.isArray(raw) ? raw.filter((g): g is string => typeof g === "string") : [];
+}
+
+/** Split `repoDir`'s declared workspace globs into `safe` (normalized, one-level-expanded, deduped, sorted workspace-relative
+ * paths) and `unsafe` (the RAW strings {@link isSafeWorkspaceGlob} refused). An unsafe entry is never expanded and never
+ * joined onto `repoDir` -- it is returned verbatim so a caller can name it without this function ever having read anything
+ * beneath it (a `../outside` entry causes zero filesystem reads here, by construction, not by a caught exception). */
+type WorkspaceGlobOptions = {
+  readManifest?: (p: string) => string;
+  listDirs?: (p: string) => string[];
+};
+
+function resolveWorkspaceGlobs(repoDir: string, deps: WorkspaceGlobOptions = {}): { safe: string[]; unsafe: string[] } {
+  const readManifest = deps.readManifest ?? ((p: string) => readFileSync(p, "utf8"));
+  const listDirs = deps.listDirs ?? listWorkspaceChildDirs;
+  const globs = readRawWorkspaceGlobs(repoDir, readManifest);
+  const safe = new Set<string>();
+  const unsafe: string[] = [];
+  for (const glob of globs) {
+    if (!isSafeWorkspaceGlob(glob)) {
+      unsafe.push(glob);
+      continue;
+    }
+    if (glob.endsWith("/*")) {
+      const parent = glob.slice(0, -"/*".length);
+      for (const name of listDirs(join(repoDir, parent))) safe.add(`${parent}/${name}`);
+    } else {
+      safe.add(glob);
+    }
+  }
+  return { safe: [...safe].sort(), unsafe };
+}
+
+/** The workspace-relative directories `repoDir`'s OWN `package.json#workspaces` declares, expanded one level and filtered to
+ * paths {@link isSafeWorkspaceGlob} accepts -- an unsafe entry is silently absent from this list (see
+ * {@link linkWorkspaceNodeModules} for where it is instead surfaced as a named `"unsafe-path"` outcome). Best-effort: an
+ * absent or unparsable `package.json` yields no workspaces rather than throwing, matching every other best-effort read in
+ * this file (W1-T4003). */
+export function deriveWorkspacePaths(
+  repoDir: string,
+  deps: WorkspaceGlobOptions = {},
+): string[] {
+  return resolveWorkspaceGlobs(repoDir, deps).safe;
+}
+
+export type WorkspaceNodeModulesOutcome =
+  | "linked"
+  // The source workspace has no nested `node_modules` of its own -- nothing to link, a normal shape for a workspace that
+  // hoists everything to root. Distinct from `"occupied"` below: this is a named SKIP, never claimed as incomplete.
+  | "no-source"
+  // Destination already exists (occupied) OR its state could not be verified (an `lstat` failure other than "absent"). Both
+  // are left untouched -- linking over either risks writing inside a real directory or a live symlink -- and both are named
+  // the SAME outcome because the caller's only safe response to either is identical: do nothing, report incomplete.
+  | "occupied"
+  | "failed"
+  // The raw workspace glob failed {@link isSafeWorkspaceGlob} -- refused before any filesystem read below `repoDir`, so
+  // `workspace` here is the RAW string from `package.json`, never a joined/resolved path.
+  | "unsafe-path";
+
+export interface WorkspaceNodeModulesResult {
+  workspace: string;
+  outcome: WorkspaceNodeModulesOutcome;
+}
+
+type WorkspaceNodeModulesOptions = WorkspaceGlobOptions & {
+  exists?: (p: string) => boolean;
+  /** Throws `ENOENT` when the path is absent; other errors mean its state is unknown. */
+  lstat?: (p: string) => unknown;
+  symlink?: (target: string, path: string) => void;
+};
+
+/** Does `results` include any workspace this run did NOT fully resolve? `"no-source"` is excluded on purpose -- a workspace
+ * with no nested install of its own is a normal, complete outcome, not a gap. Only `"occupied"`, `"failed"`, and
+ * `"unsafe-path"` leave a worker's tooling possibly unresolved, so those are what the caller's ledger line and any
+ * downstream "why did this worker fail before its diff was even evaluated" triage should treat as incomplete (W1-T4003). */
+export function workspaceNodeModulesIncomplete(results: WorkspaceNodeModulesResult[]): boolean {
+  return results.some((r) => r.outcome !== "linked" && r.outcome !== "no-source");
+}
+
+/** The sibling {@link linkWorktreeNodeModules} lacks: that one link is ROOT-only, but this fleet's npm layout can leave a
+ * workspace's own dependency nested under ITS directory (`apps/dashboard/node_modules`) rather than hoisted to root --
+ * MEASURED: `@vitejs/plugin-react` lives only there in this repo's real install, so a worktree with just the root link
+ * resolves the root CLI but not that plugin, and a worker can fail before its diff is ever evaluated. For each of `repoDir`'s
+ * declared workspaces that exists in BOTH `repoDir` and `worktreePath` and carries its own nested `node_modules` in
+ * `repoDir`, symlink `<worktreePath>/<workspace>/node_modules -> <repoDir>/<workspace>/node_modules` -- and ONLY when that
+ * destination is free. Same invariant as the root link: a SYMLINK, never an install, and every outcome a RETURN VALUE, never
+ * a throw (W1-T4003; see also W1-T2312, the outage `npm ci` in a worker worktree caused). */
+export function linkWorkspaceNodeModules(
+  repoDir: string,
+  worktreePath: string,
+  deps: WorkspaceNodeModulesOptions = {},
+): WorkspaceNodeModulesResult[] {
+  const exists = deps.exists ?? existsSync;
+  const lstat = deps.lstat ?? lstatSync;
+  const symlink = deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir"));
+  const { safe, unsafe } = resolveWorkspaceGlobs(repoDir, { readManifest: deps.readManifest, listDirs: deps.listDirs });
+  const results: WorkspaceNodeModulesResult[] = unsafe.map((workspace) => ({
+    workspace,
+    outcome: "unsafe-path" as const,
+  }));
+  for (const workspace of safe) {
+    const sourceWorkspaceDir = join(repoDir, workspace);
+    const worktreeWorkspaceDir = join(worktreePath, workspace);
+    // "considers only a matching workspace directory that exists in both source and fresh worktree" -- a declared
+    // workspace absent from either side is simply not this helper's problem (e.g. the worktree hasn't been given that
+    // directory at all yet), so it produces no outcome rather than a misleading one.
+    if (!exists(sourceWorkspaceDir) || !exists(worktreeWorkspaceDir)) continue;
+    const sourceNodeModules = join(sourceWorkspaceDir, "node_modules");
+    if (!exists(sourceNodeModules)) {
+      results.push({ workspace, outcome: "no-source" });
+      continue;
+    }
+    const dest = join(worktreeWorkspaceDir, "node_modules");
+    let destTaken = true;
+    try {
+      lstat(dest);
+    } catch (e) {
+      // ENOENT -- and only ENOENT -- means the destination is verifiably free. Any other failure (e.g. EACCES on a
+      // parent directory) leaves its state unknown, and an unknown destination is never treated as safe to link over.
+      destTaken = (e as NodeJS.ErrnoException)?.code !== "ENOENT";
+    }
+    if (destTaken) {
+      results.push({ workspace, outcome: "occupied" });
+      continue;
+    }
+    try {
+      symlink(sourceNodeModules, dest);
+      results.push({ workspace, outcome: "linked" });
+    } catch {
+      // Symlink attempt threw (e.g. EPERM) -- best-effort by contract, so this is a named outcome, never a throw.
+      results.push({ workspace, outcome: "failed" });
+    }
+  }
+  return results;
+}
+
 /** Make git ignore the `node_modules` link above, whether or not the checked-out `.gitignore` covers it. WITHOUT THIS the link
  * is untracked and the out-of-scope push guard refuses the whole branch — and relying on the checked-out repo's own
  * `.gitignore` is exactly the assumption that failed, since `worktreeAdd` serves any repo. MEASURED (git 2.x): a linked
@@ -3724,6 +3959,16 @@ export function worktreeAdd(
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
   excludeNodeModulesFromGit(worktreePath);
   linkWorktreeNodeModules(repoDir, worktreePath);
+  // The link above is ROOT-only and cannot reach a dependency npm installed beneath a declared workspace (e.g.
+  // apps/dashboard/node_modules) -- link those too, through the SAME observability channel `worktree.add` already uses, so a
+  // missing local tool is attributable to provisioning rather than misdiagnosed as the worker's own diff (W1-T4003).
+  const workspaceLinkResults = linkWorkspaceNodeModules(repoDir, worktreePath);
+  if (workspaceLinkResults.length > 0) {
+    deps.log?.("worktree.workspace_node_modules", {
+      results: workspaceLinkResults,
+      incomplete: workspaceNodeModulesIncomplete(workspaceLinkResults),
+    });
+  }
   // The link above ties this worktree's node_modules to repoDir's tree, so measure how far that tree sits behind the
   // origin/<ref> the fetch already moved, here where the coupling is real. `ref` is computed above and no new fetch happens
   // (W1-T2618).

@@ -15,7 +15,7 @@
     - test/analytics-route.test.ts
   origin: "operator-follow-up#W1-T3983-checkpoint-proof-repair-2026-09-21"
   plan_refs: [W1-T3983, W1-T3977, CONSOLE-T34]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     This is the dispatchable implementation follow-up for W1-T3983. The parent task remains in the

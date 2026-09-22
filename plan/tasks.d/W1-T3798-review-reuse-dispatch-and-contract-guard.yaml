@@ -16,7 +16,7 @@
     - test/the-review-reuse-inputs-have-a-real-producer.test.ts
   origin: "operator-session#api-t28-reconciliation-2026-09-19"
   plan_refs: ["W1-T3704"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

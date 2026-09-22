@@ -1,0 +1,41 @@
+id: fb-1790084580606-1f4a3f
+ts: 2026-09-22T13:43:00.606Z
+raw: "rmd lint-plan DEGRADES TO MINUTES UNDER GITHUB THROTTLING INSTEAD OF
+  DEGRADING FAST, AND IT IS THE GATE EVERY FILING RUNS — OBSERVED 2026-09-22,
+  and this is filed as a DIAGNOSE because the wall-clock is not yet attributed.
+  WHAT WAS OBSERVED, in one session, same worktree, same plan: two runs
+  completed inside 120s. Three later runs exceeded 240s and then 400s and had to
+  be backgrounded to finish. The transition coincides exactly with the onset of
+  GitHub SECONDARY rate-limit 403s on this account -- gh api rate_limit read
+  core 5000/5000 with 0 used while list calls returned HTTP 403, which is the
+  documented signature of the cadence limit rather than quota exhaustion. THE
+  COMMAND CAN ALREADY SEE THE DEGRADATION, WHICH IS WHY THIS LOOKS LIKE A
+  BOUNDING PROBLEM AND NOT A DETECTION ONE. Its own summary line prints,
+  verbatim: scoped by status: the credit projection was UNRESOLVABLE, so this
+  fell back to the status: field -- nothing updates that on merge, so this count
+  OVER-reports. So it detects the unreadable surface and reports honestly. What
+  it does not appear to do is BOUND the time spent discovering that, and the two
+  summaries seen this session differed enormously in corpus -- 459 task(s)
+  checked with 7 excluded as credited when the surface was degraded, against 203
+  checked with 263 excluded when it was readable -- so the degraded path is also
+  the path that checks twice as many records. THE HAZARD IS BEHAVIOURAL, NOT
+  CORRECTNESS: a pre-push gate that takes seven minutes is a gate that gets
+  skipped, and the shipped local gate is the one thing CLAUDE.md asks you to run
+  before your first push. FIRST DELIVERABLE IS ATTRIBUTION, NOT A FIX: measure
+  where the wall-clock goes in a throttled run -- per-task credit reads, a
+  retry/backoff loop, or the larger fallback corpus -- and say which. NOT
+  ESTABLISHED AND MUST NOT BE ASSUMED: that there is a retry loop at all; that
+  the slowdown is superlinear; or that the fast runs and slow runs saw the same
+  number of open PRs. A bound tuned before the population is attributed is this
+  repo's recurring defect. IF THE ANSWER IS THAT THE CREDIT SWEEP RETRIES PER
+  TASK, the remedy is to stop on the FIRST credit-surface 403 and report
+  degraded once, rather than rediscovering it 400 times."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

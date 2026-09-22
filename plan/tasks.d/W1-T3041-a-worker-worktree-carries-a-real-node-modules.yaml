@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: high
   budget_usd: 20.00
@@ -107,3 +107,23 @@
     risk:high — nothing here changes behaviour, but the state it describes is a stated INVARIANT
     being false in production on the fleet's own host, and the obvious fix (widening rule 8) would
     break the ordinary install path. The band reflects how easy this is to fix wrongly.
+
+    OPERATOR RULING 2026-09-22 — TAKE THE FREE HALF: THE DISCRIMINATING MEASUREMENT AND THE
+    REGRESSION LOCK. Build (i) and (ii); build neither of the remedies until the measurement says
+    which cause is real.
+
+    WHY THIS IS THE LOW-RISK CANDIDATE AND NOT A DODGE. The shard names two causes, (a) a
+    hook-coverage gap and (b) a linking gap, with DIFFERENT OWNERS. A fix written before the
+    single observation in (i) has a 50% chance of patching the wrong subsystem, and this repo's
+    recurring defect is exactly that: a second fix following the first immediately because the
+    first patched a symptom.
+
+    THE TWO PROHIBITIONS IN (iii) AND (iv) ARE RULED, NOT SUGGESTED. Do NOT widen rule 8 to deny
+    installs against a real tree — `ensureInstallFresh` legitimately installs into one and a
+    fresh clone must be able to install at all. Do NOT delete the existing ~2.6 GiB of copies in
+    this pass: that is the evidence, and a worker holding one open would fail mid-run. Reclaiming
+    the space is ordinary housekeeping for a quiet host.
+
+    THE DETECTOR IS THE DELIVERABLE THAT SURVIVES EITHER CAUSE. It must read the live worktree
+    root from config rather than assume a path, and SKIP — never fail — when no worktree exists,
+    so a clean host does not see a flake.
