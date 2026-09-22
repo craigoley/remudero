@@ -66,6 +66,12 @@ GOVERNANCE (why the defaults are conservative):
    → state/DEPLOY_REQUESTED) AND the install is behind origin/main. Craig gates
    MERGES today; auto-deploy-on-every-merge would silently collapse that gate, so
    it is an explicit opt-in (`auto`) and only ever runs behind the health check.
+   AMENDED 2026-09-22 (operator ruling): merges are automatic now and mounted source already goes
+   live through the daemon's own freshness restart, so the gate was holding back only IMAGE drift
+   — a Claude CLI upgrade built and published at 19:31Z sat unrunning behind it. The watchdog tick
+   now recycles image drift itself once the image for the newest image-input commit is PUBLISHED,
+   respecting STOP, an hour's back-off after a failure, the idle gate and the health check.
+   `state/DEPLOY_IMAGE_MANUAL` restores the gate for images.
  - IDLE-GATED restart: the restart is the dangerous half (in-process dispatch ⇒ a
    mid-task restart SIGKILLs the worker — the #559/#581 orphan class). The pull is
    safe anytime; the kickstart runs ONLY at a verified idle gap, re-checked in the

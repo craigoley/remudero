@@ -889,6 +889,7 @@
     "test/human-verify-queue-surfaces.test.ts": 1224,
     "test/identity-provider-seam.test.ts": 332,
     "test/idle-reasons-panel.test.ts": 1055,
+    "test/image-drift-recycles-itself.test.ts": 0,
     "test/image-drift.test.ts": 1726,
     "test/impl-review-judges-body.test.ts": 1259,
     "test/implement-role-sentence.test.ts": 1465,

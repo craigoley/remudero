@@ -34,7 +34,8 @@ name: Build image (ACR)
 #   already exists — the Azure CLI is not available to the session that wrote this file, so no
 #   read-only query was possible and neither could be confirmed.
 #
-# TRIGGER: dispatch or a main push changing deploy/Dockerfile, deploy/entrypoint.sh, or .dockerignore.
+# TRIGGER: dispatch or a main push changing any IMAGE_BAKED_PATHS entry (src/lib/deploy-judge.ts) — a
+# test holds this list equal to that one, so drift detection never waits on an image nobody builds.
 
 on:
   push:
@@ -43,6 +44,9 @@ on:
       - deploy/Dockerfile
       - deploy/entrypoint.sh
       - .dockerignore
+      - deploy/package.json
+      - deploy/package-lock.json
+      - deploy/codex-requirements.toml
   workflow_dispatch:
     inputs:
       registry:

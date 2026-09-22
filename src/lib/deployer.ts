@@ -6,9 +6,10 @@
  * checkout and kickstarts it — the same manual redeploy, automated, the daemon itself
  * never modified.
  *
- * INVARIANT — HUMAN-GATED BY DEFAULT: deploy only when an operator marker is set
- * (`rmd deploy`) AND the install is behind origin/main; auto-deploy-on-every-merge is an
- * explicit opt-in ({@link TriggerInputs.autoMode}), never the default.
+ * INVARIANT — HUMAN-GATED BY DEFAULT, EXCEPT A PUBLISHED IMAGE: deploy only when an operator
+ * marker is set (`rmd deploy`) AND the install is behind origin/main; auto-deploy-on-every-merge is
+ * an explicit opt-in ({@link TriggerInputs.autoMode}). The watchdog tick recycles image drift itself
+ * once the new image is published (operator ruling 2026-09-22; state/DEPLOY_IMAGE_MANUAL opts out).
  * INVARIANT — IDLE-GATED RESTART: the pull is safe anytime; the kickstart — the dangerous
  * half, since an in-process restart mid-task SIGKILLs the worker — runs only at a
  * verified idle gap, re-checked immediately before it fires.
@@ -40,6 +41,7 @@ import {
   DEPLOY_RESTART_RATE_CEILING_MS,
   DEPLOY_RESTART_RATE_LIMITED_STEP,
   DEPLOY_RESTART_SCORE_THRESHOLD,
+  IMAGE_BAKED_PATHS,
   accumulateDeployRestartPressure,
   judgeDeployWorth,
   resetDeployRestartPressure,
@@ -93,7 +95,21 @@ export interface TriggerInputs {
   /** W1-T3245: read as the watchdog's RECYCLE question — image drift only, mount staleness ignored
    *  because the daemon's own freshness restart already owns it. Absent ⇒ today's full reading. */
   imageDriftOnly?: boolean;
+  /** Is the image built for the newest image-input commit published? `undefined` is UNKNOWN,
+   *  which never recycles automatically — a recycle before the build lands would pull the old one. */
+  imagePublished?: boolean;
+  /** The newest commit on origin/main touching {@link IMAGE_BAKED_PATHS}, named in the reason. */
+  newestBakedSha?: string;
+  /** state/DEPLOY_IMAGE_MANUAL present: the operator put image recycles back behind `rmd deploy`. */
+  imageRecycleManual?: boolean;
+  /** When the last recorded deploy failure happened; an automatic image recycle waits an hour after one. */
+  lastFailedAtMs?: number;
+  /** The decision's clock, for the failure back-off above. */
+  nowMs?: number;
 }
+
+/** An automatic image recycle does not follow a recorded deploy failure sooner than this. */
+export const IMAGE_RECYCLE_FAILURE_BACKOFF_MS = 60 * 60_000;
 
 export interface Decision {
   deploy: boolean;
@@ -141,7 +157,7 @@ export function sameCommit(a: string | undefined, b: string | undefined): boolea
  *  instant it merges, so counting ANY commit here would fire on tens of mounted-source merges a
  *  day and train an operator to ignore the signal. Mirrors `acr-build.yml`'s own `paths:` filter,
  *  which is what decides whether a new image is even built. */
-export const IMAGE_BAKED_PATHS: readonly string[] = ["deploy/Dockerfile", "deploy/entrypoint.sh"];
+export { IMAGE_BAKED_PATHS };
 
 /** W1-T3732 — the instance registry's BASENAME. Its directory comes from
  *  `resolveRepoLayout(root).stateDir`, never an inline state-directory literal: `repo-layout.test.ts`
@@ -175,6 +191,8 @@ export interface DaemonInstanceRow {
   stateDir: string;
   /** The container that instance runs, as `docker inspect` reported it when the registry was written. */
   containerName?: string;
+  /** The `registry/name:tag` image the instance is recycled onto. */
+  image?: string;
 }
 
 /** W1-T3733 — every declared instance's `state_dir` AND `container_name`, from one pass. See
@@ -210,7 +228,13 @@ export function daemonInstanceRows(text: string): Map<string, DaemonInstanceRow>
     if (container) {
       const row = out.get(current);
       if (row) out.set(current, { ...row, containerName: container[1] });
-      else partial.set(current, { containerName: container[1] });
+      else partial.set(current, { ...partial.get(current), containerName: container[1] });
+    }
+    const image = /^ {4}image:\s*(\S+)\s*$/.exec(raw);
+    if (image) {
+      const row = out.get(current);
+      if (row) out.set(current, { ...row, image: image[1] });
+      else partial.set(current, { ...partial.get(current), image: image[1] });
     }
   }
   // A row that never named a `state_dir` is an instance this deployment can never match, so it is
@@ -247,6 +271,12 @@ function normalisedDir(dir: string): string {
 export function imageShaContainerFor(registryText: string, stateRoot: string): string {
   const name = instanceForStateRoot(registryText, stateRoot);
   return (name !== undefined ? daemonInstanceRows(registryText).get(name)?.containerName : undefined) ?? IMAGE_SHA_CONTAINER;
+}
+
+/** The image this deployment's instance is recycled onto, from its registry row. */
+export function imageRefFor(registryText: string, stateRoot: string): string | undefined {
+  const name = instanceForStateRoot(registryText, stateRoot);
+  return name === undefined ? undefined : daemonInstanceRows(registryText).get(name)?.image;
 }
 
 export function instanceForStateRoot(registryText: string, stateRoot: string): string | undefined {
@@ -392,10 +422,33 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
     };
   }
   if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
+  // IMAGE DRIFT RECYCLES ITSELF (operator ruling 2026-09-22: restarts that big changes need happen
+  // automatically). Mounted source already goes live through the daemon's own freshness restart, so
+  // the human gate below was holding back only the rarest and most necessary recycle. Still
+  // bounded: the watchdog tick only, the new image PUBLISHED, STOP respected (above), an hour's
+  // back-off after a failure, the idle gate and health check in runDeployCycle, and an opt-out.
+  // DEPLOY_AUTO keeps its own older path below; this is the default fleet's.
+  if (i.imageDriftOnly === true && imageStale && !i.autoMode && i.imageRecycleManual !== true) {
+    if (stopUnknownOrSet) return { deploy: false, reason: `${why}, but STOP is set or unknown — no automatic recycle` };
+    const image = i.newestBakedSha ? `the image for ${i.newestBakedSha.slice(0, 9)}` : "the new image";
+    const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
+      i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
+    if (recentFailure) {
+      return { deploy: false, reason: `${why}; a deploy failed under an hour ago — the automatic image recycle backs off` };
+    }
+    if (i.imagePublished === true) {
+      return { deploy: true, reason: `automatic image recycle: ${why}, and ${image} is published` };
+    }
+    return {
+      deploy: false,
+      reason: `${why}, but ${image} is ${i.imagePublished === false ? "not published yet" : "of unknown publication"} — waiting for the build`,
+    };
+  }
   if (i.autoMode && alreadyFailed) {
     return { deploy: false, reason: `auto: origin/main already failed to deploy (${describeFailureKind(i.lastFailedKind)}) — not retried; see state/DEPLOY_FAILED` };
   }
-  if (i.autoMode && i.autoRestartPressure) {
+  // Source-change pressure decides MOUNTED staleness; it never vetoes an image the tick found stale.
+  if (i.autoMode && i.autoRestartPressure && !(i.imageDriftOnly === true && imageStale)) {
     if (i.autoRestartPressure.restart) {
       return {
         deploy: true,
@@ -727,6 +780,14 @@ export interface DeployDeps {
    *  was consulted, which is what every pre-existing test does. `undefined` from a supplied
    *  reader is UNKNOWN (the container is down — the crash-loop case), never "current". */
   imageBakedCommitsBehind?: () => number | undefined;
+  /** The newest origin/main commit touching {@link IMAGE_BAKED_PATHS}. */
+  newestBakedSha?: () => string | undefined;
+  /** Is an image tagged with that sha published? `undefined` = could not tell. Asked only on drift. */
+  imagePublished?: (sha: string) => boolean | undefined;
+  /** state/DEPLOY_IMAGE_MANUAL present. */
+  imageRecycleManual?: () => boolean;
+  /** When the recorded deploy failure happened, from state/DEPLOY_FAILED. */
+  lastFailedAtMs?: () => number | undefined;
   dirtyFiles: () => string[];
   incomingFiles: (from: string, to: string) => string[];
   /** Each merged change whose daemon impact can contribute restart pressure. Optional only for
@@ -936,6 +997,9 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
       };
     }
   }
+  const imageBakedCommitsBehind = deps.imageBakedCommitsBehind?.();
+  const imageDrift = opts.imageDriftOnly === true && (imageBakedCommitsBehind ?? 0) > 0;
+  const newestBakedSha = imageDrift ? deps.newestBakedSha?.() : undefined;
   const decision = decideDeployTrigger({
     markerPresent: markerWasPresent,
     autoMode,
@@ -950,8 +1014,12 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // PRODUCER AND CONSUMER TOGETHER. A field the decision reads and nothing supplies is the
     // #1066 shape this repo has paid for eleven times; `imageBuildSha` omitted yields `undefined`
     // here, which reads UNKNOWN and changes nothing.
-    imageBakedCommitsBehind: deps.imageBakedCommitsBehind?.(),
+    imageBakedCommitsBehind,
     imageDriftOnly: opts.imageDriftOnly,
+    ...(newestBakedSha ? { newestBakedSha, imagePublished: deps.imagePublished?.(newestBakedSha) } : {}),
+    imageRecycleManual: deps.imageRecycleManual?.(),
+    lastFailedAtMs: deps.lastFailedAtMs?.(),
+    nowMs: deps.now(),
   });
   if (!decision.deploy) {
     deps.clearDeferredSince?.(); // nothing being deferred — no active deploy attempt
@@ -1170,6 +1238,11 @@ export function deployMarkerPath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_REQUESTED");
 }
 /** Explicit opt-in to deploy on ANY new main without a per-deploy marker. */
+/** The operator's opt-out: present, image drift waits for `rmd deploy` like everything else. */
+export function deployImageManualPath(stateRoot: string): string {
+  return join(stateRoot, "state", "DEPLOY_IMAGE_MANUAL");
+}
+
 export function deployAutoPath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_AUTO");
 }
@@ -1476,6 +1549,35 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         return undefined; // container down / no docker — UNKNOWN, never "current"
       }
       return bakedPathCommitsBehind(sha, (args) => git([...args]));
+    },
+    newestBakedSha: () => {
+      try {
+        return git(["log", "-1", "--format=%H", "origin/main", "--", ...IMAGE_BAKED_PATHS]).trim() || undefined;
+      } catch {
+        return undefined; // no git answer — the tick treats the image's publication as UNKNOWN and waits
+      }
+    },
+    // The build tags each image with the commit that triggered it (acr-build.yml), so a tag for
+    // the newest image-input commit exists exactly when that image is published.
+    imagePublished: (sha) => {
+      const image = registryText === undefined ? undefined : imageRefFor(registryText, o.stateRoot);
+      if (!image) return undefined;
+      try {
+        exec("docker", ["manifest", "inspect", `${image.replace(/:[^:/]+$/, "")}:${sha}`]);
+        return true;
+      } catch (err) {
+        // Only a registry that answered "no such tag" is a no; auth or network trouble is unknown.
+        return /no such manifest|manifest unknown|not found/i.test(String((err as Error)?.message ?? err)) ? false : undefined;
+      }
+    },
+    imageRecycleManual: () => existsSync(deployImageManualPath(o.stateRoot)),
+    lastFailedAtMs: () => {
+      try {
+        const at = Date.parse((JSON.parse(readFileSync(deployFailedAlertPath(o.stateRoot), "utf8")) as { at?: string }).at ?? "");
+        return Number.isFinite(at) ? at : undefined;
+      } catch {
+        return undefined; // no failure recorded (or unreadable) — no back-off applies
+      }
     },
     // Same ledger, same live-file-only read as `runningHead` directly above — the rollback anchor
     // (see runDeployCycle's rollback branch for why it is not `installHead()`).
