@@ -2658,13 +2658,8 @@ export async function runDaemon(
       }
     }
 
-    // W1-T3997: CI learning is self-improvement, never a prerequisite for reconciling the PR queue.
-    // The corpus walks recent PRs, commits, check rollups and changed-file records; awaiting that
-    // walk here once held sweep/review/arm/dispatch for the entire read. It uses the SAME detached
-    // registry as retro and triage, so a freshness restart drains it with bounded, ledger-visible
-    // abandonment rather than cutting it off invisibly. The runner records the cadence fire before
-    // its first yield and releases that fire on an unreadable corpus, preserving its own crash-loop
-    // guard while letting this iteration continue.
+    // W1-T3997: CI learning is detached so it cannot block queue reconciliation; its registry
+    // records bounded abandonment and releases the cadence fire on unreadable corpus.
     if (deps.checkCiLearningCadence) {
       let ciLearningDecision: MeasurementCadenceDecision | undefined;
       try {
