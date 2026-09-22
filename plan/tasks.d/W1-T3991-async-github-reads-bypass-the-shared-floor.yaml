@@ -1,0 +1,54 @@
+- id: W1-T3991
+  title: "THE ASYNC GITHUB TRANSPORT BYPASSES THE SHARED READ FLOOR — ghJsonAsync must pace the real polling path before it can spawn"
+  repo: remudero
+  depends_on: [W1-T3297]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - src/lib/github-transport.ts
+    - test/the-transport-paces-its-own-reads.test.ts
+  origin: "recon#pr-6470-async-transport-floor-2026-09-21"
+  plan_refs: [W1-T3297, W1-T3976, W1-T3791]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED on current origin/main a1741de0 and reproduced in PR #6470: the synchronous
+    `ghExec`/`ghJson` paths call `applyGhReadCadence` before they spawn, but `ghJsonAsync` did not.
+    The async helper is used by the daemon/review polling paths and therefore bypassed the shared
+    read stamp even after W1-T3297 added the transport floor and W1-T3976 made unattended lanes
+    enforce it. A fast async poll can consequently reach GitHub during the same secondary-limit
+    window the synchronous path is meant to protect.
+
+    PR #6470 already contains the narrow production fix and a regression test, but its branch
+    trailer incorrectly names W1-T3982, the unrelated satellite alert-policy task. The acceptance
+    author gate correctly refused that PR because W1-T3982 declares a different test path. This
+    task records the actual async transport scope so the existing change can be retargeted and
+    reviewed without weakening provenance or duplicating the implementation.
+  design: |
+    Add the shared `applyGhReadCadence` call to the real default `ghJsonAsync` transport path before
+    `execFileAsync` can spawn. Preserve the injected executor seam as network-free test plumbing;
+    an injected fake must not mutate the operator's real cadence stamp. Keep writes and the rate-limit
+    budget probe exempt exactly as W1-T3297 defined them. The test must seed a recent shared stamp,
+    call the real default async transport, and prove it rejects before any GitHub child can run.
+
+    This is a narrow transport completion, not a new limiter: reuse the existing stamp, classifier,
+    advisory/enforced mode, and fail-open filesystem behavior. The falsifier is a fresh test process
+    with an enforced recent stamp: removing the pre-spawn call must allow the child-spawn attempt
+    instead of producing `GhReadCadenceRefusal`.
+  acceptance:
+    - claim: "the real asynchronous GitHub transport refuses a read inside the enforced cadence window before spawning"
+      proof: "grep: execAsync === execFileAsync in src/lib/github-transport.ts"
+  falsifier: |
+    Remove the `applyGhReadCadence` call from `ghJsonAsync` and run the named regression in a fresh
+    process with `RMD_GH_TRANSPORT_FLOOR=enforce` and a recent shared stamp: it must fail because
+    the real async transport reaches its child-spawn seam. Keep the injected-executor path network-free
+    and verify that writes, budget probes, and advisory mode retain W1-T3297's existing behavior.
+  note: |
+    reservation hand-off: run-W1-T3986-1790029051936 -> run-W1-T3991-1790034800000
+    reservation holder: run-W1-T3991-1790034800000.
+    The implementation PR already exists as #6470; it will be retargeted to this task after this
+    plan record lands. No new implementation branch or duplicate code is needed.
