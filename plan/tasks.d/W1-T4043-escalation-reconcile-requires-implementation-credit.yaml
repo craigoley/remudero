@@ -1,0 +1,76 @@
+- id: W1-T4043
+  title: "the escalation-lifecycle reconciler closes a genuine needs-human issue from a merged plan-only amendment — its deriveStatus branch-credit path skips the implementation-evidence filter already enforced by credit backfill, so a filing can erase the human receipt before the implementation lands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 14.00
+  files:
+    - src/run-task.ts
+    - test/cross-target-credit-evidence.test.ts
+  origin: "operator-session#needs-human-reconcile-false-close-2026-09-22"
+  plan_refs: ["W1-T3063", "W1-T3084", "W1-T3873", "W1-T3996", "W1-T974"]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED 2026-09-22: the escalation-lifecycle reconciler auto-closed remudero issue #6587 for
+    W1-T974 after plan-only PR #6603 merged, even though implementation PR #6579 was still OPEN.
+    The close comment named #6603 and said the task was merged. #6603 changed only plan/acceptance
+    records and was the accepted repair for the implementation PR's proof contract; it did not
+    build W1-T974. The issue was reopened immediately and remains the genuine human receipt until
+    #6579 lands.
+
+    SOURCE CHAIN. buildEscalationReconcileCandidates() calls deriveStatus() and passes any
+    proj.merged directly to runEscalationReconcile(), which closes the issue. The ordinary credit
+    backfill already computes creditIsImplementation from the merge subject and every destructive
+    consumer there requires exactly true. A branch-only deriveStatus result has no trailer and can
+    therefore bypass both the ledger-backed plan-only refusal and the local changed-path refusal
+    when the reconciler's origin/main checkout is one merge behind. That is the observed shape of
+    #6603: a plan-only PR on a run-W1-T974 branch, found through head-branch corroboration.
+
+    This is a destructive-consumer gap, not a request to make the whole status projection stricter.
+    Dispatch and read-only status retain their existing behavior. Only the issue closer must require
+    positive implementation evidence for a head-branch-only merge credit. A filing-shaped subject
+    refuses; a genuine implementation subject proceeds; an unreadable subject waits. The guard is
+    therefore self-healing and does not strand a PR: once the real implementation merges and the
+    live subject is readable, the next sweep closes the stale escalation automatically.
+  design: |
+    Reuse the existing creditSubjectIsImplementation() vocabulary and the same bounded merge-subject
+    map already built for the credit consumer. For a reconciler projection whose source is
+    head-branch and whose state is MERGED, resolve the PR's subject from the local merge map first,
+    then from the already-batched live PR gateway when available. Require exactly true before
+    setting derived.merged for the closer. A false subject leaves the issue live as a plan filing;
+    an unavailable subject marks the candidate indeterminate so an outage or stale checkout cannot
+    close it. Trailer/ledger/pr-field credits keep their established behavior because their own
+    plan-only/path refusals already ran in deriveStatus.
+
+    Add behavior tests using the real builder seam: a merged head-branch PR titled chore(plan) is
+    not a close candidate, a feat/fix implementation remains closable, and a missing subject is
+    indeterminate. Keep the test fixture's implementation positive control so the guard cannot pass
+    merely by disabling the entire reconciler. Do not close or mutate the referenced implementation
+    PR, delete branches, or broaden this into a status-model rewrite.
+  acceptance:
+    - claim: "a merged head-branch plan-only amendment cannot produce a merged escalation-reconcile candidate"
+      proof: "grep: creditSubjectIsImplementation in src/run-task.ts"
+    - claim: "a merged head-branch implementation with readable subject still produces a merged escalation-reconcile candidate"
+      proof: "unit test: W1-T3063: the subject predicate is three-valued, never two"
+    - claim: "an unreadable implementation subject is indeterminate rather than an automatic close"
+      proof: "unit test: W1-T3084: undefined and false both decline"
+    - claim: "the reconciler keeps its bounded local merge-subject evidence in the same pass rather than adding per-issue network reads"
+      proof: "grep: readMergeSubjectsByPr(evidenceRoot) in src/run-task.ts"
+  falsifier: |
+    Seed the same task and issue with a merged plan-only head-branch PR. Before this guard the
+    builder returns derived.merged=true and runEscalationReconcile closes the issue; after it the
+    candidate is live (or indeterminate when the subject cannot be read). Then change only the PR
+    subject to a genuine implementation subject: the candidate must return to derived.merged=true.
+    Remove the strict implementation check and rerun both tests: the plan-only case must fail again.
+    A guard that refuses both cases is invalid and must not ship because it would strand legitimate
+    stale escalations instead of increasing automated flow.
+  note: |
+    Filed after reopening #6587, which the current reconciler closed falsely for merged plan-only
+    PR #6603 while implementation PR #6579 remained open. The implementation branch must use
+    run-W1-T4043-<epochMs>; this plan filing is intentionally on a non-run codex/file branch and
+    carries no Remudero-Task trailer.
