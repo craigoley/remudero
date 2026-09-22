@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 30.00
-  files: [src/lib/daemon.ts, src/lib/status.ts, test/inflight-contention-does-not-durably-block.test.ts]
+  files: [src/lib/daemon.ts, src/lib/status.ts, scripts/test-tier-manifest.json, test/inflight-contention-does-not-durably-block.test.ts]
   origin: "operator-session#three-daemon-followup-2026-09-21"
   plan_refs: ["W1-T1268", "W1-T2910", "W1-T3565"]
   status: queued
@@ -54,14 +54,16 @@
     is restored, while the same fixture with blocked_review remains blocked. No manual ledger
     deletion, timer tuning, provider routing change, or new retry loop is in scope.
   acceptance:
-    - claim: "the daemon handles a contention result at the same result boundary that currently writes independent failure blocks"
-      proof: "grep: dispatch\\.blocked_independent in src/lib/daemon.ts"
-    - claim: "the durable status reader remains the explicit decision surface for historical independent-block rows"
-      proof: "grep: latestIndependentFailureBlock in src/lib/status.ts"
-    - claim: "the status projection already carries a separate admission-refused state rather than requiring a second broad retry state"
-      proof: "grep: admission_refused in src/lib/status.ts"
-    - claim: "the established corrected-admission precedent remains cited rather than silently widened"
-      proof: "grep: blocked_illformed in src/lib/status.ts"
+    - claim: "the daemon treats a live contention result as a deferral without writing a durable independent block"
+      proof: "unit test: W1-T3979 producer: blocked_inflight writes no durable block and the task stays eligible for a later tick"
+    - claim: "a genuine independent failure remains durably blocked"
+      proof: "unit test: W1-T3979 falsifier: the identical fixture with blocked_review instead of blocked_inflight still durably blocks"
+    - claim: "a real held in-flight lock still prevents a second worker from spawning"
+      proof: "unit test: W1-T3979 concurrency: a real held inflight lock keeps the worker spawn count at zero across every tick"
+    - claim: "a historical blocked_inflight row does not durably block admission"
+      proof: "unit test: W1-T3979 reader: a retained blocked_inflight row does not durably block — admission is restored"
+    - claim: "the same historical fixture with blocked_review remains durably blocked"
+      proof: "unit test: W1-T3979 reader falsifier: the same row with only the verdict changed to blocked_review remains blocked"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTING if an actual `blocked_inflight` result already bypasses
     `dispatch.blocked_independent` and status.ts already treats its historical row as a deferral.
