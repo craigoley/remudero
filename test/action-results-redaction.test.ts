@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EXTERNAL_EFFECT_VERSION } from "../src/lib/action-reconciliation.js";
-import { ACTION_RESULTS_MAX_ROW_BYTES, buildActionResultsProjection } from "../src/lib/action-results.js";
+import { ACTION_RESULTS_MAX_ROW_BYTES, buildActionResultsProjection, EVIDENCE_REFERENCE_RE } from "../src/lib/action-results.js";
 import { EXTERNAL_EFFECT_RECONCILED_STEP } from "../src/lib/ledger.js";
 
 function ledgerLines(rows: Array<Record<string, unknown>>, opts: { present?: boolean; torn?: number } = {}) {
@@ -65,6 +65,11 @@ test("unit test: action-results route never exposes raw connector evidence", () 
   assert.equal(Object.prototype.hasOwnProperty.call(result.items[0], "evidence"), false);
 });
 
+test("unit test: action-results route accepts only the opaque evidence-reference digest shape", () => {
+  assert.equal(EVIDENCE_REFERENCE_RE.test(`sha256:${"a".repeat(64)}`), true);
+  assert.equal(EVIDENCE_REFERENCE_RE.test("raw-provider-evidence"), false);
+});
+
 test("unit test: action-results route redacts a sensitive key nested inside a preserved postcondition", () => {
   const contaminated = row(
     {},
@@ -87,6 +92,20 @@ test("unit test: action-results route rejects a malformed row without exposing i
   assert.equal(result.items.length, 0);
   assert.equal(result.rejected, 1);
   assert.doesNotMatch(JSON.stringify(result), /raw-connector-leak-marker/);
+});
+
+test("unit test: action-results route rejects non-serializable and non-object rows without throwing", () => {
+  const circular = row({}, { reason: "circular-row-marker" });
+  (circular.external_effect as Record<string, unknown>).circular = circular;
+  const result = buildActionResultsProjection({
+    ledgerLines: ledgerLines([null as unknown as Record<string, unknown>, circular]),
+    filters: {},
+  });
+  assert.equal(result.state, "verified");
+  if (result.state !== "verified") throw new Error("expected a verified projection");
+  assert.equal(result.items.length, 0);
+  assert.equal(result.rejected, 2);
+  assert.doesNotMatch(JSON.stringify(result), /circular-row-marker/);
 });
 
 test("unit test: action-results route rejects an oversized row without exposing its content", () => {
