@@ -47,7 +47,7 @@
     - claim: "a quiet feedback landing sweep is idempotent and issues no mutation"
       proof: "grep: unchanged content still pushes nothing in test/feedback-landing-union-writer.test.ts"
     - claim: "the daemon's normal post-review flow reaches the shared review producer"
-      proof: "grep: reviewCommand in src/run-task.ts"
+      proof: "grep: requestLandingReview in src/run-task.ts"
   falsifier: |
     Restore the `gh pr merge --auto` call inside the landing bridge: the fresh-landing test must
     fail because the bridge arms before review. Restore a second merge arm on reuse: the disjoint
