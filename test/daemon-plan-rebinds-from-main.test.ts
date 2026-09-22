@@ -14,6 +14,7 @@ function planYaml(ids: string[]): string {
     .join("");
 }
 
+// daemon plan reload reads origin/main without checkout mutation.
 test("daemon plan reload reads the observed main ref in test/daemon-plan-rebinds-from-main.test.ts", () => {
   const repo = gitRepo({ kind: "plan-main-ref" });
   try {
