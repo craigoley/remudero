@@ -40,7 +40,7 @@ test("daemon plan reload reads the observed main ref in test/daemon-plan-rebinds
     const fresh = reload!();
     assert.deepEqual(fresh?.tasks.map((task) => task.id), ["NEW-FROM-MAIN"]);
     assert.equal(repo.git("rev-parse", "HEAD"), beforeHead, "reload does not move HEAD");
-    assert.equal(readFileSync(planPath, "utf8"), beforeWorkingTree, "reload leaves the checkout untouched");
+    assert.equal(readFileSync(planPath, "utf8"), beforeWorkingTree, "daemon plan reload leaves the checkout untouched");
   } finally {
     repo.cleanup();
   }
