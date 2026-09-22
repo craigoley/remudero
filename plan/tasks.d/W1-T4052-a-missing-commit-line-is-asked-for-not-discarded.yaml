@@ -1,0 +1,61 @@
+- id: W1-T4052
+  title: "A SHELL-LESS WORKER THAT OMITS ITS COMMIT_MESSAGE LINE LOSES ALL ITS EDITS — 188 harness-commit refusals across 82 runs and 112 tasks since 2026-09-17, against 110 commits that landed: resume the worker's own session once to ask for the line, instead of discarding the run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#flow-research-2026-09-22"
+  plan_refs: [W1-T3696, W1-T3573]
+  files: [src/run-task.ts, test/a-missing-commit-line-is-asked-for-not-discarded.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 FROM THE LEDGER UNION (`rmd ledger-grep '"step":"implement\.harness_commit'`), rows
+    since 2026-09-15 (present 09-17 through 09-22):
+
+        110  implement.harness_commit                    the harness committed the worker's edits
+        188  implement.harness_commit_refused            "no anchored COMMIT_MESSAGE line in the report"
+         69  implement.harness_commit_refused            "the task declares no files, so there is no surface to stage"
+         68  implement.harness_commit_refused            "every change the worker made is outside its declared files"
+         29  implement.harness_commit_refused            "the worker changed nothing"
+
+    The missing-line refusals span 82 distinct runs and 112 distinct tasks. It is the single largest way a
+    shell-less implement run ends with nothing: the worker did the work, saved it to the worktree, and
+    the run returns `no_pr` because one REPORT line is absent.
+
+    (1) THE REFUSAL IS CORRECT; DISCARDING THE WORK IS NOT. `harnessCommitForShellLessWorker`
+        (src/run-task.ts) refuses to invent a subject, and says why: "an invented subject would attribute
+        work to a run that never asked for it". That invariant stays. But the run that DID the work is
+        still addressable: the implement lane already resumes the same worker session with a follow-up
+        prompt (`implement.resumed`, W1-T3573/W1-T3696, "a resumed session is still the SAME lane"). Asking
+        that same session for the one missing line keeps the message the worker's own.
+  design: |
+    (i) When `harnessCommitForShellLessWorker` refuses with the missing-line reason AND the worktree holds
+        changes (the "changed nothing" case is left exactly as it is), the implement lane resumes the
+        worker's session ONCE with a prompt that asks for nothing but the REPORT line
+        `COMMIT_MESSAGE: <type>(<scope>): <subject>` — no edits, same tool bound as the original spawn.
+    (ii) The resumed turn's text is appended to the report and the harness commit is attempted again
+         through the same function, so every other refusal (undeclared paths, over-long subject) still
+         applies unchanged.
+    (iii) ONE resume, because the recovery is the resume: a second report still lacking the line is
+          refused exactly as today, ledgered `implement.harness_commit_refused` with a reason naming that
+          the resume was tried. A new row `implement.commit_line_requested` records every resume, so the
+          rate this recovers is a ledger read.
+    (iv) The resume's cost is recorded like any other resumed turn (implement.resumed carries cost_usd).
+  acceptance:
+    - claim: "a report with edits but no COMMIT_MESSAGE line resumes the worker once and commits under the subject it then names"
+      proof: 'grep: test("W1-T4052: a missing commit line is asked for and the edits are committed" in test/a-missing-commit-line-is-asked-for-not-discarded.test.ts'
+    - claim: "a resumed report that still lacks the line is refused as before, with a reason naming the resume"
+      proof: 'grep: test("W1-T4052: a second missing line is still refused" in test/a-missing-commit-line-is-asked-for-not-discarded.test.ts'
+    - claim: "a worker that changed nothing is not resumed"
+      proof: 'grep: test("W1-T4052: no edits means no resume" in test/a-missing-commit-line-is-asked-for-not-discarded.test.ts'
+    - claim: "the subject is always the worker's: the harness never composes one"
+      proof: 'grep: test("W1-T4052: the harness never invents a subject" in test/a-missing-commit-line-is-asked-for-not-discarded.test.ts'
+  falsifier: |
+    Keep refusing on the first missing line and the first assertion goes red. Loop the resume, or invent a
+    subject after it, and the second or fourth goes red. Resume a worker whose worktree is clean and the
+    third goes red.

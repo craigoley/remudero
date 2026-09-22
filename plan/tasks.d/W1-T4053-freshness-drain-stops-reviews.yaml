@@ -1,0 +1,52 @@
+- id: W1-T4053
+  title: "EVERY FRESHNESS SELF-RESTART STOPS REVIEWS FOR ABOUT NINE MINUTES — the drain awaits detached sweep actions with the review clock already stopped: 42 drains in three days held 327 minutes, ~490 with the reboot, with no review admission: keep the review-only light pass running through the drain"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#review-latency-research-2026-09-22"
+  plan_refs: [W1-T2865, W1-T2964, W1-T4045, W1-T2852]
+  files: [src/lib/daemon.ts, test/a-freshness-drain-keeps-reviewing.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 FROM THE LEDGER UNION over 2026-09-19..22 (`daemon.freshness_drain.*`,
+    `daemon_selfrestart_for_freshness`, `sweep.disposed`):
+
+    (1) 42 freshness drains in the 72 h to 2026-09-22T19:00Z (`daemon.freshness_drain.completed`), p50
+        9.3 min, 327 minutes in total; 32 of them abandoned the detached fix actions they waited for
+        anyway (`abandoned_detached_sweep_actions > 0`). Boot to first sweep added a further p50 ~3.3 min
+        (research agent, not re-measured), so ~490 minutes over the three days with no `sweep.disposed`
+        row — the largest single cause of green PRs waiting for review. Example: 2026-09-22
+        12:18:33Z-12:27:52Z.
+    (2) WHY NOTHING REVIEWS DURING IT. `stopForFreshness` (src/lib/daemon.ts) runs one bounded sweep,
+        then `await drainDetachedSweepActions({ boundMs })`. Its own comment: "The caller stops its
+        interphase clock before entering here, so nothing races in behind the drain (W1-T2865)". The
+        interphase clock is the review-only light pass — by its own doc it "owns only the light pass, so
+        no fix, merge, close, escalation or dispatch action is introduced here". Stopping it protects the
+        drain from nothing it could introduce, and costs every review for the whole bound.
+    (3) Restarts are already limited to material advances (W1-T2964, `advanceIsMaterial`), so the count
+        is real code merges; the cost to attack is the blackout, not the restart.
+  design: |
+    (i) The interphase review clock keeps running through `drainDetachedSweepActions` and is stopped when
+        the drain settles. A light pass in flight at that moment is awaited before `stopForFreshness`
+        returns, exactly as a detached action is — never cut off mid-post.
+    (ii) Nothing else changes: no fix, merge, dispatch or escalation is admitted during the drain, the
+         drain's bound is untouched, and the final bounded sweep still runs first.
+    (iii) Each light pass during a drain is ledgered with `during_drain: true`, so "reviews kept flowing
+          through restarts" is a ledger read, and its absence is visible.
+  acceptance:
+    - claim: "a light pass runs while the freshness drain is waiting on detached actions"
+      proof: 'grep: test("W1-T4053: the review clock runs through a freshness drain" in test/a-freshness-drain-keeps-reviewing.test.ts'
+    - claim: "an in-flight light pass is awaited before the stale exit returns"
+      proof: 'grep: test("W1-T4053: the stale exit awaits an in-flight light pass" in test/a-freshness-drain-keeps-reviewing.test.ts'
+    - claim: "the drain admits no fix, merge or dispatch"
+      proof: 'grep: test("W1-T4053: a drain admits nothing but reviews" in test/a-freshness-drain-keeps-reviewing.test.ts'
+  falsifier: |
+    Stop the clock before the drain, as today, and the first assertion goes red. Return while a pass is
+    mid-flight and the second goes red. Run a full sweep instead of the light pass during the drain and the
+    third goes red.
