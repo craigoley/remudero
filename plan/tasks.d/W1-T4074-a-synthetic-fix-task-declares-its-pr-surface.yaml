@@ -1,0 +1,40 @@
+- id: W1-T4074
+  title: "74 FIX ROUNDS ON SYNTHETIC TASKS WERE REFUSED BECAUSE A SYNTHETIC TASK DECLARES NO FILES — every shell-less fix on a PR-N, unfiled, RETRO, PLAN or TRIAGE task ends 'no surface to stage': declare the PR's own diff plus the failing gates' remedy files as its surface"
+  repo: remudero
+  depends_on: [W1-T4073]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T4073, W1-T4052]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-synthetic-fix-task-declares-its-pr-surface.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED (ledger union, 2026-09-18..22; 116 successful harness commits as the control).
+    (1) 74 `implement.harness_commit_refused` "the task declares no files, so there is no surface to stage": 28 PR-N,
+        26 unfiled, 8 W1-T, 6 RETRO, 3 PLAN, 3 TRIAGE — all DAEMON fix rounds preceded by `sweep.fix.synthetic_task`.
+    (2) `fixRungTaskFor` (src/lib/sweep.ts) builds a synthetic task with no `files`, and the harness commit refuses an
+        empty declared surface. The retro lane itself declares MASTER-PLAN.md, yet a retro PR's fix declares nothing.
+    (3) The 8 W1-T cases are records not yet merged (3) or a stale snapshot (4); W1-T4073 removes those.
+    Separately flagged, not in scope: every PR trailered `unfiled` shares one task id, which is the strike-cap key.
+  design: |
+    (i) A truly task-less PR's fix declares the PR's own changed files (already fetched each round) plus the remedy files
+        its failing gates prescribe (`remedyFilesForFailingChecks`); retro and plan lanes reuse their lane's files.
+    (ii) INVARIANTS: the derived surface is never wider than the PR's diff plus the gate remedies; a file outside it is
+         still reported undeclared; an unreadable PR diff stands the round down rather than using an empty surface.
+  acceptance:
+    - claim: "a PR-N fix commits a change to a file the PR already touches"
+      proof: 'grep: test("W1-T4074: a PR-N fix commits a change to a file the PR already touches" in test/a-synthetic-fix-task-declares-its-pr-surface.test.ts'
+    - claim: "a file outside the PR diff and remedies stays undeclared"
+      proof: 'grep: test("W1-T4074: a file outside the PR diff and remedies stays undeclared" in test/a-synthetic-fix-task-declares-its-pr-surface.test.ts'
+    - claim: "a retro PR fix declares the retro lane's files"
+      proof: 'grep: test("W1-T4074: a retro PR fix declares the retro lane files" in test/a-synthetic-fix-task-declares-its-pr-surface.test.ts'
+    - claim: "an unreadable PR diff stands the round down"
+      proof: 'grep: test("W1-T4074: an unreadable PR diff stands the round down" in test/a-synthetic-fix-task-declares-its-pr-surface.test.ts'
+  falsifier: |
+    Revert to `files: undefined` and the first gets "no surface to stage". Widen to the whole repo and the second goes
+    red.

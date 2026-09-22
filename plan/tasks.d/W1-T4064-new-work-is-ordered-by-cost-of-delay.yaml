@@ -1,0 +1,51 @@
+- id: W1-T4064
+  title: "NEW WORK WAITS BEHIND A MONTH OF FILING ORDER — compareDispatch falls through to id order on every pass, so W1-T4052..W1-T4057 sat at frontier positions 117-122 while W1-T1070 (filed 2026-08-20) took the only slot: order by measured cost of delay under stride scheduling"
+  repo: remudero
+  depends_on: [W1-T4006]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "oper#followups-research-2026-09-22"
+  plan_refs: [W1-T4006, W1-T3704]
+  files: [src/lib/drain.ts, src/lib/dispatch-value.ts, src/run-task.ts, test/new-work-is-ordered-by-cost-of-delay.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-22 (4-day ledger union, 346,646 rows; 242 run.start and 337 selection passes as controls).
+    (1) After the #6629 filing merged (19:51Z) the core daemon ran ONE candidate selection by 21:20Z (21:09:35), with room
+        for one task, and picked W1-T1070 (filed 2026-08-20). W1-T4052..W1-T4057 were eligible (queued, verify auto, no
+        deps, no run branch) and sat at positions 117-122 of serve's runnable frontier, 61-66 runnable tasks ahead.
+    (2) THE CAUSE. `compareDispatch` (src/lib/drain.ts) sorts by priority, declared scope, value, dependent fanout, id.
+        Value and fanout are inert because the value calibration never becomes ready (W1-T4006: 337 of 337 passes
+        refused), and only 6 queued tasks carry `priority`. Order is therefore FILING ORDER. At ~1.25 claims/hour
+        (27 on 09-22) a task filed today waits about two days while month-old tasks — the ones most likely to have gone
+        stale — go first.
+    (3) Idle time compounds it: each daemon restart spends ~15 min sweeping before its first dispatch decision
+        (20:26:37 -> 20:42:48; 20:54:50 -> 21:09:35).
+  design: |
+    Weighted-shortest-job-first by COST OF DELAY, shared out by STRIDE SCHEDULING so nothing starves.
+    (i) score = P(still valid | filing age) x impact / expected cost.
+        - P(still valid | age) is LEARNED from this ledger: by filing age at dispatch, the share of dispatches that ended
+          already-satisfied, no-op, or refused as merged. Audit items go stale; the order should know by how much.
+        - impact = open-dependent fanout x the class posterior from W1-T4006.
+        - expected cost = the class's measured cost per merge.
+    (ii) Stride scheduling hands out selection slots in proportion to score, so every eligible task keeps a non-zero
+         share and a finite wait — no age cap, no floor number.
+    (iii) INVARIANTS: an explicit `priority:` still sorts first; eligibility is unchanged; the order is a pure function
+          of (plan tree sha, calibration snapshot) — byte-identical for the same inputs; an unreadable input falls back
+          to today's id order and ledgers the fallback once per change, never once per pass.
+  acceptance:
+    - claim: "a fresh task with higher measured cost of delay outranks an older task of the same class"
+      proof: 'grep: test("W1-T4064: a fresh task with higher cost of delay outranks an older equal-class task" in test/new-work-is-ordered-by-cost-of-delay.test.ts'
+    - claim: "every eligible task is selected within a finite number of passes"
+      proof: 'grep: test("W1-T4064: every eligible task is selected within finitely many passes under stride order" in test/new-work-is-ordered-by-cost-of-delay.test.ts'
+    - claim: "the order is byte-identical for the same plan tree and calibration snapshot"
+      proof: 'grep: test("W1-T4064: order is identical for the same plan tree and calibration snapshot" in test/new-work-is-ordered-by-cost-of-delay.test.ts'
+    - claim: "an explicit priority still sorts ahead of any computed score"
+      proof: 'grep: test("W1-T4064: explicit priority still sorts ahead of any computed score" in test/new-work-is-ordered-by-cost-of-delay.test.ts'
+  falsifier: |
+    Keep id order and the first assertion goes red. Rank purely by score without stride and a low-score task can
+    wait forever — the second goes red. Read the wall clock inside the comparator and the third goes red.

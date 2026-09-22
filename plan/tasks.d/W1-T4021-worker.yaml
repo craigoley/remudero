@@ -10,10 +10,17 @@
   origin: "measured 2026-09-22 clearing 16G of orphaned lanes by hand on the Azure host; the reaper was armed the whole time and could not see any of them"
   plan_refs: [W1-T2847, W1-T3528]
   files: [src/lib/worker.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
+
+    WITHDRAWN 2026-09-22 — ITS PREMISE IS FALSE; SUPERSEDED BY W1-T4065. The reaper's candidate source is not only git's
+    worktree registration: `reapAdhocLanes` (src/lib/worker.ts) already lists `config.root/lanes` directly and reaps
+    unregistered lanes deliberately. What is true (4-day union): 92 `adhoc_lane.reap.undecidable` rows and zero reap rows,
+    every other keep reason logged nowhere, and a fixed 14-day grace measured from the newest file anywhere in the tree.
+    W1-T4065 files that instead: a per-pass keep census by reason and a grace that tightens as disk headroom shrinks.
   rationale: |
     MEASURED 2026-09-22 on the Azure host, clearing by hand:
 

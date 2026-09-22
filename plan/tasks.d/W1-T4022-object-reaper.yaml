@@ -6,14 +6,26 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 25.00
-  risk: low
+  risk: high
+  band_meaning: span
   origin: "measured 2026-09-22 on both hosts while clearing worktrees by hand — 1.51 GiB of loose objects on Azure, and the reaper had never been able to run"
   plan_refs: [W1-T3092]
-  files: [src/lib/object-reaper.ts]
+  files: [src/lib/object-reaper.ts, src/run-task.ts, test/the-object-reaper-rung-runs.test.ts, scripts/test-tier-manifest.json]
   status: queued
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
+
+    AMENDED 2026-09-22 (oper#followups-research-2026-09-22) — THE THREE REFUSALS ARE NOT THE FIRST PROBLEM; THE RUNG NEVER
+    RUNS. Measured: 0 `objects_declined` rows in four days.
+      - `logDiskReclaimRung` loads `policyPath(config.root)` (src/run-task.ts) = /home/node/Remudero/plan/policy.yaml,
+        which does not exist on the daemon; `loadPolicy` throws and a bare `catch {}` swallows it. The ad-hoc lane rung
+        loads its policy correctly via `loadDefaultPolicy()` — use the same.
+      - Production passes no open-file counter, so the open-files refusal falls back to a constant `() => 1` and always
+        refuses; a real counter already exists (src/lib/clone-reaper.ts). Inject it.
+      - Log a policy-load failure instead of swallowing it.
+      - The daemon's git store holds 55,629 loose objects and `.git/gc.log` has blocked automatic gc since 2026-09-06.
+      Hold the quiesced-window design until there is data on how often the reaper refuses once it actually runs.
   rationale: |
     MEASURED 2026-09-22. `git count-objects -vH` on the Azure host's shared store:
 
@@ -65,6 +77,10 @@
     DO NOT WEAKEN ANY OF THE THREE REFUSALS to make the gate passable. The race they prevent
     destroys a referenced object, which is worse than any amount of disk.
   acceptance:
+    - claim: "the disk-reclaim rung loads the policy the daemon actually has, so it runs at all"
+      proof: 'grep: test("W1-T4022: the disk reclaim rung loads the daemon policy and runs" in test/the-object-reaper-rung-runs.test.ts'
+    - claim: "the open-file refusal reads a real open-file count, not a constant"
+      proof: 'grep: test("W1-T4022: the open-file refusal reads a real count" in test/the-object-reaper-rung-runs.test.ts'
     - claim: "a refusal records how long the rung has been refusing, so a permanent block is distinguishable from a single busy moment"
       proof: "grep: consecutive refusals in src/lib/object-reaper.ts"
     - claim: "the reaper runs inside a quiesced window rather than waiting to observe an idle host"
