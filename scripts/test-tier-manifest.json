@@ -234,6 +234,7 @@
     "test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts": 883,
     "test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts": 1311,
     "test/a-runaway-worker-is-visible-before-it-finishes.test.ts": 1422,
+    "test/a-second-instance-serves-its-own-gateway.test.ts": 0,
     "test/a-second-openweight-deployment-is-priced-by-its-own-row.test.ts": 0,
     "test/a-self-certifying-proof-warns-at-filing-time.test.ts": 1319,
     "test/a-shard-split-balances-by-measured-duration.test.ts": 0,
