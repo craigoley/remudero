@@ -1,0 +1,70 @@
+- id: W1-T3997
+  title: "A FIRED CI-LEARNING RUNG HOLDS THE CORE QUEUE — its synchronous corpus reader is awaited in the daemon iteration, so a daily learning pass stalls sweeps, reviews and auto-merge while it reads every PR commit and check"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/a-fired-ci-learning-must-not-hold-queue-reconciliation.test.ts
+  origin: "operator-session#core-daemon-automated-flow-2026-09-22"
+  plan_refs: ["W1-T2972", "W1-T2981", "W1-T3297", "W1-T3542"]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED on the core host 2026-09-22: ci_learning_cadence.fired at
+    01:07:52Z, then no ci_learning_cadence.ran, ci_learning_cadence.run_failed,
+    sweep.pass, or sweep.summary appeared through 01:11:31Z. The daemon remained
+    alive (heartbeat advanced at 01:10:01Z), but its Node process was busy and was
+    repeatedly running `gh api .../commits/<sha>/check-runs`. During the same
+    interval, green plan PR #6478 could not reach the ordinary review/arm path.
+
+    This is not a health failure or a reason to weaken the CI-learning corpus.
+    loadCiFailureWindow walks every recent PR commit and asks for each commit's
+    rollup and changed files; buildCiLearningCadenceRunner invokes it synchronously,
+    and daemon.ts awaits that work in the main iteration. The async return type does
+    not help when the work before its first yield is blocking. W1-T2981 already
+    established the governing queue rule for retro: a slow self-improvement rung
+    must not hold dispatch and reconciliation.
+  design: |
+    Make CI-learning collection use the existing non-blocking GitHub transport and
+    yield between bounded PR/commit observations, preserving the present distinction
+    between unreadable evidence and a clean rollup. Detach one fired CI-learning
+    action through the existing detached-action registry only after its execution
+    path can yield; name the action and refuse a second concurrent run. The normal
+    daemon iteration must continue to its queue sweep, review, arm and dispatch
+    work while the learning action is in flight. Preserve cadence fire/release
+    semantics: a read failure releases the fire as today, a completed run records
+    its result, and an abandoned action is ledger-visible rather than silently
+    counted as a completed lesson. Reuse the existing bounded freshness drain so a
+    controlled self-refresh does not cut an already-running learning action off
+    without evidence. Do not change which CI failures qualify, mint any task, or
+    make a learning verdict certify a PR.
+  acceptance:
+    - claim: "a fired CI-learning action that is still awaiting a corpus read does not prevent the daemon from reaching queue reconciliation and dispatch"
+      proof: "unit test: a fired ci-learning action does not hold queue reconciliation"
+    - claim: "only one CI-learning action may be detached at a time and a second firing is ledgered as an explicit in-flight refusal"
+      proof: "unit test: a second fired ci-learning action is refused while the first is detached"
+    - claim: "an unreadable CI-learning corpus releases its cadence fire and reports the failure without treating missing evidence as a successful lesson"
+      proof: "unit test: an unreadable detached ci-learning corpus releases its fire"
+    - claim: "the daemon has an explicit CI-learning detached-action path rather than awaiting the cadence runner inline"
+      proof: "grep: ci-learning in src/lib/daemon.ts"
+  falsifier: |
+    Hold the asynchronous CI-learning corpus promise after the fire and drive one
+    daemon tick with a runnable task and a sweep recorder. Before the fix, the
+    awaited synchronous rung leaves reconciliation/dispatch absent. After the fix,
+    the recorder must observe both while the learning action remains pending. Remove
+    the detachment or restore the inline await and the first assertion must fail.
+    Independently make the corpus read throw before it returns: the release marker
+    must be observed and no `ran` result may be emitted, proving that the improvement
+    is not manufacturing a clean lesson from unreadable input.
+  note: |
+    reservation hand-off: codex/file-w1-t3994-run-shaped-filing-1790038 -> codex/file-w1-t3997-ci-learning-queue-1790039
+    This plan-only filing intentionally uses a non-run branch and no Remudero-Task trailer. The
+    implementation must use run-W1-T3997-<epochMs> after this filing merges. This is a queue-liveness
+    repair, not a cadence expansion: the daily bound and the CI-learning eligibility rules stay intact.

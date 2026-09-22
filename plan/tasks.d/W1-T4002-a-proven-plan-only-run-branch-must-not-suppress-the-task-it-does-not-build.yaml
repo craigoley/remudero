@@ -1,0 +1,76 @@
+- id: W1-T4002
+  title: "A PROVEN PLAN-ONLY run-<id>- BRANCH CAN HOLD THAT ID'S REAL IMPLEMENTATION FOREVER — the raw remote-ref guard sees only a branch spelling, so a misidentified filing blocks dispatch even when the same full sweep has positively classified its exact PR head as plan-only"
+  repo: remudero
+  depends_on: [W1-T3994]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/drain.ts
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/drain.test.ts
+    - test/daemon.test.ts
+  origin: "operator-session#core-daemon-feedback-landing-recovery-2026-09-21"
+  plan_refs: ["W1-T534", "W1-T916", "W1-T2530", "W1-T3067", "W1-T3994", "W1-T3996"]
+  status: queued
+  priority: 1
+  rationale: |
+    OBSERVED 2026-09-22: an open foreign plan filing used the head
+    run-W1-T3996-1790040200000 while it introduced unrelated operator-agent work. The real
+    W1-T3996 durable-credit recovery is therefore declined by the daemon's raw
+    `runBranchTaskIds` guard as `run-branch-already-pushed`, even though the branch is not a
+    build of W1-T3996 and the open-PR projection already has the evidence needed to classify
+    plan-only filings. W1-T3994 prevents a newly filed self-crediting plan branch, but cannot
+    reclassify or unblock the already-open collision that exposed the outage.
+
+    The raw branch guard is otherwise correct: an unreviewed, unreadable, changed, or
+    implementation-bearing run branch must continue to block a duplicate worker. This task is
+    not a broad exemption for branches containing plan paths. The only safe exception is an
+    exact current ref plus exact head SHA that the same daemon sweep positively classified as a
+    plan-only filing. A changed remote tip immediately loses that exception; an absent or
+    unreadable sweep outcome never earns it.
+  design: |
+    Preserve the one `git ls-remote --heads origin run-*` read per daemon selection and parse its
+    exact ref-name/SHA pairs rather than reducing immediately to task ids. From the full sweep's
+    already-built OpenPrView array, derive a bounded set of positive plan-filing receipts keyed by
+    both `headRefName` and `headSha`; pass that data through the existing sweep-cycle outcome to
+    the following dispatch selection. A raw run ref is nonblocking only when every currently
+    observed ref for that task matches one of those positive exact-head receipts. No new GitHub
+    request, synthetic status, branch delete, or cached "healthy" default is allowed.
+
+    Keep the existing `run-branch-already-pushed` behavior for any remaining ref: no receipt,
+    unreadable classification, a different SHA, a different branch, or an implementation PR all
+    remain blocking. Ledger the narrow released collision with the PR/ref/SHA and a distinct
+    `plan-filing-run-branch-exception` reason, so an operator can distinguish a proven filing
+    from a missing branch read. Thread the same rule through daemon selection and bounded drain
+    selection rather than leaving their duplicate-work answers divergent. Do not close, rename,
+    push, or mutate the foreign plan PR; normal review and branch-protection processes retain
+    authority over it.
+  acceptance:
+    - claim: "a current plan-only receipt releases only the exact matching run-branch tip so the real task can be selected"
+      proof: "grep: planOnlyRunBranchReceipt in src/lib/drain.ts"
+    - claim: "a changed or unreadable run-branch tip stays blocked rather than inheriting a stale plan-only receipt"
+      proof: "grep: planOnlyRunBranchReceipts in src/lib/sweep.ts"
+    - claim: "an implementation-bearing run branch remains a blocking in-flight claim"
+      proof: "grep: unmatchedRunRefsRemainBlocking in src/lib/drain.ts"
+    - claim: "the exception is an explicit plan-filing-run-branch-exception outcome rather than a silent omission"
+      proof: "grep: plan-filing-run-branch-exception in src/lib/daemon.ts"
+  falsifier: |
+    Seed the raw remote result with run-W1-T999-1790040200000 at SHA A and a positive full-sweep
+    filing receipt for exactly that ref/SHA. Before this fix the task is skipped solely because
+    its id occurs in `runBranchTaskIds`; after the fix it is selectable. Delete the exact
+    ref/SHA comparison and change the remote tip to SHA B: the changed-tip test must become a
+    false admission. Remove the positive filing classification or add a second unmatched
+    run-W1-T999-* ref: both must restore the ordinary blocking skip, proving this does not turn
+    plan-looking branches into a general duplicate-dispatch bypass.
+  note: |
+    reservation hand-off: run-W1-T3994-1790041223007 -> codex/file-w1-t4002-plan-1790042400000
+    This filing uses a non-run branch and carries no Remudero-Task trailer. The implementation must
+    use run-W1-T4002-<epochMs> after this filing merges. This is recovery for the current W1-T3996
+    collision and prevention for every pre-W1-T3994 filing that can still be open; W1-T3994 remains
+    the author-time prevention gate.

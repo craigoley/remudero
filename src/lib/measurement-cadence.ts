@@ -1,7 +1,7 @@
 import { reconcilePlan } from "./plan-reconcile.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, posix } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
 import {
   mineVerdictRows,
@@ -1475,6 +1475,42 @@ export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconc
   }
   opts.land(writes);
   return { drift: taskIds.length, taskIds, status: "landed", threshold: opts.threshold };
+}
+
+export interface PlanReconcileShardRecord {
+  taskId: string;
+  path: string;
+  text: string;
+}
+
+export interface PlanReconcileCadenceInputOptions {
+  checkoutRoot: string;
+  readShards: () => readonly PlanReconcileShardRecord[];
+  creditedMergedIds: () => ReadonlySet<string>;
+  land: (inputs: readonly { relPath: string; content: string }[]) => void;
+  threshold?: number;
+}
+
+/** W1-T3970: adapt the production shard/credit readers to the pure cadence reducer. The caller
+ * owns the landing bridge; this adapter only maps task ids back to repo-relative shard paths and
+ * carries the one credit projection into the reducer. */
+export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOptions): PlanReconcileCadenceOpts {
+  const records = [...deps.readShards()];
+  const byId = new Map(records.map((record) => [record.taskId, record.path]));
+  const credited = new Set(deps.creditedMergedIds());
+  return {
+    shards: records.map(({ taskId, text }) => ({ taskId, text })),
+    isCreditedMerged: (taskId) => credited.has(taskId),
+    threshold: deps.threshold ?? 10,
+    land: (writes) => {
+      const inputs = writes.map((write) => {
+        const path = byId.get(write.taskId);
+        if (path === undefined) throw new Error(`plan reconciliation could not resolve shard ${write.taskId}`);
+        return { relPath: relative(deps.checkoutRoot, path), content: write.text };
+      });
+      deps.land(inputs);
+    },
+  };
 }
 
 const VERIFY_HUMAN_AGE_BANDS = [14, 30, 60] as const;

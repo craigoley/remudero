@@ -75,6 +75,7 @@ import {
   buildKickRoute,
   buildMergeHoldRoute,
   buildPauseRoute,
+  buildPrActionRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
   buildStopRoute,
@@ -3665,6 +3666,7 @@ function assembleServeRoutes(
     // Console UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now.
     buildKickRoute(fleetControlDeps),
     buildDrainNowRoute(fleetControlDeps),
+    buildPrActionRoute(fleetControlDeps),
     // W1-T2719: existing durable refusal, exposed without any merge/lifecycle primitive.
     buildMergeHoldRoute(fleetControlDeps),
     // recon-ER: the post-drain rundown's one-tap verdict (W1-T141). Declared, aggregated into

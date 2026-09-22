@@ -735,7 +735,9 @@ export interface DaemonDeps {
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
   reloadPlan?: () => Plan | null;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
-  refreshMerged: () => MergedSet;
+  refreshMerged: (plan?: Plan) => MergedSet;
+  /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
+  onPlanReload?: (plan: Plan) => void;
   /** The in-flight guard: the open PR number for a task, re-derived from the same projection `refreshMerged` just
    * built, never a second read path. Optional (W1-T80, the #143/#145 duplicate-build race). */
   isOpenPr?: OpenPrCheck;
@@ -926,6 +928,15 @@ export interface DaemonDeps {
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
+  /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
+   * consumes at most one per poll and keeps final fix/review authority in its established command
+   * path; the HTTP writer never starts a process. */
+  pendingPrActions?: () => Array<{ action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string }>;
+  /** Clear the request only after its established command reaches a named terminal outcome. */
+  clearPrAction?: (action: "fix" | "review", prNumber: number) => void;
+  /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
+   * commands. It is injected so this scheduler module never grows a second repair implementation. */
+  runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
   /** The injected clock, pacing idle polling when nothing is runnable. The real command wires a timer-backed wait;
    * tests inject a fake that resolves immediately, so the loop is provable without a real wall-clock wait. */
   sleep: (ms: number) => Promise<void>;
@@ -2302,6 +2313,7 @@ export async function runDaemon(
         const fresh = deps.reloadPlan();
         if (fresh) {
           plan = fresh;
+          deps.onPlanReload?.(fresh);
           log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
         }
       } catch (e) {
@@ -2370,7 +2382,7 @@ export async function runDaemon(
       if (drain) log("console.drain_consumed", { origin: drain.origin });
     }
 
-    const isMerged = deps.refreshMerged();
+    const isMerged = deps.refreshMerged(planForBatch);
 
     // Reconcile the daemon-lifetime parks from the SAME cached projection dispatch uses below. A
     // credited merge is conclusive. A confirmed absence of an open PR is conclusive only when both
@@ -3086,6 +3098,37 @@ export async function runDaemon(
         log("console.kick_dispatched", { task: kick.taskId, origin: kick.origin });
         forcedNext = task;
         break;
+      }
+    }
+
+    // Console PR actions use the same durable-marker boundary as an UP NEXT kick, but they do
+    // not select a task or bypass the established PR pipeline. Keep the marker while the bounded
+    // command runs: another click for the same action/PR overwrites one request rather than
+    // starting a concurrent fix or review worker. One action per poll prevents an action burst
+    // from starving the normal sweep and dispatch path.
+    if (deps.pendingPrActions && deps.runPrAction) {
+      const request = deps.pendingPrActions()[0];
+      if (request) {
+        try {
+          const result = await deps.runPrAction(request);
+          log(result.outcome === "completed" ? "console.pr_action_completed" : "console.pr_action_refused", {
+            action: request.action,
+            pr_number: request.prNumber,
+            origin: request.origin,
+            requested_at: request.requestedAt,
+            ...(result.detail ? { detail: result.detail } : {}),
+          });
+        } catch (error) {
+          log("console.pr_action_failed", {
+            action: request.action,
+            pr_number: request.prNumber,
+            origin: request.origin,
+            requested_at: request.requestedAt,
+            error: String((error as Error)?.message ?? error),
+          });
+        } finally {
+          deps.clearPrAction?.(request.action, request.prNumber);
+        }
       }
     }
 

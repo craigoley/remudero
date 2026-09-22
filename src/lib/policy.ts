@@ -46,6 +46,17 @@ export interface IntakeCadenceRungPolicy {
   maxPerDay: number;
 }
 
+/** Operator-authored evidence required before successful check-run filtering may suppress a
+ * webhook wake. Counts are deliberately explicit: a window with no covered aggregate heads is
+ * not evidence, even when its timestamps span a day. */
+export interface GithubEventWakeEnforceRatification {
+  observedFrom: string;
+  observedThrough: string;
+  ratifiedAt: string;
+  aggregateHeadsCovered: number;
+  aggregateHeadsTotal: number;
+}
+
 /** The plain, consumer-facing values every W1-T253 read site will resolve against. */
 export interface PolicyValues {
   proofTimeoutMs: number;
@@ -205,6 +216,7 @@ export interface PolicyValues {
     checkSettleMs: number;
     semanticCheckMode: "shadow" | "enforce";
     aggregateCheckNames: string[];
+    enforceRatification?: GithubEventWakeEnforceRatification;
   };
   /** W1-T2579 — the arm gate's operator-ratified band table. `decideAutoMergeArm`
    *  (src/lib/review.ts) consults this only on the already-arming `full-pass`/`keyword-floor`
@@ -486,6 +498,86 @@ function githubEventWakeAggregateCheckNamesField(
   });
   origins[path] = parseOrigin(path, origin);
   return names;
+}
+
+function githubEventWakeEnforceRatificationField(
+  raw: unknown,
+  origins: Record<string, PolicyFieldOrigin>,
+  required: boolean,
+): GithubEventWakeEnforceRatification | undefined {
+  const path = "githubEventWake.enforceRatification";
+  if (raw === undefined) {
+    if (required) {
+      throw new PolicyError(
+        `policy.yaml: '${path}' is required when githubEventWake.semanticCheckMode is enforce; ` +
+          "shadow evidence has not been operator-ratified.",
+      );
+    }
+    return undefined;
+  }
+  if (!isPlainObject(raw)) {
+    throw new PolicyError(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'.`);
+  }
+  const { value, origin } = raw as Record<string, unknown>;
+  if (!isPlainObject(value)) {
+    throw new PolicyError(`policy.yaml: '${path}.value' must be a complete evidence mapping.`);
+  }
+  const stringFields = ["observedFrom", "observedThrough", "ratifiedAt"] as const;
+  const dates = Object.fromEntries(
+    stringFields.map((field) => {
+      const candidate = value[field];
+      if (typeof candidate !== "string" || candidate.length === 0 || !candidate.endsWith("Z")) {
+        throw new PolicyError(`policy.yaml: '${path}.value.${field}' must be a non-empty UTC ISO timestamp.`);
+      }
+      const parsed = Date.parse(candidate);
+      if (!Number.isFinite(parsed)) {
+        throw new PolicyError(`policy.yaml: '${path}.value.${field}' must be a valid UTC ISO timestamp.`);
+      }
+      return [field, parsed] as const;
+    }),
+  ) as Record<(typeof stringFields)[number], number>;
+  const observedFrom = dates.observedFrom;
+  const observedThrough = dates.observedThrough;
+  const ratifiedAt = dates.ratifiedAt;
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (observedThrough <= observedFrom || observedThrough - observedFrom < dayMs) {
+    throw new PolicyError(`policy.yaml: '${path}' evidence window must cover at least one full UTC day.`);
+  }
+  const utcBoundary = (timestamp: number): boolean => {
+    const date = new Date(timestamp);
+    return date.getUTCHours() === 0 && date.getUTCMinutes() === 0 && date.getUTCSeconds() === 0 && date.getUTCMilliseconds() === 0;
+  };
+  if (!utcBoundary(observedFrom) || !utcBoundary(observedThrough)) {
+    throw new PolicyError(`policy.yaml: '${path}' evidence window must begin and end at UTC midnight.`);
+  }
+  if (ratifiedAt <= observedThrough) {
+    throw new PolicyError(`policy.yaml: '${path}.value.ratifiedAt' must be after the evidence window.`);
+  }
+  const countFields = ["aggregateHeadsCovered", "aggregateHeadsTotal"] as const;
+  const counts = Object.fromEntries(
+    countFields.map((field) => {
+      const candidate = value[field];
+      if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
+        throw new PolicyError(`policy.yaml: '${path}.value.${field}' must be a non-negative integer.`);
+      }
+      return [field, candidate] as const;
+    }),
+  ) as Record<(typeof countFields)[number], number>;
+  if (counts.aggregateHeadsTotal === 0 || counts.aggregateHeadsCovered !== counts.aggregateHeadsTotal) {
+    throw new PolicyError(
+      `policy.yaml: '${path}' evidence must cover every observed aggregate head (covered=${counts.aggregateHeadsCovered}, total=${counts.aggregateHeadsTotal}).`,
+    );
+  }
+  if (origin !== "net-new") {
+    throw new PolicyError(`policy.yaml: '${path}.origin' must be exactly "net-new" for operator evidence.`);
+  }
+  return {
+    observedFrom: value.observedFrom as string,
+    observedThrough: value.observedThrough as string,
+    ratifiedAt: value.ratifiedAt as string,
+    aggregateHeadsCovered: counts.aggregateHeadsCovered,
+    aggregateHeadsTotal: counts.aggregateHeadsTotal,
+  };
 }
 
 function validateHeadroomCurve(
@@ -805,6 +897,11 @@ export function validatePolicy(raw: unknown): Policy {
   const githubEventWakeAggregateCheckNames = githubEventWakeRaw?.aggregateCheckNames !== undefined
     ? githubEventWakeAggregateCheckNamesField(githubEventWakeRaw.aggregateCheckNames, origin)
     : [...DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES];
+  const githubEventWakeEnforceRatification = githubEventWakeEnforceRatificationField(
+    githubEventWakeRaw?.enforceRatification,
+    origin,
+    githubEventWakeSemanticCheckMode === "enforce",
+  );
 
   // W1-T2579: optional, absent means `[]` — see validateArmCalibrationBands's own doc for why
   // this row is stricter-at-load/inert-at-consult rather than the triplet shape above.
@@ -864,6 +961,7 @@ export function validatePolicy(raw: unknown): Policy {
         checkSettleMs: githubEventWakeCheckSettleMs,
         semanticCheckMode: githubEventWakeSemanticCheckMode,
         aggregateCheckNames: githubEventWakeAggregateCheckNames,
+        enforceRatification: githubEventWakeEnforceRatification,
       },
       armCalibrationBands,
       workerRuleHeadlines,

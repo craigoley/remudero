@@ -509,6 +509,7 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
+  landPlanReconcileShards,
   recordDecision,
   recordRuling,
   sweepFeedbackLanding,
@@ -862,6 +863,10 @@ import {
   verifyHumanCadence,
   wipeTestCadenceCheck,
   type MeasurementCadenceDecision,
+  buildPlanReconcileCadenceInput,
+  type PlanReconcileCadenceOpts,
+  type PlanReconcileCadenceInputOptions,
+  type PlanReconcileShardRecord,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
   type VerifyHumanCadenceResult,
@@ -904,6 +909,7 @@ import {
   taskRecordPath,
   readBlobsAtRef,
   mergePlanBlobs,
+  loadPlanAtRef,
 } from "./lib/plan.js";
 import { exitCodeFor } from "./lib/errors.js";
 import {
@@ -1965,10 +1971,12 @@ import {
   checkSharedPause,
   clearKick,
   consumeDrainNow,
+  clearPrAction,
   consumeStop,
   isQuietHours,
   pauseDetail,
   pendingKicks,
+  pendingPrActions,
   requestPause,
   requestStop,
   resumeFleet,
@@ -2004,6 +2012,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
 let composedRealGraph: ComposedRealGraph | undefined;
 
@@ -22363,14 +22372,53 @@ export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementati
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
  *  now under the SAME filter too — see {@link creditIsReconcilable}. */
-function defaultCreditedMergedIds(): Set<string> {
-  const config = loadConfig();
+export function defaultCreditedMergedIds(
+  configOverride?: Config,
+  checkoutRoot = repoRoot,
+  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
+): Set<string> {
+  const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
+  // No ledger means no positive merge-credit evidence. Return an empty projection rather than
+  // reaching for the GitHub gateway from an isolated or not-yet-initialized checkout.
+  if (!existsSync(ledgerPath)) return new Set();
   const self = resolveOwnerRepo();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   return new Set(
-    buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
+    creditBuilder(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
   );
+}
+
+/** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
+ * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
+ * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
+export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land"> {
+  land?: typeof landPlanReconcileShards;
+}
+
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileCadenceOpts | undefined {
+  try {
+    return buildPlanReconcileCadenceInput({
+      checkoutRoot: deps.checkoutRoot,
+      readShards: deps.readShards,
+      creditedMergedIds: deps.creditedMergedIds,
+      land: (inputs) => {
+        const landOpts = { targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" };
+        // Kept on ONE line so a test driving either arm marks the whole call site covered — see
+        // buildMeasurementCadenceDaemonHooks's `planReconcileOption` a few hundred lines down for
+        // the same fold, done for the same reason: diff-coverage is line-based, and a multi-line
+        // ternary here would credit only the branch a given test actually took.
+        const landing = deps.land ? deps.land(deps.checkoutRoot, inputs, landOpts) : landPlanReconcileShards(deps.checkoutRoot, inputs, landOpts);
+        if (!landing.landed || landing.error) {
+          throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+        }
+      },
+    });
+  } catch {
+    // An unavailable config, plan, ledger or credit projection must not abort the other
+    // measurement-cadence rungs. Omit this optional rung for the tick and retry next time.
+    return undefined;
+  }
 }
 
 /** PRIMARY CONTROL: GitHub rejects pull-request diffs above this file count, so reconciliation
@@ -24368,6 +24416,11 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
    *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
   ratifications?: Ratifications;
   coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
+  /** W1-T3970: keep the cadence landing bridge injectable while production retains the real PR path. */
+  planReconcileLand?: typeof landPlanReconcileShards;
+  /** W1-T3970: keep the production credit read injectable so offline cadence fixtures do not
+   * accidentally shell out to the live GitHub projection. */
+  creditedMergedIds?: () => ReadonlySet<string>;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -24405,6 +24458,22 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       const verifyHuman = await defaultVerifyHumanCadenceResult(root, configFor(), verifyHumanRunId, cadenceClock);
+      // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
+      // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
+      // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
+      // checkout. A failed landing throws so the cadence records an error and retries later; it
+      // must never report a successful reconciliation on an unlanded PR.
+      const planReconcile = buildPlanReconcileProductionInput({
+        checkoutRoot: repoRoot,
+        readShards: () => readPlanShards(join(resolveRepoLayout(repoRoot).planDir, "tasks.d")),
+        // Keep the cadence's explicit config/root boundary. The hook is testable with an
+        // injected Config, and an unattended target must never fall back to the operator's HOME
+        // config just because the credit projection is evaluated lazily.
+        creditedMergedIds: deps.creditedMergedIds ?? (() => defaultCreditedMergedIds(configFor(), repoRoot)),
+        land: deps.planReconcileLand,
+      });
+      const planReconcileOption =
+        planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -24418,6 +24487,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
+        ...planReconcileOption,
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),
@@ -28620,14 +28690,16 @@ export function planReloader(
   // Any directory INSIDE the work tree is enough: git walks up from `-C` to find `.git`. Deriving
   // it from `planPath` keeps this in step with whatever plan location the caller resolved, rather
   // than introducing a second notion of where the repo is.
-  const repoDirForGit = dirname(target.planPath);
+  const planRepoRoot = dirname(dirname(target.planPath));
+  const planRelativePath = relative(planRepoRoot, target.planPath) || "plan/tasks.yaml";
+  const repoDirForGit = planRepoRoot;
   const treeSha =
     deps.treeSha ??
     (() =>
       execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
         encoding: "utf8",
       }).trim());
-  const load = deps.load ?? ((pp: string) => loadPlan(pp));
+  const load = deps.load ?? (() => loadPlanAtRef(planRepoRoot, planRelativePath, "origin/main"));
   let lastSha: string | undefined;
   return () => {
     const sha = treeSha();
@@ -28654,9 +28726,13 @@ export function planReloader(
       return null;
     }
     if (sha === lastSha) return null;
+    // Do not advance the observed sha until the committed ref has parsed successfully. A transient
+    // fetch/object/read failure must be retried on the next tick, rather than permanently pinning
+    // the daemon to the old plan while claiming it observed the new one.
+    const fresh = load(target.planPath);
     lastSha = sha;
     log("daemon.plan_changed", { tree_sha: sha.slice(0, 12), allow_stale: allowStale });
-    return load(target.planPath);
+    return fresh;
   };
 }
 
@@ -29082,6 +29158,10 @@ export async function daemonCommand(
      *  passes this. */
     runDaemon?: typeof runDaemon;
     runTask?: typeof runTask;
+    /** Command seams for the selected-repository PR-action wiring test. Production keeps the
+     * established fix/review implementations; tests inject terminal fakes without touching GitHub. */
+    fixCommand?: typeof fixCommand;
+    reviewCommand?: typeof reviewCommand;
     /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
      * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
      * the full and light paths without reading this source file as text. */
@@ -29348,15 +29428,16 @@ export async function daemonCommand(
   // `refreshMerged`, below) buys that property directly and per tick, without discarding the
   // delta cache alongside it — see that method's own doc for why a failed half's EMPTY rows are
   // dropped WITH its verdict rather than left behind under a healthy label.
+  const activePlanRef: { current: Plan } = { current: plan };
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
-  const refreshMerged: () => MergedSet = () => {
+  const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
     // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
     boardOpenPrCount.reset();
     const proj = projectPlan(
-      plan,
+      planOverride,
       { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
       statusPath,
     );
@@ -29801,6 +29882,9 @@ export async function daemonCommand(
       plan,
       {
         refreshMerged,
+        onPlanReload: (fresh) => {
+          activePlanRef.current = fresh;
+        },
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
@@ -30004,6 +30088,21 @@ export async function daemonCommand(
         pendingKicks: () => pendingKicks(config.root),
         clearKick: (taskId) => clearKick(config.root, taskId),
         consumeDrainNow: () => consumeDrainNow(config.root),
+        // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
+        // marker; this is the sole point that reaches the established selected-repository CLI
+        // commands. Their own disposition, strike, worktree and review-lock gates remain the
+        // authority -- an action request is never a bypass.
+        pendingPrActions: () => pendingPrActions(config.root),
+        clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
+        runPrAction: async (request) => {
+          const args = [String(request.prNumber), "--repo", target.repo];
+          const exitCode = request.action === "fix"
+            ? await (deps.fixCommand ?? fixCommand)(args)
+            : await (deps.reviewCommand ?? reviewCommand)(String(request.prNumber), ["--repo", target.repo]);
+          return exitCode === 0
+            ? { outcome: "completed", detail: `${request.action} command accepted PR #${request.prNumber}` }
+            : { outcome: "refused", detail: `${request.action} command refused PR #${request.prNumber} (exit ${exitCode})` };
+        },
         // W1-T2568: keep the existing sleep clock for nested in-flight tickers, and interrupt
         // ONLY the top-level poll waits that return to the ordinary full-sweep gate. Sharing the
         // interruptible clock with a heartbeat ticker could consume a wake without reconciling.
@@ -30054,6 +30153,7 @@ export async function daemonCommand(
           (t: Task) => lastProj?.get(t.id)?.merged ?? false,
           undefined,
           targetCheckoutRoot,
+          () => activePlanRef.current,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -30073,6 +30173,7 @@ export async function daemonCommand(
           // eligibility predicate, never two independently-derived ones.
           (t: Task) => lastProj?.get(t.id)?.merged ?? false,
           undefined,
+          () => activePlanRef.current,
         ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
@@ -35922,7 +36023,7 @@ export function buildSweepHook(
   config: Config,
   ledgerPath: string,
   runId: string,
-  plan: Plan,
+  bootPlan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   tmpMaxAgeMs?: number,
   // Injectable board gateway — appended LAST so no positional caller shifts, the same convention
@@ -35955,6 +36056,7 @@ export function buildSweepHook(
   // that path explicit so same-named repositories under different owners cannot reap this repo's
   // origin by accident.
   targetCheckoutRoot?: string,
+  planAccessor?: () => Plan,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -36032,13 +36134,14 @@ export function buildSweepHook(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
+      const plan = planAccessor?.() ?? bootPlan;
       const effects = buildSweepEffects({
         owner: owner,
         repo: repo,
         config: config,
         ledgerPath: ledgerPath,
         runId: runId,
-        plan: plan,
+        plan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
         pacer,
@@ -36334,6 +36437,7 @@ export function buildSweepLightHook(
   reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
+  planAccessor?: () => Plan,
 ): () => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -36353,13 +36457,14 @@ export function buildSweepLightHook(
         isMerged,
         readMainPlan: resolvedReadMainPlan,
       });
+      const activePlan = planAccessor?.() ?? plan;
       const effects = buildSweepEffects({
         owner: owner,
         repo: repo,
         config: config,
         ledgerPath: ledgerPath,
         runId: runId,
-        plan: plan,
+        plan: activePlan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
       });

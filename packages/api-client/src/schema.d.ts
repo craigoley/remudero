@@ -163,6 +163,18 @@ export interface components {
       taskId: string;
       issueUrl: string;
     };
+    /** A bounded operator request to run the established repair or review command against one pull request in this daemon instance. The request is recorded for the daemon's next poll; this HTTP route never starts a worker itself. HIGH-tier confirmation is required by the service before this schema is accepted. */
+    PrActionRequest: {
+      action: "fix" | "review";
+      prNumber: number;
+    };
+    /** Durable receipt only. `armed: true` means the selected daemon instance recorded the request; it does not claim that a worker has started or that the pull request is fixed. */
+    PrActionResult: {
+      armed: boolean;
+      action: "fix" | "review";
+      prNumber: number;
+      requestedAt: string;
+    };
     /** POST /v1/escalation/mark-handled's body (W1-T182) -- the NEEDS ME affordance an ESCALATION row (any class: BLOCKED/MANUAL/HARD_STOP/GRILL) actually supports, distinct from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts); the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue does not, by itself, imply the underlying block is fixed. */
     MarkEscalationHandledRequest: {
       taskId: string;
@@ -1065,6 +1077,17 @@ export interface paths {
     post: {
       responses: {
           "200": ApproveManualResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/pr-actions": {
+    post: {
+      responses: {
+          "200": PrActionResult;
           "400": Error;
           "401": Error;
           "403": Error;

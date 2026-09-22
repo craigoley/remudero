@@ -537,6 +537,52 @@ components:
         issueUrl:
           type: string
 
+    PrActionRequest:
+      type: object
+      description: >
+        A bounded operator request to run the established repair or review command against one
+        pull request in this daemon instance. The request is recorded for the daemon's next poll;
+        this HTTP route never starts a worker itself. HIGH-tier confirmation is required by the
+        service before this schema is accepted.
+      additionalProperties: false
+      required:
+        - action
+        - prNumber
+      properties:
+        action:
+          type: string
+          enum:
+            - fix
+            - review
+        prNumber:
+          type: integer
+          minimum: 1
+
+    PrActionResult:
+      type: object
+      description: >
+        Durable receipt only. `armed: true` means the selected daemon instance recorded the
+        request; it does not claim that a worker has started or that the pull request is fixed.
+      required:
+        - armed
+        - action
+        - prNumber
+        - requestedAt
+      properties:
+        armed:
+          type: boolean
+          const: true
+        action:
+          type: string
+          enum:
+            - fix
+            - review
+        prNumber:
+          type: integer
+        requestedAt:
+          type: string
+          format: date-time
+
     MarkEscalationHandledRequest:
       type: object
       description: >
@@ -3075,6 +3121,43 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/pr-actions:
+    post:
+      summary: Queue one confirmed pull-request repair or review in this daemon instance.
+      description: >
+        W1-T3989: the console can request `fix` for an actionable red PR or `review` for a
+        green PR waiting only for Remudero review. This is a HIGH-tier, exact-payload-confirmed
+        action. The handler writes durable intent and returns immediately; the daemon consumes at
+        most one request per poll through its existing `rmd fix` or `rmd review` command path.
+        A successful receipt is intentionally not a worker-start or PR-success claim.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrActionRequest"
+      responses:
+        "200":
+          description: The selected daemon instance recorded a request for its next poll.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrActionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Missing write authority or the required high-tier confirmation nonce.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
 

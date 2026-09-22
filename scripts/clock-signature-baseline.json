@@ -282,7 +282,7 @@
   "src/lib/policy.ts": {
     "legacy": 0,
     "dateNow": 0,
-    "newDate": 1
+    "newDate": 2
   },
   "src/lib/project-init.ts": {
     "legacy": 2,
