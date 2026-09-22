@@ -13,6 +13,38 @@
   status: merged
   attempts: 0
   rationale: |
+    ── CORRECTION, 2026-09-22: THIS TASK'S HEADLINE MEASUREMENT WAS WRONG. ──────────────────────
+    The claim below that `daemon_selfrestart_for_freshness` "appears ZERO times in the last 40,000
+    ledger rows" is FALSE, and the query that produced it was the error. It grepped only the LIVE
+    `state/ledger.ndjson`. `rotateLedger` keeps the newest 200 lines PER STEP there and moves the
+    rest into `state/ledger*.ndjson.gz`, which the query never opened. Re-measured across live
+    files AND archives on all three daemon state directories:
+
+        rmd-state2 (remudero)        673 rows, newest 2026-09-22T04:49:04Z
+        rmd-site-state (site)        245 rows, newest 2026-09-22T04:53:54Z
+        remudero-console-state       220 rows, newest 2026-09-22T04:53:53Z
+
+    Those newest rows match `deploy/entrypoint.sh`'s own restart lines to the second
+    (`exited 75 (freshness) — restart N/100 IN-CONTAINER`). The loop fires constantly and always
+    did: 1,138 recorded restarts across the three daemons. There was never an unexplained silence,
+    so "THE ROOT CAUSE IS STILL UNKNOWN" below answers a question that was not being asked.
+
+    This repo already carries the rule that would have caught it — "a zero is not a measurement
+    until a positive control proves the query could see its corpus", and the companion rule that
+    the rotations come in TWO forms and a glob naming one answers silently wrong. Both were
+    available and neither was run.
+
+    WHAT SURVIVES, AND IT IS WHY #6010 WAS STILL WORTH BUILDING: the code observation is
+    independently true. `daemonFreshnessFromService` really does collapse four distinct answers —
+    guarded, degraded, dirty, immaterial — into one `{stale:false}`, and before #6010 none of them
+    ledgered anything. #6010 shipped `daemon.freshness_not_stale`, which is live and working
+    (`{"arm":"immaterial"}` observed 2026-09-22T10:39Z). So the DELIVERABLE was sound; only the
+    evidence offered for its urgency was not. The five-hour stale window on 2026-09-18 was real,
+    but its cause is unexplained by this task and is now diagnosable from the row #6010 added.
+
+    Left below verbatim rather than rewritten, so the mistake stays legible.
+    ─────────────────────────────────────────────────────────────────────────────────────────────
+
     MEASURED ON THE LIVE FLEET, 2026-09-18. The daemon process ran from 00:35 to 05:50 UTC.
     `cc12d9169` — a `src/` change, and the very fix that unblocks the squeeze — merged at
     00:46:42, ELEVEN MINUTES after that process booted. It should have self-restarted on the next
