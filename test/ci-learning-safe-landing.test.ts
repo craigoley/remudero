@@ -295,6 +295,47 @@ test("W1-T3754: a landing reconciles against main, never overwrites it", () => {
   assert.deepEqual(pendingFiles(root), [], "the stale filename is removed after origin-level reconciliation");
 });
 
+test("W1-T3754: a queued shard with a different origin stays durable when main has the same path", () => {
+  const bareOrigin = makeBareOrigin();
+  const checkout = cloneRoot(bareOrigin);
+  const root = stateRoot();
+  const relPath = "plan/tasks.d/W1-T9012-stale.yaml";
+  mkdirSync(join(checkout, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(
+    join(checkout, relPath),
+    ciLearningShardYaml(draft("ci-learning:4321:canonical"), "W1-T9012"),
+    "utf8",
+  );
+  git(checkout, "add", "-A");
+  git(checkout, "commit", "--quiet", "-m", "chore: add canonical CI learning path");
+  git(checkout, "push", "--quiet", "origin", "main");
+
+  const queuedPath = join(root, "state", "ci-learning-pending", relPath);
+  mkdirSync(join(queuedPath, ".."), { recursive: true });
+  writeFileSync(
+    queuedPath,
+    ciLearningShardYaml(draft("ci-learning:4321:queued"), "W1-T9013"),
+    "utf8",
+  );
+  const { gh } = fakeGh("https://github.com/o/r/pull/3755");
+  const result = withLiveWritesAllowed(() =>
+    landCiLearningShards([], checkout, {
+      stateRoot: root,
+      mintTaskId: () => {
+        throw new Error("a non-identical queued shard must not mint");
+      },
+      planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
+      gh,
+    }),
+  );
+
+  assert.equal(result.filed.length, 1, "a queued shard with a different origin remains eligible for landing");
+  assert.equal(result.filed[0]?.relPath, relPath, "the queued path is the one re-landed after content comparison");
+  assert.deepEqual(pendingFiles(root), [queuedPath], "the differing queued bytes remain durable for a later landing");
+});
+
 test("W1-T3492 criterion 3: a second scheduled firing reuses a pending finding instead of minting a duplicate id", async () => {
   const bareOrigin = makeBareOrigin();
   const checkout = cloneRoot(bareOrigin);
