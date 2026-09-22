@@ -1,0 +1,68 @@
+- id: W1-T4046
+  title: "ONE SYNCHRONOUS LEDGER-UNION READ FREEZES EVERY TIMER IN THE DAEMON FOR ~9 SECONDS, AND THE ASYNC READER THAT KEEPS THE LOOP RESPONSIVE HAS NO CALLERS — measured 9.22 s blocked versus 0.01 s on the same 389-file corpus: move the measurement cadence's union reads to the async reader"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  origin: "oper#sync-ledger-union-freezes-the-loop-2026-09-22"
+  plan_refs: [W1-T4041, W1-T4045, W1-T4034, W1-T3335]
+  files: [src/lib/ledger-union.ts, src/lib/measurement-cadence.ts, test/a-union-read-keeps-the-loop-responsive.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE MEASUREMENT. Run 2026-09-22 inside the daemon container against the live state directory
+    (389 ledger files), with a 100 ms interval probe recording how late it fired:
+
+        readLedgerUnionRecordsSync   wall 9.32 s   worst event-loop block 9.22 s   probe ticks during: 3
+        readLedgerUnionRecords       wall 13.04 s  worst event-loop block 0.01 s   probe ticks during: 130
+
+    Same corpus, same step filter. The synchronous reader decompresses and scans every file with
+    `readFileSync`/`gunzipSync` and holds the thread the whole time; the async reader
+    (`readLedgerUnionRecords` / `openLedgerUnion`, streams + readline) costs about 40% more wall time
+    and never blocks for more than ten milliseconds. The async reader exists today and has no caller
+    outside src/lib/ledger-union.ts.
+
+    (1) WHY A BLOCK IS NOT A LOCAL COST. The daemon is one event loop. While a synchronous read runs,
+        nothing timer-driven can fire: not the `daemon.alive` heartbeat, not the inter-phase review
+        clock, not the phase ticker's light pass. The process stays alive and resumes afterwards,
+        which is exactly the shape of the 2026-09-22 outage (three timer lanes silent together while
+        the main loop kept writing rows).
+
+    (2) DETACHING DOES NOT HELP, AND THAT CORRECTS AN EARLIER FIX. #6593 detached the measurement
+        cadence so the daemon no longer awaits it. That removes the await, not the work: a detached
+        promise's synchronous stretches still run on the same thread and still block every timer. The
+        cadence reaches the synchronous reader through `resolveLedgerUnion` at three sites —
+        `scanShape4Gates`, `previousMeasurementCadenceMetrics` and `blockedCiShareFromLedger` —
+        roughly 30 s of blocking per cadence fire at the measured rate.
+
+    (3) SCOPE IS THE CADENCE, ON PURPOSE. There are about fifteen synchronous union call sites in
+        src/. This task converts the three the cadence uses — the cadence that was running at the
+        incident — and stops. Which others are on the daemon's hot path is exactly what W1-T4041's
+        `daemon.loop_lag` rows will name once deployed; converting them from evidence rather than a
+        guess is the discipline two wrong root causes on 2026-09-22 paid for.
+
+    (4) NOT A THRESHOLD, NOT A CAP. Nothing is bounded or skipped. The same rows are read; the thread
+        is simply released between chunks.
+  design: |
+    (i) An async counterpart of `resolveLedgerUnion` returning the same `LedgerUnionResult`, built on
+        the existing async reader — no second parser, no second dedupe rule.
+    (ii) The three cadence helpers become async and await it; `runMeasurementCadenceReport` is already
+         awaited, so the change stays inside the declared files.
+    (iii) The synchronous `resolveLedgerUnion` stays for non-daemon CLI callers; nothing else moves.
+  acceptance:
+    - claim: "a ledger union read on the async path lets a concurrent timer keep firing throughout"
+      proof: 'grep: test("W1-T4046: an async union read keeps the event loop responsive" in test/a-union-read-keeps-the-loop-responsive.test.ts'
+    - claim: "the async and synchronous union reads return the same rows for the same corpus and pattern"
+      proof: 'grep: test("W1-T4046: async and sync union reads agree row for row" in test/a-union-read-keeps-the-loop-responsive.test.ts'
+    - claim: "the measurement cadence no longer calls the synchronous union resolver"
+      proof: 'grep: test("W1-T4046: the measurement cadence reads the union asynchronously" in test/a-union-read-keeps-the-loop-responsive.test.ts'
+    - claim: "an async resolver exists beside the synchronous one"
+      proof: 'grep: export async function resolveLedgerUnionAsync in src/lib/ledger-union.ts'
+  falsifier: |
+    Keep calling the synchronous resolver and the first assertion goes red: a timer that should fire
+    every few milliseconds records one late tick spanning the whole read. Build the async path with a
+    different dedupe or filter and the second goes red on a fixture with duplicated rotated lines.
+    Leave one cadence helper on the sync resolver and the third goes red.
