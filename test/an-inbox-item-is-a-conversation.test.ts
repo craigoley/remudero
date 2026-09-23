@@ -340,12 +340,15 @@ test("W1-T4088: the responder's timer logs a failure and keeps going", async () 
   const store = { threadStorePath: inboxThreadStorePath(f.root) };
   writeFileSync(store.threadStorePath, "{ torn\n");
   const lines: string[] = [];
-  const pump = startInboxResponder(f.responder(), 10, (s) => lines.push(s));
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  // W1-T4088: margins match this file's own busy-loop test (200ms) rather than the tightest
+  // interval that would pass quietly — a CI shard under coverage instrumentation and three
+  // sibling shards' load is not this sandbox, and a real tick needs real headroom to land.
+  const pump = startInboxResponder(f.responder(), 20, (s) => lines.push(s));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   writeFileSync(store.threadStorePath, "");
   appendThreadMessage(inboxThreadIdentity(VH), "reply", "drop it", store);
   appendThreadMessage({ taskId: "W1-T1", class: "review" }, "reply", "an escalation thread is not the responder's", store);
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await new Promise((resolve) => setTimeout(resolve, 200));
   pump.stop();
   await pump.settled();
   assert.ok(lines.includes("inbox.thread_answer_failed"));
