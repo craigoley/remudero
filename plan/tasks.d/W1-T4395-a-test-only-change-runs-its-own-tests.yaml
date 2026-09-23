@@ -1,0 +1,35 @@
+- id: W1-T4395
+  title: "A PULL REQUEST THAT CHANGES ONLY TESTS RUNS NO TESTS — #6867 changed one test file: ci-shard classified it SOURCE and skipped under W1-T3207, coverage-shard classified it TEST_ONLY and skipped (#6528), test-slow skipped, and its main-push run was cancelled in the queue; a TEST_ONLY diff must run the changed test files and the suites they share helpers with"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: [W1-T3207, W1-T3191]
+  files: [.github/workflows/ci.yml, scripts/diff-class.mjs, test/a-test-only-change-runs-its-own-tests.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED on PR #6867: every test job classified or skipped the change away, so the changed test never ran in CI.
+  design: |
+    (i) diff-class exposes the TEST_ONLY file list; a TEST_ONLY PR runs exactly those files (plus any test/helpers/ importer)
+    on the ci shards, uninstrumented, with the same retry wrapper. (ii) A change under test/helpers/ or test/fixtures/
+    is not TEST_ONLY: it runs the full suite. (iii) Nothing else about the SOURCE or PLAN lanes changes.
+  acceptance:
+    - claim: "a test-only diff runs the changed test files"
+      proof: 'grep: test("W1-T4395: a test-only diff runs the changed test files" in test/a-test-only-change-runs-its-own-tests.test.ts'
+    - claim: "a helper or fixture change is not treated as test-only"
+      proof: 'grep: test("W1-T4395: a helper or fixture change is not treated as test-only" in test/a-test-only-change-runs-its-own-tests.test.ts'
+  falsifier: |
+    Keep the TEST_ONLY skip and the first test finds no job that runs the changed file.

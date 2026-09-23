@@ -51,8 +51,10 @@ function inTempState(fn: (ledgerPath: string, dir: string) => void): void {
   }
 }
 
+// These rotations run milliseconds apart in real time; W1-T4100's cadence window would hold the
+// second, and what is under test here is what each rotation archives, not how often one runs.
 const rotate = (ledgerPath: string, atMs: number, ceilingBytes = 4000) =>
-  rotateLedger(ledgerPath, { ceilingBytes, now: () => new Date(atMs) });
+  rotateLedger(ledgerPath, { ceilingBytes, now: () => new Date(atMs), smoothingWindowMs: 0 });
 
 test("two consecutive rotations archive no row twice", () => {
   inTempState((ledgerPath) => {

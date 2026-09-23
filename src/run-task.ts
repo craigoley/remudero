@@ -950,7 +950,7 @@ import {
   mergePlanBlobs,
   loadPlanAtRef,
 } from "./lib/plan.js";
-import { exitCodeFor } from "./lib/errors.js";
+import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
 import {
   DEFAULT_OVERLAP_WARNING_POLICY,
@@ -2065,7 +2065,7 @@ import {
   REPORT_EXCERPT_CAP,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
-  foreignTreeStandDownReason, listRegisteredWorktrees,
+  foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock,
   workerLedgerFields,
   workerTranscript,
   uniqueRunBranch,
@@ -12882,6 +12882,7 @@ interface RunTaskBodyOptions {
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   isolationExec?: IsolationProbeExecutor;
+  managedCheckoutInstall?: (repoDir: string) => void;
   maskLearnings?: boolean;
   maskRecon?: boolean;
   maskRules?: boolean;
@@ -12956,6 +12957,91 @@ export function reportWorkerSourceSizeFollowup(
     log("source_size.followup.error", { reason: "unexpected_throw", detail });
     say("source-size follow-up could not be evaluated — implementation verdict is unchanged");
     return undefined;
+  }
+}
+
+/** W1-T4356: a managed checkout the refresh could not leave consistent — deferred, like W1-T4193's refusal, as blocked_toolchain. */
+export class ManagedCheckoutRefreshRefusedError extends RmdError {
+  readonly reasonClass = "blocked_toolchain" as const;
+  constructor(readonly reason: string) {
+    super("git", GENERIC_EXIT_CODE, `managed checkout refresh refused: ${reason}`, { reason });
+    this.name = "ManagedCheckoutRefreshRefusedError";
+  }
+}
+
+/** W1-T4356: W1-T4193's refusal, naming why the checkout whose install it would borrow was left behind. */
+class ManagedCheckoutNotRefreshedError extends WorktreeNodeModulesRefusedError {
+  constructor(refused: WorktreeNodeModulesRefusedError, readonly notRefreshed: string) {
+    super(refused.packageName, refused.worktreePath, refused.nodeModulesSource);
+    this.message += `; the managed checkout was not fast-forwarded: ${notRefreshed}`;
+  }
+}
+
+/** `skipped` carries the reason a later W1-T4193 refusal names; `release` frees the lock a borrowed checkout was taken under. */
+export type ManagedCheckoutRefresh = { release: () => void } & (
+  | { kind: "unborrowed" | "current" | "fast_forwarded" }
+  | { kind: "skipped"; reason: string }
+);
+
+/**
+ * W1-T4356: keep `repoDir` current before a worktree borrows its install. Only a checkout with its OWN node_modules is
+ * borrowed (`resolveNodeModulesSource` prefers it); any other worktree links the install root the entrypoint keeps fresh.
+ * A clean checkout behind origin/main is fast-forwarded and `install` reinstalls on the lockfile change (a failed install
+ * reverts the fast-forward, so the next dispatch retries it rather than borrowing a broken tree); a dirty, diverged
+ * or off-main one, or one a live worker still borrows from, is left untouched. The lock at `lockPath` is held until the
+ * caller's run.lock marks its own borrower, so a peer dispatch never mutates the tree under a worktree it could not yet see.
+ */
+export function refreshManagedCheckout(
+  repoDir: string,
+  lockPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  install: (repoDir: string) => void = (dir) => void ensureInstallFresh(dir),
+): ManagedCheckoutRefresh {
+  if (!existsSync(join(repoDir, "node_modules"))) return { kind: "unborrowed", release: () => {} };
+  let lock: DrainLockHandle;
+  try {
+    lock = acquireDrainLock(lockPath);
+  } catch (error) {
+    throw new ManagedCheckoutRefreshRefusedError(`another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})`);
+  }
+  const release = () => lock.release();
+  const git = (...args: string[]) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  const skip = (reason: string): ManagedCheckoutRefresh => {
+    log("managed_checkout.refresh_skipped", { reason });
+    return { kind: "skipped", reason, release };
+  };
+  try {
+    const dirty = git("status", "--porcelain");
+    if (dirty) return skip(`checkout is dirty (${dirty.split("\n").length} changed path(s))`);
+    const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+    if (branch !== "main") return skip(`checkout is on ${branch}, not main`);
+    try {
+      git("fetch", "--quiet", "origin");
+    } catch (error) {
+      // Not a refusal: an unreachable origin leaves the checkout as it is, and `skip` ledgers the reason the refusal names.
+      return skip(`could not fetch origin (${String((error as Error)?.message ?? error)})`);
+    }
+    const beforeSha = git("rev-parse", "HEAD");
+    if (beforeSha === git("rev-parse", "origin/main")) return { kind: "current", release };
+    if (git("merge-base", "HEAD", "origin/main") !== beforeSha) return skip("checkout has diverged from origin/main");
+    const borrower = listRegisteredWorktrees(repoDir).find(({ path }) => {
+      const held = path === repoDir ? undefined : readRunLock(path);
+      return held?.kind === "corrupt" || (held?.kind === "live" && defaultIsPidAlive(held.info.pid));
+    });
+    if (borrower) return skip(`a live worker still borrows its node_modules (${borrower.path})`);
+    git("merge", "--ff-only", "--quiet", "origin/main");
+    log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: git("rev-parse", "HEAD") });
+    try {
+      install(repoDir);
+    } catch (error) {
+      // Revert, so the checkout still reads as behind and the next dispatch retries the install instead of linking it.
+      git("reset", "--quiet", "--keep", beforeSha);
+      throw new Error(`install failed after the fast-forward, reverted to ${beforeSha}: ${String((error as Error)?.message ?? error)}`);
+    }
+    return { kind: "fast_forwarded", release };
+  } catch (error) {
+    release();
+    throw new ManagedCheckoutRefreshRefusedError(String((error as Error)?.message ?? error));
   }
 }
 
@@ -13507,6 +13593,8 @@ async function runTask(
      * the REAL `runTask()` catch branch that drops this run's dispatch claim on that refusal.
      */
     worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
+    /** W1-T4356: reinstalls a fast-forwarded managed checkout; default {@link ensureInstallFresh}'s `npm ci`. */
+    managedCheckoutInstall?: (repoDir: string) => void;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -14375,6 +14463,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
+  // W1-T4356: nothing else fast-forwards repos/<repo>, so a lockfile change on main left every implement dispatch refused by
+  // W1-T4193 below. A refusal here is that same deferral, raised before a worktree exists.
+  let checkoutRefresh: ManagedCheckoutRefresh;
+  try {
+    checkoutRefresh = refreshManagedCheckout(
+      repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall,
+    );
+  } catch (e) {
+    log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
+    releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+    throw e;
+  }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError
   // before this run touches recon/implement/commit -- catch it HERE, at dispatch, rather
   // than let a stale base surface only after a full run as the out-of-scope scope guard's
@@ -14392,7 +14492,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
     worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
-  } catch (e) {
+    // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
+    // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
+    // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
+    // written now and removed on terminal verdict (the finally below). If the process
+    // crashes, the lock's pid goes dead and prune reclaims it. (docs/archive/DIAGNOSIS.md)
+    // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+  } catch (caught) {
+    // W1-T4356: a refusal over a checkout the refresh had to leave behind names why it was left.
+    const e = caught instanceof WorktreeNodeModulesRefusedError && checkoutRefresh.kind === "skipped"
+      ? new ManagedCheckoutNotRefreshedError(caught, checkoutRefresh.reason)
+      : caught;
     if (e instanceof WorktreeBaseStaleError) {
       log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref, behind: e.behind });
       say(
@@ -14412,6 +14523,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         package: e.packageName,
         worktreePath: e.worktreePath,
         node_modules_source: e.nodeModulesSource,
+        ...(e instanceof ManagedCheckoutNotRefreshedError ? { managed_checkout_not_refreshed: e.notRefreshed } : {}),
       });
       say(`REFUSED: ${e.message}`);
       try {
@@ -14431,6 +14543,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
+  } finally {
+    checkoutRefresh.release();
   }
   // W1-T2626 (design note (iii)): a single unreadable remote head is already ledgered --
   // `worktree.add`'s `remote_head: "unreadable"` plus its `worktree.base_uncheckable`
@@ -14450,12 +14564,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       newest_ts: uncheckableStreak.newestTs,
     });
   }
-  // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
-  // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
-  // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
-  // written now and removed on terminal verdict (the finally below). If the process
-  // crashes, the lock's pid goes dead and prune reclaims it. (docs/archive/DIAGNOSIS.md)
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   try {
     // ── Recon (read-only).

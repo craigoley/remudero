@@ -1,0 +1,42 @@
+- id: W1-T4404
+  title: "NOTHING IN CI MAPS A CHANGE TO THE TESTS IT AFFECTS — build one selector (changed tests, import-graph callers via callerReachableSuites, suites that read changed files by path via censusSuiteFiles/sourceTextPathsRead, recent failures, full-suite fallback for config/lockfile/helpers/workflows) and run it in SHADOW beside every full run, recording whether it would have caught each real failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: [W1-T3191, W1-T3207]
+  files: [src/lib/affected-suites.ts, src/lib/ci-parity.ts, scripts/select-affected-suites.mjs, .github/workflows/ci.yml, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED: callerReachableSuites (src/lib/ci-parity.ts) and censusSuiteFiles/sourceTextPathsRead (scripts/diff-class.mjs) exist but are advisory/local only. External: import-graph selection skipped ~70% of test files while selecting every affected test in 99.6% of commits (NameRTS, arXiv 2605.25356).
+  design: |
+    (i) src/lib/affected-suites.ts: one pure function (changed files, repo) -> {suites, fullRun: boolean, reasons}.
+    Floor = changed test files ∪ import-graph callers ∪ path-reading census suites ∪ suites failed in the last N runs;
+    fullRun when any change is outside src/ and test/ (config, package.json, lockfile, test/helpers, fixtures,
+    workflows). (ii) SHADOW ONLY: CI computes the selection beside the unchanged full run and writes an artifact plus a
+    step summary; for every failed file in the full run it records selected or missed. Nothing is skipped.
+    (iii) rmd preflight uses the same function, so local and CI can never disagree about what a change affects.
+  acceptance:
+    - claim: "rmd preflight uses the same selector"
+      proof: "grep: selectAffectedSuites( in src/lib/ci-parity.ts"
+    - claim: "the selector includes callers and path-reading suites of a changed module"
+      proof: 'grep: test("W1-T4404: the selector includes callers and path-reading suites of a changed module" in test/the-affected-suite-selector-runs-in-shadow.test.ts'
+    - claim: "a config or lockfile change selects the full suite"
+      proof: 'grep: test("W1-T4404: a config or lockfile change selects the full suite" in test/the-affected-suite-selector-runs-in-shadow.test.ts'
+    - claim: "shadow mode records each real failure as selected or missed and skips nothing"
+      proof: 'grep: test("W1-T4404: shadow mode records each real failure as selected or missed and skips nothing" in test/the-affected-suite-selector-runs-in-shadow.test.ts'
+  falsifier: |
+    Select by import graph alone and the first test misses a census suite that greps the changed file.

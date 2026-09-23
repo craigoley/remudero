@@ -24,6 +24,7 @@ import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { rotationStampIso } from "./ledger-union.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
 
@@ -330,10 +331,104 @@ export function groupSpendByAccount(lines: readonly LedgerLine[]): AccountSpendS
   return { byAccount, refused };
 }
 
+// ── W1-T4100 design note (i): WHAT WRITES SO MUCH ───────────────────────────────────────────
+// 369 archives in a day is a symptom; the cause is bytes-per-hour concentrated in whichever
+// `step` is misbehaving that day. Pure over raw lines — never I/O — so a caller (a digest, an ad
+// hoc `rmd` read, a test) decides which corpus window to measure: a rotation's own archived
+// snapshot, the live file, or several stitched together.
+
+/** One step's measured share of a ledger-line corpus — the unit {@link topLedgerWriters} ranks. */
+export interface LedgerWriterShare {
+  step: string;
+  bytes: number;
+  lineCount: number;
+  /** This step's share of the WHOLE corpus's measured bytes, 0..1. */
+  shareOfBytes: number;
+}
+
+/** Rank every distinct `step` in `lines` by bytes written, heaviest first. A line with no
+ *  parseable JSON or no string `step` is measured (it still occupies real disk) under
+ *  `"(unparseable)"`/`"(unknown)"` respectively, so noise is visible rather than silently dropped
+ *  from the total. `bytes` counts each line's own length plus the newline it owns on disk, the
+ *  same unit {@link readLedgerCorpusPressure} (ledger-compaction-rung.ts) already measures. */
+export function topLedgerWriters(lines: readonly string[], limit = 10): LedgerWriterShare[] {
+  const byStep = new Map<string, { bytes: number; lineCount: number }>();
+  let totalBytes = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const bytes = Buffer.byteLength(line, "utf8") + 1;
+    totalBytes += bytes;
+    let step = "(unparseable)";
+    try {
+      const json = JSON.parse(line) as Record<string, unknown>;
+      step = typeof json.step === "string" && json.step.length > 0 ? json.step : "(unknown)";
+    } catch {
+      // step stays "(unparseable)" — a torn/corrupt line still counts toward the total
+    }
+    const entry = byStep.get(step) ?? { bytes: 0, lineCount: 0 };
+    entry.bytes += bytes;
+    entry.lineCount += 1;
+    byStep.set(step, entry);
+  }
+  return [...byStep.entries()]
+    .map(([step, v]) => ({ step, bytes: v.bytes, lineCount: v.lineCount, shareOfBytes: totalBytes > 0 ? v.bytes / totalBytes : 0 }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, limit);
+}
+
+/** {@link LedgerWriterShare} plus whether THIS step has grown its share of write volume well past
+ *  its own historical baseline — design note (i)'s "a step writing far above its historical share
+ *  is flagged", not merely "whichever step happens to be biggest today" (a flat, evenly-spread
+ *  corpus would otherwise flag its own top entry for no reason). */
+export interface LedgerWriterFlag extends LedgerWriterShare {
+  aboveHistoricalShare: boolean;
+}
+
+/** Rank `current`'s top writers exactly as {@link topLedgerWriters} does, and flag any whose share
+ *  of `current` is at least `thresholdMultiplier` times its share of `baseline` — a real shift in
+ *  WHERE the bytes are going, not just the top of an otherwise-flat distribution. A step absent
+ *  from `baseline` entirely (its share there is 0) is flagged the moment it writes anything in
+ *  `current`, since no multiple of zero is ever "above" it. */
+export function flagAnomalousLedgerWriters(
+  current: readonly string[],
+  baseline: readonly string[],
+  opts: { limit?: number; thresholdMultiplier?: number } = {},
+): LedgerWriterFlag[] {
+  const thresholdMultiplier = opts.thresholdMultiplier ?? 2;
+  const currentTop = topLedgerWriters(current, opts.limit ?? 10);
+  const baselineShares = new Map(topLedgerWriters(baseline, Number.MAX_SAFE_INTEGER).map((w) => [w.step, w.shareOfBytes]));
+  return currentTop.map((w) => {
+    const baselineShare = baselineShares.get(w.step) ?? 0;
+    const aboveHistoricalShare = baselineShare > 0 ? w.shareOfBytes >= baselineShare * thresholdMultiplier : w.shareOfBytes > 0;
+    return { ...w, aboveHistoricalShare };
+  });
+}
+
 /** SIZE CEILING (W1-T209, recon R-9). Below the size a real never-rotated ledger reaches, so one
  *  actually crosses it, and above any single run's appends, so a rotating ledger never thrashes.
  *  Why: the ledger measured at intake (docs/forensics/ledger.md#ledger_rotation_ceiling_bytes). */
 export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+/** W1-T4100 — THE SMOOTHING WINDOW. 369 archives in a day (READ 2026-09-23, ~13/hour) is what a
+ *  size-only ceiling does under bursty write volume: every append that crosses `ceilingBytes`
+ *  rotates again immediately, so a burst of writes multiplies into a burst of archives — each one
+ *  more a union read must open. This is the minimum real time between two rotations of the SAME
+ *  ledger under ordinary growth: a rotation that would otherwise fire again before the window has
+ *  elapsed since the last one instead waits, letting the burst's later writes land in the ALREADY
+ *  rotated live file rather than minting a fresh archive each. Five minutes: short enough that a
+ *  genuinely steady-state ledger (roughly one rotation every 5-8 real minutes, per the same 2026-
+ *  09-23 read) rotates close to its old cadence, long enough that a burst of dozens of crossings
+ *  inside a minute collapses to one. See {@link LEDGER_ROTATION_BACKSTOP_MULTIPLIER} for the bound
+ *  that keeps this a courtesy, never a way to grow the live file without limit. */
+export const LEDGER_ROTATION_SMOOTHING_WINDOW_MS = 5 * 60_000;
+
+/** W1-T4100 — THE BACKSTOP. The smoothing window above is a courtesy, never a way to hold the live
+ *  ledger past a size this repo has already been burned by keeping in memory whole (see ledger-
+ *  compaction-rung.ts's own OOM account of a 4 GB corpus against an 8 GB heap). A live file that
+ *  reaches this multiple of `ceilingBytes` rotates immediately regardless of how recently the last
+ *  rotation fired — the one case where the window itself would be the defect. */
+export const LEDGER_ROTATION_BACKSTOP_MULTIPLIER = 4;
 
 /** W1-T2244: the one row an operator produces when they act on a risk-judge escalation instead of
  *  taking its "merge it by hand" escape hatch in silence. Written by `recordRiskOverride`, read
@@ -980,14 +1075,129 @@ function datedArchivePath(path: string, now: Date): string {
   return join(dirname(path), `${base}.${stamp}.ndjson`);
 }
 
+/** W1-T4100 — THE NAME MUST NEVER RUN AHEAD OF ITS FILE. READ 2026-09-23: an archive named
+ *  `ledger.2027-10-14T21-24-52-494Z.ndjson.gz` with a real file mtime of 2026-09-13 — a name over
+ *  a YEAR ahead of when the archive actually landed, so every "pick the newest by name" reader
+ *  (the exact contract {@link rotationStampIso}'s callers rely on) picked that stale file over
+ *  every real one written since. `datedArchivePath` stamped straight off whatever `Date` its
+ *  caller handed it; the incident is that value running ahead of reality, not the formatting.
+ *
+ *  The one clock that cannot lie about when a file actually landed is the file's OWN mtime,
+ *  stamped by the OS independently of whatever produced the name — so it is the ceiling every
+ *  archive stamp is checked against, both the one this rotation is about to write (see
+ *  {@link healIfAheadOfOwnMtime}) and every one already on disk (this function, run at the start
+ *  of every rotation so a bad name left by a still-corrupted caller never survives past the next
+ *  one). EACH renamed to reflect its OWN real mtime — deliberately NOT bumped forward to sort
+ *  after whatever else is on disk: the whole point of the incident this fixes is a stale file
+ *  LOOKING newest, so healing it to look newest again (just under a different name) would repeat
+ *  the defect rather than remove it. A name collision at millisecond precision (two real writes
+ *  landing the same ms, vanishingly rare) is nudged forward by the smallest amount that clears it,
+ *  never reordered relative to any other archive's OWN mtime.
+ *
+ *  Returns the newest SAFE stamp found across every archive (healed or not), so the archive THIS
+ *  rotation is about to write — a genuinely new write, unlike the historical files above — is
+ *  named no earlier than the real newest thing already on disk.
+ *  Falsifier: test/the-ledger-rotates-at-a-steady-pace.test.ts. */
+function reconcileArchiveStamps(dir: string, fs: ArchiveNamingFs): number | undefined {
+  let maxSafeMs: number | undefined;
+  for (const { name, mtimeMs } of archiveMtimes(dir, fs)) {
+    const nameMs = Date.parse(rotationStampIso(name)!);
+    if (!Number.isFinite(nameMs)) continue;
+    let safeMs = nameMs;
+    if (nameMs > mtimeMs) {
+      const renamed = renameArchiveTo(join(dir, name), name, mtimeMs, fs);
+      // A failed rename leaves the old (unsafe) name on disk; a nudged one lands a little later.
+      safeMs = renamed === undefined ? nameMs : Date.parse(rotationStampIso(basename(renamed))!);
+    }
+    if (maxSafeMs === undefined || safeMs > maxSafeMs) maxSafeMs = safeMs;
+  }
+  return maxSafeMs;
+}
+
+/** Every rotation-archive-shaped entry in `dir` with its real (OS-assigned) mtime. An unreadable
+ *  dir reads as no archives and an entry gone since the readdir is skipped — both best-effort, so
+ *  naming and pacing never fail the rotation that asked. */
+function archiveMtimes(dir: string, fs: ArchiveNamingFs): Array<{ name: string; mtimeMs: number }> {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return []; // state dir unreadable — nothing to reconcile or pace against, same as no archives
+  }
+  const out: Array<{ name: string; mtimeMs: number }> = [];
+  for (const name of names) {
+    if (rotationStampIso(name) === undefined) continue; // only real archive-shaped names count
+    try {
+      out.push({ name, mtimeMs: fs.mtimeMs(join(dir, name)) });
+    } catch {
+      continue; // gone since the readdir — nothing to heal, count or pace against
+    }
+  }
+  return out;
+}
+
+/** Rename the archive at `fullPath` (current basename `currentName`) to the name `stampMs`
+ *  encodes, preserving its gzip/plain form, and return its new path. A name another archive already
+ *  holds is nudged forward a millisecond at a time — `renameSync` would silently replace that file.
+ *  Best-effort: a failed rename returns `undefined` and must never fail the rotation that triggered
+ *  the heal — the file is simply left as it was, never deleted or truncated. */
+function renameArchiveTo(fullPath: string, currentName: string, stampMs: number, fs: ArchiveNamingFs): string | undefined {
+  const ext = currentName.endsWith(".gz") ? ".ndjson.gz" : ".ndjson";
+  const nameAt = (ms: number): string => `ledger.${fixedClock(ms).iso().replace(/[:.]/g, "-")}${ext}`;
+  let ms = Math.floor(stampMs);
+  if (nameAt(ms) === currentName) return fullPath; // already safe under its own name
+  while (existsSync(join(dirname(fullPath), nameAt(ms)))) ms++;
+  const target = join(dirname(fullPath), nameAt(ms));
+  try {
+    fs.renameSync(fullPath, target);
+    return target;
+  } catch {
+    return undefined; // best-effort — a failed rename must never fail the rotation that triggered it
+  }
+}
+
+/** Post-write correction for the archive THIS rotation just wrote. `now` (the value
+ *  {@link rotateLedgerLocked} named the archive with) can itself be the corrupted clock — that is
+ *  the actual incident, not a hypothetical — so the archive's own real mtime, read back from disk
+ *  right after {@link writeArchive} lands it, is what decides whether the name needs healing, not
+ *  a second opinion from the same `now`. `lastArchiveMs` (from {@link reconcileArchiveStamps})
+ *  keeps the healed name monotonic against every archive already on disk. */
+function healIfAheadOfOwnMtime(archivePath: string, lastArchiveMs: number | undefined, fs: ArchiveNamingFs): string {
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.mtimeMs(archivePath);
+  } catch {
+    return archivePath; // can't stat the archive just written — leave its name exactly as it is
+  }
+  const name = basename(archivePath);
+  const iso = rotationStampIso(name);
+  const nameMs = iso ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(nameMs) || nameMs <= mtimeMs) return archivePath; // not ahead — leave it
+  // FLOOR, never round: mtimeMs is sub-millisecond and a stamp is not, so a rounded-UP ms could
+  // still land a fraction of a millisecond ahead of the real mtime it was meant to cap at.
+  let safeMs = Math.floor(mtimeMs);
+  if (lastArchiveMs !== undefined && safeMs <= lastArchiveMs) safeMs = lastArchiveMs + 1;
+  return renameArchiveTo(archivePath, name, safeMs, fs) ?? archivePath;
+}
+
 /** Minimal fs surface {@link writeArchive} needs for compression, injectable so a test can force
  *  compression to fail — proving the fallback below — without monkey-patching `node:zlib`. */
 export interface LedgerArchiveFsDeps {
   gzipSync: (buf: Buffer) => Buffer;
+  /** W1-T4100: the archive-naming and pacing reads, each defaulting to node:fs, so every
+   *  best-effort arm of {@link archiveMtimes}/{@link renameArchiveTo} is provable. */
+  readdirSync?: (dir: string) => string[];
+  mtimeMs?: (path: string) => number;
+  renameSync?: (from: string, to: string) => void;
 }
 
-const realArchiveFs: LedgerArchiveFsDeps = {
+type ArchiveNamingFs = Required<LedgerArchiveFsDeps>;
+
+const realArchiveFs: ArchiveNamingFs = {
   gzipSync: (buf) => gzipSync(buf),
+  readdirSync: (dir) => readdirSync(dir),
+  mtimeMs: (path) => statSync(path).mtimeMs,
+  renameSync: (from, to) => renameSync(from, to),
 };
 
 /**
@@ -1196,6 +1406,21 @@ export function compactRotations(
   return { sourceCount: sources.length, rowsWritten: rows.length, duplicatesCollapsed: read - rows.length, archiveName, archiveNames };
 }
 
+/** W1-T4100 — THE SMOOTHING CHECK ITSELF. Real elapsed time only, read from the newest archive
+ *  ALREADY on disk (never a marker this module would have to invent and clean up — the archive
+ *  corpus itself is the durable record of "when did a rotation last actually land"), independent
+ *  of whatever `now` a caller hands {@link rotateLedgerLocked} for naming/retention purposes. The
+ *  backstop is checked FIRST and unconditionally, so a live file that has genuinely outgrown the
+ *  window's patience is never held hostage by it. */
+function ledgerRotationDue(sizeBytes: number, ceilingBytes: number, dir: string, fs: ArchiveNamingFs, windowMs: number): boolean {
+  if (sizeBytes > ceilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER) return true;
+  // The newest archive's FILE mtime, not its name's stamp — the window paces real rotations, and a
+  // name is exactly what reconcileArchiveStamps exists because it cannot always be trusted.
+  const mtimes = archiveMtimes(dir, fs).map((a) => a.mtimeMs);
+  if (mtimes.length === 0) return true; // no prior rotation to smooth against
+  return systemClock.now() - mtimes.reduce((a, b) => Math.max(a, b)) >= windowMs;
+}
+
 export function rotateLedger(
   path: string,
   opts: {
@@ -1203,12 +1428,19 @@ export function rotateLedger(
     fsDeps?: LedgerRotationFsDeps;
     now?: () => Date;
     archiveFsDeps?: LedgerArchiveFsDeps;
+    /** Cadence window, default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}; 0 rotates on every crossing. */
+    smoothingWindowMs?: number;
   } = {},
 ): LedgerRotationResult {
   const ceilingBytes = opts.ceilingBytes ?? LEDGER_ROTATION_CEILING_BYTES;
+  const windowMs = opts.smoothingWindowMs ?? LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
   const fsDeps = opts.fsDeps ?? realRotationFs;
-  const archiveFsDeps = opts.archiveFsDeps ?? realArchiveFs;
+  const archiveFsDeps: ArchiveNamingFs = { ...realArchiveFs, ...opts.archiveFsDeps };
   if (!ledgerExceedsRotationCeiling(path, ceilingBytes, fsDeps)) return { rotated: false };
+  // W1-T4100: a burst of appends each crossing the ceiling again must not each mint a fresh
+  // archive — see LEDGER_ROTATION_SMOOTHING_WINDOW_MS's own doc for why and
+  // LEDGER_ROTATION_BACKSTOP_MULTIPLIER for the bound that still applies regardless.
+  if (!ledgerRotationDue(fsDeps.statSize(path), ceilingBytes, dirname(path), archiveFsDeps, windowMs)) return { rotated: false };
 
   const release = tryAcquireRotationLock(ledgerRotationLockPath(path));
   if (release === null) return { rotated: false }; // a live rotator holds it — its catch-up covers us
@@ -1216,6 +1448,7 @@ export function rotateLedger(
     // Re-check under the lock: if the holder we queued behind just rotated, the file is
     // already small and there is nothing left to do (see the doc above).
     if (!ledgerExceedsRotationCeiling(path, ceilingBytes, fsDeps)) return { rotated: false };
+    if (!ledgerRotationDue(fsDeps.statSize(path), ceilingBytes, dirname(path), archiveFsDeps, windowMs)) return { rotated: false };
     return rotateLedgerLocked(path, ceilingBytes, archiveFsDeps, opts.now);
   } finally {
     release();
@@ -1226,17 +1459,27 @@ export function rotateLedger(
 function rotateLedgerLocked(
   path: string,
   ceilingBytes: number,
-  archiveFsDeps: LedgerArchiveFsDeps,
+  archiveFsDeps: ArchiveNamingFs,
   now: (() => Date) | undefined,
 ): LedgerRotationResult {
   const { size: size0, content: snapshot, bytes: snapshotBytes, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
 
+  // W1-T4100: heal on-disk names that ran ahead of their write time; the newest safe stamp is the
+  // floor this rotation's own name must clear.
+  const dir = dirname(path);
+  const lastArchiveMs = reconcileArchiveStamps(dir, archiveFsDeps);
+  let requestedMs = now ? now().getTime() : systemClock.now();
+  if (lastArchiveMs !== undefined && requestedMs <= lastArchiveMs) requestedMs = lastArchiveMs + 1;
   // DELTA ARCHIVING: the carried prefix is the core the previous rotation wrote back, already
   // archived, so only what follows it goes to a new archive. Re-copying it made adjacent archives
   // share 99.3% of rows (fleet host, 2026-09-23). An empty delta writes no archive at all.
   const delta = snapshotBytes.subarray(archivedPrefixBytes(path, snapshotBytes));
-  const plainArchivePath = datedArchivePath(path, now?.() ?? new Date());
-  const archivePath = delta.length > 0 ? writeArchive(plainArchivePath, delta.toString("utf8"), archiveFsDeps) : undefined;
+  const plainArchivePath = datedArchivePath(path, new Date(requestedMs));
+  // The landed archive's own mtime is the clock `now` cannot corrupt (see healIfAheadOfOwnMtime).
+  const archivePath =
+    delta.length > 0
+      ? healIfAheadOfOwnMtime(writeArchive(plainArchivePath, delta.toString("utf8"), archiveFsDeps), lastArchiveMs, archiveFsDeps)
+      : undefined;
 
   // ONE clock read for the whole rotation — the health-window filter, the shed pointer's size
   // estimate, and the shed pointer's actual `ts` all agree on the same instant.

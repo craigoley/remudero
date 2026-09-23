@@ -1,0 +1,36 @@
+- id: W1-T4399
+  title: "ABOUT 25 ONE-MINUTE GATES EACH START THEIR OWN RUNNER — commitlint, lint-plan, depcruise, claims, jscpd, dashboard, comment-load-ratchet and the rest each check out, set up node and run npm ci, and each bills at least a rounded-up minute (~228k job-min/month); run them as steps of one or two jobs, keeping every check name the branch rules and ci-gate require"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: []
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/the-light-gates-share-one-runner.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED: ~27 jobs besides the test shards on a SOURCE PR run, each ~1 billed minute; npm ci itself takes 6-9 s cached.
+  design: |
+    (i) A gates job runs the light checks as steps with continue-on-error, then reports each result as its own
+    check run under the SAME name the REQUIRED list and branch protection use (checks API), so no required context
+    disappears and gate-monotonic sees no demotion. (ii) A gate with its own heavy setup stays separate.
+    (iii) One step failing never hides another: every step runs and reports.
+  acceptance:
+    - claim: "the light gates run as steps of one job"
+      proof: 'grep: test("W1-T4399: the light gates run as steps of one job" in test/the-light-gates-share-one-runner.test.ts'
+    - claim: "every required gate still reports under its own name"
+      proof: 'grep: test("W1-T4399: every required gate still reports under its own name" in test/the-light-gates-share-one-runner.test.ts'
+  falsifier: |
+    Drop the per-gate check-run report and the second test finds a required context no job produces.
