@@ -121,3 +121,15 @@ test("W1-T3843: the canonical ci-learning shard is allowed to remain parked for 
 
   assert.equal(result.violations.some((v) => v.check === "machine-filing-admission"), false);
 });
+
+test("a retired machine-filed task is not refused as unselectable", () => {
+  // A withdrawn duplicate is blocked on purpose; refusing it made every retirement of a machine
+  // filing — the plan gardener's MERGE and RETIRE proposals among them — fail lint-plan.
+  const retired = task({ author_class: "machine", status: "blocked", retirement: "withdrawn", note: "duplicate" });
+  const result = lintTask(retired, { machineFilingAdmission: { plan: planFor(retired), releasedIds: new Set(), pathExists: () => true } });
+  assert.equal(result.violations.find((v) => v.check === "machine-filing-admission"), undefined);
+  // The same task without the retirement is still refused: the exemption is the ruling, not the block.
+  const held = task({ author_class: "machine", status: "blocked", note: "duplicate" });
+  const refused = lintTask(held, { machineFilingAdmission: { plan: planFor(held), releasedIds: new Set(), pathExists: () => true } });
+  assert.ok(refused.violations.some((v) => v.check === "machine-filing-admission"));
+});
