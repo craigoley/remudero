@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fetchCiFailures, defaultCiAnnotationFetch, type CiAnnotationFetch } from "../src/run-task.js";
+import { fetchCiFailures, defaultCiAnnotationFetch, type CiAnnotationFetch, type CiJobLogFetch } from "../src/run-task.js";
 import { describeCiLogUnavailable, diffCoverageReport, type CiFailure } from "../src/lib/sweep.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 // ── W1-T2298 — the coverage failure detail is published and nothing reads it. Two halves: a SECOND
 // SOURCE for `logTail` when the log blob cannot be read, and a REPORTER for the diff-scoped coverage
@@ -26,6 +27,12 @@ function recorder(messages: string[]): { fetch: CiAnnotationFetch; calls: Array<
     },
   };
 }
+
+/** W1-T4226: a job log that cannot be read — the failure these tests name, through the
+ *  `fetchJobLog` seam instead of the shared refusal stub. */
+const unreadableLog: CiJobLogFetch = () => {
+  throw Object.assign(new Error("HTTP 403: Forbidden"), { code: "EPROXY" });
+};
 
 const DIFF_COVERAGE_TAIL = [
   "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests, even though the aggregate coverage-ratchet floor may still be satisfied:",
@@ -60,7 +67,8 @@ test("a readable log tail is still preferred, so existing recognisers match exac
 
 test("an unreadable failure detail records which source answered and why, instead of degrading silently", () => {
   const empty = recorder([]);
-  const [f] = fetchCiFailures("o", "r", [failing("coverage-ratchet")], 60, empty.fetch);
+  // W1-T4226: the job-log read goes through its seam and FAILS, never the refused real gh.
+  const [f] = fetchCiFailures("o", "r", [failing("coverage-ratchet")], 60, { fetchAnnotations: empty.fetch, fetchJobLog: unreadableLog });
   assert.equal(f?.logTail, "");
   assert.equal(f?.tailSource, undefined, "no source answered, so none may be claimed");
   assert.equal(f?.annotationFallback?.outcome, "empty", "the fallback ran and said so");
@@ -76,7 +84,8 @@ test("a throwing annotation fallback is named, never rethrown — the producer k
   const boom: CiAnnotationFetch = () => {
     throw Object.assign(new Error("Forbidden"), { code: "EPROXY" });
   };
-  const [f] = fetchCiFailures("o", "r", [failing("ci")], 60, boom);
+  // W1-T4226: the job-log read goes through its seam and FAILS, never the refused real gh.
+  const [f] = fetchCiFailures("o", "r", [failing("ci")], 60, { fetchAnnotations: boom, fetchJobLog: unreadableLog });
   assert.equal(f?.annotationFallback?.outcome, "failed");
   assert.match((f?.annotationFallback as { detail: string }).detail, /EPROXY: Forbidden/);
   assert.equal(f?.logUnavailable?.kind, "fetch-failed", "the log's own cause is untouched by the fallback's failure");
@@ -127,5 +136,15 @@ test("the DEFAULT annotation fetch really shells out — the seam's own implemen
   // Not a fake: this runs `defaultCiAnnotationFetch` itself. Against a repo/id that cannot resolve
   // it must THROW (which the producer's catch is what turns into a named cause) rather than return
   // a value — so the default is proven executable, not merely present.
-  assert.throws(() => defaultCiAnnotationFetch("no-such-owner-xyzzy", "no-such-repo-xyzzy", "1"));
+  // W1-T4226: the shell-out reaches this test's own `gh` stub answering GitHub's 404, never the
+  // shared refusal stub — the default still really spawns `gh`, and still throws on the failure.
+  const shim = ghShim([{ when: "/annotations", stderr: "gh: Not Found (HTTP 404)", exit: 1 }], { kind: "ci-annotations-404" });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    assert.throws(() => defaultCiAnnotationFetch("no-such-owner-xyzzy", "no-such-repo-xyzzy", "1"));
+  } finally {
+    process.env.PATH = originalPath;
+  }
+  assert.deepEqual(shim.calls(), ["api repos/no-such-owner-xyzzy/no-such-repo-xyzzy/check-runs/1/annotations --jq .[].message"], "the default really shelled out, once");
 });

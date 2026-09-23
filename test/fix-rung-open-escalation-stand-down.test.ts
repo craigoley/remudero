@@ -197,6 +197,8 @@ async function sweep(opts: {
         return result({ sessionId: `s-${opts.spawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       // The worker pushed nothing that changes the verdict — the same review comes back, which is
       // what makes this a false block rather than a genuine deficiency.
       runReview: async () => review,

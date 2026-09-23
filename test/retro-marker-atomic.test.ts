@@ -33,6 +33,7 @@ import { drainDetachedSweepActions } from "../src/lib/sweep.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
+import { withHealthyRetroProbeGh } from "./helpers/w4226-g1-retro-probe-gh.js";
 import type { RunRetroPrepublishPreflightOptions, RetroPrepublishResult } from "../src/lib/retro-preflight.js";
 
 /**
@@ -352,7 +353,8 @@ test("retroCommand: --dry-run builds the gather and returns 0 without ever touch
 
   const logSpy = t.mock.method(console, "log", () => {});
   try {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGh }));
+    // W1-T4226: the gather's throttle probe reads a scripted, healthy `gh`, never the refused real one.
+    const exitCode = await withHealthyRetroProbeGh(() => withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGh })));
     assert.equal(exitCode, 0, "--dry-run never fails a genuinely-first-ever retro");
     assert.ok(
       logSpy.mock.calls.some((c) => String(c.arguments[0]).includes("Retro gather")),
@@ -404,7 +406,8 @@ test("retroCommand: a follow-up dedup 'tasks' read that THROWS degrades to an em
   const logSpy = t.mock.method(console, "log", () => {});
 
   try {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGh }));
+    // W1-T4226: the gather's throttle probe reads a scripted, healthy `gh`, never the refused real one.
+    const exitCode = await withHealthyRetroProbeGh(() => withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGh })));
     assert.equal(exitCode, 0, "a dedup-source read hiccup must never abort the retro (best-effort, W1-T105 design)");
     assert.ok(
       errSpy.mock.calls.some(
@@ -446,7 +449,8 @@ test("retroCommand: a non-trivial MASTER-PLAN.md yielding ZERO proposal-bullet m
 
   try {
     assert.ok(noProposalBulletsMd.length > 500, "sanity: the fixture must clear the guard's own non-trivial threshold");
-    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGh }));
+    // W1-T4226: the gather's throttle probe reads a scripted, healthy `gh`, never the refused real one.
+    const exitCode = await withHealthyRetroProbeGh(() => withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGh })));
     assert.equal(exitCode, 0, "a format-drift dedup source must never abort the retro");
     assert.ok(
       errSpy.mock.calls.some((c) => String(c.arguments[0]).includes("followups.open_titles.proposals") && String(c.arguments[0]).includes("format drift")),
@@ -1385,7 +1389,8 @@ test("the injected offline gateway is consulted by retroCommand, so no real one 
   t.mock.method(console, "log", () => {});
   const github = offlineGithub();
   try {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github }));
+    // W1-T4226: the gather's throttle probe reads a scripted, healthy `gh`, never the refused real one.
+    const exitCode = await withHealthyRetroProbeGh(() => withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github })));
     assert.equal(exitCode, 0, "--dry-run never fails a genuinely-first-ever retro");
     assert.ok(
       github.calls.length > 0,

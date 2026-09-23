@@ -16,13 +16,14 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -45,6 +46,11 @@ test("serve's startup banner is readable in a redirected log BEFORE the process 
   const logPath = join(home, "serve.out.log");
   const port = await freePort();
 
+  // W1-T4226: the serve child's boot-time board read shells out to `gh` — answered by this
+  // test's own scripted stub (an empty board), never the shared refusal stub.
+  const gh = ghShim([{ when: "/pulls?", stdout: "[]" }], { kind: "serveboot-gh" });
+  t.after(() => rmSync(gh.dir, { recursive: true, force: true }));
+
   const out = openSync(logPath, "a", 0o600);
   const child = spawn(join(repoRoot, "bin", "rmd"), ["serve", "--port", String(port), "--host", "127.0.0.1"], {
     // NON-TTY stdout, redirected to a file — the launchd unit's exact shape.
@@ -53,6 +59,7 @@ test("serve's startup banner is readable in a redirected log BEFORE the process 
     // it exited 2 as an "unexpected argument" despite being documented in USAGE.
     env: {
       ...process.env,
+      PATH: `${gh.dir}:${process.env.PATH ?? ""}`,
       HOME: home,
       // REQUIRED, NOT TIDINESS — the sibling test/serve-orphan-teardown.test.ts earned this
       // guard for `checkCliFreshness`'s network git and this file never got it back-ported.

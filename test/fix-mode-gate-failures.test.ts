@@ -227,6 +227,8 @@ test("runFixRung (criterion 3): a review-mode round with REAL unmet criteria dis
         return result({ sessionId: "fix-session-1" });
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => reviewVerdict({ state: "success", criteria: [criterion({ claim: "criterion A merges cleanly", met: true })], headSha: "sha-1" }),
       push: () => {},
       issues: fakeIssueStore(),
@@ -269,6 +271,8 @@ test("runFixRung (criteria 1/2, round 1): unmetCriteria EMPTY but actionableGate
         return result({ sessionId: "fix-session-1" });
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => reviewVerdict({ state: "success", criteria: [], testTheater: false, headSha: "sha-1" }),
       push: () => {},
       issues: fakeIssueStore(),
@@ -312,6 +316,8 @@ test("runFixRung (criterion 4, round 1): unmetCriteria EMPTY and actionableGateF
         return result({ sessionId: "fix-session-1" });
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => reviewVerdict({ state: "success", criteria: [], headSha: "sha-1" }),
       push: () => {},
       issues: fakeIssueStore(),
@@ -346,6 +352,8 @@ test("runFixRung (criterion 1, mid-rung recurrence): unmetCriteria EMPTY and act
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       // Every re-review is the SAME nothing-to-act-on shape: still failing, still zero criteria,
       // no test theater — round 1's strike genuinely bought no new information.
       runReview: async () => reviewVerdict({ state: "failure", criteria: [], testTheater: false, headSha: "sha-1" }),
@@ -393,6 +401,8 @@ test("runFixRung (criteria 1/2, mid-rung recurrence): round 2's fresh re-review 
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       // Round 1's strike fixes the named criterion but ADDS assertion-free tests: testTheater
       // fails the verdict on its own — a genuine, structured, single-form gate failure.
       runReview: async () =>
@@ -427,6 +437,8 @@ test("runFixRung (criterion 5): a fully empty-evidence review (no unmet criteria
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => {
         reviewCalls++;
         return reviewVerdict({ state: "failure", criteria: [], summary: "contradictory", headSha: `esc-sha-${reviewCalls}` });

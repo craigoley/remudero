@@ -291,9 +291,15 @@ const COMMIT_ONLY_GIT = () =>
     slug: "o/r",
     exec: fakeGit(commit("aaa", "fix(triage): prompt the worker with the id the lane reserved (#3005)", "Remudero-Task: W1-T2326\n")),
   });
+/** W1-T4226: #3005's changed-file list (rung (c)'s plan-only check), read through the gateway's
+ *  `exec` seam, never the refused real gh — a code change, as #3005's `fix(triage)` subject says. */
+const COMMIT_ONLY_FILES_EXEC = (args: string[]): string => {
+  if (args.join(" ") === "api --paginate repos/o/r/pulls/3005/files --jq .[].filename") return "src/lib/triage.ts\n";
+  throw new Error(`unexpected gh call: ${args.join(" ")}`);
+};
 
 test("W1-T2387 END TO END: a commit-only trailer now CREDITS through deriveStatus, not merely through the gateway", () => {
-  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: COMMIT_ONLY_GIT() });
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: COMMIT_ONLY_GIT(), exec: COMMIT_ONLY_FILES_EXEC });
   const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
   assert.equal(p.merged, true, "the projection credits it — the re-verify accepts the second anchored surface");
   assert.equal(p.source, "trailer");
@@ -301,7 +307,7 @@ test("W1-T2387 END TO END: a commit-only trailer now CREDITS through deriveStatu
 });
 
 test("W1-T2387 FALSIFIER: with the commit index EMPTY the same row is NOT credited — the credit really comes from that surface", () => {
-  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: () => new Map() });
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: () => new Map(), exec: COMMIT_ONLY_FILES_EXEC });
   const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
   assert.equal(p.merged, false, "no commit evidence, no anchored body trailer, no credit");
 });
@@ -310,7 +316,7 @@ test("W1-T2387 + W1-T2392 COMPOSE: a build the union credits stops warning as an
   // W1-T2392's warning fires only when every credit surface came back empty. The union adds a
   // reading to one of them, so a build it now credits must go silent — asserted in one place
   // because the two are only correct together.
-  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: COMMIT_ONLY_GIT() });
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [COMMIT_ONLY_ROW], commitTrailerIndex: COMMIT_ONLY_GIT(), exec: COMMIT_ONLY_FILES_EXEC });
   const p = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: gh }).get("W1-T2326")!;
   assert.equal(p.merged, true, "credited");
   assert.equal(p.uncreditedBuild, undefined, "and therefore NOT reported as an uncredited build");
