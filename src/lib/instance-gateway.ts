@@ -15,8 +15,8 @@
  *   naming the reason — never an empty board, never another instance's data, never a boot failure.
  *
  * Inside the gateway container an instance's state root is `<stateBase>/<name>` — the mount
- * `deploy/serve-container.sh` makes from the registry's `state_dir`. Its checkout (and plan) is the
- * directory named after the repo, exactly as the daemon lays out its own state root.
+ * `deploy/serve-container.sh` makes from the registry's `state_dir`. Its checkout (and plan) is
+ * `repos/<repo>`, where the daemon clones every repo it manages (`join(config.root, "repos", repo)`).
  */
 import { readFileSync } from "node:fs";
 import { access } from "node:fs/promises";
@@ -74,7 +74,7 @@ export interface InstanceGatewayOptions {
 
 export function instanceStateRoot(instance: RegistryInstance, stateBase: string): InstanceStateRoot {
   const root = join(stateBase, instance.name);
-  const checkout = join(root, instance.repo.split("/")[1]);
+  const checkout = join(root, "repos", instance.repo.split("/")[1]);
   return {
     instance: instance.name,
     root,

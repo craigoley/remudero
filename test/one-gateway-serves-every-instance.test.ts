@@ -30,7 +30,7 @@ function task(id: string, repo: string): string {
   return `- id: ${id}\n  title: ${id} title\n  repo: ${repo}\n  type: implement\n  depends_on: []\n  status: queued\n`;
 }
 
-/** One instance's state root in the daemon's own layout: `state/ledger.ndjson` and `<repo>/plan/tasks.yaml`. */
+/** One instance's state root in the daemon's own layout: `state/ledger.ndjson` and `repos/<repo>/plan/tasks.yaml`. */
 function stateRoot(root: string, repo: string, taskIds: string[]): { ledgerPath: string; planPath: string; checkout: string } {
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
@@ -38,7 +38,7 @@ function stateRoot(root: string, repo: string, taskIds: string[]): { ledgerPath:
     ledgerPath,
     taskIds.map((id, i) => JSON.stringify({ ts: `2026-09-23T10:0${i}:00.000Z`, run_id: `r-${id}`, task_id: id, step: "verdict", verdict: "FAIL" })).join("\n") + "\n",
   );
-  const checkout = join(root, repo);
+  const checkout = join(root, "repos", repo);
   mkdirSync(join(checkout, "plan"), { recursive: true });
   const planPath = join(checkout, "plan", "tasks.yaml");
   writeFileSync(planPath, taskIds.map((id) => task(id, repo)).join(""));
