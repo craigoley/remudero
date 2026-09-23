@@ -70,7 +70,7 @@ export function planShards(repoRoot: string): Map<string, string> {
 
 const filesKey = (t: Task): string => [...(t.files ?? [])].sort().join("\n");
 
-/** Filing order: by id prefix, then task number, so W1-T999 is older than W1-T1000. */
+/** Filing order: by id prefix, then task NUMBER, so a three-digit id sorts before a four-digit one. */
 function byFilingOrder(a: Task, b: Task): number {
   const parse = (id: string) => /^(.*-T)(\d+)(.*)$/.exec(id) ?? [id, id, "0", ""];
   const [, pa, na, sa] = parse(a.id);
