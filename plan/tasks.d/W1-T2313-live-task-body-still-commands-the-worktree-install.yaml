@@ -87,7 +87,9 @@
   origin: "feedback#fb-1785982194342-bb9d81"
   plan_refs: ["W1-T65", "W1-T2312", "W1-T2314", "W1-T384", "W1-T151"]
   files: [plan/tasks.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T2313 — Every acceptance proof already holds on main.
   attempts: 0
   note: |
     PROVENANCE IS W1-T2312'S, UNCHANGED — this is one third of a single filing from

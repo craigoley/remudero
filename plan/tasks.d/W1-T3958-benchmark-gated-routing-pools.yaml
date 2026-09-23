@@ -18,7 +18,9 @@
     - test/model-pool-readiness.test.ts
     - test/model-pool-selection.test.ts
     - test/model-pool-fallback.test.ts
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T3958 — It depends on W1-T3762, which will never be built.
   attempts: 0
   rationale: |
     Kilo Auto Model is a useful product parallel because it turns model choice into a measured,
