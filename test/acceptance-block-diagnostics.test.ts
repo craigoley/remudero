@@ -79,6 +79,39 @@ const NO_HEADER = `## Validation
   proof: unit test: test/foo.test.ts
 `;
 
+/** W1-T1097: THE DEFECT'S OWN SHAPE — #1712 verbatim. An `## Acceptance` header IS present, but
+ *  the next line is unbulleted `claim:`/`proof:` prose, so the scan bails before recognising a
+ *  single bullet. `bulletsWritten` and `criteriaParsed` both read 0 and therefore AGREE, which is
+ *  exactly why `acceptanceBlockDiagnostics`'s own `defective` flag misses this shape — see the
+ *  first test below. */
+const ZERO_CRITERIA = `## Acceptance
+
+claim: something that was never turned into a bullet
+proof: unit test: test/foo.test.ts
+`;
+
+/** A temp `tasks.yaml` — mirrors `test/acceptance-preflight-agrees-with-gate.test.ts`'s own
+ *  helper: a single monolith file, no `tasks.d/` sibling needed. */
+function tmpPlan(yaml: string): { path: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-accept-diag-plan-"));
+  const path = join(dir, "tasks.yaml");
+  writeFileSync(path, yaml);
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/** Capture only `console.error` output — the DEFECTIVE refusal channel `checkAcceptanceCommand`
+ *  writes to, distinct from the `console.log` diagnostic report. */
+function withCapturedStderr(fn: () => number): { code: number; err: string[] } {
+  const err: string[] = [];
+  const real = console.error;
+  console.error = (...a: unknown[]) => void err.push(a.map(String).join(" "));
+  try {
+    return { code: fn(), err };
+  } finally {
+    console.error = real;
+  }
+}
+
 function tmpFile(contents: string): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-accept-diag-"));
   const path = join(dir, "body.md");
@@ -170,6 +203,111 @@ test("check-acceptance reports a missing header through the CLI, not only throug
   const f = tmpFile(NO_HEADER);
   try {
     assert.equal(checkAcceptanceCommand([f.path]), 1, "a body with no Acceptance header must refuse");
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ── W1-T1097: check-acceptance exits non-zero on a body it resolved ZERO criteria from ──────────
+//
+// `acceptanceBlockDiagnostics`'s `defective` flag reads `!headerFound || parsed.length !==
+// bulletsWritten || emptyProofs > 0`, and BOTH counters read 0 when the scan bails before the
+// first bullet — they agree, so `defective` is false and the untrailered path used to print "OK"
+// and exit 0. The fix sources the untrailered path's exit code from `acceptanceAuthorTimeCheck`
+// instead, the SAME predicate `scripts/acceptance-author-gate.mjs` already calls in CI, so the two
+// can never disagree about the same bytes (design item i).
+
+test("W1-T1097: a zero-criteria body makes check-acceptance exit non-zero", () => {
+  // The diagnostic itself, reproduced first: both counters read 0 and AGREE, so `defective` misses
+  // this shape — the exact bug this task fixes an exit code around, not a parser change.
+  const d = acceptanceBlockDiagnostics(ZERO_CRITERIA);
+  assert.equal(d.headerFound, true);
+  assert.equal(d.bulletsWritten, 0);
+  assert.equal(d.criteriaParsed, 0);
+  assert.equal(d.defective, false, "the historical trap: 0 === 0, so `defective` cannot see this input");
+
+  const f = tmpFile(ZERO_CRITERIA);
+  try {
+    assert.equal(
+      checkAcceptanceCommand([f.path]),
+      1,
+      "the verb must refuse a body it resolved zero criteria from, even though `d.defective` reads false",
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("W1-T1097: a trailered body with no header still passes", () => {
+  const plan = tmpPlan(`- id: W1-T1097-FIXTURE
+  title: "fixture: a task with real acceptance criteria in its shard"
+  repo: remudero
+  type: implement
+  acceptance:
+    - claim: "criterion one"
+      proof: "unit test: test/fixture-one.test.ts"
+`);
+  // No \`## Acceptance\` block at all — only the trailer. Design item (iv)/(viii): rationale (8)
+  // names this exact shape (a valid trailered implementation PR with no body-level header) as one
+  // this task must not make worse.
+  const body = tmpFile("Some PR description with no Acceptance header of its own.\n\nRemudero-Task: W1-T1097-FIXTURE\n");
+  try {
+    assert.equal(
+      checkAcceptanceCommand([body.path], { planPath: plan.path }),
+      0,
+      "the trailer resolves real criteria from the shard, so a missing body-level header is irrelevant",
+    );
+  } finally {
+    plan.cleanup();
+    body.cleanup();
+  }
+});
+
+test("W1-T1097: the zero-criteria refusal names the offending line", () => {
+  const f = tmpFile(ZERO_CRITERIA);
+  try {
+    const { code, err } = withCapturedStderr(() => checkAcceptanceCommand([f.path]));
+    assert.equal(code, 1);
+    assert.ok(
+      err.some((l) => l.includes("## Acceptance")),
+      "the refusal must name the header line itself",
+    );
+    assert.ok(
+      err.some((l) => l.includes("claim: something that was never turned into a bullet")),
+      "the refusal must name the first line that is not a bullet",
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("W1-T1097: healthy and truncating bodies keep their exit codes", () => {
+  const good = tmpFile(UNWRAPPED);
+  const bad = tmpFile(WRAPPED);
+  const noHeader = tmpFile(NO_HEADER);
+  try {
+    assert.equal(checkAcceptanceCommand([good.path]), 0, "a healthy body must still pass");
+    assert.equal(checkAcceptanceCommand([bad.path]), 1, "a truncating body must still refuse");
+    assert.equal(checkAcceptanceCommand([noHeader.path]), 1, "a missing header must still refuse");
+  } finally {
+    good.cleanup();
+    bad.cleanup();
+    noHeader.cleanup();
+  }
+});
+
+test("W1-T1097: the verb and the author-time gate agree on one body", () => {
+  const f = tmpFile(ZERO_CRITERIA);
+  try {
+    const verbCode = checkAcceptanceCommand([f.path]);
+    const gateVerdict = acceptanceAuthorTimeCheck(ZERO_CRITERIA);
+    assert.equal(gateVerdict.ok, false);
+    assert.equal(gateVerdict.defect, "empty-proofs");
+    assert.equal(
+      verbCode === 0,
+      gateVerdict.ok,
+      "the verb's exit code and the CI gate's verdict must never disagree on the same bytes",
+    );
   } finally {
     f.cleanup();
   }
