@@ -66,15 +66,15 @@
     the harness cannot see or intercept in advance, only warn about.
   acceptance:
     - claim: "the shared PR-authoring contract names gh pr edit's specific failure signature (repository.pullRequest.projectCards / Projects Classic) and states plainly that a failure carrying it is a transport failure, never evidence the edit was rejected or already applied"
-      proof: "unit test: test/gh-pr-edit-fallback-contract.test.ts"
+      proof: 'grep: test("W1-T4268: the contract names the projectCards failure signature as a transport failure, never a rejected or applied edit" in test/gh-pr-edit-fallback-contract.test.ts'
     - claim: "the SAME fallback lines render byte-identical in both the implement contract and the fix contract — the falsifier proving the two prompts cannot drift apart on this fact"
-      proof: "unit test: test/gh-pr-edit-fallback-contract.test.ts"
+      proof: 'grep: test("W1-T4268: the fallback lines render byte-identical across the implement and fix contracts" in test/gh-pr-edit-fallback-contract.test.ts'
     - claim: "the fallback names the working substitute as a copy-executable command shape, not a vague pointer at 'use the API instead'"
       proof: "grep: gh api -X PATCH repos/{owner}/{repo}/pulls in src/lib/compaction.ts"
     - claim: "the fallback is defined once, in compaction.ts, and renderFixPrompt (prompt-render.ts) imports and splices that single constant rather than carrying its own copy of the wording"
       proof: "grep: GH_PR_EDIT_FALLBACK_LINES in src/lib/prompt-render.ts"
     - claim: "the task adds no new call site to src/run-task.ts and touches none of the harness's own internal PR-body/trailer/retro writers — this is prompt text only, never a second REST-write implementation competing with W1-T2948's"
-      proof: "unit test: test/gh-pr-edit-fallback-contract.test.ts"
+      proof: 'grep: test("W1-T4268: the task adds no run-task call site and no second REST-write implementation" in test/gh-pr-edit-fallback-contract.test.ts'
   note: |
     RISK regraded medium->high for span alone (compaction.ts + prompt-render.ts are two distinct module
     stems under the Rule-19 sizing count) — the blast radius is the opposite of the band: a two-line
