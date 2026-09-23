@@ -25,9 +25,9 @@
     guard reads. Split by SHAPE, which is the whole finding:
 
       UNQUOTED — a live citation, pointing at a spelling that no longer exists:
-        W1-T2399:112  MASTER-PLAN design rule 8 already counts an infrastructure event ONCE
-        W1-T2416:63   and why design rule 17 had to be written
-        W1-T2457:60   in a file where `rule 19` otherwise means design rule 19   <- THE THIRD
+        W1-T2399:112  MASTER-PLAN `design rule 8` already counts an infrastructure event ONCE
+        W1-T2416:63   and why `design rule 17` had to be written
+        W1-T2457:60   in a file where `rule 19` otherwise means `design rule 19`   <- THE THIRD
 
       QUOTED or BACKTICKED — a historical excerpt describing the pre-rename namespace, CORRECT AS IS:
         W1-T2456:73   MASTER-PLAN's own 'design rule N' (40 citations, including a DIFFERENT
