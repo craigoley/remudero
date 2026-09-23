@@ -66,7 +66,7 @@ function fakeDeps(overrides: Record<string, unknown> = {}) {
   return { deps, calls, ...rec };
 }
 
-test('W1-T4084: the local command reads its flags from the CI workflow', () => {
+test("W1-T4084: the local command reads its flags from the CI workflow", () => {
   const ciYamlText = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
 
   // Today's real ci.yml, parsed for real: the exact node coverage flags the "Test with coverage"
@@ -105,7 +105,7 @@ test('W1-T4084: the local command reads its flags from the CI workflow', () => {
   );
 });
 
-test('W1-T4084: the diff is taken from the merge base', () => {
+test("W1-T4084: the diff is taken from the merge base", () => {
   // A bare "origin" plus a "work" clone that pushes to it, reproducing the exact shape of a real
   // GitHub remote and a real local checkout -- not a single working tree diffed against itself.
   const origin = gitRepo({ bare: true, branch: "main", kind: "w1-t4084-origin" });
