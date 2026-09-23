@@ -11,7 +11,7 @@
   files: [test/rule-citations-match-their-rule.test.ts]
   origin: architect
   plan_refs: ["W1-T2457", "§12", "§5C"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     HALF TWO OF A SPLIT FILING (W1-T2615 is the plan-only record edit). This half touches NO task record
