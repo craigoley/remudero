@@ -121,3 +121,16 @@ test("W1-T3843: the canonical ci-learning shard is allowed to remain parked for 
 
   assert.equal(result.violations.some((v) => v.check === "machine-filing-admission"), false);
 });
+
+test("W1-T4111: a machine-filed task the plan gardener retired is admitted without a selectability refusal", () => {
+  const retired = task({ author_class: "machine", status: "blocked", retirement: "withdrawn", note: "plan gardener: merge into W1-T1" });
+  const result = lintTask(retired, {
+    machineFilingAdmission: {
+      plan: planFor(retired),
+      releasedIds: new Set(),
+      pathExists: () => true,
+    },
+  });
+
+  assert.equal(result.violations.find((v) => v.check === "machine-filing-admission"), undefined);
+});

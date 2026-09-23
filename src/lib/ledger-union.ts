@@ -14,7 +14,7 @@ export interface LedgerGrepFsDeps {
   gunzipSync: (buf: Buffer) => Buffer;
 }
 
-const realLedgerFs: LedgerGrepFsDeps = {
+export const realLedgerFs: LedgerGrepFsDeps = {
   readdirSync: (dir) => nodeReaddirSync(dir),
   existsSync: (path) => nodeExistsSync(path),
   readFileSync: (path) => nodeReadFileSync(path),

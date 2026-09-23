@@ -1635,6 +1635,16 @@ export interface LearningsSelectionContext {
   usage?: LearningUsage;
   /** Seeds that draw, so a run's selection is reproducible. */
   seed?: number;
+  /** W1-T4241: re-select under this many derived seeds and report each entry's selected share. */
+  propensityDraws?: number;
+}
+
+/** W1-T4241: re-selections per propensity; 1/64 resolution separates contested from deterministic. */
+export const LEARNING_PROPENSITY_DRAWS = 64;
+
+/** The `k`th propensity seed: a fixed stride from the run seed, so it reproduces from that alone. */
+export function propensitySeed(seed: number, k: number): number {
+  return (seed + Math.imul(k + 1, 0x9e3779b1)) >>> 0;
 }
 
 /** A generated lookup index (W1-T33): per shard filename, the entry ids it carries and the union
@@ -1763,50 +1773,64 @@ export function selectLearnings<T extends LearningEntry>(
   taskFiles: string[] | undefined,
   budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   context?: LearningsSelectionContext,
-): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts } {
+): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; propensity?: Record<string, number> } {
   const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
   const haystack = selectionHaystack(context);
   const usage = context?.usage;
-  const rng = usage ? seededRandom(context?.seed ?? 0) : undefined;
-  const ranked = active
+  const matched = active
     .map((entry) => ({ entry, counts: matchCounts(entry, files, haystack) }))
     .filter((r) => r.counts.file > 0 || r.counts.symbol > 0 || r.counts.error > 0)
     // W1-T4091: one posterior draw per entry, taken in a fixed (id) order so the seed reproduces it.
-    .sort((a, b) => (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0))
-    .map((r) => ({ ...r, draw: rng ? sampleBeta(learningValue(r.entry.id, usage), rng) : 0 }))
-    .sort((a, b) => {
-      if (b.counts.error !== a.counts.error) return b.counts.error - a.counts.error;
-      if (b.counts.symbol !== a.counts.symbol) return b.counts.symbol - a.counts.symbol;
-      if (b.counts.file !== a.counts.file) return b.counts.file - a.counts.file;
-      const layerDiff = LAYERS.indexOf(entryLayer(a.entry)) - LAYERS.indexOf(entryLayer(b.entry));
-      if (layerDiff !== 0) return layerDiff;
-      if (b.draw !== a.draw) return b.draw - a.draw;
-      const ac = a.entry.cited ?? "";
-      const bc = b.entry.cited ?? "";
-      if (ac !== bc) return bc < ac ? -1 : 1; // recent (larger ISO) first
-      return a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0;
-    })
-    .map((r) => r.entry);
+    .sort((a, b) => (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0));
 
-  const selected: T[] = [];
-  const dropped: T[] = [];
-  const matchedBy: LearningMatchCounts = { file: 0, symbol: 0, error: 0 };
-  let used = 0;
-  for (const entry of ranked) {
-    const cost = entryBudgetWeight(entry) + 1; // +1 for the joining "\n"
-    if (used + cost > budgetChars && selected.length > 0) {
-      dropped.push(entry);
-      continue;
+  const selectWith = (seed: number): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts } => {
+    const rng = usage ? seededRandom(seed) : undefined;
+    const ranked = matched
+      .map((r) => ({ ...r, draw: rng ? sampleBeta(learningValue(r.entry.id, usage), rng) : 0 }))
+      .sort((a, b) => {
+        if (b.counts.error !== a.counts.error) return b.counts.error - a.counts.error;
+        if (b.counts.symbol !== a.counts.symbol) return b.counts.symbol - a.counts.symbol;
+        if (b.counts.file !== a.counts.file) return b.counts.file - a.counts.file;
+        const layerDiff = LAYERS.indexOf(entryLayer(a.entry)) - LAYERS.indexOf(entryLayer(b.entry));
+        if (layerDiff !== 0) return layerDiff;
+        if (b.draw !== a.draw) return b.draw - a.draw;
+        const ac = a.entry.cited ?? "";
+        const bc = b.entry.cited ?? "";
+        if (ac !== bc) return bc < ac ? -1 : 1; // recent (larger ISO) first
+        return a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0;
+      });
+
+    const selected: T[] = [];
+    const dropped: T[] = [];
+    const matchedBy: LearningMatchCounts = { file: 0, symbol: 0, error: 0 };
+    let used = 0;
+    for (const { entry, counts } of ranked) {
+      const cost = entryBudgetWeight(entry) + 1; // +1 for the joining "\n"
+      if (used + cost > budgetChars && selected.length > 0) {
+        dropped.push(entry);
+        continue;
+      }
+      selected.push(entry);
+      if (counts.file > 0) matchedBy.file++;
+      if (counts.symbol > 0) matchedBy.symbol++;
+      if (counts.error > 0) matchedBy.error++;
+      used += cost;
     }
-    selected.push(entry);
-    const counts = matchCounts(entry, files, haystack);
-    if (counts.file > 0) matchedBy.file++;
-    if (counts.symbol > 0) matchedBy.symbol++;
-    if (counts.error > 0) matchedBy.error++;
-    used += cost;
+    return { selected, dropped, matchedBy };
+  };
+
+  const seed = context?.seed ?? 0;
+  const result = selectWith(seed);
+  const draws = context?.propensityDraws ?? 0;
+  if (draws <= 0) return result;
+  // W1-T4241: 0 < share < 1 means the budget cut, not match strength, decided the entry.
+  const hits: Record<string, number> = Object.fromEntries(matched.map((r) => [r.entry.id, 0]));
+  for (let k = 0; k < draws; k++) {
+    for (const entry of selectWith(propensitySeed(seed, k)).selected) hits[entry.id] += 1;
   }
-  return { selected, dropped, matchedBy };
+  const propensity = Object.fromEntries(Object.entries(hits).map(([id, n]) => [id, n / draws]));
+  return { ...result, propensity };
 }
 
 /** One entry as a provenance-tagged CONTEXT bullet. */

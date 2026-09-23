@@ -113,21 +113,41 @@ export function decideLedgerCompaction(
 
   if (lastFiredAtMs !== undefined) {
     const sinceMs = nowMs - lastFiredAtMs;
+    const intervalMs = ledgerCompactionIntervalMs(pressure, trigger);
     // A marker stamped in the FUTURE is a clock problem, not a reason to compact in a loop. Treat it
     // as "just fired" — the conservative direction, since the cost of waiting is one interval and
     // the cost of looping is a daemon that compacts instead of building.
-    if (sinceMs < trigger.minIntervalMs) {
+    if (sinceMs < intervalMs) {
       return {
         fire: false,
         overBound: true,
         reason:
           `over bound (${over}) but throttled — last compaction ${Math.max(0, Math.floor(sinceMs / 1000))}s ago, ` +
-          `interval ${Math.floor(trigger.minIntervalMs / 1000)}s`,
+          `interval ${Math.floor(intervalMs / 1000)}s`,
       };
     }
   }
 
   return { fire: true, overBound: true, reason: `over bound — ${over}` };
+}
+
+/** How far over the bound the corpus is: 1 at or under it, rising with whichever axis is worse. */
+export function ledgerPressureRatio(pressure: LedgerCorpusPressure, trigger: LedgerCompactionTrigger = DEFAULT_LEDGER_COMPACTION_TRIGGER): number {
+  return Math.max(1, pressure.archiveCount / trigger.maxArchives, pressure.archiveBytes / trigger.maxArchiveBytes);
+}
+
+/** W1-T4262: the wait between passes SHRINKS as the corpus grows past its bound, so compaction runs
+ *  sooner when arrivals outpace what a pass retires (2026-09-23: 967 archives against 400, up to 135
+ *  new an hour, one pass per 30 minutes). */
+export function ledgerCompactionIntervalMs(pressure: LedgerCorpusPressure, trigger: LedgerCompactionTrigger = DEFAULT_LEDGER_COMPACTION_TRIGGER): number {
+  return Math.round(trigger.minIntervalMs / ledgerPressureRatio(pressure, trigger));
+}
+
+/** W1-T4262: how much recent history a pass leaves alone. A day at the bound, shrinking with the
+ *  square of the pressure (about 4 hours at 967 archives), and never under an hour, so a rotation a
+ *  reader may still be opening is never merged away under it. */
+export function ledgerCompactionProtectedHours(pressure: LedgerCorpusPressure, trigger: LedgerCompactionTrigger = DEFAULT_LEDGER_COMPACTION_TRIGGER): number {
+  return Math.max(1, Math.floor(24 / ledgerPressureRatio(pressure, trigger) ** 2));
 }
 
 /** What one bounded pass did, as the ledger should record it. */
