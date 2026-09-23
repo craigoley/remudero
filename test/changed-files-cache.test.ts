@@ -8,6 +8,7 @@ import { buildBatchedGithub, type BatchedPr } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import type { Clock } from "../src/lib/clock.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const url = (n: number): string => `https://github.com/o/r/pull/${n}`;
 const pr = (n: number, state: string): BatchedPr => ({ number: n, url: url(n), state, headRefName: `b${n}`, body: "" });
@@ -84,7 +85,7 @@ test("an uncached pr answers unreadable at once and is fetched off the event loo
   const t0 = performance.now();
   for (let round = 0; round < 3; round++) for (const r of rows) assert.equal(gh.changedFiles?.(r.url), undefined);
   const elapsed = performance.now() - t0;
-  assert.ok(elapsed < 50, `15 misses answered in ${elapsed}ms — a miss must never wait on GitHub`);
+  assertWallClockBound(elapsed, 50, "15 misses answered without waiting on GitHub");
   assert.equal(started, 0, "no read starts inside the synchronous derivation");
   assert.deepEqual(syncCalls, [], "the synchronous gh seam is never reached");
 
