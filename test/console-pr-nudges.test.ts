@@ -142,6 +142,60 @@ void test("W1-T4077: a nudge runs detached and never holds dispatch", async () =
   assert.deepEqual(markers.map((r) => r.prNumber), [6630], "the unfinished fix keeps its marker; the finished review's is cleared");
 });
 
+void test("W1-T4077: a read that throws is logged and the next tick still runs", async () => {
+  const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let reads = 0;
+  const pump = startPrActionPump(
+    {
+      pendingPrActions: () => {
+        reads += 1;
+        if (reads === 1) throw new Error("ledger unreadable");
+        return [{ action: "review", prNumber: 6612, origin: "console", requestedAt: "2026-09-22T22:00:02.000Z" }];
+      },
+      runPrAction: async () => ({ outcome: "completed" as const }),
+      clearPrAction: () => {},
+    },
+    10,
+    (step, extra) => lines.push({ step, extra }),
+  );
+  await wait(60);
+  pump.stop();
+  await pump.settled();
+  const failed = lines.find((l) => l.step === "console.pr_action_read_failed");
+  assert.ok(failed, "the first, throwing read is logged rather than crashing the pump");
+  assert.match(String(failed?.extra?.error), /ledger unreadable/);
+  assert.ok(lines.some((l) => l.step === "console.pr_action_started"), "a later, successful read still starts its request");
+});
+
+void test("W1-T4077: settled() waits for every in-flight request", async () => {
+  let resolveRun: (() => void) | undefined;
+  let running = false;
+  const pump = startPrActionPump(
+    {
+      pendingPrActions: () => [{ action: "review", prNumber: 6612, origin: "console", requestedAt: "2026-09-22T22:00:03.000Z" }],
+      runPrAction: () => {
+        running = true;
+        return new Promise<{ outcome: "completed" }>((resolve) => {
+          resolveRun = () => {
+            running = false;
+            resolve({ outcome: "completed" });
+          };
+        });
+      },
+      clearPrAction: () => {},
+    },
+    10,
+    () => {},
+  );
+  await wait(30);
+  pump.stop();
+  assert.equal(running, true, "the request is still in flight when settled() is called");
+  const settled = pump.settled();
+  resolveRun?.();
+  await settled;
+  assert.equal(running, false, "settled() only resolved once the in-flight request finished");
+});
+
 function strikeExhaustedRedPr(): OpenPrView {
   return {
     prNumber: 6630,
@@ -174,9 +228,7 @@ void test("W1-T4077: a requested fix on a strike-exhausted PR dispatches one rou
 
 void test("W1-T4077: a requested fix still refuses a merged PR", async () => {
   const outcome = await routeFix("MERGED", requestedFixView(strikeExhaustedRedPr()), {
-    dispatchFix: async () => {
-      throw new Error("a merged PR must never dispatch");
-    },
+    dispatchFix: async () => { throw new Error("a merged PR must never dispatch"); },
     escalate: async () => {},
   } as never);
   assert.equal(outcome.outcome, "refused");
