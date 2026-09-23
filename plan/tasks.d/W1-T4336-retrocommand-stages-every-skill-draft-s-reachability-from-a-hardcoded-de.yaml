@@ -1,0 +1,75 @@
+- id: W1-T4336
+  title: "retroCommand stages every skill-draft's reachability from a HARDCODED describeWorkerSkillReachability([]) literal (never the exported WORKER_SETTING_SOURCES), and the check only ever describes the closed native settingSources route — every future skill-draft proposal, like skill-draft:62aff41d7a5fd038 this cycle ratifies, is staged carrying a needlessly alarming 'NOT reachable by a worker today' note that says nothing about the ALREADY-SHIPPED W1-T3101 approved-tree injection route"
+  repo: remudero
+  depends_on: [W1-T2766, W1-T3101]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  band_meaning: span
+  budget_usd: 20.00
+  rationale: |
+    VERIFIED AT SOURCE while reviewing skill-draft:62aff41d7a5fd038's ratification. retroCommand's ONLY
+    call to `describeWorkerSkillReachability` (run-task.ts:22270) reads:
+
+      stageSkillDrafts(followupRegistryPath, gather.skillDrafts, workerAllowlistFromSettings(undefined),
+        describeWorkerSkillReachability([]), log);
+
+    THE LITERAL `[]` IS THE EXACT REGRESSION W1-T3137'S OWN FALSIFIER NAMES, one call site over. That
+    task's doctrine, verbatim: "DO NOT ASSERT THE LITERAL `[]`. Read `WORKER_SETTING_SOURCES`; a test that
+    hard-codes the value passes unchanged after someone edits the spawn, which is the exact regression it
+    exists to catch." `worker.ts` already exports `WORKER_SETTING_SOURCES` for precisely this reason
+    (worker.ts:1171, "so a future audit measures whether a repo-owned SKILL.md reaches a worker reads the
+    REAL exported constant"). retroCommand imports neither the constant nor anything derived from it —
+    it re-derives the literal inline, so a future settingSources edit (W1-T3137's own Route A, should an
+    operator choose it) would silently leave every staged proposal's reachability note WRONG until someone
+    remembers this second, independent call site.
+
+    SEPARATELY, THE ASSESSMENT ITSELF ONLY EVER DESCRIBES ONE OF TWO ROUTES. `describeWorkerSkillReachability`
+    (skill-workshop.ts:252-266) answers "can the native SDK settingSources mechanism load this file" — the
+    route W1-T3101 explicitly declined to touch. It says nothing about the route W1-T3101 DID build:
+    `loadInjectableSkills` reads every approved skill carrying `applies-to:` and `renderSkillsPart` splices
+    its FULL body into a matching worker's prompt, with no dependency on settingSources at all. A staged
+    candidate whose `taskType` IS one of `INJECTABLE_SKILL_TASK_TYPES` (recon/implement/diagnose/review/
+    manual — checked in `renderSkillDraft` before `applies-to:` is even written) is therefore staged with
+    a note that is technically true and practically misleading: it reads as "this candidate cannot reach a
+    worker," when in fact ratifying it is SUFFICIENT for it to reach one, on the very next matching
+    dispatch. skill-draft:62aff41d7a5fd038 is the live fixture — its note reads "NOT reachable by a worker
+    today" while its own `applies-to: implement` frontmatter makes it immediately injectable once ratified
+    (see W1-T4335, ratifying it this cycle).
+  design: |
+    (i) THE LITERAL: import `WORKER_SETTING_SOURCES` from `./lib/worker.js` in run-task.ts (already
+    imported there for other purposes — verify the existing import block) and pass it to the
+    `describeWorkerSkillReachability` call at the `stageSkillDrafts` call site, replacing the `[]` literal.
+    Behavior is UNCHANGED today (WORKER_SETTING_SOURCES is currently `[]`), so this is a regression-proofing
+    fix, not a functional one, until the day someone edits the spawn.
+    (ii) THE MESSAGE: extend the reachability text `stageSkillDraft` renders (skill-workshop.ts:315-321) —
+    or `describeWorkerSkillReachability`'s own `reason` field, whichever keeps the two functions single-
+    purpose — so that when a draft's `taskType` resolves via `injectableSkillTaskType` (i.e. it WILL carry
+    an `applies-to:` line), a NOT-reachable-via-native-loading verdict is followed by a second sentence
+    naming the W1-T3101 injection route as the real path once approved: e.g. "NOT reachable via the native
+    settingSources loading route (<reason>) — will be injected into every matching <type> prompt once
+    approved (loadInjectableSkills -> selectSkillsForTask -> renderSkillsPart, W1-T3101)." A draft whose
+    taskType is NOT recognized keeps the unqualified note, since neither route would deliver it.
+    (iii) NOT IN SCOPE: any change to `WORKER_SETTING_SOURCES`, `spawnWorker`'s isolation, or
+    `loadInjectableSkills` itself — this task only makes the STAGED TEXT accurate and regression-proof, the
+    same boundary W1-T3101 and W1-T3137 both hold.
+  acceptance:
+    - claim: "the staged reachability check reads the same exported constant spawnWorker actually passes (WORKER_SETTING_SOURCES), never a hardcoded [] literal, at retroCommand's stageSkillDrafts call site"
+      proof: "grep: WORKER_SETTING_SOURCES in src/run-task.ts"
+    - claim: "a candidate whose task type resolves to a recognized injectable class (e.g. implement) is staged with a note naming the W1-T3101 injection route as its real future reachability, not only the closed native route"
+      proof: "unit test: a candidate whose task type resolves to a recognized"
+    - claim: "a candidate whose task type is NOT a recognized injectable class keeps the unqualified 'NOT reachable by a worker today' text — the falsifier proving the broadened message never overclaims reachability for a draft neither route can deliver"
+      proof: "unit test: a candidate whose task type is NOT a recognized"
+  risk: high
+  origin: architect
+  plan_refs: ["§8A", "§5B"]
+  files: [src/run-task.ts, src/lib/skill-workshop.ts, test/skill-workshop.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Filed alongside W1-T4335 (the ratification of skill-draft:62aff41d7a5fd038 itself) while reviewing that
+    candidate; independent of it — this fixes the MINING pipeline's self-description for every future
+    skill-draft proposal, not a prerequisite for ratifying this cycle's candidate.
+    risk:high, band_meaning:span — the two-file touch (run-task.ts's retroCommand call site + the function
+    it calls in skill-workshop.ts) matches this repo's Rule 19 sizing convention for a same-concern fix
+    spanning a call site and its callee (the W1-T3101/W1-T2766 precedent).

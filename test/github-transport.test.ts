@@ -299,13 +299,13 @@ test("approveBatchCommand (via approveCommand with 2+ bare ids) with repoDir abs
         "P-FIXTURE1": {
           proposalId: "P-FIXTURE1",
           fragmentYaml: fragment("NEW-1", "one"),
-          stampLine: "- P-FIXTURE1 (plan) — RATIFIED via fixture.",
+          stampLine: "- P-FIXTURE1 (plan) — RATIFIED via fixture -> NEW-1.",
           anchorFingerprint: "",
         },
         "P-FIXTURE2": {
           proposalId: "P-FIXTURE2",
           fragmentYaml: fragment("NEW-1", "two"),
-          stampLine: "- P-FIXTURE2 (plan) — RATIFIED via fixture.",
+          stampLine: "- P-FIXTURE2 (plan) — RATIFIED via fixture -> NEW-1.",
           anchorFingerprint: "",
         },
       }),

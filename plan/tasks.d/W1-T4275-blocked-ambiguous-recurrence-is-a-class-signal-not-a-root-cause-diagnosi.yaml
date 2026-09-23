@@ -1,0 +1,35 @@
+- id: W1-T4275
+  title: "blocked-ambiguous recurrence is a class signal, not a root-cause diagnosis — preserve each PR's named evidence and require a bounded observation proposal before prescribing a class-wide repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  budget_usd: 100.00
+  rationale: |
+    OBSERVED 2026-08-27..2026-09-03: three distinct PRs reached the blocked-ambiguous repair surface,
+    but their ledgered evidence names different mechanisms. PR #3030 at e9e5b39 was mergeState dirty
+    involving a deletion (or no captured file evidence), so it escalated without auto-resolution;
+    PR #3039 at ee02fe5 exhausted 2/2 strikes with CI failed, but the attempted failed-log fetch itself
+    failed; PR #3043 at 3283dcd exhausted 3/2 strikes with CI and coverage-ratchet failed. The recurrence
+    proves that the surface recurred, not that these instances share a cause. W1-T77/W1-T78 already own
+    per-PR disposition and clarification; this v0 artifact prevents an Architect from collapsing their
+    distinct evidence into an invented class diagnosis.
+  design: |
+    Add one compressed Investigation-discipline rule to CLAUDE.md: three distinct repaired PRs in seven
+    days is a recurrence signal, not a root-cause diagnosis. The rule cites #3030/#3039/#3043, preserves
+    each PR's existing disposition, and requires a bounded observation proposal with the cited corpus
+    before asserting a shared mechanism or prescribing a class-wide repair. This is an instruction-layer
+    guardrail, not a claim that the unknown cause has been enforced away.
+  acceptance:
+    - claim: "CLAUDE.md states that a three-PR/seven-day recurrence is a class signal, not a root-cause diagnosis"
+      proof: "grep: recurrence is a class signal, not a root-cause diagnosis in CLAUDE.md"
+    - claim: "the rule preserves the distinct docket evidence by citing #3030, #3039, and #3043 rather than collapsing them into one inferred mechanism"
+      proof: "grep: #3030/#3039/#3043 in CLAUDE.md"
+    - claim: "the rule requires a bounded observation proposal before a class-wide repair is prescribed, while leaving each PR's existing disposition intact"
+      proof: "grep: preserve the per-PR disposition and file a bounded observation proposal in CLAUDE.md"
+  risk: low
+  origin: "feedback#FD-2026-09-03-fb-repair-blocked-ambiguous-2956"
+  plan_refs: ["§7B", "§5D", "P25"]
+  files: [CLAUDE.md]
+  status: queued
+  attempts: 0

@@ -1,0 +1,62 @@
+- id: W1-T4283
+  title: "scanSkillDraft admits a step that only restates its own description — clean_single_strike's rendered step ('resolve the task on the first attempt') carries no behavior a worker did not already have; refuse a draft whose step text adds no information beyond the mined outcome it was drafted from"
+  repo: remudero
+  depends_on: [W1-T4282, W1-T2766]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 25.00
+  files: [src/lib/skill-workshop.ts, test/skill-workshop-actionable-step-text.test.ts]
+  origin: architect
+  plan_refs: ["W1-T2766", "W1-T81", "W1-T92", "W1-T101", "skill-draft:25c3724cf6958acf"]
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED AT SOURCE. `PROCEDURAL_STEP_TEXT` (src/lib/skill-workshop.ts:38-41) holds two entries today:
+
+      clean_single_strike:  "Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung."
+      fully_executed_proof: "Execute every acceptance criterion as a real, observed proof — never let the
+                              keyword floor stand in for a run."
+
+    `fully_executed_proof` names a concrete, checkable PRACTICE (execute proofs for real; do not let keyword
+    matching substitute) that a worker did not already know to do differently. `clean_single_strike` names only
+    the OUTCOME the mining signal measures — every worker is already trying to resolve a task on its first
+    attempt; telling it to do so again is not a procedure, it is the restated goal of the whole system. Nothing
+    in the mining signal (a binary "did this run need a fix.dispatch rung") captures WHAT the successful runs
+    actually DID differently, so there is no evidenced behavior this entry could name without inventing advice
+    the mining never observed.
+
+    THE LIVE FIXTURE IS THIS VERY PROPOSAL. skill-draft:25c3724cf6958acf's `## Procedure` section is exactly one
+    bullet, rendered verbatim from this entry, over 84 cited runs. Once W1-T4282 makes such a draft genuinely
+    deliverable to every implement-task prompt, this specific step would spend knowledge-budget characters
+    (MASTER-PLAN §8A's "smallest high-signal set" doctrine) for zero net behavioral guidance. This is the same
+    "a promise with no payload" defect class this codebase already polices in W1-T101 (a dialect proof prefix
+    that names no runnable artifact) and the W1-T81/W1-T92 linter-precision family: a component that LOOKS like
+    it is doing its job while carrying no checkable content.
+  design: |
+    Add a content-actionability check, invoked alongside `scanSkillDraft` (same refusal shape: return on the
+    first offending line, named), that flags a rendered step whose text carries no token/verb not already
+    present in the candidate's own `description` — i.e., the step is a near-restatement of the outcome the
+    draft was mined from, rather than a distinct instruction. Keep this DATA-DRIVEN (Rule 2): compare each
+    `PROCEDURAL_STEP_TEXT` entry's RENDERED text against its own `description`, rather than hardcoding an
+    allowlist/denylist of signal keys — so a future signal with genuinely actionable text (like
+    `fully_executed_proof`) is never caught, and a future signal with the same restated-outcome shape as
+    `clean_single_strike` is caught automatically without a second edit to this check.
+  acceptance:
+    - claim: "the clean_single_strike step text, rendered verbatim from PROCEDURAL_STEP_TEXT, is refused as restating its own outcome with no new behavioral content — the live fixture from skill-draft:25c3724cf6958acf"
+      proof: 'grep: test("W1-T4283: the clean_single_strike step is refused as restating its own outcome" in test/skill-workshop-actionable-step-text.test.ts'
+    - claim: "the fully_executed_proof step text passes unchanged — the falsifier proving the check does not refuse every drafted step, only content-empty ones"
+      proof: 'grep: test("W1-T4283: the fully_executed_proof step passes unchanged" in test/skill-workshop-actionable-step-text.test.ts'
+    - claim: "a refused draft's reason names the offending step verbatim, matching scanSkillDraft's existing refusal shape (offendingLine + reason)"
+      proof: 'grep: test("W1-T4283: a refused draft names the offending step verbatim with offendingLine and reason" in test/skill-workshop-actionable-step-text.test.ts'
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF `clean_single_strike` has already been rewritten to name a concrete,
+    evidenced practice rather than the restated outcome, or removed from `PROCEDURAL_STEP_TEXT` — re-check
+    `grep -n clean_single_strike src/lib/skill-workshop.ts` before concluding this still applies.
+  note: |
+    Filed while evaluating proposal skill-draft:25c3724cf6958acf. depends_on W1-T4282 is a file-overlap
+    serialization (both edit skill-workshop.ts), not a design coupling — either could land first on its own
+    merits. Does not retroactively re-scan the already-staged skill-draft:25c3724cf6958acf proposal; that
+    proposal should not be re-offered for approval until this check exists and it (or a rewritten successor)
+    passes it.
