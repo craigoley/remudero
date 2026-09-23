@@ -18,7 +18,7 @@
 // sees. A stale entry (its script now wired, or gone) is itself reported.
 //
 // This proves a gate sits in an EXECUTABLE position, not that its refusal is honoured: a step
-// behind `if: false` or ending `|| true` still reads WIRED here.
+// ending `|| true` still reads WIRED here; one behind a literal `if: false` does not (W1-T4115).
 //
 // Usage: node scripts/unwired-gate-check.mjs. Exits 1 and names every offending path; 0 otherwise.
 
@@ -225,13 +225,18 @@ export function isGateShaped(relPath) {
  *  step named after the script it does not run must not credit it. */
 export const EXECUTING_KEYS = new Set(["run", "uses", "entrypoint", "args", "cmd"]);
 
-/** Collect every string sitting under an {@link EXECUTING_KEYS} key, at any depth. */
+export function isNeverRun(condition) {
+  return condition === false || (typeof condition === "string" && /^\s*(?:\$\{\{\s*)?false(?:\s*\}\})?\s*$/.test(condition));
+}
+
+/** Collect every string under an {@link EXECUTING_KEYS} key, at any depth, except behind {@link isNeverRun}. */
 export function collectExecutingStrings(node, out = []) {
   if (Array.isArray(node)) {
     for (const item of node) collectExecutingStrings(item, out);
     return out;
   }
   if (node && typeof node === "object") {
+    if ("if" in node && isNeverRun(node.if)) return out;
     for (const [key, value] of Object.entries(node)) {
       if (EXECUTING_KEYS.has(key)) {
         if (typeof value === "string") out.push(value);

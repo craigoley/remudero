@@ -783,6 +783,7 @@
     "test/event-review-clock-all-phases.test.ts": 856,
     "test/every-blocked-escalation-is-judged.test.ts": 0,
     "test/every-escalation-opened-today-was-non-conforming.test.ts": 0,
+    "test/every-gate-knows-how-often-it-fires.test.ts": 0,
     "test/every-inbox-message-is-plain-language.test.ts": 0,
     "test/every-inbox-message-meets-the-standard.test.ts": 1051,
     "test/every-message-names-one-declared-sender.test.ts": 263,

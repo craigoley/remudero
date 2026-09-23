@@ -192,8 +192,9 @@ test("W1-T3997: asynchronous CI-learning collection yields between unreadable an
 
   assert.deepEqual(corpus, {
     prs: [
-      { number: 13, commits: [{ sha: "head13" }] },
-      { number: 14, commits: [{ sha: "head14", rollup: [], changedFiles: ["src/lib/learn.ts"] }] },
+      // W1-T4115: the window also says whether each pull request merged (none of these carry merged_at).
+      { number: 13, merged: false, commits: [{ sha: "head13" }] },
+      { number: 14, merged: false, commits: [{ sha: "head14", rollup: [], changedFiles: ["src/lib/learn.ts"] }] },
     ],
   });
   assert.equal(yields, 5, "the reader yields once per eligible PR and once per observed commit");
