@@ -516,6 +516,23 @@ export function lockReadFailureMeansZero(e: unknown): boolean {
 // Why: the sizing argument in full — docs/forensics/deployer.md#deploy_idle_defer_ceiling_ms
 export const DEPLOY_IDLE_DEFER_CEILING_MS = 30 * 60_000;
 
+/**
+ * W1-T4060 — THE FETCH TICK RETRIES A REF-LOCK RACE, BOUNDED. MEASURED 2026-09-22: 41 of 288
+ * `rmd-fleet-watchdog` ticks in 24h ended "install root … is unfit (fetch-failed: … cannot lock
+ * ref … is at X but expected Y)" — the daemon's own freshness fetch and the watchdog's fetch
+ * racing over the SAME remote-tracking refs in the mounted daemon-install checkout. The next
+ * tick always recovered, so the fix is the same bounded retry `deploy/entrypoint.sh`'s
+ * `boot_fetch` already applies (W1-T2501): retry ONLY a ref-lock failure (git's own "cannot lock
+ * ref" wording), never a fetch failure generally — a network or auth failure still reports the
+ * install root unfit on the first attempt, exactly as before this task.
+ *
+ * PRIMARY CONTROL: this is what normally stops the retry loop — the lock clears within the first
+ * two attempts on every MEASURED case, so the third is the ordinary end of the loop, not a
+ * fallback catching some other already-broken bound.
+ */
+export const DEPLOY_FETCH_LOCK_RETRY_MAX_ATTEMPTS = 3;
+export const DEPLOY_FETCH_LOCK_RETRY_PAUSE_MS = 2_000;
+
 export interface IdleGateResult {
   /** The raw {@link daemonIsIdle} reading this cycle. */
   idle: boolean;
@@ -1389,9 +1406,37 @@ export function buildDeployLogger(
  */
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const ledgerPath = deployLedgerPath(o.stateRoot);
+  const log = o.log ?? buildDeployLogger(ledgerPath);
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
+
+  // W1-T4060 — see DEPLOY_FETCH_LOCK_RETRY_MAX_ATTEMPTS's own banner above. `git()` throws
+  // whatever execFileSync throws on a non-zero exit; with `{ encoding: "utf8" }` (this module's
+  // default exec, and every test's fake) that error carries a STRING `.stderr`, the same shape
+  // the classification below pattern-matches against.
+  const isRefLockFailure = (err: unknown): boolean => {
+    const stderr = typeof err === "object" && err !== null ? (err as { stderr?: unknown }).stderr : undefined;
+    const message = typeof stderr === "string" && stderr.length > 0 ? stderr : err instanceof Error ? err.message : String(err);
+    return /cannot lock ref/i.test(message);
+  };
+  const fetchWithRefLockRetry = (): void => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        git(["fetch", "origin", "--quiet"]);
+        if (attempt > 1) {
+          log("deploy.fetch_lock_retry_ok", { attempt, max: DEPLOY_FETCH_LOCK_RETRY_MAX_ATTEMPTS });
+        }
+        return;
+      } catch (err) {
+        if (!isRefLockFailure(err) || attempt >= DEPLOY_FETCH_LOCK_RETRY_MAX_ATTEMPTS) {
+          throw err;
+        }
+        log("deploy.fetch_lock_retry", { attempt, max: DEPLOY_FETCH_LOCK_RETRY_MAX_ATTEMPTS });
+        sleep(DEPLOY_FETCH_LOCK_RETRY_PAUSE_MS);
+      }
+    }
+  };
   const windowMs = o.healthWindowMs ?? 45_000;
   const pollMs = o.healthPollMs ?? 3_000;
 
@@ -1482,11 +1527,9 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   };
 
   return {
-    log: o.log ?? buildDeployLogger(ledgerPath),
+    log,
     now: () => Date.now(),
-    fetch: () => {
-      git(["fetch", "origin", "--quiet"]);
-    },
+    fetch: fetchWithRefLockRetry,
     installHead: () => git(["rev-parse", "HEAD"]).trim(),
     originMain: () => git(["rev-parse", "origin/main"]).trim(),
     markerPresent: () => existsSync(deployMarkerPath(o.stateRoot)),
