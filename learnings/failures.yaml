@@ -155,7 +155,8 @@
   subsystem: testing
   lifecycle: active
   operator_impact: false
-  files: [test]
+  files: []
+  error_signatures: [ERR_MODULE_NOT_FOUND, node --test]
   fact: >-
     Bare `node --test` silently module-resolution-fails for test files importing
     `src/`: a `.js` specifier that the repo's tsx runner resolves becomes one
@@ -169,7 +170,9 @@
   subsystem: testing
   lifecycle: active
   operator_impact: false
-  files: [test]
+  files: []
+  symbols: [TAP]
+  error_signatures: [interleave]
   fact: >-
     TAP output proximity is not causation. Concurrent `node --test` runners
     interleave stdout/stderr, so context lines around a failure may belong to a
@@ -183,7 +186,8 @@
   subsystem: diagnosis
   lifecycle: active
   operator_impact: false
-  files: [src]
+  files: []
+  error_signatures: [failure message, error message, MEASUREMENT FAILED, self-diagnosing]
   fact: >-
     A failure message is self-diagnosing only when it separates its cause from
     neighbouring causes in the same failure class; naming the check that fired
