@@ -43820,9 +43820,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "lint-plan",
-    syntax: "rmd lint-plan [--plan <path>] [--base <git-ref>]",
+    syntax: "rmd lint-plan [--plan <path>] [--base <git-ref>] [--merge-base]",
     summary: "Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.",
-    detail: "§5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
+    detail: "§5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; --merge-base (W1-T4381) scopes to the merge-base of that ref and HEAD, so a record the ref changed after the fork is not this branch's change; exits non-zero on any blocking violation, spawns nothing",
   },
   {
     name: "plan-reconcile",
