@@ -64,7 +64,9 @@
   origin: architect
   plan_refs: ["§8A", "§5B"]
   files: [src/run-task.ts, src/lib/skill-workshop.ts, test/skill-workshop.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing from the skill-draft approvals (#6779-#6804): superseded by W1-T4341 (the same hard-coded describeWorkerSkillReachability([]) defect).
   attempts: 0
   note: |
     Filed alongside W1-T4335 (the ratification of skill-draft:62aff41d7a5fd038 itself) while reviewing that

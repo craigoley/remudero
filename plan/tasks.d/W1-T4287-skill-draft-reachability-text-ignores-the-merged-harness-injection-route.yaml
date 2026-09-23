@@ -11,7 +11,9 @@
   files: ["src/lib/skill-workshop.ts", "src/run-task.ts", "test/skill-workshop.test.ts", "test/a-staged-skill-reaches-the-worker-prompt.test.ts"]
   origin: architect
   plan_refs: ["§7B", "P25", "W1-T2766", "W1-T3101"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing from the skill-draft approvals (#6779-#6804): superseded by W1-T4341 (the same hard-coded describeWorkerSkillReachability([]) defect).
   attempts: 0
   rationale: |
     FOUND WHILE RATIFYING skill-draft:afa9c5aea4d3c168 (W1-T4286) — a defect in the GENERATOR, not
