@@ -1,0 +1,75 @@
+- id: W1-T4269
+  title: "Skill-staging reachability caveat is stale and batch-wide — the retro's `describeWorkerSkillReachability([])` call answers only the SDK-native settingSources question for the WHOLE batch, while W1-T3101's approved-skill prompt-injection route (keyed per-draft on its own `applies-to:` frontmatter) already delivers a skill regardless of settingSources"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  rationale: |
+    OBSERVED reviewing skill-draft proposal skill-draft:d625783bf2e72aed ("implement-clean-single-strike"),
+    drafted with `applies-to: implement` in its frontmatter and staged carrying the line "NOT reachable by
+    a worker today: settingSources excludes 'project' ... a repo-owned .claude/skills/<name>/SKILL.md is
+    not discoverable by a worker today". That line is computed by src/lib/skill-workshop.ts's
+    `stageSkillDraft` from a `reachability` argument, and the ONLY production call site
+    (src/run-task.ts:22266-22272, inside `retroCommand`) supplies it as a single precomputed
+    `describeWorkerSkillReachability([])` — a bare `[]` literal, not the real exported
+    `WORKER_SETTING_SOURCES` constant, computed ONCE and applied to every draft in `gather.skillDrafts`
+    regardless of that draft's own task type.
+
+    THAT CHECK ANSWERS THE WRONG QUESTION FOR AN OPTED-IN DRAFT. W1-T3101 (merged) built a SECOND,
+    independent delivery route that does not touch `settingSources` at all: `loadInjectableSkills` reads
+    the APPROVED `.claude/skills/` tree for files whose frontmatter carries `applies-to:`
+    (SKILL_APPLIES_TO_RE), `selectSkillsForTask` selects any matching one for that task class under the
+    knowledge budget, and `renderSkillsPart`/`renderImplementPromptWithParts` inject it into the CONTEXT
+    block (src/run-task.ts:12088-12105). `renderSkillDraft` (skill-workshop.ts:85-115) ALWAYS emits
+    `applies-to: <type>` in the frontmatter whenever `injectableSkillTaskType(candidate.taskType)` is
+    defined — true for recon/implement/diagnose/review/manual, i.e. every task class the custom route
+    cares about. So d625783bf2e72aed's own draft (`applies-to: implement`) WOULD be selected and injected
+    the moment it is approved, entirely independent of the settingSources question its own caveat answers.
+
+    The caveat therefore misleads the exact decision this ratification step exists to make: an operator
+    reading "NOT reachable by a worker today" has no reason to believe approving the proposal does
+    anything, when in fact it would make the skill permanently injectable into every future implement
+    prompt. This is the same class of drift the fleet's own "claimed vs evidenced" doctrine exists to
+    catch — a caveat that was accurate before W1-T3101 landed and was never updated once it did.
+
+    ALSO A LATENT REGRESSION RISK ON ITS OWN TERMS: the `[]` literal at the call site is exactly the
+    shape W1-T3137's falsifier warns against ("do not assert the literal `[]`... a test that hard-codes
+    the value passes unchanged after someone edits the spawn"), here in PRODUCTION code rather than a
+    test — if a future change ever adds 'project' to WORKER_SETTING_SOURCES, this call site would keep
+    reporting the pre-change reachability forever because it never reads the constant.
+  design: |
+    (i) ADD `describeSkillDeliveryRoute(draft: SkillDraft, settingSources: readonly string[]): { reachable:
+    boolean; reason: string }` to src/lib/skill-workshop.ts. It parses `draft.markdown`'s frontmatter with
+    the SAME `SKILL_APPLIES_TO_RE` regex `loadInjectableSkills` already uses (never a second derivation of
+    "does this draft opt into the custom route" — reuse the one regex that decides it for real). When an
+    `applies-to:` line is present, return reachable:true citing the W1-T3101 prompt-injection route
+    (independent of settingSources). When absent, fall back to the EXISTING, UNCHANGED
+    `describeWorkerSkillReachability(settingSources)` — its own contract is not touched, so W1-T3137's
+    queued reachability test keeps asserting against it unmodified.
+    (ii) `stageSkillDrafts`'s `reachability` parameter becomes a FUNCTION `(draft: SkillDraft) => {
+    reachable: boolean; reason: string }` computed per draft inside its loop, rather than one static value
+    for the whole batch; `stageSkillDraft` (singular) takes the resolved value for its own draft.
+    (iii) The retro's call site (src/run-task.ts, inside `retroCommand`) passes
+    `(draft) => describeSkillDeliveryRoute(draft, WORKER_SETTING_SOURCES)` — importing the REAL exported
+    constant from worker.ts — instead of the single precomputed `describeWorkerSkillReachability([])`.
+    (iv) NOT IN SCOPE: the Route A / Route B ruling on WORKER_SETTING_SOURCES itself, which is W1-T3137's
+    open question and untouched by this task — this task changes only which route's reachability gets
+    REPORTED for a draft that already opted into the W1-T3101 route via its own frontmatter.
+  acceptance:
+    - claim: "a draft whose frontmatter declares applies-to (the shape every injectable-task-type candidate renders, including the d625783b clean-single-strike draft's applies-to: implement) is reported reachable via the W1-T3101 prompt-injection route, regardless of settingSources"
+      proof: 'grep: test("W1-T4269: a draft declaring applies-to is reported reachable via the prompt-injection route regardless of settingSources" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
+    - claim: "a draft with no applies-to line falls back to the native settingSources check, reading the real exported WORKER_SETTING_SOURCES constant rather than a hardcoded literal"
+      proof: 'grep: test("W1-T4269: a draft with no applies-to line falls back to the settingSources check reading the real WORKER_SETTING_SOURCES" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
+    - claim: "describeWorkerSkillReachability's own contract is untouched by this task, so it still reports false for [] and true for ['project']"
+      proof: 'grep: test("W1-T4269: describeWorkerSkillReachability still reports false for an empty list and true for project" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
+    - claim: "the retro's staging call site computes reachability per draft, so two drafts of different task types staged in the same retro pass can report different reachability lines"
+      proof: 'grep: test("W1-T4269: two drafts of different task types staged together report different reachability lines" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
+  files: [src/lib/skill-workshop.ts, src/run-task.ts, test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts]
+  origin: "skill-draft-review#d625783bf2e72aed"
+  plan_refs: ["W1-T2766", "W1-T3101", "W1-T3137"]
+  status: queued
+  attempts: 0

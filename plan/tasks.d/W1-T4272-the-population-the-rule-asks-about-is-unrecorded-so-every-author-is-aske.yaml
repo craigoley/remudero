@@ -1,0 +1,109 @@
+- id: W1-T4272
+  title: "the population the rule asks about is unrecorded, so every author is asked to repeat an archaeology dig by hand — a bound-fire census resolves each fire's SUBJECT and that subject's LATER outcome, counts EPISODES not rows, and reports the healthy/stuck split behind a positive control"
+  repo: remudero
+  depends_on: [W1-T4271]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    THE RULE ASKS FOR A MEASUREMENT NOBODY RECORDS. "Before tuning the number, check the population it
+    is meant to separate has ever been observed" is an instruction to go and find out. It has been
+    obeyed properly exactly once: W1-T382's recon measured that 21 of 21 PRs this repo ever booked as a
+    check-wait timeout later MERGED, and that empty far-population is the whole argument its shard
+    rests on — "there is no observed `stuck` population, so there is no gap and no threshold. Raising
+    `maxIters` changes how often the bug fires, not whether it is a bug."
+
+    THAT MEASUREMENT COST A DIG AND WAS NEVER MECHANIZED. It is cited in five separate shards
+    (W1-T1018, W1-T457, W1-T442, W1-T1235, W1-T1266) as a remembered figure, and the same class is
+    invoked in W1-T918 and W1-T450 as "four bounds in this repo have fired on a healthy condition".
+    Seven citations, one measurement, no command. The rule fails Law 4's own test as W1-T438 states it
+    — a convention binds only where compliance is verifiable at invocation — because the population it
+    names is not queryable at the moment an author would need it.
+
+    THE JOIN IS AVAILABLE AND CHEAP. A `ci.stalled` row carries `run_id` and `task_id` like every
+    ledger line (src/lib/ledger.ts:34-35), and the same run's `pr.opened` row carries the PR url, so a
+    fire is joinable to its subject without changing any emission. The subject's later fate is then a
+    ledger read for terminal rows, with a remote read only for subjects the ledger cannot settle.
+    `resolveLedgerUnion` already supplies the archive-inclusive corpus the count must run over — never
+    the live file, which is ~0.28% of history.
+
+    AND THE ROW COUNT IS NOT AN EVENT COUNT. Six of the escalation's 31 dates land inside twelve
+    minutes on 2026-08-26 (15:04:42, 15:09:03, 16:08:00, 16:08:24, 16:14:52, 16:14:55). Repeated fires
+    inside one wait window against one subject are ONE episode, so a raw row count overstates the
+    numerator by an unknown factor — a second way the reported figure is not the figure claimed.
+  design: |
+    (i) THE CENSUS, IN `src/lib/rule-efficacy.ts` BESIDE THE UNION READ IT REUSES. A new export over
+    the same corpus: for each ACTIVITY-signature row, resolve SUBJECT (via the row's `run_id` to that
+    run's opened PR, or the row's own subject field where it carries one) and OUTCOME (did that subject
+    later reach a terminal healthy state). Report the split: fired-and-subject-later-healthy,
+    fired-and-subject-genuinely-stuck, and outcome-UNKNOWN. NOT a new module — W1-T382's own design
+    note settles this shape: "NOT a new module: nothing here needs one, and a new module would need its
+    own call-site proof."
+
+    (ii) EPISODES, NOT ROWS. Collapse fires sharing a subject inside one wait window to a single
+    episode, and report both figures — episodes and rows — so the collapse is auditable rather than a
+    quietly smaller number.
+
+    (iii) UNKNOWN IS A FIRST-CLASS OUTCOME, NEVER A SILENT LEAN. A subject whose fate cannot be
+    resolved is counted UNKNOWN with the reason, never folded into healthy (which would manufacture a
+    violation) nor into stuck (which would manufacture an exoneration). Same polarity the module
+    already keeps when the union cannot be read.
+
+    (iv) A POSITIVE CONTROL GATES THE HEADLINE. CLAUDE.md's own rule: a zero is not a measurement until
+    a positive control proves the query could see its corpus. A census that resolves ZERO subjects
+    while the union carries fire rows REFUSES to print a split — that is the query failing, not a clean
+    population. The control is the join itself demonstrated against a row whose subject is known.
+
+    (v) WHAT THIS UNLOCKS, STATED SO IT IS NOT MISTAKEN FOR SCOPE. Once a fire carries an observed
+    subject outcome, a fire whose subject later merged IS a healthy-condition fire — genuine violation
+    evidence, of exactly the kind W1-T4271's VIOLATION kind is defined over. Promoting the signature on
+    that evidence is a later, EVIDENCED table edit, and is deliberately NOT performed here: this task
+    ships the observation, not a verdict drawn from it.
+
+    NOT IN SCOPE, each refused for a stated reason. NO change to any bound's VALUE — this task tunes no
+    number, which is the rule's own first instruction. NO new ledger emission at the fire sites: the
+    join works from fields already written, and adding a field would put the census behind a deployment
+    before it could read one row of history. NO auto-filing of tasks from the census (Law 5's
+    laundering shape). NO widening to the two UNMEASURABLE signatures, which need GitHub check-run
+    names — W1-T418 marked that follow-on and it stays follow-on.
+  acceptance:
+    - claim: "each bound-fire row resolves to its SUBJECT and that subject's later outcome, so a fire whose subject later reached a healthy terminal state is reported as a healthy-condition fire rather than an unclassified recurrence"
+      proof: 'grep: test("W1-T4272: a fire whose subject later reached a healthy terminal state is reported as a healthy-condition fire" in test/bound-fire-outcome.test.ts'
+    - claim: "the census reports EPISODES alongside rows — repeated fires against one subject inside one wait window collapse to one episode, and both figures are rendered so the collapse is auditable"
+      proof: 'grep: test("W1-T4272: repeated fires against one subject within one wait window collapse to one episode, rows and episodes both rendered" in test/bound-fire-outcome.test.ts'
+    - claim: "a subject whose outcome cannot be resolved is reported UNKNOWN with its reason, counted neither as healthy nor as stuck"
+      proof: 'grep: test("W1-T4272: an unresolvable subject is reported UNKNOWN with its reason, counted neither healthy nor stuck" in test/bound-fire-outcome.test.ts'
+    - claim: "a census that resolves zero subjects while the union carries fire rows REFUSES to print a split rather than reporting an empty healthy population — the positive control that stops a broken join reading as a clean measurement"
+      proof: 'grep: test("W1-T4272: a census resolving zero subjects over non-empty fire rows refuses to print a split" in test/bound-fire-outcome.test.ts'
+    - claim: "the census reads the ledger UNION rather than the live file alone, so the population it reports is history and not the most recent 0.28% of it"
+      proof: 'grep: test("W1-T4272: the census reads the ledger UNION rather than the live file alone" in test/bound-fire-outcome.test.ts'
+    - claim: "the census is reachable from the report the operator already runs, so the measurement cannot merge as fully-tested dead code"
+      proof: "grep: boundFireCensus in src/lib/rule-efficacy.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§8A", "P48", "W1-T382", "W1-T418"]
+  files: [src/lib/rule-efficacy.ts, test/bound-fire-outcome.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS IS THE PROMOTE-TO-INSTRUMENT THE PROPOSAL WAS REACHING FOR, built against observed evidence
+    rather than an activity count. The rule stays prose; what changes is that its central question —
+    has the separated population ever been observed — becomes a command instead of a dig repeated by
+    hand, badly or not at all. Seven shards cite one measurement; after this, none of them has to.
+    depends_on W1-T4271 IS A REAL DEPENDENCY AND ALSO A SERIALIZATION. Real: the census is defined over
+    ACTIVITY-kind signatures, which W1-T4271 introduces, and its output is the evidence that could later
+    promote one back to VIOLATION. Serialization: both edit `src/lib/rule-efficacy.ts`, and the
+    pre-dispatch overlap check would serialize them regardless, so the edge makes the order explicit
+    rather than incidental.
+    risk:high, BOTH READINGS RECORDED. Rule 19's SPAN scores `files:` as two stems (`rule-efficacy`,
+    `bound-fire-outcome`) and decomposing is wrong — a census cannot ship without the positive control
+    that proves its join could see the corpus, which is the whole difference between this and the
+    figure it replaces. BLAST RADIUS is bounded: read-only over the ledger union, no bound's value
+    moves, no emission changes, and the census draws no verdict of its own.
+    verify:auto — the join, the episode collapse and the control are functions over fixture ledgers
+    with the remote read injected at the same seam `resolveLedgerUnion` already uses; nothing spawns
+    and no live host is required.
+    PROOF NOTES: the five `unit test:` proofs use the PURE-PATH form naming a file this shard's own
+    `files:` declares; the grep forward-references a new identifier into an EXISTING file, the
+    no-third-option form.

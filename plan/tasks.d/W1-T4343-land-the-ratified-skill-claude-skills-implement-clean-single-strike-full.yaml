@@ -1,0 +1,150 @@
+- id: W1-T4343
+  title: "LAND THE RATIFIED SKILL — `.claude/skills/implement-clean-single-strike-fully-exec-bf9fbed9/SKILL.md` writes the mined, safety-scanned procedure directly, because `rmd approve`'s own writer never touches `.claude/skills/` despite `stageSkillDraft`'s summary text promising it does, and its reachability caveat names the wrong (dead) delivery path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 15.00
+  files: [.claude/skills/implement-clean-single-strike-fully-exec-bf9fbed9/SKILL.md, test/the-ratified-skill-lands-and-still-injects.test.ts]
+  origin: "skill-draft:bf9fbed9e9207c08"
+  plan_refs: ["W1-T2766", "W1-T3101", "W1-T3137", "W1-T111"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED at the current checkout, not the stale plan snapshot this ratification was drafted
+    against. Two findings, both load-bearing for what "ratify" must mean here.
+
+    (1) THE PROPOSAL'S OWN REACHABILITY CAVEAT NAMES A DEAD PATH. `describeWorkerSkillReachability`
+    (src/lib/skill-workshop.ts:252) reports on whether a spawned WORKER can discover
+    `.claude/skills/<name>/SKILL.md` itself via `settingSources` — true today, and irrelevant. The
+    LIVE delivery route is W1-T3101 (merged): `loadInjectableSkills` reads the APPROVED tree directly
+    (readdirSync/readFileSync, no settingSources involved), `SKILL_APPLIES_TO_RE` opts a skill in via
+    its own `applies-to:` frontmatter, and `selectSkillsForTask` + `renderSkillsPart` inject the body
+    into `implementPromptParts`, spending from the existing `DEFAULT_KNOWLEDGE_BUDGET_CHARS` (8148,
+    lib/learnings.ts:41). This skill's frontmatter already carries `applies-to: implement`, which
+    `INJECTABLE_SKILL_TASK_TYPES` (skill-workshop.ts:46-52) recognises — nothing further needs
+    building for it to inject once the file exists.
+
+    (2) THE WRITE THE PROPOSAL PROMISES DOES NOT EXIST. `stageSkillDraft`'s own staged summary text
+    (skill-workshop.ts:319-321) reads: "Approving this proposal drafts a plan PR that writes
+    '.claude/skills/<name>/SKILL.md' — nothing writes under .claude/skills/ outside that PR." Grepped
+    the whole tree for a writer: NONE exists. `RatificationPayload` (src/lib/inbox.ts:1721-1725)
+    carries only `{proposalId, fragmentYaml, stampLine}`. `ratificationShardFiles` /
+    `writeRatificationShards` (inbox.ts:1961-2014, invoked at src/run-task.ts:34175-34178) write
+    ONLY `plan/tasks.d/*.yaml` shards from `fragmentYaml` plus the `MASTER-PLAN.md` stamp — and
+    `ratificationShardFiles` REFUSES an empty fragment ("the drafted fragment is empty — nothing to
+    file"), so a bare stamp with no filed task would make `rmd approve` throw rather than land
+    anything. `rmd approve` on THIS proposal is therefore a one-shot: once it ratifies, the
+    proposal's classification becomes `ratified` (approveProposal refuses a second call), so the
+    file can never be produced by a LATER re-approval of the same id — it has to be produced by
+    filing a task now, exactly as this fragment does.
+
+    THE CONTENT ITSELF CLEARS THE BAR ALREADY BUILT FOR IT: `renderSkillDraft` (skill-workshop.ts:85)
+    only emits past the two-run floor, `scanSkillDraft` (skill-workshop.ts:214) already passed this
+    exact markdown against the worker allowlist and the instruction-injection pattern set before it
+    was ever staged, and the evidence cites 27 supporting merged implement runs. Nothing about the
+    content needs re-litigating; what was missing was a path from "staged proposal" to "file on disk".
+
+    NOT BUILDING A GENERIC APPROVE-TIME WRITER HERE, DELIBERATELY. One instance is not evidence a
+    recurring mechanism is worth its own surface area on `RatifyGateway`/`RatificationPayload` — the
+    same build-on-evidence discipline this repo already applies to skill reachability itself
+    (W1-T3137's own note: "an author's caution is not a reason to park a record… only a judge that
+    deems a change risky should", and the W1-T19-era "banked until a rung-1 escape is observed"
+    pattern). If skill-draft proposals recur, filing each as its own small landing task, as this one
+    does, is the cheaper and more honest answer until volume says otherwise.
+
+    A SEPARATE, SMALLER STALENESS NOTED BUT NOT FOLDED IN: the retro's own call site
+    (src/run-task.ts:22266-22272) calls `stageSkillDraft`s with `describeWorkerSkillReachability([])`
+    — a HARD-CODED empty array, never the real exported `WORKER_SETTING_SOURCES` — so every future
+    staged skill's reachability line is accidentally correct today only because `[]` happens to match
+    the real value, and would silently go stale the moment `WORKER_SETTING_SOURCES` ever changes.
+    That is a documentation-staleness risk on a DIFFERENT call site than anything this task touches;
+    it is named here for the record and left for its own filing rather than smuggled into this diff.
+  design: |
+    (i) WRITE THE FILE VERBATIM, with one correction. Frontmatter and Procedure section, byte-for-byte
+    as staged (and as `renderSkillDraft`/`PROCEDURAL_STEP_TEXT` in skill-workshop.ts already produce
+    for this exact candidate — verified against source, not transcribed from memory):
+
+        ---
+        name: implement-clean-single-strike-fully-exec-bf9fbed9
+        description: A procedure shape proven across 27 merged implement run(s): clean_single_strike + fully_executed_proof.
+        applies-to: implement
+        ---
+
+        ## Procedure
+
+        - Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung.
+        - Execute every acceptance criterion as a real, observed proof — never let the keyword floor stand in for a run.
+
+        ## Evidence
+
+        <the 27 `- [src: run#…]` lines plus the trailing `- Filed under: …` line, copied VERBATIM
+        from state/inbox-proposals.json's `skill-draft:bf9fbed9e9207c08` entry — REFUSE rather than
+        retype: transcribing 27 run ids by hand risks exactly the kind of drift `ratificationShardFiles`
+        itself refuses rather than guesses at (inbox.ts:1958-1959). Read the registry entry, do not
+        reconstruct it from this task's prose.>
+
+    The ONLY change from the staged draft: replace the two-line HTML comment beneath the frontmatter
+    ("DRAFTED by skill-workshop.ts … not yet ratified.") with one stating it WAS ratified — naming
+    `rmd approve skill-draft:bf9fbed9e9207c08` as the ratifying act and this task's own id as the
+    landing PR — so the file never asserts a pending-ratification state about itself once it exists
+    on disk and is being read by a worker.
+
+    (ii) PROVE IT ACTUALLY INJECTS, reusing the EXISTING exported functions — never a
+    re-implementation:
+      - `splitFrontmatter`/`SKILL_APPLIES_TO_RE` (or `loadInjectableSkills` directly) parse the landed
+        file with `appliesTo` including `"implement"`.
+      - `loadInjectableSkills(".claude/skills")` (real readdirSync/readFileSync, or the injected
+        variants over a temp copy of the real directory) includes this skill alongside the existing
+        `tddr`/`grfp` macro skills (which stay EXCLUDED — they carry no `applies-to:`, per
+        skill-workshop.ts:388's opt-in-only comment; this is the regression lock that a real macro
+        skill in the same directory does not accidentally start injecting).
+      - `selectSkillsForTask(loaded, "implement", DEFAULT_KNOWLEDGE_BUDGET_CHARS)` selects it (body
+        fits under budget — it will, but prove it rather than assume it).
+      - `scanSkillDraft` (the SAME allowlist/scan the staging pipeline already ran) still reports
+        `ok: true` against the LANDED text, including the rewritten comment line — a safety regression
+        lock that the one edit this task makes did not introduce a host/path/tool/injection violation.
+
+    (iii) NOT IN SCOPE: any change to `RatifyGateway`/`RatificationPayload`/`writeRatificationShards`
+    (no generic approve-time skill writer — see rationale); any change to
+    `describeWorkerSkillReachability`'s production call site or its hard-coded `[]` argument; any
+    restructuring or trimming of the Evidence section's size (a separate filing if the `skills.injected`
+    ledger event ever shows this crowding out other injections — build on that evidence, not on
+    anticipation of it).
+  acceptance:
+    - claim: "the file exists at the exact path with frontmatter (name/description/applies-to) and the two Procedure bullets matching skill-workshop.ts's own renderSkillDraft/PROCEDURAL_STEP_TEXT output for this candidate, verbatim"
+      proof: "unit test: the file exists at the exact path with frontmatter"
+    - claim: "loadInjectableSkills over the real .claude/skills/ tree includes this skill with appliesTo including 'implement', while the pre-existing tddr/grfp macro skills stay excluded (no applies-to: frontmatter) — the opt-in regression lock"
+      proof: "unit test: loadInjectableSkills over the real .claude skills tree includes this"
+    - claim: "selectSkillsForTask selects this skill for an implement-type task within DEFAULT_KNOWLEDGE_BUDGET_CHARS, so it actually reaches a rendered prompt via the existing W1-T3101 route rather than merely existing on disk"
+      proof: "unit test: selectSkillsForTask selects this skill for an implement-type task within"
+    - claim: "the landed file, including its rewritten ratification comment, still passes scanSkillDraft's host/path/tool/instruction-injection scan — the one edit this task makes introduces no new violation"
+      proof: "unit test: the landed file including its rewritten ratification comment still"
+    - claim: "the file's HTML comment no longer asserts 'not yet ratified' — it states it was ratified via rmd approve skill-draft:bf9fbed9e9207c08"
+      proof: "grep: RATIFIED in .claude/skills/implement-clean-single-strike-fully-exec-bf9fbed9/SKILL.md"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the file already exists at this path (a duplicate landing from a
+    prior ratification of the same proposal), or if `skill-draft:bf9fbed9e9207c08` is no longer the
+    entry's id in state/inbox-proposals.json (superseded/re-drafted under a different candidate hash
+    in the interim — `proceduralCandidateHash` mints a NEW id for a changed run set, so a re-mined
+    version of this shape would need re-checking, not assuming). Re-run before building:
+    `ls .claude/skills/implement-clean-single-strike-fully-exec-bf9fbed9` and grep the live registry
+    for the exact id.
+  note: |
+    RATIFIED from proposal skill-draft:bf9fbed9e9207c08 (staged by src/lib/skill-workshop.ts's
+    stageSkillDraft, called from retroCommand — src/run-task.ts:22266-22272). Sources verified at the
+    current checkout rather than assumed: skill-workshop.ts:85 (renderSkillDraft, the 2-run floor),
+    skill-workshop.ts:214 (scanSkillDraft), skill-workshop.ts:252 (describeWorkerSkillReachability,
+    the caveat's real and irrelevant scope), skill-workshop.ts:292-328 (stageSkillDraft, the promise
+    text and the "nothing writes under .claude/skills/" comment), skill-workshop.ts:367-422
+    (loadInjectableSkills/selectSkillsForTask, the W1-T3101 injection route), inbox.ts:1712-1935
+    (approveProposal/RatificationPayload/RatifyGateway — no file-write surface beyond the plan shard
+    and the MASTER-PLAN stamp), inbox.ts:1961-2014 (ratificationShardFiles/writeRatificationShards,
+    the empty-fragment refusal), run-task.ts:34098-34211 (createRatificationBranch's real git
+    writes: shards + MASTER-PLAN.md + plan-index regen, nothing else).
+    NOT a duplicate: grepped plan/tasks.d/ for any existing task addressing a missing
+    skill-draft-to-.claude/skills/ writer — none exists. W1-T3137 (queued) is the sibling reachability
+    finding for the DIRECT settingSources path and is unaffected by this landing either way.

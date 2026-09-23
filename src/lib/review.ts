@@ -6138,10 +6138,11 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "openapi/daemon.yaml":
     "the daemon's API schema (content) — scripts/generate-api-client.mjs is the enforcement logic and is tracked below",
   "settings/macros.yaml":
-    "the operator's macro table (W1-T2763) — CONTENT scripts/prompt-surface-gate.mjs guards, named " +
-    "at that script's touchedPathSurfaces so an edit to it must carry golden evidence. The gate is " +
-    "the rule and is tracked on INSTRUMENT_SURFACE above; this file is what it measures, the same " +
-    "shape as openapi/daemon.yaml directly above.",
+    "the operator's macro table (W1-T2763) — CONTENT scripts/prompt-surface-gate.mjs measures, named " +
+    "at that script's touchedPathSurfaces. An edit needs golden evidence only when a row could reach a " +
+    "model unasked (W1-T4332, isOperatorOnlyMacroTable); operator-only rows reach no worker or judge. " +
+    "The gate is the rule and is tracked on INSTRUMENT_SURFACE above; this file is what it measures, " +
+    "the same shape as openapi/daemon.yaml directly above.",
   "plan/claims.yaml": "claim DATA the claims gate validates, not the checker's rule logic",
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
