@@ -344,6 +344,7 @@
     "test/an-analytics-request-returns-under-its-own-ceiling.test.ts": 0,
     "test/an-automate-verdict-releases-when-the-risk-judge-proceeds.test.ts": 0,
     "test/an-availability-probe-reads-the-limit-that-stops-it.test.ts": 0,
+    "test/an-emergency-stop-read-never-reparses-the-archives.test.ts": 0,
     "test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts": 1360,
     "test/an-escalation-and-its-reply-are-one-thread.test.ts": 1455,
     "test/an-event-wake-must-not-discard-an-admitted-batch.test.ts": 914,
