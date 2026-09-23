@@ -6,13 +6,13 @@
  * write to, and the daemon answers each reply in plain language.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runDaemon } from "../src/lib/daemon.js";
+import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import { machineTokens } from "../src/lib/inbox-plain.js";
 import {
   answerThread,
@@ -34,7 +34,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { inboxThreadDecider, type RunResult } from "../src/run-task.js";
+import { daemonCommand, inboxThreadDecider, type RunResult } from "../src/run-task.js";
 
 const VH = "verify-human:W1-T235";
 const RULING = "ruling:operator-owned";
@@ -439,4 +439,39 @@ test("W1-T4088: serve gives the escalation reply route the thread store", async 
   } finally {
     server.close();
   }
+});
+
+test("W1-T4088: REACHABILITY — daemonCommand actually WIRES inboxResponder into the deps it hands runDaemon", async () => {
+  // The same class of defect test/auto-triage-wiring.test.ts exists to make impossible: a
+  // producer that only ever built in unit tests calling it directly, never from the real
+  // composition root. This drives the REAL daemonCommand and asserts on the DaemonDeps it
+  // actually hands runDaemon, the same seam that file pins for its own rung.
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4088-wiring-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+  assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
+  assert.equal(captured!.inboxResponder?.threadStorePath, inboxThreadStorePath(root), "the real thread store, not left out");
+  assert.equal(captured!.inboxResponder?.ledgerPath, join(root, "state", "ledger.ndjson"));
+  assert.equal(typeof captured!.inboxResponder?.readItems, "function");
+  assert.equal(typeof captured!.inboxResponder?.reframe, "function");
 });
