@@ -425,7 +425,6 @@ export interface DigestSummary {
   learningOutcomes?: LearningOutcomeSummary;
   knowledgeMeasured?: KnowledgeMeasuredSummary;
   gateFireRates?: GateFireRateSummary;
-  /** W1-T4100: the heaviest `step`s by bytes in the window. Soft-composed. See {@link summarizeLedgerWriters}. */
   ledgerWriters?: LedgerWriterFlag[];
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
    *  `.fired` duplicates it and `.skipped` is the cadence working as intended. */
@@ -769,9 +768,7 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
   return summary;
 }
 
-/** W1-T4100 (i): what writes so much — `window`'s top five steps by bytes, flagged against their
- *  share of `baseline`. An empty baseline flags nothing: every step "new" would be noise, not a
- *  finding. Bytes are re-serialised rows — the parsed form is all a digest holds. */
+/** W1-T4100 (i): `window`'s top five steps by (re-serialised) bytes; an empty `baseline` flags none, as all-"new" is noise. */
 export function summarizeLedgerWriters(window: LedgerLine[], baseline: LedgerLine[] = []): LedgerWriterFlag[] | undefined {
   if (window.length === 0) return undefined;
   const current = window.map((l) => JSON.stringify(l));
@@ -826,9 +823,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     }`,
     `alerts: ${s.alerts ? renderAlertsSummary(s.alerts) : "(no poll this window)"}`,
     `issues reviewed: ${s.issues ? renderIssuesSummary(s.issues) : "(no poll this window)"}`,
-    // W1-T112: soft-composed — present only when `rmd inbox` polled inside this window, an
-    // absent entirely (not a "(no poll this window)" placeholder) line otherwise, see the
-    // `inbox` field's doc on DigestSummary.
+    // W1-T112: soft-composed, never a placeholder — see the `inbox` field's doc on DigestSummary.
     ...(s.inbox ? [`inbox: ${renderInboxPollSummary(s.inbox)}`] : []),
     // Soft-composed exactly like `inbox` above — absent, never a placeholder, when the window
     // carries no `board_review.ran`. See the `boardReview` field's doc on DigestSummary.
@@ -1031,8 +1026,7 @@ export function readDigestWindow(
 export function buildDigest(ledgerPath: string, sinceIso: string, consoleBaseUrl?: string): string {
   const read = readDigestWindow(ledgerPath, sinceIso);
   const summary = summarize(read.lines, sinceIso);
-  // W1-T4100: named only when a rotation landed in the window — churn is what they explain, and a
-  // window the live file alone answers renders byte-identical to a caller-built summary.
+  // W1-T4100: only when a rotation landed in the window — the churn the writers explain.
   const ledgerWriters = read.archivesRead > 0 ? summarizeLedgerWriters(read.lines) : undefined;
   return renderDigest({ ...summary, read, ...(ledgerWriters ? { ledgerWriters } : {}) }, consoleBaseUrl);
 }
