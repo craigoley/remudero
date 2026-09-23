@@ -198,7 +198,7 @@ export interface DispatchClaimReserver {
   anchorMessage?(taskId: string): string | undefined;
 }
 
-export interface DispatchClaimGitDeps {
+export interface ClaimGitDeps {
   /** Runs a git argv; returns its exit status, stdout and stderr. Injected by tests. */
   run(args: string[]): { status: number; stdout: string; stderr: string };
   /** Overrides the anchor so a test can make two writers distinguishable. */
@@ -208,7 +208,7 @@ export interface DispatchClaimGitDeps {
 /** The real reserver: an orphan commit over the empty tree, pushed to the task's own ref — the
  *  same scheme `gitTriageClaimReserver` uses, so two writers' payloads stay unrelated. The
  *  message carries pid+host+time, legible to an operator and doubling as the uniqueness source. */
-export function gitDispatchClaimReserver(deps: DispatchClaimGitDeps): DispatchClaimReserver {
+export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReserver {
   // Closure-scoped to one reserver, cleared on success, so a refusal never echoes an older attempt.
   let lastStderr: string | undefined;
   return {
@@ -510,7 +510,7 @@ function parseRepairClaim(anchor: string, message: string): RepairClaim | undefi
 }
 
 /** Real Git implementation usable from a fleet fixer, Codex session, or operator checkout. */
-export function gitRepairClaimReserver(deps: DispatchClaimGitDeps): RepairClaimReserver {
+export function gitRepairClaimReserver(deps: ClaimGitDeps): RepairClaimReserver {
   const minted = new Map<string, Omit<RepairClaim, "anchor">>();
   return {
     mintAnchor(input) {

@@ -1,0 +1,37 @@
+- id: W1-T4103
+  title: "EVERY REPOSITORY CARD IN THE CONSOLE READS 'NOT COLLECTED' BECAUSE /v1/repos RETURNS NULL FOR ALL ITS TELEMETRY BY DESIGN — fill error rate, last run, queued tasks, 7-day tokens and cost, connected-at and active from the ledger and plan the daemon already holds, and keep null only where no source exists"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: medium
+  origin: "operator-report#console-not-working-2026-09-23"
+  plan_refs: ["W1-T4102", "W1-T4104"]
+  files:
+    - src/lib/repo-dashboard-route.ts
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: chore/amend-W1-T1081-fold-satisfied -> file/console-resilience-core
+    (the id was minted from the operator's other open worktree in the same session).
+  rationale: |
+    READ 2026-09-23 on origin/main 3d3c61590: src/lib/repo-dashboard-route.ts serves /v1/repos
+    and returns null for errorrate, last_run, queuedtasks, tokens7d, cost_7d, connected_at,
+    active, proofpolicy, workerpoolsize and alertthreshold. The console's /repos, /repos/[id],
+    /connections and /onboard therefore render "Not collected" on every card. No task in either
+    plan fills them (the console's "Wire repository telemetry hooks" task only renders them; core
+    W1-T3773 is retired). Most have a source already in the daemon: verdict rows (error rate,
+    last run), the plan (queued tasks), worker cost rows (7-day tokens and cost), the managed-repo
+    registry (connected-at, active), and config (proof policy, worker pool size).
+  acceptance:
+    - claim: "error rate and last run are derived from the repository's verdict rows"
+      proof: "unit test: a repository's error rate and last run come from its verdict rows"
+    - claim: "queued tasks count the repository's open plan tasks"
+      proof: "unit test: queued tasks count the repository's open plan tasks"
+    - claim: "7-day tokens and cost sum the repository's worker cost rows in the window"
+      proof: "unit test: seven-day tokens and cost sum the repository's worker rows in the window"
+    - claim: "a field with no source stays null, never zero"
+      proof: "unit test: a telemetry field with no source stays null rather than zero"
