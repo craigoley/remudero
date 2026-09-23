@@ -60,7 +60,7 @@
     plan/feedback/fb-repair-blocked-fixable-2955.yaml — which is this shard's actual deliverable". Each
     re-filing therefore costs a spawned triage run, a branch, a PR and a review pass to arrive back at a
     rejection that is already on disk. It also pollutes retro accounting: that same merge is why R32-4
-    "hit on a member P56's spirit excludes" and why design rule 17 had to be written.
+    "hit on a member P56's spirit excludes" and why DR-17 had to be written.
 
     (6) THIS IS THE FAILURE MODE W1-T905 WROTE ITS OWN RISK NOTE ABOUT. That note: "a wrong recurrence key
     does not fail loudly, it floods the Architect's front door. That failure mode is why (ii) keys on the
