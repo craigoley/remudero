@@ -143,7 +143,7 @@ function makeWorld(): World {
       drafts[id] = {
         proposalId: id,
         fragmentYaml,
-        stampLine: `- ${id} — RATIFIED`,
+        stampLine: `- ${id} (proposal ${i}) — RATIFIED 2026-09-23 -> W1-T${900 + i}.`,
         anchorFingerprint: fingerprintAnchors.map((a) => `${a.pattern}::${"path" in a ? (a.path ?? "") : ""}`).sort().join("|"),
       };
     }
@@ -303,7 +303,7 @@ test("any changed input invalidates the classification", () => {
       () => {
         const path = join(w.stateDir, "inbox-drafts.json");
         const drafts = JSON.parse(readFileSync(path, "utf8"));
-        drafts["P-new"] = { proposalId: "P-new", fragmentYaml: fragment("W1-T990", []), stampLine: "- P-new", anchorFingerprint: "" };
+        drafts["P-new"] = { proposalId: "P-new", fragmentYaml: fragment("W1-T990", []), stampLine: "- P-new (p) — RATIFIED 2026-09-23 -> W1-T990.", anchorFingerprint: "" };
         writeFileSync(path, JSON.stringify(drafts));
       },
       (r) => assert.equal(stateOf(r, "P-new")?.state, "ready"),
@@ -485,7 +485,7 @@ test("a fragment verdict is reused only against the same plan object", () => {
   const w = makeWorld();
   const memo = createFragmentMemo();
   const proposal = { id: "P1", summary: "s", evidenceAnchors: [] };
-  const draft = { proposalId: "P1", fragmentYaml: fragment("W1-T950", ["W1-T100"]), stampLine: "- P1", anchorFingerprint: "" };
+  const draft = { proposalId: "P1", fragmentYaml: fragment("W1-T950", ["W1-T100"]), stampLine: "- P1 (p) — RATIFIED 2026-09-23 -> W1-T950.", anchorFingerprint: "" };
   const ctx = {
     plan: w.plan,
     isMerged: () => true,

@@ -1,0 +1,158 @@
+- id: W1-T4347
+  title: "PR #5389'S COVERAGE-SHARD (1/4) AND COVERAGE-RATCHET FAILED WHILE SHARD (4/4) AND MUTATION-RATCHET PASSED, AGAINST A SINGLE-FILE stryker.conf.json DIFF — 'shouldn't touch coverage shards at all' is NOT what the source says: diff-class.mjs classifies it SOURCE (never plan/docs scope), so the full instrumented suite ran regardless, and at least one test PARSES stryker.conf.json's live content inside that same suite; name the actual failing test, reproduce it locally twice, and decide flake vs regression rather than the diff's surface shape"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: encouraged}
+  risk: high
+  budget_usd: 100.00
+  files: [docs/audits/pr-5389-coverage-shard-classification.md, docs/docs-index.json]
+  origin: "followup:DAEMON-1789303069637:2026-09-13T13:21:14.481Z:0"
+  plan_refs: ["W1-T108", "W1-T133", "W1-T297", "W1-T3512", "§5"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FOLLOW-UP'S PREMISE WAS CHECKED AGAINST SOURCE, NOT TAKEN ON FAITH, AND IT DOES NOT HOLD.
+    scripts/diff-class.mjs's classify() (verified 2026-09-13) resolves any changed-file list to
+    PLAN_ONLY only when every path passes isInPlanScope (src/lib/plan-scope.ts:45-47 — `path ===
+    "MASTER-PLAN.md" || path === ORIENTATION_DOC || path.startsWith("plan/")`), to DOCS_ONLY when
+    the remainder is entirely under docs/, and to SOURCE otherwise. stryker.conf.json is neither, so
+    a single-file stryker.conf.json diff classifies SOURCE — identically to a src/ change. ci.yml's
+    coverage-shard job reads that class at its own "Determine this diff's fast-lane class" step
+    (ci.yml:693-717) and only skips "Test with coverage" for PLAN_ONLY/DOCS_ONLY (ci.yml:769-773);
+    on SOURCE it runs the real instrumented suite via `scripts/test-tier-manifest.mjs --select-all
+    --shard <matrix.shard>/4 --base HEAD^1` (ci.yml:809-827), a DETERMINISTIC duration-balanced
+    partition read from the checked-in scripts/test-tier-manifest.json — not a random split. So a
+    stryker.conf.json-only diff pays for, and is exposed to, the FULL suite exactly like a src/ edit
+    would be. "Shouldn't touch coverage shards at all" is an assumption about the diff's SUBJECT, not
+    a fact about what the harness actually runs on it.
+
+    THE LEADING, SOURCE-VERIFIED MECHANISM BY WHICH IT COULD GENUINELY BREAK A SHARD.
+    test/mutation-trigger-covers-its-own-command.test.ts (its own header cites R-42,
+    docs/audits/recon-2026-09-05.md, and W1-T108/W1-T133) does not merely reference
+    stryker.conf.json's path — it `readFileSync`s and JSON.parses the LIVE file, extracts every
+    `*.test.ts` token from `commandRunner.command` via `extractCommandTestFiles`
+    (scripts/mutation-ratchet.mjs:520-522), and asserts every one is a member of
+    scripts/mutation-relevant-paths.json (loaded via `loadRelevantPaths`,
+    scripts/mutation-ratchet.mjs:42-48). Verified today: stryker.conf.json's commandRunner.command
+    names exactly 7 test files (classify, fix-rung-classify, block-reason,
+    three-retries-in-three-seconds-against-a-lockout, session-limit-is-a-refusal-not-a-success,
+    codex-quota-window-refusal, a-capped-pr-exhausts-repair-before-it-reaches-a-human) and
+    scripts/mutation-relevant-paths.json currently carries all 7 plus src/lib/classify.ts,
+    stryker.conf.json, scripts/mutation-ratchet.mjs and scripts/mutation-baseline.json — CONSISTENT
+    on main today. If PR #5389's diff added, removed or renamed a commandRunner.command test-file
+    argument without a matching scripts/mutation-relevant-paths.json edit, THIS test fails
+    deterministically wherever test-tier-manifest.mjs's duration split happens to place it — which
+    would be shard-specific (consistent with 1/4 red, 4/4 green) and INDEPENDENT of mutation-ratchet,
+    since Stryker's own run never executes this census test (it is not one of the 7 command-runner
+    test files; it only reads the config that lists them). This is a NAMED, VERIFIABLE hypothesis to
+    check against PR #5389's actual diff — not an assumption to file a fix against.
+
+    A MEMBERSHIP-ONLY REFERENCE IS NOT THE SAME RISK. test/instrument-isolation.test.ts:139,305 also
+    match a grep for "stryker.conf" but only assert the PATH STRING is a member of INSTRUMENT_SURFACE
+    (src/lib/review.ts) — they do not parse the file's content, so an ordinary field edit (mutate,
+    timeoutMS, concurrency) cannot move them. The corpus must be classified content-sensitive vs
+    membership-only per file, not treated as one undifferentiated risk from a bare grep hit — a
+    RE-DERIVED census, since a 2026-09-13 grep already found roughly a dozen test/**/*.test.ts files
+    matching "stryker.conf" and this note's count must not be trusted over a fresh run.
+
+    NOT COVERED BY WHAT IS ALREADY FILED. W1-T3512 (queued) widens the source-only-gate skip to more
+    REQUIRED checks, but strictly for PLAN_ONLY diffs (plan/ scope) — stryker.conf.json is never
+    plan-scoped, so that task cannot reach this case even once built. W1-T297/W1-T402 (both merged)
+    refuse a diff that BUNDLES an instrument-surface path with a src/ path in the SAME PR;
+    PR #5389's diff is single-file, so that refusal never engages and neither task's rationale
+    addresses a single-file instrument-only diff's OWN coverage-shard outcome. Neither can answer
+    whether this PR's specific failure was the coupling above, an unrelated regression, or the
+    general suite-flake class this repo already tracks extensively (W1-T2904 and dozens of sibling
+    shards) — none of which cross-references stryker.conf.json-content-sensitive tests specifically.
+  design: |
+    A BOUNDED READ-ONLY FORENSIC PASS, the W1-T2625 shape: it reads and writes one artifact, edits
+    no source, and ships no fix.
+
+    (i) PULL THE REAL EVIDENCE FIRST. `gh pr view 5389 --json headRefName,headRepositoryOwner,state`
+    and the coverage-shard(1/4) + coverage-ratchet check-run logs for that head sha
+    (`gh run view --log` on the matching workflow run, or `gh api` over the check-run's
+    `details_url`/annotations). Extract the FAILING TEST NAME and its exact assertion/error text
+    verbatim. Workflow run LOGS persist well past the coverage-shard artifact's `retention-days: 1`
+    (ci.yml:872), so absence of the uploaded artifact is not itself a reason to stop — try the run
+    log before concluding evidence is gone. If the PR or its checks are genuinely unreadable (closed,
+    logs expired, host unreachable), say so with the SPECIFIC missing surface rather than guessing.
+
+    (ii) PULL PR #5389'S EXACT stryker.conf.json DIFF and check it against the leading hypothesis
+    above: did commandRunner.command's test-file list change? Did scripts/mutation-relevant-paths.json
+    change in the SAME diff (the task said single-file, so verify that claim too rather than repeat
+    it) or not at all? If the census test in the rationale is not what failed, say so plainly and move
+    to (iii) rather than forcing the diff to fit the hypothesis.
+
+    (iii) RE-DERIVE THE CORPUS LIVE — `grep -rl 'stryker\.conf' test/` — and classify EVERY hit as
+    CONTENT-SENSITIVE (parses/reads the file and asserts on its parsed shape, like
+    test/mutation-trigger-covers-its-own-command.test.ts) or MEMBERSHIP-ONLY (asserts a path string
+    without reading the file, like test/instrument-isolation.test.ts). For each content-sensitive
+    file, check whether PR #5389's diff could plausibly move its assertion.
+
+    (iv) REPRODUCE, DO NOT INFER. Materialize the PR's exact stryker.conf.json content in a scratch
+    worktree at the PR's base commit, run `node scripts/test-tier-manifest.mjs --select-all --shard
+    1/4 --base <base-sha>` to reproduce the SAME deterministic file selection CI used, then run that
+    selection TWICE under `node --test`. Two failures on the same test = a deterministic break tied to
+    the diff (genuine regression, name the test + assertion). One failure and one pass, or neither
+    failure, on an otherwise-identical selection = evidence pointing toward the general flake class
+    (cite the specific tracked task/class it matches, e.g. W1-T2904's retry-wrapper-masked flakes, or
+    say which sibling shard in plan/tasks.d/ already tracks the observed shape). Record which case
+    obtained and why.
+
+    (v) THE VERDICT IS DISCRETE, NOT NARRATED. The artifact concludes with exactly one of:
+    GENUINE REGRESSION (naming the test, the assertion, and the diff line that broke it),
+    PRE-EXISTING FLAKE (naming the existing tracked class/task the observed shape matches), or
+    UNDETERMINED (naming the specific evidence that was unreadable and why). A conclusion that reads
+    as prose without landing on one of these three FAILS this task's own acceptance.
+
+    (vi) NO FIX SHIPS HERE. If (i)-(v) surface a real defect — the content-sensitive coupling in the
+    rationale genuinely broke, or a structural gap in how instrument-surface content changes are
+    checked against their dependent tests — name it as a SUCCESSOR FILING in the artifact with enough
+    detail (files, mechanism, fixture) that a later Architect pass can file it without re-deriving
+    this investigation. Do not smuggle a src/ or scripts/ edit into this PR.
+
+    (vii) IF THE PR IS ALREADY MERGED OR CLOSED BY DISPATCH TIME, that is not itself a stop condition
+    — the workflow run and its logs still exist independently of PR state, and (iv)'s local
+    reproduction needs only the diff and the base sha, both recoverable from the merge/close commit.
+    Only mark UNDETERMINED if the SPECIFIC evidence needed is actually gone.
+  acceptance:
+    - claim: "PR #5389's actual failing test(s) in coverage-shard (1/4) are NAMED with the exact assertion/error text pulled from the CI run logs (or the retained workflow run logs if the uploaded artifact expired), never inferred from the diff's shape alone"
+      proof: "grep: FAILING TEST: in docs/audits/pr-5389-coverage-shard-classification.md"
+    - claim: "the stryker.conf.json-referencing test corpus is RE-DERIVED live (not trusted from this filing's count) and each file is classified CONTENT-SENSITIVE or MEMBERSHIP-ONLY against PR #5389's actual diff"
+      proof: "grep: CORPUS: in docs/audits/pr-5389-coverage-shard-classification.md"
+    - claim: "the failure is reproduced, or its non-reproduction is recorded, by re-running shard 1/4's exact deterministic selection twice against the PR's materialized diff in a scratch worktree — a genuine break reproduces on both runs"
+      proof: "grep: REPRODUCTION: in docs/audits/pr-5389-coverage-shard-classification.md"
+    - claim: "the pass concludes with exactly one discrete verdict — GENUINE REGRESSION naming the broken test and assertion, PRE-EXISTING FLAKE naming the tracked class it matches, or UNDETERMINED naming the specific missing evidence — never an open-ended narrative"
+      proof: "grep: VERDICT: in docs/audits/pr-5389-coverage-shard-classification.md"
+    - claim: "the pass ships no fix; anything needing a code change is named as a SUCCESSOR FILING in the artifact rather than built here"
+      proof: "grep: SUCCESSOR FILING in docs/audits/pr-5389-coverage-shard-classification.md"
+  note: |
+    FILED 2026-09-13 from follow-up harvest followup:DAEMON-1789303069637:2026-09-13T13:21:14.481Z:0
+    (run DAEMON-1789303069637, PR #5389). Every mechanism in the rationale was verified at source
+    before filing rather than inherited from the harvest line: scripts/diff-class.mjs's classify()
+    and src/lib/plan-scope.ts's isInPlanScope (2026-09-13 read); ci.yml's classify step (:693-717)
+    and its SOURCE-only "Test with coverage" gate (:751-849); the deterministic duration-balanced
+    shard selection via scripts/test-tier-manifest.mjs (:809-827); stryker.conf.json's own
+    commandRunner.command (7 test files, read verbatim) cross-checked live against
+    scripts/mutation-relevant-paths.json (11 entries, currently consistent) via
+    test/mutation-trigger-covers-its-own-command.test.ts and scripts/mutation-ratchet.mjs's
+    extractCommandTestFiles/loadRelevantPaths; and test/instrument-isolation.test.ts:139,305 as the
+    contrasting membership-only (non-content-sensitive) shape.
+
+    SIZING BAND: risk: high is set up front for Rule 19's SPAN, not blast radius — files: spans two
+    stems (a docs/audits/*.md artifact and docs/docs-index.json), the same shape W1-T2625 and
+    W1-T2607 both carried at risk:high for the identical reason. The work itself is a bounded,
+    read-only forensic pass with no code deliverable.
+
+    NOT A RE-LITIGATION of whether stryker.conf.json-only diffs SHOULD get a fast-lane skip from
+    coverage-shard — that is a broader design question (W1-T3512's territory, extended to a new
+    diff class) this pass deliberately does not decide, because deciding it correctly needs to know
+    whether ANY corpus test is content-sensitive in a way that would make such a skip unsafe for
+    FUTURE stryker.conf.json edits, not just this one. If this pass's findings make that case, it is
+    named as a SUCCESSOR FILING rather than decided here.
+
+    RE-FILES NOTHING: W1-T3512 (queued) and W1-T297/W1-T402 (merged) were read at source and neither
+    covers a single-file, non-bundled, instrument-only diff's own coverage-shard outcome — see
+    rationale for why each falls short of this specific question.
