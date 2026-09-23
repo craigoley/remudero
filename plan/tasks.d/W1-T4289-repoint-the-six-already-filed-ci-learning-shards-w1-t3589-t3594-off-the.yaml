@@ -1,0 +1,73 @@
+- id: W1-T4289
+  title: "repoint the six already-filed ci-learning shards (W1-T3589-T3594) off the nonexistent learnings/ci-gate-lessons.yaml onto the indexed learnings/ci.yaml — plan-data only, no src touched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Companion to W1-T4288 (proof-debt:W1-T3589). W1-T4288 fixes the PRODUCER (src/lib/measurement-cadence.ts)
+    so no future ci-learning shard is filed with an unresolvable proof; it does nothing for the SIX
+    shards already on disk carrying the old, broken target. Those six — W1-T3589 (ci-learning:5289:
+    ci-gate), W1-T3590 (ci-learning:5318:coverage-ratchet), W1-T3591 (ci-learning:5318:coverage-shard
+    (4/4)), W1-T3592 (ci-learning:5431:ci-gate), W1-T3593 (ci-learning:5431:coverage-ratchet), W1-T3594
+    (ci-learning:5433:squash-trailer-gate) — are QUEUED, verify:human, MACHINE-AUTHORED AND PARKED ("a
+    person decides what guidance changes"). Each carries exactly one acceptance criterion whose proof
+    targets `learnings/ci-gate-lessons.yaml`, a path confirmed absent from disk and absent from
+    learnings/index.json (see W1-T4288's rationale). Left alone, no human review of these six can ever
+    satisfy their criterion — the target cannot hold a matched, injectable entry no matter what is
+    written into it, because nothing indexed ever reads it.
+
+    SCOPE, DELIBERATELY NARROW: this task repoints the DATA (each shard's `files:` entry and its
+    acceptance proof's target path) to `learnings/ci.yaml` — the same file W1-T4288 makes the producer's
+    canonical target, chosen independently here too so the two tasks agree regardless of dispatch order.
+    It does NOT author the substantive lesson content for any of the six findings — that remains the
+    parked, verify:human, "a person decides what guidance changes" step the tasks were always designed to
+    require, and it needs domain knowledge of each incident's specific repair (the ci_learning_prs lists
+    on each shard) that a proof-debt-remediation pass is not the place to invent. This task only makes
+    each criterion CAPABLE of eventually resolving; a person still writes the lesson.
+
+    ATOMIC COUPLING, RE-RISKED RATHER THAN DECOMPOSED (Rule 19 exit): the fix is ONE concern — retire the
+    proof-debt this SAME producer bug generated across its whole filed cluster — but it is unsatisfiable
+    piecewise. Repointing one of the six leaves five still permanently unresolvable, which is the exact
+    defect being fixed; the invariant only holds once all six agree. Six plan/tasks.d/*.yaml touches for
+    one indivisible correction is the W1-T240/T241/T242 shape, not a sizing violation to be split.
+
+    NO SRC TOUCHED. Every file this task edits is a plan/tasks.d/*.yaml record — a plan-data correction,
+    not a code change. depends_on is deliberately [] rather than W1-T4288: this task needs no diff from
+    W1-T4288 to be correct (the target file is specified directly here too, not derived), the two tasks'
+    files: are fully disjoint, and a hard gate would strand this plan-data fix behind an unrelated src PR
+    if that PR ever stalled — the same reasoning this plan applies repeatedly to companion pairs
+    (W1-T121/W1-T122, W1-T177/W1-T178/W1-T179).
+  design: |
+    For each of the six shard files, change exactly two lines: the `files:` list entry and the
+    acceptance proof's target path, both from `learnings/ci-gate-lessons.yaml` to `learnings/ci.yaml`.
+    No other field on any of the six records changes — not `id`, not `title`, not `origin`, not
+    `ci_learning_prs`, not the claim text, not `note`. VERIFY each file's exact current two lines from
+    source before editing (distrust this note; do not assume identical line numbers across the six — they
+    were generated at different times with different title/note lengths).
+  acceptance:
+    - claim: "W1-T3589's shard (ci-learning:5289:ci-gate) is repointed to the indexed learnings/ci.yaml"
+      proof: "grep: learnings/ci.yaml in plan/tasks.d/W1-T3589-the-ci-gate-gate-refused-36-pull-requests-in-this-window-and-each-was-re.yaml"
+    - claim: "W1-T3590's shard (ci-learning:5318:coverage-ratchet) is repointed to the indexed learnings/ci.yaml"
+      proof: "grep: learnings/ci.yaml in plan/tasks.d/W1-T3590-the-coverage-ratchet-gate-refused-25-pull-requests-in-this-window-and-ea.yaml"
+    - claim: "W1-T3591's shard (ci-learning:5318:coverage-shard (4/4)) is repointed to the indexed learnings/ci.yaml"
+      proof: "grep: learnings/ci.yaml in plan/tasks.d/W1-T3591-the-coverage-shard-4-4-gate-refused-16-pull-requests-in-this-window-and.yaml"
+    - claim: "W1-T3592's shard (ci-learning:5431:ci-gate) is repointed to the indexed learnings/ci.yaml"
+      proof: "grep: learnings/ci.yaml in plan/tasks.d/W1-T3592-the-ci-gate-gate-refused-26-pull-requests-in-this-window-and-each-was-re.yaml"
+    - claim: "W1-T3593's shard (ci-learning:5431:coverage-ratchet) is repointed to the indexed learnings/ci.yaml"
+      proof: "grep: learnings/ci.yaml in plan/tasks.d/W1-T3593-the-coverage-ratchet-gate-refused-14-pull-requests-in-this-window-and-ea.yaml"
+    - claim: "W1-T3594's shard (ci-learning:5433:squash-trailer-gate) is repointed to the indexed learnings/ci.yaml"
+      proof: "grep: learnings/ci.yaml in plan/tasks.d/W1-T3594-the-squash-trailer-gate-gate-refused-14-pull-requests-in-this-window-and.yaml"
+  risk: high
+  origin: architect
+  plan_refs: ["§8A", "§5C"]
+  files: [plan/tasks.d/W1-T3589-the-ci-gate-gate-refused-36-pull-requests-in-this-window-and-each-was-re.yaml, plan/tasks.d/W1-T3590-the-coverage-ratchet-gate-refused-25-pull-requests-in-this-window-and-ea.yaml, plan/tasks.d/W1-T3591-the-coverage-shard-4-4-gate-refused-16-pull-requests-in-this-window-and.yaml, plan/tasks.d/W1-T3592-the-ci-gate-gate-refused-26-pull-requests-in-this-window-and-each-was-re.yaml, plan/tasks.d/W1-T3593-the-coverage-ratchet-gate-refused-14-pull-requests-in-this-window-and-ea.yaml, plan/tasks.d/W1-T3594-the-squash-trailer-gate-gate-refused-14-pull-requests-in-this-window-and.yaml]
+  status: queued
+  attempts: 0
+  note: "FILED from proof-debt:W1-T3589 (rmd proof-queue-audit, criterion 0, grep-path-absent), alongside
+    its producer-fix companion W1-T4288. risk:high is a recorded Rule 19 atomic-coupling exit, not a sizing
+    artifact: six plan/tasks.d/*.yaml touches for one indivisible correction (repointing FIVE of six would
+    still leave one permanently unresolvable). Repo-wide grep for \"ci-gate-lessons\" before filing found
+    exactly these six victims and no more — confirmed exhaustive, not partial."

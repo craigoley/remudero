@@ -1,0 +1,82 @@
+- id: W1-T4288
+  title: "the ci-learning shard producer's SOLE resolvable proof target is a file that exists nowhere and is indexed nowhere — CI_LEARNING_LESSONS_FILE names learnings/ci-gate-lessons.yaml, learnings/ contains only architecture.yaml/ci.yaml/failures.yaml/platform.yaml/testing.yaml, and learnings/index.json's five-file map has no entry for it, so every filed shard's grep proof is permanently unresolvable (proof-debt:W1-T3589, grep-path-absent)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    RATIFIES the proof-debt finding on W1-T3589 (rmd proof-queue-audit, criterion 0, grep-path-absent):
+    "the lane that trips the ci-gate gate is reached by a matched learnings entry rather than prose no
+    dispatched worker reads" cannot resolve, because its proof (`grep: ci-learning:5289:ci-gate in
+    learnings/ci-gate-lessons.yaml`) names a file that is not in the checkout.
+
+    VERIFIED FROM SOURCE, not assumed. `learnings/` on this checkout contains exactly five files —
+    architecture.yaml, ci.yaml, failures.yaml, platform.yaml, testing.yaml — matching W1-T33's
+    per-subsystem split design. `learnings/ci-gate-lessons.yaml` is not among them. Worse, it is not
+    reachable EVEN IF a human writes content there: `learnings/index.json`'s "files" map — the ONLY thing
+    `loadIndexedLearnings` (src/lib/learnings.ts:1604-1613) iterates to decide which files it reads for
+    the W1-T19/W1-T145 injection matcher — enumerates exactly those same five keys. A file absent from
+    that map is invisible to every dispatched worker's prompt, by construction, forever, regardless of
+    its content.
+
+    ROOT CAUSE, one line: src/lib/measurement-cadence.ts:2717 —
+      export const CI_LEARNING_LESSONS_FILE = "learnings/ci-gate-lessons.yaml";
+    — feeds BOTH the emitted shard's `files:` entry (line 2705) and its acceptance proof's target path
+    (line 2708, `grep: ${draft.findingId} in ${CI_LEARNING_LESSONS_FILE}`). The comment above the
+    constant (2714-2716) states the design intent correctly — "a `grep:` proof is a BASIC REGEX, so a
+    glob matches nothing and the criterion would degrade silently" — the producer deliberately avoids the
+    `learnings/*.yaml` glob and targets ONE concrete file. The reasoning is sound; the target it landed
+    on was never created and was never indexed. That intent (one concrete, grep-able, matcher-reachable
+    file) is exactly what `learnings/ci.yaml` already is — it is INDEXED, and its existing entries
+    (required-check-poster, rerun-the-job-not-the-run, rollup-dedupe-by-latest-attempt,
+    skipped-check-deadlock) are already lessons about the same class of gate this rung files findings
+    about (ci-gate, coverage-ratchet, coverage-shard, squash-trailer-gate all trip on `.github/**`,
+    src/lib/review.ts, src/lib/sweep.ts, src/lib/status.ts, src/run-task.ts — precisely `ci.yaml`'s own
+    glob set, learnings/index.json:86-97).
+
+    BLAST RADIUS, measured before drafting: a repo-wide grep for "ci-gate-lessons" returns exactly the
+    constant's definition, its two use sites in `ciLearningShardYaml`, and six filed shards — W1-T3589,
+    W1-T3590, W1-T3591, W1-T3592, W1-T3593, W1-T3594. All six are QUEUED, MACHINE-AUTHORED, verify:human,
+    parked for a human to act on — and every one is unfalsifiable as filed, because its proof target does
+    not exist. Repairing those six is a companion, plan-data-only task filed alongside this one — this
+    task's job is the producer, so no SEVENTH victim is ever filed.
+
+    ONE UNRELATED FIXTURE, deliberately left untouched and recorded so it is not mistaken for a missed
+    site: test/a-persisted-risk-ruling-reaches-the-linter.test.ts:28 hardcodes the literal string
+    "learnings/ci-gate-lessons.yaml" as an arbitrary example path in a task-linter fixture unrelated to
+    this constant (it never imports CI_LEARNING_LESSONS_FILE and asserts nothing about the file's
+    existence or indexedness) — verified by reading it. It is out of scope for this task.
+  design: |
+    Change the ONE constant. `CI_LEARNING_LESSONS_FILE` (src/lib/measurement-cadence.ts:2717) becomes
+    `"learnings/ci.yaml"` — an existing, indexed path, never a new file and never a glob (the comment's
+    own reasoning against a glob survives; update the comment so it no longer describes this as a
+    dedicated new file, but as the EXISTING ci-subsystem file, chosen because it is already indexed and
+    already the house's home for gate/CI lessons). No change to `ciLearningShardYaml`'s template logic,
+    `fileCiLearningShards`'s filing flow, or `CI_LEARNING_REMEDY_SURFACE` (a separate, purely-descriptive
+    constant used only in prose, never as a proof target) — VERIFY both from source before touching
+    anything beyond the one constant and its comment (distrust this note).
+    ADD A REGRESSION GUARD so this exact class — a machine-filed proof target absent from
+    learnings/index.json — cannot recur silently. A new test loads the real learnings/index.json, takes
+    CI_LEARNING_LESSONS_FILE's basename, and asserts it is a key of the index's "files" map. A future
+    repoint to an unindexed path fails this test immediately, rather than surfacing as fresh proof-debt on
+    whatever shard the rung next files.
+  acceptance:
+    - claim: "CI_LEARNING_LESSONS_FILE names a CONCRETE, EXISTING learnings file — learnings/ci.yaml — never the nonexistent learnings/ci-gate-lessons.yaml and never a glob"
+      proof: "grep: CI_LEARNING_LESSONS_FILE = \"learnings/ci.yaml\" in src/lib/measurement-cadence.ts"
+    - claim: "the constant's target is one of the files learnings/index.json actually enumerates, so every future shard's grep proof is reachable by the SAME matcher W1-T19/W1-T145 inject from — a regression guard against ever repointing to an unindexed file again"
+      proof: "unit test: test/ci-learning-lessons-file-is-indexed.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§8A", "§5C"]
+  files: [src/lib/measurement-cadence.ts, test/ci-learning-lessons-file-is-indexed.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED from proof-debt:W1-T3589 (rmd proof-queue-audit, criterion 0, grep-path-absent). Producer
+    half of a two-task ratification; W1-T4289 is the plan-data companion repairing the six already-filed
+    victims. depends_on left [] on both sides deliberately — the two tasks' files: are fully disjoint
+    (src+test vs. six plan/tasks.d/*.yaml, no W1-T171 overlap) and each specifies learnings/ci.yaml
+    directly rather than deriving it from the other's diff, so a hard gate would only strand
+    independently-correct work if either stalled — the W1-T121/W1-T122, W1-T177/W1-T178/W1-T179
+    soft-ordering precedent."
