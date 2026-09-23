@@ -1,0 +1,13 @@
+- id: W1-T4291
+  title: "RATIFICATION CANDIDATE: prep for P25 open plan"
+  repo: master-plan
+  depends_on: []
+  type: implement
+  verify:
+    - proof: "grep: path-absent during MASTER-PLAN.md audit; ensure under plan/proposals.d"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "plan/proposals.d"
+  files:
+    - "plan/proposals.d/W1-T4291.yaml"

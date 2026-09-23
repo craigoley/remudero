@@ -1,0 +1,13 @@
+- id: W1-T4292
+  title: "RATIFICATION CANDIDATE: stamp MASTER-PLAN.md proposal with NEW placeholders"
+  repo: master-plan
+  depends_on: []
+  type: implement
+  verify:
+    - proof: "grep: ensure stamp line present in MASTER-PLAN.md; pending-review"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "plan/proposals.d"
+  files:
+    - "plan/proposals.d/W1-T4292.yaml"
