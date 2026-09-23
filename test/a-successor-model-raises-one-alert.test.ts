@@ -12,6 +12,7 @@ import {
   parseModelId,
   watchSuccessorModels,
   watchSuccessorModelsBestEffort,
+  readCashCatalog,
   type CatalogSnapshot,
   type ModelAvailabilityAlertedEntry,
   type RoutedLadderRow,
@@ -260,4 +261,40 @@ test("W1-T4080: a failed catalog read never throws out of the cadence, and escal
   // The failure is CARRIED, not erased: a caller can tell "the watch failed" from "nothing to alert".
   assert.deepEqual(outcome, { status: "failed", error: boom });
   assert.equal(escalated.length, 0);
+});
+
+/** A fetch fake answering the two cash listing paths by suffix. */
+function cashFetch(answer: (url: string) => Response | Promise<Response>): typeof fetch {
+  return (async (input: string | URL | Request) => answer(String(input))) as typeof fetch;
+}
+
+test("W1-T4080: readCashCatalog reads listed and deployed ids off the two cash listing paths", async () => {
+  const seen: string[] = [];
+  const result = await readCashCatalog({
+    cashEndpoint: "https://cash.example.invalid",
+    apiKey: "test-key",
+    fetchImpl: cashFetch((url) => {
+      seen.push(url);
+      const ids = url.includes("openai/deployments") ? ["gpt-6-luna"] : ["gpt-6-luna", "gpt-7-luna"];
+      // A non-string id is dropped rather than coerced.
+      return Response.json({ data: [...ids.map((id) => ({ id })), { id: 7 }] });
+    }),
+  });
+  assert.deepEqual(result, { listed: ["gpt-6-luna", "gpt-7-luna"], deployed: ["gpt-6-luna"] });
+  assert.ok(seen.every((url) => url.startsWith("https://cash.example.invalid/openai/")), JSON.stringify(seen));
+});
+
+test("W1-T4080: a cash listing with no data array, a non-2xx status, or a failed fetch reads as nothing observed", async () => {
+  const deps = { cashEndpoint: "https://cash.example.invalid/", apiKey: "test-key" };
+  const noArray = await readCashCatalog({ ...deps, fetchImpl: cashFetch(() => Response.json({ data: "unexpected" })) });
+  assert.deepEqual(noArray, { listed: [], deployed: [] });
+  const refused = await readCashCatalog({ ...deps, fetchImpl: cashFetch(() => new Response("nope", { status: 503 })) });
+  assert.deepEqual(refused, { listed: [], deployed: [] });
+  const unreachable = await readCashCatalog({
+    ...deps,
+    fetchImpl: cashFetch(() => {
+      throw new Error("ECONNREFUSED");
+    }),
+  });
+  assert.deepEqual(unreachable, { listed: [], deployed: [] });
 });
