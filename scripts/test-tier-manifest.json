@@ -1272,6 +1272,7 @@
     "test/repair-filing-respects-prior-rejection.test.ts": 1149,
     "test/replay.test.ts": 290,
     "test/repo-dashboard-route.test.ts": 0,
+    "test/repo-dashboard-telemetry.test.ts": 0,
     "test/repo-layout.test.ts": 0,
     "test/repo-root-identity.test.ts": 3766,
     "test/repo-root-test-fixtures-are-ignored.test.ts": 390,
