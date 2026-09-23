@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { buildCreditCandidates, creditCandidatesFromProjection } from "../src/run-task.js";
+import { buildCreditCandidates, creditCandidatesFromProjection, prerequisiteOnlyMergeBody } from "../src/run-task.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, StatusProjection } from "../src/lib/status.js";
 
@@ -54,7 +54,11 @@ function gateway(
       counters.trailerFallbacks += 1;
       return null;
     },
-    prByRef: () => null,
+    prByRef: (ref: string | number) => {
+      const number = typeof ref === "number" ? ref : Number(String(ref).match(/\d+$/)?.[0] ?? ref);
+      const row = byNumber.get(number);
+      return row === undefined ? null : pr(row);
+    },
     headRefName: (url: string) => byNumber.get(Number(String(url).split("/").pop())) ? `run-${byNumber.get(Number(String(url).split("/").pop()))!.taskId}-1000` : undefined,
     prBody: (url: string) => {
       const row = byNumber.get(Number(String(url).split("/").pop()));
@@ -157,4 +161,57 @@ test("creditCandidatesFromProjection is the named candidate mapping", () => {
   );
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0]?.creditIsImplementation, true);
+});
+
+// The two markers are the measured #5886 body shape; either marker alone is intentionally not
+// enough to withdraw ordinary commit-trailer credit.
+const PREREQUISITE_ONLY_BODY = `Prerequisite split for W1-T3685's own PR (#5861), which the blocked_review fix rung refused under Standing rule 25.
+
+This PR carries ONLY the instrument: scripts/console-parity-ratchet.mjs and scripts/console-parity-baseline.json.`;
+
+test("W1-T4078: an instrument-only prerequisite cannot earn merge credit", () => {
+  const candidates = creditCandidatesFromProjection(
+    [projection("W1-T3685", true, 5886)],
+    new Map([[5886, "feat(console-parity): pre-register the board verb's cli-only reason (W1-T3685) (#5886)"]]),
+    new Map([[5886, PREREQUISITE_ONLY_BODY]]),
+  );
+  assert.equal(prerequisiteOnlyMergeBody(PREREQUISITE_ONLY_BODY, "W1-T3685"), true);
+  assert.equal(candidates[0]?.creditIsImplementation, false);
+});
+
+test("W1-T4078: a normal implementation with a commit trailer still earns credit", () => {
+  const body = "## Summary\nThis implements the requested guard.\n";
+  const candidates = creditCandidatesFromProjection(
+    [projection("W1-T4078", true, 7108)],
+    new Map([[7108, "feat(sweep): guard the credit projection (W1-T4078) (#7108)"]]),
+    new Map([[7108, body]]),
+  );
+  assert.equal(prerequisiteOnlyMergeBody(body, "W1-T4078"), false);
+  assert.equal(candidates[0]?.creditIsImplementation, true);
+});
+
+test("W1-T4078: an unreadable prerequisite body preserves unknown evidence", () => {
+  // Missing body evidence leaves the existing subject path intact; it never becomes a guessed
+  // prerequisite classification.
+  assert.equal(prerequisiteOnlyMergeBody(undefined, "W1-T3685"), undefined);
+  const candidates = creditCandidatesFromProjection(
+    [projection("W1-T3685", true, 5886)],
+    new Map([[5886, "feat(console-parity): pre-register the board verb's cli-only reason (W1-T3685) (#5886)"]]),
+  );
+  assert.equal(candidates[0]?.creditIsImplementation, true, "the missing body does not invent a prerequisite refusal");
+});
+
+test("W1-T4078: the real credit builder refuses the merged prerequisite", () => {
+  const counters = { mergedBatch: 0, trailerSnapshots: 0, trailerFallbacks: 0 };
+  const candidates = buildCreditCandidates(
+    "craigoley",
+    "remudero",
+    planOf("W1-T3685"),
+    ledgerPath(),
+    undefined,
+    gateway([{ taskId: "W1-T3685", number: 5886, state: "MERGED", body: PREREQUISITE_ONLY_BODY }], counters),
+    () => undefined,
+  );
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.creditIsImplementation, false);
 });

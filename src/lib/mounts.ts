@@ -177,6 +177,8 @@ export interface Mounts {
   escalation_judge?: Mount;
   /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge. */
   verify_human_judge?: Mount;
+  /** OPTIONAL — a task's last attempt after the worker tier failed it; must stay below the Architect. */
+  step_up?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
    *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
@@ -586,6 +588,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     raw.escalation_judge === undefined ? undefined : parseMount(raw.escalation_judge, "escalation_judge", tiers, efforts);
   const verifyHumanJudge =
     raw.verify_human_judge === undefined ? undefined : parseMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts);
+  const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -610,8 +613,18 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), synthesis, routes };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes };
+  // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
+  // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);
+  // A PEER IS ALLOWED, ABOVE IS NOT — the bar `judge: opus` (3) already clears beside a squeeze
+  // Architect on `gpt-5.6-terra` (3), because G-17 constrains worker ROUTES, not seats. Strict
+  // dominance here refused the whole table under that squeeze. Operator ruling 2026-09-22.
+  if (stepUp && tiers[stepUp.model] > tiers[architect.model]) {
+    throw new MountsError(
+      `'step_up' (${stepUp.model}, tier ${tiers[stepUp.model]}) must not outrank the Architect (${architect.model}, tier ${tiers[architect.model]}) — a peer tier is allowed, above it is not.`,
+    );
+  }
   return mounts;
 }
 

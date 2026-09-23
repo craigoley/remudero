@@ -128,7 +128,7 @@ import {
   type RepairFilingCapture,
 } from "../src/lib/sweep.js";
 
-import type { Mount } from "../src/lib/mounts.js";
+import { loadMounts, mountsPath, type Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
 import { cashDivertToolsForLane, worktreesDir } from "../src/lib/worker.js";
@@ -1373,6 +1373,15 @@ test("BEHAVIORAL (W1-T7B): two real implement strikes dispatch a DIAGNOSE worker
     assert.match(thirdAttemptPrompt, /DIAGNOSE FINDINGS/, "3rd attempt must be diagnose-informed");
     assert.match(thirdAttemptPrompt, /ROOT CAUSE: the assertion expects a 1-indexed count/, "carrying the report VERBATIM");
 
+    // Operator ruling 2026-09-22: the Sonnet/Luna tier does the work; only the LAST attempt, after
+    // that tier has failed twice, steps up to the committed `step_up:` mount (Opus, or Sol 6).
+    const stepUp = loadMounts(mountsPath(join(import.meta.dirname, ".."))).step_up;
+    assert.ok(stepUp, "the committed table declares a step_up mount");
+    assert.notEqual(spawnCalls[1]?.model, stepUp.model, "the 1st attempt rides the implement mount");
+    assert.notEqual(spawnCalls[2]?.model, stepUp.model, "the 2nd attempt rides the implement mount");
+    assert.equal(spawnCalls[4]?.model, stepUp.model, "the diagnose-informed last attempt steps up");
+    assert.equal(spawnCalls[4]?.effort, stepUp.effort);
+
     // W1-T3726 / W1-T2905: the diagnose dispatch's `...cashDivertSpawnFields("diagnose")` spread
     // must actually reach the spawn args — the wiring, not just the helper (test/a-blocked-
     // auction-falls-back-to-cash.test.ts documents this as its behavioral proof, so a dropped
@@ -1394,6 +1403,7 @@ test("BEHAVIORAL (W1-T7B): two real implement strikes dispatch a DIAGNOSE worker
     assert.ok(ledger.some((l) => l.step === "diagnose.spawn"), "ledger must show diagnose.spawn");
     assert.ok(ledger.some((l) => l.step === "diagnose.done"), "ledger must show diagnose.done");
     assert.ok(ledger.some((l) => l.step === "diagnose.worker_done"), "the diagnose worker's own spawn is ledgered");
+    assert.ok(ledger.some((l) => l.step === "implement.step_up" && l.to === stepUp.model), "the step-up is ledgered");
     assert.equal(
       ledger.filter((l) => l.step === "implement.done").length,
       3,
@@ -3691,6 +3701,46 @@ test("runFixRung: strike 1 RESUMES the failing implement session; strike 2 is a 
   assert.equal(spawnCalls[1].resumeSessionId, undefined, "strike 2 is a FRESH worker — never resumed a second time");
   assert.equal(outcome.outcome, "fixed");
   assert.equal(outcome.strikes, 2);
+});
+
+test("runFixRung: only the FINAL fresh strike steps up to the step_up mount; earlier strikes keep the fix mount", async () => {
+  // Operator ruling 2026-09-22: Opus/Sol only for work the Sonnet/Luna tier could not do.
+  const stepUpMount = { model: "opus", effort: "high", maxTurns: 400, contextBudget: 180000 };
+  const failingAt = (sha: string) =>
+    fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], sha);
+  for (const strikeCap of [2, 3]) {
+    const spawnCalls: SpawnWorkerArgs[] = [];
+    let reviewCalls = 0;
+    const base = fixRungBaseOpts();
+    await runFixRung({
+      ...base,
+      stepUpMount,
+      strikeCap,
+      initialReview: failingAt("sha-0"),
+      deps: {
+        spawn: async (args) => {
+          spawnCalls.push(args);
+          return result({ sessionId: `fix-session-${spawnCalls.length}` });
+        },
+        waitForCiGreen: async () => "green",
+        runReview: async () => {
+          reviewCalls++;
+          return reviewCalls < strikeCap ? failingAt(`sha-${reviewCalls}`) : fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })], "sha-done");
+        },
+        push: () => {},
+        issues: fakeIssues([]),
+        ledgerPath: tmpLedgerPath(),
+        log: () => {},
+        say: () => {},
+        account: (r) => r,
+      },
+    });
+    assert.equal(spawnCalls.length, strikeCap, `strikeCap ${strikeCap}`);
+    for (const [index, call] of spawnCalls.entries()) {
+      const last = index === strikeCap - 1;
+      assert.equal(call.model, last ? "opus" : base.mount.model, `strikeCap ${strikeCap}, strike ${index + 1}`);
+    }
+  }
 });
 
 test("runFixRung: a second block after N strikes escalates rather than looping (P21's golden, verbatim) — no third spawn", async () => {

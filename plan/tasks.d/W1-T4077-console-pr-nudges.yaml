@@ -1,0 +1,77 @@
+- id: W1-T4077
+  title: "THE CONSOLE CANNOT NUDGE A STALLED PR — its route is pinned to the high tier the console's write token can never reach, the daemon reads a nudge only between main-loop iterations (one took 43 minutes today) and runs a fix inside the loop, and a fix nudge on a strike-exhausted PR spawns nothing: let the write token request review and fix, pick nudges up on their own timer, run them detached, and let a requested fix try again"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-22: a button to get a stalled PR reviewed, and one to dispatch a fix worker for a red PR the daemon is not fixing"
+  plan_refs: [W1-T404, W1-T913, W1-T4045]
+  files: [src/lib/panel-actions.ts, src/lib/fleet-control.ts, src/lib/daemon.ts, src/run-task.ts, test/console-pr-nudges.test.ts, test/panel-actions.test.ts, test/route-wiring.test.ts, test/console-token-refresh.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 ON origin/main.
+    (1) THE DAEMON HALF IS BUILT. `POST /v1/pr-actions` (src/lib/panel-actions.ts) writes one idempotent marker
+        `state/PR_ACTION_REQUESTED-<action>-<n>` holding only `{action: fix|review, prNumber, origin, requestedAt}`. The
+        daemon reads it, runs `rmd review <n>` / `rmd fix <n>` through `runPrAction` (src/run-task.ts), logs
+        `console.pr_action_*` and clears it. `rmd review` has no admission gate: it posts remudero-review=pending and
+        reviews the current head.
+    (2) THE CONSOLE CANNOT REACH IT. The route is `tier: "high"` (+ a confirm nonce); the console's only credential the
+        daemon recognises is the bearer write token, which W1-T404's ruling pins at tier "low". THE OPERATOR'S RULING
+        (2026-09-22): these two actions only request a review or a fix through the fleet's ordinary pipelines, which
+        keep their own rails (daily cost ceiling, one fix worker per branch, review and merge gates) — they are not
+        high-risk, and the existing write token may request them. No new credential, identity provider or nonce.
+    (3) A NUDGE IS READ TOO SLOWLY, AND A FIX BLOCKS THE LOOP. The read sits in the main-loop iteration
+        (src/lib/daemon.ts) and `await deps.runPrAction(request)` holds that iteration for the whole command. Measured:
+        daemon pid 75605 ran an iteration at 19:33 and the next after 20:16 — a nudge in that window waits ~43 min, and a
+        fix nudge would itself hold dispatch for a whole fix round (13-18 min observed).
+    (4) A FIX NUDGE DOES NOTHING IN THE CASE IT EXISTS FOR. `rmd fix` routes through `routeFix` (src/run-task.ts),
+        which escalates instead of dispatching once `priorStrikes >= strikeCap` — the stuck PR the operator is looking
+        at returns "escalated, no spawn".
+  design: |
+    (i) `/v1/pr-actions` becomes tier "low", so the bearer write token reaches it and no nonce is needed. Every other
+        route keeps its tier; the tests that pin tiers move with this one route.
+    (ii) A small timer beside the heartbeat checks for PR-action markers each poll interval and starts each as a
+         detached action keyed by (action, PR) — a timer fires during awaited work, so a nudge starts within about a
+         minute whatever the main loop is doing, and dispatch is never held. The main-loop read is removed so a marker
+         is consumed exactly once.
+    (iii) A requested fix routes as a fresh attempt: the strike count does not turn it into an escalation. Everything
+          else is unchanged — a merged or closed PR is refused, the fix rung's branch claim keeps one worker per branch,
+          the daily cost ceiling applies, and a PR with no failure evidence is refused with its reason. The strike
+          ledger is not reset; the row records `operator_requested: true`.
+    (iv) An action is switched off by a state marker, `state/CONSOLE_PR_ACTION_OFF-review` or `-fix` — the same
+         instant, no-PR pattern as PAUSE (a typed policy row would need schema, provenance and census work for one
+         boolean). A switched-off action is refused at the route with that reason; both are on by default.
+    (v) The route records an operator name the console passes in `x-remudero-operator` (display-only audit, never an
+        authorisation input) beside the token origin.
+  acceptance:
+    - claim: "the console's write token can request review and fix without a confirm nonce"
+      proof: 'grep: test("W1-T4077: the write token requests review and fix without a nonce" in test/console-pr-nudges.test.ts'
+    - claim: "a nudge starts while the main loop is busy"
+      proof: 'grep: test("W1-T4077: a nudge starts while the main loop is busy" in test/console-pr-nudges.test.ts'
+    - claim: "a nudge runs detached and never holds dispatch"
+      proof: 'grep: test("W1-T4077: a nudge runs detached and never holds dispatch" in test/console-pr-nudges.test.ts'
+    - claim: "a requested fix on a strike-exhausted PR dispatches one round"
+      proof: 'grep: test("W1-T4077: a requested fix on a strike-exhausted PR dispatches one round" in test/console-pr-nudges.test.ts'
+    - claim: "a requested fix still refuses a merged PR"
+      proof: 'grep: test("W1-T4077: a requested fix still refuses a merged PR" in test/console-pr-nudges.test.ts'
+    - claim: "a switched-off action is refused with its reason"
+      proof: 'grep: test("W1-T4077: a switched-off action is refused with its reason" in test/console-pr-nudges.test.ts'
+  falsifier: |
+    Keep the route at high and the first goes red with a bearer-only request. Leave the read in the main loop and the
+    second goes red with a busy-loop fixture. Await the command inline and the third goes red. Route a requested fix
+    through the strike cap and the fourth spawns nothing.
+  note: |
+    AMENDED 2026-09-22 BEFORE ANY BUILD (operator ruling): the first filing (#6658) proposed a Cloudflare Access identity,
+    strongest-grant provider ordering, a status route and a runtime switch. The operator judged those over-engineered
+    for two actions that only enter the ordinary review and fix pipelines; this record replaces them with the design
+    above.
+    AMENDED 2026-09-22 AFTER CI ON #6664: `test/console-token-refresh.test.ts` independently pins the route-tier list
+    and includes `/v1/pr-actions` among HIGH routes. Design (i) deliberately lowers that route and says every other
+    route keeps its tier, so this existing test must move with the route: continue comparing configured/unconfigured
+    tables, remove `/v1/pr-actions` from the unchanged HIGH set, and assert the route's intended LOW tier. Added this
+    test path to the bounded scope; no acceptance criterion or product decision changed.

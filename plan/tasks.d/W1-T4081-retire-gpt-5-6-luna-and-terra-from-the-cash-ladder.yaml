@@ -1,0 +1,39 @@
+- id: W1-T4081
+  title: "RETIRE gpt-5.6-luna AND gpt-5.6-terra FROM THE CASH LADDER ONCE gpt-6-luna IS SERVING — the cleanup the operator asked for when the GPT-6 switch-over lands"
+  repo: remudero
+  depends_on: [W1-T4079, W1-T4080]
+  priority: 90
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator-ruling#azure-gpt6-2026-09-22"
+  plan_refs: ["W1-T4079", "W1-T4080"]
+  files:
+    - .remudero/mounts.yaml
+    - src/lib/worker-provider.ts
+    - test/the-cash-ladder-retires-its-predecessor.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-09-22: "add a task to clean that up once the models are available." W1-T4079
+    keeps gpt-5.6-luna directly behind gpt-6-luna so the ladder stays backwards-compatible through the
+    switch-over; once gpt-6-luna is READY and has actually served, the predecessor rows, and Terra
+    (being phased out), are dead weight and a second price table to keep honest. Backlogged at 90 so it
+    never races the switch-over itself.
+  design: |
+    (i) PRECONDITION, CHECKED FIRST: the cash ledger shows gpt-6-luna selected and completing requests on
+    at least 7 distinct days. If not, stop and report — no edit.
+    (ii) Remove gpt-5.6-luna and gpt-5.6-terra from the cash rows, keeping each row at two or more
+    candidates (the single-candidate rule the Codex rows already enforce).
+    (iii) Remove their OPENWEIGHT_PRICES / TEMPERATURE / context rows and the matching tests' pins.
+    (iv) Name the Azure deployments the operator may now delete; this task deletes nothing on Azure.
+  acceptance:
+    - claim: "no cash row names gpt-5.6-luna or gpt-5.6-terra and every row keeps two candidates"
+      proof: 'grep: test("W1-T4081: the cash ladder no longer names its predecessors" in test/the-cash-ladder-retires-its-predecessor.test.ts'
+    - claim: "the task refuses to edit before gpt-6-luna has served on seven days"
+      proof: 'grep: test("W1-T4081: the retirement waits for seven days of service" in test/the-cash-ladder-retires-its-predecessor.test.ts'
+  falsifier: |
+    CLOSE IF the cash ladder already names neither gpt-5.6-luna nor gpt-5.6-terra.
