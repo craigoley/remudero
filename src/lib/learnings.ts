@@ -1635,17 +1635,14 @@ export interface LearningsSelectionContext {
   usage?: LearningUsage;
   /** Seeds that draw, so a run's selection is reproducible. */
   seed?: number;
-  /** W1-T4241: re-run the selection under this many derived seeds and report, per matched entry,
-   *  the share of them that selected it. Absent or 0 computes nothing. */
+  /** W1-T4241: re-select under this many derived seeds and report each entry's selected share. */
   propensityDraws?: number;
 }
 
-/** W1-T4241: how many re-selections estimate a propensity (1/64 resolution is ample to tell a
- *  contested entry from a deterministic one). */
+/** W1-T4241: re-selections per propensity; 1/64 resolution separates contested from deterministic. */
 export const LEARNING_PROPENSITY_DRAWS = 64;
 
-/** The `k`th derived seed a propensity re-selection uses: a fixed odd-constant stride from the run's
- *  own seed, so a propensity is reproducible from the run seed alone. */
+/** The `k`th propensity seed: a fixed stride from the run seed, so it reproduces from that alone. */
 export function propensitySeed(seed: number, k: number): number {
   return (seed + Math.imul(k + 1, 0x9e3779b1)) >>> 0;
 }
@@ -1827,8 +1824,7 @@ export function selectLearnings<T extends LearningEntry>(
   const result = selectWith(seed);
   const draws = context?.propensityDraws ?? 0;
   if (draws <= 0) return result;
-  // W1-T4241: the share of K re-selections, under seeds derived from this run's own, that pick each
-  // matched entry. Strictly between 0 and 1 means the budget cut, not match strength, decided it.
+  // W1-T4241: 0 < share < 1 means the budget cut, not match strength, decided the entry.
   const hits: Record<string, number> = Object.fromEntries(matched.map((r) => [r.entry.id, 0]));
   for (let k = 0; k < draws; k++) {
     for (const entry of selectWith(propensitySeed(seed, k)).selected) hits[entry.id] += 1;
