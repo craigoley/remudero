@@ -7,12 +7,14 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 15.00
-  risk: medium
+  risk: high
+  band_meaning: span
   origin: "operator-session#auto-recycle-2026-09-22"
   plan_refs: ["W1-T2501", "W1-T3245"]
   files:
     - src/lib/deployer.ts
     - test/the-deploy-tick-retries-a-ref-lock-race.test.ts
+    - scripts/test-tier-manifest.json
   status: queued
   attempts: 0
   rationale: |
@@ -27,6 +29,10 @@
     The next tick recovers each time, so this delays rather than blocks, but it delayed a deploy
     request by a full interval on 2026-09-22 and, once image recycles are automatic (the
     auto-recycle PR of the same day), every lost tick delays a required recycle.
+
+    Rule 19 span: the deployer retry is only verified when its regression test is registered in
+    the shipped test tier. The implementation, test, and test-tier entry are one acceptance
+    invariant; `risk: high` records this cross-subsystem span, not a claim of larger blast radius.
   design: |
     (i) In realDeployDeps.fetch, retry a failure whose stderr matches "cannot lock ref", bounded
     (three attempts, a short back-off) — the same classification the entrypoint's boot_fetch uses
