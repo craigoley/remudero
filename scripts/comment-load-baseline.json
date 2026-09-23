@@ -305,6 +305,7 @@
   "src/lib/plan.ts": 257,
   "src/lib/policy.ts": 500,
   "src/lib/poll-interval.ts": 250,
+  "src/lib/pr-board.ts": 42,
   "src/lib/producer-completeness.ts": 242,
   "src/lib/producer-identity.ts": 70,
   "src/lib/project-init.ts": 176,
