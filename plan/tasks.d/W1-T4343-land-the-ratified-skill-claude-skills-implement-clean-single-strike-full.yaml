@@ -5,7 +5,8 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 15.00
   files: [.claude/skills/implement-clean-single-strike-fully-exec-bf9fbed9/SKILL.md, test/the-ratified-skill-lands-and-still-injects.test.ts]
   origin: "skill-draft:bf9fbed9e9207c08"
@@ -115,13 +116,13 @@
     anticipation of it).
   acceptance:
     - claim: "the file exists at the exact path with frontmatter (name/description/applies-to) and the two Procedure bullets matching skill-workshop.ts's own renderSkillDraft/PROCEDURAL_STEP_TEXT output for this candidate, verbatim"
-      proof: "unit test: test/the-ratified-skill-lands-and-still-injects.test.ts"
+      proof: "unit test: the file exists at the exact path with frontmatter"
     - claim: "loadInjectableSkills over the real .claude/skills/ tree includes this skill with appliesTo including 'implement', while the pre-existing tddr/grfp macro skills stay excluded (no applies-to: frontmatter) — the opt-in regression lock"
-      proof: "unit test: test/the-ratified-skill-lands-and-still-injects.test.ts"
+      proof: "unit test: loadInjectableSkills over the real .claude skills tree includes this"
     - claim: "selectSkillsForTask selects this skill for an implement-type task within DEFAULT_KNOWLEDGE_BUDGET_CHARS, so it actually reaches a rendered prompt via the existing W1-T3101 route rather than merely existing on disk"
-      proof: "unit test: test/the-ratified-skill-lands-and-still-injects.test.ts"
+      proof: "unit test: selectSkillsForTask selects this skill for an implement-type task within"
     - claim: "the landed file, including its rewritten ratification comment, still passes scanSkillDraft's host/path/tool/instruction-injection scan — the one edit this task makes introduces no new violation"
-      proof: "unit test: test/the-ratified-skill-lands-and-still-injects.test.ts"
+      proof: "unit test: the landed file including its rewritten ratification comment still"
     - claim: "the file's HTML comment no longer asserts 'not yet ratified' — it states it was ratified via rmd approve skill-draft:bf9fbed9e9207c08"
       proof: "grep: RATIFIED in .claude/skills/implement-clean-single-strike-fully-exec-bf9fbed9/SKILL.md"
   falsifier: |
