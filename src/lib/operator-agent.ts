@@ -2196,7 +2196,7 @@ function latestConsequenceRows(deps: OperatorAgentRouteDependencies): {
     decisions.set(row.consequence_id, {
       consequenceId: row.consequence_id,
       decision: row.decision,
-      at: new Date(row.at).toISOString(),
+      at: fixedClock(Date.parse(row.at)).iso(),
       ...(actor ? { actor } : {}),
       ...(typeof row.nonce_id === "string" && row.nonce_id ? { nonceId: row.nonce_id } : {}),
       ...(reason ? { reason } : {}),
