@@ -669,6 +669,7 @@ import {
   materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
+  pruneOrphanedDrafts,
   parseProposalRegistry,
   parseSupersedesExpr,
   approveRunBranch,
@@ -39889,6 +39890,8 @@ export function buildInboxDraftHook(
       const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
+      const pruned = pruneOrphanedDrafts(draftsPath, registryPath);
+      if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
