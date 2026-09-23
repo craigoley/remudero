@@ -1,0 +1,88 @@
+- id: W1-T4230
+  title: "FOUR ACTIVE LEARNINGS CAN NEVER BE INJECTED — 17 of 160 `files:` globs are bare directory names (`test`, `src`, `plan/tasks.d`) that the anchored matcher reads as a file literally named `test`; repair them and make an unreachable active learning a CI refusal, so a PR that deletes a learning's last matching file must repoint or supersede it in the same change"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "research:agent-memory-scan-2026-09-23"
+  plan_refs: ["§4E", "§8A", W1-T19, W1-T2701, W1-T4093, W1-T4095]
+  files:
+    - src/lib/learnings.ts
+    - learnings/architecture.yaml
+    - learnings/ci.yaml
+    - learnings/failures.yaml
+    - learnings/platform.yaml
+    - learnings/testing.yaml
+    - learnings/index.json
+    - test/an-active-learning-is-reachable-by-some-file.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 at origin/main f0e1fc43 with the repo's OWN selector, not a re-implementation:
+    `loadLearningsCorpus("learnings")` filtered to `lifecycle: active`, then
+    `selectLearnings([entry], <every path from git ls-files>, 1e9)` per entry and per glob.
+
+        active learnings                                   79
+        selectable by SOME tracked file (positive control) 75
+        selectable by NO tracked file                       4
+        `files:` globs matching zero tracked files         17 of 160
+
+    The four that no task can ever receive: `bare-node-test-resolution-failure` [test],
+    `tap-proximity-is-not-causation` [test], `an-error-names-its-cause-not-its-check` [src],
+    `position-is-presentation-not-identity` [scripts, hooks, test, plan/tasks.d]. Eleven more
+    entries carry at least one dead glob beside a live one (`docs`, `plan/tasks.d`, `plan/feedback`,
+    `scripts`, `learnings`, `test`).
+
+    CAUSE (OBSERVED, src/lib/learnings.ts `globToRegExp` + `matchCount`): the pattern compiles to
+    `^…$` with no directory-prefix rule, so `test` matches only a path equal to `test`. Symbols and
+    error signatures cannot rescue these entries: the corpus has zero of either (W1-T4093 derives
+    them and is not built). Nothing notices: an entry that is never offered keeps the Beta prior of
+    W1-T4091, so the gardener's RETIRE class (posterior below the corpus median) never selects it,
+    and its bytes still count against the corpus-wide `learnings-budget-ratchet`. It is dead weight
+    that looks healthy.
+
+    EXTERNAL PATTERN (research:agent-memory-scan-2026-09-23): Karpathy's "LLM wiki" names LINT —
+    orphans, superseded claims, missing cross-refs — as a first-class memory operation beside
+    ingest and query; Zep/Graphiti invalidate a fact at the moment the world it describes changes,
+    rather than discovering it later. This repo's form of both is a gate: a learning whose
+    referent disappears is refused in the PR that removed the referent.
+
+    WHY FIX THE DATA, NOT THE MATCHER: widening `globToRegExp` so a bare segment means `<seg>/**`
+    silently changes the meaning of all 160 globs, including the 143 that work today. Repairing 17
+    strings and refusing the next one keeps the matcher's semantics fixed and makes intent explicit
+    in the record.
+  design: |
+    (i) Export a PURE `unreachableLearnings(entries, trackedPaths)` from src/lib/learnings.ts that
+        returns, per ACTIVE entry, its dead globs and whether the entry as a whole is unreachable
+        by file. It must call the same `matchCount`/`globToRegExp` path `selectLearnings` uses —
+        never a second glob engine (the minimatch reading of these 17 happens to agree today; a
+        second engine is exactly the "query answers a different question" trap).
+    (ii) Repair the 17 dead globs in learnings/*.yaml to the recursive form each evidently meant
+        (`test` -> `test/**`, `plan/tasks.d` -> `plan/tasks.d/**`, `docs` -> `docs/**`, …) and
+        regenerate learnings/index.json with `npm run learnings-index`.
+    (iii) Add test/an-active-learning-is-reachable-by-some-file.test.ts, a census over the LIVE
+        corpus and `git ls-files`, so `npm test` in CI refuses any active entry with a dead glob.
+        The failure message names the entry id, the dead glob, and the two legal repairs:
+        repoint the glob, or set `lifecycle: superseded` with `superseded_by`. Superseded,
+        quarantined and contested entries are exempt, since they are never injected.
+    (iv) Positive control inside the test: a fixture entry with glob `test` must be reported
+        dead, and the same entry with `test/**` must not. Without it, a census that reads zero
+        could be reading nothing.
+  acceptance:
+    - claim: "an active learning whose every glob matches no tracked path is reported unreachable, through the same matcher selection uses"
+      proof: "unit test: W1-T4230: a learning whose every glob is dead is unreachable"
+    - claim: "the pure census is exported from the learnings module"
+      proof: "grep: export function unreachableLearnings( in src/lib/learnings.ts"
+    - claim: "no active learning in the live corpus carries a glob matching zero tracked files at head"
+      proof: "unit test: W1-T4230: every active learning in the live corpus is reachable"
+  falsifier: |
+    Revert one repaired glob to its bare form (`test/**` back to `test`) and the live-corpus census
+    must fail naming that entry. Replace `unreachableLearnings`' matcher with minimatch and the
+    fixture `a/b` vs `a/**` control must disagree with `selectLearnings`. Delete the positive-control
+    fixture and a census that silently reads zero entries must no longer be distinguishable from a
+    clean one — which is why the control is an acceptance item, not decoration.
+  note: "Does not touch src/lib/knowledge-gardener.ts (open #6741 rewrites it as a gardener framework). Complements W1-T4093: symbol-derived retrieval would give these four a second path in, but a record whose only declared path is dead is a defect either way."

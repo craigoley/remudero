@@ -1,0 +1,98 @@
+- id: W1-T4231
+  title: "THE THOMPSON DRAW ALREADY RANDOMIZES WHICH LEARNINGS A RUN RECEIVES, AND NOTHING READS THE EXPERIMENT — record each contested entry's selection propensity on `learnings.injected`, join injected-vs-dropped to the run's clean-merge outcome, and report a per-learning outcome effect (or `unmeasurable`) beside the worker's own `LEARNINGS_USED` claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: span
+  origin: "research:agent-memory-scan-2026-09-23"
+  plan_refs: ["§4E", "Self-improvement direction", W1-T4090, W1-T4091, W1-T4092, W1-T419]
+  files:
+    - src/lib/learnings.ts
+    - src/lib/knowledge-outcome.ts
+    - src/run-task.ts
+    - src/lib/digest.ts
+    - test/a-learning-is-credited-by-the-outcome-of-the-runs-it-reached.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main f0e1fc43.
+    (1) THE ONLY VALUE SIGNAL IS A SELF-REPORT. `src/lib/knowledge-value.ts` holds, per learning,
+        Beta(used + 1, offered - used + 1), where `used` is the implement worker's own
+        `LEARNINGS_USED:` line (W1-T4090). Its header says so: "A worker's report is a claim, not
+        proof; the ablation harness (W1-T4092) is the causal check." W1-T4092 is queued and
+        `wipeTestCadence.enabled` is false; the ledger holds one `wipetest.pair` row ever.
+    (2) SELECTION IS ALREADY A SEEDED RANDOMIZATION. `selectLearnings` (src/lib/learnings.ts) sorts
+        matched entries by error, symbol and file hit counts and by layer, then by ONE seeded draw
+        from each entry's Beta posterior (`seedOf(runId)`), and fills greedily to
+        `DEFAULT_KNOWLEDGE_BUDGET_CHARS`. Entries that lose the budget cut are logged as `dropped`
+        on the `learnings.injected` row (W1-T419), which carries `run_id` like every ledger row.
+        For any entry whose place at the budget boundary was decided by the draw rather than by
+        the deterministic keys, being injected or dropped is RANDOM, with a propensity that is
+        exactly computable: re-run the same pure selection over the same usage snapshot under K
+        alternate seeds.
+    (3) SO THE HARNESS IS RUNNING A RANDOMIZED TRIAL ON EVERY CONTESTED RUN AND DISCARDING IT.
+        Joining `learnings.injected` (selected + dropped) to the run's terminal outcome — the
+        retro's existing `clean_single_strike` signal, merged with zero `fix.dispatch`
+        (src/lib/retro.ts `PROCEDURAL_SUCCESS_SIGNALS`) — gives an inverse-propensity-weighted
+        outcome difference that is causal within the contested band, for free, with no extra
+        worker spend.
+
+    EXTERNAL PATTERN (research:agent-memory-scan-2026-09-23): ACE (arXiv 2510.04618) keeps
+    `helpful=X harmful=Y` counters on every context bullet, and ExpeL (arXiv 2308.10144) upvotes
+    and downvotes insights, removing one at zero. Both count from the agent's own judgement of
+    execution feedback. This task takes their idea — each piece of knowledge carries an outcome
+    ledger, not only a usage ledger — and replaces the self-assessment with a measured,
+    randomization-identified outcome that neither system has.
+
+    UNKNOWN AT FILING, AND THE TASK MUST SAY SO RATHER THAN ASSUME: how often a run's matched set
+    exceeds the 8148-char budget (so `dropped` is non-empty). The ledger lives on the operator
+    host and this filing session could not read it. If contested runs are rare, the report reads
+    `unmeasurable` with its denominator — never a favourable zero — and that reading is itself
+    the evidence for whether the budget, W1-T4092's cadence, or neither should move.
+  design: |
+    (i) SELECTION RECORDS ITS OWN PROPENSITY. Extend `selectLearnings`' result, without changing
+        what it selects for a given seed, with `propensity: Record<id, number>` for every matched
+        entry: the fraction of K (default 64, a named constant) re-selections under seeds derived
+        from the run seed in which the entry was selected. Entries at 0 or 1 are deterministic and
+        excluded downstream; entries strictly between are CONTESTED. Log `propensity` for contested
+        entries only, plus `usage_sha` (sha256 of the usage snapshot read), on the existing
+        `learnings.injected` row in src/run-task.ts. Masked (wipe-test arm B) runs are excluded.
+    (ii) A PURE ESTIMATOR in a new src/lib/knowledge-outcome.ts: fold ledger-union rows (read
+        through src/lib/ledger-union.ts, never the live file alone, and report the window the
+        union covered) into per-learning contested observations {injected, propensity,
+        clean_single_strike}. Emit, per learning, a Hajek IPW estimate of the outcome difference
+        (injected minus dropped), n per arm, and a verdict `helps | hurts | no-detectable-effect |
+        unmeasurable`. Below a named floor (default 10 contested runs per arm), the verdict is
+        `unmeasurable` with its counts. A run with no terminal verdict is excluded and counted as
+        excluded, never scored as failure.
+    (iii) SURFACE, DO NOT ACT. src/lib/digest.ts renders one knowledge-outcome section: the
+        learnings with a measurable effect, and every learning where the outcome verdict and the
+        `LEARNINGS_USED` posterior disagree in sign (used often but hurts, or rarely claimed but
+        helps). This task does NOT feed the estimate back into ranking or into gardener RETIRE —
+        closing that loop before one window of readings exists is the vibes-not-experiments
+        failure the self-improvement direction forbids. A follow-up can take it once readings exist.
+  acceptance:
+    - claim: "for a fixed seed and usage snapshot, selection output is unchanged and every contested entry carries a propensity strictly between 0 and 1"
+      proof: "unit test: W1-T4231: contested entries carry a propensity and selection is unchanged"
+    - claim: "the estimator weights injected and dropped observations by inverse propensity and returns unmeasurable with its counts below the per-arm floor"
+      proof: "unit test: W1-T4231: outcomes are weighted by inverse propensity with a per-arm floor"
+    - claim: "a run with no terminal verdict is excluded and counted, never scored as a failure"
+      proof: "unit test: W1-T4231: a run with no terminal verdict is excluded and counted"
+    - claim: "the estimator module exports the fold"
+      proof: "grep: export function foldLearningOutcomes( in src/lib/knowledge-outcome.ts"
+    - claim: "the injected ledger row carries contested propensities"
+      proof: "grep: propensity in src/run-task.ts"
+    - claim: "the digest calls the outcome fold"
+      proof: "grep: foldLearningOutcomes( in src/lib/digest.ts"
+  falsifier: |
+    Weight every observation 1 instead of 1/propensity on a fixture where a high-propensity entry
+    is injected mostly into runs that were going to merge cleanly anyway, and the IPW test must
+    fail. Score a verdict-less run as a failure and the exclusion test must fail. Compute the
+    propensity with a different seed schedule than the one selection used and the reproducibility
+    test must fail. Feed a corpus with 3 contested runs and assert `helps`, and the floor test must
+    fail — `unmeasurable` is the only honest answer there.
+  note: "Complements W1-T4092 rather than replacing it: ablation removes a whole factor (all learnings) and measures its effect; this measures single entries, but only inside the contested band. Does not touch src/lib/knowledge-gardener.ts (open #6741)."
