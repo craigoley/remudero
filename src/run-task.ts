@@ -146,6 +146,7 @@ import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
+import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
@@ -32533,6 +32534,8 @@ export async function serveCommand(
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
     snapshotCache: serveBoardSnapshot,
+    // A merged PR's file list survives the restart on disk, and a miss never blocks the first snapshot.
+    changedFilesCache: createChangedFilesCache(config.root, self.owner, self.repo, { log }),
   });
   // W1-T2303: resolve the feedback-expansion rung ONCE at boot (never per request) — the SAME
   // shape `resolveDecisionSummaryMount`/`realDecisionSummarizer` already wire for the sibling
