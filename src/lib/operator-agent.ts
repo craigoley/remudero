@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import type { ServerResponse } from "node:http";
 import type { Route } from "./service.js";
-import { clockFromMillisFn } from "./clock.js";
+import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
@@ -60,6 +60,7 @@ import {
   classifyConsequenceAction,
   evaluateConsequencePolicy,
   recordConsequenceRefusal,
+  type ConsequenceAction,
   type ConsequenceActionInput,
 } from "./consequence-policy.js";
 import {
@@ -2018,12 +2019,16 @@ export function buildOperatorAgentConsequencePreflightRoute(deps: OperatorAgentR
       const nowIso = new Date(deps.now?.() ?? Date.now()).toISOString();
       const result = evaluateConsequencePolicy(action, { now: nowIso });
       const refusal = result.ok ? undefined : recordConsequenceRefusal(result, { now: nowIso });
+      const approval = consequenceApprovalProjection(action);
       appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, action.id, bearerTokenId(req), {
         action_id: action.id,
         consequence_class: action.consequenceClass,
         ready: result.ok,
         at: nowIso,
         ...(refusal ? { code: refusal.code, reason: refusal.reason } : {}),
+        // W1-T4104: the bounded operator-facing projection GET /v1/operator-agent/consequences reads
+        // back — this row is the ONLY durable record of a pending consequence approval in core.
+        ...(approval ? { approval } : {}),
       });
       if (!result.ok) {
         sendJson(res, 409, { ok: false, actionId: action.id, code: result.code, reason: result.reason, at: nowIso });
@@ -2032,6 +2037,195 @@ export function buildOperatorAgentConsequencePreflightRoute(deps: OperatorAgentR
       sendJson(res, 200, { ok: true, actionId: action.id, consequenceClass: action.consequenceClass, at: nowIso });
     }),
   };
+}
+
+// ── W1-T4104: GET /v1/operator-agent/consequences — the list the console's Approvals page reads ──
+
+export const OPERATOR_AGENT_CONSEQUENCES_PATH = "/v1/operator-agent/consequences";
+/** The `source` every listed record carries — the exact string the console's fixtures pin. */
+export const OPERATOR_AGENT_CONSEQUENCES_SOURCE = "rmd:core:/v1/operator-agent/consequences";
+/** The most pending consequence approvals one read returns; `truncated` says when more exist. */
+export const MAX_PENDING_CONSEQUENCES = 100;
+/** A preflight refused for one of these is WAITING on an operator (an approver, or the cooling-off
+ *  window an approver is asked to sit out) — every other refusal code is a dead action, not a queue. */
+const PENDING_CONSEQUENCE_CODES: ReadonlySet<string> = new Set(["missing-approvers", "cooling-off-active"]);
+/** The console's consequence-v1 classes: only these two ever ask an operator to approve. */
+const APPROVAL_CONSEQUENCE_CLASSES: ReadonlySet<string> = new Set(["financial", "irreversible"]);
+const MAX_CONSEQUENCE_TARGET = 320;
+const MAX_CONSEQUENCE_RECOVERY = 1_000;
+const FINANCIAL_ONLY_RECOVERY =
+  "financial action: consequence-policy-v1 records no recovery path for a transfer; treat it as unrecoverable once executed";
+const CONSEQUENCE_WRITE_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
+
+/** What an operator must see to approve, persisted on the preflight ledger row. */
+export interface ConsequenceApprovalProjection {
+  target: string;
+  amount?: number;
+  currency?: string;
+  ceiling?: number;
+  coolingOffMs?: number;
+  coolingOffUntil?: string;
+  expiresAt: string;
+  approverRequired: boolean;
+  recoveryStatement: string;
+  evidenceFreshUntil?: string;
+}
+
+/** consequence-v1 as the console's `normalizedConsequenceRecord` validates it. */
+export interface PendingConsequenceRecord {
+  consequenceId: string;
+  classes: string[];
+  target: string;
+  amountUsd?: number;
+  currency?: string;
+  ceilingUsd?: number;
+  coolingOffMs?: number;
+  coolingOffUntil?: string;
+  expiresAt: string;
+  approverRequired: boolean;
+  recoveryStatement: string;
+  freshness: "verified" | "stale";
+  observedAt: string;
+  receipts: never[];
+  source: string;
+}
+
+function earliestIso(values: ReadonlyArray<string | undefined>): string | undefined {
+  const present = values.filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)));
+  if (present.length === 0) return undefined;
+  return present.reduce((earliest, value) => (Date.parse(value) < Date.parse(earliest) ? value : earliest));
+}
+
+/** The approval-facing projection of a classified action, or `undefined` when the action is not
+ *  one an operator approves (reversible/disruptive) or cannot be shown without truncating its
+ *  target — an identity is never shortened into a different-looking one. */
+export function consequenceApprovalProjection(action: ConsequenceAction): ConsequenceApprovalProjection | undefined {
+  if (!APPROVAL_CONSEQUENCE_CLASSES.has(action.consequenceClass)) return undefined;
+  if (action.target.identity.length > MAX_CONSEQUENCE_TARGET) return undefined;
+  const expiresAt = earliestIso([action.financial?.quoteExpiresAt, action.irreversible?.confirmationExpiresAt]);
+  if (!expiresAt) return undefined;
+  const recovery = action.irreversible?.recoveryStatement ?? FINANCIAL_ONLY_RECOVERY;
+  const evidenceFreshUntil = earliestIso(action.evidence.map((item) => fixedClock(Date.parse(item.observedAt) + item.maxAgeSeconds * 1000).iso()));
+  const financial = action.financial;
+  return {
+    target: action.target.identity,
+    ...(financial
+      ? {
+          amount: financial.amount,
+          currency: financial.currency,
+          ceiling: financial.perActionCeiling,
+          coolingOffMs: financial.coolingOffSeconds * 1000,
+          coolingOffUntil: fixedClock(Date.parse(financial.coolingOffStartedAt) + financial.coolingOffSeconds * 1000).iso(),
+        }
+      : {}),
+    expiresAt,
+    approverRequired: action.requiredApprovers > 0,
+    recoveryStatement: recovery.slice(0, MAX_CONSEQUENCE_RECOVERY),
+    ...(evidenceFreshUntil ? { evidenceFreshUntil } : {}),
+  };
+}
+
+function storedApprovalProjection(value: unknown): ConsequenceApprovalProjection | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.target !== "string" || !value.target || value.target.length > MAX_CONSEQUENCE_TARGET) return undefined;
+  if (typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt))) return undefined;
+  if (typeof value.approverRequired !== "boolean" || typeof value.recoveryStatement !== "string" || !value.recoveryStatement) return undefined;
+  return value as unknown as ConsequenceApprovalProjection;
+}
+
+export interface PendingConsequenceRead {
+  state: "verified";
+  consequences: PendingConsequenceRecord[];
+  source: "ledger";
+  generatedAt: string;
+  max: number;
+  total: number;
+  truncated: boolean;
+  /** Pending preflight rows written before W1-T4104 carried no approval projection — counted,
+   *  never guessed into a record. */
+  unprojected: number;
+}
+
+/** The pending consequence approvals: every action whose LATEST preflight row was refused for a
+ *  {@link PENDING_CONSEQUENCE_CODES} reason, is financial/irreversible, and has not expired. */
+export function readPendingConsequences(deps: OperatorAgentRouteDependencies): PendingConsequenceRead {
+  const clock = clockFromMillisFn(deps.now);
+  const nowMs = clock.now();
+  const latest = new Map<string, Record<string, unknown>>();
+  for (const row of readLedgerUnionRecordsSync(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP }).rows) {
+    if (typeof row.action_id === "string" && row.action_id) latest.set(row.action_id, row);
+  }
+  const pending: PendingConsequenceRecord[] = [];
+  let unprojected = 0;
+  for (const [consequenceId, row] of latest) {
+    if (row.ready !== false || typeof row.code !== "string" || !PENDING_CONSEQUENCE_CODES.has(row.code)) continue;
+    if (typeof row.consequence_class !== "string" || !APPROVAL_CONSEQUENCE_CLASSES.has(row.consequence_class)) continue;
+    const projection = storedApprovalProjection(row.approval);
+    if (!projection || typeof row.at !== "string") {
+      unprojected += 1;
+      continue;
+    }
+    if (Date.parse(projection.expiresAt) <= nowMs) continue;
+    const stale = projection.evidenceFreshUntil !== undefined && Date.parse(projection.evidenceFreshUntil) <= nowMs;
+    pending.push({
+      consequenceId,
+      classes: [row.consequence_class],
+      target: projection.target,
+      ...(projection.amount !== undefined ? { amountUsd: projection.amount, currency: projection.currency } : {}),
+      ...(projection.ceiling !== undefined ? { ceilingUsd: projection.ceiling } : {}),
+      ...(projection.coolingOffMs !== undefined ? { coolingOffMs: projection.coolingOffMs } : {}),
+      ...(projection.coolingOffUntil !== undefined ? { coolingOffUntil: projection.coolingOffUntil } : {}),
+      expiresAt: projection.expiresAt,
+      approverRequired: projection.approverRequired,
+      recoveryStatement: projection.recoveryStatement,
+      freshness: stale ? "stale" : "verified",
+      observedAt: row.at,
+      receipts: [],
+      source: OPERATOR_AGENT_CONSEQUENCES_SOURCE,
+    });
+  }
+  pending.sort((left, right) => Date.parse(right.observedAt) - Date.parse(left.observedAt) || left.consequenceId.localeCompare(right.consequenceId));
+  return {
+    state: "verified",
+    consequences: pending.slice(0, MAX_PENDING_CONSEQUENCES),
+    source: "ledger",
+    generatedAt: clock.iso(),
+    max: MAX_PENDING_CONSEQUENCES,
+    total: pending.length,
+    truncated: pending.length > MAX_PENDING_CONSEQUENCES,
+    unprojected,
+  };
+}
+
+/** GET /v1/operator-agent/consequences — bounded, read-only list of pending consequence approvals.
+ *  An empty queue is an empty list with its read time, never a 404. */
+export function buildOperatorAgentConsequencesReadRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "GET",
+    path: "/v1/operator-agent/consequences",
+    scope: "read",
+    handler: (_req, res) => sendJson(res, 200, readPendingConsequences(deps)),
+  };
+}
+
+/** Every write verb on the list path, refused BY NAME (405 `read_only`, `allow: GET`) rather than
+ *  the router's anonymous 404 — the list records nothing; a decision is a different surface. */
+export function buildOperatorAgentConsequencesWriteRefusalRoutes(): Route[] {
+  return CONSEQUENCE_WRITE_METHODS.map((method): Route => ({
+    method,
+    path: OPERATOR_AGENT_CONSEQUENCES_PATH,
+    scope: "read",
+    handler: (_req, res) => {
+      res.setHeader("allow", "GET");
+      sendJson(res, 405, {
+        error: "read_only",
+        method,
+        path: OPERATOR_AGENT_CONSEQUENCES_PATH,
+        detail: `${method} ${OPERATOR_AGENT_CONSEQUENCES_PATH} refused: the pending consequence approval list is read-only`,
+        allow: ["GET"],
+      });
+    },
+  }));
 }
 
 function followUpHistory(deps: OperatorAgentRouteDependencies): FollowUpHistory[] {
@@ -2483,6 +2677,8 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentPromotionAdvanceRoute(deps),
     buildOperatorAgentPromotionRollbackRoute(deps),
     buildOperatorAgentConsequencePreflightRoute(deps),
+    buildOperatorAgentConsequencesReadRoute(deps),
+    ...buildOperatorAgentConsequencesWriteRefusalRoutes(),
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
