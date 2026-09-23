@@ -182,11 +182,11 @@
     - claim: "the exact ratified Procedure step is preserved verbatim, not paraphrased"
       proof: "grep: Resolve the task on the first attempt in .claude/skills/implement-clean-single-strike-afa9c5ae/SKILL.md"
     - claim: "the production implement prompt still calls the W1-T3101 harness-injection selector this skill relies on"
-      proof: "grep: selectSkillsForTask( in src/run-task.ts"
+      proof: 'grep: test("W1-T4286: the production implement prompt still calls selectSkillsForTask" in test/implement-clean-single-strike-skill-is-injectable.test.ts'
     - claim: "the skill is REACHABLE — selectSkillsForTask(loadInjectableSkills(...), 'implement', ...) selects it, reusing the SAME production call site run-task.ts:12091-12098 wires (W1-T3101), and the Evidence-line count matches the description's stated run count (a self-consistency proof, not a hardcoded duplicate)"
       proof: "unit test: test/implement-clean-single-strike-skill-is-injectable.test.ts"
     - claim: "native SDK reachability is untouched by this task — spawnWorker still passes settingSources: [] — this skill reaches a worker ONLY via the harness-injection route, never via native Skill-tool loading"
-      proof: 'grep: settingSources: \[\] in src/lib/worker.ts'
+      proof: 'grep: test("W1-T4286: spawnWorker still passes empty settingSources so native Skill-tool loading stays off" in test/implement-clean-single-strike-skill-is-injectable.test.ts'
   note: |
     Grounded against a live read of origin state before drafting (not assumed): skill-workshop.ts
     (renderSkillDraft:85-115, describeWorkerSkillReachability:252-266, loadInjectableSkills:367-394,

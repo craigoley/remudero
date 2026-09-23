@@ -76,15 +76,15 @@
         across a small file set, not an unrelated blast radius.
   acceptance:
     - claim: "a draft carrying applies-to: (harness-injectable) is reported REACHABLE, naming the harness-injection route, even while native settingSources reachability is independently false"
-      proof: "unit test: test/skill-workshop.test.ts"
+      proof: 'grep: test("W1-T4287: an applies-to draft is reported reachable via the harness-injection route while native settingSources is false" in test/skill-workshop.test.ts'
     - claim: "a draft with NO applies-to (a non-injectable candidate.taskType) and settingSources excluding 'project' still reports NOT reachable, naming BOTH routes it checked — the falsifier proving this was not simply flipped to always-true"
-      proof: "unit test: test/skill-workshop.test.ts"
+      proof: 'grep: test("W1-T4287: a draft without applies-to and without project settingSources is not reachable and names both routes" in test/skill-workshop.test.ts'
     - claim: "the new exported per-draft reachability helper is called by retroCommand's production path in src/run-task.ts"
       proof: "grep: describeSkillDraftReachability( in src/run-task.ts"
     - claim: "retroCommand's real call site computes reachability from EACH draft's own markdown rather than one shared value for the whole batch — two drafts in the same retro cycle, one with applies-to and one without, are staged with DIFFERENT reachability verdicts"
       proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
     - claim: "spawnWorker's isolation is untouched — WORKER_SETTING_SOURCES still excludes 'project'; this task fixes only what the staged summary CLAIMS about reachability, never what a worker can load"
-      proof: 'grep: settingSources: \[\] in src/lib/worker.ts'
+      proof: 'grep: test("W1-T4287: WORKER_SETTING_SOURCES still excludes project so a worker loads nothing new" in test/a-staged-skill-reaches-the-worker-prompt.test.ts'
   note: |
     Filed as a SIBLING to W1-T4286 rather than folded into it (Rule 19): W1-T4286 lands one specific,
     already-scanned skill; this fixes the GENERATOR so every skill-draft proposal staged AFTER this
