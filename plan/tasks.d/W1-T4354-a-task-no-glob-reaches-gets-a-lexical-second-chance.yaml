@@ -1,0 +1,64 @@
+- id: W1-T4354
+  title: "30% OF TASKS MATCH ZERO LEARNINGS — add a deterministic BM25 lane that fills only the budget the glob/symbol/error match leaves empty, assigned per run by a seeded draw whose propensity is ledgered, so W1-T4241's outcome fold decides whether it helps"
+  repo: remudero
+  depends_on: [W1-T4241, W1-T4243]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "research:turbopuffer-scan-2026-09-23"
+  plan_refs: ["§4E", W1-T4241, W1-T4243, W1-T420, W1-T933, W1-T941]
+  files:
+    - src/lib/learning-lexical.ts
+    - src/lib/learnings.ts
+    - src/run-task.ts
+    - test/a-task-no-glob-reaches-gets-a-lexical-second-chance.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    (1) THE GAP. MEASURED 2026-09-23 by replaying `selectLearnings` over all 2,207 plan records at 50de4b6a:
+        652 (30%) match zero learnings. Matching is by `files:` globs and declared `symbols:` /
+        `error_signatures:` only (src/lib/learnings.ts header), so a lesson whose words fit a task but whose
+        globs do not never reaches it. src/lib/knowledge-dedup.ts documents the same miss at intake:
+        "PARAPHRASE EVADES IT".
+    (2) THE RULINGS THIS MUST RESPECT. Three merged modules reject embedding retrieval — learnings.ts
+        ("never embedding-based or semantic"), knowledge-dedup.ts ("an embedding check is a model call inside
+        a lint path — nondeterministic, priced, and unfalsifiable at review"), skill.ts ("NOT an index, NOT
+        embeddings"). BM25 is lexical: deterministic, offline, free, and its score is reviewable by hand. It
+        fits all three.
+    (3) WHY A TRIAL, NOT A SWITCH. Whether lexical recall HELPS a worker is not knowable by reading its
+        output. W1-T4241 made the budget cut a randomized trial with ledgered propensities, and W1-T4243
+        cumulates its outcome fold over 30 days. Assigning the lane per run by a seeded draw puts it inside
+        that same machinery: the fold reads lane-on vs lane-off by `clean_single_strike`.
+
+    EXTERNAL PATTERN (research:turbopuffer-scan-2026-09-23): turbopuffer runs BM25 and vector queries
+    separately and fuses them client-side; Cursor pairs trigram search with embeddings. The deterministic half
+    of that hybrid is the half this repo's rulings admit.
+  design: |
+    (i) A PURE `bm25Rank(query, docs, opts)` in src/lib/learning-lexical.ts: stated tokenizer (lowercase,
+        split on non-alphanumerics, drop tokens under 3 chars and a short stated stopword list), classic BM25
+        (k1 = 1.2, b = 0.75, named constants), ties broken by id. No dependency, no model call.
+    (ii) In `selectLearnings`, AFTER the existing ranking has filled what it can: when the lane is on, rank the
+        remaining active, unselected entries' `fact` against the task title plus rationale and fill ONLY the
+        budget left over, above a named minimum score. With the lane off, selection is byte-identical to main.
+    (iii) Lane assignment per run is a seeded draw from the run seed (the same `seededRandom` family
+        `propensitySeed` uses) with a named probability, and the `learnings.injected` row carries
+        `lexical_lane: {on, p, ids}` so the outcome fold can weight by it.
+    (iv) Nothing feeds retirement or ranking outside the lane itself.
+  acceptance:
+    - claim: "the lane fills only leftover budget, is byte-identical when off, and is seeded"
+      proof: "unit test: test/a-task-no-glob-reaches-gets-a-lexical-second-chance.test.ts"
+    - claim: "the lexical ranker is exported"
+      proof: "grep: export function bm25Rank( in src/lib/learning-lexical.ts"
+    - claim: "selection calls the ranker"
+      proof: "grep: bm25Rank( in src/lib/learnings.ts"
+    - claim: "the injected row carries the lane assignment"
+      proof: "grep: lexical_lane in src/run-task.ts"
+  falsifier: |
+    Let the lane displace an entry the glob lane selected and the no-displacement case must fail. Turn the lane
+    off and replay every plan record against main's `selectLearnings`: any difference in selected, dropped or
+    matchedBy fails. Draw the lane from wall-clock time instead of the run seed and the same-seed-same-selection
+    case must fail. Drop the lane assignment from the ledger row and the fold-input case must fail.
+  note: "Measurement-first retrieval: the lane is a randomized arm the outcome fold judges, not a relevance claim. Filed after the turbopuffer/Cursor scan; the embedding alternative stays rejected by the three rulings named in (2)."

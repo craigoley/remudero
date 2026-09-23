@@ -11,7 +11,9 @@
   origin: "skill-draft:de866b8a3997b473"
   plan_refs: ["W1-T3101", "W1-T3137", "W1-T971"]
   files: [.claude/skills/implement-clean-single-strike-de866b8a/SKILL.md, test/implement-clean-single-strike-skill-reaches-the-prompt.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing from the skill-draft approvals (#6779-#6804): superseded by W1-T4338 (approval lands the skill) and W1-T4270 (clean_single_strike restates the merge outcome, not a technique).
   attempts: 0
   rationale: |
     RATIFIES skill-draft:de866b8a3997b473 -- a candidate mined by mineProceduralCandidates
