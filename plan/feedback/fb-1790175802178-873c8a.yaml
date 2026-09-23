@@ -1,0 +1,37 @@
+id: fb-1790175802178-873c8a
+ts: 2026-09-23T15:03:22.178Z
+raw: "THE RATIFY WORKER OPENS PLAN FILINGS THAT FAIL lint-plan, AND ON FOUR
+  APPROVALS IT FILED JUNK THAT CLAIMS A RATIFICATION NOBODY MADE. Observed
+  2026-09-23 14:05-14:30Z: after a batch of `rmd approve` calls the fleet opened
+  about 15 'chore(plan): ratify <proposal> via rmd approve' PRs (#6776-#6793)
+  and every one was red. (1) THE COMMON DEFECT: most filed tasks whose criteria
+  share one whole-file proof ('unit test: test/<file>.test.ts'), which lint-plan
+  refuses as [shared-proof] (W1-T3814) — e.g. #6776 W1-T4268 criteria 1,2,5;
+  #6764 W1-T4263 criteria 1,2,6. ci-shard (2/4) then failed on every one because
+  test/ci-parity.test.ts re-runs lint-plan:fast. The worker evidently never runs
+  lint-plan (or rmd preflight) on its own filing before opening the PR; the
+  operator-filed pattern that passes is one discriminating 'grep:
+  test(\"<TASKID>: <claim>\" in <test path>' per criterion (see W1-T4330). (2)
+  THE SERIOUS DEFECT: #6780, #6782, #6786 and #6791 filed placeholder tasks
+  titled 'RATIFICATION CANDIDATE: …' / 'Draft ratification preconditions' with
+  repo: master-plan, a proof LIST where the verify: value belongs, unexecutable
+  proofs such as 'grep: path-absent during MASTER-PLAN.md audit; ensure under
+  plan/proposals.d', and no rationale/design/note (so the citation-anchor
+  census, which needs one prose unit per shard, failed). #6791 was titled as
+  ratifying proof-debt:W1-T4048 yet appended 'P25 (MASTER-PLAN §7/P25) —
+  RATIFIED 2026-09-23 -> W1-T4291/W1-T4292' to MASTER-PLAN.md — a ratification
+  record that does not match the approval it came from. Only red CI kept it off
+  main. All four were closed on the operator's instruction; the valid filings
+  were repaired by giving each criterion its own proof. ASK: the ratify worker
+  must run lint-plan --base on its own filing and refuse to open a PR that fails
+  it, and the MASTER-PLAN ratification line it writes must be derived from the
+  approved proposal id, never from model output."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
