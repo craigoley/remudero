@@ -1,0 +1,13 @@
+- id: W1-T4277
+  title: "RATIFICATION CANDIDATE: Prepare stamp for PROPOSAL LIST updating Masters etc"
+  repo: remudero/master-plan
+  depends_on: [W1-T4276]
+  type: implement
+  verify: "grep: ensure W1-T4277 references W1-T4276 and updates stamp line"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "verify-human-automate-W1-T3999"
+  files:
+    - MASTER-PLAN.md
+    - plan/tasks.yaml

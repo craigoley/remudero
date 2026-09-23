@@ -1,0 +1,13 @@
+- id: W1-T4276
+  title: "RATIFICATION CANDIDATE: Draft a RATIFICATION for MASTER-PLAN §7/P25 open-plan"
+  repo: remudero/master-plan
+  depends_on: []
+  type: implement
+  verify: "grep: MASTER-PLAN.md contains §7/P25 and flags as ratification candidate"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "verify-human-automate-W1-T3999"
+  files:
+    - MASTER-PLAN.md
+    - plan/tasks.yaml
