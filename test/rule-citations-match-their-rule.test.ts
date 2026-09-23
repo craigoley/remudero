@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -29,6 +29,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const MASTER_PLAN_PATH = join(REPO_ROOT, "MASTER-PLAN.md");
 const CLAUDE_MD_PATH = join(REPO_ROOT, "CLAUDE.md");
+const PLAN_TASKS_DIR = join(REPO_ROOT, "plan", "tasks.d");
 
 function readMasterPlan(): string {
   return readFileSync(MASTER_PLAN_PATH, "utf8");
@@ -39,6 +40,72 @@ function readClaudeMd(): string {
   // them — live in `doctrine/`. `resolveDoctrineForReader` follows every pointer and fails LOUD on
   // one that dangles, so a moved fact reddens here rather than passing as an absence.
   return resolveDoctrineForReader(() => readFileSync(CLAUDE_MD_PATH, "utf8"));
+}
+
+interface TextCorpusEntry {
+  path: string;
+  text: string;
+}
+
+interface DesignRuleMention {
+  raw: string;
+  start: number;
+  end: number;
+  quoted: boolean;
+}
+
+// W1-T2616: the plan-record corpus is a directory, not a fixed list. Keep the quote shapes
+// deliberately narrow: a quoted or backticked historical excerpt is evidence to preserve, while
+// a live `design rule N` citation outside one is the retired namespace this guard refuses.
+const DESIGN_RULE_MENTION = /\bdesign rules?\s+\d+\b/gi;
+const QUOTED_OR_BACKTICKED_SPAN = /(?<![\w])(?:'[^']{2,200}'|"[^"]{2,200}"|`[^`]{2,200}`)(?![\w])/g;
+
+function readPlanTaskCorpus(): TextCorpusEntry[] {
+  return readdirSync(PLAN_TASKS_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".yaml"))
+    .map((entry) => {
+      const path = join(PLAN_TASKS_DIR, entry.name);
+      return { path, text: readFileSync(path, "utf8") };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function isQuotedOrBackticked(text: string, start: number, end: number): boolean {
+  QUOTED_OR_BACKTICKED_SPAN.lastIndex = 0;
+  let span: RegExpExecArray | null;
+  while ((span = QUOTED_OR_BACKTICKED_SPAN.exec(text))) {
+    if (start >= span.index && end <= span.index + span[0].length) return true;
+  }
+  return false;
+}
+
+function findDesignRuleMentions(text: string): DesignRuleMention[] {
+  const mentions: DesignRuleMention[] = [];
+  DESIGN_RULE_MENTION.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = DESIGN_RULE_MENTION.exec(text))) {
+    const start = match.index;
+    const end = start + match[0].length;
+    mentions.push({ raw: match[0], start, end, quoted: isQuotedOrBackticked(text, start, end) });
+  }
+  return mentions;
+}
+
+function unquotedDesignRuleCitations(corpus: ReadonlyArray<TextCorpusEntry>): string[] {
+  const offenders: string[] = [];
+  for (const entry of corpus) {
+    for (const mention of findDesignRuleMentions(entry.text)) {
+      if (mention.quoted) continue;
+      const line = entry.text.slice(0, mention.start).split("\n").length;
+      offenders.push(`${entry.path}:${line}: ${mention.raw}`);
+    }
+  }
+  return offenders;
+}
+
+function assertNoUnquotedDesignRuleCitations(corpus: ReadonlyArray<TextCorpusEntry>): void {
+  const offenders = unquotedDesignRuleCitations(corpus);
+  assert.deepEqual(offenders, [], `unquoted retired namespace citations found:\n${offenders.join("\n")}`);
 }
 
 // ── Namespace A: §12 "Standing rule N" ────────────────────────────────────────────────────────────
@@ -209,4 +276,35 @@ test("CLAUDE.md's decoding row names all three citation families: Standing rule 
   // (run-task.ts) and the uniqueness gate (test/plan-proposals.test.ts) alike.
   assert.match(text, /"P48"/, "the retro-proposal family must be documented by its literal live form, not P-N");
   assert.doesNotMatch(text, /"P-N"/, "the hyphenated P-N metavariable form must be gone -- no live parser accepts it");
+});
+
+test("the plan-task corpus refuses an unquoted numbered design-rule citation", () => {
+  const fixture: TextCorpusEntry[] = [{ path: "fixture.yaml", text: "a live design rule 7 citation\n" }];
+  assert.throws(
+    () => assertNoUnquotedDesignRuleCitations(fixture),
+    /fixture\.yaml:1: design rule 7/,
+    "an unquoted numbered citation must fail by path and line, not merely by count",
+  );
+});
+
+test("the plan-task corpus permits quoted or backticked history and ignores unnumbered prose", () => {
+  const fixture: TextCorpusEntry[] = [
+    {
+      path: "fixture.yaml",
+      text: [
+        "the historical 'design rule 15' excerpt remains",
+        "the historical `design rule 16` excerpt remains",
+        "design rules are discussed here without a number",
+        "design rule (i) is a numbered design item, not a namespace citation",
+      ].join("\n"),
+    },
+  ];
+  assert.deepEqual(unquotedDesignRuleCitations(fixture), []);
+  assert.doesNotThrow(() => assertNoUnquotedDesignRuleCitations(fixture));
+});
+
+test("the live plan-task corpus is derived from every YAML shard on disk and carries no unquoted citation", () => {
+  const corpus = readPlanTaskCorpus();
+  assert.ok(corpus.length > 0, "plan/tasks.d/ must contain at least one YAML shard");
+  assertNoUnquotedDesignRuleCitations(corpus);
 });
