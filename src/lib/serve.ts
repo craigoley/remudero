@@ -147,6 +147,17 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
+  DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
+  InstanceRegistryError,
+  parseInstanceNames,
+  parseInstanceRegistry,
+  projectRegistry,
+  registryDrift,
+  type InstanceRegistry,
+  type RegistryDrift,
+} from "./instance-registry.js";
+import { daemonInstanceRegistryPath } from "./deployer.js";
+import {
   buildProviderAuthRoutes,
   ProviderAuthSessionStore,
   readProviderAuthProfiles,
@@ -390,6 +401,8 @@ export interface ServeDeps {
    * real state dir — the same seam `replay`/`peek` above both use.
    */
   selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
+  /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
+  registry?: Partial<RegistryRouteDeps>;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
    * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
@@ -2920,6 +2933,81 @@ export function buildVersionRoute(sha: string): Route {
     },
   };
 }
+/** W1-T4227 — `GET /v1/registry`'s inputs. Both paths and the reader are injectable for tests. */
+export interface RegistryRouteDeps {
+  /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */
+  repoRegistryPath: string;
+  /** The fleet host's copy; defaults to {@link DEFAULT_HOST_INSTANCE_REGISTRY_PATH}. */
+  hostRegistryPath?: string;
+  clock?: Clock;
+  /** Async on purpose: a console read route never blocks the event loop (W1-T3192's census). */
+  readText?: (path: string) => Promise<string>;
+}
+
+/** How the host copy compared: `unreadable`/`malformed` are notes, never a failed response. */
+export type HostRegistryState = "in_sync" | "drifted" | "unreadable" | "malformed";
+
+/**
+ * W1-T4227 — `GET /v1/registry`: the fleet as projects → repos → instances, from the ONE registry
+ * (`.remudero/daemon-instances.yaml`) through {@link parseInstanceRegistry}. The body is built by
+ * {@link projectRegistry} from names and repos only — never a path, state dir, credential dir,
+ * image or token, even though the registry rows carry the first four. `source` names WHICH
+ * registry answered (`"repo"`), not where it lives on disk.
+ *
+ * DRIFT: when the host copy is readable and declares a different instance set, the body carries
+ * `drift: { hostOnly, repoOnly }`. A host copy that cannot be read (every dev machine, the console
+ * container) or parsed is a `hostRegistry` NOTE and no `drift` field — never an error, because the
+ * repo registry answered and the host copy is only the thing being checked against it.
+ */
+export function buildRegistryRoute(deps: RegistryRouteDeps): Route {
+  const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
+  const clock = deps.clock ?? systemClock;
+  const hostPath = deps.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH;
+  return {
+    method: "GET",
+    path: "/v1/registry",
+    scope: "read",
+    handler: async (_req, res) => {
+      let registry: InstanceRegistry;
+      try {
+        registry = parseInstanceRegistry(await readText(deps.repoRegistryPath));
+      } catch (error) {
+        // Path-free refusal: fs errors embed the absolute path, so echo only the parser's code.
+        const code = error instanceof InstanceRegistryError ? error.code : "unreadable";
+        sendJson(res, 503, { error: "registry_unavailable", reason: code });
+        return;
+      }
+      const repoNames = registry.instances.filter((i) => i.live).map((i) => i.name);
+      let hostRegistry: HostRegistryState;
+      let drift: RegistryDrift | undefined;
+      let hostText: string | undefined;
+      try {
+        hostText = await readText(hostPath);
+      } catch {
+        // An absent/unreadable host copy is the normal case off the fleet host; it is a note.
+        hostText = undefined;
+      }
+      if (hostText === undefined) {
+        hostRegistry = "unreadable";
+      } else {
+        try {
+          drift = registryDrift(repoNames, parseInstanceNames(hostText));
+          hostRegistry = drift ? "drifted" : "in_sync";
+        } catch {
+          // A host copy outside the shell grammar cannot be compared; say so rather than guess.
+          hostRegistry = "malformed";
+        }
+      }
+      sendJson(res, 200, {
+        ...projectRegistry(registry),
+        source: "repo",
+        generatedAt: clock.iso(),
+        hostRegistry,
+        ...(drift ? { drift } : {}),
+      });
+    },
+  };
+}
 /**
  * The "github credential" glance chip's inner text — rendered SERVER-SIDE, the same
  * "no client-script risk" discipline the sibling "console build" chip already follows (see that
@@ -3817,6 +3905,11 @@ function assembleServeRoutes(
       deps.resolveCurrentSha ?? resolveConsoleSha,
     ),
     buildVersionRoute(consoleSha),
+    // W1-T4227: the fleet's one registry, read-only — see buildRegistryRoute's own doc.
+    buildRegistryRoute({
+      ...deps.registry,
+      repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+    }),
     // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
     // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to
     // "never live" so a caller that omits it (a bare test) never fabricates liveness.

@@ -1101,6 +1101,7 @@
     "test/one-invocation-is-one-burst.test.ts": 0,
     "test/one-manifest-predicate-reads-the-declared-workspaces.test.ts": 0,
     "test/one-procedure-is-one-skill-proposal.test.ts": 0,
+    "test/one-registry-for-the-fleet.test.ts": 0,
     "test/one-shot-disk-reclaim-rung.test.ts": 1222,
     "test/open-build-is-not-credit.test.ts": 7455,
     "test/open-pr-corroboration.test.ts": 855,
