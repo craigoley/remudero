@@ -350,10 +350,30 @@ converge_host_units() {
   # A DIRTY OR OFF-MAIN CHECKOUT IS NEVER INSTALLED -- the whole safety argument. Without it a
   # worktree experiment becomes root systemd configuration on the next tick.
   [ -d "\$CHECKOUT/.git" ] || { echo "rmd-relaunch: units -- \$CHECKOUT is not a checkout; not converging."; return 0; }
-  if [ -n "\$(git -C "\$CHECKOUT" status --porcelain 2>/dev/null)" ]; then
-    echo "rmd-relaunch: units -- checkout is DIRTY; not converging (an unreviewed tree must never become root config)."
+  tracked_changes=\$(git -C "\$CHECKOUT" status --porcelain --untracked-files=no 2>/dev/null || true)
+  refusal_since="\$STATE_DIR/state/units-converge-refused-since"
+  refusal_alerted="\$STATE_DIR/state/units-converge-refusal-alerted"
+  if [ -n "\$tracked_changes" ]; then
+    echo "rmd-relaunch: units -- checkout is DIRTY (tracked changes); not converging (an unreviewed tree must never become root config): \$tracked_changes"
+    # W1-T4076 -- the stamp's directory is NOT guaranteed to exist. A redirection into a missing
+    # directory fails in the SHELL, before the command runs, so the trailing \`2>/dev/null || true\`
+    # never sees it and the error leaks to the launcher's own stderr on every tick.
+    mkdir -p "\$STATE_DIR/state" 2>/dev/null || true
+    if [ ! -f "\$refusal_since" ]; then
+      date -u +%s > "\$refusal_since" 2>/dev/null || true
+      rm -f "\$refusal_alerted" 2>/dev/null || true
+    fi
+    refused_at=\$(cat "\$refusal_since" 2>/dev/null || echo "")
+    now=\$(date -u +%s 2>/dev/null || echo "")
+    case "\$refused_at:\$now" in *[!0-9:]*) : ;; *)
+      if [ -n "\$refused_at" ] && [ -n "\$now" ] && [ "\$((now - refused_at))" -ge 21600 ] && [ ! -e "\$refusal_alerted" ]; then
+        echo "rmd-relaunch: ALERT host unit convergence has been refused for at least 6 hours; tracked paths: \$tracked_changes" >&2
+        : > "\$refusal_alerted" 2>/dev/null || true
+      fi
+    ;; esac
     return 0
   fi
+  rm -f "\$refusal_since" "\$refusal_alerted" 2>/dev/null || true
 
   # W1-T3583 -- READABLE AND ON MAIN, BEFORE ANY UPDATE. A detached HEAD, a foreign branch or a
   # corrupted .git is named here and left alone; nothing below this point may switch, rebase or
