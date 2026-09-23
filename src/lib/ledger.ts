@@ -187,6 +187,13 @@ export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
  * reclaimed candidate's), and this stamp's spread position (before `...line`) would let that
  * unrelated meaning silently win the key if the two shared a name.
  */
+/** W1-T4107: the one shape every "append a row, spy on the writer in a test" seam shared under four
+ *  names (mutation-gate verdicts, follow-up harvest, contradiction resolution, replay results). */
+export interface LedgerWriterDeps {
+  ledgerPath: string;
+  writeLedger?: typeof appendLedger;
+}
+
 export function appendLedger(
   path: string,
   line: LedgerLine,

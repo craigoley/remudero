@@ -148,3 +148,27 @@ test("inline and aliased seams are counted and identical member-sets are reporte
   if (report.length > 0) console.log(report.join("\n"));
   assert.ok(Array.isArray(report), "identical member-set reporting is advisory");
 });
+
+test("W1-T4107: no two deps declarations share a member-set", () => {
+  // Positive control: the census really reads declarations.
+  assert.ok(depsInterfaceDeclarations().length > 100, "the census sees the corpus");
+  assert.deepEqual(identicalMemberSetReport(), [], "a shape declared twice is folded into one declaration");
+});
+
+test("W1-T4107: the census population fell by the declarations removed", () => {
+  // 160 declarations before W1-T4107; it folded 8 into 3. The ceiling stays at 160: the census guards the
+  // POPULATION, and this room is what the knowledge rungs' named seams may use without it ever growing.
+  assert.equal(depsInterfaceDeclarations().length, 155, "8 folded into 3");
+  assert.deepEqual(
+    ["LedgerWriterDeps", "ClaimGitDeps", "FollowupRegistryDeps"].filter((n) => !depsInterfaceDeclarations().includes(n)),
+    [],
+    "the three shared declarations exist",
+  );
+  assert.deepEqual(
+    ["MutationGateVerdictDeps", "FollowupHarvestDeps", "ContradictionResolutionDeps", "RecordReplayResultsDeps", "DispatchClaimGitDeps", "TriageClaimGitDeps", "PruneFollowupsDeps", "RetireFollowupsDeps"].filter((n) =>
+      depsInterfaceDeclarations().includes(n),
+    ),
+    [],
+    "the eight folded names are gone, not aliased",
+  );
+});
