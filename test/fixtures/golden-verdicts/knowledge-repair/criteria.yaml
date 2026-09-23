@@ -1,0 +1,4 @@
+# W1-T4240: a knowledge-maintenance diff (the gardener's own shape) that RETARGETS an existing
+# operator_impact:true entry's retrieval key. The proof executes for real against checkout/.
+- claim: "the entry's retrieval key names the runner paths it is about"
+  proof: "grep: scripts/test-with-retry.mjs in learnings/failures.yaml"
