@@ -858,15 +858,11 @@ export interface GhAppTokenMint {
 export type GhAppTokenMinter = (env: NodeJS.ProcessEnv) => Promise<GhAppTokenMint>;
 
 /** Mints into a SCRATCH COPY of `env` — `refreshInstallationToken` writes `GH_TOKEN` onto
- *  whatever env it is given, and the ambient env is what a later WRITE still needs untouched. */
+ *  whatever env it is given, and the ambient env is what a later WRITE still needs untouched.
+ *  A rejection fails open in `routeInteractiveGhRead`'s own catch (design iii). */
 async function defaultMintGhAppToken(env: NodeJS.ProcessEnv): Promise<GhAppTokenMint> {
   const scratch: NodeJS.ProcessEnv = { ...env };
-  let result: Awaited<ReturnType<typeof refreshInstallationToken>>;
-  try {
-    result = await refreshInstallationToken({ env: scratch });
-  } catch {
-    return { ok: false }; // fail open (design iii) — never an unhandled rejection
-  }
+  const result = await refreshInstallationToken({ env: scratch });
   return result.ok && scratch.GH_TOKEN ? { ok: true, token: scratch.GH_TOKEN } : { ok: false };
 }
 
