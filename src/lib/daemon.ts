@@ -17,6 +17,7 @@
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
 import { startFleetLane, triageFleetLane, type FleetLaneDeps } from "./fleet-lane.js";
+import { startKnowledgeGardener, type GardenerDeps } from "./knowledge-gardener.js";
 import type {
   CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
@@ -952,6 +953,9 @@ export interface DaemonDeps {
   plainBackfill?: PlainBackfillDeps;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
   fleetLane?: FleetLaneDeps;
+  /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
+   *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
+  knowledgeGardener?: GardenerDeps;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
    * commands. It is injected so this scheduler module never grows a second repair implementation. */
   runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
@@ -1507,6 +1511,14 @@ function startInFlightTicker(
                 if (accepted) eventWakePending = false;
               }
             }
+          }
+          // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds it
+          // while the batch drains. Withheld, never aborted: work already in flight finishes. STOP is not
+          // read here: it ends the daemon on its own, and fixtures bound this loop with it.
+          const lightHalt = deps.checkPause?.();
+          if (lightHalt) {
+            log("daemon.sweep_light.held", { phase: owner.phase, detail: lightHalt });
+            continue;
           }
           try {
             await deps.sweepLight!();
@@ -2205,15 +2217,18 @@ export async function runDaemon(
   // W1-T4089: the fleet's own findings, filed at the pace the fleet merges work.
   const fleetLaneDeps = deps.fleetLane;
   const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLane(fleetLaneDeps), pollIntervalMs, log) : undefined;
+  const gardenerRef: { stop: () => void } = { stop: () => {} };
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     prActionPumpRef.stop();
     plainBackfill?.stop();
     fleetLane?.stop();
+    gardenerRef.stop();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
   };
   prActionPumpRef.stop = startPrActionPump(deps, pollIntervalMs, log).stop;
+  if (deps.knowledgeGardener) gardenerRef.stop = startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs).stop;
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where

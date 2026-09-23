@@ -3654,7 +3654,7 @@ function assembleServeRoutes(
   const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
   const rawRoutes = [
     projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals),
-    buildRepoDashboardRoute({ root: deps.questionsRoot }),
+    buildRepoDashboardRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath, planPath: deps.panelGraph.planPath }),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     buildDaemonHealthRoute(daemonHealthDeps),
