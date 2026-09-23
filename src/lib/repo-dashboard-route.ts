@@ -7,14 +7,17 @@
  * - `tokens7d`, `cost_7d`: the repository's worker rows inside the trailing seven days.
  * A row names its repository by its own `repo`, else through its run's `run.start` row.
  * `connected_at`, `active` and every setting stay `null`: the managed-repos file records only
- * identities and no config key holds a per-repo policy, pool size or alert threshold. An
- * unavailable source leaves its fields `null`, never `0`.
+ * identities and no config key holds a per-repo policy, pool size or alert threshold. An absent
+ * ledger leaves its fields `null`, never `0`; a FAILED plan or ledger read is unavailable with its reason.
  */
 
-import { join } from "node:path";
+import { stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { RmdError } from "./errors.js";
 import { loadManagedRepos, type ManagedRepo } from "./managed-repos.js";
 import { loadPlan, type Plan } from "./plan.js";
 import { isMergeCreditLine, readLedgerUnionBounded } from "./status.js";
@@ -194,6 +197,105 @@ function toDashboardEntry(repo: ManagedRepo, t: RepoTelemetry): RepoDashboardEnt
   };
 }
 
+/** How long one computed telemetry pass is served while its input stamps are unchanged; the seven-day window
+ *  moves with the clock even when no input file does. */
+export const REPO_TELEMETRY_CACHE_TTL_MS = 60_000;
+
+const REPO_TELEMETRY_WORKER_KIND = "remudero-repo-telemetry" as const;
+
+/** Plain data only: it crosses to the worker by structured clone. */
+export interface RepoTelemetryRequest {
+  kind: typeof REPO_TELEMETRY_WORKER_KIND;
+  repos: ManagedRepo[];
+  ledgerPath: string;
+  planPath: string;
+  nowMs: number;
+}
+
+export type RepoTelemetryOutcome = { ok: true; telemetry: RepoTelemetry[] } | { ok: false; reason: string };
+
+type LedgerReader = (path: string) => readonly Row[] & { present?: boolean };
+
+/** A plan or ledger read that failed: the console read cache reports its message as the staleness reason. */
+export class RepoTelemetryUnavailableError extends RmdError {
+  constructor(reason: string) {
+    super("plan", 1, reason);
+    this.name = "RepoTelemetryUnavailableError";
+  }
+}
+
+function isRepoTelemetryRequest(v: unknown): v is RepoTelemetryRequest {
+  return !!v && typeof v === "object" && (v as { kind?: unknown }).kind === REPO_TELEMETRY_WORKER_KIND;
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** The whole slow pass (ledger union, plan, projection), run synchronously wherever it is called from. A failed
+ *  read becomes a reason-carrying outcome, never a null field that reads as "no source". */
+export function computeRepoTelemetrySync(
+  req: RepoTelemetryRequest,
+  readers: { readLedger?: LedgerReader; readPlan?: (path: string) => Plan } = {},
+): RepoTelemetryOutcome {
+  let ledger: readonly Row[] | undefined;
+  try {
+    const read = (readers.readLedger ?? readLedgerUnionBounded)(req.ledgerPath);
+    ledger = read.present === false ? undefined : read;
+  } catch (err) {
+    return { ok: false, reason: `ledger read failed: ${messageOf(err)}` };
+  }
+  if (ledger === undefined) return { ok: true, telemetry: req.repos.map(() => UNKNOWN) };
+  let plan: Plan | undefined;
+  try {
+    plan = (readers.readPlan ?? loadPlan)(req.planPath);
+  } catch (err) {
+    return { ok: false, reason: `plan read failed: ${messageOf(err)}` };
+  }
+  return { ok: true, telemetry: req.repos.map((repo) => projectRepoTelemetry(repo, { ledger, plan, nowMs: req.nowMs })) };
+}
+
+/** The worker branch's body, named so the parent can cover it: coverage instruments the parent thread only. */
+export function postRepoTelemetryWorkerResponse(port: { postMessage: (value: unknown) => void } | null, req: RepoTelemetryRequest): void {
+  port?.postMessage(computeRepoTelemetrySync(req));
+}
+
+if (!isMainThread && isRepoTelemetryRequest(workerData)) postRepoTelemetryWorkerResponse(parentPort, workerData);
+
+/** Runs {@link computeRepoTelemetrySync} on a worker thread so the serving event loop never parses the ledger. Every
+ *  terminal path resolves exactly once, and a dead worker is an unavailable outcome with its reason. */
+export function computeRepoTelemetryOffThread(req: RepoTelemetryRequest, workerUrl?: URL): Promise<RepoTelemetryOutcome> {
+  return new Promise((resolve) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: req, execArgv: process.execArgv });
+    } catch (err) {
+      resolve({ ok: false, reason: `repo telemetry worker could not start: ${messageOf(err)}` });
+      return;
+    }
+    let settled = false;
+    const settle = (outcome: RepoTelemetryOutcome): void => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+      void worker.terminate();
+    };
+    worker.once("message", (msg: RepoTelemetryOutcome) => settle(msg));
+    worker.once("error", (err) => settle({ ok: false, reason: `repo telemetry worker failed: ${messageOf(err)}` }));
+    worker.once("exit", (code) => settle({ ok: false, reason: `repo telemetry worker exited with code ${code} before reporting` }));
+  });
+}
+
+async function statStamp(path: string): Promise<string> {
+  try {
+    const s = await stat(path);
+    return `${s.size}:${s.mtimeMs}`;
+  } catch (err) {
+    // An unstattable input is part of the key: the pass that reads it reports the read failure itself.
+    return `unstattable:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+  }
+}
+
 /** GET /v1/repos — the validated, read-only managed-repo portfolio. */
 export function buildRepoDashboardRoute(deps: {
   /** Repository root containing the managed-repos state file. */
@@ -202,40 +304,52 @@ export function buildRepoDashboardRoute(deps: {
   clock?: Clock;
   /** The daemon ledger; omitted means every ledger-derived field stays null. */
   ledgerPath?: string;
-  /** Defaults to `<root>/plan/tasks.yaml`; an unreadable plan leaves `queuedtasks` null. */
+  /** Defaults to `<root>/plan/tasks.yaml`; an unreadable plan makes the telemetry unavailable with its reason. */
   planPath?: string;
-  /** Defaults to the bounded newest-first union of the live ledger and its rotations. */
-  readLedger?: (path: string) => readonly Row[] & { present?: boolean };
+  /** Injected readers run the pass in-process; the defaults run it on a worker thread. */
+  readLedger?: LedgerReader;
   readPlan?: (path: string) => Plan;
+  /** Test seam: the module a spawned telemetry worker loads. */
+  workerUrl?: URL;
 }): Route {
   const clock = deps.clock ?? systemClock;
-  const readLedger = deps.readLedger ?? ((path: string) => readLedgerUnionBounded(path));
-  const readPlan = deps.readPlan ?? ((path: string) => loadPlan(path));
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
+  const inProcess = deps.readLedger !== undefined || deps.readPlan !== undefined;
+  const compute = (req: RepoTelemetryRequest): Promise<RepoTelemetryOutcome> =>
+    inProcess
+      ? Promise.resolve(computeRepoTelemetrySync(req, { readLedger: deps.readLedger, readPlan: deps.readPlan }))
+      : computeRepoTelemetryOffThread(req, deps.workerUrl);
+  // ONE entry, keyed on every input's size and mtime, so the cache cannot grow with requests.
+  let cached: { key: string; atMs: number; outcome: RepoTelemetryOutcome } | undefined;
+  let inflight: { key: string; promise: Promise<{ atMs: number; outcome: RepoTelemetryOutcome }> } | undefined;
+  const measure = async (repos: ManagedRepo[], ledgerPath: string): Promise<{ atMs: number; outcome: RepoTelemetryOutcome }> => {
+    const stamps = await Promise.all([ledgerPath, planPath, join(dirname(planPath), "tasks.d")].map(statStamp));
+    const key = [repos.map((r) => `${r.owner}/${r.repo}`).join(","), ...stamps].join("|");
+    if (cached && cached.key === key && clock.now() - cached.atMs < REPO_TELEMETRY_CACHE_TTL_MS) return cached;
+    if (inflight && inflight.key === key) return inflight.promise;
+    const atMs = clock.now();
+    const promise = compute({ kind: REPO_TELEMETRY_WORKER_KIND, repos, ledgerPath, planPath, nowMs: atMs }).then((outcome) => {
+      cached = { key, atMs, outcome };
+      return cached;
+    });
+    inflight = { key, promise };
+    return promise.finally(() => {
+      if (inflight?.promise === promise) inflight = undefined;
+    });
+  };
   return {
     method: "GET",
     path: "/v1/repos",
     scope: "read",
-    handler: (_req, res) => {
+    handler: async (_req, res) => {
       const managed = loadManagedRepos(deps.root);
-      let ledger: readonly Row[] | undefined;
-      let plan: Plan | undefined;
-      if (managed.length > 0 && deps.ledgerPath !== undefined) {
-        const read = readLedger(deps.ledgerPath);
-        ledger = read.present === false ? undefined : read;
-        try {
-          plan = readPlan(planPath);
-        } catch {
-          // An unreadable plan leaves queuedtasks null (unknown), never a zero count.
-          plan = undefined;
-        }
-      }
-      const nowMs = clock.now();
-      const repos = managed.map((repo) => toDashboardEntry(repo, projectRepoTelemetry(repo, { ledger, plan, nowMs })));
+      const measured = managed.length > 0 && deps.ledgerPath !== undefined ? await measure(managed, deps.ledgerPath) : undefined;
+      if (measured && !measured.outcome.ok) throw new RepoTelemetryUnavailableError(measured.outcome.reason);
+      const telemetry = measured?.outcome.ok ? measured.outcome.telemetry : managed.map(() => UNKNOWN);
       const body: RepoDashboardResult = {
-        generated_at: clock.iso(),
+        generated_at: measured ? fixedClock(measured.atMs).iso() : clock.iso(),
         source: "managed-repos",
-        repos,
+        repos: managed.map((repo, i) => toDashboardEntry(repo, telemetry[i])),
       };
       sendJson(res, 200, body);
     },
