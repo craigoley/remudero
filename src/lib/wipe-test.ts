@@ -97,6 +97,7 @@ export interface MatchedLearningsResult {
   droppedIds: string[];
   matchedBy: LearningMatchCounts;
   globalRefusedReason?: string;
+  propensity?: Record<string, number>;
 }
 
 const MASKED_RESULT: MatchedLearningsResult = {
@@ -121,13 +122,19 @@ export function computeMatchedLearningsForArm(
     input.taskFiles,
     input.selectionContext,
   );
-  const { selected, dropped, matchedBy } = deps.selectLearnings(entries, input.taskFiles, input.budgetChars, input.selectionContext);
+  const { selected, dropped, matchedBy, propensity } = deps.selectLearnings(
+    entries,
+    input.taskFiles,
+    input.budgetChars,
+    input.selectionContext,
+  );
   return {
     matchedLearnings: deps.renderMatchedLearnings(selected),
     selectedIds: selected.map((e) => e.id),
     droppedIds: dropped.map((e) => e.id),
     matchedBy,
     globalRefusedReason,
+    ...(propensity ? { propensity } : {}),
   };
 }
 
