@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
   renameSync,
@@ -14,6 +15,7 @@ import {
   statSync,
   writeSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -877,13 +879,13 @@ function writeFileAtomic(path: string, content: string | Buffer, beforeRename?: 
  *  `size`, `content` and `{dev, ino}` describe the same open file rather than three separate path
  *  re-resolutions. {@link rotateLedger} compares `identity` against a by-name `stat` right before
  *  its final rename: a mismatch means the path no longer holds the snapshotted file. */
-function readSnapshotWithIdentity(path: string): { size: number; content: string; identity: FileIdentity } {
+function readSnapshotWithIdentity(path: string): { size: number; content: string; bytes: Buffer; identity: FileIdentity } {
   const fd = openSync(path, "r");
   try {
     const st = fstatSync(fd);
     const buf = Buffer.alloc(st.size);
     readSync(fd, buf, 0, st.size, 0);
-    return { size: st.size, content: buf.toString("utf8"), identity: { dev: st.dev, ino: st.ino } };
+    return { size: st.size, content: buf.toString("utf8"), bytes: buf, identity: { dev: st.dev, ino: st.ino } };
   } finally {
     closeSync(fd);
   }
@@ -895,6 +897,33 @@ function readSnapshotWithIdentity(path: string): { size: number; content: string
  *  `writeFileAtomic`'s `.rotate-tmp-*` staging names are invisible to that reader. */
 export function ledgerRotationLockPath(ledgerPath: string): string {
   return `${ledgerPath}.rotate.lock`;
+}
+
+/** Sidecar naming the retained core the last rotation wrote back as the live file's prefix, as
+ *  `{bytes, sha256}`. Every row in that prefix was archived when it first arrived, so the next
+ *  rotation archives only the bytes after it. Ends in `.json`, so no reader lists it as an archive. */
+export function ledgerCarriedPrefixPath(ledgerPath: string): string {
+  return `${ledgerPath}.carried.json`;
+}
+
+function sha256Hex(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+/** Leading bytes of `snapshot` already archived: the recorded length when the snapshot still starts
+ *  with exactly those bytes, else 0 — a missing, corrupt or mismatched sidecar archives the whole
+ *  snapshot. Content-addressed, so a stale sidecar can cost duplication and never a row. */
+function archivedPrefixBytes(ledgerPath: string, snapshot: Buffer): number {
+  let carried: { bytes?: unknown; sha256?: unknown } | null;
+  try {
+    carried = JSON.parse(readFileSync(ledgerCarriedPrefixPath(ledgerPath), "utf8")) as typeof carried;
+  } catch {
+    // deliberate: no readable sidecar means nothing is known to be archived — archive it all.
+    return 0;
+  }
+  const bytes = carried?.bytes;
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > snapshot.length) return 0;
+  return sha256Hex(snapshot.subarray(0, bytes)) === carried?.sha256 ? bytes : 0;
 }
 
 /** What the rotation lock records about its holder — the SAME `{pid, host, startedAt}` shape
@@ -983,8 +1012,8 @@ function writeArchive(plainArchivePath: string, snapshot: string, fsDeps: Ledger
 export interface LedgerRotationResult {
   /** False when the ledger was absent or already at/under the ceiling — nothing to do. */
   rotated: boolean;
-  /** Absolute path to the dated archive holding every pre-rotation line verbatim — set only
-   *  when `rotated`. Ends in `.ndjson.gz` (the form {@link writeArchive}/ledger-grep.ts's
+  /** Absolute path to the dated archive holding every pre-rotation line verbatim past the carried
+   *  prefix (see {@link ledgerCarriedPrefixPath}) — set only when `rotated` and that delta is non-empty. Ends in `.ndjson.gz` (the form {@link writeArchive}/ledger-grep.ts's
    *  `ledgerRotationEntries` both already call "gzip") unless compression itself failed, in
    *  which case it ends in plain `.ndjson` — see {@link writeArchive}'s own doc. */
   archivePath?: string;
@@ -998,8 +1027,9 @@ export interface LedgerRotationResult {
 }
 
 /**
- * Roll, but keep a decision tail (W1-T209). Move the whole file byte-for-byte into a dated archive
- * — relocated, never deleted — then rewrite the live path to hold only the decision-relevant lines.
+ * Roll, but keep a decision tail (W1-T209). Move the file byte-for-byte into a dated archive —
+ * relocated, never deleted; since the delta change, only the bytes past the already-archived carried
+ * prefix — then rewrite the live path to hold only the decision-relevant lines.
  * A rotation that shrinks the file but drops one of those is worthless, so the acceptance test is
  * the breaker, not the file size. Only the snapshot is gzipped (W1-T2482), and this is a no-op when
  * the ledger is absent or under `ceilingBytes`.
@@ -1048,8 +1078,10 @@ export interface LedgerCompactionResult {
   rowsWritten: number;
   /** Duplicate lines collapsed. The reclaim is exactly this many rows' worth. */
   duplicatesCollapsed: number;
-  /** The compacted archive's filename, whose stamp is the NEWEST row it carries — see below. */
+  /** The NEWEST compacted archive's filename, whose stamp is the newest row it carries — see below. */
   archiveName: string;
+  /** Every archive written, one per UTC day of the rows' ts, oldest first. */
+  archiveNames: string[];
 }
 
 /**
@@ -1073,7 +1105,7 @@ export function compactedArchiveName(newestTs: string): string {
 }
 
 /**
- * Compact a set of rotations into ONE deduped archive, preserving every distinct row.
+ * Compact a set of rotations into deduped archives, one per UTC day, preserving every distinct row.
  *
  * PURE OVER INJECTED I/O so its falsifier can assert ROW-SET EQUALITY rather than a size drop. A
  * compaction that shrinks the corpus is trivial to write and worthless to trust: a byte-count
@@ -1106,7 +1138,7 @@ export function compactRotations(
     }
   }
   if (rows.length === 0) {
-    return { sourceCount: sources.length, rowsWritten: 0, duplicatesCollapsed: 0, archiveName: "" };
+    return { sourceCount: sources.length, rowsWritten: 0, duplicatesCollapsed: 0, archiveName: "", archiveNames: [] };
   }
   // Ordered by each row's OWN ts, so the compacted archive reads chronologically like the rotations
   // it replaces. A row with no parseable ts sorts last rather than being dropped — losing a torn
@@ -1117,26 +1149,46 @@ export function compactRotations(
     return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
   };
   rows.sort((a, b) => tsOf(a) - tsOf(b));
-  const dated = rows.filter((r) => Number.isFinite(tsOf(r)));
   const clock = io.clock ?? systemClock;
-  // A row stamped in the future (one read 2027-10-14 on 2026-09-23) must not stamp the file past now:
-  // a future name is immune to every time window. The row itself is kept; only the name is capped.
-  const newestMs = dated.length > 0 ? Math.min(tsOf(dated[dated.length - 1]!), clock.now()) : clock.now();
-  const newestTs = fixedClock(newestMs).iso();
-  const archiveName = compactedArchiveName(newestTs);
-  io.write(archiveName, rows.join("\n") + "\n");
-  // THE SOURCES GO ONLY AFTER THE REPLACEMENT IS WRITTEN. A crash between the two costs a duplicate
+  const nowMs = clock.now();
+  // ONE ARCHIVE PER UTC DAY of the rows' ts, so a window read opens only the days it needs rather
+  // than a ~1M-row whole-corpus file (fleet host, 2026-09-23). A row stamped in the future (one read
+  // 2027-10-14 on 2026-09-23) joins today's file: a future name is immune to every time window, and
+  // capping two future days to now would give them one name. An undated row joins the newest day.
+  const byDay = new Map<string, { rows: string[]; newestMs: number }>();
+  const undated: string[] = [];
+  for (const line of rows) {
+    const ts = tsOf(line);
+    if (!Number.isFinite(ts)) {
+      undated.push(line);
+      continue;
+    }
+    const capped = Math.min(ts, nowMs);
+    const day = fixedClock(capped).iso().slice(0, 10);
+    const bucket = byDay.get(day) ?? { rows: [], newestMs: capped };
+    bucket.rows.push(line);
+    bucket.newestMs = Math.max(bucket.newestMs, capped);
+    byDay.set(day, bucket);
+  }
+  const days = [...byDay.values()];
+  if (days.length === 0) days.push({ rows: [], newestMs: nowMs });
+  days[days.length - 1]!.rows.push(...undated);
+  const archiveNames = days.map((d) => compactedArchiveName(fixedClock(d.newestMs).iso()));
+  days.forEach((d, i) => io.write(archiveNames[i]!, d.rows.join("\n") + "\n"));
+  const archiveName = archiveNames[archiveNames.length - 1]!;
+  // THE SOURCES GO ONLY AFTER EVERY REPLACEMENT IS WRITTEN. A crash between the two costs a duplicate
   // archive, which the union dedupes anyway; the other order costs history.
   //
-  // AND NEVER THE FILE JUST WRITTEN. The compacted stamp is its newest row's ts, which is very
-  // often the stamp of the newest SOURCE — so the archive lands on that source's own name and the
-  // cleanup would then delete the replacement, taking every row with it. Found by the window case
-  // below, which read back an empty union.
+  // AND NEVER A FILE JUST WRITTEN. A day's stamp is its newest row's ts, which is very often the
+  // stamp of a SOURCE — so an output lands on that source's own name and the cleanup would then
+  // delete the replacement, taking every row with it. Found by the window case below, which read
+  // back an empty union.
+  const written = new Set(archiveNames);
   for (const path of sources) {
-    if (basename(path) === archiveName) continue;
+    if (written.has(basename(path))) continue;
     io.remove(path);
   }
-  return { sourceCount: sources.length, rowsWritten: rows.length, duplicatesCollapsed: read - rows.length, archiveName };
+  return { sourceCount: sources.length, rowsWritten: rows.length, duplicatesCollapsed: read - rows.length, archiveName, archiveNames };
 }
 
 export function rotateLedger(
@@ -1172,10 +1224,14 @@ function rotateLedgerLocked(
   archiveFsDeps: LedgerArchiveFsDeps,
   now: (() => Date) | undefined,
 ): LedgerRotationResult {
-  const { size: size0, content: snapshot, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
+  const { size: size0, content: snapshot, bytes: snapshotBytes, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
 
+  // DELTA ARCHIVING: the carried prefix is the core the previous rotation wrote back, already
+  // archived, so only what follows it goes to a new archive. Re-copying it made adjacent archives
+  // share 99.3% of rows (fleet host, 2026-09-23). An empty delta writes no archive at all.
+  const delta = snapshotBytes.subarray(archivedPrefixBytes(path, snapshotBytes));
   const plainArchivePath = datedArchivePath(path, now?.() ?? new Date());
-  const archivePath = writeArchive(plainArchivePath, snapshot, archiveFsDeps);
+  const archivePath = delta.length > 0 ? writeArchive(plainArchivePath, delta.toString("utf8"), archiveFsDeps) : undefined;
 
   // ONE clock read for the whole rotation — the health-window filter, the shed pointer's size
   // estimate, and the shed pointer's actual `ts` all agree on the same instant.
@@ -1360,9 +1416,12 @@ function rotateLedgerLocked(
     keptLines = keptCandidates.map((p) => p.raw);
   }
 
+  // The pointer sits AFTER the carried prefix: it is a new row, archived by the next rotation.
+  const coreContent = keptLines.length > 0 ? keptLines.join("\n") + "\n" : "";
+  let pointerContent = "";
   if (shedCount > 0) {
     archivedLineCount += shedCount;
-    keptLines.push(
+    pointerContent =
       JSON.stringify({
         ts: nowIso,
         run_id: "ledger-rotation",
@@ -1370,11 +1429,10 @@ function rotateLedgerLocked(
         step: "ledger.rotation_shed",
         shed_count: shedCount,
         archive_path: archivePath,
-      }),
-    );
+      }) + "\n";
   }
 
-  const newLiveContent = (keptLines.length > 0 ? keptLines.join("\n") + "\n" : "") + tail;
+  const newLiveContent = coreContent + pointerContent + tail;
   const swapped = writeFileAtomic(path, newLiveContent, () => {
     // Immediately before the rename: is the live path STILL the inode this rotation snapshotted?
     // If not, something replaced it and renaming would clobber it. (A ledger REMOVED mid-rotation
@@ -1389,12 +1447,14 @@ function rotateLedgerLocked(
     );
     return { rotated: false };
   }
+  const coreBytes = Buffer.from(coreContent, "utf8");
+  writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({ bytes: coreBytes.length, sha256: sha256Hex(coreBytes) }));
 
   return {
     rotated: true,
     archivePath,
     archivedLineCount,
-    retainedLineCount: keptLines.length,
+    retainedLineCount: keptLines.length + (pointerContent ? 1 : 0),
   };
 }
 
