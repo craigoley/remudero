@@ -11,7 +11,7 @@
   origin: "session: 2026-09-23 backlog triage — duplicate machine-filed ci-learning shards"
   plan_refs: ["W1-T2968", "W1-T3492", "W1-T3754", "W1-T3765"]
   files: [src/lib/feedback-landing.ts, src/run-task.ts, test/ci-learning-safe-landing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 AT origin/main b5c2804. The 43 machine-filed "THE <gate> GATE REFUSED N PULL REQUESTS" shards

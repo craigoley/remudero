@@ -11,7 +11,7 @@
   origin: "PR #6677 coverage-ratchet 2026-09-22 (src/lib/inbox-owner.ts:15)"
   plan_refs: [W1-T171]
   files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts, doctrine/coverage-traps/in-a-new-file-sandwich-type-only-declarations-between.md]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22: CI diff-coverage on #6677 reported `src/lib/inbox-owner.ts:15` uncovered — the line

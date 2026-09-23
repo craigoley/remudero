@@ -11,7 +11,7 @@
   origin: "operator ask 2026-09-23: other gardeners for self improvement; research over origin/main d7b569e0d"
   plan_refs: [W1-T4095]
   files: [src/lib/gardener.ts, src/lib/knowledge-gardener.ts, src/lib/daemon.ts, test/a-gardener-judges-its-own-actions.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23. src/lib/knowledge-gardener.ts (W1-T4095) splits cleanly: GENERAL — per-class Beta records, the
