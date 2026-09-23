@@ -91,7 +91,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // guards W1-T2886's move for every template that did NOT intentionally change.
   // W1-T4106 re-baselined fix and implement: both now carry ONE_TEST_SUITE_AT_A_TIME_LINE.
   assert.equal(sha256(recon), "45ccd6b3f8cf9ffbf89a5d7bbe0c5c946cfa9bb27a0faea04d1f920ccdde66ad");
-  assert.equal(sha256(diagnose), "cc1209eecea9ef35572af1a184d1a90850f2ee6eed0139082b9f54ec2edb41bc");
+  // W1-T4330 re-baselined diagnose: its contract now leads with REPRODUCTION and adds FALSIFIER
+  // (test/a-diagnose-report-names-a-red-capable-reproduction.test.ts pins the new text itself).
+  assert.equal(sha256(diagnose), "ab2e0942887144a79c234d86a5b65ef390d05babe7c116bb4f8bd3fa5bf0fa49");
   assert.equal(sha256(implement), "777f6108eb521809d0678927104f78dcd1c367a2bab56d3ffb7f8435fa173229");
 });
 

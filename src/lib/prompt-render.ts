@@ -890,7 +890,17 @@ export function renderDiagnosePrompt(task: Pick<Task, "id" | "title">, failureEv
       "report.",
     `TASK: ${task.id} — ${task.title}`,
     `## PRIOR FAILURE EVIDENCE\n${failureEvidence || "(no evidence captured)"}`,
-    "Output exactly one report:\nDIAGNOSE REPORT\nROOT CAUSE: <your best-evidenced explanation>\n" +
+    // W1-T4330: reproduce BEFORE theorising. A root cause read from code alone is carried verbatim
+    // into the third attempt, so the report must show the command that goes red on this failure,
+    // or say plainly that none could be built and label the cause INFERRED.
+    "Build the reproduction FIRST: one command, run by you, that goes red on this exact failure — " +
+      "before you read code to form a theory. If you cannot build one, say NONE, list what you " +
+      "tried, and label the root cause INFERRED. Redact any secret from output you quote.",
+    "Output exactly one report:\nDIAGNOSE REPORT\n" +
+      "REPRODUCTION: <the command you ran and the lines of its red output that carry the signal — " +
+      "or NONE, then what you tried>\n" +
+      "ROOT CAUSE: <your best-evidenced explanation; prefix INFERRED if REPRODUCTION is NONE>\n" +
+      "FALSIFIER: <the one observation that would prove the root cause wrong, and whether you checked it>\n" +
       "EVIDENCE: <the specific commands/output that support it>\n" +
       "SUGGESTED APPROACH: <a concrete next step for the retry — description only, no code>",
   ].join("\n\n");
