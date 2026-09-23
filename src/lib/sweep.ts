@@ -9000,6 +9000,15 @@ export async function runSweep(
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
     const pr = openPrs[prIndex];
     let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
+    // A positively classified plan filing has no implementation surface for the code-fix lane.
+    // Keep the red visible through the existing escalation path, where the plan violation can
+    // be repaired, instead of spending a worker strike that cannot produce a commit.
+    if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
+      disposition = "refused-escalate";
+      reason =
+        `plan-only PR has red required checks — the code-fix lane cannot change files outside the ` +
+        `plan filing; escalation is required for plan repair`;
+    }
     // W1-T3306: `deriveDisposition` has no ledger input, while capped proof grades live only on
     // `review.posted`. Route the exact capped-green arm refusal through the EXISTING fix rung;
     // its claim re-read and shared strike cap remain the sole spending boundary. An operator
