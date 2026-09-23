@@ -110,7 +110,7 @@ test("planRatificationBatch: N ready proposals fold into ONE masterPlanMd, and e
   assert.equal(plan.masterPlanMd, expected);
 });
 
-test("planRatificationBatch: two ratification PRs filed together share no file — bulletless members leave MASTER-PLAN.md untouched by either (W1-T4350)", () => {
+test("planRatificationBatch: two disjoint batches planned off one base leave MASTER-PLAN.md byte-identical and name disjoint shards (W1-T4350)", () => {
   // Two DISJOINT batches, as if filed as two separate PRs off the same base. Neither proposal
   // has an existing MASTER-PLAN.md bullet, so W1-T4350's design means neither PR's diff touches
   // MASTER-PLAN.md at all — the only files either PR changes are its own shard(s), which are

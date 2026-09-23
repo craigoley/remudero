@@ -2565,9 +2565,10 @@ export function applyStampToMasterPlan(masterPlanMd: string, proposalId: string,
 // ── W1-T2471: RATIFY A BATCH — one branch, one commit, one MASTER-PLAN block, one PR ───────
 //
 // `approveProposal` ships ONE proposal per branch, commit, PR and review spawn, and PARALLEL single-approves cannot
-// fix that: `applyStampToMasterPlan` appends at EOF, so N branches off one base conflict pairwise on merge
+// fix that: `applyStampToMasterPlan` appended at EOF, so N branches off one base conflicted pairwise on merge
 // (measured). Folding N stamps SEQUENTIALLY through ONE accumulator leaves only one branch to conflict on, over an
-// EXPLICIT, ORDERED set the caller names.
+// EXPLICIT, ORDERED set the caller names. (W1-T4350 has since stopped the EOF append itself; the fold remains for
+// the bullet-replace case and for one-commit, one-PR batching.)
 
 /** One batch member that did NOT reach `accepted`, carrying its OWN reason — the ordinary {@link refusalReason}, or a
  *  duplicate refusal against an earlier-accepted member of this batch. */
