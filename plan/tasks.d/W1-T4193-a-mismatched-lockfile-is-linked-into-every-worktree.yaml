@@ -1,0 +1,41 @@
+- id: W1-T4193
+  title: "A WORKTREE WHOSE LOCKFILE DIFFERS FROM THE CANONICAL node_modules IS LINKED ANYWAY — linkWorktreeNodeModules detects the mismatch, warns and returns linked-lockfile-mismatch, and worktreeAdd ignores the result, so a worker's proofs run against dependencies its own commit never asked for (four feedback reports from core, site and console): refuse the dispatch on a mismatch, and never link a satellite repo's worktree to the core install's node_modules"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789309767852-219d98"
+  plan_refs: ["W1-T2777", "W1-T2716"]
+  files: [src/lib/worker.ts, test/worktree-node-modules-lockfile-mismatch.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: `linkWorktreeNodeModules` (src/lib/worker.ts ~3395-3411) hashes package.json/package-lock.json, warns
+    on a mismatch and returns "linked-lockfile-mismatch"; its caller `worktreeAdd` (~3993) discards the return value.
+    OBSERVED: `resolveNodeModulesSource` (~3330) falls back to the install root's node_modules when the target repo has
+    none, so a console or site worktree is linked to CORE's dependency tree.
+    OBSERVED: W1-T2777 (#3818) shipped detection only and says so ("THIS TASK DOES NOT TOUCH REFRESH"); W1-T2716's
+    refuse-or-park design was retired as overtaken by it. So the refusal half was never built.
+
+    ALSO REPORTED AS: fb-1789315360491-ff460c, fb-1789328946438-96e9b7, fb-1790038102980-5f225f.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): high.
+  design: |
+    (i) A lockfile mismatch at worktree creation is a refusal the dispatcher sees, not a warning: the run records a
+        named outcome and does not spawn the worker. (ii) A repo whose own checkout has no node_modules is never linked to
+        the install root's tree; it is refused with the same outcome. (iii) Never run `npm ci`/`npm install` inside the
+        worktree: the node_modules symlink is shared and an install's clear phase empties it (the plan header's binding
+        rule). Refreshing the canonical checkout is the remedy, and the refusal names it.
+  acceptance:
+    - claim: "a lockfile mismatch refuses the worktree instead of linking it"
+      proof: 'grep: test("W1-T4193: a lockfile mismatch refuses the worktree instead of linking it" in test/worktree-node-modules-lockfile-mismatch.test.ts'
+    - claim: "a repo with no node_modules of its own is never linked to the install roots tree"
+      proof: 'grep: test("W1-T4193: a repo with no node_modules of its own is never linked to the install roots tree" in test/worktree-node-modules-lockfile-mismatch.test.ts'

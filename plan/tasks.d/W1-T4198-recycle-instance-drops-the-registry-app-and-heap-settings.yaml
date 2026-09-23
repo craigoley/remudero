@@ -1,0 +1,36 @@
+- id: W1-T4198
+  title: "recycle --instance VALIDATES THE REGISTRY'S gh_app_* AND max_old_space_mb FIELDS AND THEN DISCARDS THEM, so a fresh instance boots with no GitHub App identity and no heap setting until an operator supplies them by hand: pass them into the container environment"
+  repo: remudero
+  depends_on: [W1-T4197]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789348698577-6e864f"
+  plan_refs: ["W1-T4197"]
+  files: [deploy/recycle-container.sh, test/recycle-container.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: deploy/recycle-container.sh (~205) matches max_old_space_mb and the three gh_app_* registry fields to a
+    no-op arm (`: ;;`). They are validated and dropped; nothing exports them as GH_APP_* or NODE_OPTIONS. No plan record
+    names these fields.
+
+    W1-T4197, W1-T4198 and W1-T4199 all edit deploy/recycle-container.sh and its suite, so they are chained by depends_on to be built one after another rather than as conflicting PRs.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) Each validated registry field reaches the container in the form the runtime already reads (the GitHub App id,
+        installation id and key path variables, and --max-old-space-size inside NODE_OPTIONS). (ii) An absent optional
+        field changes nothing; a present one is never silently ignored.
+  acceptance:
+    - claim: "an instances app fields reach the container environment"
+      proof: 'grep: test("W1-T4198: an instances app fields reach the container environment" in test/recycle-container.test.ts'
+    - claim: "an instances heap size reaches NODE_OPTIONS"
+      proof: 'grep: test("W1-T4198: an instances heap size reaches NODE_OPTIONS" in test/recycle-container.test.ts'

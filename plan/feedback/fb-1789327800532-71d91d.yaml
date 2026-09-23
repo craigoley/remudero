@@ -14,9 +14,9 @@ raw: "PORTAL DATA-PLANE BLOCKER: PR #14 is intentionally draft. Its merged
   portal adapter task; do not guess endpoint names or payload fields again."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

@@ -146,6 +146,7 @@ import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./li
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
@@ -882,6 +883,13 @@ import {
   type WipeTestCadenceRunResult,
 } from "./lib/measurement-cadence.js";
 import {
+  routedModelIdsFromCheckout,
+  watchSuccessorModels,
+  type SuccessorAlert,
+  type SuccessorWatchOptions,
+  type SuccessorWatchReading,
+} from "./lib/model-availability.js";
+import {
   judgeCiLessonEfficacy,
   readFiledCiLessons,
   summarizeCiLessonRecurrences,
@@ -1310,6 +1318,8 @@ import {
   type EscalationReconcileSummary,
   type FixClass,
   type FixDispatchEvidence,
+  type FixDispatchSnapshot,
+  type FixSuperseded,
   type InstrumentEntanglementPaths,
   type LiveStateResult,
   type MemoryGovernorResult,
@@ -7158,6 +7168,7 @@ export interface FixRungOutcome {
    * with a second reason source — see {@link branchAuthorshipStandDownReason}.
    */
   standDownReason?: string;
+  superseded?: FixSuperseded;
   /**
    * W1-T1095: set only when `outcome === "parked"` — the prerequisite PR number
    * {@link outOfDiffBlockerFor} found. The rung spent ZERO strikes reaching this outcome
@@ -8441,12 +8452,15 @@ async function spawnFixWorkerBounded(
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     spawnWallClockBoundMs?: number;
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
   args: SpawnWorkerArgs,
-  ctx: { runId: string; taskId: string },
+  ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot },
 ): Promise<
-  { kind: "spawned"; result: WorkerResult; elapsedMs: number } | { kind: "abandoned"; elapsedMs: number }
+  | { kind: "spawned"; result: WorkerResult; elapsedMs: number }
+  | { kind: "abandoned"; elapsedMs: number }
+  | { kind: "superseded"; elapsedMs: number; superseded: FixSuperseded }
 > {
   // W1-T1219: this bound is the FIX-RUNG SPAWN's own — see `fixSpawnWallClockBoundMs`'s own
   // plan/policy.yaml row for why it is no longer `sweepWallClockBoundMs` (the sweep-tick bound,
@@ -8459,17 +8473,39 @@ async function spawnFixWorkerBounded(
   const bound = new Promise<"abandoned">((resolve) => {
     timer = setTimeout(() => resolve("abandoned"), boundMs);
   });
+  // W1-T4105: a third arm, the PR moving on, stops the worker through the same record-then-reclaim path.
+  const watchStop = new AbortController();
+  const superseded =
+    deps.watchSuperseded && ctx.snapshot?.headSha
+      ? deps.watchSuperseded(ctx.snapshot, watchStop.signal).then(
+          (s) => (s ? { superseded: s } : new Promise<never>(() => {})),
+          () => new Promise<never>(() => {}),
+        )
+      : new Promise<never>(() => {});
   try {
-    const winner = await Promise.race([spawnPromise, bound]);
-    if (winner === "abandoned") {
+    const winner = await Promise.race([spawnPromise, bound, superseded]);
+    if (winner === "abandoned" || "superseded" in winner) {
       const elapsedMs = Date.now() - startedAt;
-      deps.log("fix.spawn_abandoned", {
-        run_id: ctx.runId,
-        task_id: ctx.taskId,
-        elapsed_ms: elapsedMs,
-        bound_ms: boundMs,
-        reason: "spawn wall-clock bound exceeded",
-      });
+      if (winner === "abandoned") {
+        deps.log("fix.spawn_abandoned", {
+          run_id: ctx.runId,
+          task_id: ctx.taskId,
+          elapsed_ms: elapsedMs,
+          bound_ms: boundMs,
+          reason: "spawn wall-clock bound exceeded",
+        });
+      } else {
+        deps.log("fix.superseded", {
+          run_id: ctx.runId,
+          task_id: ctx.taskId,
+          condition: winner.superseded.condition,
+          old_head: winner.superseded.oldHead,
+          new_head: winner.superseded.newHead,
+          elapsed_ms: elapsedMs,
+          worktree_path: args.cwd,
+          strike_spent: false,
+        });
+      }
       try {
         await deps.reclaimWorker?.({ runId: ctx.runId, taskId: ctx.taskId, elapsedMs });
       } catch (e) {
@@ -8479,8 +8515,7 @@ async function spawnFixWorkerBounded(
           error: String((e as Error)?.message ?? e),
         });
       }
-      // Never leave the real spawn's eventual outcome unhandled — it may still resolve or
-      // throw well after this rung has moved on (returned `spawn_abandoned` to its caller).
+      // The real spawn may settle long after this rung moved on; never leave that unhandled.
       spawnPromise.then(
         () => {},
         (e) => {
@@ -8491,11 +8526,12 @@ async function spawnFixWorkerBounded(
           });
         },
       );
-      return { kind: "abandoned", elapsedMs };
+      return winner === "abandoned" ? { kind: "abandoned", elapsedMs } : { kind: "superseded", elapsedMs, superseded: winner.superseded };
     }
     return { kind: "spawned", result: winner, elapsedMs: Date.now() - startedAt };
   } finally {
     if (timer) clearTimeout(timer);
+    watchStop.abort();
   }
 }
 
@@ -8967,6 +9003,7 @@ export async function runFixRung(opts: {
      * precondition for it.
      */
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
     /**
      * W1-T1095 (capability 1's resume half): an OPTIONAL fresh live-state read of an
      * ARBITRARY prerequisite PR number (never `opts.prUrl` itself) — consulted ONLY when
@@ -10239,7 +10276,17 @@ export async function runFixRung(opts: {
     try {
       // W1-T1044: bounds this ONE spawn by wall-clock elapsed time — see
       // spawnFixWorkerBounded's own doc for the measured incident this closes.
-      const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, { runId: opts.runId, taskId: opts.taskId });
+      const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, {
+        runId: opts.runId,
+        taskId: opts.taskId,
+        snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
+      });
+      if (spawnOutcome.kind === "superseded") {
+        const s = spawnOutcome.superseded;
+        const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
+        deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s };
+      }
       if (spawnOutcome.kind === "abandoned") {
         deps.say(
           `fix rung: ABANDONED strike ${attempt}/${opts.strikeCap} — worker spawn exceeded its ` +
@@ -24957,6 +25004,35 @@ export async function defaultVerifyHumanCadenceResult(
  * ledger/state this cadence reads and the git history it joins against both live under THIS
  * process's own `config.root`/`repoRoot`, never a drained target's.
  */
+export function buildSuccessorAlertHandler(opts: {
+  ledgerPath: string;
+  runId: string;
+  successorEscalate?: typeof tryEscalate;
+  resolveOwnerRepo?: typeof resolveOwnerRepo;
+  issueGateway?: typeof ghIssueGateway;
+}): (alert: SuccessorAlert) => string | null {
+  const resolveTarget = opts.resolveOwnerRepo ?? resolveOwnerRepo;
+  const createIssueGateway = opts.issueGateway ?? ghIssueGateway;
+  const escalateSuccessor = opts.successorEscalate ?? tryEscalate;
+  return (alert: SuccessorAlert) => {
+    const { owner, repo } = resolveTarget();
+    return escalateSuccessor(
+      {
+        class: "MANUAL",
+        taskId: "MODEL-CATALOG",
+        summary: `Successor model ${alert.model} is ${alert.state}`,
+        detail:
+          `${alert.model} is a higher-generation ${alert.family} successor observed in ${alert.sources.join(" and ")}. ` +
+          `The next step is: ${alert.nextStep}. ${alert.gated ? "This family is human-gated and is never proposed for automatic routing." : ""}`,
+        options: [{ label: "Review successor model", detail: alert.nextStep }],
+        recommendation: "Review successor model",
+        consequence: "Without a decision, the current routing remains unchanged.",
+      },
+      { issues: createIssueGateway(owner, repo), ledgerPath: opts.ledgerPath, runId: opts.runId },
+    );
+  };
+}
+
 export function buildMeasurementCadenceDaemonHooks(deps: {
   check?: () => MeasurementCadenceDecision;
   run?: () => Promise<MeasurementCadenceRunResult>;
@@ -24975,6 +25051,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   /** W1-T3970: keep the production credit read injectable so offline cadence fixtures do not
    * accidentally shell out to the live GitHub projection. */
   creditedMergedIds?: () => ReadonlySet<string>;
+  successorWatch?: (opts: SuccessorWatchOptions) => Promise<SuccessorWatchReading>;
+  /** Keep the production escalation path injectable so cadence fixtures never create GitHub issues. */
+  successorEscalate?: typeof tryEscalate;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -25014,6 +25093,28 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
       const verifyHuman = await defaultVerifyHumanCadenceResult(repoRoot, configFor(), verifyHumanRunId, cadenceClock);
+      const successorRunId = `MODEL-SUCCESSOR-CADENCE-${cadenceClock.now()}`;
+      const successorLedgerPath = ledgerPathFor(configFor());
+      const successorWatch = deps.successorWatch ?? ((opts: SuccessorWatchOptions) => watchSuccessorModels(opts));
+      const successorWatchReading = await successorWatch({
+        config: configFor(),
+        routedModels: routedModelIdsFromCheckout(repoRoot),
+        statePath: join(root, "state", "model-successor-watch.json"),
+        now: () => cadenceClock.date(),
+        ledger: (row) => appendLedger(successorLedgerPath, {
+          run_id: successorRunId,
+          task_id: "MODEL-CATALOG",
+          lane: "measurement-cadence",
+          ...row,
+        } as LedgerLine),
+        alert: policyFor().values.measurementCadence.escalate
+          ? buildSuccessorAlertHandler({
+              ledgerPath: successorLedgerPath,
+              runId: successorRunId,
+              successorEscalate: deps.successorEscalate,
+            })
+          : undefined,
+      });
       // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
       // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
       // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
@@ -25030,7 +25131,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       const planReconcileOption =
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
-      return runMeasurementCadenceReport({
+      const report = runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,
@@ -25053,6 +25154,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         },
         verifyHuman,
       });
+      return { ...report, successorWatch: successorWatchReading };
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
 }
@@ -29760,6 +29862,72 @@ export function logLearningsUsed(
   if (usagePath) recordLearningUsage(usagePath, row);
 }
 
+export function memoryLintCommand(rest: string[]): number {
+  const out = (line: string) => console.log(line);
+  const fix = rest.includes("--fix");
+  const mergeAt = rest.indexOf("--merge");
+  const mergeFrom = mergeAt >= 0 ? rest[mergeAt + 1] : undefined;
+  const dirs = rest.filter((a, i) => !a.startsWith("--") && !(mergeAt >= 0 && i === mergeAt + 1));
+  if (dirs.length === 0 || (mergeAt >= 0 && !mergeFrom)) {
+    out("usage: rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...");
+    return 2;
+  }
+  const corpus = memoryLintCorpus(repoRoot);
+  if (mergeFrom) {
+    const { moved } = mergeMemoryDirs(mergeFrom, dirs[0]!);
+    out(`merged ${moved.length} memories from ${mergeFrom} into ${dirs[0]}`);
+  }
+  let findings = 0;
+  for (const dir of dirs) {
+    if (fix) {
+      const { removed, added } = fixMemoryDir(dir);
+      out(`fixed ${dir}: removed ${removed.length} dangling index lines, listed ${added.length} files`);
+    }
+    const report = lintMemoryDir(dir, corpus);
+    findings += report.dangling.length + report.unlisted.length + report.missingFrontmatter.length + report.duplicates.length + (report.index.load === "ok" ? 0 : 1);
+    out(renderMemoryLint(report));
+  }
+  return findings > 0 && !fix ? 1 : 0;
+}
+
+export function memoryLintCorpus(root: string): KnowledgeText[] {
+  const corpus: KnowledgeText[] = [];
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, ent.name);
+      if (ent.isDirectory()) walk(path);
+      else if (ent.isFile() && ent.name.endsWith(".md")) corpus.push({ id: relative(root, path), text: readFileSync(path, "utf8") });
+    }
+  };
+  walk(join(root, "doctrine"));
+  if (existsSync(join(root, "learnings"))) {
+    for (const e of loadLearningsCorpus(join(root, "learnings"))) corpus.push({ id: `learnings#${e.id}`, text: e.fact });
+  }
+  return corpus;
+}
+
+export function plainInboxWriter(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): SummarizeDeps["summarize"] | undefined {
+  try {
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "inbox-plain-settings.json"),
+    });
+    return realDecisionSummarizer({
+      mount: resolveDecisionSummaryMount(loadMounts(mountsPath(repoRoot))),
+      cwd: config.root,
+      settingsFile,
+    });
+  } catch (e) {
+    log("inbox.plain_writer_unavailable", { error: String((e as Error)?.message ?? e) });
+    return undefined;
+  }
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -30717,6 +30885,11 @@ export async function daemonCommand(
         // authority -- an action request is never a bypass.
         pendingPrActions: () => pendingPrActions(config.root),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
+        plainBackfill: {
+          stateDir: join(config.root, "state"),
+          readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
+          summarize: plainInboxWriter(config, log),
+        },
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];
           const exitCode = request.action === "fix"
@@ -43388,6 +43561,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set.",
   },
   {
+    name: "memory-lint",
+    syntax: "rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...",
+    summary: "Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.",
+    detail: "W1-T4098: reads each <memory-dir> (a Claude Code auto-memory directory holding MEMORY.md and one file per memory) and reports index lines whose link target is gone, memory files the index does not list, files without a name/description frontmatter block, the index's size against Claude Code's load limit (200 lines / about 25 KB), and memories whose phrasing repeats a doctrine rule or a learning in this repo. --fix makes only safe index edits (moves dangling lines to MEMORY.archive.md, lists unlisted files) and never deletes a memory file. --merge <from-dir> moves every memory from <from-dir> into the first <memory-dir> and rebuilds both indexes. Exits non-zero when anything is reported and --fix was not given.",
+  },
+  {
     name: "ledger-grep",
     syntax: "rmd ledger-grep <pattern>",
     summary: "Grep the deduplicated union of every ledger archive and the live ledger file.",
@@ -44316,6 +44495,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => checkProofCommand(rest)],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
   ["ci-failures", (rest) => ciFailuresCommand(rest)],

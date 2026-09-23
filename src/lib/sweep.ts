@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -19,6 +20,7 @@ import { gitPushEmptyCommit, gitPushRunBranch, LanePushForeignHeadError } from "
 import { ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger } from "./ledger.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -929,6 +931,8 @@ export interface BuildSweepEffectsDeps {
   captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void;
   ghRunImpl?: (file: string, args: readonly string[]) => void;
   spawnWallClockBoundMsOverride?: number;
+  /** W1-T4105: how often a running fix worker's PR is re-read; defaults to the daemon poll pace. */
+  fixSupersededPollMsOverride?: number;
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[]) => Promise<unknown>;
@@ -1299,6 +1303,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     captureRepairFeedbackImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["captureRepairFeedbackImpl"]>>("captureRepairFeedbackImpl"),
     ghRunImpl = defaultSweepGhRun,
     spawnWallClockBoundMsOverride,
+    fixSupersededPollMsOverride,
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
     readJsonImpl = ghJsonAsync,
@@ -2084,6 +2089,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     dispatchFix: async (pr, evidence) => {
       let worktreePath = "";
+      let keepWorktree = false;
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
       // this round's whole checkout→commit→push window (acquired just before the worktree is
       // created, released once `runFixRung` returns/throws), never a narrower slice.
@@ -2532,7 +2538,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         const budgetUsd = task.budget_usd ?? defaultBudgetUsd;
 
-        await runFixRung({
+        const fixWorktree = worktreePath;
+        const rung = await runFixRung({
           ...buildFixRungDispatchArgs({
             task,
             runId,
@@ -2648,6 +2655,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             // wall-clock bound + best-effort reclaim close it here.
             spawnWallClockBoundMs,
             reclaimWorker: reclaimWorkerImpl,
+            // W1-T4105: the sweep is parked while this worker runs, so the watch keeps its cadence.
+            watchSuperseded: (snapshot: FixDispatchSnapshot, signal: AbortSignal) =>
+              watchFixSuperseded({
+                snapshot,
+                signal,
+                intervalMs: fixSupersededPollMsOverride ?? DEFAULT_POLL_INTERVAL_MS,
+                read: async () => {
+                  const v = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefOid,statusCheckRollup"]) as {
+                    headRefOid?: string;
+                    statusCheckRollup?: RollupCheck[];
+                  };
+                  return { headSha: v.headRefOid, rollup: v.statusCheckRollup };
+                },
+                isWorkerHead: (sha: string) => headIsInWorktree(fixWorktree, sha),
+                log: (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, pr_number: pr.prNumber, ...extra }),
+              }),
             // W1-T1284: same LOCAL worktree reader as the run-loop call site above — see that
             // site's own comment.
             captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
@@ -2660,6 +2683,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             packageScripts: readPackageScriptsFor(worktreePath),
           },
         });
+        keepWorktree = rung?.superseded !== undefined;
       } catch (e) {
         // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
         // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
@@ -2678,9 +2702,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // it does today.
         if (outcome.rethrow) throw e;
       } finally {
-        if (worktreePath) {
+        // W1-T4105: a superseded worker's worktree is kept for diagnosis.
+        if (worktreePath && !keepWorktree) {
           try {
-            worktreeRemove(repoDir, worktreePath);
+            worktreeRemoveForBuild(repoDir, worktreePath);
           } catch {
             /* best-effort cleanup */
           }
@@ -3916,6 +3941,76 @@ export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: 
     if (!prior || (c.startedAt ?? "") >= (prior.startedAt ?? "")) latest.set(key, c);
   }
   return [...latest.values()];
+}
+
+/** W1-T4105 — what a fix worker was sent against: the PR head and the check(s) it must fix. */
+export interface FixDispatchSnapshot {
+  headSha: string;
+  failingChecks: readonly string[];
+}
+
+export interface FixSuperseded {
+  kind: "superseded";
+  condition: "head-moved" | "check-green";
+  oldHead: string;
+  newHead: string;
+}
+
+export type FixSupersededDecision = FixSuperseded | { kind: "continue" } | { kind: "unknown"; reason: string };
+
+/** W1-T4105 — PURE: is a running fix worker's target gone? A head the worker's own worktree already
+ *  holds is its own push, never a supersession; an unreadable head is `unknown`, never a stop. */
+export function decideFixSuperseded(
+  snapshot: FixDispatchSnapshot,
+  observed: { headSha?: string; rollup?: readonly RollupCheckEntry[]; error?: string },
+  isWorkerHead: (sha: string) => boolean,
+): FixSupersededDecision {
+  const head = observed.headSha;
+  if (!head) return { kind: "unknown", reason: observed.error ?? "PR head missing from the read" };
+  if (head !== snapshot.headSha) {
+    if (isWorkerHead(head)) return { kind: "continue" };
+    return { kind: "superseded", condition: "head-moved", oldHead: snapshot.headSha, newHead: head };
+  }
+  if (snapshot.failingChecks.length === 0) return { kind: "continue" };
+  const latest = dedupeRollupByLatestAttempt(observed.rollup ?? []);
+  const green = snapshot.failingChecks.every((name) =>
+    latest.some((c) => (c.name ?? c.context) === name && REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())),
+  );
+  return green ? { kind: "superseded", condition: "check-green", oldHead: head, newHead: head } : { kind: "continue" };
+}
+
+/** W1-T4105 — true when `sha` is already in the fix worktree's own history (the worker pushed it). */
+export function headIsInWorktree(worktreePath: string, sha: string): boolean {
+  try {
+    execFileSync("git", ["-C", worktreePath, "merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
+    return true;
+  } catch {
+    // Not an ancestor (exit 1) or unreadable: either way not provably the worker's own push.
+    return false;
+  }
+}
+
+/** W1-T4105 — while a fix worker runs, one PR read per `intervalMs` (the sweep's own poll cadence,
+ *  which the synchronous worker otherwise parks). Resolves on supersession; `undefined` once aborted. */
+export async function watchFixSuperseded(w: {
+  snapshot: FixDispatchSnapshot;
+  signal: AbortSignal;
+  intervalMs: number;
+  read: () => Promise<{ headSha?: string; rollup?: RollupCheckEntry[] }>;
+  isWorkerHead: (sha: string) => boolean;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): Promise<FixSuperseded | undefined> {
+  while (!w.signal.aborted) {
+    await delay(w.intervalMs, undefined, { signal: w.signal }).catch(() => /* aborted: the loop re-checks the signal */ undefined);
+    if (w.signal.aborted) return undefined;
+    const observed = await w.read().catch((e: unknown) => ({ error: String((e as Error)?.message ?? e) }));
+    const decision = decideFixSuperseded(w.snapshot, observed, w.isWorkerHead);
+    if (decision.kind === "superseded") return decision;
+    if (decision.kind === "unknown") {
+      w.log("fix.superseded_unknown", { old_head: w.snapshot.headSha, reason: decision.reason, worker: "left running" });
+    }
+  }
+  return undefined;
 }
 
 /** Aggregate ONLY the REQUIRED contexts into `checksState` (W1-T103). `requiredContexts` is branch

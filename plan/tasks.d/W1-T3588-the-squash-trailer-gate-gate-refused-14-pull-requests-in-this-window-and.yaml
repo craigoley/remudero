@@ -5,9 +5,10 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing: W1-T3594 carries the same origin and landed first (W1-T4190).
   attempts: 0
-  author_class: machine
   origin: "ci-learning:5433:squash-trailer-gate"
   ci_learning_prs: [5433, 5441, 5445, 5454, 5520, 5538, 5545, 5549, 5550, 5552, 5559, 5562, 5564, 5571]
   files:

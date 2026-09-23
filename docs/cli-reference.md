@@ -32,6 +32,7 @@ usage:
   rmd authority [--json]   # Every external write the fleet may make without the operator, its gate, and its last firing.
   rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
+  rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
@@ -279,6 +280,16 @@ rmd reap-branches [--prune]
 ```
 
 W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set.
+
+### `rmd memory-lint`
+
+Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
+
+```
+rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...
+```
+
+W1-T4098: reads each <memory-dir> (a Claude Code auto-memory directory holding MEMORY.md and one file per memory) and reports index lines whose link target is gone, memory files the index does not list, files without a name/description frontmatter block, the index's size against Claude Code's load limit (200 lines / about 25 KB), and memories whose phrasing repeats a doctrine rule or a learning in this repo. --fix makes only safe index edits (moves dangling lines to MEMORY.archive.md, lists unlisted files) and never deletes a memory file. --merge <from-dir> moves every memory from <from-dir> into the first <memory-dir> and rebuilds both indexes. Exits non-zero when anything is reported and --fix was not given.
 
 ### `rmd ledger-grep`
 

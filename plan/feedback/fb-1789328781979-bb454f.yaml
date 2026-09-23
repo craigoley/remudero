@@ -12,9 +12,9 @@ raw: "FEEDBACK LANDING REQUIRED-REVIEW GAP: Core PR #5438 was a feedback landing
   leaves it open with a reason."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6492
 summary: null
 expansion: null
 submission_key: null

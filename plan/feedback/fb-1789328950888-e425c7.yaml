@@ -14,9 +14,9 @@ raw: "PR LIFECYCLE AFTER AUTO MERGE ARMING: Site PR 11 had auto merge armed but
   pending review does not consume a fix strike."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5571
 summary: null
 expansion: null
 submission_key: null

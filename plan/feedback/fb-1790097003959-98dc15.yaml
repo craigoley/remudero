@@ -3,9 +3,9 @@ ts: 2026-09-22T17:10:03.959Z
 raw: "A RUN-SHAPED HEAD REF IS ITSELF A TASK-IDENTITY SURFACE, AND THE GATE'S REMEDY TEXT DOES NOT SAY SO — so a plan-only filing on a `run-<id>-<epoch>` branch is judged against the shard's IMPLEMENTATION criteria and cannot be repaired in place. Observed 2026-09-22 on PR 6548. The trailer had already been removed from the body, which is what the refusal asked for, and the reviewer still resolved W1-T4025 and graded the filing against criteria naming tests that cannot exist in a plan-only diff. CONFIRMED INDEPENDENTLY the same day: head-identity-gate reports \"identified on both surfaces: the head commit's Remudero-Task trailer and its run-shaped head ref\", so the branch name is a first-class identity surface by design, not an accident. THE REPAIR IS NOT AVAILABLE IN PLACE: GitHub cannot rename an open PR's head branch, so the only exit is to push the same commit to a `file-*` branch, open a new PR and close the old one — which is what was done (6548 closed, 6558 opened and merged). CANDIDATE REMEDIES, CHEAP FIRST. (a) NAME THE HEAD REF IN THE REFUSAL alongside the trailer, so an author learns both surfaces at once instead of discovering the second after fixing the first. Pure text. (b) CHECK IT AT AUTHOR TIME: a plan-only diff pushed to a run-shaped branch is mechanically detectable before CI spends anything — the pre-push gates already read the branch name (worker-branch-shape, head-identity-gate). (c) Treat a plan-only DIFF as overriding the branch-derived identity, so a filing is judged as a filing whatever branch carries it; this changes what the reviewer judges and needs a ruling rather than a patch. FALSIFYING CHECK: push a plan-only shard edit to a `run-<existing-task-id>-<epoch>` branch with no trailer anywhere; if the review gates it deterministically as plan-only, the branch is not being read as identity and this report is wrong."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

@@ -545,11 +545,21 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ] && [ "${REPLACE}" -ne 1 ] && [ "${DRY_RUN}" -
   exit 1
 fi
 
+RESOURCE_POLICY_SERVE_ARGS=() # W1-T4102: serve's host share; see deploy/resource-policy.sh
+if [ -f "${SCRIPT_ROOT}/deploy/resource-policy.sh" ]; then
+  . "${SCRIPT_ROOT}/deploy/resource-policy.sh"
+  resource_policy_serve_args
+  echo "serve-container: resource policy — ${RESOURCE_POLICY_NOTE}"
+else
+  echo "serve-container: resource policy NOT applied — ${SCRIPT_ROOT}/deploy/resource-policy.sh is absent"
+fi
+
 RUN_ARGS=(
   run -d --name "${CONTAINER_NAME}"
   --restart=unless-stopped
   --network "${NETWORK}"
   --user 1000:1000
+  "${RESOURCE_POLICY_SERVE_ARGS[@]+"${RESOURCE_POLICY_SERVE_ARGS[@]}"}"
   -e GH_TOKEN
   -e GH_APP_ID
   -e GH_APP_INSTALLATION_ID

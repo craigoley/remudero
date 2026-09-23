@@ -1,0 +1,34 @@
+- id: W1-T4200
+  title: "AN OPERATOR'S DEPLOY MARKER IS NEVER HONOURED ON THE WATCHDOG'S IMAGE-DRIFT-ONLY TICK — decideDeployTrigger returns before it reads the marker whenever the image is current, and the launcher always passes --image-drift-only, so `rmd deploy` writes a request only a hand-run deploy-run can act on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789313854640-76360d"
+  plan_refs: []
+  files: [src/lib/deployer.ts, test/deployer.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: deploy/install-host-units.sh (~486) always calls `deploy-run --image-drift-only`. In
+    `decideDeployTrigger` (src/lib/deployer.ts) restart reasons are forced false under imageDriftOnly (~457), and when the
+    image is not stale the function returns (~496-530) before the marker check (~532). W1-T3694 (#5848) only named the
+    stale-daemon blocker.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) A present operator marker is read before the drift-only early return and routes to the full guarded deploy
+        path, with the same guards an unmarked full deploy has. (ii) A drift-only tick with no marker is unchanged.
+  acceptance:
+    - claim: "an operator marker reaches the guarded deploy path on a drift-only tick"
+      proof: 'grep: test("W1-T4200: an operator marker reaches the guarded deploy path on a drift-only tick" in test/deployer.test.ts'
+    - claim: "a drift-only tick with no marker still returns early"
+      proof: 'grep: test("W1-T4200: a drift-only tick with no marker still returns early" in test/deployer.test.ts'

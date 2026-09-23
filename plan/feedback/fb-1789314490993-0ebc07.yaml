@@ -16,9 +16,9 @@ raw: "Deploy supervisor install-root topology is not commissioned on Azure.
   lifecycle executor."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6257
 summary: null
 expansion: null
 submission_key: null

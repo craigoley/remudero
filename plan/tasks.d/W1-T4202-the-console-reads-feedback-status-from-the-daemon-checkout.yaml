@@ -1,0 +1,35 @@
+- id: W1-T4202
+  title: "THE CONSOLE'S GRILL-REPLY ROUTE READS FEEDBACK STATUS FROM THE DAEMON'S OWN CHECKOUT, NOT THE CANONICAL PLAN, so a status already on main is refused as `not parked at grilling` and the only in-console answer path breaks: read the entry from fetched origin/main (or the managed target) first"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789961623033-1a6238"
+  plan_refs: []
+  files: [src/lib/panel-graph.ts, test/panel-graph.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: serveCommand passes `panelGraph: { root: repoRoot }` (src/run-task.ts ~32205), the daemon's own checkout.
+    The reply route reads `readFeedbackEntry(deps.root, replyTo)` and refuses unless status is "grilling"
+    (src/lib/panel-graph.ts ~303-312). Nothing makes it read the managed target or origin/main.
+    W1-T3562, W1-T3560 and W1-T2749 handle landing and split-root records, not serve's read root.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) The reply route resolves the entry's current status from the canonical source feedback landing writes to
+        (fetched origin/main's blob, or the managed target) and falls back to the checkout only when that read fails,
+        saying so in the refusal. (ii) A reply to an entry that really is not grilling is still refused.
+  acceptance:
+    - claim: "a grill reply is accepted when main has the entry at grilling and the checkout lags"
+      proof: 'grep: test("W1-T4202: a grill reply is accepted when main has the entry at grilling and the checkout lags" in test/panel-graph.test.ts'
+    - claim: "a reply to an entry not at grilling is still refused"
+      proof: 'grep: test("W1-T4202: a reply to an entry not at grilling is still refused" in test/panel-graph.test.ts'

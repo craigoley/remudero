@@ -239,6 +239,11 @@
     "dateNow": 0,
     "newDate": 4
   },
+  "src/lib/model-availability.ts": {
+    "legacy": 1,
+    "dateNow": 0,
+    "newDate": 0
+  },
   "src/lib/onboard/inventory.ts": {
     "legacy": 1,
     "dateNow": 0,

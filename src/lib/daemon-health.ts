@@ -40,10 +40,12 @@
  * (daemon.ts), not from this route.
  */
 
-import { statfsSync } from "node:fs";
+import { readFileSync, statfsSync } from "node:fs";
+import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
+import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
@@ -308,6 +310,88 @@ export function ghRateLimitWindow(
   return end;
 }
 
+/** One `/proc/pressure/<resource>` reading (percent of wall time). */
+export interface PressureReading {
+  someAvg10: number;
+  someAvg60: number;
+  fullAvg10?: number;
+}
+
+/** W1-T4102: the HOST's pressure (also inside a container); `"unknown"`, never zero, when unreadable. */
+export type HostPressure = Record<"cpu" | "io" | "memory", PressureReading | "unknown">;
+
+export function parsePressure(text: string): PressureReading | undefined {
+  const field = (line: string | undefined, key: string): number | undefined => {
+    const m = line?.match(new RegExp(`\\b${key}=([0-9.]+)`));
+    return m ? Number(m[1]) : undefined;
+  };
+  const lines = text.split("\n");
+  const some = lines.find((l) => l.startsWith("some "));
+  const full = lines.find((l) => l.startsWith("full "));
+  const someAvg10 = field(some, "avg10");
+  const someAvg60 = field(some, "avg60");
+  if (someAvg10 === undefined || someAvg60 === undefined) return undefined;
+  const fullAvg10 = field(full, "avg10");
+  return fullAvg10 === undefined ? { someAvg10, someAvg60 } : { someAvg10, someAvg60, fullAvg10 };
+}
+
+export function readHostPressure(read: (path: string) => string = (path) => readFileSync(path, "utf8")): HostPressure {
+  const one = (resource: string): PressureReading | "unknown" => {
+    try {
+      return parsePressure(read(`/proc/pressure/${resource}`)) ?? "unknown";
+    } catch {
+      // Deliberate: no PSI or a hidden /proc is "unknown", not idle.
+      return "unknown";
+    }
+  };
+  return { cpu: one("cpu"), io: one("io"), memory: one("memory") };
+}
+
+/** W1-T4102: serve's own event-loop blocking (a bare 401 took 1-20 s on 2026-09-23). */
+export interface EventLoopLag {
+  p50Ms: number;
+  p99Ms: number;
+  maxMs: number;
+  windowMs: number;
+}
+
+const LAG_WINDOW_MS = 60_000;
+
+/** A rolling one-minute `monitorEventLoopDelay` window, started on first read. */
+export function createEventLoopLagMonitor(
+  clock: Clock = systemClock,
+  histogram: () => IntervalHistogram = () => monitorEventLoopDelay({ resolution: 20 }),
+): () => EventLoopLag | undefined {
+  let hist: IntervalHistogram | undefined;
+  let startedAt = 0;
+  return () => {
+    if (!hist) {
+      hist = histogram();
+      hist.enable();
+      startedAt = clock.now();
+      return undefined;
+    }
+    const ms = (ns: number) => Math.round(ns / 1e5) / 10;
+    const reading: EventLoopLag = {
+      p50Ms: ms(hist.percentile(50)),
+      p99Ms: ms(hist.percentile(99)),
+      maxMs: ms(hist.max),
+      windowMs: clock.now() - startedAt,
+    };
+    if (reading.windowMs >= LAG_WINDOW_MS) {
+      hist.reset();
+      startedAt = clock.now();
+    }
+    return hist.count === 0 && reading.maxMs === 0 ? undefined : reading;
+  };
+}
+
+let defaultLagMonitor: (() => EventLoopLag | undefined) | undefined;
+function defaultEventLoopLag(): EventLoopLag | undefined {
+  defaultLagMonitor ??= createEventLoopLagMonitor();
+  return defaultLagMonitor();
+}
+
 /** {@link buildDaemonHealthRoute}'s dependencies. */
 export interface DaemonHealthDeps {
   /** `<root>/state/ledger.ndjson` — the SAME ledger every other daemon-health/board reader tails. */
@@ -324,6 +408,8 @@ export interface DaemonHealthDeps {
   now?: () => number;
   /** Default poll interval when the winning `daemon.*` line carries none of its own. */
   defaultPollIntervalMs?: number;
+  eventLoopLag?: () => EventLoopLag | undefined;
+  hostPressure?: () => HostPressure;
 }
 
 /** `GET /v1/daemon-health`'s body — every field individually optional/absent (never a
@@ -338,6 +424,8 @@ export interface DaemonHealthSnapshot {
   nextPollAt?: string;
   diskFreeBytes?: number;
   rateLimitRemaining?: number;
+  eventLoopLag?: EventLoopLag;
+  hostPressure: HostPressure;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -364,6 +452,8 @@ export function buildDaemonHealthRoute(deps: DaemonHealthDeps): Route {
         nextPollAt: poll.lastPollTs ? new Date(Date.parse(poll.lastPollTs) + poll.pollIntervalMs).toISOString() : undefined,
         diskFreeBytes: readDiskFreeBytes(deps.diskPath, deps.statfs),
         rateLimitRemaining: readGhRateLimitRemaining(deps.exec),
+        eventLoopLag: (deps.eventLoopLag ?? defaultEventLoopLag)(),
+        hostPressure: (deps.hostPressure ?? readHostPressure)(),
       };
       sendJson(res, 200, body);
     },

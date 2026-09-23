@@ -11,9 +11,9 @@ raw: "Observed fix-ownership publication race on #5424: an active W1-T3529
   liveness/timeout rule."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

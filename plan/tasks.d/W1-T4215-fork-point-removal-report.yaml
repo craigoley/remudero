@@ -1,0 +1,28 @@
+- id: W1-T4215
+  title: "A BRANCH CAN SILENTLY DELETE WIRING THAT MAIN ADDED AFTER THE FORK POINT WHILE KEEPING THE TEST FOR IT, AND ONLY A FULL COVERAGE RUN NOTICES: report, without refusing, a branch that removes a symbol main added after its merge base"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1790092106955-e8b160"
+  plan_refs: []
+  files: [scripts/fork-point-removal-report.mjs, test/fork-point-removal-report.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: no detector for this exists in scripts/ or src/lib, and no plan record covers it. The report says CI
+    caught the incident and it was repaired (adf73e5b3), so this is a cheaper early signal, not a missing safety gate. Its
+    false-positive rate is unknown, which is why it reports and does not refuse.
+
+    VALUE (triage estimate): low.
+  design: |
+    (i) A report-only script lists exported symbols that main added after the branch's merge base and that the branch
+        diff removes. (ii) Run it on recent merged PRs first and record its false-positive rate before anything gates on it.
+  acceptance:
+    - claim: "a branch removing a symbol main added after the fork is reported"
+      proof: 'grep: test("W1-T4215: a branch removing a symbol main added after the fork is reported" in test/fork-point-removal-report.test.ts'

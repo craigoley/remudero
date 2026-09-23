@@ -1,0 +1,39 @@
+- id: W1-T4120
+  title: "THE APPROVALS PAGE NOW LISTS PENDING CONSEQUENCES BUT CANNOT DECIDE ONE — the console POSTs /v1/operator-agent/consequences/decision, which core does not serve, and core records no decision; serve a nonce-confirmed approve/refuse that ledgers a receipt and clears the item from the pending list"
+  repo: remudero
+  depends_on: [W1-T4104]
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator-report#console-not-working-2026-09-23"
+  plan_refs: ["W1-T3894", "W1-T4104"]
+  files:
+    - src/lib/operator-agent.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 while building W1-T4104: the console's decision form in
+    app/api/console/consequences/route.ts POSTs /v1/operator-agent/consequences/decision. Core serves no
+    such route, and nothing in core records an approve or refuse for a consequence, so every listed item
+    carries `receipts: []` and the Approve button can only fail. W1-T4104 made the list real; this makes
+    it actionable.
+  design: |
+    A write-scoped POST that takes the consequence id, the decision (approve | refuse), a reason, and a
+    confirmation nonce from the existing confirm-nonce store (serve.ts createConfirmNonceStore — the same
+    guard the host actions use). It ledgers a decision row carrying the actor and the nonce id, and a
+    subsequent W1-T4104 list read shows the receipt and drops an approved item from pending. A decision on
+    an expired or unknown consequence is refused by name. Read the console's request shape from its source
+    before choosing field names.
+  acceptance:
+    - claim: "an approve with a valid nonce is ledgered and the item leaves the pending list"
+      proof: "unit test: an approved consequence is ledgered and leaves the pending list"
+    - claim: "a refuse is ledgered with its reason and shows as a receipt"
+      proof: "unit test: a refused consequence is ledgered with its reason as a receipt"
+    - claim: "a decision without a valid nonce is refused"
+      proof: "unit test: a consequence decision without a valid nonce is refused"
+    - claim: "a decision on an expired or unknown consequence is refused by name"
+      proof: "unit test: a decision on an expired or unknown consequence is refused by name"

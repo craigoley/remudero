@@ -1,0 +1,36 @@
+- id: W1-T4207
+  title: "THE COMMONEST FIX-RUNG REFUSAL, `every change the worker made is outside its declared files`, IS LOGGED ON fix.commit_refused WITHOUT THE PATHS, so neither the next strike nor the operator can act on it: carry the undeclared list the harness already computed onto that row and into the next strike's prompt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1790097003960-ef6a3c"
+  plan_refs: []
+  files: [src/run-task.ts, test/scope-guard-overrun.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: `commitWorkerEdits` returns the `undeclared` list (src/run-task.ts ~35240) and
+    `harnessCommitForShellLessWorker` logs it on its own `implement.harness_commit_refused` row, but its `onRefusal`
+    callback passes only the reason, and the fix lane's `fix.commit_refused` row (~10395-10401) carries strike, round,
+    mode, head_sha and reason only. The sweep reads fix.commit_refused (src/lib/sweep.ts ~7954), not the implement row.
+    The report counts this refusal as 37 of 76. W1-T4052 (queued) explicitly leaves undeclared-path refusals out of scope.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) onRefusal receives the undeclared paths with the reason, and fix.commit_refused records them (capped, with a
+        count of any omitted). (ii) The next fix strike's prompt names those paths and the declared files, so the worker
+        keeps its change inside `files:` or reports that the task needs amending.
+  acceptance:
+    - claim: "fix.commit_refused names the undeclared paths"
+      proof: 'grep: test("W1-T4207: fix\.commit_refused names the undeclared paths" in test/scope-guard-overrun.test.ts'
+    - claim: "the next strikes prompt names the paths the last one could not commit"
+      proof: 'grep: test("W1-T4207: the next strikes prompt names the paths the last one could not commit" in test/scope-guard-overrun.test.ts'

@@ -16,9 +16,9 @@ raw: "Observed PR-body pipeline defect on #5424 (W1-T3529): the generated body
   restores the unindented Proof: line."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/4978
 summary: null
 expansion: null
 submission_key: null

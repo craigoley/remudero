@@ -34,9 +34,9 @@ raw: "NOTHING ENFORCES THE THIRD EDIT OF A NEW DOCTRINE RULE, AND THE CODEX LANE
   building anything."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5176
 summary: null
 expansion: null
 submission_key: null

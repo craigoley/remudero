@@ -38,9 +38,9 @@ raw: "A BRANCH CAN SILENTLY DELETE A MERGED PR'S WIRING WHILE KEEPING THE TEST
   its output did not reach the operator during this incident."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

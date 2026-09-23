@@ -17,9 +17,9 @@ raw: "OBSERVED 2026-09-20, remudero-console PR #1364: a conflict-repair worker
   indefinitely. Preserve no-loss and single-strike guarantees."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null
