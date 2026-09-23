@@ -19,6 +19,7 @@ import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
 import type { BoardSnapshotCache } from "./board-snapshot-cache.js";
+import type { ChangedFilesCache } from "./changed-files-cache.js";
 import type { WorkerState } from "./worker.js";
 import {
   type BoardIssueRest,
@@ -4075,6 +4076,8 @@ export function buildBatchedGithub(
      *  genuine error handling against an ACTUAL crashed thread — a real, fake seam over a mock. */
     workerUrl?: string | URL;
     snapshotCache?: BoardSnapshotCache;
+    /** The BOARD's non-blocking, durable `changedFiles` (lib/changed-files-cache.ts). Omitted ⇒ the synchronous memo below. */
+    changedFilesCache?: ChangedFilesCache;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -4763,6 +4766,7 @@ export function buildBatchedGithub(
       // files at any page size, so this cannot ride the one fetch the way body, head ref and title do. It is
       // O(1) per PR that reaches the refusal, MEMOISED for the gateway's lifetime, and pre-filtered by the free
       // own-run-branch test.
+      if (opts.changedFilesCache) return opts.changedFilesCache.lookup(prUrl, cache?.byUrl.get(prUrl)?.state);
       const cached = changedFilesByUrl.get(prUrl);
       if (cached !== undefined) return cached ?? undefined;
       const number = prUrl.match(/\/pull\/(\d+)/)?.[1];

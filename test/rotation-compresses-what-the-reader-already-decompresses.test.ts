@@ -190,7 +190,7 @@ test("a state directory holding both forms is read completely and neither form i
     });
     assert.ok(!(second.archivePath as string).endsWith(".gz"), "sanity: second rotation landed plain");
 
-    const archives = readdirSync(dir).filter((f) => f !== "ledger.ndjson");
+    const archives = readdirSync(dir).filter((f) => f !== "ledger.ndjson" && !f.endsWith(".carried.json"));
     assert.equal(archives.length, 2, "sanity: one gzip archive and one plain archive both exist on disk");
 
     const gzipHalf = resolveLedgerUnion(dir, `"marker":"only-in-gzip-archive"`);

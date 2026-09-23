@@ -1,0 +1,44 @@
+- id: W1-T4389
+  title: "A PR THAT RE-USES A TASK ID ITS BASE ALREADY DECLARES IS NOT REFUSED — and on a run-<ID> branch its name alone would credit the OTHER task as built. Refuse it in review with both shard files named, whatever the worker that minted it did"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "id collision 2026-09-23: remudero-console #1695 vs #1699"
+  plan_refs: ["W1-T4388"]
+  files:
+    - src/lib/task-id-reservation.ts
+    - src/lib/review.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on craigoley/remudero-console: PR #1695 (branch run-CONSOLE-T58-1790193411130) added
+    plan/tasks.d/CONSOLE-T58-read-only-control-status-is-not-a-write.yaml while main came to declare CONSOLE-T58
+    in plan/tasks.d/CONSOLE-T58-console-errors-reach-the-sre-gardener.yaml (#1699, merged 20:43Z). The two
+    files have different names, so git reported #1695 MERGEABLE. The reviewer refused it only for an unrelated
+    reason (Standing rule 15: shard beside non-plan files). Had it been a clean shard-only or impl-only PR,
+    it would have passed review, and merging it would have credited the SRE task as built via the branch name.
+    W1-T4388 prevents the mint; this refuses the collision whichever way it arises (a hand filing, an offline
+    mint, a worker that ignores the brief).
+  design: |
+    In review, before judging criteria: collect the task ids the PR's diff ADDS in plan/ (tasks.yaml entries and
+    tasks.d shards) and the ids the base branch declares, per file. Any added id declared by the base in a
+    DIFFERENT file is a FAIL naming both files and "renumber the later one". For a run-<ID>-<epoch> head whose
+    <ID> the base declares in a file the PR did not author, and whose own diff adds a shard for <ID>, the same
+    FAIL applies. Works for every prefix (W1-T, CONSOLE-T, PORTAL-T). A PR that EDITS the base's own shard for
+    an id is not a collision. src/lib/task-id-reservation.ts exports taskIdCollisions(addedDecls, baseDecls); src/lib/review.ts calls it
+    in the verdict path beside failSummary's Standing rule 15 branch, and the refusal fits the 140-char status cap.
+  acceptance:
+    - claim: "a pull request adding a shard under an id its base already declares is refused with both files named"
+      proof: "unit test: a pull request adding a shard under an id its base already declares is refused with both files named"
+    - claim: "editing the base's own shard for an id is not a collision"
+      proof: "unit test: editing the base's own shard for an id is not a collision"
+    - claim: "the review verdict path checks for id collisions"
+      proof: 'grep: taskIdCollisions( in src/lib/review.ts'
+  falsifier: |
+    CLOSE IF review already refuses a PR adding a shard under an id its base declares in another file.
