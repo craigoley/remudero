@@ -127,14 +127,30 @@ function armMatchesCurrentMount(mounts: Mounts, arm: MountExplorationArm, curren
   return mounts.capabilities?.codex[capability ?? ""]?.[currentMount.effort]?.includes(arm.servedModel) ?? false;
 }
 
+/**
+ * Exploration never explores UP (operator ruling 2026-09-22: Opus and Sol only for work the lower
+ * tier could not do). Step-up attempts ride the same lane, so their served models appear as arms.
+ */
+function atOrBelowCurrentMount(mounts: Mounts, currentMount: Mount, model: string): boolean {
+  const tier = mounts.tiers[model];
+  const currentTier = mounts.tiers[currentMount.model];
+  if (tier === undefined || currentTier === undefined || tier > currentTier) return false;
+  const ladder = mounts.capabilities?.ladder ?? {};
+  const rank = ladder[capabilityForClaudeModel(mounts, model) ?? ""];
+  const currentRank = ladder[capabilityForClaudeModel(mounts, currentMount.model) ?? ""];
+  return rank === undefined || currentRank === undefined || rank <= currentRank;
+}
+
 function expressArm(mounts: Mounts, currentMount: Mount, arm: MountExplorationArm): ExpressedArm | undefined {
   if (arm.provider === "claude") {
     if (!(arm.servedModel in mounts.tiers)) return undefined;
+    if (!atOrBelowCurrentMount(mounts, currentMount, arm.servedModel)) return undefined;
     return { arm, mount: { ...currentMount, model: arm.servedModel, effort: arm.effort } };
   }
   const capability = codexCapabilityForArm(mounts, arm);
   const requestedModel = claudeCandidatesFor(mounts, capability)[0];
   if (!capability || !requestedModel) return undefined;
+  if (!atOrBelowCurrentMount(mounts, currentMount, requestedModel)) return undefined;
   return {
     arm,
     mount: { ...currentMount, model: requestedModel, effort: arm.effort },

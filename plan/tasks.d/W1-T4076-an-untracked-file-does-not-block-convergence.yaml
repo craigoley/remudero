@@ -1,0 +1,53 @@
+- id: W1-T4076
+  title: "AN UNTRACKED FILE SILENTLY BLOCKS LAUNCHER CONVERGENCE FOR DAYS — the rendered launcher refuses to converge on ANY porcelain output, so one untracked feedback file left the site watchdog running a stale launcher (deploy-run without --state-root, reading core's state) from 2026-09-20 to 2026-09-22 with only a journal line per tick; converge on tracked changes only, and alert when convergence has been refused for hours"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#auto-recycle-2026-09-22"
+  plan_refs: ["W1-T2877", "W1-T3245", "W1-T256"]
+  files:
+    - deploy/install-host-units.sh
+    - test/an-untracked-file-does-not-block-convergence.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    CORRECTED 2026-09-22 (this record was first filed with the wrong root cause — "the repo registry
+    lacks ten fields" — and rewritten after the live evidence below, before any build).
+
+    MEASURED ON THE FLEET HOST. The site watchdog's launcher (~/rmd-site-relaunch.sh, rendered by
+    deploy/install-host-units.sh) ran `deploy-run --image-drift-only` WITHOUT --state-root, so the
+    recycle supervisor evaluated CORE's state root and reported "up-to-date" for a site daemon two image
+    commits behind (21:53Z), leaving site's own DEPLOY_REQUESTED unread. The launcher's own
+    converge_host_units would have re-rendered it, but refused every tick with "checkout is DIRTY; not
+    converging": `git status --porcelain` counted ONE UNTRACKED file, an unsubmitted feedback record
+    (plan/feedback/fb-1789929134064-f30f19.yaml, written 2026-09-20). Moving that file aside at 22:05Z
+    let the next tick converge by itself at 22:17:58Z, and the re-rendered launcher carries
+    --state-root. Convergence reads the HOST registry (/etc/remudero/daemon-instances.yaml), which is
+    complete; the repo registry's missing unit fields were a red herring.
+
+    The refusal is right for TRACKED changes (an unreviewed tree must never become root config). An
+    untracked file is not part of any rendered artifact, and the refusal was invisible for two days.
+  design: |
+    (i) In the rendered launcher's converge_host_units, test `git status --porcelain
+    --untracked-files=no`: untracked files never become root configuration, so they no longer block.
+    Any TRACKED change still refuses, byte-for-byte as today.
+    (ii) When convergence has been refused for longer than a bound (e.g. 6 hours, measured from a stamp
+    the launcher already has a directory for), raise one operator alert naming the refusing paths —
+    never silent for days again.
+    (iii) Leave the two-registry split (repo .remudero/daemon-instances.yaml for recycles, host
+    /etc/remudero/daemon-instances.yaml for units) as a noted follow-up, not part of this change.
+  acceptance:
+    - claim: "an untracked file no longer blocks convergence"
+      proof: 'grep: test("W1-T4076: an untracked file does not block convergence" in test/an-untracked-file-does-not-block-convergence.test.ts'
+    - claim: "a tracked change still refuses convergence"
+      proof: 'grep: test("W1-T4076: a tracked change still refuses" in test/an-untracked-file-does-not-block-convergence.test.ts'
+    - claim: "a long refusal raises one alert naming the paths"
+      proof: 'grep: test("W1-T4076: a long refusal raises one alert" in test/an-untracked-file-does-not-block-convergence.test.ts'
+  falsifier: |
+    CLOSE IF the rendered launcher's dirty check already ignores untracked files.

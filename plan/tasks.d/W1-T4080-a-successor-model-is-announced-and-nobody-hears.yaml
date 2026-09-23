@@ -1,0 +1,50 @@
+- id: W1-T4080
+  title: "A SUCCESSOR MODEL IS ANNOUNCED AND NOBODY HEARS — watch the provider catalogs for successors of the models the ladders route (gpt-6-luna for gpt-5.6-luna), and raise ONE operator alert per model naming exactly what is missing: deploy it, add its price row, or nothing (already switched)"
+  repo: remudero
+  depends_on: [W1-T4079]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator-ruling#azure-gpt6-2026-09-22"
+  plan_refs: ["W1-T4079"]
+  files:
+    - src/lib/model-availability.ts
+    - src/run-task.ts
+    - test/a-successor-model-raises-one-alert.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-09-22: "Whenever 6 becomes available, can we have the smart router
+    automatically switch over to them or at least alert us that we need to make a change."
+    W1-T4079 makes the switch automatic once a model is deployed and priced. Deploying it on Azure and
+    recording its published price are operator acts (they spend money and change the account), so the
+    automation that remains is telling the operator, once, the moment the catalog offers it.
+
+    MEASURED 2026-09-22: the data-plane model list (openai/models, readable with the daemon's own cash
+    endpoint and key) announced gpt-6-luna/gpt-6-sol hours before the management catalog offered them
+    for deployment. The Codex subscription's `model/list` offered gpt-6-luna/-sol/-astra first of all.
+  design: |
+    (i) On the measurement cadence (not per tick), read the cash data-plane model list and the Codex
+    account's model list. A SUCCESSOR of a routed model is a listed id in the same family with a
+    higher generation (gpt-<N>-luna for gpt-<M>-luna, N > M) that no ladder row routes as READY.
+    (ii) Classify each successor: announced (listed, not deployed), deployed-unpriced, or ready.
+    (iii) Raise ONE operator alert per successor per state, through the existing escalation path, naming
+    the exact next step (the `az cognitiveservices account deployment create` command, or the price row
+    to add). Never repeat for an unchanged state; ledger every reading.
+    (iv) Human-gated families (Astra, Fable — src/lib/model-gate.ts) are reported as present but never
+    proposed for routing.
+  acceptance:
+    - claim: "a listed higher-generation model in a routed family is reported as a successor"
+      proof: 'grep: test("W1-T4080: a higher generation in a routed family is a successor" in test/a-successor-model-raises-one-alert.test.ts'
+    - claim: "each successor state raises exactly one alert, naming the next step"
+      proof: 'grep: test("W1-T4080: one alert per successor state, naming the next step" in test/a-successor-model-raises-one-alert.test.ts'
+    - claim: "the measurement cadence calls the successor watch"
+      proof: 'grep: watchSuccessorModels( in src/run-task.ts'
+    - claim: "a human-gated family is never proposed for routing"
+      proof: 'grep: test("W1-T4080: a gated family is reported but never proposed" in test/a-successor-model-raises-one-alert.test.ts'
+  falsifier: |
+    CLOSE IF a catalog successor watch already exists at build time.

@@ -2548,6 +2548,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             pr,
             reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           }),
+          ...(mountsTable.step_up ? { stepUpMount: mountsTable.step_up } : {}),
           birthWorktreeSnapshot,
           // W1-T322: same plan this sweep already loaded (`fixRungTaskFor(plan, …)` above) — see
           // runTask's own `openTaskIds` comment for what this set is and why it's computed once.

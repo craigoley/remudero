@@ -917,6 +917,7 @@ import {
   loadPlanAtRef,
 } from "./lib/plan.js";
 import { exitCodeFor } from "./lib/errors.js";
+import { flushThenExit } from "./lib/flush-exit.js";
 import {
   DEFAULT_OVERLAP_WARNING_POLICY,
   declarationCountsByPath,
@@ -1217,7 +1218,6 @@ import {
   buildCommitTrailerIndex,
   classifyGhFailure,
   createDispatchBreakerCache,
-  DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   deriveStatus,
   evaluateDispatchBreakerCorroboratedDetailed,
   type DispatchBreakerDetail,
@@ -1226,7 +1226,9 @@ import {
   isGhRateLimitError,
   addLifetimeDispatchTallies,
   effectiveLifetimeDispatches,
+  hasRepeatedTaskAttributableLifetimeDispatches,
   lifetimeDispatchTally,
+  taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
   projectPlan,
   readLedgerLines,
@@ -8701,6 +8703,8 @@ export async function runFixRung(opts: {
   /** The failing implement worker's session id — resumed on strike 1. */
   initialSessionId: string;
   mount: Mount;
+  /** The final fresh strike's mount (`step_up:`); absent keeps every strike on {@link mount}. */
+  stepUpMount?: Mount;
   settingsFile: string;
   config: Config;
   budgetUsd: number;
@@ -10185,14 +10189,17 @@ export async function runFixRung(opts: {
     // all written before the executor shipped.
     const verdictRegime = strikeRegimeForDispatch(review.criteria);
 
+    // The final fresh strike steps up: the fix mount has already failed this PR at least once.
+    const strikeMount = opts.stepUpMount && round === "fresh" && attempt >= opts.strikeCap ? opts.stepUpMount : opts.mount;
+    if (strikeMount !== opts.mount) deps.log("fix.step_up", { strike: attempt, from: opts.mount.model, to: strikeMount.model });
     const fixArgs: SpawnWorkerArgs = {
       cwd: opts.worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile: opts.settingsFile,
-      model: opts.mount.model,
-      mountProvider: opts.mount.provider,
-      effort: opts.mount.effort,
-      maxTurns: opts.mount.maxTurns,
+      model: strikeMount.model,
+      mountProvider: strikeMount.provider,
+      effort: strikeMount.effort,
+      maxTurns: strikeMount.maxTurns,
       maxBudgetUsd: opts.budgetUsd,
       config: opts.config,
       prompt,
@@ -12713,6 +12720,8 @@ export function resolveRunMounts(
    * table, so — like `reviewerMount`/`fixMount` — this is never optional/try-caught.
    */
   diagnoseMount: Mount;
+  /** The last-attempt mount (`step_up:` in mounts.yaml); absent keeps every attempt on its own mount. */
+  stepUpMount?: Mount;
   /**
    * impl-BP — the RECON stage's own mount (`routes.recon`, task_type "recon" × risk × class).
    *
@@ -12771,6 +12780,7 @@ export function resolveRunMounts(
     reviewerMount: resolveMount(mountsTable, "reviewer", task.risk),
     fixMount: resolveMount(mountsTable, "fix", task.risk),
     diagnoseMount: resolveMount(mountsTable, "diagnose", task.risk),
+    ...(mountsTable.step_up ? { stepUpMount: mountsTable.step_up } : {}),
     reconMount,
     taskClass,
     mountClass: mountResolution.resolvedClass,
@@ -13825,7 +13835,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // checkout — resolution + the loud class-fallback ledgering live in
   // resolveRunMounts (exported, above) so every branch, including the fallback a
   // COMPLETE committed table can never reach, is unit-covered with fixture tables.
-  const { mount, reviewerMount, fixMount, diagnoseMount, reconMount, taskClass, mountClass } = resolveRunMounts(
+  const { mount, reviewerMount, fixMount, diagnoseMount, stepUpMount, reconMount, taskClass, mountClass } = resolveRunMounts(
     repoRoot,
     task,
     log,
@@ -14727,6 +14737,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
     let impl!: WorkerResult;
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
+      // The diagnose-informed attempt is the LAST one before the task goes to a human, and it only
+      // happens after the implement mount has failed twice: that attempt steps up (operator ruling
+      // 2026-09-22 — Opus and Sol are for work the Sonnet/Luna tier could not do).
+      const attemptMount = findings && stepUpMount ? stepUpMount : implementMount;
+      if (attemptMount !== implementMount) log("implement.step_up", { from: implementMount.model, to: attemptMount.model });
       impl = account(
         // `spawn` (opts.spawn ?? the real spawnWorker, exactly like the recon dispatch
         // above) — not the raw spawnWorker import. Zero behavior change on the real path
@@ -14741,10 +14756,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
           // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
           // needed >61 turns — docs/archive/DIAGNOSIS.md), an order of magnitude above expected.
-          model: implementMount.model,
-          mountProvider: implementMount.provider,
-          effort: implementMount.effort,
-          maxTurns: implementMount.maxTurns,
+          model: attemptMount.model,
+          mountProvider: attemptMount.provider,
+          effort: attemptMount.effort,
+          maxTurns: attemptMount.maxTurns,
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config: implementConfig,
@@ -14793,7 +14808,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           runId,
           rung: "implement",
           text: workerTranscript(impl),
-          model: implementMount.model,
+          model: attemptMount.model,
           verdict: impl.subtype,
           headSha: implHeadShaForArchive,
         },
@@ -15542,6 +15557,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         worktreePath,
         initialSessionId: impl.sessionId,
         mount: fixMount,
+        ...(stepUpMount ? { stepUpMount } : {}),
         settingsFile,
         config,
         budgetUsd,
@@ -27780,18 +27796,25 @@ export function breakerGateFor(
     return memo.detail;
   };
   const stateFor = (taskId: string) => detailFor(taskId).state;
-  let lifetimeMemo: { taskId: string; exceeded: boolean } | undefined;
+  let lifetimeMemo: { taskId: string; pressure: boolean } | undefined;
   const lifetimeCapExceededFor = (taskId: string) => {
     if (lifetimeMemo?.taskId !== taskId) {
-      // ledger-read-intent: live — archive history is the audited boot projection above; its
-      // fresh incremental overlay accounts for later attempts without materialising the corpus.
-      const tally = auditedLifetimeHistory?.tallyFor(taskId) ?? lifetimeDispatchTally(readLedgerLines(ledgerPath), taskId);
+      // W1-T4025: the old count is now a SENSOR. Archive history is the audited boot projection;
+      // the live ledger contributes only attributable attempts so orphaned workers and capacity
+      // refusals do not spend adaptive pressure. A repeated signal routes through the judge but
+      // never refuses the task here.
+      const live = readLedgerLines(ledgerPath);
+      const liveTally = lifetimeDispatchTally(live, taskId);
+      const attributableLive = taskAttributableLifetimeDispatches(live, taskId);
+      const archived = auditedLifetimeHistory?.tallyFor(taskId) ?? { starts: 0, capacityBlocked: 0 };
       lifetimeMemo = {
         taskId,
-        exceeded: effectiveLifetimeDispatches(tally) >= DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
+        pressure:
+          hasRepeatedTaskAttributableLifetimeDispatches(live, taskId) ||
+          effectiveLifetimeDispatches(addLifetimeDispatchTallies(archived, { starts: attributableLive, capacityBlocked: liveTally.capacityBlocked })) > 1,
       };
     }
-    return lifetimeMemo.exceeded;
+    return lifetimeMemo.pressure;
   };
   return {
     isIndeterminate: (taskId) => stateFor(taskId) === "indeterminate",
@@ -28662,11 +28685,11 @@ async function drainCommand(
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner, repo, ledgerPath, runId }),
-        // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
-        // breakerGate this invocation already holds for the streak breaker above,
-        // never a second cache/read path — see breakerGateFor's doc.
+        // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
+        // drain flushes one bounded batch after the pass and routes it through the existing judge;
+        // a judge/proposal failure is logged and does not hold this or a sibling task.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
-        onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner, repo, ledgerPath, runId }),
+        onLifetimePressure: productionLifetimePressureHook({ plan: () => plan, root: repoRoot, config, ledgerPath, runId }),
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
@@ -30345,11 +30368,11 @@ export async function daemonCommand(
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
-        // breakerGate this invocation already holds for the streak breaker above,
-        // never a second cache/read path — see breakerGateFor's doc.
+        // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
+        // daemon flushes one bounded batch after the pass and routes it through the existing judge;
+        // a judge/proposal failure is logged and does not hold this or a sibling task.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
-        onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        onLifetimePressure: productionLifetimePressureHook({ plan: () => activePlanRef.current, root: repoRoot, config, ledgerPath, runId }),
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
@@ -33972,21 +33995,42 @@ export function creditEvidenceRootFor(
   return slug.toLowerCase() === `${owner}/${repo}`.toLowerCase() ? candidate : undefined;
 }
 
+/**
+ * W1-T4078 — identify the measured Rule-25 prerequisite shape without turning PR prose into a
+ * general-purpose subject classifier. `undefined` means the body was not readable, so callers
+ * must preserve the existing answer rather than infer either implementation or prerequisite.
+ * Both markers are required: a body that merely mentions a prerequisite, or merely mentions an
+ * instrument, is not enough to withdraw a previously valid commit-trailer credit.
+ */
+export function prerequisiteOnlyMergeBody(body: string | undefined, taskId: string): boolean | undefined {
+  if (body === undefined) return undefined;
+  const escapedTaskId = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const namesPrerequisite = new RegExp(`^Prerequisite split for\\s+${escapedTaskId}\\b`, "im").test(body);
+  const carriesOnlyInstrument = /\bthis\s+PR\s+carries\s+ONLY\s+the\s+instrument\b/i.test(body);
+  return namesPrerequisite && carriesOnlyInstrument;
+}
+
 /** Map one whole-plan projection to the credit consumer's narrow candidate shape. Keeping this
  * pure makes the performance refactor unable to change the merged/pr/url ownership filter. */
 export function creditCandidatesFromProjection(
   projections: Iterable<StatusProjection>,
   mergeSubjects: ReadonlyMap<number, string>,
+  mergeBodies: ReadonlyMap<number, string> = new Map(),
 ): CreditCandidate[] {
   const candidates: CreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
+    const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber));
+    const prerequisiteOnly = prerequisiteOnlyMergeBody(mergeBodies.get(projection.prNumber), projection.taskId);
     candidates.push({
       taskId: projection.taskId,
       prNumber: projection.prNumber,
       prUrl: projection.prUrl,
       merged: true,
-      creditIsImplementation: creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber)),
+      // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
+      // the squash commit carries the task trailer. Unreadable body evidence stays with the
+      // subject result so this repair can only subtract the measured false credit.
+      creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit,
     });
   }
   return candidates;
@@ -34039,7 +34083,16 @@ export function buildCreditCandidates(
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
   const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
   const projection = projectPlan(plan, deps);
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects);
+  // W1-T4078 — `buildBatchedGithub` already has each merged PR body in the same cache that fed
+  // the projection. Read those bodies by PR number so the measured prerequisite-only split can
+  // be refused without adding a GitHub request or weakening ordinary commit-trailer credit.
+  const mergeBodies = new Map<number, string>();
+  for (const candidate of projection.values()) {
+    if (!candidate.merged || candidate.prNumber === undefined || candidate.prUrl === undefined) continue;
+    const pr = baseGithub.prByRef(candidate.prUrl);
+    if (pr?.body !== undefined) mergeBodies.set(candidate.prNumber, pr.body);
+  }
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies);
 }
 
 /**
@@ -39851,6 +39904,103 @@ export interface VerifyHumanRouteResult {
   released?: string[];
 }
 
+/** Production inputs for the adaptive lifetime-pressure follow-up. The route owns no plan or PR
+ * mutation: it only records the judge result and stages the same idempotent inbox proposal used by
+ * `verify-human-sweep`. Keeping this as a separate adapter lets the drain/daemon paths share the
+ * judge without making a pressure signal a hidden blocking gate. */
+type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
+  plan: Plan;
+  root: string;
+  config: Config;
+  ledgerPath: string;
+  runId: string;
+};
+
+/** Route repeated attributable dispatch pressure through the existing three-way LLM judge. */
+export async function routeAdaptiveLifetimePressure(
+  tasks: readonly Task[],
+  deps: AdaptiveLifetimePressureRoute,
+): Promise<VerifyHumanRouteResult> {
+  const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
+  const shards = tasks.map((task): ShardUnderJudgement => {
+    const taskRows = rows.filter((row) => row.task_id === task.id || row.task === task.id);
+    const attributableDispatches = taskAttributableLifetimeDispatches(rows, task.id);
+    const capacityRefusals = taskRows.filter((row) => row.step === "daemon.spawn_infra_blocked").length;
+    const openPrEvidence = taskRows.filter((row) => row.step === "pr.opened").length;
+    const mergeEvidence = taskRows.filter((row) => row.step === "verdict.merged" || (row.step === "verdict" && row.verdict === "merged")).length;
+    const lastOutcome = [...taskRows].reverse().find((row) => typeof row.step === "string");
+    const lastStep = typeof lastOutcome?.step === "string" ? lastOutcome.step : "unavailable";
+    const lastVerdict = typeof lastOutcome?.verdict === "string" ? lastOutcome.verdict : "unavailable";
+    const evidence =
+      `adaptive lifetime pressure: attributable dispatches=${attributableDispatches}; ` +
+      `capacity refusals=${capacityRefusals}; open PR evidence=${openPrEvidence}; ` +
+      `merge evidence=${mergeEvidence}; last step=${lastStep}; last verdict=${lastVerdict}; ` +
+      `current run=${deps.runId}`;
+    return {
+      id: task.id,
+      title: task.title ?? task.id,
+      rationale: "Repeated attributable dispatch pressure was observed; decide whether to automate, backlog, or ask the operator.",
+      acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
+      ageDays: 0,
+      depsAllMerged: (task.depends_on ?? []).every((id) => deps.plan.byId.get(id)?.status === "merged"),
+      citedInSrc: idCitedInSrc(task.id, deps.root),
+      evidence,
+      observationKey:
+        `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
+        `open=${openPrEvidence}:merged=${mergeEvidence}:last=${lastStep}:${lastVerdict}`,
+    };
+  });
+  return routeVerifyHumanBacklog(shards, {
+    judge: realVerifyHumanJudge({
+      mounts: loadMounts(mountsPath(deps.root)),
+      config: deps.config,
+      cwd: deps.root,
+      settingsFile: join(deps.root, "settings", "worker.json"),
+    }),
+    priorVerdicts: priorVerifyHumanVerdicts(rows),
+    maxJudged: tasks.length,
+    stageProposal: (proposal) =>
+      void stageInboxProposalOnce(join(deps.config.root, "state", "inbox-proposals.json"), proposal),
+    appendRow: (row) => appendLedger(deps.ledgerPath, row as LedgerLine),
+    runId: deps.runId,
+  });
+}
+
+/**
+ * The production `onLifetimePressure` hook, EXTRACTED so its body is reachable from a test.
+ *
+ * Inline in `drainCommand`/`daemonCommand` the surrounding deps object IS covered — both commands
+ * are driven by real tests with `runDaemon`/`runDrain` stubbed — but an `async (tasks) => { … }`
+ * body only runs when real pressure occurs, so `diff-coverage` named exactly those body lines.
+ * Lifting the body out leaves one expression per call site that runs at CONSTRUCTION. Same
+ * extraction-and-injection remedy {@link resolveEventPath} documents in this file.
+ *
+ * `plan` is a THUNK, not a value: the daemon re-projects its active plan every tick, so the hook
+ * must read it when it FIRES. Capturing `activePlanRef.current` eagerly would pin the first tick's
+ * projection for the life of the process.
+ */
+type ProductionLifetimePressureHookInputs = {
+  plan: () => Plan;
+  root: string;
+  config: Config;
+  ledgerPath: string;
+  runId: string;
+};
+
+export function productionLifetimePressureHook(
+  deps: ProductionLifetimePressureHookInputs,
+): (tasks: readonly Task[]) => Promise<void> {
+  return async (tasks) => {
+    await routeAdaptiveLifetimePressure(tasks, {
+      plan: deps.plan(),
+      root: deps.root,
+      config: deps.config,
+      ledgerPath: deps.ledgerPath,
+      runId: deps.runId,
+    });
+  };
+}
+
 /**
  * Judge the parked `verify: human` population and route the verdicts.
  *
@@ -44279,7 +44429,9 @@ export async function main(
   // process-boundary concerns the task record calls out: the freshness gate above, and the
   // exit code translation right here.
   realDeps();
-  process.exit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
+  // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
+  // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
+  await flushThenExit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
 }
 
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
@@ -44291,7 +44443,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
     // `PlanError` answers with its declared code) instead of hardcoding the generic one for
     // every uncaught throw — a foreign `Error` still falls through to the same code as before.
-    process.exit(exitCodeFor(err));
+    void flushThenExit(exitCodeFor(err));
   });
 }
 

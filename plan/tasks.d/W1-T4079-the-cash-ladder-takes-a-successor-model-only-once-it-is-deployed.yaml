@@ -1,0 +1,56 @@
+- id: W1-T4079
+  title: "THE CASH LADDER TAKES A SUCCESSOR MODEL ONLY ONCE IT IS DEPLOYED AND CONFIGURED — list gpt-6-luna ahead of gpt-5.6-luna now, skip it while its Azure deployment answers 404 or it has no price/temperature/context row, and pick it up with no edit once both exist (forwards- and backwards-compatible)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator-ruling#azure-gpt6-2026-09-22"
+  plan_refs: ["W1-T3546", "W1-T3598", "W1-T3608", "W1-T4080"]
+  files:
+    - src/lib/worker-provider.ts
+    - .remudero/mounts.yaml
+    - test/the-cash-ladder-takes-a-successor-once-it-is-ready.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-09-22: stay on gpt-5.6 for the Azure cash ladder for now, and have the router
+    switch to GPT-6 automatically once it is available — forwards and backwards compatible.
+
+    MEASURED 2026-09-22 against synthwatch-foundry, with the adapter's own endpoint and key:
+    GET openai/models?api-version=2024-10-21 LISTS gpt-6-luna, gpt-6-sol (and dated -2026-09-22
+    variants); the management catalog (`az cognitiveservices account list-models`) does not yet offer
+    them for deployment. A POST to openai/deployments/gpt-6-luna/chat/completions answers 404 (no
+    deployment); the same POST to gpt-5.6-luna answers 400 (deployment exists, request malformed).
+
+    TODAY A LADDER ROW CANNOT NAME A MODEL AHEAD OF ITS DEPLOYMENT. selectOpenWeightModel takes the
+    first syntactically valid, context-fitting id, with no existence check (the openweight-ladder note
+    in operator memory: an undeployed lead fails as a transport error and does not walk). And a model
+    with no OPENWEIGHT_PRICES / OPENWEIGHT_TEMPERATURE row refuses before transport — correctly, since
+    an unmeasured price must never be spent against dailyCapUsd.
+  design: |
+    (i) READINESS, cached per deployment (bounded TTL): a candidate is READY when (a) its price,
+    temperature and context rows exist, and (b) a bounded probe of its deployment does not answer 404.
+    Probe once per TTL per deployment, never per request; an unreadable probe is UNKNOWN and keeps the
+    previous reading (never flaps a lane onto an unmeasured model).
+    (ii) selectOpenWeightModel skips a candidate that is not READY and ledgers why, once per state change
+    (`cash.candidate_not_ready` with deployment, reason: undeployed | unpriced | unknown).
+    (iii) mounts.yaml: gpt-6-luna leads every cash row gpt-5.6-luna appears in, with gpt-5.6-luna
+    directly behind it. Until it is READY every lane resolves exactly as today.
+    (iv) Adding gpt-6-luna's price/temperature/context rows is part of the switch-over, done when the
+    model is deployable and its published price is known — W1-T4080 alerts when that moment arrives.
+  acceptance:
+    - claim: "an undeployed successor at the head of a row is skipped and the row resolves to the model behind it"
+      proof: 'grep: test("W1-T4079: an undeployed successor is skipped, not selected" in test/the-cash-ladder-takes-a-successor-once-it-is-ready.test.ts'
+    - claim: "a deployed successor with no price row is skipped"
+      proof: 'grep: test("W1-T4079: an unpriced successor is skipped" in test/the-cash-ladder-takes-a-successor-once-it-is-ready.test.ts'
+    - claim: "once deployed and configured, the successor is selected with no ladder edit"
+      proof: 'grep: test("W1-T4079: a ready successor is selected with no edit" in test/the-cash-ladder-takes-a-successor-once-it-is-ready.test.ts'
+    - claim: "an unreadable probe keeps the previous reading instead of flapping"
+      proof: 'grep: test("W1-T4079: an unknown probe keeps the previous reading" in test/the-cash-ladder-takes-a-successor-once-it-is-ready.test.ts'
+  falsifier: |
+    CLOSE IF selectOpenWeightModel already skips undeployed or unpriced candidates at build time.

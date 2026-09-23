@@ -1,0 +1,40 @@
+- id: W1-T4085
+  title: "INTERACTIVE READS SPEND THE OPERATOR'S OWN GITHUB BUDGET — the deny floor's 180s read cadence is shared by every session on the host, so a single legitimate read is refused behind another session's poll; route interactive gh reads through the fleet GitHub App's installation token, which carries its own secondary-limit budget"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator-session#flow-2026-09-22"
+  plan_refs: ["W1-T3275", "W1-T1066"]
+  files:
+    - hooks/deny-floor.sh
+    - src/lib/github-transport.ts
+    - test/interactive-reads-use-the-app-budget.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The cadence floor (hooks/deny-floor.sh, W1-T3275) is correct to be shared: GitHub's secondary limit
+    counts per USER across every process. OBSERVED 2026-09-22: with two interactive sessions and the
+    in-process transport on one host, single reads were refused "0s after the last one" repeatedly, and
+    the only way through was the on-the-record override RMD_GH_COOLDOWN_S=0 — used several times in one
+    session. The operator memory records the fix already measured: the remudero-fleet installation
+    token is throttled separately from the user.
+  design: |
+    (i) An interactive read-shaped gh call runs with GH_TOKEN set to a freshly minted installation token
+    (the ids and key the host already has), and its cadence is tracked on a SEPARATE stamp.
+    (ii) Writes stay on the user's identity (authorship matters); only reads move.
+    (iii) If minting fails, fall back to today's floor unchanged.
+  acceptance:
+    - claim: "an interactive read uses the installation token and the app stamp"
+      proof: 'grep: test("W1-T4085: an interactive read rides the app budget" in test/interactive-reads-use-the-app-budget.test.ts'
+    - claim: "writes keep the user identity"
+      proof: 'grep: test("W1-T4085: writes keep the user identity" in test/interactive-reads-use-the-app-budget.test.ts'
+    - claim: "a failed mint falls back to the shared floor"
+      proof: 'grep: test("W1-T4085: a failed mint falls back to the shared floor" in test/interactive-reads-use-the-app-budget.test.ts'
+  falsifier: |
+    CLOSE IF interactive reads already use an installation token at build time.
