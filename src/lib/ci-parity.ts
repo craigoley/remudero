@@ -2216,6 +2216,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "population walk",
   ),
   refusedForPredicate(
+    "test/an-active-learning-is-reachable-by-some-file.test.ts",
+    "a",
+    "W1-T4240's reachability census. Its `git ls-files` enumerates every tracked path as the MATCH DOMAIN for the learnings " +
+      "corpus's `files:` globs, and the property it asserts is about each ACTIVE LEARNING (some glob hits some path; no shard line " +
+      "reads as a comment to the proof judge), never a property every enumerated src/ file must hold. The `src/` strings the " +
+      "recognizer sees are fixture paths and imports",
+  ),
+  refusedForPredicate(
     "test/a-suite-is-not-a-second-concern.test.ts",
     "b",
     "walks `git ls-files src/*.ts src/lib/*.ts` for real, but asserts an aggregate percentage threshold (pct > 60) rather than a " +

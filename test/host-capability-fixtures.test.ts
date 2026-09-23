@@ -322,6 +322,16 @@ const DECLARED: readonly Declared[] = [
     count: 1,
     reason: "W1-T3728: the wait fixture provides a mode-0600 durable cash-key file.",
   },
+  {
+    kind: "chmod",
+    file: "a-root-owned-runtime-path-is-refused-at-boot.test.ts",
+    key: "0o555",
+    count: 1,
+    reason:
+      "W1-T4195: the subject IS writability — the boot check is `[ -w ]`, so an EISDIR/ENOTDIR substitute cannot " +
+      "exercise it. The denial is taken only as non-root; under uid 0 the file runs the entrypoint as `nobody` via " +
+      "setpriv against a root-chowned path, and skips with a stated reason when setpriv is absent — never vacuous.",
+  },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
   {
     kind: "platform-tool",

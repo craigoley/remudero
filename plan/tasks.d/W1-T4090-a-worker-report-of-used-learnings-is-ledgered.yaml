@@ -10,7 +10,7 @@
   origin: "knowledge-system audit 2026-09-22 (operator ask: an automated, self-improving memory system)"
   plan_refs: [W1-T2760, W1-T33]
   files: [src/run-task.ts, test/a-worker-report-of-used-learnings-is-ledgered.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22 ON origin/main AND THE LIVE HOST.

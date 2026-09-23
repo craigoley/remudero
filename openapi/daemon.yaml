@@ -392,6 +392,95 @@ components:
           items:
             $ref: "#/components/schemas/RepoDashboardEntry"
 
+    RegistryResult:
+      type: object
+      description: >
+        W1-T4227 -- GET /v1/registry: the fleet as projects -> repos -> instances, read from the
+        one registry (`.remudero/daemon-instances.yaml`, src/lib/instance-registry.ts). It carries
+        names, repos and instance prefixes ONLY -- never a path, state dir, credential dir, image
+        or token. `drift` is present only when the host's copy is readable and names a different
+        instance set; `hostRegistry` says how that comparison went.
+      required:
+        - projects
+        - source
+        - generatedAt
+        - hostRegistry
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/RegistryProject"
+        source:
+          type: string
+          enum:
+            - repo
+        generatedAt:
+          type: string
+        hostRegistry:
+          type: string
+          enum:
+            - in_sync
+            - drifted
+            - unreadable
+            - malformed
+        drift:
+          $ref: "#/components/schemas/RegistryDrift"
+
+    RegistryProject:
+      type: object
+      required:
+        - id
+        - repos
+      properties:
+        id:
+          type: string
+          description: The project id; an instance that names none belongs to "default".
+        repos:
+          type: array
+          items:
+            $ref: "#/components/schemas/RegistryRepo"
+
+    RegistryRepo:
+      type: object
+      required:
+        - repo
+        - instances
+      properties:
+        repo:
+          type: string
+          description: owner/name on GitHub.
+        instances:
+          type: array
+          items:
+            $ref: "#/components/schemas/RegistryInstance"
+
+    RegistryInstance:
+      type: object
+      required:
+        - name
+        - prefix
+      properties:
+        name:
+          type: string
+        prefix:
+          type: string
+          description: The `/v1/i/<name>` prefix the instance is reached under.
+
+    RegistryDrift:
+      type: object
+      required:
+        - hostOnly
+        - repoOnly
+      properties:
+        hostOnly:
+          type: array
+          items:
+            type: string
+        repoOnly:
+          type: array
+          items:
+            type: string
+
     RecapEvent:
       type: object
       description: >
@@ -3092,6 +3181,33 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/registry:
+    get:
+      summary: The fleet's one registry -- projects, repos and instances, read-only.
+      description: >
+        W1-T4227. Parses `.remudero/daemon-instances.yaml` (parseInstanceRegistry) and reports
+        drift against the fleet host's `/etc/remudero/daemon-instances.yaml` when that copy is
+        readable. An unreadable or malformed host copy is a `hostRegistry` note, never an error.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The registry projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The repo registry could not be read or was refused by the parser.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/status:
     get:

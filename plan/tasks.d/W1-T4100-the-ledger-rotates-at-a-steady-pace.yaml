@@ -6,6 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 30.00
+  priority: 1
   risk: high
   band_meaning: blast-radius
   origin: "knowledge-system audit 2026-09-22 (side finding)"

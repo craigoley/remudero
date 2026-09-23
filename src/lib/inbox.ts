@@ -5,7 +5,7 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask } from "./task-linter.js";
@@ -707,8 +707,10 @@ export interface ReadinessContext {
   isMerged: MergedResolver;
   /** Whether one evidence anchor is still grep-true (on main, in the real runner). */
   grepAnchorTrue: (anchor: EvidenceAnchor) => boolean;
-  /** Every OTHER proposal id currently open (not yet ratified) — the conflict source. */
-  openProposalIds: Set<string>;
+  /** Every OTHER proposal id currently open (not yet ratified) — the conflict source. Only `has` is read, so a
+   *  caller classifying N proposals can hand every one the SAME registry-wide set behind a self-excluding view
+   *  (W1-T4261) instead of copying it N times. */
+  openProposalIds: Pick<ReadonlySet<string>, "has">;
   /** True when the ledger already carries `ratify.approved` for this id — checked FIRST and overriding the registry's
    *  copy (W1-T190), which a crash between the two writes can leave stale. */
   isRatified: (proposalId: string) => boolean;
@@ -730,6 +732,52 @@ export interface ReadinessContext {
    *  `deps_merged` and surfaces as `deps_observable`. THE POLARITY DOES NOT FLIP — it still keeps the proposal out of
    *  READY (W1-T130). Only what is SAID changes. */
   depsUnobservable?: (taskId: string) => GhFailureReason | undefined;
+  /** W1-T4261: reuse of each draft's fragment parse and lint verdict across passes over the SAME plan object — see
+   *  {@link FragmentMemo}. Optional; absent recomputes both, exactly as before. */
+  fragmentMemo?: FragmentMemo;
+}
+
+/** One drafted fragment's parse and (lazily) its blocking lint messages against one plan. */
+interface FragmentVerdict {
+  parsed: { plan: Plan } | { error: string };
+  blocking?: string[];
+}
+
+/**
+ * W1-T4261 — a draft's fragment parse and its {@link blockingLintMessages} depend only on the fragment text, the
+ * proposal id (the parse error names it) and the base plan, so a pass whose plan object is the previous pass's reuses
+ * them. MEASURED on a 700-proposal fixture: the two were ~500 ms of a ~750 ms recompute, paid again whenever the
+ * ledger or registry moved. A different plan object empties the memo; {@link beginFragmentPass} keeps only what the
+ * previous pass used, so it holds at most two passes' drafts.
+ */
+export interface FragmentMemo {
+  plan?: Plan;
+  previous: Map<string, FragmentVerdict>;
+  current: Map<string, FragmentVerdict>;
+}
+
+export function createFragmentMemo(): FragmentMemo {
+  return { previous: new Map(), current: new Map() };
+}
+
+/** Start a classification pass: the previous pass's entries stay reachable for this one, older ones are dropped. */
+export function beginFragmentPass(memo: FragmentMemo): void {
+  memo.previous = memo.current;
+  memo.current = new Map();
+}
+
+function fragmentVerdict(memo: FragmentMemo | undefined, plan: Plan, fragmentYaml: string, proposalId: string): FragmentVerdict {
+  if (memo === undefined) return { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  if (memo.plan !== plan) {
+    memo.plan = plan;
+    memo.previous = new Map();
+    memo.current = new Map();
+  }
+  const key = `${proposalId}\u0000${fragmentYaml}`;
+  let verdict = memo.current.get(key) ?? memo.previous.get(key);
+  if (verdict === undefined) verdict = { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  memo.current.set(key, verdict);
+  return verdict;
 }
 
 /** The ledger's answer to "has this proposal already been ratified?". Re-derived on every read rather than trusted
@@ -770,6 +818,29 @@ export function declinedReasonInLedger(
     if (l.step === "panel.proposal_restored") reason = undefined;
   }
   return reason;
+}
+
+/**
+ * W1-T4261 — {@link isRatifiedInLedger} and {@link declinedReasonInLedger} for EVERY proposal, from ONE pass over the
+ * ledger. Each of those walks the whole ledger per call, and a classifier calls them once (or twice) per proposal, so
+ * an inbox pass over N proposals walked it ~2N times. Same rows, same order, same latest-wins decline/restore rule —
+ * a precomputed answer, never a different one; a non-string `task_id` matches no proposal in either form.
+ */
+export function ledgerProposalVerdicts(ledgerLines: { step?: unknown; task_id?: unknown; reason?: unknown }[]): {
+  isRatified: (proposalId: string) => boolean;
+  isDeclined: (proposalId: string) => string | undefined;
+  ratified: ReadonlySet<string>;
+  declined: ReadonlyMap<string, string>;
+} {
+  const ratified = new Set<string>();
+  const declined = new Map<string, string>();
+  for (const l of ledgerLines) {
+    if (typeof l.task_id !== "string") continue;
+    if (l.step === "ratify.approved") ratified.add(l.task_id);
+    else if (l.step === "panel.proposal_declined") declined.set(l.task_id, typeof l.reason === "string" ? l.reason : "declined by an operator");
+    else if (l.step === "panel.proposal_restored") declined.delete(l.task_id);
+  }
+  return { isRatified: (id) => ratified.has(id), isDeclined: (id) => declined.get(id), ratified, declined };
 }
 
 /**
@@ -1017,7 +1088,8 @@ export function classifyProposal(
 
   const draftStale = isDraftStale(draft, proposal.evidenceAnchors);
 
-  const fragment = safeParseFragment(draft.fragmentYaml, proposal.id);
+  const verdict = fragmentVerdict(ctx.fragmentMemo, ctx.plan, draft.fragmentYaml, proposal.id);
+  const fragment = verdict.parsed;
   if ("error" in fragment) {
     reasons.push({ predicate: "lint_clean", detail: `draft-unclean: fragment failed to parse — ${fragment.error}` });
   } else {
@@ -1034,7 +1106,8 @@ export function classifyProposal(
         detail: `deps-unobservable: ${detail} — GitHub could not be read, this is not a claim that it is unmerged`,
       });
     }
-    const blocking = blockingLintMessages(ctx.plan, fragment.plan);
+    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan);
+    const blocking = verdict.blocking;
     if (blocking.length > 0) {
       reasons.push({ predicate: "lint_clean", detail: `draft-unclean: lint-plan violation(s) — ${blocking.join("; ")}` });
     }
@@ -1473,6 +1546,77 @@ export function gitGrepAnchorTrue(cwd: string, ref: string, anchor: EvidenceAnch
     if (err.status === 1) return false;
     throw err;
   }
+}
+
+/**
+ * W1-T4261 — answers {@link gitGrepAnchorTrue} once per (main commit, anchor). MEASURED 2026-09-23 on the fleet
+ * gateway: one `git grep` spawn per proposal per inbox pass was 39% of the serve process's CPU (693 proposals). A
+ * grep's answer is a pure function of the commit's tree and the anchor's pattern+path, so a cache keyed by the
+ * commit sha is exact; a new sha drops every entry. `sha` undefined (unresolvable) caches nothing.
+ */
+export interface AnchorGrepCache {
+  sha?: string;
+  results: Map<string, boolean>;
+}
+
+/** BACKSTOP, not the control: a new main sha is what normally empties {@link AnchorGrepCache}. This only stops one
+ *  sha's map outgrowing any registry this repo has held (693 proposals, one or two anchors each, on 2026-09-23). */
+export const ANCHOR_GREP_CACHE_MAX_ENTRIES = 20_000;
+
+export function createAnchorGrepCache(): AnchorGrepCache {
+  return { results: new Map() };
+}
+
+/** Look `anchor` up in `cache` for commit `sha`, running `grep` (against that sha) only on a miss. A throwing grep is
+ *  never cached — the error propagates exactly as the uncached call's would. */
+export function cachedAnchorGrep(
+  cache: AnchorGrepCache,
+  sha: string | undefined,
+  anchor: EvidenceAnchor,
+  grep: (ref: string, anchor: EvidenceAnchor) => boolean,
+): boolean {
+  if (sha === undefined) return grep("origin/main", anchor);
+  if (cache.sha !== sha || cache.results.size >= ANCHOR_GREP_CACHE_MAX_ENTRIES) {
+    cache.sha = sha;
+    cache.results.clear();
+  }
+  const key = JSON.stringify([anchor.pattern, anchor.path ?? null]);
+  const hit = cache.results.get(key);
+  if (hit !== undefined) return hit;
+  const answer = grep(sha, anchor);
+  cache.results.set(key, answer);
+  return answer;
+}
+
+/** A file's text, or undefined when it cannot be read — every caller below treats absent and unreadable alike. */
+export type ReadGitFile = (path: string) => string | undefined;
+
+function readGitFileOrUndefined(path: string): string | undefined {
+  try {
+    return fs.readFileSync(path, "utf8");
+  } catch (_err) {
+    // Absent, a directory, or unreadable all mean "this layout does not carry the ref here"; the resolver
+    // below tries the next place and finally answers undefined, which caches nothing.
+    return undefined;
+  }
+}
+
+/**
+ * W1-T4261 — `origin/main`'s sha read straight from the repo's ref files, never a subprocess: `.git` (a directory,
+ * or a worktree's `gitdir:` file), its `commondir`, then the loose ref and `packed-refs`. MEASURED: `git rev-parse`
+ * costs ~5 ms a spawn; these reads cost microseconds, so the memo can check the commit on every pass. Undefined for
+ * any layout this does not recognise (a symbolic ref, a reftable store) — the caller then caches nothing.
+ */
+export function readOriginMainSha(root: string, readText: ReadGitFile = readGitFileOrUndefined): string | undefined {
+  const dotGit = join(root, ".git");
+  const pointer = readText(dotGit);
+  const gitDir = pointer?.startsWith("gitdir:") ? resolvePath(root, pointer.slice("gitdir:".length).trim()) : dotGit;
+  const common = readText(join(gitDir, "commondir"));
+  const commonDir = common === undefined ? gitDir : resolvePath(gitDir, common.trim());
+  const loose = readText(join(commonDir, "refs", "remotes", "origin", "main"))?.trim();
+  if (loose !== undefined && /^[0-9a-f]{40,64}$/.test(loose)) return loose;
+  const packed = readText(join(commonDir, "packed-refs"));
+  return packed === undefined ? undefined : /^([0-9a-f]{40,64}) refs\/remotes\/origin\/main$/m.exec(packed)?.[1];
 }
 
 // ── Rendering (design (c): the reasoning rides with the recommendation) ──────────────────

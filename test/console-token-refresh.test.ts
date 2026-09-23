@@ -215,7 +215,8 @@ test("W1-T3807 follow-up: stale serve cleanup stops both analytics caches before
     });
     assert.equal(response.status, 200);
     controller.abort();
-    for (let i = 0; i < 20 && exits.length === 0; i += 1) {
+    // W1-T4229: the exit now follows a drain, which a client-held socket can stretch to seconds.
+    for (let i = 0; i < 1200 && exits.length === 0; i += 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
     assert.deepEqual(exits, [0]);

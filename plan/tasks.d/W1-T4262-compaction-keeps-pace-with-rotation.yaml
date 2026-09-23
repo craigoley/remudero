@@ -1,0 +1,44 @@
+- id: W1-T4262
+  title: "LEDGER COMPACTION RETIRES ABOUT TWELVE ARCHIVES A PASS WHILE ROTATION ADDS UP TO 135 AN HOUR — the daemon hook compacts only rotations older than one day (DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS), and 768 of the 958 archives on the host were written today, so almost none are eligible; each pass also re-opens its own ~1M-row output, so the corpus sat at 967 archives against a bound of 400 and the daemon ran out of heap every ten minutes on 2026-09-23"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "daemon OOM crash loop 2026-09-23 (fixed at the reader by #6753); read on the host over origin/main a8cbc5fbc"
+  plan_refs: [W1-T3368, W1-T4100]
+  files: [src/lib/ledger-compact.ts, src/lib/ledger-compaction-rung.ts, src/run-task.ts, test/ledger-compaction-keeps-pace-with-rotation.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> chore-file-W1-T4262
+  rationale: |
+    READ 2026-09-23 12:30Z in remudero-daemon (/home/node/Remudero/state): 958 ledger archives, 189 dated 2026-09-22, 768
+    dated 2026-09-23 (up to 135 in one hour, several within the same minute), one dated 2027-10-14. The compaction rung
+    (W1-T3368) fires correctly on pressure ("over bound — 968 archive(s) > 400") but its pass reported source_count 13
+    and rows_written 993592: selectLedgerCompactionSources takes the oldest rotations strictly older than the cutoff,
+    and the daemon passes --older-than 1 day, so today's flood is never eligible and the oldest source is the
+    compactor's own previous output, re-read and re-written every pass. The corpus therefore grows faster than it is
+    compacted. #6753 stopped the mount sweep from holding the corpus in memory; this task stops the corpus outgrowing
+    its bound. W1-T4100 (why rotation is this fast, future-dated names) is the other half.
+  design: |
+    (i) Eligibility follows pressure, not a fixed age: when over bound, rotations older than the newest few hours of
+        history are eligible, and the protected window shrinks as the archive count rises further over the bound — a
+        tiered response, never one fixed cutoff.
+    (ii) A pass never re-opens an archive the compactor wrote itself while uncompacted rotations are eligible; compacted
+         outputs are only merged with each other when the count is still over bound after every rotation is compacted.
+    (iii) Each fire's report says how many archives it retired and how many arrived since the last fire; when arrivals
+          exceed retirements over a day, the next fires run sooner, so compaction keeps pace with rotation.
+  acceptance:
+    - claim: "a flood of same-day rotations is compacted while over bound"
+      proof: 'grep: test("W1-T4262: a flood of same-day rotations is compacted while over bound" in test/ledger-compaction-keeps-pace-with-rotation.test.ts'
+    - claim: "a pass does not re-open the compactor's own output while rotations remain"
+      proof: 'grep: test("W1-T4262: a pass does not re-open the compactor.s own output while rotations remain" in test/ledger-compaction-keeps-pace-with-rotation.test.ts'
+    - claim: "compaction runs sooner when arrivals outpace retirements"
+      proof: 'grep: test("W1-T4262: compaction runs sooner when arrivals outpace retirements" in test/ledger-compaction-keeps-pace-with-rotation.test.ts'
+  falsifier: |
+    Keep --older-than 1 day and the first test compacts nothing from a corpus of 500 rotations stamped today.
