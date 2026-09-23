@@ -784,20 +784,23 @@ function withReadMeta(out: Array<Record<string, unknown>>, torn: number, present
   return out as LedgerLines;
 }
 
-/** How many dated rotations {@link readLedgerUnionBounded} opens, newest first. MEASURED: the live file plus
- *  the NINE newest held a row of every step the board reads, for 0.23s against 7.74s for the full union. 24 is
- *  that 9 with headroom, and all 24 cost 0.21s. */
-export const STATUS_BOARD_MAX_ROTATIONS = 24;
+/** PRIMARY CONTROL: how far back {@link readLedgerUnionBounded} reads, as rotations stamped within this long of
+ *  the newest. It replaced a 24-FILE cap, which covered about a week only because every rotation re-copied the
+ *  same week-long retained core (adjacent archives shared 99.3% of rows, 2026-09-23); archives holding only new
+ *  rows would shrink 24 files to about an hour. A week is what those 24 files held: their oldest row was 6-8
+ *  days back. */
+export const STATUS_BOARD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** How many rotations {@link readMergeCreditedTaskIds} may open before giving up on a task. THE CAP IS SAFE IN
- *  THE DIRECTION THAT MATTERS: this reader only ADDS ids it has seen, so it cannot invent a credit; reading too
- *  shallow just re-credits the task. Why: all 445 ever-credited ids resolve within 24 files —
- *  docs/forensics/status.md */
-export const CREDIT_SCAN_MAX_ROTATIONS = 24;
+/** BACKSTOP, AND A FLOOR RATHER THAN A CAP: the newest this-many rotations are read even when stamped before
+ *  {@link STATUS_BOARD_WINDOW_MS}. It only ever ADDS files, so it cannot shrink what the window covers; it
+ *  binds only on a host that rotates slowly, where 24 files reach back months (this Mac: last cycle 3 weeks
+ *  before its newest rotation) and a week alone would blank a board the old cap filled. */
+export const STATUS_BOARD_MIN_ROTATIONS = 24;
 
 /**
  * Every task id the ledger has EVER recorded merge credit for, across all three ledger forms, newest-first,
- * stopping as soon as every candidate resolves. WHY THIS EXISTS: asking the same question of the live file
+ * stopping as soon as every candidate resolves. NO FILE CAP: a credit it misses re-credits the task, and a
+ * count of archives says nothing about how far back they reach. WHY THIS EXISTS: asking the same question of the live file
  * alone assumes registering a credit step stops rotation dropping it. THAT BELIEF IS FALSE — registration stops
  * a step being shed COMPLETELY and says nothing about the per-step row cap, so older credit leaves the live
  * file, the task is re-credited, and the fresh row evicts another. Why: docs/forensics/status.md
@@ -805,8 +808,9 @@ export const CREDIT_SCAN_MAX_ROTATIONS = 24;
 export function readMergeCreditedTaskIds(
   path: string,
   opts: {
-    /** Stop as soon as every one of these has been resolved. Omitted ⇒ read to the cap. */
+    /** Stop as soon as every one of these has been resolved. Omitted ⇒ read the whole union. */
     candidates?: Iterable<string>;
+    /** Opt-in cap on rotations opened; omitted ⇒ none. Only a cap can make `budgetExhausted` true. */
     maxRotations?: number;
     /** The LIVE half only, so a caller with an injected reader keeps controlling the live file while rotations
      *  still come from the real corpus — ONE code path, not a legacy branch beside a new one. */
@@ -831,7 +835,7 @@ export function readMergeCreditedTaskIds(
   };
   const done = (): boolean => wanted.size > 0 && outstanding <= 0;
 
-  const cap = opts.maxRotations ?? CREDIT_SCAN_MAX_ROTATIONS;
+  const cap = opts.maxRotations;
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, ledgerFs);
@@ -842,34 +846,32 @@ export function readMergeCreditedTaskIds(
       order: "newest-first",
       maxRotations: cap,
       dedupe: false,
+      // Only a line naming a verdict can be a credit, so every other line skips its parse and is never held.
+      pattern: /verdict/,
       readLiveRecords: () => live,
       onRecord: take,
       satisfied: done,
     },
     statusLedgerUnionFsDeps(ledgerFs, opts),
   );
-  // `complete: false` means the cap or the corpus ran out with candidates unresolved — those get re-credited,
-  // which is today's behaviour, not a regression.
+  // `complete: false` means candidates are unresolved: new merges nothing has credited yet, or ids a cap hid.
   const complete = wanted.size === 0 ? true : outstanding <= 0;
-  // W1-T3019: `budgetExhausted` separates "the BUDGET ran out" (the rotation cap hid files we never
-  // opened, so an outstanding candidate's absence is UNPROVEN) from "the CORPUS ran out" (every file
-  // that exists was opened and the id was not there, so the absence IS proven). The discriminator is
-  // therefore whether the cap actually hid anything -- `archiveCount > cap` -- and NOT whether
-  // candidates remain outstanding: `!complete` already means they do, so testing `wanted.size > 0`
-  // here reports every proven absence as a budget exhaustion and erases the distinction the field
-  // exists for. A corpus of EXACTLY the cap, or one rotation short of it, is fully read and proven.
-  return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && read.archiveCount > cap };
+  // W1-T3019: `budgetExhausted` separates "a CAP hid files we never opened" (absence UNPROVEN) from "the
+  // CORPUS ran out" (every file opened, absence PROVEN). With no cap nothing is hidden, so it is false.
+  const hidden = cap !== undefined && read.archiveCount > cap;
+  return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && hidden };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at
- *  `satisfied` or {@link STATUS_BOARD_MAX_ROTATIONS}. IT RETURNS EVERY LINE UNFILTERED, since the board matches
+ *  `satisfied` or the end of {@link STATUS_BOARD_WINDOW_MS}. IT RETURNS EVERY LINE UNFILTERED, since the board matches
  *  some steps BY PREFIX. Why: `daemon.summary` had 0 live rows against 524 in rotations, so `rmd status`
  *  reported "no cycle recorded" on a host with 524 cycles */
 export function readLedgerUnionBounded(
   path: string,
   opts: {
     satisfied?: (stepsSeen: ReadonlySet<string>) => boolean;
-    maxRotations?: number;
+    /** How far back to read; defaults to {@link STATUS_BOARD_WINDOW_MS}. */
+    windowMs?: number;
     ledgerFs?: LedgerFsDeps;
     readdirSync?: (dir: string) => string[];
     gunzipSync?: (buf: Buffer) => Buffer;
@@ -884,7 +886,8 @@ export function readLedgerUnionBounded(
     {
       liveFirst: true,
       order: "newest-first",
-      maxRotations: opts.maxRotations ?? STATUS_BOARD_MAX_ROTATIONS,
+      rotationWindowMs: opts.windowMs ?? STATUS_BOARD_WINDOW_MS,
+      minRotations: STATUS_BOARD_MIN_ROTATIONS,
       dedupe: false,
       readLiveRecords: () => live,
       satisfied: opts.satisfied,

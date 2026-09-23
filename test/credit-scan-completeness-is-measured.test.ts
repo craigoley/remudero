@@ -19,15 +19,22 @@
  *
  * TELEMETRY ONLY. Nothing here changes which corrections are written; the last two tests assert
  * that, because "no behaviour change" is the load-bearing half of this claim.
+ *
+ * 2026-09-23: the 24-rotation cap was RETIRED — a count of archives says nothing about how far back
+ * they reach — so the default walk reads the whole corpus and an unresolved candidate is always a
+ * PROVEN absence. The corpora below still straddle the old cap, to pin that nothing hides past it.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CREDIT_SCAN_MAX_ROTATIONS, readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { runCreditBackfill } from "../src/lib/sweep.js";
+
+/** The retired rotation cap — kept as a fixture depth, so each corpus sits where the old bound bit. */
+const CREDIT_SCAN_MAX_ROTATIONS = 24;
 
 const row = (o: Record<string, unknown>): string => JSON.stringify({ ts: "2026-09-07T00:00:00.000Z", ...o });
 const credit = (taskId: string) => row({ task_id: taskId, step: "verdict.merged", verdict: "merged" });
@@ -89,14 +96,15 @@ test("W1-T3019: a credit found in a rotation still suppresses the correction, an
 
 // ── the exhausted walk: a not-found is UNKNOWN, and the row says so ──────────────────────────
 
-test("W1-T3019: a walk that hits the rotation cap reports complete=false and COUNTS the unproven absences", async () => {
+test("W1-T3019: a corpus deeper than the retired cap is walked to its end and the absence is PROVEN", async () => {
   const dir = corpus({ live: [row({ task_id: "SEED", step: "run.start" })], rotations: overCapRotations() });
   const ledgerPath = join(dir, "ledger.ndjson");
   const s = await runCreditBackfill([candidate("W1-T404"), candidate("W1-T405")], { ledgerPath, runId: "SWEEP-1" });
 
-  assert.equal(s.creditScanComplete, false, "the corpus is deeper than the cap, so the walk gave up");
-  assert.equal(s.creditScanFilesRead, CREDIT_SCAN_MAX_ROTATIONS + 1, "live + the cap in rotations");
-  assert.equal(s.creditScanUnknown, 2, "BOTH corrections were written on an absence the walk never proved");
+  assert.equal(s.creditScanComplete, false, "neither candidate resolves");
+  assert.equal(s.creditScanFilesRead, CREDIT_SCAN_MAX_ROTATIONS + 5, "live + every rotation, past the old cap");
+  assert.equal(s.creditScanExhaustedBudget, false, "no bound hid a file");
+  assert.equal(s.creditScanUnknown, 0, "so neither correction rests on an unproven absence");
   assert.equal(s.corrected, 2, "and they are still written — this task changes measurement, not behaviour");
   rmSync(dir, { recursive: true, force: true });
 });
@@ -108,7 +116,7 @@ test("W1-T3019: each correction row carries credit_scan_complete, so a re-credit
   await runCreditBackfill([candidate("W1-T404")], { ledgerPath, runId: "SWEEP-1", log: (step, extra) => rows.push({ step, extra }) });
   const corrections = rows.filter((l) => l.step === "sweep.credit_backfill");
   assert.equal(corrections.length, 1);
-  assert.equal(corrections[0].extra?.credit_scan_exhausted_budget, true, "the diagnostic that separates repair from churn");
+  assert.equal(corrections[0].extra?.credit_scan_exhausted_budget, false, "the diagnostic that separates repair from churn");
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -123,9 +131,9 @@ test("W1-T3019: the summary row publishes all three figures", async () => {
   const sum = logs.find((l) => l.step === "sweep.credit_backfill.summary");
   assert.ok(sum, "the summary still fires on every pass");
   assert.equal(sum.extra?.credit_scan_complete, false);
-  assert.equal(sum.extra?.credit_scan_exhausted_budget, true);
-  assert.equal(sum.extra?.credit_scan_unknown, 1);
-  assert.equal(sum.extra?.credit_scan_files_read, CREDIT_SCAN_MAX_ROTATIONS + 1);
+  assert.equal(sum.extra?.credit_scan_exhausted_budget, false);
+  assert.equal(sum.extra?.credit_scan_unknown, 0);
+  assert.equal(sum.extra?.credit_scan_files_read, CREDIT_SCAN_MAX_ROTATIONS + 5);
   assert.equal(sum.extra?.total, 1, "and the pre-existing fields are unchanged");
   assert.equal(sum.extra?.corrected, 1);
   rmSync(dir, { recursive: true, force: true });
@@ -156,8 +164,8 @@ test("W1-T3019: dryRun still writes nothing, and still reports what it would hav
   const s = await runCreditBackfill([candidate("W1-T404")], { ledgerPath, runId: "SWEEP-1", dryRun: true });
   assert.equal(s.corrected, 0, "dryRun leaves no trace");
   assert.equal(readLedgerLines(ledgerPath).filter((l) => l.step === "sweep.credit_backfill").length, 0);
-  assert.equal(s.creditScanExhaustedBudget, true, "…but the scan is still MEASURED, so --dry-run can diagnose the loop");
-  assert.equal(s.creditScanUnknown, 1);
+  assert.equal(s.creditScanFilesRead, CREDIT_SCAN_MAX_ROTATIONS + 5, "…but the scan is still MEASURED, so --dry-run can diagnose the loop");
+  assert.equal(s.creditScanUnknown, 0);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -166,7 +174,7 @@ test("W1-T3019: an unmerged candidate is still a no-op regardless of what the sc
   const ledgerPath = join(dir, "ledger.ndjson");
   const s = await runCreditBackfill([{ ...candidate("W1-T404"), merged: false }], { ledgerPath, runId: "SWEEP-1" });
   assert.equal(s.corrected, 0, "merged:false is the first gate and this task does not touch it");
-  assert.equal(s.creditScanUnknown, 1, "the candidate is still counted as unproven — measurement is not gated on merge state");
+  assert.equal(s.creditScanFilesRead, CREDIT_SCAN_MAX_ROTATIONS + 5, "the candidate is still scanned — measurement is not gated on merge state");
   rmSync(dir, { recursive: true, force: true });
 });
 
