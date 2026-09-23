@@ -120,6 +120,15 @@ sleep 2
     const codex = await readCodexModelCatalog(config);
     assert.deepEqual(codex, ["gpt-5.6-luna", "gpt-6-luna"]);
 
+    const refused = await watchSuccessorModels({
+      config,
+      statePath: join(root, "refused.json"),
+      readCash: async () => { throw new Error("cash catalog unavailable"); },
+      readCodex: async () => [],
+    });
+    assert.equal(refused.status, "refused");
+    assert.match(refused.refusedReason ?? "", /cash catalog unavailable/);
+
     const reading = await watchSuccessorModels({
       config,
       statePath: join(root, "successors.json"),
