@@ -12,7 +12,7 @@
   plan_refs: ["W1-T4105", "W1-T3115"]
   files:
     - test/setup/tmp-hygiene.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 while building W1-T4105: `test/policy.test.ts` made a real
