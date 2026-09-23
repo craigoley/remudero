@@ -11,7 +11,7 @@
   origin: "session: 2026-09-23 backlog triage — find ways to automatically unblock blocked items"
   plan_refs: ["W1-T2474", "W1-T391", "W1-T931", "W1-T280"]
   files: [src/lib/held-dependency-roots.ts, src/lib/status-board.ts, test/held-dependency-roots.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 AT origin/main b5c2804.

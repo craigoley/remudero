@@ -11,7 +11,7 @@
   origin: "knowledge-system audit 2026-09-22"
   plan_refs: [W1-T4095]
   files: [src/lib/memory-lint.ts, src/run-task.ts, test/an-operator-memory-stays-loadable.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22 on the operator's machine: ~/.claude/projects/-Users-craigoleyagent-Remudero/memory (9 files) and
