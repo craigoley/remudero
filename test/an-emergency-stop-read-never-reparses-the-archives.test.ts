@@ -73,3 +73,14 @@ test("W1-T4334: a new archive file invalidates the cached archive rows", () => {
   assert.equal(reads.get("ledger.2026-09-01.ndjson"), 2, "a rotation re-parses the archive set once");
   assert.equal(reads.get("ledger.2026-09-02.ndjson.gz"), 1);
 });
+
+test("W1-T4334: an unreadable state directory reads as no emergency rows", () => {
+  const { fs } = memoryFs("/state-unreadable", new Map());
+  const rows = emergencyStopRows("/state-unreadable/ledger.ndjson", {
+    ...fs,
+    readdirSync: () => {
+      throw new Error("EACCES");
+    },
+  });
+  assert.deepEqual(rows, []);
+});
