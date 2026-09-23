@@ -28,6 +28,7 @@ import type { GateFireRateReport } from "../src/lib/gate-fire-rate.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const probesPromise = loadGateProbes(REPO_ROOT);
@@ -65,9 +66,10 @@ const REPORT = {
   alwaysFired: ["busy-gate"],
 };
 
-/** A git repo holding every surface the gardener measures, each seeded with one piece of work. */
-function gateRepo(opts: { ciGate?: string } = {}): string {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4116-`));
+/** The shared fixture repo, seeded with every surface the gardener measures, each holding one piece of work. */
+function seededGates(opts: { ciGate?: string } = {}): string {
+  const repo = gitRepo({ kind: "w1t4116" });
+  const root = repo.dir;
   const put = (rel: string, text: string) => {
     mkdirSync(join(root, rel, ".."), { recursive: true });
     writeFileSync(join(root, rel), text);
@@ -82,10 +84,8 @@ function gateRepo(opts: { ciGate?: string } = {}): string {
   put(CI_GATE_YML, opts.ciGate ?? CI_GATE());
   mkdirSync(join(root, "state"));
   writeFileSync(join(root, "state", "gate-fire-rates.json"), JSON.stringify(REPORT, null, 2) + "\n");
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", ...args], { stdio: "pipe" });
-  git("init", "-q");
-  git("add", "-A");
-  git("commit", "-q", "-m", "seed");
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "seed");
   return root;
 }
 
@@ -105,7 +105,7 @@ const off = (root: string, ...classes: string[]) => classes.forEach((c) => write
 
 test("W1-T4116: a slack baseline is tightened to its measured value", async () => {
   const probes = await probesPromise;
-  const root = gateRepo();
+  const root = seededGates();
   off(root, "refresh", "demote");
   const landed: Landed[] = [];
   const pass = runGarden(gateGardenSpec(deps(root, landed), probes), deps(root, landed));
@@ -124,7 +124,7 @@ test("W1-T4116: a slack baseline is tightened to its measured value", async () =
 
 test("W1-T4116: a demotion is only proposed for operator review", async () => {
   const probes = await probesPromise;
-  const root = gateRepo();
+  const root = seededGates();
   off(root, "tighten", "refresh");
   const landed: Landed[] = [];
   const spec = gateGardenSpec(deps(root, landed), probes);
@@ -142,14 +142,14 @@ test("W1-T4116: a demotion is only proposed for operator review", async () => {
   assert.equal(probes.gm.evaluateGateMonotonic(probes.gm.readGateLists(base), probes.gm.readGateLists(head)).ok, true);
   // Judged by the decision alone: a closed PR debits the class.
   writeFileSync(join(root, "src/lib/a.ts"), "export const a = 2;\n");
-  execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", "commit", "-qam", "move"]);
+  execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", "commit", "-qam", "move"], { stdio: "pipe" });
   runGarden(spec, deps(root, landed, () => "closed"));
   assert.deepEqual(readGardenState(gardenStatePath(join(root, "state"), "gate"), GATE_GARDEN_CLASSES).classes.demote, { alpha: 3, beta: 2 });
 });
 
 test("W1-T4116: a stale row is refreshed and the learnings headroom is left alone", async () => {
   const probes = await probesPromise;
-  const root = gateRepo();
+  const root = seededGates();
   const inv = gateInventory(root, join(root, "state"), probes);
   const refresh = inv.candidates.filter((a) => a.class === "refresh").map((a) => a.target).sort();
   assert.deepEqual(refresh, [
@@ -194,7 +194,7 @@ test("W1-T4116: edits refuse what they cannot do exactly", async () => {
   // A rationale identical to the one already on main would be refused by gate-monotonic, so the pass fails.
   const rationale = demotionCandidate(REPORT, new Set(["quiet-gate"]))!.edit;
   assert.equal(rationale.kind, "demote");
-  const root = gateRepo({ ciGate: CI_GATE(rationale.kind === "demote" ? rationale.rationale : "") });
+  const root = seededGates({ ciGate: CI_GATE(rationale.kind === "demote" ? rationale.rationale : "") });
   off(root, "tighten", "refresh");
   assert.throws(() => runGarden(gateGardenSpec(deps(root, []), probes), deps(root, [])), /gate-monotonic would refuse/);
   assert.ok(!existsSync(join(root, "docs/gate-garden-log.md")));
