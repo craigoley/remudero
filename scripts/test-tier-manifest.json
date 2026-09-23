@@ -1624,6 +1624,7 @@
     "test/the-recovery-path-merges-into-a-shared-checkout.test.ts": 2598,
     "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": 692,
     "test/the-regime-helper-has-one-derivation.test.ts": 0,
+    "test/the-release-judge-is-measured.test.ts": 0,
     "test/the-restart-seam-adapts-to-its-host.test.ts": 0,
     "test/the-retro-dedupe-set-is-bounded-by-the-retained-window.test.ts": 2500,
     "test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts": 9513,

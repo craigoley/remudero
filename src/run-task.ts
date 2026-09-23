@@ -808,7 +808,7 @@ import {
   type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./lib/verify-human-judge.js";
-import { releaseAutomatedShard } from "./lib/verify-human-release.js";
+import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
 import {
@@ -24717,6 +24717,20 @@ export function stageInboxProposalOnce(registryPath: string, proposal: Proposal)
   );
 }
 
+/** The release audit's remembered state; a missing or corrupt file starts empty, never throws. */
+export function readReleaseAuditState(path: string): ReleaseAuditState {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ReleaseAuditState>;
+    return {
+      released: parsed.released ?? {},
+      escalationKeys: parsed.escalationKeys ?? [],
+      outcomes: parsed.outcomes ?? {},
+    };
+  } catch {
+    return EMPTY_RELEASE_AUDIT_STATE; // absent on the first run, or unreadable — the next write replaces it
+  }
+}
+
 export async function defaultVerifyHumanCadenceResult(
   /**
    * THE CHECKOUT, NOT `config.root` — different directories on every fleet host. `config.root` is
@@ -24736,7 +24750,7 @@ export async function defaultVerifyHumanCadenceResult(
     const ledgerPath = ledgerPathFor(config);
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
-    return await verifyHumanCadence({
+    const result = await verifyHumanCadence({
       shards: parkedVerifyHumanShards(plan, repoRoot, clock),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
@@ -24753,6 +24767,17 @@ export async function defaultVerifyHumanCadenceResult(
       releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
+    // W1-T4083: measure the release judge over every retained rotation, remembering what older
+    // rotations showed in a state file, so a judge that never escalates is caught.
+    const auditStatePath = join(config.root, "state", "verify-human-release-audit.json");
+    const audit = runReleaseAudit(readLedgerUnionBounded(ledgerPath, { maxRotations: 400 }) as unknown as Record<string, unknown>[], {
+      appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
+      stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
+      runId,
+      readState: () => readReleaseAuditState(auditStatePath),
+      writeState: (state) => writeAtomic(auditStatePath, JSON.stringify(state)),
+    });
+    return { ...result, releaseAudit: { releases: audit.releases, escalations: audit.escalations, merged: audit.merged, failed: audit.failed, alerts: audit.alerts.map((a) => a.kind) } };
   } catch (e) {
     return {
       parked: 0,
