@@ -23,6 +23,7 @@ import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
 import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -102,6 +103,8 @@ function fixtureDeps(root: string, tasks: Task[]): ServeDeps {
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T4226: /v1/daemon-health reads `gh api rate_limit` -- fake it, never shell the refused gh.
+    daemonHealth: { exec: fakeGhRateLimitExec() },
   };
 }
 
