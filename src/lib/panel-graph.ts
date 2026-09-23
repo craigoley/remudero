@@ -82,6 +82,7 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
+import { fleetLaneDecisions, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
@@ -1308,6 +1309,9 @@ export interface InboxFleetItem {
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: PlainInboxMessage;
   lane: "ready" | "drafting" | "notReady" | "declined";
+  /** W1-T4089: the fleet lane's latest decision, when it has made one. */
+  decision?: FleetLaneDecision;
+  reason?: string;
 }
 
 /** The drafted fragment's task ids + titles. A ready fragment already passed classifyProposal's
@@ -1335,6 +1339,7 @@ function classifyAllProposals(
   registryPath: string;
   proposals: Proposal[];
   classifications: InboxClassification[];
+  ledgerLines: ReturnType<typeof readLedgerLines>;
 } {
   const registryPath = join(deps.inboxRoot, "state", "inbox-proposals.json");
   const draftsPath = join(deps.inboxRoot, "state", "inbox-drafts.json");
@@ -1378,7 +1383,7 @@ function classifyAllProposals(
       draftSpawnedAt: (id) => inflight[id],
     }),
   );
-  return { registryPath, proposals, classifications };
+  return { registryPath, proposals, classifications, ledgerLines };
 }
 
 /**
@@ -1398,7 +1403,7 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
     path: "/v1/inbox",
     scope: "read",
     handler: (_req, res) => {
-      const { registryPath, proposals, classifications } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
+      const { registryPath, proposals, classifications, ledgerLines } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
       // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
       const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
 
@@ -1444,10 +1449,14 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
           return fresh.length === current.length ? null : fresh;
         });
       }
+      // W1-T4089: the daemon's fleet lane files only what this classification calls ready, so it
+      // acts on the same readiness truth the operator sees rather than a second, cheaper guess.
+      writeClassificationSnapshot(join(deps.inboxRoot, "state"), classifications);
       // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
       // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
       // lanes stay unchanged for one release so the console can move over without a break.
       const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+      const fleetDecisions = fleetLaneDecisions(ledgerLines as never);
       const needsYou = {
         ready: ready.filter(isOperator),
         drafting: drafting.filter(isOperator),
@@ -1459,7 +1468,10 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
         ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
         ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
-      ].filter((i) => !isOperator(i));
+      ]
+        .filter((i) => !isOperator(i))
+        // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
+        .map((i) => ({ ...i, ...fleetDecisions.get(i.proposalId) }));
       sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet });
     },
   };

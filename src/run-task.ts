@@ -146,6 +146,8 @@ import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./li
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { mergedInLastDay } from "./lib/fleet-lane.js";
+import { ratifyCliGateway } from "./lib/panel-graph.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -30889,6 +30891,12 @@ export async function daemonCommand(
           stateDir: join(config.root, "state"),
           readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
           summarize: plainInboxWriter(config, log),
+        },
+        fleetLane: {
+          stateDir: join(config.root, "state"),
+          ledgerPath,
+          mergedLastDay: () => mergedInLastDay(repoRoot),
+          approve: (proposalId) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).approve(proposalId),
         },
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];

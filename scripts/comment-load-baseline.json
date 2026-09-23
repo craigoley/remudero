@@ -226,6 +226,7 @@
   "src/lib/fix-fence.ts": 56,
   "src/lib/fix-rung-classify.ts": 250,
   "src/lib/fleet-control.ts": 500,
+  "src/lib/fleet-lane.ts": 250,
   "src/lib/flight-judge.ts": 170,
   "src/lib/flight-signals.ts": 86,
   "src/lib/flush-exit.ts": 27,

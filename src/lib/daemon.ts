@@ -16,6 +16,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
+import { startFleetLane, triageFleetLane, type FleetLaneDeps } from "./fleet-lane.js";
 import type {
   CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
@@ -949,6 +950,8 @@ export interface DaemonDeps {
   /** W1-T4087: writes plain-language messages for operator-owned inbox items that have none yet,
    *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
   plainBackfill?: PlainBackfillDeps;
+  /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
+  fleetLane?: FleetLaneDeps;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
    * commands. It is injected so this scheduler module never grows a second repair implementation. */
   runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
@@ -2199,9 +2202,13 @@ export async function runDaemon(
   const prActionPumpRef: { stop: () => void } = { stop: () => {} };
   // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
+  // W1-T4089: the fleet's own findings, filed at the pace the fleet merges work.
+  const fleetLaneDeps = deps.fleetLane;
+  const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLane(fleetLaneDeps), pollIntervalMs, log) : undefined;
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     prActionPumpRef.stop();
     plainBackfill?.stop();
+    fleetLane?.stop();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
