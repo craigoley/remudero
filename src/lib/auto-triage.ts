@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import type { ClaimGitDeps } from "./dispatch-claim.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
@@ -134,19 +135,12 @@ export interface TriageClaimReserver {
   drop(feedbackId: string, opts?: { expect?: string }): boolean;
 }
 
-export interface TriageClaimGitDeps {
-  /** Runs a git argv; returns its exit status, stdout and stderr. Injected by tests. */
-  run(args: string[]): { status: number; stdout: string; stderr: string };
-  /** Overrides the anchor so a test can make two writers distinguishable. */
-  anchor?: () => string;
-}
-
 /**
  * The real reserver: an orphan commit over the empty tree pushed to the entry's own ref (no
  * `-p`, mirroring `gitRemoteRefReserver`) so this writer's payload is unrelated to every other's.
  * The commit message carries pid+host+time for an operator inspecting a stuck claim.
  */
-export function gitTriageClaimReserver(deps: TriageClaimGitDeps): TriageClaimReserver {
+export function gitTriageClaimReserver(deps: ClaimGitDeps): TriageClaimReserver {
   return {
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
