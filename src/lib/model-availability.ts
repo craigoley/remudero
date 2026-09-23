@@ -8,36 +8,25 @@ import { OPENWEIGHT_API_KEY_ENV, OPENWEIGHT_PRICES, openWeightDeploymentReady } 
 
 /**
  * A SUCCESSOR MODEL IS ANNOUNCED AND NOBODY HEARS (W1-T4080, operator ruling
- * `operator-ruling#azure-gpt6-2026-09-22`): "Whenever 6 becomes available, can we have the smart
- * router automatically switch over to them or at least alert us that we need to make a change."
- * W1-T4079 shipped the automatic switch once a model is DEPLOYED AND PRICED — both operator acts
- * that spend money and change the account, so they stay manual. The automation that remains is
- * telling the operator, ONCE, the moment the catalog offers a successor: this module owns that
- * watch and nothing else.
+ * `operator-ruling#azure-gpt6-2026-09-22`). W1-T4079 shipped the automatic switch once a model is
+ * DEPLOYED AND PRICED — both operator acts that spend money and change the account, so they stay
+ * manual. The automation that remains is telling the operator, ONCE, the moment the catalog
+ * offers a successor: this module owns that watch and nothing else.
  *
- * DESIGN, taken verbatim from the task record:
- *  (i) on the measurement cadence (never per tick — see run-task.ts's call site), read the cash
- *      data-plane model list and the Codex account's model list. A successor of a routed model is
- *      a listed id in the same family with a higher generation (`gpt-<N>-luna` for `gpt-<M>-luna`,
- *      N > M) that no ladder row routes as READY.
- *  (ii) classify each successor: announced (listed, not deployed), deployed-unpriced, or ready.
- *  (iii) raise ONE operator alert per successor per STATE, through the existing escalation path
- *      ({@link import("./escalate.js").escalate}), naming the exact next step — the
- *      `az cognitiveservices account deployment create` command, or the price row to add. Never
- *      repeat for an unchanged state; ledger every reading.
- *  (iv) human-gated families (Astra, Fable — model-gate.ts) are reported as present but never
- *      proposed for routing.
+ * DESIGN, taken verbatim from the task record: (i) on the measurement cadence, read the cash
+ * data-plane and Codex model lists — a successor is a listed id in a routed family with a higher
+ * generation that no ladder row routes as READY. (ii) classify it: announced (listed, not
+ * deployed), deployed-unpriced, or ready. (iii) raise ONE alert per successor per STATE through
+ * the existing escalation path, naming the exact next step; never repeat for an unchanged state,
+ * ledger every reading. (iv) human-gated families (Astra, Fable — model-gate.ts) are reported but
+ * never proposed for routing.
  *
- * WHY THE CASH LADDER, NOT THE CODEX LADDER, DEFINES "ROUTED". W1-T4079's automatic switch (and
- * this task's own worked example, "gpt-6-luna for gpt-5.6-luna") is about the CASH/Azure ladder:
- * a Codex-subscription model needs no separate deploy-or-price step (the account simply lists it),
- * so it can never sit in the "announced but not yet switched" state this watch exists to surface.
- * The Codex catalog is still a genuine EARLY-WARNING source (MEASURED 2026-09-22: it offered
- * gpt-6-luna/-sol/-astra before the cash data-plane list did), so a caller may fold Codex-listed
- * ids into {@link CatalogSnapshot.listed} — it just never seeds a "ready" row {@link findSuccessors}
- * compares against, and it is not read by this module directly: `resolveCodexBin`/
- * `readCodexRuntime`'s bin-resolution is private to worker-provider.ts, and this task's own file
- * scope excludes that file (see this task's PR body for the filed follow-up).
+ * TRAP: a Codex-subscription model needs no separate deploy-or-price step, so it can never sit in
+ * the "announced but not switched" state this watch exists to surface — see {@link
+ * routedLadderRows}'s own doc for why only the CASH ladder seeds a "ready" row.
+ *
+ * FALSIFIER (task record): a catalog successor watch already existed at build time — it did not
+ * (`grep -rn watchSuccessorModels src/` was empty before this file).
  */
 
 // ── Parsing a model id into (family, generation) ───────────────────────────
@@ -295,9 +284,17 @@ export async function watchSuccessorModels(
 
 // ── Real reads (production wiring only; every fixture above injects its own) ──
 
-/** capability -> effort -> ordered candidate model ids, {@link Mounts.capabilities}'s own cash
- *  shape (canonical `cash`, falling back to the deprecated `openweight` spelling — W1-T3607,
- *  the SAME fallback `openWeightEndpoint` reads in worker-provider.ts). */
+/**
+ * capability -> effort -> ordered candidate model ids, {@link Mounts.capabilities}'s own cash
+ * shape (canonical `cash`, falling back to the deprecated `openweight` spelling — W1-T3607, the
+ * SAME fallback `openWeightEndpoint` reads in worker-provider.ts).
+ *
+ * WHY THIS IS THE ONLY LADDER {@link findSuccessors} COMPARES AGAINST — this task's own worked
+ * example, "gpt-6-luna for gpt-5.6-luna", and W1-T4079's automatic switch, are both about the
+ * CASH/Azure ladder. A Codex-subscription model needs no separate deploy-or-price step (the
+ * account simply lists it), so it can never sit in the "announced but not switched" state this
+ * watch exists to surface, and never seeds a "ready" row here.
+ */
 export function routedLadderRows(
   mounts: Pick<Mounts, "capabilities">,
   ready: (model: string) => boolean = openWeightDeploymentReady,
