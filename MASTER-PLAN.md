@@ -7287,4 +7287,4 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
 - verify-human:W1-T370 (plan) — RATIFIED 2026-09-10 -> W1-T3392/W1-T3393.
 - W1-T3075 (the dispatch frontier's id-order starves new value: after explicit priority, use measured expected value by deterministic task class; dependency fan-out breaks equal or unmeasured values) — RATIFIED 2026-09-11 -> W1-T3412/W1-T3416. The operator selected the prepared `(b) then (c)` recommendation. The value term is gated on a complete union, W1-T3074's population floor, and two-cycle stability; a failed gate retains priority/scope/id order rather than inventing a rate. W1-T3416 removes the stale `NOT YET RULED` record so this is the sole operative statement.
 - P44 (proof-debt: W1-T3570 grep-path-absent criteria repair) — RATIFIED 2026-09-15 -> W1-T4290.
-- P69 (FD-2026-09-03-fb-repair-blocked-ambiguous-2956: blocked-ambiguous recurrence is a class signal, not a diagnosis) — RATIFIED 2026-09-03 -> W1-T4275.
+- FD-2026-09-03-fb-repair-blocked-ambiguous-2956 (blocked-ambiguous recurrence is a class signal, not a diagnosis) — RATIFIED 2026-09-23 -> W1-T4275.
