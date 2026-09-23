@@ -1,0 +1,47 @@
+- id: W1-T4105
+  title: "A FIX-RUNG WORKER KEEPS REPAIRING A PR FOR 45 MINUTES AFTER A NEWER COMMIT MADE IT GREEN — the sweep snapshots the failing head once and never looks again; check the PR head and its checks while the worker runs, and stop it (recorded as superseded, not failed) when the head moves or the failing check turns green"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator-report#console-not-working-2026-09-23"
+  plan_refs: ["W1-T4102", "W1-T4106"]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23. The sweep dispatched a fix worker for #6681 (W1-T4079) at 01:47:17 UTC
+    against failing head 3dd6d72 (worktree sweep-W1-T4079-1790128037477). A human pushed the
+    actual fix, dde0c1861, 69 s later at 01:48:26 UTC, and every required check on it went green.
+    At 02:30 the worker was still running — four parallel coverage suites against the stale
+    commit — and it was the load that took the console down (W1-T4102). The PR it was repairing
+    had been green for most of that time.
+
+    The local-merge verifier in src/lib/ci-parity.ts already refuses on "head-moved" and
+    "main-moved", but only at the moment it runs. Nothing watches the head for the whole life
+    of a fix worker, so a superseded repair spends its budget and the host's memory to the end,
+    and may then push onto a PR that no longer needs it.
+  design: |
+    While a fix worker runs, the sweep re-reads the PR head and the failing check at the
+    sweep's existing cadence (no new polling loop, no extra GitHub budget beyond one read per
+    poll it already does). If the head differs from the snapshot, or the check the worker was
+    sent to fix now passes on the current head, the worker is stopped through the existing
+    graceful worker-stop path, its worktree is kept for diagnosis, and the run is ledgered as
+    `fix.superseded` with the old head, the new head, and which condition fired. A superseded
+    run never counts as a repair strike.
+  acceptance:
+    - claim: "a fix worker whose PR head moves is stopped and ledgered as superseded"
+      proof: "unit test: a fix worker whose PR head moves is stopped and ledgered as superseded"
+    - claim: "a fix worker whose failing check turns green is stopped and ledgered as superseded"
+      proof: "unit test: a fix worker whose failing check turns green is stopped and ledgered as superseded"
+    - claim: "a superseded run is not counted as a repair strike"
+      proof: "unit test: a superseded fix run is not counted as a repair strike"
+    - claim: "an unreadable head leaves the worker running and says so"
+      proof: "unit test: an unreadable PR head leaves the fix worker running and says so"

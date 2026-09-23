@@ -1,0 +1,52 @@
+- id: W1-T4106
+  title: "A WORKER CAN START FOUR FULL COVERAGE SUITES AT ONCE FROM ITS BASH TOOL, AND DID — refuse a second concurrent full test run in the same worker at the deny floor, point the refusal at `rmd preflight --coverage` (which already runs the shards one after another), and say so in the worker contract"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator-report#console-not-working-2026-09-23"
+  plan_refs: ["W1-T4102", "W1-T4105"]
+  files:
+    - hooks/deny-floor.sh
+    - src/lib/prompt-render.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on the fleet host: one fix-rung worker ran
+    `eval 'mkdir -p /tmp/cov/raw1 /tmp/cov/raw2 /tmp/cov/raw3s /tmp/cov/raw4 ...'` and started
+    four `node --enable-source-maps --experimental-test-coverage ... --test` parents writing
+    /tmp/cov/lcov_s1.info to lcov_s4.info, all at once. Node's runner then ran ~7 files per parent,
+    so ~28 test processes at 250 MB-1 GB each on a 15.6 GiB host — the swap storm that took the
+    console down (W1-T4102).
+
+    The harness does not do this: testWithCoverageShards in src/lib/ci-parity.ts runs its four
+    shards SEQUENTIALLY. The worker re-invented the parallel version by hand. Two things make
+    the cheap guards unavailable, both measured: Node 22 refuses `--test-concurrency` in
+    NODE_OPTIONS (exit 9), so the environment cannot bound it; and a prompt rule alone is prose
+    that binds only if read. Workers already run hooks/deny-floor.sh (containment.ts probes it
+    on every run), so the refusal belongs there.
+  design: |
+    A deny-floor rule over Bash commands:
+    - refuse a command that would start more than one `node ... --test` run at once (several in
+      one command joined by `&`, `xargs -P`, `parallel`, or a loop that backgrounds them);
+    - refuse starting a `node ... --test` run while one is already live under the same worktree
+      (found from /proc/<pid>/cwd under the hook's cwd, so another worker's run never counts);
+    - a single test file, or a run scoped with --test-name-pattern, is allowed alongside;
+    - the refusal names `rmd preflight --coverage` as the way to get CI-shaped coverage.
+    The worker contract (prompt-render.ts) says the same thing in one line.
+  acceptance:
+    - claim: "a command that starts two full test runs at once is refused"
+      proof: "unit test: a command that starts two full test runs at once is refused"
+    - claim: "a second full test run under the same worktree is refused while one is live"
+      proof: "unit test: a second full test run under the same worktree is refused while one is live"
+    - claim: "another worktree's live run does not block this worker"
+      proof: "unit test: another worktree's live test run does not block this worker"
+    - claim: "a single-file run is allowed alongside a live suite"
+      proof: "unit test: a single-file test run is allowed alongside a live suite"
+    - claim: "the refusal names the sequential preflight route"
+      proof: "unit test: the parallel-suite refusal names the sequential preflight route"
