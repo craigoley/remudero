@@ -2001,6 +2001,7 @@ import {
   type GhRateLimitRefusal,
   parseDecisionRequest,
   parseFollowups,
+  parseLearningsUsed,
   parseQuestion,
   parseReconReport,
   parseReport,
@@ -15066,6 +15067,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         question: question.question.slice(0, 120),
       });
     }
+
+    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds);
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
@@ -29737,6 +29740,19 @@ const daemonDefaultBuildSweepHook = buildSweepHook;
 const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
 type DaemonSweepHookBuilder = typeof buildSweepHook;
 type DaemonSweepLightHookBuilder = typeof buildSweepLightHook;
+
+export function logLearningsUsed(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  text: string,
+  injectedIds: readonly string[],
+): void {
+  const parsed = parseLearningsUsed(text, injectedIds);
+  if (!parsed) {
+    log("learnings.used", { silent: true, injected_ids: [...injectedIds] });
+    return;
+  }
+  log("learnings.used", { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused });
+}
 
 export async function daemonCommand(
   rest: string[],
