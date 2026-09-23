@@ -1,0 +1,63 @@
+- id: W1-T4390
+  title: "AN AUTO-FIXING SRE CAN LOOP OR DO HARM, AND NOTHING OUTSIDE IT WOULD NOTICE — give every runbook an independent governor that slows, shadows or stops it on its own receipts, evaluated by a second process so a wedged lane cannot bypass it"
+  repo: remudero
+  depends_on: [W1-T4386]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-09-23: most fixes may auto-run, but with a watcher that stops loops and harm"
+  plan_refs: ["W1-T4385", "W1-T4386", "W1-T4227"]
+  files:
+    - src/lib/sre-governor.ts
+    - src/lib/sre-runbooks.ts
+    - src/lib/daemon.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The operator widened W1-T4386's allowlist to recycles and lock clearing, on one condition: "a watcher of
+    sorts to make sure it doesn't get in a loop or do anything harmful". W1-T4386's own stop-after-two-failures
+    is not that watcher: it lives inside the lane it polices, and it only counts failures. Today's incidents
+    show what it misses. A recycle that "succeeds" and whose incident returns within minutes is a loop, not
+    two failures. A catch-up that clears one incident while a fast burn starts elsewhere is harm. And two
+    runbooks can undo each other forever (A's fix fires B, B's fix re-fires A). Per the operator's standing
+    preference, the response is tiered and self-healing, not a hard ceiling.
+  design: |
+    A pure function sreGovernorVerdict(receipts, incidents, controls, nowMs) in src/lib/sre-governor.ts maps
+    each runbook to live | slow | shadow | stopped, with the reason, computed ONLY from the ledger (`sre.runbook`
+    receipts, incident events, control state), never from lane memory. TIERS:
+    slow — the same fingerprint acted on again inside its backoff window (the window doubles per repeat and
+      halves per clean day);
+    shadow — the incident re-fired after a "successful" act (a LOOP), or a new fast-burning fingerprint started
+      within the act's blast-radius window (HARM); shadow records what it would do and never acts;
+    stopped — flapping (runbook A's success precedes runbook B's incident, and B's success precedes A's again),
+      or harm seen twice; the lane is paused and the needs-human issue is assigned to the operator.
+    SELF-HEALING: a shadowed runbook returns to live once its shadow receipts show the incidents it would
+    have acted on clearing without it doing harm, over a window stated beside the constant with its derivation.
+    A NEW runbook starts in shadow and earns live the same way.
+    GLOBAL: every verdict is stopped while the emergency stop, a pause or quiet hours hold.
+    TWO ENFORCERS: (1) sre-runbooks.ts calls sreGovernorVerdict( before every act; (2) the core daemon, a
+    different process, evaluates the same function every tick over the SRE instance's ledger (via the W1-T4227
+    registry state root). On any stopped verdict it pauses the SRE instance through the existing per-instance
+    control, so a lane that is wedged, or that skips its own check, is still stopped. Each verdict change is a
+    `sre.governor` ledger row {runbook, from, to, reason, evidence}.
+  acceptance:
+    - claim: "an incident that returns after a successful act moves its runbook to shadow"
+      proof: "unit test: an incident that returns after a successful act moves its runbook to shadow"
+    - claim: "two runbooks that re-fire each other are both stopped and the operator is escalated"
+      proof: "unit test: two runbooks that re-fire each other are both stopped and the operator is escalated"
+    - claim: "a new fast burn after an act shadows the runbook that acted"
+      proof: "unit test: a new fast burn after an act shadows the runbook that acted"
+    - claim: "a shadowed runbook returns to live once its shadow record is clean"
+      proof: "unit test: a shadowed runbook returns to live once its shadow record is clean"
+    - claim: "the emergency stop, a pause or quiet hours stop every runbook"
+      proof: "unit test: the emergency stop, a pause or quiet hours stop every runbook"
+    - claim: "the daemon pauses the SRE lane when the governor stops it, even if the lane never checked"
+      proof: "unit test: the daemon pauses the SRE lane when the governor stops it, even if the lane never checked"
+    - claim: "the core daemon evaluates the governor every tick"
+      proof: 'grep: sreGovernorVerdict( in src/lib/daemon.ts'
+  falsifier: |
+    CLOSE IF the SRE lane's runbooks are already gated by a verdict computed outside the lane's own process.

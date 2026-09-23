@@ -231,6 +231,16 @@ export const RUN_BRANCH_UNFILED_FORM = "run-unfiled-<epochMs>";
  *  placeholder) — the one `scripts/head-identity-gate.mjs` tests a real head ref against. */
 export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
 
+/** A GARDENER'S OWN HEAD: `gardenCheckout` names every garden PR's branch `<gardener>-garden-<epochMs>`,
+ *  and `scripts/head-identity-gate.mjs` admits exactly this shape. A garden PR tends the repo on a
+ *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
+ *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
+ *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
+export const GARDEN_NAMES = ["knowledge", "plan", "gate"] as const;
+export type GardenName = (typeof GARDEN_NAMES)[number];
+export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
+export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
+
 /**
  * THE BRANCH-NAME CONTRACT, CARRIED INTO THE PROMPT ITSELF (W1-T3388). CLAUDE.md's own
  * maintenance note says a DISPATCHED WORKER never loads CLAUDE.md at all — `spawnWorker` passes
@@ -30053,7 +30063,7 @@ export function plainInboxWriter(
 /** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. A PR for
  *  operator review opens as a DRAFT, which GitHub refuses to merge until a person marks it ready. */
 export function gardenCheckout(opts: {
-  name: string;
+  name: GardenName;
   repoDir: string;
   worktreesRoot: string;
   owner: string;
@@ -30070,6 +30080,12 @@ export function gardenCheckout(opts: {
     root,
     land: ({ paths, title, body, review }) => {
       git("add", "--", ...paths);
+      // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
+      // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
+      if (paths.some((p) => p.startsWith("docs/") && p.endsWith(".md"))) {
+        execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" });
+        git("add", "--", "docs/docs-index.json");
+      }
       git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
       git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
@@ -43869,7 +43885,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "ledger-compact",
     syntax: "rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]",
     summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
-    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
+    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement per UTC day of its rows, then removes only the source files those replacements cover. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
   },
   {
     name: "hand-runs",

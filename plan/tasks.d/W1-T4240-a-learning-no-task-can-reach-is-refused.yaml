@@ -19,7 +19,7 @@
     - learnings/testing.yaml
     - learnings/index.json
     - test/an-active-learning-is-reachable-by-some-file.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 at origin/main f0e1fc43 with the repo's OWN selector, not a re-implementation:

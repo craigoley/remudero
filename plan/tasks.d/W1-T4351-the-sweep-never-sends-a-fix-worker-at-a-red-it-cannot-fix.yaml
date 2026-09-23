@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 on the fleet ledger: one long daemon run walked the red PRs serially, each a
