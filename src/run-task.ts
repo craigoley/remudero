@@ -1257,6 +1257,7 @@ import {
   type StatusProjection,
   planBranchReap,
   type BranchFacts,
+  BRANCH_REAP_REASON_LABEL,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
   taskIdFromSlugBranch,
@@ -19735,6 +19736,13 @@ export function reapBranchesCommand(
     `hold:      ${plan.hold.length}  (${confirmedHold} confirmed no PR + commits not in main, ` +
       `${plan.undetermined.length} state undetermined)`,
   );
+  if (plan.hold.length > 0) {
+    print("  held branches:");
+    for (const name of plan.hold) {
+      const reason = plan.reasons[name] ?? "state_undetermined";
+      print(`    ${name} — ${BRANCH_REAP_REASON_LABEL[reason]} [${reason}]`);
+    }
+  }
   if (plan.undetermined.length > 0) {
     print(`  undetermined: ${plan.undetermined.join(", ")}`);
   }
@@ -19767,6 +19775,8 @@ export function reapBranchesCommand(
       dangling_citations: danglingCitations,
       orphan_declarations: orphanDeclarations,
       missing_branches: deadDeclaredGuards,
+      held_branches: plan.hold,
+      reasons: plan.reasons,
     });
   }
 
