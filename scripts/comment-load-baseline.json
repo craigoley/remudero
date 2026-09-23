@@ -242,6 +242,7 @@
   "src/lib/grep-zero-cause.ts": 95,
   "src/lib/hand-run-census.ts": 250,
   "src/lib/headroom.ts": 179,
+  "src/lib/held-dependency-roots.ts": 250,
   "src/lib/host-parity.ts": 249,
   "src/lib/idle-reasons-panel.ts": 87,
   "src/lib/image-drift.ts": 93,
