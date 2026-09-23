@@ -25229,7 +25229,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
           writeLedgerLine: (row) =>
             appendLedger(ledgerPathFor(configFor()), {
               run_id: `KNOWLEDGE-MEASUREMENT-${cadenceClock.now()}`,
-              task_id: "KNOWLEDGE",
+              task_id: "knowledge-measurement",
               lane: "measurement-cadence",
               ...row,
               step: KNOWLEDGE_MEASURED_STEP,
