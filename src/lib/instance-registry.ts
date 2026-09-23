@@ -20,6 +20,7 @@
  * both scripts pass it straight to the daemon. The `owner/name` identity is the new `github_repo`
  * field; a registry that has not grown it yet may carry `owner/name` in `repo:` itself.
  */
+import { RmdError } from "./errors.js";
 
 /** The project an instance belongs to when its registry row names none — a standalone repo. */
 export const DEFAULT_PROJECT = "default";
@@ -39,10 +40,10 @@ export type InstanceRegistryErrorCode =
   | "duplicate_live_repo";
 
 /** A registry the parser refuses. `code` is stable for callers; `message` names the line/instance. */
-export class InstanceRegistryError extends Error {
+export class InstanceRegistryError extends RmdError {
   readonly code: InstanceRegistryErrorCode;
   constructor(code: InstanceRegistryErrorCode, message: string) {
-    super(`instance registry ${code}: ${message}`);
+    super("registry", 1, `instance registry ${code}: ${message}`, { code });
     this.name = "InstanceRegistryError";
     this.code = code;
   }
