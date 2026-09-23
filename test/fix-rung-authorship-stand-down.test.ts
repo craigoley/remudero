@@ -115,6 +115,10 @@ function fixRungBaseOpts() {
   };
 }
 
+/** W1-T4226: the rung's live PR-body read goes through `deps.fetchPrBody`, not the refused
+ *  `gh pr view --json body` — a plain body carrying this fixture task's own trailer. */
+const fakePrBody = async (): Promise<string> => "## Summary\n\nfix-rung fixture PR body.\n\nRemudero-Task: W1-T296X\n";
+
 function tmpLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-fixrung-authorship-")), "ledger.ndjson");
 }
@@ -195,6 +199,7 @@ test("runFixRung (criteria 1+2): a still-OPEN PR whose head is moved by a non-ru
     strikeCap: 3,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -248,6 +253,7 @@ test("runFixRung (criterion 3, first half): a FIRST round against a PR the rung 
     strikeCap: 1,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -281,6 +287,7 @@ test("runFixRung (criterion 3, second half): a head the RUNG ITSELF pushed in ro
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `s-${spawnCalls.length}` });
@@ -321,6 +328,7 @@ test("runFixRung (criterion 4): an UNREADABLE live-head read PROCEEDS exactly as
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `s-${spawnCalls.length}` });
@@ -368,6 +376,7 @@ test("runFixRung (criterion 5): repeated invocations that observe the SAME forei
       strikeCap: 3,
       initialReview: failing,
       deps: {
+        fetchPrBody: fakePrBody,
         spawn: async (args) => {
           spawnCalls.push(args);
           return result({ sessionId: `s-${spawnCalls.length}` });
@@ -530,6 +539,7 @@ test("runFixRung (W1-T1278 criterion 3): a SECOND red required name with nothing
       { name: "ci", logTail: "tsc: error TS2322" },
     ],
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `s-${spawnCalls.length}` });

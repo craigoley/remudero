@@ -9,6 +9,7 @@ import { buildBatchedGithub, deriveStatus, ghGateway, projectPlan, type BatchedP
 import { drainCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { DrainDeps, DrainSummary } from "../src/lib/drain.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 /**
  * `drainCommand` WAS THE LAST DISPATCH-PATH HOLDOUT ON THE UNBATCHED GATEWAY.
@@ -228,9 +229,8 @@ const ONE_TASK_YAML = `
  * `ghGateway` takes no `log` at all and emits no such step, at any sha. So the line's presence is
  * a fact about which constructor ran — not an assertion about a string in the source.
  *
- * No network is required and none is assumed: `gh` failing (absent, unauthenticated, throttled) is
- * the path this asserts, and it is also the fail-SAFE direction — a failed read marks the
- * projection indeterminate, so the drain declines rather than dispatching blind.
+ * No network is required and none is assumed: the `gh` the default gateway spawns is a scripted
+ * PATH stub (W1-T4226), so the read SUCCEEDS against an empty repo and the step is `fetch_ok`.
  */
 test("REACHABILITY: the real drainCommand builds its projection from the BATCHED gateway, by default", async () => {
   const root = mkdtempSync(join(tmpdir(), "drain-gateway-default-"));
@@ -240,6 +240,12 @@ test("REACHABILITY: the real drainCommand builds its projection from the BATCHED
   const planPath = join(planDir, "tasks.yaml");
   writeFileSync(planPath, ONE_TASK_YAML);
 
+  // W1-T4226: the DEFAULT factory is still what runs, but the `gh` it spawns is a scripted PATH
+  // stub answering the batched gateway's two list reads with an empty repo — never the refused
+  // shared stub — so the gateway's own read path is exercised, not only its failure arm.
+  const gh = ghShim([{ when: "/pulls?state=", stdout: "[]" }]);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${savedPath ?? ""}`;
   try {
     let captured: DrainDeps | undefined;
     // `runDrain` IS INJECTED SO THE LOOP NEVER RUNS. That is a safety property, not a convenience:
@@ -261,9 +267,7 @@ test("REACHABILITY: the real drainCommand builds its projection from the BATCHED
     assert.equal(code, 0);
     assert.ok(captured, "runDrain was reached and its DrainDeps captured");
 
-    // Drive the DEFAULT factory once. `gh` failing here (absent, unauthenticated, throttled) is
-    // the expected and fail-SAFE path — a failed read marks the projection indeterminate, so the
-    // selector declines rather than dispatching blind.
+    // Drive the DEFAULT factory once, against the scripted `gh` above (an empty repo).
     captured.refreshMerged();
 
     const lines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
@@ -280,7 +284,9 @@ test("REACHABILITY: the real drainCommand builds its projection from the BATCHED
       steps.some((s2) => s2.startsWith("board_gateway.")),
       `FALSIFIER: reverting the factory to ghGateway removes every board_gateway.* step. steps=${steps.join(",")}`,
     );
+    assert.ok(gh.calls().length > 0, "the default gateway really spawned `gh` (the scripted stub), not an injected fake");
   } finally {
+    process.env.PATH = savedPath;
     rmSync(root, { recursive: true, force: true });
   }
 });

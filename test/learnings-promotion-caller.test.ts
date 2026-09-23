@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import {
   classifyPromotionResult,
   renderPromotionProposals,
@@ -351,6 +352,14 @@ test("W1-T1059: retroCommand's --dry-run report carries the promotion section an
   writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
   const logSpy = t.mock.method(console, "log", () => {});
   const github = offlineGithub();
+  // W1-T4226: retroCommand's SHIPPED gateway probes `gh api rate_limit` with no deps seam of its
+  // own, so a scripted PATH `gh` answers it healthily instead of the refused shared stub.
+  const gh = ghShim([
+    { when: "rate_limit", stdout: "5000" },
+    { when: "api user", stdout: "fixture-bot" },
+  ]);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${savedPath ?? ""}`;
   let judged = 0;
   try {
     const exitCode = await withLiveWritesAllowed(() =>
@@ -379,6 +388,7 @@ test("W1-T1059: retroCommand's --dry-run report carries the promotion section an
     assert.ok(judged >= 0);
     assert.ok(github.calls.length > 0, "the injected gateway must be consulted");
   } finally {
+    process.env.PATH = savedPath;
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
   }

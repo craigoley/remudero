@@ -37,9 +37,24 @@ import { test } from "node:test";
 
 import { RETIREMENT_REASONS, type Task } from "../src/lib/plan.js";
 import { blockedDispositionViolations, type BlockedDispositionContext } from "../src/lib/task-linter.js";
-import { lintPlanCommand } from "../src/run-task.js";
+import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** W1-T4226: lint-plan reads GitHub through its `LintPlanStatusDeps` seam, not the refused `gh` —
+ *  offline, with a recording fake gateway so a test can assert none was ever built (mirrors
+ *  test/policy.test.ts's `offlineLintDeps`). The disposition check reads only the base-ref shard. */
+function offlineLintDeps(gatewaysBuilt: string[]): LintPlanStatusDeps {
+  const github = fakeGitHub();
+  return {
+    offline: true,
+    ghGateway: (owner, repo) => {
+      gatewaysBuilt.push(`${owner}/${repo}`);
+      return github;
+    },
+  };
+}
 
 // ── shared fixtures (pure, in-memory) ───────────────────────────────────────────────────────────
 
@@ -159,12 +174,14 @@ test("criterion 1 & 6: a task the diff moves into blocked with no disposition is
     writeFileSync(planPath, fixtureTask("ZZ-NEWLY-BLOCKED", "blocked"), "utf8");
 
     const cap = captureConsole();
+    const gatewaysBuilt: string[] = [];
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], offlineLintDeps(gatewaysBuilt));
     } finally {
       cap.restore();
     }
+    assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this test");
 
     assert.equal(code, 1, "a task the diff moves into blocked with no disposition must fail the run");
     const line = cap.errLines.find((l) => l.includes("[blocked-task-disposition]") && l.includes("ZZ-NEWLY-BLOCKED"));
@@ -207,12 +224,14 @@ test("criterion 3 (end-to-end): a diff that moves a task into blocked AND names 
     writeFileSync(planPath, fixtureTask("ZZ-RETIRED-NOW", "blocked", "retired"), "utf8");
 
     const cap = captureConsole();
+    const gatewaysBuilt: string[] = [];
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], offlineLintDeps(gatewaysBuilt));
     } finally {
       cap.restore();
     }
+    assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this test");
 
     assert.equal(code, 0, "a disposition-naming transition into blocked must not fail the run");
     assert.ok(
@@ -249,12 +268,14 @@ test("criterion 4 (end-to-end): a diff that merely TOUCHES a standing blocked ta
     );
 
     const cap = captureConsole();
+    const gatewaysBuilt: string[] = [];
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], offlineLintDeps(gatewaysBuilt));
     } finally {
       cap.restore();
     }
+    assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this test");
 
     assert.equal(code, 0, "the standing population must never fail the gate merely by being touched");
     const warnLine = cap.errLines.find((l) => l.includes("[blocked-task-disposition]") && l.includes("ZZ-STANDING"));
@@ -270,12 +291,14 @@ test("criterion 4 (whole-plan pass): with no --base at all, the standing populat
     writeFileSync(planPath, fixtureTask("ZZ-WHOLE-PLAN", "blocked"), "utf8");
 
     const cap = captureConsole();
+    const gatewaysBuilt: string[] = [];
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath]);
+      code = await lintPlanCommand(["--plan", planPath], offlineLintDeps(gatewaysBuilt));
     } finally {
       cap.restore();
     }
+    assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this test");
 
     assert.equal(code, 0, "the whole-plan pass must never refuse the standing population");
     assert.ok(

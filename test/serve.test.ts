@@ -744,6 +744,8 @@ test("prewarmBoardGithub: a background timer re-warms on the TTL, with NO reques
   const github: GitHub = buildBatchedGithub("o", "r", {
     ttlMs: 20,
     fetchAll: () => { fetchCalls++; return []; },
+    // W1-T4226: the warm's escalation-issue list goes through this seam, not the refused `gh api`.
+    fetchAllIssues: () => [],
   });
   const stop = prewarmBoardGithub(github, 20); // background refresh every 20ms, matching the gateway's own TTL
   try {
@@ -760,7 +762,8 @@ test("prewarmBoardGithub: a background timer re-warms on the TTL, with NO reques
 test("buildServeServer starts the prewarm timer only once a console connects, and stops it when the server closes", async () => {
   const root = tmpRoot();
   let fetchCalls = 0;
-  const github = buildBatchedGithub("o", "r", { ttlMs: 10, fetchAll: () => { fetchCalls++; return []; } });
+  // W1-T4226: the warm's escalation-issue list goes through `fetchAllIssues`, not the refused `gh api`.
+  const github = buildBatchedGithub("o", "r", { ttlMs: 10, fetchAll: () => { fetchCalls++; return []; }, fetchAllIssues: () => [] });
   const deps = depsFor(root, planOf([task()]), { board: { plan: planOf([task()]), ledgerPath: ledgerPathFor(root), github }, boardGithubRefreshMs: 10 });
   const server = buildServeServer(deps);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
