@@ -387,6 +387,14 @@ export interface LedgerUnionRawReadOptions extends LedgerUnionOptions {
   order?: "oldest-first" | "newest-first";
   liveFirst?: boolean;
   maxRotations?: number;
+  /** Open only rotations stamped within this many ms of the NEWEST rotation's stamp. A rotation's
+   *  stamp is when it was cut, so every row it holds is at or before it, and one stamped before the
+   *  window holds nothing inside it. Anchored on the corpus, not the wall clock, so an idle host still
+   *  reads its last week. Rows are NOT filtered: a retained row older than the window stays. */
+  rotationWindowMs?: number;
+  /** With {@link rotationWindowMs}: the newest this-many rotations are read even when stamped before the
+   *  window — a FLOOR that only ever adds files, so a host rotating once a week keeps its last month. */
+  minRotations?: number;
   pattern?: RegExp;
   dedupe?: boolean;
   requireArchives?: boolean;
@@ -409,7 +417,22 @@ function orderedEntries(rotations: LedgerCorpusEntry[], opts: LedgerUnionRawRead
   const ordered = opts.order === "newest-first"
     ? [...rotations].sort((a, b) => (a.path < b.path ? 1 : a.path > b.path ? -1 : 0))
     : rotations;
-  return opts.maxRotations === undefined ? ordered : ordered.slice(0, opts.maxRotations);
+  const windowed = opts.rotationWindowMs === undefined ? ordered : withinRotationWindow(ordered, opts.rotationWindowMs, opts.minRotations ?? 0);
+  return opts.maxRotations === undefined ? windowed : windowed.slice(0, opts.maxRotations);
+}
+
+function stampMsOf(entry: LedgerCorpusEntry): number {
+  const stamp = rotationStampIso(basename(entry.path));
+  return stamp === undefined ? Number.NaN : Date.parse(stamp);
+}
+
+function withinRotationWindow(entries: LedgerCorpusEntry[], windowMs: number, minRotations: number): LedgerCorpusEntry[] {
+  const stamps = entries.map(stampMsOf).filter((ms) => !Number.isNaN(ms));
+  if (stamps.length === 0) return entries;
+  const start = stamps.reduce((a, b) => Math.max(a, b)) - windowMs;
+  const newest = new Set(entries.map((e) => e.path).sort().reverse().slice(0, minRotations));
+  // An unparseable name cannot be placed in time, so it is read rather than guessed old.
+  return entries.filter((entry) => newest.has(entry.path) || !(stampMsOf(entry) < start));
 }
 
 export function readLedgerUnionRawLinesSync(

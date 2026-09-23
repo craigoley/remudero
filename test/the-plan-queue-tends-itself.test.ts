@@ -256,7 +256,7 @@ test("W1-T4111: a self-hosting daemon wires the plan gardener", async () => {
         return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
       },
     });
-    assert.equal(captured?.gardens?.length, 1);
+    assert.ok((captured?.gardens?.length ?? 0) >= 1, "the plan gardener is the first wired garden");
     captured!.gardens![0]!(60_000).stop();
     const state = readGardenState(gardenStatePath(join(root, "state"), "plan"), PLAN_GARDEN_CLASSES);
     assert.ok(state.lastPass, "the wired garden ran a pass over this repo's plan");

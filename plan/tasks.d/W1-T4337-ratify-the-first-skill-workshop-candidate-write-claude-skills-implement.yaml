@@ -11,7 +11,9 @@
   files: [.claude/skills/implement-clean-single-strike-a4ce515f/SKILL.md, test/the-first-ratified-skill-reaches-implement-workers.test.ts]
   origin: architect
   plan_refs: ["§7", "P25", "W1-T2766", "W1-T3101"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing from the skill-draft approvals (#6779-#6804): superseded by W1-T4338 (approval lands the skill) and W1-T4270 (clean_single_strike restates the merge outcome, not a technique); shares 78 of 79 evidence runs with W1-T4286.
   attempts: 0
   rationale: |
     RATIFIES proposal skill-draft:a4ce515f0f097a31 — the first candidate skill-workshop.ts (W1-T2766)
