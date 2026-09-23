@@ -510,6 +510,7 @@ import {
   type SummarizeDeps,
 } from "./lib/feedback.js";
 import {
+  ciLearningMergedOrigins,
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
@@ -20439,7 +20440,8 @@ export function ciLearningCommand(
   // W1-T2968 — THE PLAN IS THE RECORD. This argument was hardcoded `[]`, so idempotency was inert:
   // every re-read of one window re-drafted everything it had already drafted. A filed record
   // carries its finding id as its `origin:`, which is what makes the plan answerable here.
-  const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(checkoutRoot);
+  // W1-T4190: unioned with what fetched origin/main holds — the checkout's plan can lag it.
+  const planOrigins = deps.planOrigins ?? [...new Set([...ciLearningPlanOrigins(checkoutRoot), ...ciLearningMergedOrigins(checkoutRoot)])];
   const result = mintCiLearningShards(corpus, planOrigins);
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
@@ -29699,6 +29701,7 @@ export function buildCiLearningCadenceRunner(deps: {
   landShards?: typeof landCiLearningShards;
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
+  mergedOrigins?: (checkoutRoot: string) => string[];
   mintTaskId?: (filingBranch?: string) => string;
   recordFire?: (root: string, at: Date) => void;
   releaseFire?: (root: string) => void;
@@ -29722,7 +29725,9 @@ export function buildCiLearningCadenceRunner(deps: {
     }
     const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
     const pendingOrigins = (deps.pendingOrigins ?? ciLearningPendingOrigins)(deps.root, deps.checkoutRoot);
-    const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins])];
+    // W1-T4190: and what origin/main already holds, so a merged finding never takes a draft slot.
+    const mergedOrigins = (deps.mergedOrigins ?? ciLearningMergedOrigins)(deps.checkoutRoot);
+    const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const result = mintCiLearningShards(corpus, idempotencyOrigins);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
     const lessonRecurrences =

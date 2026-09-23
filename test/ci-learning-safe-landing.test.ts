@@ -9,6 +9,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import {
   CI_LEARNING_LANDING_BRANCH,
+  ciLearningMergedOrigins,
   ciLearningPendingOrigins,
   landCiLearningShards,
   landingIdentity,
@@ -515,4 +516,78 @@ test("W1-T3542 criterion 3: generated CLI and operator docs describe queue-backe
   assert.match(guide, /queue-backed landing bridge/, "the operator guide names the durable path");
   assert.doesNotMatch(cli, /REPORT-ONLY: prints the drafts, writes no plan record/, "the stale report-only claim is gone");
   assert.doesNotMatch(guide, /Report-only: prints the drafts, writes no plan record/, "the stale guide claim is gone");
+});
+
+/** A checkout whose WORKING TREE is behind origin/main, where origin/main already carries a shard
+ *  with `origin` — the daemon's operator checkout between self-syncs, after yesterday's landing PR
+ *  merged and acknowledgeMergedCiLearningShards emptied the pending queue. */
+function checkoutBehindMainCarrying(origin: string): { bareOrigin: string; checkout: string } {
+  const bareOrigin = makeBareOrigin();
+  const checkout = cloneRoot(bareOrigin);
+  mkdirSync(join(checkout, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9020-merged.yaml"), ciLearningShardYaml(draft(origin), "W1-T9020"), "utf8");
+  git(checkout, "add", "-A");
+  git(checkout, "commit", "--quiet", "-m", "chore(ci-learning): land pending lessons");
+  git(checkout, "push", "--quiet", "origin", "main");
+  git(checkout, "reset", "--quiet", "--hard", "HEAD~1");
+  return { bareOrigin, checkout };
+}
+
+test("W1-T4190: a finding already on origin/main is not re-filed from a checkout that is behind it", () => {
+  const origin = "ci-learning:4321:ci-gate";
+  const { checkout } = checkoutBehindMainCarrying(origin);
+  assert.deepEqual(ciLearningPlanOrigins(checkout), [], "control: the checkout's own plan does not hold the finding");
+  const { gh, createCount } = fakeGh("https://github.com/o/r/pull/4109");
+  const result = withLiveWritesAllowed(() =>
+    landCiLearningShards([draft(origin)], checkout, {
+      stateRoot: stateRoot(),
+      mintTaskId: () => {
+        throw new Error("a finding origin/main already holds must not consume an id");
+      },
+      planOrigins: ciLearningPlanOrigins(checkout),
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
+      gh,
+    }),
+  );
+  assert.deepEqual(result.skipped, [origin], "the merged finding is skipped, not staged again");
+  assert.deepEqual(result.filed, [], "nothing is filed for it");
+  assert.equal(createCount(), 0, "no landing PR is opened for a finding main already carries");
+});
+
+test("W1-T4190: a finding already on origin/main does not take a draft slot at mint time", async () => {
+  const { checkout } = checkoutBehindMainCarrying("ci-learning:4321:ci-gate");
+  const root = stateRoot();
+  let minted = 0;
+  const run = buildCiLearningCadenceRunner({
+    root,
+    checkoutRoot: checkout,
+    loadWindow: () => repairedWindow(),
+    loadLessons: () => ({ status: "unreadable" }),
+    mintTaskId: () => `W1-T903${++minted}`,
+    landShards: () => {
+      throw new Error("nothing to land: the only finding is already on main");
+    },
+    recordFire: () => {},
+  });
+  const result = await withLiveWritesAllowed(() => run());
+  assert.equal(result.draftCount, 0, "the merged finding is excluded before the mint ceiling is applied");
+  assert.equal(minted, 0, "no task id is reserved for it");
+});
+
+test("W1-T4190: an unreadable origin/main is reported, not read as no merged findings", () => {
+  const checkout = cloneRoot(makeBareOrigin());
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (msg: string) => errors.push(String(msg));
+  try {
+    const origins = ciLearningMergedOrigins(checkout, () => {
+      throw new Error("fatal: bad revision 'origin/main'");
+    });
+    assert.deepEqual(origins, [], "the held set falls back to the plan and queue alone");
+  } finally {
+    console.error = original;
+  }
+  assert.equal(errors.length, 1, "the unreadable read is named once");
+  assert.match(errors[0], /origin\/main's filed origins are unreadable.*bad revision/);
 });
