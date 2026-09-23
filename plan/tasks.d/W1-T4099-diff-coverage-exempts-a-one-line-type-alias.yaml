@@ -1,0 +1,31 @@
+- id: W1-T4099
+  title: "DIFF-COVERAGE BLOCKS A ONE-LINE TYPE ALIAS NO TEST CAN COVER — `computeTypeOnlyRanges` exempts interface and object-type bodies but not `export type X = \"a\" | \"b\";`, which compiles to no JavaScript; #6677 went red on it on 2026-09-22: exempt single-line type aliases and correct the doctrine that says type-only lines are exempt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "PR #6677 coverage-ratchet 2026-09-22 (src/lib/inbox-owner.ts:15)"
+  plan_refs: [W1-T171]
+  files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts, doctrine/coverage-traps/in-a-new-file-sandwich-type-only-declarations-between.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22: CI diff-coverage on #6677 reported `src/lib/inbox-owner.ts:15` uncovered — the line
+    `export type InboxOwner = "operator" | "fleet";`. The doctrine body says type-only lines are exempt, citing
+    `computeTypeOnlyRanges` (W1-T171), which only walks brace-delimited interface/object-type bodies. The PR removed
+    the alias to get green, the cost the doctrine promised it would never impose.
+  design: |
+    (i) `computeTypeOnlyRanges` also marks a `type` alias statement (single or multi-line, no braces) and an
+        `import type` / `export type { … }` line as type-only.
+    (ii) The doctrine body names the fixed case and its date.
+  acceptance:
+    - claim: "a one-line union type alias is exempt"
+      proof: 'grep: test("W1-T4099: a one-line union type alias is exempt" in test/diff-coverage.test.ts'
+    - claim: "a real statement next to a type alias is still flagged"
+      proof: 'grep: test("W1-T4099: a real statement next to a type alias is still flagged" in test/diff-coverage.test.ts'
+  falsifier: |
+    Revert the change and the first test flags the alias.

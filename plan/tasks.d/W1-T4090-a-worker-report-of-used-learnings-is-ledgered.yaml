@@ -1,0 +1,40 @@
+- id: W1-T4090
+  title: "EVERY WORKER REPORTS WHICH LEARNINGS IT USED AND THE ANSWER IS THROWN AWAY — `parseLearningsUsed` (worker.ts, W1-T2760) has no production caller, 361 host transcripts carry a LEARNINGS_USED line, and the ledger union holds zero `learnings.used` rows: parse each implement worker's report and ledger it beside `learnings.injected`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "knowledge-system audit 2026-09-22 (operator ask: an automated, self-improving memory system)"
+  plan_refs: [W1-T2760, W1-T33]
+  files: [src/run-task.ts, test/a-worker-report-of-used-learnings-is-ledgered.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 ON origin/main AND THE LIVE HOST.
+    (1) compaction.ts asks every implement worker to end with `LEARNINGS_USED: learnings#<id>, …` or `none`.
+        `parseLearningsUsed(text, injectedIds)` (worker.ts) parses it and refuses any id that was never injected.
+    (2) `git grep "parseLearningsUsed("` finds no caller in src/ outside its own definition. The ledger union
+        (live + every rotation) holds 0 `learnings.used` rows. 361 worker transcripts on the host carry the line
+        (185 say none).
+    (3) So `cited`/`cited_count` still measure INJECTION, and `selectLearnings` tiebreaks on `cited`: a fact that is
+        injected keeps winning, whether or not it ever helps.
+  design: |
+    (i) Where run-task.ts collects an implement worker's final text, call `parseLearningsUsed` with the run's own
+        `matched_ids` from its `learnings.injected` row, and ledger `learnings.used {used_ids, injected_ids, refused}`.
+    (ii) A silent report (no anchored line) ledgers `learnings.used {silent: true, injected_ids}` so a missing answer
+         is countable, never read as "used none".
+    (iii) Nothing else changes: ranking stays as it is until W1-T4091.
+  acceptance:
+    - claim: "an implement worker's LEARNINGS_USED report is ledgered with its injected set"
+      proof: 'grep: test("W1-T4090: an implement worker.s LEARNINGS_USED report is ledgered with its injected set" in test/a-worker-report-of-used-learnings-is-ledgered.test.ts'
+    - claim: "a claimed id that was never injected is refused by name"
+      proof: 'grep: test("W1-T4090: a claimed id that was never injected is refused by name" in test/a-worker-report-of-used-learnings-is-ledgered.test.ts'
+    - claim: "a silent report is ledgered as silent"
+      proof: 'grep: test("W1-T4090: a silent report is ledgered as silent" in test/a-worker-report-of-used-learnings-is-ledgered.test.ts'
+    - claim: "run-task calls the parser"
+      proof: 'grep: parseLearningsUsed( in src/run-task.ts'
+  falsifier: |
+    Remove the call and the first test finds no `learnings.used` row after a fake implement run.
