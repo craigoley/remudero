@@ -11,7 +11,7 @@ import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { tryEscalate } from "./escalate.js";
-import { appendLedger, type LedgerLine } from "./ledger.js";
+import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
 import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD, promotionTaint } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult, PromotionTaintResult } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
@@ -1545,15 +1545,9 @@ export function mutationGateVerdictLine(input: MutationGateVerdictInput): Ledger
   };
 }
 
-/** Dependencies for {@link recordMutationGateVerdict} — a test spies on `writeLedger`. */
-export interface MutationGateVerdictDeps {
-  ledgerPath: string;
-  writeLedger?: typeof appendLedger;
-}
-
 /** Append one {@link mutationGateVerdictLine}. UNWIRED here, because the call site lives in
  *  `mutation-ratchet.mjs`/`ci.yml`; shipped now so the step and its rotation survival land once. */
-export function recordMutationGateVerdict(input: MutationGateVerdictInput, deps: MutationGateVerdictDeps): void {
+export function recordMutationGateVerdict(input: MutationGateVerdictInput, deps: LedgerWriterDeps): void {
   const writeLedger = deps.writeLedger ?? appendLedger;
   writeLedger(deps.ledgerPath, mutationGateVerdictLine(input));
 }
@@ -2750,15 +2744,9 @@ export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []
   return { candidates, deduped, harvestLines };
 }
 
-/** Dependencies for {@link recordFollowupHarvest} — a test spies on `writeLedger`, not disk. */
-export interface FollowupHarvestDeps {
-  ledgerPath: string;
-  writeLedger?: typeof appendLedger;
-}
-
 /** Append every {@link FollowupHarvest.harvestLines} entry so a later {@link mineFollowups} pass
  *  mints neither the candidate nor the dedup match again. Invoked ONLY on a real retro. */
-export function recordFollowupHarvest(harvest: FollowupHarvest, deps: FollowupHarvestDeps): void {
+export function recordFollowupHarvest(harvest: FollowupHarvest, deps: LedgerWriterDeps): void {
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const line of harvest.harvestLines) writeLedger(deps.ledgerPath, line);
 }
@@ -3133,7 +3121,8 @@ export interface FollowupRetireOutcome {
   reason: string;
 }
 
-export interface RetireFollowupsDeps {
+/** W1-T4107: shared by retireSettledFollowups and pruneFollowups, which took identical seams. */
+export interface FollowupRegistryDeps {
   registryPath: string;
   /** Injectable — production takes {@link updateProposalRegistry}, mirroring
    *  {@link RouteFollowupsDeps.updateRegistry}'s own test seam. */
@@ -3147,7 +3136,7 @@ export interface RetireFollowupsDeps {
 /** Retire every routed follow-up whose originating task has merged — the missing counterpart to
  *  the append-only write. Unlike board-review's retirement this ACTUALLY REMOVES the entry,
  *  because the measured growth is a registry-SIZE problem. `"unreadable"` retires nothing. */
-export function retireSettledFollowups(read: FollowupReferentRead, deps: RetireFollowupsDeps): FollowupRetireOutcome[] {
+export function retireSettledFollowups(read: FollowupReferentRead, deps: FollowupRegistryDeps): FollowupRetireOutcome[] {
   if (read.kind === "unreadable") return [];
 
   const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
@@ -3203,23 +3192,12 @@ export interface FollowupPruneOutcome {
   reason: string;
 }
 
-export interface PruneFollowupsDeps {
-  registryPath: string;
-  /** Injectable — production takes {@link updateProposalRegistry}, mirroring the same test seam
-   *  {@link RouteFollowupsDeps} and {@link RetireFollowupsDeps} use. */
-  updateRegistry?: (
-    registryPath: string,
-    update: (current: Proposal[]) => Proposal[] | null,
-    opts?: UpdateProposalRegistryOpts,
-  ) => Proposal[] | null;
-}
-
 /** Apply {@link isSelfReferentialFollowup}'s predicate — parsed back off each already-minted
  *  proposal's `summary`, since this population predates the admission arm — and remove every match
  *  in ONE write, as {@link retireSettledFollowups} does. NEEDS NO BATCHED READ: the predicate is
  *  local to each summary, so a second pass finds nothing left to remove. A foreign summary is left
  *  alone and never guessed at. */
-export function pruneSelfReferentialFollowups(deps: PruneFollowupsDeps): FollowupPruneOutcome[] {
+export function pruneSelfReferentialFollowups(deps: FollowupRegistryDeps): FollowupPruneOutcome[] {
   const updateRegistry = deps.updateRegistry ?? updateProposalRegistry;
   let outcomes: FollowupPruneOutcome[] = [];
 
@@ -3578,21 +3556,13 @@ export interface ContradictionResolution {
   reason?: string;
 }
 
-/** Dependencies {@link applyContradictionResolution} needs injected — same shape as correct.ts's `writeLedger` override. */
-export interface ContradictionResolutionDeps {
-  /** Absolute path to state/ledger.ndjson. */
-  ledgerPath: string;
-  /** Defaults to the real {@link appendLedger}; tests inject a spy instead of touching disk. */
-  writeLedger?: typeof appendLedger;
-}
-
 /** APPLY a resolution: `activeId` is re-admitted, `supersededId` marked `superseded`. Appends ONE
  *  `contradiction.resolved` ledger line naming both ids, `by` and `reason` — the durable record a
  *  learnings write requires. The ONLY function here that resolves a `contested` entry. */
 export function applyContradictionResolution(
   entries: LearningEntry[],
   resolution: ContradictionResolution,
-  deps: ContradictionResolutionDeps,
+  deps: LedgerWriterDeps,
 ): LearningEntry[] {
   const writeLedger = deps.writeLedger ?? appendLedger;
   const updated = entries.map((e) => {
