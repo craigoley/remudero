@@ -13,7 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import type { Writable } from "node:stream";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { drained } from "../src/lib/flush-exit.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const FLUSH_EXIT = join(ROOT, "src", "lib", "flush-exit.ts");
@@ -126,4 +128,41 @@ void test("W1-T4063: an early-closed reader does not hang the exit", async () =>
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// `drained`'s CATCH arm, one test per arm. A write that throws means the stream can deliver nothing
+// more (ERR_STREAM_DESTROYED, a synchronous EPIPE), so the exit must PROCEED rather than hang — the
+// child-process tests above cannot reach it, because a real pipe does not throw synchronously.
+test("drained resolves when the stream's own write THROWS — a dead stream leaves nothing to wait for", async () => {
+  const removed: string[] = [];
+  let writes = 0;
+  const dead = {
+    destroyed: false,
+    writableEnded: false,
+    writable: true,
+    once(): unknown { return dead; },
+    off(event: string): unknown { removed.push(event); return dead; },
+    write(): never { writes += 1; throw new Error("ERR_STREAM_DESTROYED"); },
+  };
+
+  // Resolving at all IS the assertion: an unhandled throw would reject and fail this test, and a
+  // `done()` that never ran would hang it until the runner's timeout.
+  await drained(dead as unknown as Writable);
+
+  assert.equal(writes, 1, "the zero-length probe write was attempted exactly once");
+  assert.deepEqual(removed, ["error", "close"], "and the listeners are torn down by the same done() path");
+});
+
+test("drained short-circuits a stream that can no longer deliver, without writing to it", async () => {
+  let writes = 0;
+  const ended = {
+    destroyed: false,
+    writableEnded: true,
+    writable: true,
+    once(): unknown { return ended; },
+    off(): unknown { return ended; },
+    write(): never { writes += 1; throw new Error("must not be written to"); },
+  };
+  await drained(ended as unknown as Writable);
+  assert.equal(writes, 0, "an ended stream is never probed — the guard returns before the write");
 });
