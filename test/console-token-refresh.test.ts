@@ -362,6 +362,7 @@ interface ServeLauncherFixtureOptions {
   daemonTokenPresent?: boolean;
   extraArgv?: string[];
   existingContainer?: boolean;
+  operatorIdentityPresent?: boolean;
 }
 
 function runServeLauncherFixture(
@@ -405,6 +406,11 @@ function runServeLauncherFixture(
   if (options.accountFilePresent) writeFileSync(accountFilePath, '{"account":"fake"}');
   if (options.webhookSecretPresent) writeFileSync(webhookSecretPath, "fake-webhook-secret");
   if (options.existingWebhookSecretMount) writeFileSync(existingWebhookSecretPath, "old-fake-webhook-secret");
+  const operatorIdentityPath = join(root, ".config", "remudero", "operator-identity.json");
+  if (options.operatorIdentityPresent) {
+    mkdirSync(join(root, ".config", "remudero"), { recursive: true });
+    writeFileSync(operatorIdentityPath, '{"issuer":"https://FAKE-OPERATOR-ISSUER.test"}');
+  }
 
   writeFileSync(
     dockerPath,
@@ -481,6 +487,7 @@ exit 1
     RMD_CLAUDE_JSON_PATH: options.accountFilePresent ? accountFilePath : join(root, "no-account-file"),
     RMD_GITHUB_WEBHOOK_SECRET_PATH: options.webhookSecretPresent ? webhookSecretPath : "",
   };
+  delete env.RMD_OPERATOR_IDENTITY_FILE;
   delete env.GH_APP_ID;
   delete env.GH_APP_INSTALLATION_ID;
   delete env.GH_APP_PRIVATE_KEY_PATH;
@@ -521,9 +528,25 @@ exit 1
     accountFilePath,
     webhookSecretPath,
     existingWebhookSecretPath,
+    operatorIdentityPath,
     stateDir,
   };
 }
+
+test("a host operator identity file is mounted read-only at a fixed path and never printed", () => {
+  const dest = "/home/node/.rmd-operator-identity.json";
+  const present = runServeLauncherFixture("direct", { operatorIdentityPresent: true });
+  assert.equal(present.result.status, 0, present.result.stderr);
+  assert.ok(present.capture.includes(`${present.operatorIdentityPath}:${dest}:ro`), present.capture);
+  assert.ok(present.capture.includes(`RMD_OPERATOR_IDENTITY_PATH=${dest}`), present.capture);
+  const printed = present.result.stdout + present.result.stderr + present.capture;
+  assert.ok(!printed.includes("FAKE-OPERATOR-ISSUER"), "the file's content is never printed");
+  const absent = runServeLauncherFixture("direct");
+  assert.equal(absent.result.status, 0, absent.result.stderr);
+  assert.ok(!absent.capture.includes(dest), "no file, no mount");
+  assert.ok(!absent.capture.includes("RMD_OPERATOR_IDENTITY_PATH"), "no file, no env");
+  assert.match(absent.result.stderr, /no operator identity file/);
+});
 
 test("W1-T2778: a direct readable host App key becomes one read-only file mount and the launched env names that destination", () => {
   const fixture = runServeLauncherFixture("direct");

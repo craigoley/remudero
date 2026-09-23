@@ -1132,6 +1132,7 @@
     "test/operator-agent-settings-scope-write.test.ts": 0,
     "test/operator-agent.test.ts": 1500,
     "test/operator-gated-default-reachability.test.ts": 4097,
+    "test/operator-identity-file.test.ts": 0,
     "test/operator-macros-are-generated.test.ts": 1078,
     "test/operator-merge-hold-command.test.ts": 1583,
     "test/operator-message-standard.test.ts": 225,
