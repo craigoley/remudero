@@ -6,7 +6,6 @@
  * Every GitHub read is injected — nothing here touches the network.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +29,7 @@ import {
 import type { WorkerResult } from "../src/lib/worker.js";
 import { priorStrikesFor, runFixRung } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const OLD_HEAD = "3dd6d72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_HEAD = "dde0c1861bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -266,17 +266,13 @@ test("W1-T4105: the worker's own push is not a supersession, and a still-red che
 });
 
 test("W1-T4105: headIsInWorktree reads the worktree's own history", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-w1t4105-git-"));
+  const repo = gitRepo({ kind: "w1t4105" });
   try {
-    const git = (...args: string[]) =>
-      execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
-    git("init", "-q");
-    git("commit", "-q", "--allow-empty", "-m", "worker push");
-    const own = git("rev-parse", "HEAD");
-    assert.equal(headIsInWorktree(dir, own), true);
-    assert.equal(headIsInWorktree(dir, NEW_HEAD), false, "a commit the worktree never saw is foreign");
+    const own = repo.git("rev-parse", "HEAD");
+    assert.equal(headIsInWorktree(repo.dir, own), true);
+    assert.equal(headIsInWorktree(repo.dir, NEW_HEAD), false, "a commit the worktree never saw is foreign");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    repo.cleanup();
   }
 });
 

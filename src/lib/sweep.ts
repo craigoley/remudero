@@ -3985,6 +3985,7 @@ export function headIsInWorktree(worktreePath: string, sha: string): boolean {
     execFileSync("git", ["-C", worktreePath, "merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
     return true;
   } catch {
+    // Not an ancestor (exit 1) or unreadable: either way not provably the worker's own push.
     return false;
   }
 }
@@ -4000,7 +4001,7 @@ export async function watchFixSuperseded(w: {
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<FixSuperseded | undefined> {
   while (!w.signal.aborted) {
-    await delay(w.intervalMs, undefined, { signal: w.signal }).catch(() => undefined);
+    await delay(w.intervalMs, undefined, { signal: w.signal }).catch(() => /* aborted: the loop re-checks the signal */ undefined);
     if (w.signal.aborted) return undefined;
     const observed = await w.read().catch((e: unknown) => ({ error: String((e as Error)?.message ?? e) }));
     const decision = decideFixSuperseded(w.snapshot, observed, w.isWorkerHead);
