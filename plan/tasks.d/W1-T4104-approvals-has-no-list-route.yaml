@@ -12,7 +12,7 @@
   plan_refs: ["W1-T3894", "W1-T4103"]
   files:
     - src/lib/operator-agent.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/amend-W1-T1081-fold-satisfied -> file/console-resilience-core
