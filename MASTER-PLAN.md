@@ -5666,6 +5666,41 @@ verbs (query keys, ruled untouchable 2026-08-15); Chain-of-Draft output limits; 
 lanes; a TOON serialization of the ledger (waiting on a measured `input_tokens` figure — name the query,
 not a number).
 
+## 4E. External scan (2026-09-23): agent memory systems — taken, refused, already held
+
+[research: agent-memory-scan-2026-09-23] Surveyed: Walrus Memory/MemWal, Honcho, Brainfish, Letta
+(sleep-time compute), Mem0, Zep/Graphiti, LangMem, Cognee, A-MEM, the Anthropic memory tool, Claude
+Code memory, Reflexion, Voyager, ExpeL, AWM, Generative Agents, Dynamic Cheatsheet, ACE, OpenHands,
+Devin, Cursor, Karpathy's LLM wiki. Benchmark figures came from abstracts or search snippets (the scan's
+proxy blocked arxiv), so none is cited here as evidence.
+**THE MEASURED FINDING:** this corpus already holds most of the field's patterns — supersede-not-delete
+(W1-T33), contested lifecycle and revert recall (W1-T88, W1-T2701), deterministic insertion dedup that
+names its paraphrase miss (W1-T420, the Honcho #729 failure avoided by design), a hard injection budget
+enforced by a gate, Thompson ranking on usage (W1-T4091), and a Letta-style background gardener
+(W1-T4095). The field's lead is OUTCOME-LINKED counters (ACE helpful/harmful, ExpeL votes) and
+MISS-driven authoring (Brainfish, the LLM wiki's lint). Measured at f0e1fc43: **4 of 79 active
+learnings are unreachable by any tracked path** (17 of 160 globs are bare directories under an
+anchored matcher), and `selectLearnings`' seeded draw already randomizes the budget cut that nothing reads.
+**TAKEN — THREE SHARDS, FILED 2026-09-23:** **W1-T4240** an unreachable active learning is a CI refusal
+(the lint half of the LLM wiki, applied as Graphiti-style invalidation at the PR that removes the
+referent) · **W1-T4241** the Thompson draw read as a randomized trial: per-learning outcome effect by
+inverse propensity, surfaced beside the `LEARNINGS_USED` claim, never fed back until readings exist ·
+**W1-T4243** knowledge-gap census: zero-match rate on failed vs clean runs by code area, measurement only.
+**REFUSED, WITH THE REASON:** embeddings or a vector store (matching is deterministic by rule,
+learnings.ts header, and paraphrase-miss is a stated tradeoff); a knowledge graph (83 records do not
+need traversal); an LLM that rewrites the corpus whole (ACE's "context collapse" is the measured cost;
+the gardener's one-class deltas already avoid it); on-chain or content-addressed blob storage (git is
+the content-addressed, append-only substrate); time-based expiry (a lease that decays by age retires
+correct rules — W1-T4241's outcome reading is the evidence a retirement should wait for); a peer or
+theory-of-mind model of the operator (W1-T3895 holds preferences with provenance and expiry); any NEW
+producer of filed work until W1-T4014 gives the existing ~7/day a release path; speculative sleep-time
+recon for frontier tasks (no measured share of wall-clock spent in recon on the critical path — the
+query is `recon.done.ts − run.start.ts` over the ledger union, then decide).
+**ALREADY HELD:** Anthropic's "assume interruption" checkpoint (the compaction anchor); Devin/OpenHands
+trigger-scoped knowledge (file, symbol and error-signature matching, W1-T3081/W1-T4093); on-demand rule
+bodies (W1-T4094); verified-procedure skill libraries à la Voyager/AWM (`mineProceduralCandidates`,
+W1-T2766); human approval before a durable write (a `learnings/` PR is the approval).
+
 ## 5. Principles engine
 
 Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet
