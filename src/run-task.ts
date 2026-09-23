@@ -19998,7 +19998,7 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
 const DEFAULT_FLEET_REPOS: readonly string[] = ["craigoley/remudero", "craigoley/remudero-site", "craigoley/remudero-console"];
 
 /** Injectable seam for {@link boardCommand} — real callers pass none of it. */
-export interface BoardCommandDeps {
+export interface BoardCommandOptions {
   survey?: (repos: readonly string[]) => PullRequestBoard;
   loadConfig?: () => Pick<Config, "fleetRepos">;
 }
@@ -20008,7 +20008,7 @@ export interface BoardCommandDeps {
  *  else {@link DEFAULT_FLEET_REPOS}. An unreadable config (the empty-checkout CI shape every
  *  other diagnostic verb here already guards — see `handRunsCommand`'s own note) is not a fleet
  *  with no repos; it falls back the same as an absent field, never crashing a report-only verb. */
-function defaultFleetRepos(deps: BoardCommandDeps): readonly string[] {
+function defaultFleetRepos(deps: BoardCommandOptions): readonly string[] {
   try {
     const configured = (deps.loadConfig ?? loadConfig)().fleetRepos;
     if (Array.isArray(configured) && configured.length > 0) return configured;
@@ -20033,7 +20033,7 @@ function defaultFleetRepos(deps: BoardCommandDeps): readonly string[] {
  * repository red or unavailable. This verb reports; it does not gate (design iv) — mirroring
  * `ciFailuresCommand`'s own report-only contract just above.
  */
-export function boardCommand(rest: string[], deps: BoardCommandDeps = {}): number {
+export function boardCommand(rest: string[], deps: BoardCommandOptions = {}): number {
   const badArg = unknownArgError("board", rest, ["--repo"], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
