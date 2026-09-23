@@ -1,0 +1,130 @@
+- id: W1-T4353
+  title: "THE ACCEPTANCE FALLBACK'S ONLY PROOF IS NON-DISCRIMINATING BY CONSTRUCTION — `PR_OPEN_TIME_ACCEPTANCE_FALLBACK` and `ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK` grep a line in `src/lib/review.ts` that is present at every merge base, so a plan-only/squash-derived PR whose diff never touches that file fails the REQUIRED `proof-discrimination` check by design (the RETRO-1789341105445/#5455 stall); switch both fallback claims to the `demonstration:` dialect and teach the author-time gate's shape check to accept it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 40.00
+  origin: "retro#1789341105445"
+  plan_refs: ["§5", "W1-T1060", "W1-T3508"]
+  files: [src/run-task.ts, scripts/acceptance-author-gate.mjs, test/a-fallback-acceptance-proof-must-not-be-diff-blind.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on run RETRO-1789341105445's own plan-sync PR (#5455, run DAEMON-1789343790915): a
+    plan-only PR opened through `ghPrCreateFillCommand` with a commit-derived body carrying no
+    Acceptance block falls through to `ensureJudgeableBody(..., PR_OPEN_TIME_ACCEPTANCE_FALLBACK)`
+    (`src/run-task.ts`, ~2883/3802). That fallback's ONE criterion carries the proof
+    `grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts` — VERIFIED PRESENT AT
+    HEAD (this checkout) for BOTH fallback constants: `ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK`
+    (~3812/3818, consumed by `acceptanceGateBodyRepair` at ~3854-3857 for the fix rung's body-only
+    repair path) carries the identical proof string. `src/lib/review.ts` declares
+    `export function acceptanceAuthorTimeCheck` on `origin/main` today and has for a long time, so
+    that declaration is present, unchanged, at BOTH the PR head and the merge base of essentially
+    every PR that does not itself edit `src/lib/review.ts` — which is every plan-only PR by
+    definition, and most worker PRs besides.
+    `scripts/proof-discrimination-gate.mjs` is a REQUIRED context (`proof-discrimination` in
+    `.github/workflows/ci-gate.yml:82`, verified). Its `criteriaForReview` resolves criteria from
+    the TASK's plan acceptance first and falls back to the PR body's own `## Acceptance` block only
+    when no task criteria resolve (`resolvePlanCriteriaAtHead` returns `[]`) — exactly the case for
+    a plan-only/synthetic PR whose trailer does not resolve to a filed task's own criteria. So the
+    fallback body's grep proof IS what gets evaluated, and `evaluateProofDiscrimination` runs it via
+    `check-proof --base <mergeBase>`, which reports `CHECK_PROOF_EXIT.executedStale` whenever the
+    pattern matches identically at head and base. It always will, for this target, on any PR that
+    doesn't touch `src/lib/review.ts`. Such a PR either has no resolvable `Remudero-Task:` trailer
+    (no grandfathered allowance possible — `staleAllowanceFor` returns 0, and the gate's own message
+    states this plainly: "No resolvable Remudero-Task trailer, so no grandfathered allowance
+    applies") or resolves to a synthetic/constant id absent from
+    `scripts/proof-discrimination-baseline.json` — either way, `judgeStaleAgainstAllowance` fails and
+    `proof-discrimination-gate.mjs` exits 1, REFUSED.
+    THIS IS A DISTINCT DEFECT FROM W1-T3508, not a duplicate. W1-T3508 (its shard still present in
+    `plan/tasks.d/`, and this exact grep-proof shape already reflected in the current tree) fixed the
+    fallback's proof SHAPE — it moved from bare, un-dialected prose (refused by
+    `acceptance-author-gate`'s `proof-shape` check, W1-T3508's own fixture, PR #5347) to a
+    syntactically valid `grep:` dialect proof (now passes `acceptance-author-gate`). That fix made
+    the proof EXECUTABLE. It did not make it DISCRIMINATING — a proof can parse cleanly, execute
+    cleanly, and STILL prove nothing about the PR that carries it, which is exactly the
+    `proof-discrimination` gate's whole purpose (its own header comment: "A proof that passes before
+    and after a PR does not establish the PR's claim"). Fixing dialect-shape and fixing
+    diff-discrimination are two different properties of the same string, and the current fallback
+    proof satisfies neither generically nor the first without the second: it is executable AND
+    guaranteed non-discriminating, for the exact population of PRs — plan-only, squash-derived,
+    commit-body-only — this fallback exists to serve. Every future plan-only retro-sync PR opened
+    without a hand-written Acceptance block will hit this same failure the retro lane's own PR did.
+  design: |
+    TWO call sites, one concern, unsatisfiable piecewise — VERIFY BOTH FROM SOURCE before editing;
+    line numbers above are this session's reading and drift.
+    (i) In `src/run-task.ts`, change BOTH `PR_OPEN_TIME_ACCEPTANCE_FALLBACK`'s and
+    `ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK`'s single criterion's `proof:` from the `grep:` dialect to
+    the `demonstration:` dialect (W1-T277, `DIALECT_DEMO_RE` in `src/lib/review.ts`) — "the honest
+    OPPOSITE of `grep:`/`unit test:`: it names a proof the harness DECLINES to check, on the record."
+    Do NOT invent a diff-scoped grep target instead: none exists, because the claim these constants
+    author is explicitly NOT about the diff ("not a claim that the underlying diff is correct, or
+    that any task's acceptance is met" — preserve this disclaimer, verbatim or in substance, inside
+    the new proof/claim text) and a repo-wide fallback cannot know in advance which file, if any, a
+    future arbitrary PR's diff will touch (`changedPathsAtRange` in
+    `scripts/acceptance-author-gate.mjs` already proves this set varies PR to PR — there is no
+    universal target). A claim that is honestly not mechanically checkable belongs in the dialect
+    built for that, not disguised as an executable one.
+    (ii) In `scripts/acceptance-author-gate.mjs`, `authorTimeProofShapeRefusal` currently treats
+    `parseWhitelistedProof(proof) === null` as a blocking `cannot execute` defect for EVERY criterion
+    in a PR body's `## Acceptance` block, with no distinction between genuinely unparseable prose
+    (the real defect W1-T3508 closed) and a deliberately-declared `demonstration:` proof (a
+    recognised, honest, non-executable house dialect). Import and reuse `isDemonstrationProof` from
+    `src/lib/review.ts` (already exported — never re-derive `DIALECT_DEMO_RE`) and exempt a criterion
+    from the "cannot execute" defect when `isDemonstrationProof(criterion.proof)` is true. This
+    brings the standalone script's own ADDITIONAL shape check into line with
+    `acceptanceAuthorTimeCheck` itself, which already treats an inert/demonstration proof as
+    advisory-only, never a refusal (`src/lib/review.ts` ~5237-5247: "REPORTED, NEVER REFUSED...this
+    gate is pure").
+    BOTH HALVES ARE REQUIRED TOGETHER, and neither is independently testable against the acceptance
+    criteria below: shipping (i) alone trades a `proof-discrimination` refusal for a `proof-shape`
+    refusal at the SAME gate family (the unmodified shape check still flags demonstration as
+    unexecutable); shipping (ii) alone leaves the fallback's live proof as `grep:`, unaffected by a
+    shape-check change it never reaches, still stale under `proof-discrimination-gate.mjs`.
+    DO NOT WIDEN THE EXEMPTION PAST DEMONSTRATION. A criterion whose proof carries NO recognised
+    dialect prefix at all (bare prose) must still be refused with `proof-shape` — this is what keeps
+    the fix narrow rather than opening a general loophole for any PR body to write
+    `demonstration: trust me` to dodge the shape check. `task-linter.ts` already reserves
+    `demonstration:`'s LEGALITY-for-`verify:human` gating to ITSELF for PLAN task criteria, and
+    `review.ts` states plainly it "has no opinion on `verify`" for body-level blocks — this task does
+    not move that boundary, it only stops conflating "declared non-executable" with "malformed" at
+    one already-recognised dialect, for the two constants that generate this specific structural
+    disclaimer.
+  acceptance:
+    - claim: "`PR_OPEN_TIME_ACCEPTANCE_FALLBACK`'s proof is written in the `demonstration:` dialect, so `evaluateProofDiscrimination`'s loop (`scripts/proof-discrimination-gate.mjs`) skips it outright — `parseWhitelistedProof` returns `null` for it and the loop's `continue` means the injected proof-runner is NEVER invoked for it, so it can never be counted `stale` or `unreadable`, regardless of whether a PR's diff touches `src/lib/review.ts`"
+      proof: "unit test: the open-time fallback's demonstration proof is skipped by proof-discrimination, never staled"
+    - claim: "`ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK` carries the identical `demonstration:` proof, so a body-only repair the fix rung performs after `acceptance-author-gate` refuses a defective body cannot recreate a `proof-discrimination` refusal either"
+      proof: "unit test: the fix-rung repair fallback's demonstration proof is skipped by proof-discrimination, never staled"
+    - claim: "`authorTimeProofShapeRefusal` accepts a `demonstration:`-dialect criterion as judgeable — `evaluateGate`, given a body built from either fallback constant, returns `ok: true` with no `proof-shape` defect — while a criterion whose proof carries NO recognised dialect prefix at all (bare prose, the exact pre-W1-T3508 shape) is STILL refused with defect `proof-shape`, proving the fix recognises the legitimate dialect rather than widening into a blanket pass for unlabelled prose"
+      proof: "unit test: the author-time gate accepts demonstration but still refuses bare undialected prose"
+    - claim: "the RETRO-1789341105445/#5455 regression is locked: replaying `evaluateProofDiscrimination` against the OLD fallback shape (`grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts`) over an injected proof-runner reporting `CHECK_PROOF_EXIT.executedStale` for that exact proof reproduces the `stale` outcome that blocked #5455, proving this task's fixtures actually exercise the defect it removes rather than merely describing it"
+      proof: "unit test: the old grep fallback proof reproduces the executed-stale regression the new one removes"
+  falsifier: |
+    Restore either fallback constant's `grep: ^export function acceptanceAuthorTimeCheck in
+    src/lib/review.ts` proof while leaving `authorTimeProofShapeRefusal`'s demonstration exemption in
+    place. That fallback's criteria 1/2 test must then observe a `stale` verdict from
+    `evaluateProofDiscrimination` against the fixture proof-runner, reproducing #5455. Separately,
+    remove the demonstration exemption from `authorTimeProofShapeRefusal` while leaving the fallback
+    proofs on `demonstration:`. Criterion 3's positive half must then observe `evaluateGate` refuse
+    with `proof-shape` on a fallback-built body. A change that only asserts the proof STRING contains
+    the word `demonstration` (never actually driving it through `evaluateProofDiscrimination` and
+    `evaluateGate`) does not discriminate this defect.
+  note: |
+    Filed as a follow-up from run RETRO-1789341105445's own plan-sync PR (#5455, run
+    DAEMON-1789343790915), which hit this exact `proof-discrimination` failure. DISTINCT FROM
+    W1-T3508 (`plan/tasks.d/W1-T3508-...yaml`, still present at filing time, its target state already
+    reflected in the current tree): that task fixed the fallback proof's DIALECT-SHAPE (bare prose ->
+    parseable `grep:`), closing the `acceptance-author-gate` `proof-shape` refusal on PR #5347. This
+    task fixes a SEPARATE property of the SAME proof string — that it is executable but structurally
+    guaranteed non-discriminating for the population of PRs the fallback exists to serve — closing the
+    `proof-discrimination` refusal on PR #5455. No hard `depends_on` on W1-T3508: the current tree
+    already carries its target state (the `grep:`-dialect proof), so whatever its own plan-bookkeeping
+    status, this task's premise (fixing what is CURRENTLY in the tree) is unaffected either way.
+    Genuinely atomic across `src/run-task.ts` and `scripts/acceptance-author-gate.mjs` (see design) —
+    risk:high is a blast-radius/atomic-coupling call, not a sizing workaround: either fallback
+    constant can author a body for any worker PR (W1-T3508's own framing), and this task additionally
+    touches the shape-check inside a REQUIRED CI script every PR runs through.

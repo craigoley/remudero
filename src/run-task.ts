@@ -153,6 +153,7 @@ import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
+import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
 import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -1077,6 +1078,7 @@ import {
   buildHeadlineIndex,
   buildPromotionJudgePrompt,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  LEARNING_PROPENSITY_DRAWS,
   loadLearningsIndex,
   loadLearningsCorpus,
   parsePromotionJudgeVerdict,
@@ -14717,6 +14719,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // resulting text is forced empty. A normal (non-wipe-test) run always passes
     // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
     // block ran before W1-T86.
+    const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
     const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
       homes: {
         projectDir: learningsDir,
@@ -14726,8 +14729,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       taskFiles: task.files,
       selectionContext: {
         text: learningsSelectionText,
-        usage: readLearningUsage(learningUsagePath(join(config.root, "state"))),
+        usage: learningUsage,
         seed: seedOf(runId),
+        propensityDraws: LEARNING_PROPENSITY_DRAWS,
       },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
@@ -14751,6 +14755,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       matched_by: learningsResult.matchedBy,
       global_refused_reason: learningsResult.globalRefusedReason,
       masked: !!opts.maskLearnings,
+      // W1-T4241: the budget cut, not match strength, decided these entries (0 < p < 1), so injected
+      // vs dropped is a seeded randomization the outcome fold (knowledge-outcome.ts) can read.
+      propensity: contestedPropensities(learningsResult.propensity),
+      usage_sha: createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
     });
 
     // ── Render + provenance-lint the prompt.

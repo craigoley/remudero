@@ -74,3 +74,126 @@ macros:
     headlines:
       - "Plan and task hygiene"
     args: true
+
+  # ── EXTERNAL SCAN 2026-09-23: popular community skills, rewritten for this repo ─────────────────
+  #
+  # The four rows below take IDEAS from two MIT-licensed community collections — Matt Pocock's
+  # `mattpocock/skills` (grilling, diagnosing-bugs, handoff, wait-what) and Jesse Vincent's
+  # `obra/superpowers` (systematic-debugging, verification-before-completion). No text is copied:
+  # every expansion is written here, against this repo's own doctrine, so no third-party notice is
+  # owed and Apache-2.0 stays the only licence in the tree. Named anyway, so a reader can compare.
+  #
+  # WHY ROWS AND NOT AN INSTALLED PLUGIN. A plugin or a `skills.sh` install is a SUBSCRIPTION: its
+  # author can change the instructions an operator session runs, on their schedule, with no review
+  # here. That is a supply-chain path into the interactive lane that `hooks/deny-floor.sh` exists to
+  # bound. A row is reviewed in a PR, is byte-checked by `macro-skills:check`, and changes only when
+  # this repo changes it. The full taken / refused / already-held list is MASTER-PLAN §4F.
+  - name: grill
+    summary: "Interview me about a plan until every decision is settled — rounds of numbered questions, each with your recommended answer, and no action until I confirm."
+    expansion: |
+      Interview me about the plan, design or decision below until we share one understanding of
+      it. Do not start the work. The interview is the work.
+
+      Treat the plan as a tree of decisions. Some decisions depend on others. The FRONTIER is
+      every decision whose prerequisites are already settled. Ask in rounds:
+
+      - Each round asks the whole frontier at once. Number the questions (Q1, Q2 …).
+      - Give each question a short title, the choices you see, YOUR RECOMMENDED ANSWER, and the
+        one piece of evidence that would change your recommendation.
+      - Never put a question in this round if its answer depends on another question in this
+        round. It belongs in a later round.
+      - After I answer, re-compute the frontier and ask the next round.
+
+      Facts are yours to find; decisions are mine to make. Never ask me a question the repository,
+      the plan, the ledger or `gh` can answer. Look it up — use a sub-agent for anything slow —
+      and report it as OBSERVED with `file:line` or the command you ran. Keep asking the rest of
+      the frontier while a lookup runs. If a lookup cannot be done, say so and mark the fact
+      INFERRED; never present a guess as a finding.
+
+      Challenge me. If an answer conflicts with CLAUDE.md, DECISIONS.md, a filed task or the code,
+      quote the conflict and ask which one wins. When I rule on something, the ruling stands for
+      the rest of the interview; raise it again only with new evidence, once.
+
+      Stop when the frontier is empty: every branch visited, nothing silently assumed. Then give
+      one summary with three parts — SETTLED (each decision and my reason), OPEN (anything I
+      deferred, with your recommendation), and FACTS (what you looked up, with sources). Take no
+      action on the plan until I confirm the summary. If I then ask to file it as plan tasks, pass
+      the confirmed summary to `rmd plan --mode=create` as its brief; never hand-write shards.
+    headlines:
+      - "Investigation discipline"
+      - "Plan and task hygiene"
+    args: true
+  - name: diagnose
+    summary: "Debug by evidence — build one command that goes red on the reported symptom before forming any theory, then fix and prove it with that same command."
+    expansion: |
+      Diagnose the problem below. Your first move is a command that produces evidence, never a
+      patch.
+
+      1. BUILD A LOOP FIRST. Find ONE command — a test, a script, a CLI call with a fixture, a
+         ledger query — that goes red on the EXACT symptom reported, not on something nearby.
+         Run it and show the invocation and its output. Make it fast and deterministic: pin
+         time, seed randomness, narrow the scope. For a flaky failure, raise the reproduction
+         rate until it is debuggable. Until this command exists, do not read code to build a
+         theory. If you cannot build one, stop and say what you tried and what you need from me.
+      2. CHECK WHAT CHANGED. "It worked yesterday" outweighs any theory. Read `git log` for the
+         area and the dates first. Check that the upstream inputs are what you assume before you
+         touch the logic that consumes them. For a pipeline, count items at every step before
+         changing any filter.
+      3. MINIMISE. Cut inputs, config and steps one at a time, re-running the loop after each
+         cut, until only the parts that make it fail remain.
+      4. HYPOTHESISE, RANKED. List the candidate causes. For each, name the one observation that
+         would falsify it, and check that observation before you believe it.
+      5. FIX THE NAMED CAUSE, then re-run the SAME loop and show it green. Prove the fix is
+         load-bearing: undo it, show red, restore it, show green.
+
+      If two patches have not moved the symptom, stop. No third patch and no wider change — get
+      more data or return to the last known good state.
+
+      Report what you OBSERVED (with the command) separately from what you INFERRED. Redact every
+      secret from any output you show.
+    headlines:
+      - "Investigation discipline"
+      - "Coverage traps"
+    args: true
+  - name: handoff
+    summary: "Write a handoff so a fresh session can continue this work — state with evidence, the pending ledger, and the next prompt, paste-ready."
+    expansion: |
+      Write a handoff so a new session, which sees nothing of this conversation, can continue
+      the work. Save it in this session's scratchpad or the OS temp directory — never inside the
+      repository — and tell me the path.
+
+      Include, in this order:
+
+      1. GOAL — what the work is for, in two sentences.
+      2. STATE AT HEAD — for each branch and PR touched: its name, head SHA, CI state and
+         mergeability, each marked OBSERVED (with when and how) or NOT OBSERVED. A PR title, a
+         plan status or a ledger line is a record of intent, not state.
+      3. DECISIONS — each ruling made in this session, with its reason. These are settled; the
+         next session must not re-open them without new evidence.
+      4. PENDING — every open item as a ledger: what it is, what blocks it, and who must act.
+         Name any task id minted without a reservation as a FLOOR, not a claim.
+      5. TRAPS — what was tried and failed, and why, so it is not tried again.
+      6. NEXT PROMPT — the first prompt for the new session, complete and paste-ready. Its header
+         names the repo, the account, the branch cut from latest `main`, and the mode: RECON or
+         IMPLEMENT.
+
+      Point to what already exists — PRs, commits, plan shards, files — by id AND title; do not
+      restate it. Redact every secret, token and personal detail.
+    headlines:
+      - "Ledger and evidence discipline"
+      - "Plan and task hygiene"
+    args: true
+  - name: wait-what
+    summary: "Your last message did not land — re-explain it in plain language, with context, and say what you need from me."
+    expansion: |
+      Your last message did not land. Re-explain it, using plain language (ISO 24495-1):
+
+      - Start with one or two sentences of context: what we are doing and where we are.
+      - Then the point, in short sentences. Use common words. Define any term I may not share.
+      - Name every task, PR or file by its title or purpose as well as its id — a bare id is
+        not an explanation.
+      - End with what you need from me, if anything, as one clear question.
+
+      Do not add new material. Say the same thing more clearly, or say plainly that you were
+      wrong and what is actually true.
+    args: true
