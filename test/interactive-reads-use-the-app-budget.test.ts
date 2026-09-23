@@ -15,12 +15,13 @@
 //         cadence entirely.
 //   (iii) a failed mint is not an error: the call falls straight back to today's shared floor.
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import {
   GH_APP_READ_BUCKET,
   GH_SEARCH_BUCKET,
@@ -165,18 +166,19 @@ test("W1-T4085: the default minter is not an attempt on a host with no GH_APP_* 
 
 test("W1-T4085: ghInteractiveRead spawns gh carrying the minted token", async () => {
   await withCache(async (env) => {
-    const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-interactive-bin-`));
+    // The shared shim echoes its stdout inside double quotes, so `$GH_TOKEN` prints the identity
+    // the child process actually received.
+    const shim = ghShim([{ when: "pr view 7", stdout: "$GH_TOKEN" }], { kind: "gh-interactive-read" });
     try {
-      writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "$GH_TOKEN $*"\n');
-      chmodSync(join(bin, "gh"), 0o755);
       const out = await ghInteractiveRead(["pr", "view", "7"], {
         encoding: "utf8",
-        env: { ...env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        env: { ...env, PATH: `${shim.dir}:${process.env.PATH ?? ""}` },
         deps: { env, warn: () => {}, mint: async () => ({ ok: true, token: "ghs_minted_for_spawn" }) },
       });
-      assert.equal(String(out).trim(), "ghs_minted_for_spawn pr view 7");
+      assert.equal(String(out).trim(), "ghs_minted_for_spawn");
+      assert.deepEqual(shim.calls(), ["pr view 7"]);
     } finally {
-      rmSync(bin, { recursive: true, force: true });
+      rmSync(shim.dir, { recursive: true, force: true });
     }
   });
 });
