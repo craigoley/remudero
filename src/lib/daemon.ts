@@ -958,6 +958,8 @@ export interface DaemonDeps {
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
   knowledgeGardener?: GardenerDeps<GardenWorkspace>;
+  /** W1-T4110: further gardeners (gardener.ts specs), each started on its own timer beside the main loop. */
+  gardens?: ReadonlyArray<(intervalMs: number) => { stop: () => void }>;
   /** W1-T4088: answers operator replies on inbox threads, on its own timer beside the main loop. */
   inboxResponder?: InboxResponderDeps;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
@@ -2235,7 +2237,11 @@ export async function runDaemon(
     return s;
   };
   prActionPumpRef.stop = startPrActionPump(deps, pollIntervalMs, log).stop;
-  if (deps.knowledgeGardener) gardenerRef.stop = startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs).stop;
+  const gardens = [
+    ...(deps.knowledgeGardener ? [startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs)] : []),
+    ...(deps.gardens ?? []).map((start) => start(pollIntervalMs)),
+  ];
+  gardenerRef.stop = () => gardens.forEach((g) => g.stop());
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where

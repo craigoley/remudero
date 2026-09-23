@@ -1,0 +1,63 @@
+- id: W1-T4332
+  title: "THE PROMPT-SURFACE GATE REFUSES EVERY OPERATOR MACRO ROW, AND ITS ONLY REMEDY IS A JUDGE FIXTURE THE ROW CANNOT AFFECT — `touchedPathSurfaces` names `settings/macros.yaml` beside `learnings/*.yaml`, but a macro renders to a `disable-model-invocation` skill no worker loads and no judge reads, so the golden-verdict evidence it demands can only be test theater: drop the path while every rendered row stays operator-only, and refuse the day one could reach a worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - scripts/prompt-surface-gate.mjs
+    - src/lib/review.ts
+    - test/a-prompt-surface-edit-carries-its-own-fixture.test.ts
+  origin: "operator-session#external-skill-scan-2026-09-23"
+  plan_refs: ["W1-T3077", "W1-T2763", "W1-T3137"]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 at origin/main a8cbc5fb. Names are symbols; re-verify at your head.
+
+    MEASURED: `rmd preflight --ci-parity` on a diff adding four operator macro rows (the external
+    skill scan, MASTER-PLAN §4F) refused at `prompt-surface-gate`: "For the PATH surface(s)
+    settings/macros.yaml the ONLY admissible evidence is a golden verdict under
+    test/fixtures/golden-verdicts/**". The gate is in `ci-gate.yml`'s required roster. No merged PR
+    has passed it with a data edit to that file: the only prior edits on record changed comments,
+    which `isCommentOnlyYamlChange` exempts.
+
+    WHY THE PATH IS THERE. W1-T3077 declared the prompt surface as "the words every worker reads"
+    and listed `settings/macros.yaml` beside `learnings/*.yaml`. The golden corpus
+    (test/fixtures/golden-verdicts/README.md) drives `judgeReview` and `decideAutoMergeArm`.
+
+    WHY IT DOES NOT BELONG. OBSERVED, each pinned by an existing test or source line:
+    `renderMacroSkill` (scripts/generate-macro-skills.mjs) writes `disable-model-invocation: true` on
+    every row and never writes `applies-to:`; `loadInjectableSkills` (src/lib/skill-workshop.ts)
+    skips any skill without `applies-to:`; test/a-repo-skill-no-worker-can-reach.test.ts pins
+    `WORKER_SETTING_SOURCES` excluding 'project'. So a macro row reaches no worker prompt and no judge,
+    and no golden verdict can move when one changes. A gate whose only remedy is a fixture the change
+    cannot affect fires on a healthy condition (CLAUDE.md, Investigation discipline) and teaches
+    authors to add theater.
+  design: |
+    (i) Remove `settings/macros.yaml` from `touchedPathSurfaces`. Keep `learnings/*.yaml` unchanged.
+    (ii) KEEP THE PROPERTY THAT MADE IT SAFE, AS A REFUSAL: the gate treats `settings/macros.yaml` as a
+        surface again whenever the rendered table could reach a model unasked — any rendered skill
+        lacking `disable-model-invocation: true`, or carrying `applies-to:`. Read that through the
+        generator's own `renderAllMacroSkills`, never a second parser.
+    (iii) Update the `settings/macros.yaml` reason in `INSTRUMENT_SURFACE_EXCLUSIONS` (src/lib/review.ts),
+        which today says the gate guards this file, so the two stay true together.
+    (iv) Do not change the golden corpus, the symbol list, the comment-only exemption, or CI wiring.
+  acceptance:
+    - claim: "a data edit to an operator-only macro row passes the gate with no golden fixture"
+      proof: 'grep: test("W1-T4332: a data edit to an operator-only macro row passes the gate with no golden fixture" in test/a-prompt-surface-edit-carries-its-own-fixture.test.ts'
+    - claim: "a macro table that would render a model-invocable or injectable skill is still a prompt surface"
+      proof: 'grep: test("W1-T4332: a macro table that would render a model-invocable or injectable skill is still a prompt surface" in test/a-prompt-surface-edit-carries-its-own-fixture.test.ts'
+    - claim: "a learnings shard data edit is still refused without a golden fixture"
+      proof: 'grep: test("W1-T4332: a learnings shard data edit is still refused without a golden fixture" in test/a-prompt-surface-edit-carries-its-own-fixture.test.ts'
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION, and report it, if ANY worker lane can load `.claude/skills/`: grep
+    src/ for a provider that sets project setting sources, and check the PINNED `@openai/codex`
+    version's docs for native skill discovery paths (this filing did not verify whether Codex reads
+    `.claude/skills/`; it recorded that as a HYPOTHESIS). If a lane can load them, the path belongs in
+    the gate and the right fix is a golden case, not an exemption.
+  note: "UNRESERVED FLOOR: same lane and same reason as W1-T4330. Reserve from the operator checkout before merge. The four macro rows this unblocks are a ready patch held outside the tree until this merges (see this PR's body)."
