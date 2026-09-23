@@ -30572,6 +30572,9 @@ export async function daemonCommand(
       detail: bootHold.detail,
       reason: `fleet ${bootHold.control} hold: ${bootHold.detail}`,
     });
+    // W1-T4194: the held loop never sweeps, so a replaced container's dead-holder locks would
+    // outlive the hold. Same predicate as daemonBoot's sweep; nothing else runs.
+    runInflightLockSweepRung(config, log);
   } else {
     (deps.daemonBoot ?? invokeDaemonBoot)(
     log,
