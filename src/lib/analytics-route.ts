@@ -148,6 +148,21 @@ export interface RoutingTelemetrySnapshot {
   assignmentsWithoutTerminalResult: number;
   buckets: RoutingTelemetryBucket[];
   daily: RoutingTelemetryDay[];
+  /** Step-up receipts emitted when the normal worker tier could not finish the work. */
+  stepUps: {
+    total: number;
+    byStep: Array<{ step: "implement.step_up" | "fix.step_up"; count: number }>;
+    byTargetModel: Array<{ model: string; count: number }>;
+  };
+  /** Frontier preference outcomes, including the selected provider/model after a bypass. */
+  preferenceOutcomes: Array<{
+    preferredProvider: string;
+    selectedProvider: string;
+    selectedModel: string;
+    outcome: "kept" | "bypassed";
+    reason?: string;
+    count: number;
+  }>;
 }
 
 /** W1-T4024 — cash-lane dollars over one named trailing window. */
@@ -612,6 +627,17 @@ type AnalyticsCheckpointState = {
     pendingTerminalsByAssignmentId: Array<[string, RoutingTerminalReceipt]>;
     buckets: Array<Omit<RoutingTelemetryBucketState, "fallbackReasons"> & { fallbackReasons: Array<[string, number]> }>;
     days: RoutingTelemetryDay[];
+    /** Optional so checkpoints written before W1-T4062 remain readable. */
+    stepUps?: Array<{ step: "implement.step_up" | "fix.step_up"; model: string; count: number }>;
+    /** Optional so checkpoints written before W1-T4062 remain readable. */
+    preferenceOutcomes?: Array<{
+      preferredProvider: string;
+      selectedProvider: string;
+      selectedModel: string;
+      outcome: "kept" | "bypassed";
+      reason?: string;
+      count: number;
+    }>;
   };
   operatorAgentRows: Omit<AnalyticsAccumulator["operatorAgentRows"], "memory"> & {
     /** Optional for checkpoints written before W1-T4001. */
@@ -645,6 +671,8 @@ type RoutingAssignment = {
   taskType: string;
   routingRule: string;
   preferenceBypassed: boolean;
+  preferredProvider?: string;
+  preferenceBypassReason?: string;
 };
 
 /** The minimum terminal receipt needed for aggregation. Raw terminal ledger rows can carry
@@ -670,6 +698,18 @@ interface RoutingTelemetryAccumulator {
   pendingTerminalsByAssignmentId: Map<string, RoutingTerminalReceipt>;
   bucketsByKey: Map<string, RoutingTelemetryBucketState>;
   daysByDay: Map<string, RoutingTelemetryDay>;
+  stepUpsByKey: Map<string, { step: "implement.step_up" | "fix.step_up"; model: string; count: number }>;
+  preferenceOutcomesByKey: Map<
+    string,
+    {
+      preferredProvider: string;
+      selectedProvider: string;
+      selectedModel: string;
+      outcome: "kept" | "bypassed";
+      reason?: string;
+      count: number;
+    }
+  >;
 }
 
 function routingTelemetryAccumulator(): RoutingTelemetryAccumulator {
@@ -680,6 +720,8 @@ function routingTelemetryAccumulator(): RoutingTelemetryAccumulator {
     pendingTerminalsByAssignmentId: new Map(),
     bucketsByKey: new Map(),
     daysByDay: new Map(),
+    stepUpsByKey: new Map(),
+    preferenceOutcomesByKey: new Map(),
   };
 }
 
@@ -1035,9 +1077,20 @@ function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Recor
   if (!id || !provider || !model) return undefined;
   const runId = str(line.run_id);
   const routing = raw.routing;
+  const routingObject = routing && typeof routing === "object" ? (routing as Record<string, unknown>) : undefined;
+  const capabilityPreference = routingObject?.capabilityPreference;
+  const preferredProvider =
+    capabilityPreference && typeof capabilityPreference === "object"
+      ? str((capabilityPreference as Record<string, unknown>).provider)
+      : undefined;
+  const preferenceBypass = routingObject?.preferenceBypass;
   const preferenceBypassed = Boolean(
-    routing && typeof routing === "object" && (routing as Record<string, unknown>).preferenceBypass,
+    preferenceBypass,
   );
+  const preferenceBypassReason =
+    preferenceBypass && typeof preferenceBypass === "object"
+      ? str((preferenceBypass as Record<string, unknown>).reason)
+      : undefined;
   return {
     id,
     provider,
@@ -1045,7 +1098,41 @@ function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Recor
     taskType: (runId && acc.taskTypesByRun.get(runId)) ?? "unknown",
     routingRule: boundedRoutingRule(raw),
     preferenceBypassed,
+    ...(preferredProvider ? { preferredProvider } : {}),
+    ...(preferenceBypassReason ? { preferenceBypassReason } : {}),
   };
+}
+
+function accumulateRoutingDecision(acc: RoutingTelemetryAccumulator, assignment: RoutingAssignment): void {
+  if (!assignment.preferredProvider) return;
+  const outcome = assignment.preferenceBypassed ? "bypassed" : "kept";
+  const key = [assignment.preferredProvider, assignment.provider, assignment.model, outcome, assignment.preferenceBypassReason ?? ""].join("\0");
+  const current = acc.preferenceOutcomesByKey.get(key);
+  if (current) {
+    current.count += 1;
+    return;
+  }
+  acc.preferenceOutcomesByKey.set(key, {
+    preferredProvider: assignment.preferredProvider,
+    selectedProvider: assignment.provider,
+    selectedModel: assignment.model,
+    outcome,
+    ...(assignment.preferenceBypassReason ? { reason: assignment.preferenceBypassReason } : {}),
+    count: 1,
+  });
+}
+
+function accumulateStepUp(acc: RoutingTelemetryAccumulator, line: Record<string, unknown>): void {
+  if (line.step !== "implement.step_up" && line.step !== "fix.step_up") return;
+  const step = line.step;
+  const model = str(line.to) ?? "unreported";
+  const key = `${step}\0${model}`;
+  const current = acc.stepUpsByKey.get(key);
+  if (current) {
+    current.count += 1;
+    return;
+  }
+  acc.stepUpsByKey.set(key, { step, model, count: 1 });
 }
 
 function routingTerminalReceipt(line: Record<string, unknown>): RoutingTerminalReceipt {
@@ -1095,6 +1182,7 @@ function applyRoutingTerminal(
 }
 
 function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: Record<string, unknown>): void {
+  accumulateStepUp(acc, line);
   if (line.step === "run.start") {
     const runId = str(line.run_id);
     const taskType = str(line.type);
@@ -1106,6 +1194,7 @@ function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: 
     if (acc.assignmentsById.has(assignment.id)) return;
     acc.assignmentsById.set(assignment.id, assignment);
     routingBucketFor(acc, assignment).assignments += 1;
+    accumulateRoutingDecision(acc, assignment);
     const pending = acc.pendingTerminalsByAssignmentId.get(assignment.id);
     if (pending) {
       acc.pendingTerminalsByAssignmentId.delete(assignment.id);
@@ -1134,6 +1223,7 @@ function accumulateRoutingTelemetryLine(acc: RoutingTelemetryAccumulator, line: 
 }
 
 function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTelemetrySnapshot {
+  const stepUps = [...acc.stepUpsByKey.values()];
   return {
     version: "routing-v1",
     evidenceState: acc.assignmentsById.size > 0 ? "observed" : "not-collected-in-retained-ledger",
@@ -1150,6 +1240,18 @@ function snapshotRoutingTelemetry(acc: RoutingTelemetryAccumulator): RoutingTele
       }))
       .sort((left, right) => right.assignments - left.assignments || left.assignedModel.localeCompare(right.assignedModel)),
     daily: [...acc.daysByDay.values()].sort((left, right) => left.day.localeCompare(right.day)).slice(-30),
+    stepUps: {
+      total: stepUps.reduce((total, row) => total + row.count, 0),
+      byStep: [...new Set(stepUps.map((row) => row.step))]
+        .map((step) => ({ step, count: stepUps.filter((row) => row.step === step).reduce((total, row) => total + row.count, 0) }))
+        .sort((left, right) => left.step.localeCompare(right.step)),
+      byTargetModel: [...new Set(stepUps.map((row) => row.model))]
+        .map((model) => ({ model, count: stepUps.filter((row) => row.model === model).reduce((total, row) => total + row.count, 0) }))
+        .sort((left, right) => right.count - left.count || left.model.localeCompare(right.model)),
+    },
+    preferenceOutcomes: [...acc.preferenceOutcomesByKey.values()].sort(
+      (left, right) => right.count - left.count || left.preferredProvider.localeCompare(right.preferredProvider) || left.selectedModel.localeCompare(right.selectedModel),
+    ),
   };
 }
 
@@ -1409,6 +1511,8 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
         fallbackReasons: [...bucket.fallbackReasons.entries()],
       })),
       days: [...acc.routingTelemetry.daysByDay.values()].map((day) => ({ ...day })),
+      stepUps: [...acc.routingTelemetry.stepUpsByKey.values()].map((row) => ({ ...row })),
+      preferenceOutcomes: [...acc.routingTelemetry.preferenceOutcomesByKey.values()].map((row) => ({ ...row })),
     },
     operatorAgentRows: {
       proof: acc.operatorAgentRows.proof.map((row) => ({ ...row })),
@@ -1451,6 +1555,13 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
     );
   }
   acc.routingTelemetry.daysByDay = new Map(state.routingTelemetry.days.map((day) => [day.day, { ...day }]));
+  for (const row of state.routingTelemetry.stepUps ?? []) {
+    acc.routingTelemetry.stepUpsByKey.set(`${row.step}\0${row.model}`, { ...row });
+  }
+  for (const row of state.routingTelemetry.preferenceOutcomes ?? []) {
+    const key = [row.preferredProvider, row.selectedProvider, row.selectedModel, row.outcome, row.reason ?? ""].join("\0");
+    acc.routingTelemetry.preferenceOutcomesByKey.set(key, { ...row });
+  }
   acc.operatorAgentRows = {
     proof: state.operatorAgentRows.proof.map((row) => ({ ...row })),
     decisions: state.operatorAgentRows.decisions.map((row) => ({ ...row })),
@@ -1694,6 +1805,17 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
     Object.freeze(value.spend.cash);
     Object.freeze(value.spend);
   }
+  // Additive W1-T4062 fields: checkpoints written before this projection existed remain valid
+  // and receive an explicit empty projection rather than failing cache boot.
+  value.routingTelemetry.stepUps ??= { total: 0, byStep: [], byTargetModel: [] };
+  value.routingTelemetry.preferenceOutcomes ??= [];
+  for (const row of value.routingTelemetry.stepUps.byStep) Object.freeze(row);
+  for (const row of value.routingTelemetry.stepUps.byTargetModel) Object.freeze(row);
+  Object.freeze(value.routingTelemetry.stepUps.byStep);
+  Object.freeze(value.routingTelemetry.stepUps.byTargetModel);
+  Object.freeze(value.routingTelemetry.stepUps);
+  for (const row of value.routingTelemetry.preferenceOutcomes) Object.freeze(row);
+  Object.freeze(value.routingTelemetry.preferenceOutcomes);
   for (const bucket of value.routingTelemetry.buckets) {
     for (const reason of bucket.fallbackReasons) Object.freeze(reason);
     Object.freeze(bucket.fallbackReasons);
@@ -1739,6 +1861,8 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
       assignmentsWithoutTerminalResult: 0,
       buckets: [],
       daily: [],
+      stepUps: { total: 0, byStep: [], byTargetModel: [] },
+      preferenceOutcomes: [],
     },
     ...emptyLiveAnalyticsMetrics(),
     timeSeries: buildAnalyticsTimeSeries([], null),
@@ -1754,6 +1878,10 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     dimensions: { value: snapshot.dimensions, enumerable: false, writable: false },
     drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
     operatorAgentMemory: { value: snapshot.operatorAgentMemory, enumerable: false, writable: false },
+  });
+  Object.defineProperties(snapshot.routingTelemetry, {
+    stepUps: { value: snapshot.routingTelemetry.stepUps, enumerable: false, writable: false },
+    preferenceOutcomes: { value: snapshot.routingTelemetry.preferenceOutcomes, enumerable: false, writable: false },
   });
   return freezeAnalyticsSnapshot(snapshot);
 }
