@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { learningValue, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -1586,6 +1587,11 @@ export function evaluateLayerBudgetRatchet(entries: LearningEntry[], caps: Layer
 /** Text the learning selector can search for declared symbols and error signatures. */
 export interface LearningsSelectionContext {
   text?: string | readonly string[];
+  /** W1-T4091: each learning's offered/used history. When present, entries of equal match strength
+   *  are ranked by a draw from their usefulness posterior instead of by `cited` date. */
+  usage?: LearningUsage;
+  /** Seeds that draw, so a run's selection is reproducible. */
+  seed?: number;
 }
 
 /** A generated lookup index (W1-T33): per shard filename, the entry ids it carries and the union
@@ -1718,15 +1724,21 @@ export function selectLearnings<T extends LearningEntry>(
   const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
   const haystack = selectionHaystack(context);
+  const usage = context?.usage;
+  const rng = usage ? seededRandom(context?.seed ?? 0) : undefined;
   const ranked = active
     .map((entry) => ({ entry, counts: matchCounts(entry, files, haystack) }))
     .filter((r) => r.counts.file > 0 || r.counts.symbol > 0 || r.counts.error > 0)
+    // W1-T4091: one posterior draw per entry, taken in a fixed (id) order so the seed reproduces it.
+    .sort((a, b) => (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0))
+    .map((r) => ({ ...r, draw: rng ? sampleBeta(learningValue(r.entry.id, usage), rng) : 0 }))
     .sort((a, b) => {
       if (b.counts.error !== a.counts.error) return b.counts.error - a.counts.error;
       if (b.counts.symbol !== a.counts.symbol) return b.counts.symbol - a.counts.symbol;
       if (b.counts.file !== a.counts.file) return b.counts.file - a.counts.file;
       const layerDiff = LAYERS.indexOf(entryLayer(a.entry)) - LAYERS.indexOf(entryLayer(b.entry));
       if (layerDiff !== 0) return layerDiff;
+      if (b.draw !== a.draw) return b.draw - a.draw;
       const ac = a.entry.cited ?? "";
       const bc = b.entry.cited ?? "";
       if (ac !== bc) return bc < ac ? -1 : 1; // recent (larger ISO) first
