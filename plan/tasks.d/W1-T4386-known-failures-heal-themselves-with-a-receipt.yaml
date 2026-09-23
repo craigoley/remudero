@@ -1,0 +1,37 @@
+- id: W1-T4386
+  title: "A KNOWN FAILURE WAITS FOR A HUMAN EVEN WHEN ITS FIX IS KNOWN AND REVERSIBLE — let the SRE lane run a small allowlist of pre-approved reversible remediations with a before/after check and a ledger receipt, and interrupt the operator only on a user-visible fast burn or a fix that failed twice"
+  repo: remudero
+  depends_on: [W1-T4385]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator request 2026-09-23: an SRE gardener fed by console and daemon errors"
+  plan_refs: ["W1-T4385", "W1-T4356"]
+  files:
+    - src/lib/sre-runbooks.ts
+    - src/lib/sre-lane.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Operator rulings 2026-09-23: reversible fixes on an allowlist auto-run; anything irreversible (restarts,
+    recycles, deletes) is filed or escalated; interrupt the operator only on a user-visible fast burn (console
+    down or unusable, fleet built nothing for hours) or when the lane's own fix failed twice. Each initial
+    runbook was performed by hand that day: stale managed checkout (git merge --ff-only origin/main then npm ci,
+    when clean and no borrowing worker runs), expired registry login (az acr login), stale-red ci-gate (rerun
+    the failed jobs).
+  design: |
+    A runbook = {id, matches(incident), precheck, act, verify, reversible:true}. The lane runs one only when its
+    precheck holds, verifies the invariant cleared afterwards, and ledgers `sre.runbook` {id, fingerprint,
+    before, after, outcome}. A runbook that fails twice for a fingerprint stops and escalates. Escalation uses the
+    existing escalation surface (the needs-human issue path) with the incident's evidence; nothing else notifies.
+  acceptance:
+    - claim: "a matching runbook runs only after its precheck and records a before-and-after receipt"
+      proof: "unit test: a matching runbook runs only after its precheck and records a before-and-after receipt"
+    - claim: "a runbook that fails twice stops and escalates with the evidence"
+      proof: "unit test: a runbook that fails twice stops and escalates with the evidence"
+    - claim: "an incident that is not a fast burn never interrupts the operator"
+      proof: "unit test: an incident that is not a fast burn never interrupts the operator"

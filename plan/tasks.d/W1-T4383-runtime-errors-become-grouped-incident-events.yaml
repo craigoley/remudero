@@ -1,0 +1,42 @@
+- id: W1-T4383
+  title: "NOTHING RECEIVES A RUNTIME ERROR — the console and the gateway throw into logs nobody reads. Serve one ingest endpoint that scrubs each error, fingerprints it by type plus in-app frames, and records it as a grouped incident event"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator request 2026-09-23: an SRE gardener fed by console and daemon errors"
+  plan_refs: ["W1-T4384", "W1-T4385", "W1-T4387"]
+  files:
+    - src/lib/incident-events.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Phase 1 of the SRE gardener (operator rulings 2026-09-23: no paid APM; its own lane; reversible runbooks
+    auto-run; interrupt only on user-visible fast burns). Grouping follows Sentry's documented model — the
+    fingerprint is the error type plus the IN-APP stack frames, never library frames or line numbers — which is
+    small enough to own instead of buying.
+  design: |
+    POST /v1/incidents/events (scope write, tier low; the console's bearer suffices). EXACT BODY:
+    {source:"console"|"gateway"|"daemon", kind:"exception"|"http_5xx"|"latency"|"invariant", name:string,
+     message:string, frames?:[{file:string, fn:string}], route?:string, sha?:string, at:string (ISO)}.
+    Scrub before anything is stored: strip query strings and fragments from routes and messages, drop anything
+    shaped like a token, email or uuid, cap message at 500 chars and frames at 20. Fingerprint = sha256 of kind +
+    name + message with digits and hex ids normalised + the first 3 frames whose file is in the app (not
+    node_modules), each as file:fn with no line numbers. Ledger one `incident.event` row {fingerprint, source,
+    kind, name, route, sha}; past 20 events per fingerprint per minute, record a single `incident.sampled` count
+    row instead. RESPONSE: {fingerprint:string, accepted:true, sampled:boolean}. A malformed body is 400 with the reason.
+  acceptance:
+    - claim: "two errors differing only in line numbers and ids share one fingerprint"
+      proof: "unit test: two errors differing only in line numbers and ids share one fingerprint"
+    - claim: "a library frame never changes the fingerprint"
+      proof: "unit test: a library frame never changes the fingerprint"
+    - claim: "an event carrying a token or a query string is stored scrubbed"
+      proof: "unit test: an event carrying a token or a query string is stored scrubbed"
+    - claim: "a burst past the per-minute cap is recorded as one sampled count"
+      proof: "unit test: a burst past the per-minute cap is recorded as one sampled count"

@@ -1,0 +1,39 @@
+- id: W1-T4384
+  title: "THE WORST FAILURES THROW NOTHING — on 2026-09-23 the fleet built nothing for hours, the gateway blocked 85 s and the ledger re-copied itself 800 times, and no exception fired. Record event-loop lag and evaluate a few ledger invariants with multi-window burn rates, emitting invariant incident events"
+  repo: remudero
+  depends_on: [W1-T4383]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-09-23: an SRE gardener fed by console and daemon errors"
+  plan_refs: ["W1-T4383", "W1-T4385", "W1-T4356", "W1-T4267"]
+  files:
+    - src/lib/incident-invariants.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Every incident found by hand on 2026-09-23 was silent: dispatch.settled_set fulfilled 0 for hours while
+    priority-1 work was queued (worktree.node_modules_refused); the gateway's first /v1/status took 85.8 s after a
+    restart (a boot CPU profile put 92% in synchronous GitHub CLI subprocesses); the disk filled on the operator
+    Mac. An APM would have seen none of it. Alerting follows Google SRE's multi-window burn rate: an invariant
+    fires only when a long window AND a short confirmation window (1/12 of it) both burn, so a blip never files.
+  design: |
+    (i) The gateway and the daemon sample event-loop delay (node perf_hooks monitorEventLoopDelay) and ledger
+    `runtime.loop_lag` p99 once a minute; uncaught exceptions and 5xx responses become W1-T4383 events.
+    (ii) A pure evaluator over ledger rows with one small declarative rule table, each rule {id, bad(window),
+    long, short}. Initial rules: dispatch-stall (queued priority-1 tasks exist and 0 fulfilled dispatches in the
+    window), repeated-refusal (the same refusal step and reason 3+ times in the window), loop-lag (p99 over its
+    bound in both windows), no-merges-with-green-queue. A firing rule posts a kind "invariant" event whose name
+    is the rule id and whose message carries the measured values.
+  acceptance:
+    - claim: "an invariant fires only when both its long and short windows burn"
+      proof: "unit test: an invariant fires only when both its long and short windows burn"
+    - claim: "zero fulfilled dispatches with queued priority-one work fires the dispatch-stall rule"
+      proof: "unit test: zero fulfilled dispatches with queued priority-one work fires the dispatch-stall rule"
+    - claim: "event-loop lag is recorded as a ledger row"
+      proof: "unit test: event-loop lag is recorded as a ledger row"
