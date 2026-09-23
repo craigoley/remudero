@@ -59,6 +59,7 @@ import {
 } from "./operator-message.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { heldDependencyRoots, type HeldDependencyRoot } from "./held-dependency-roots.js";
 import {
   drainNowFilePath,
   pauseFilePath,
@@ -510,6 +511,9 @@ export interface NeedsMeSection {
   /** The standing App-token fallback, if one stands — absent when the last refresh succeeded, so a healthy fleet
    *  renders no row. */
   tokenFallback?: TokenFallbackRow;
+  /** W1-T4192: dependency roots only a person can move, with the tasks each one holds. EMPTY when none; ABSENT when
+   *  merge state could not be read, because an unknown is not a quiet board. */
+  heldRoots?: HeldDependencyRoot[];
 }
 
 export interface StatusBoardModel {
@@ -1935,6 +1939,7 @@ function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHe
 function deriveNeedsMe(
   lines: ReadonlyArray<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,
+  plan?: Plan,
 ): NeedsMeSection {
   // W1-T931: this board's read of `cost.anomaly` rows — never a re-derivation of the detector's math, which lives in
   // cost-anomaly.ts. DEDUPED BY `run_id`, LAST ONE WINS.
@@ -2006,7 +2011,18 @@ function deriveNeedsMe(
   }
   uncreditedBuilds.sort((a, b) => a.taskId.localeCompare(b.taskId));
 
-  return { costAnomaly, imageDrift, mergeHeld, uncreditedBuilds, ...(tokenFallback ? { tokenFallback } : {}) };
+  // W1-T4192: read merge state off the SAME projections, so a held root is never judged on a second derivation.
+  const heldRoots =
+    plan && projections ? heldDependencyRoots(plan, (id) => projections.get(id)?.merged === true) : undefined;
+
+  return {
+    costAnomaly,
+    imageDrift,
+    mergeHeld,
+    uncreditedBuilds,
+    ...(tokenFallback ? { tokenFallback } : {}),
+    ...(heldRoots ? { heldRoots } : {}),
+  };
 }
 
 /** Is `a` strictly newer than `b`, by PARSED timestamp? An absent or unparseable `b` — no successful read ever recorded
@@ -2201,7 +2217,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
-  const needsMe = deriveNeedsMe(lines, projections);
+  const needsMe = deriveNeedsMe(lines, projections, plan);
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
@@ -2527,7 +2543,8 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
     !n.imageDrift &&
     n.mergeHeld.length === 0 &&
     n.uncreditedBuilds.length === 0 &&
-    !n.tokenFallback
+    !n.tokenFallback &&
+    (n.heldRoots ?? []).length === 0
   ) {
     out.push("nothing needs you");
     return out;
@@ -2550,6 +2567,13 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
     out.push(
       `uncredited build : ${r.taskId} — merged ${r.prUrl} (#${r.prNumber}) names it in the ${r.namedIn}, ` +
         `but no credit surface claimed it; the task stays dispatchable until a trailer or a run-${r.taskId}-<epochMs> head credits it`,
+    );
+  }
+  // W1-T4192: the one decision that releases a chain nothing else can move.
+  for (const r of n.heldRoots ?? []) {
+    out.push(
+      `held root : ${r.rootId} (${r.hold}) holds ${r.stalled.length} task(s): ${r.stalled.join(", ")} — ` +
+        `release, retire or rule on ${r.rootId} and they can dispatch`,
     );
   }
   for (const r of n.costAnomaly) {
