@@ -1013,6 +1013,7 @@
     "test/light-pass-tick-is-not-bounded-by-ci.test.ts": 1095,
     "test/lint-grep-unmatchable.test.ts": 1062,
     "test/lint-plan-broken-base.test.ts": 14824,
+    "test/lint-plan-fast-scopes-to-the-merge-base.test.ts": 2780,
     "test/lint-plan-merge-evidence.test.ts": 1043,
     "test/lint-plan-open-only.test.ts": 51754,
     "test/lint-plan-proof-discrimination.test.ts": 1098,
