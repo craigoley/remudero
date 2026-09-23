@@ -1,7 +1,8 @@
 /**
- * W1-T3223 — the bounded ledger scan may forget a correction after rotation, but the writer must
- * not. These tests exercise the real atomic credit store and put the original correction behind
- * more rotations than `readMergeCreditedTaskIds` is allowed to open.
+ * W1-T3223 — the ledger scan may lose a correction, but the writer must not. These tests exercise
+ * the real atomic credit store. Since the 24-rotation cap retired (2026-09-23) the scan reads the
+ * whole corpus, so a correction is "lost" here by leaving it out of every file, behind that many
+ * rotations of noise.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +11,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import {
-  CREDIT_SCAN_MAX_ROTATIONS,
   defaultCreditStorePath,
   hasCreditBackfillReceipt,
   loadCreditStore,
@@ -38,24 +38,9 @@ function candidate(taskId: string, prNumber: number): CreditCandidate {
   };
 }
 
-function ledgerRow(taskId: string, prNumber: number): string {
-  return JSON.stringify({
-    ts: "2026-09-09T00:00:00.000Z",
-    run_id: "prior",
-    task_id: taskId,
-    step: "verdict.merged",
-    verdict: "merged",
-    pr_number: prNumber,
-    pr_url: `https://github.com/craigoley/remudero/pull/${prNumber}`,
-    source: "sweep.credit_backfill",
-  });
-}
-
-/** Put `oldestRows` just outside the production reader's newest-first rotation budget. */
-function exhaustBoundedScan(dir: string, oldestRows: string[] = []): void {
-  const oldest = join(dir, "ledger.2026-09-01T00-00-00-000Z.ndjson.gz");
-  writeFileSync(oldest, gzipSync(Buffer.from(`${oldestRows.join("\n")}${oldestRows.length ? "\n" : ""}`)));
-  for (let i = 0; i < CREDIT_SCAN_MAX_ROTATIONS; i++) {
+/** Twenty-four rotations of noise (the retired cap) and no copy of any correction written before. */
+function loseFromLedger(dir: string): void {
+  for (let i = 0; i < 24; i++) {
     const stamp = String(i).padStart(2, "0");
     const path = join(dir, `ledger.2026-09-02T${stamp}-00-00-000Z.ndjson.gz`);
     const noise = JSON.stringify({ ts: `2026-09-02T${stamp}:00:00.000Z`, step: "daemon.poll", n: i });
@@ -71,12 +56,11 @@ test("a successful correction remains suppressed after its ledger row rotates be
     assert.equal(first.corrected, 1);
     assert.equal(hasCreditBackfillReceipt(loadCreditStore(defaultCreditStorePath(ledgerPath)), c.taskId), true);
 
-    const appended = readFileSync(ledgerPath, "utf8").trim();
     writeFileSync(ledgerPath, "");
-    exhaustBoundedScan(dir, [appended]);
+    loseFromLedger(dir);
 
     const second = await runCreditBackfill([c], { ledgerPath, runId: "second" });
-    assert.equal(second.creditScanExhaustedBudget, true, "the ledger reader must genuinely miss the old correction");
+    assert.equal(second.creditScanComplete, false, "the ledger reader must genuinely miss the old correction");
     assert.equal(second.corrected, 0, "the durable writer receipt, not the bounded scan, prevents the duplicate");
     assert.equal(second.durableReceiptSuppressions, 1);
     assert.equal(second.results[0]?.durablyBackfilled, true);
@@ -89,12 +73,12 @@ test("a successful correction remains suppressed after its ledger row rotates be
 test("a genuinely new merge is corrected once even when the bounded scan exhausts", async () => {
   const { dir, ledgerPath } = tempState();
   try {
-    exhaustBoundedScan(dir);
+    loseFromLedger(dir);
     const c = candidate("W1-T-NEW", 4102);
     const summary = await runCreditBackfill([c], { ledgerPath, runId: "new" });
 
-    assert.equal(summary.creditScanExhaustedBudget, true);
-    assert.equal(summary.corrected, 1, "budget exhaustion alone must not stand down a real correction");
+    assert.equal(summary.creditScanComplete, false);
+    assert.equal(summary.corrected, 1, "an unresolved scan alone must not stand down a real correction");
     assert.equal(summary.durableReceiptSuppressions, 0);
     assert.equal(hasCreditBackfillReceipt(loadCreditStore(defaultCreditStorePath(ledgerPath)), c.taskId), true);
     assert.equal(readFileSync(ledgerPath, "utf8").trim().split("\n").length, 1);
@@ -106,7 +90,7 @@ test("a genuinely new merge is corrected once even when the bounded scan exhaust
 test("ordinary durable merge evidence does not suppress the first ledger correction", async () => {
   const { dir, ledgerPath } = tempState();
   try {
-    exhaustBoundedScan(dir);
+    loseFromLedger(dir);
     const c = candidate("W1-T-EVIDENCE-NOT-RECEIPT", 4103);
     const storePath = defaultCreditStorePath(ledgerPath);
     const withTrailer = recordCredit({}, c.taskId, {
@@ -216,7 +200,7 @@ test("falsifier: removing the durable lookup re-credits the same correction afte
       },
     };
     saveCreditStore(defaultCreditStorePath(ledgerPath), durable);
-    exhaustBoundedScan(dir, [ledgerRow(c.taskId, c.prNumber)]);
+    loseFromLedger(dir);
 
     const withLookup = await runCreditBackfill([c], { ledgerPath, runId: "with-lookup" });
     assert.equal(withLookup.corrected, 0);

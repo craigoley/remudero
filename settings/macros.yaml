@@ -123,6 +123,28 @@ macros:
       - "Investigation discipline"
       - "Plan and task hygiene"
     args: true
+  # Idea from Matt Pocock's `research` (mattpocock/skills, MIT); text written here (MASTER-PLAN §4F).
+  - name: research
+    summary: "Research a question against primary sources in a background agent and commit the findings as a dated report under docs/research/."
+    expansion: |
+      Research the question below. Run the investigation in a background agent so this session
+      keeps working, and do not answer from memory.
+
+      - Read primary sources: this repo's code and history, official docs at the version pinned
+        here, source code at a named commit, first-party APIs. Follow every claim back to the
+        source that owns it; a secondary write-up is a lead, never evidence.
+      - Label each claim OBSERVED (with file:line, command, or URL and read date) or INFERRED.
+        Before reporting a zero, run a positive control that proves the query could see its
+        corpus. If a source is unreachable, say so and leave the claim INFERRED.
+      - Write one report to docs/research/<slug>.md. Head it with the question, the date, and
+        every source's commit SHA or URL. Never write it under state/ — that directory is
+        ignored, and docs/research/README.md records the reports it has already lost.
+      - Return the report's path and a five-line summary: the answer, the strongest evidence,
+        and what is still unknown.
+    headlines:
+      - "Investigation discipline"
+      - "Ledger and evidence discipline"
+    args: true
   - name: diagnose
     summary: "Debug by evidence — build one command that goes red on the reported symptom before forming any theory, then fix and prove it with that same command."
     expansion: |
