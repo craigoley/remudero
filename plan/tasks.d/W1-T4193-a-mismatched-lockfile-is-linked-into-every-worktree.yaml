@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "feedback#fb-1789309767852-219d98"
   plan_refs: ["W1-T2777", "W1-T2716"]
-  files: [src/lib/worker.ts, test/worktree-node-modules-lockfile-mismatch.test.ts]
+  files: [src/lib/worker.ts, src/run-task.ts, test/worktree-node-modules-lockfile-mismatch.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -34,6 +34,12 @@
         the install root's tree; it is refused with the same outcome. (iii) Never run `npm ci`/`npm install` inside the
         worktree: the node_modules symlink is shared and an install's clear phase empties it (the plan header's binding
         rule). Refreshing the canonical checkout is the remedy, and the refusal names it.
+    (iv) The refusal is a deferral, never a strike: ensureInstallFresh refreshes the canonical checkout, so a mismatch is
+        transient. src/run-task.ts is in files: because a throw from worktreeAdd reaches runTaskBody's worktree-add catch,
+        which releases the dispatch claim only for WorktreeBaseStaleError (and then returns failed, a strike). Any other
+        throw leaves the claim held, and every later dispatch meets it as taken (found 2026-09-23 at 862593fb). Throw a
+        typed error with reasonClass blocked_toolchain, the shape the daemon already defers without a strike, and give it
+        its own arm there that logs a named line, removes the worktree and releases the claim.
   acceptance:
     - claim: "a lockfile mismatch refuses the worktree instead of linking it"
       proof: 'grep: test("W1-T4193: a lockfile mismatch refuses the worktree instead of linking it" in test/worktree-node-modules-lockfile-mismatch.test.ts'
