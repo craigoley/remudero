@@ -1553,6 +1553,24 @@ test("ratifyCliGateway.approve: the SAME real detached bin/rmd spawn, distinct C
   assert.match(logFiles[0], /^approve-P901-\d+\.log$/);
 });
 
+test("ratifyCliGateway: a proposal id holding a path still spawns approve and logs to one flat file", async () => {
+  const root = tmpRoot();
+  mkdirSync(join(root, "bin"), { recursive: true });
+  const markerPath = join(root, "marker.txt");
+  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" > "${markerPath}"\n`, { mode: 0o755 });
+  const logDir = join(root, "state", "logs");
+  const id = "adoption:symbol-no-caller:src/lib/retro.ts:renderOverrunProposals";
+  ratifyCliGateway(root, logDir).approve(id);
+  const deadline = Date.now() + 5000;
+  while (!existsSync(markerPath) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.equal(readFileSync(markerPath, "utf8"), `approve ${id}\n`, "the id reaches rmd unchanged");
+  const logFiles = readdirSync(logDir);
+  assert.equal(logFiles.length, 1);
+  assert.match(logFiles[0]!, /^approve-adoption_symbol-no-caller_src_lib_retro.ts_renderOverrunProposals-\d+\.log$/);
+});
+
 // bearerTokenId parity check (never the raw secret leaked as ledger origin).
 test("panel-graph ledger origin is a stable hash, never the raw bearer token", () => {
   assert.doesNotMatch(writerId, new RegExp(WRITE_TOKEN));

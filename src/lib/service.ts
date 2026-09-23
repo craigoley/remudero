@@ -17,6 +17,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature } from "node:crypto";
 import { join as joinPath, resolve as resolvePath, sep } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 
 /** Bearer scope a route (or SSE stream) requires. `write` implies `read`. */
 export type Scope = "read" | "write";
@@ -157,6 +158,17 @@ export interface IdentityProvider {
    *  (W1-T495) — mirrors {@link writeTier}; `undefined` satisfies no sensitive route once
    *  {@link ServiceOptions.enforceReadSensitivity} is on. */
   readonly readSensitivity?: ReadSensitivity;
+  /** W1-T4244 — a PER-REQUEST grant, used instead of `grant` when present: its own `tier`/`actor`
+   *  replace {@link writeTier}. `undefined` means "not mine"; answer it synchronously (see {@link grantedScopes}). */
+  authorize?(req: IncomingMessage, allowQueryToken: boolean): IdentityResolution | undefined | Promise<IdentityResolution | undefined>;
+}
+
+/** What an {@link IdentityProvider.authorize} hands back for a request it verified (W1-T4244). */
+export interface IdentityResolution {
+  scopes: ReadonlySet<Scope>;
+  tier?: WriteTier;
+  /** WHO acted, carried to every route through {@link verifiedActor}; absent for a shared credential. */
+  actor?: string;
 }
 
 /** What {@link createService}'s provider dispatch hands back once some {@link IdentityProvider}
@@ -168,6 +180,17 @@ export interface IdentityGrant {
   tier?: WriteTier;
   /** The granting provider's {@link IdentityProvider.readSensitivity}, carried through unchanged (W1-T495). */
   readSensitivity?: ReadSensitivity;
+  actor?: string;
+}
+
+/** The verified actor's slot on the request — a symbol key, so no header can ever set it. */
+const VERIFIED_ACTOR = Symbol.for("remudero.service.verifiedActor");
+
+/** W1-T4244 — who the dispatch verified, or `undefined` for the shared bearer token. panel-actions.ts's
+ *  `bearerTokenId` reads this first, so every route's existing ledger `origin` names the operator. */
+export function verifiedActor(req: IncomingMessage): string | undefined {
+  const actor = (req as unknown as Record<symbol, unknown>)[VERIFIED_ACTOR];
+  return typeof actor === "string" ? actor : undefined;
 }
 
 /**
@@ -273,6 +296,9 @@ export interface ServiceOptions {
   /** Additional {@link IdentityProvider}s consulted after the two built-in grantors (W1-T430's
    *  seam) — attaches a future grantor without editing this module's dispatch. Empty by default. */
   providers?: IdentityProvider[];
+  /** W1-T4244 — {@link operatorSessionIdentityProvider}, consulted BEFORE the bearer token: the console
+   *  sends both, and the bearer answering first would pin the operator at `low`. */
+  operatorSession?: IdentityProvider;
   routes?: Route[];
   sse?: SseRoute[];
   /** W1-T3175 — the built console. Omitted: this module behaves byte-for-byte as before. */
@@ -743,6 +769,216 @@ export function createCloudflareAccessKeyCache(
   };
 }
 
+// ── W1-T4244 — THE OPERATOR REACHES CORE AS THEMSELVES ─────────────────────────────────────────
+// The console's bearer token is pinned at `low` (W1-T404), so it forwards the signed-in operator's
+// Clerk session token (RS256 JWT) too; this verifies it against the issuer's PUBLIC keys and an
+// allowlist — no Clerk secret in core. Claims: https://clerk.com/docs/guides/sessions/session-tokens
+
+/** The header carrying the operator's session token, beside the console's bearer token. */
+export const OPERATOR_SESSION_HEADER = "x-rmd-operator-session";
+
+/** PRIMARY CONTROL — `high` needs a factor verified at most this many minutes ago (Clerk's own default). */
+export const DEFAULT_OPERATOR_STEP_UP_WINDOW_MINUTES = 10;
+
+/** PRIMARY CONTROL — clock disagreement tolerated on `exp`/`nbf`; small beside a 60s session token. */
+export const OPERATOR_SESSION_CLOCK_SKEW_MS = 5_000;
+
+/** PRIMARY CONTROL — how long a fetched key set is trusted before it is fetched again. */
+export const OPERATOR_JWKS_TTL_MS = 10 * 60 * 1000;
+
+/** BACKSTOP — least time between key-set fetches, so tokens naming unknown `kid`s cannot drive a fetch loop. */
+export const OPERATOR_JWKS_REFETCH_MIN_INTERVAL_MS = 30_000;
+
+/** BACKSTOP — a key-set fetch runs on the request path, so a hung issuer ends in a refusal. */
+export const OPERATOR_JWKS_FETCH_TIMEOUT_MS = 5_000;
+
+export interface OperatorJwk {
+  kid: string;
+  kty: string;
+  [field: string]: unknown;
+}
+
+/** The key lookup the provider awaits. `undefined` is a DENIAL. */
+export interface OperatorJwksCache {
+  key(kid: string): Promise<OperatorJwk | undefined>;
+}
+
+/** The `serve.operatorIdentity` config block. `iss` must equal `issuer`; `azp` must be an allowed
+ *  origin; `sub` must be an operator user id. */
+export interface OperatorIdentityConfig {
+  issuer: string;
+  /** Defaults to `<issuer>/.well-known/jwks.json`. */
+  jwksUrl?: string;
+  allowedOrigins: string[];
+  operatorUserIds: string[];
+  stepUpWindowMinutes?: number;
+}
+
+export function operatorJwksUrl(config: Pick<OperatorIdentityConfig, "issuer" | "jwksUrl">): string {
+  return config.jwksUrl ?? `${config.issuer.replace(/\/+$/, "")}/.well-known/jwks.json`;
+}
+
+type ServiceLog = (step: string, extra?: Record<string, unknown>) => void;
+
+/** The key set, fetched on demand and cached. FAIL CLOSED: a failed fetch forgets every key. An
+ *  unknown `kid` refetches (rotation), throttled; concurrent misses share one fetch. */
+export function createOperatorJwksCache(opts: {
+  jwksUrl: string;
+  fetchImpl?: typeof fetch;
+  clock?: Clock;
+  log?: ServiceLog;
+}): OperatorJwksCache {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const clock = opts.clock ?? systemClock;
+  const log = opts.log ?? (() => {});
+  let keys: Map<string, OperatorJwk> | undefined;
+  let fetchedAt = 0;
+  let lastAttemptAt: number | undefined;
+  let inflight: Promise<void> | undefined;
+
+  const refresh = async (): Promise<void> => {
+    lastAttemptAt = clock.now();
+    try {
+      const res = await fetchImpl(opts.jwksUrl, { signal: AbortSignal.timeout(OPERATOR_JWKS_FETCH_TIMEOUT_MS) });
+      if (!res.ok) throw new Error(`jwks endpoint returned ${res.status}`);
+      const body = (await res.json()) as { keys?: unknown };
+      if (!Array.isArray(body.keys)) throw new Error("jwks response missing a keys array");
+      const next = new Map<string, OperatorJwk>();
+      for (const k of body.keys as OperatorJwk[]) {
+        if (k && typeof k.kid === "string" && k.kty === "RSA") next.set(k.kid, k);
+      }
+      keys = next;
+      fetchedAt = clock.now();
+    } catch (e) {
+      // FAIL CLOSED, recorded: a key set we cannot re-read is not one we trust.
+      keys = undefined;
+      log("service.operator_jwks_fetch_failed", { url: opts.jwksUrl, error: String((e as Error)?.message ?? e) });
+    }
+  };
+
+  return {
+    key: async (kid) => {
+      if (inflight) await inflight;
+      const now = clock.now();
+      const fresh = keys !== undefined && now - fetchedAt < OPERATOR_JWKS_TTL_MS;
+      if (fresh && keys!.has(kid)) return keys!.get(kid);
+      if (lastAttemptAt !== undefined && now - lastAttemptAt < OPERATOR_JWKS_REFETCH_MIN_INTERVAL_MS) {
+        return fresh ? keys!.get(kid) : undefined; // throttled: no second fetch this soon.
+      }
+      inflight ??= refresh().finally(() => {
+        inflight = undefined;
+      });
+      await inflight;
+      return keys?.get(kid);
+    },
+  };
+}
+
+export interface OperatorSessionOptions extends OperatorIdentityConfig {
+  keys: OperatorJwksCache;
+  clock?: Clock;
+  log?: ServiceLog;
+}
+
+interface OperatorSessionClaims {
+  iss?: unknown;
+  sub?: unknown;
+  azp?: unknown;
+  exp?: unknown;
+  nbf?: unknown;
+  iat?: unknown;
+  fva?: unknown;
+}
+
+/** Why a presented session token earned nothing — ledgered, never returned to the caller. */
+export type OperatorSessionRefusal =
+  | "malformed"
+  | "algorithm"
+  | "unknown_key"
+  | "signature"
+  | "issuer"
+  | "expired"
+  | "not_yet_valid"
+  | "origin"
+  | "unknown_user";
+
+/** `fva` is `[firstFactorMinutes, secondFactorMinutes]` as of issue (`-1` = never). The most recent
+ *  non-negative entry counts, aged by the minutes since `iat`. */
+export function operatorStepUpIsFresh(fva: unknown, iatSeconds: unknown, nowMs: number, windowMinutes: number): boolean {
+  if (!Array.isArray(fva)) return false;
+  const verified = fva.filter((m): m is number => typeof m === "number" && Number.isFinite(m) && m >= 0);
+  if (verified.length === 0) return false;
+  const sinceIssueMinutes = typeof iatSeconds === "number" ? Math.max(0, (nowMs - iatSeconds * 1000) / 60_000) : 0;
+  return Math.min(...verified) + sinceIssueMinutes <= windowMinutes;
+}
+
+/** Verify one session token: shape, `alg` (RS256 only), key by `kid`, signature, `iss`, `exp`/`nbf`,
+ *  `azp`, then the `sub` allowlist. A decode that throws is the provider's catch to handle. */
+export async function verifyOperatorSession(
+  token: string,
+  opts: OperatorSessionOptions,
+  nowMs: number,
+): Promise<{ ok: true; sub: string; tier: WriteTier } | { ok: false; reason: OperatorSessionRefusal }> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return { ok: false, reason: "malformed" };
+  const [headerB64, payloadB64, signatureB64] = parts;
+  const header = decodeJwtSegment<{ kid?: unknown; alg?: unknown }>(headerB64);
+  if (header.alg !== "RS256") return { ok: false, reason: "algorithm" };
+  if (typeof header.kid !== "string") return { ok: false, reason: "unknown_key" };
+  const jwk = await opts.keys.key(header.kid);
+  if (!jwk) return { ok: false, reason: "unknown_key" };
+  const publicKey = createPublicKey({ key: jwk, format: "jwk" });
+  const signed = Buffer.from(`${headerB64}.${payloadB64}`, "utf8");
+  if (!verifySignature("RSA-SHA256", signed, publicKey, Buffer.from(signatureB64, "base64url"))) {
+    return { ok: false, reason: "signature" };
+  }
+  const claims = decodeJwtSegment<OperatorSessionClaims>(payloadB64);
+  if (claims.iss !== opts.issuer) return { ok: false, reason: "issuer" };
+  if (typeof claims.exp !== "number" || claims.exp * 1000 + OPERATOR_SESSION_CLOCK_SKEW_MS <= nowMs) {
+    return { ok: false, reason: "expired" };
+  }
+  if (claims.nbf !== undefined && (typeof claims.nbf !== "number" || claims.nbf * 1000 - OPERATOR_SESSION_CLOCK_SKEW_MS > nowMs)) {
+    return { ok: false, reason: "not_yet_valid" };
+  }
+  if (typeof claims.azp !== "string" || !opts.allowedOrigins.includes(claims.azp)) return { ok: false, reason: "origin" };
+  if (typeof claims.sub !== "string" || !opts.operatorUserIds.includes(claims.sub)) return { ok: false, reason: "unknown_user" };
+  const window = opts.stepUpWindowMinutes ?? DEFAULT_OPERATOR_STEP_UP_WINDOW_MINUTES;
+  const tier: WriteTier = operatorStepUpIsFresh(claims.fva, claims.iat, nowMs, window) ? "high" : "middle";
+  return { ok: true, sub: claims.sub, tier };
+}
+
+/** The operator-session grantor (W1-T4244), via `authorize` only. A failed check is "not mine" (the
+ *  bearer, still `low`, answers next) and is ledgered. Grants `middle`, or `high` after a step-up. */
+export function operatorSessionIdentityProvider(opts: OperatorSessionOptions): IdentityProvider {
+  const clock = opts.clock ?? systemClock;
+  const log = opts.log ?? (() => {});
+  return {
+    name: "operator-session",
+    grant: () => undefined,
+    authorize: (req) => {
+      const raw = req.headers[OPERATOR_SESSION_HEADER];
+      const token = Array.isArray(raw) ? raw[0] : raw;
+      if (!token) return undefined; // not my credential -- answered synchronously, see grantedScopes.
+      return verifyAndResolve(token);
+    },
+  };
+
+  async function verifyAndResolve(token: string): Promise<IdentityResolution | undefined> {
+    try {
+      const verdict = await verifyOperatorSession(token, opts, clock.now());
+      if (!verdict.ok) {
+        log("service.operator_session_refused", { reason: verdict.reason });
+        return undefined;
+      }
+      return { scopes: READ_WRITE, tier: verdict.tier, actor: `operator:${verdict.sub}` };
+    } catch (e) {
+      // A token that cannot even be decoded is refused and recorded, never thrown into dispatch.
+      log("service.operator_session_refused", { reason: "malformed", error: String((e as Error)?.message ?? e) });
+      return undefined;
+    }
+  }
+}
+
 /**
  * Dispatch across `providers` IN ORDER, returning the first grant (plus provenance) or
  * `undefined` if none recognize the credentials (401) — tailnet identity first but additive, the
@@ -752,12 +988,28 @@ function grantedScopes(
   providers: readonly IdentityProvider[],
   req: IncomingMessage,
   allowQuery: boolean,
-): IdentityGrant | undefined {
-  for (const provider of providers) {
+  from = 0,
+): IdentityGrant | undefined | Promise<IdentityGrant | undefined> {
+  for (let i = from; i < providers.length; i++) {
+    const provider = providers[i];
+    if (provider.authorize) {
+      const resolved = provider.authorize(req, allowQuery);
+      // W1-T4244: stay SYNCHRONOUS unless a provider really awaits — an extra tick lets a stream
+      // `error` fire before the body read listens, hanging the request (serve-survives-malformed-url).
+      if (resolved instanceof Promise) {
+        return resolved.then((r) => (r ? toGrant(provider, r) : grantedScopes(providers, req, allowQuery, i + 1)));
+      }
+      if (resolved) return toGrant(provider, resolved);
+      continue;
+    }
     const scopes = provider.grant(req, allowQuery);
     if (scopes) return { scopes, provider: provider.name, tier: provider.writeTier, readSensitivity: provider.readSensitivity };
   }
   return undefined;
+}
+
+function toGrant(provider: IdentityProvider, resolved: IdentityResolution): IdentityGrant {
+  return { scopes: resolved.scopes, provider: provider.name, tier: resolved.tier, readSensitivity: provider.readSensitivity, actor: resolved.actor };
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -834,6 +1086,7 @@ export function createService(opts: ServiceOptions): Server {
   // Identity first (additive), then the bearer token — the pre-seam order, then extra providers.
   const providers: IdentityProvider[] = [
     ...(opts.identity ? [tailscaleIdentityProvider(opts.identity)] : []),
+    ...(opts.operatorSession ? [opts.operatorSession] : []),
     bearerTokenProvider(opts.tokens),
     ...(opts.providers ?? []),
   ];
@@ -895,12 +1148,14 @@ export function createService(opts: ServiceOptions): Server {
       // Query-param auth is honored ONLY for a plain route that opted in (the HTML shell) — never
       // for an SSE stream or an API route, where a `?token=` would leak via Referer/logs.
       const allowQuery = !sseRoute && (route?.allowQueryToken ?? false);
-      const granted = grantedScopes(providers, req, allowQuery);
+      const pending = grantedScopes(providers, req, allowQuery);
+      const granted = pending instanceof Promise ? await pending : pending;
       if (!granted) {
         log("service.unauthorized", { method, path });
         sendJson(res, 401, { error: "unauthorized" });
         return;
       }
+      if (granted.actor) (req as unknown as Record<symbol, unknown>)[VERIFIED_ACTOR] = granted.actor;
       if (!granted.scopes.has(requiredScope)) {
         log("service.forbidden", { method, path, required_scope: requiredScope, granted_by: granted.provider });
         sendJson(res, 403, { error: "forbidden", required_scope: requiredScope });

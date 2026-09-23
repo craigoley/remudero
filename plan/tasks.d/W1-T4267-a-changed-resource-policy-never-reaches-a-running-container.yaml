@@ -1,0 +1,48 @@
+- id: W1-T4267
+  title: "A MERGED RESOURCE POLICY NEVER REACHES A RUNNING CONTAINER — the core daemon ran for a day after W1-T4102 with no memory ceiling and default CPU shares, because limits apply only when a container is created and nothing recycles on limit drift. Make the recycle tick compare each container's live limits with the policy and recycle on a mismatch"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "fleet host audit 2026-09-23"
+  plan_refs: ["W1-T4102", "W1-T3240", "W1-T3245"]
+  files:
+    - src/lib/deployer.ts
+    - deploy/install-host-units.sh
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 13:34Z on the fleet host (load average 65 on 8 cores): `docker inspect` showed
+    remudero-daemon at Memory=0 CpuShares=0 (no ceiling, default weight) while remudero-console-daemon,
+    recycled after W1-T4102 merged, had Memory=13006536704 CpuShares=512. The core daemon is the one
+    that runs parallel coverage suites, the load that starved the gateway in the first place, so the
+    starvation fix covered every container except the one it was written for. Its only restart since
+    (12:49Z) was an in-place restart after its freshness exit, which keeps the old HostConfig. The recycle
+    tick reads image drift only (W1-T3245), and resource-policy.sh is a mounted source file, so its
+    merge created no recycle pressure. Stop-gap applied by hand: `docker update --cpu-shares=512`
+    (cgroup cpu.weight read back 59). The memory ceiling was NOT applied live, because the daemon sat
+    at 11.8 GiB against a 12.1 GiB cap and a live cap would OOM-kill in-flight workers.
+  design: |
+    A fifth quantity beside the four decideDeployTrigger already reads: resource-policy drift. The tick
+    computes the container's EXPECTED limits from deploy/resource-policy.sh (serve args for the gateway,
+    build args for every build daemon) and reads the ACTUAL ones with `docker inspect` (HostConfig Memory,
+    MemorySwap, CpuShares, MemoryReservation). Any mismatch makes a recycle due, and the reason names each
+    field as expected-versus-actual. An unreadable inspect is UNKNOWN and never forces a recycle (the
+    same no-storm rule as an unknown image sha). The recycle itself stays the existing graceful path.
+  acceptance:
+    - claim: "a container whose live limits differ from the policy is due a recycle"
+      proof: "unit test: a container whose live limits differ from the policy is due a recycle"
+    - claim: "the recycle reason names each drifted limit as expected and actual"
+      proof: "unit test: the recycle reason names each drifted limit as expected and actual"
+    - claim: "an unreadable container inspect never forces a recycle"
+      proof: "unit test: an unreadable container inspect never forces a recycle"
+    - claim: "the tick hands the live limits to the deploy decision"
+      proof: "grep: resourcePolicyDrift in deploy/install-host-units.sh"
+  falsifier: |
+    CLOSE IF remudero-daemon's HostConfig already shows the build-daemon memory ceiling and cpu-shares 512
+    after a recycle that no operator triggered by hand.

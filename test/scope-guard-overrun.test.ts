@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { scopeAdvisorySection, type UnwiredAdvisory } from "../src/lib/review.js";
-import { runTask, scopeGuardOutOfScopeFiles } from "../src/run-task.js";
+import { runFixRung, runTask, scopeGuardOutOfScopeFiles } from "../src/run-task.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { SpawnWorkerArgs } from "../src/lib/worker.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
@@ -525,4 +529,133 @@ test("WHAT IS LOST, pinned rather than argued: an UNDECLARED scope still ledgers
   assert.deepEqual(scopeGuardOutOfScopeFiles(diff, []), diff);
   // …and the advisory the review would build for that same PR is empty, so nothing renders.
   assert.equal(scopeAdvisorySection([]), undefined, "the PR comment says nothing — this is the gap, named");
+});
+
+// ── W1-T4207: A REFUSED FIX COMMIT NAMES THE PATHS IT COULD NOT STAGE ──────────────────────────
+// `fix.commit_refused` used to carry the reason alone, so neither the operator nor the next strike
+// could see WHICH out-of-scope paths the worker wrote. These drive the REAL `runFixRung` and the
+// REAL `harnessCommitForShellLessWorker`/`commitWorkerEdits` against a throwaway git repo — no fake
+// harness — so the paths come from an actual `git status`.
+
+const FIX_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
+const FIX_TASK_ID = "W1-T4207X";
+
+function fixFailedReview(): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
+  const criterion: CriterionVerdict = {
+    claim: "the fix lands",
+    proof: "unit test: the fix lands",
+    met: false,
+    reason: "still blocked",
+    proof_exec: "not_executable",
+  };
+  return {
+    state: "failure", criteria: [criterion], testTheater: false, summary: "blocked", floorDegraded: false,
+    capped: false, keywordOnly: false, planOnly: false, headSha: "head-a", reviewerOutcome: "failure",
+  };
+}
+
+function fixWorker(text: string): WorkerResult {
+  return {
+    sessionId: "fix-session", costUsd: 1, numTurns: 2, text, blocks: [], stderr: "", subtype: "success",
+    isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "sonnet", effort: "medium",
+    tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+/** One fix-rung invocation whose worker writes `writes` (all outside `files:`) and asks for a commit. */
+async function refusedFixRung(
+  root: string,
+  writes: readonly string[],
+  ledgerLines: () => Array<Record<string, unknown>>,
+): Promise<{ lines: Array<{ step: string } & Record<string, unknown>>; prompts: string[] }> {
+  const repo = mkdtempSync(join(root, `${RMD_TMP_PREFIX}repo-`));
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "t");
+  git("commit", "-q", "--allow-empty", "-m", "seed");
+  const lines: Array<{ step: string } & Record<string, unknown>> = [];
+  const prompts: string[] = [];
+  await runFixRung({
+    taskId: FIX_TASK_ID,
+    runId: `${FIX_TASK_ID}-run`,
+    task: { id: FIX_TASK_ID, title: "refused fix", files: ["src/run-task.ts"] },
+    prUrl: "https://github.com/acme/remudero/pull/4207",
+    branch: `run-${FIX_TASK_ID}-1`,
+    worktreePath: repo,
+    initialSessionId: "initial-session",
+    mount: FIX_MOUNT,
+    settingsFile: join(root, "settings.json"),
+    config: { root, workerProviders: { harnessCommitsFix: true } } as Config,
+    budgetUsd: 10,
+    strikeCap: 2,
+    initialReview: fixFailedReview(),
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: FIX_MOUNT },
+    deps: {
+      spawn: async (args: SpawnWorkerArgs) => {
+        prompts.push(args.prompt);
+        for (const path of writes) {
+          mkdirSync(join(repo, path, ".."), { recursive: true });
+          writeFileSync(join(repo, path), "out of scope\n");
+        }
+        return fixWorker("REPORT\nCOMMIT_MESSAGE: fix(x): touch the wrong files");
+      },
+      waitForCiGreen: async () => "green" as const,
+      runReview: async () => fixFailedReview(),
+      fetchPrBody: async () => "REPORT",
+      push: () => assert.fail("a refused commit must not push"),
+      issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
+      ledgerPath: join(root, "ledger.ndjson"),
+      ledgerLines,
+      log: (step: string, extra?: Record<string, unknown>) => lines.push({ step, ...(extra ?? {}) }),
+      say: () => {},
+      account: (result: WorkerResult) => result,
+    },
+  });
+  return { lines, prompts };
+}
+
+test("W1-T4207: fix.commit_refused names the undeclared paths", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4207-row-`));
+  try {
+    const few = await refusedFixRung(root, ["docs/notes.md", "scripts/x.mjs"], () => []);
+    const row = few.lines.find((line) => line.step === "fix.commit_refused");
+    assert.equal(row?.reason, "every change the worker made is outside its declared files");
+    assert.deepEqual([...((row?.undeclared as string[] | undefined) ?? [])].sort(), ["docs/notes.md", "scripts/x.mjs"]);
+    assert.equal("undeclared_omitted" in (row ?? {}), false, "nothing omitted, so no omitted count");
+
+    // CAPPED, WITH A COUNT: a worker that sprayed 25 paths is named by its first 20, the rest counted.
+    const many = Array.from({ length: 25 }, (_, i) => `docs/spray-${String(i).padStart(2, "0")}.md`);
+    const wide = await refusedFixRung(root, many, () => []);
+    const capped = wide.lines.find((line) => line.step === "fix.commit_refused");
+    assert.equal(((capped?.undeclared as string[] | undefined) ?? []).length, 20);
+    assert.equal(capped?.undeclared_omitted, 5);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4207: the next strikes prompt names the paths the last one could not commit", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4207-prompt-`));
+  try {
+    const first = await refusedFixRung(root, ["docs/notes.md"], () => []);
+    assert.doesNotMatch(first.prompts[0] ?? "", /could not commit/, "a first strike has no prior refusal to name");
+    const ledger = first.lines.map((line) => ({ task_id: FIX_TASK_ID, ...line }));
+
+    const next = await refusedFixRung(root, ["docs/notes.md"], () => ledger);
+    const prompt = next.prompts[0] ?? "";
+    assert.match(prompt, /could not commit/);
+    assert.match(prompt, /docs\/notes\.md/, "names the undeclared path");
+    assert.match(prompt, /declared files: src\/run-task\.ts/i, "names the declared files");
+    assert.match(prompt, /amend/i, "offers the report-that-the-task-needs-amending exit");
+
+    // Another task's refusal, or one a later non-refused round superseded, is not this strike's news.
+    const foreign = ledger.map((line) => ({ ...line, task_id: "W1-OTHER" }));
+    assert.doesNotMatch((await refusedFixRung(root, [], () => foreign)).prompts[0] ?? "", /could not commit/);
+    const superseded = [...ledger, { task_id: FIX_TASK_ID, step: "fix.done", subtype: "success" }];
+    assert.doesNotMatch((await refusedFixRung(root, [], () => superseded)).prompts[0] ?? "", /could not commit/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
