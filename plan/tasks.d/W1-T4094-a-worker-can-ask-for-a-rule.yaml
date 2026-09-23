@@ -11,6 +11,7 @@
   origin: "knowledge-system audit 2026-09-22"
   plan_refs: [W1-T4092]
   files: [src/lib/learnings.ts, src/lib/worker.ts, src/run-task.ts, test/a-worker-can-ask-for-a-rule.test.ts]
+  priority: 2
   status: queued
   attempts: 0
   rationale: |

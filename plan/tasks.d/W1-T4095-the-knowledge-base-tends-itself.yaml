@@ -11,7 +11,7 @@
   origin: "operator ask 2026-09-22: a process that prunes and self-improves the memory system; industry-leading, automated"
   plan_refs: [W1-T4090, W1-T4091, W1-T4093, W1-T4096, W1-T4097, W1-T4098]
   files: [src/lib/knowledge-gardener.ts, src/lib/knowledge-inventory.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/digest.ts, test/the-knowledge-base-tends-itself.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22 (knowledge-system audit).
