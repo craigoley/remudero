@@ -154,6 +154,7 @@ import { planGardenSpec } from "./lib/plan-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
+import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
 import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
 import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -25223,6 +25224,17 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
           ...resolveOwnerRepo(),
         },
         verifyHuman,
+        // W1-T4243: the knowledge rung's one `knowledge.measured` row, written like successorWatch's above.
+        knowledge: {
+          writeLedgerLine: (row) =>
+            appendLedger(ledgerPathFor(configFor()), {
+              run_id: `KNOWLEDGE-MEASUREMENT-${cadenceClock.now()}`,
+              task_id: "knowledge-measurement",
+              lane: "measurement-cadence",
+              ...row,
+              step: KNOWLEDGE_MEASURED_STEP,
+            }),
+        },
       });
       return { ...report, successorWatch: successorWatchReading };
     });
