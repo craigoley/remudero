@@ -61,13 +61,13 @@
     REPORTED for a draft that already opted into the W1-T3101 route via its own frontmatter.
   acceptance:
     - claim: "a draft whose frontmatter declares applies-to (the shape every injectable-task-type candidate renders, including the d625783b clean-single-strike draft's applies-to: implement) is reported reachable via the W1-T3101 prompt-injection route, regardless of settingSources"
-      proof: "unit test: test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts"
+      proof: 'grep: test("W1-T4269: a draft declaring applies-to is reported reachable via the prompt-injection route regardless of settingSources" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
     - claim: "a draft with no applies-to line falls back to the native settingSources check, reading the real exported WORKER_SETTING_SOURCES constant rather than a hardcoded literal"
-      proof: "unit test: test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts"
+      proof: 'grep: test("W1-T4269: a draft with no applies-to line falls back to the settingSources check reading the real WORKER_SETTING_SOURCES" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
     - claim: "describeWorkerSkillReachability's own contract is untouched by this task, so it still reports false for [] and true for ['project']"
-      proof: "unit test: test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts"
+      proof: 'grep: test("W1-T4269: describeWorkerSkillReachability still reports false for an empty list and true for project" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
     - claim: "the retro's staging call site computes reachability per draft, so two drafts of different task types staged in the same retro pass can report different reachability lines"
-      proof: "unit test: test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts"
+      proof: 'grep: test("W1-T4269: two drafts of different task types staged together report different reachability lines" in test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts'
   files: [src/lib/skill-workshop.ts, src/run-task.ts, test/the-staged-reachability-line-matches-the-real-delivery-route.test.ts]
   origin: "skill-draft-review#d625783bf2e72aed"
   plan_refs: ["W1-T2766", "W1-T3101", "W1-T3137"]

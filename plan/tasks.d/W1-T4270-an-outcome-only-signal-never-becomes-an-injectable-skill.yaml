@@ -61,13 +61,13 @@
     staged in the state-side registry).
   acceptance:
     - claim: "a candidate whose ONLY signal is clean_single_strike (the d625783b shape: fixDispatchCount===0) never renders a skill draft"
-      proof: "unit test: test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts"
+      proof: 'grep: test("W1-T4270: a candidate whose only signal is clean_single_strike never renders a skill draft" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
     - claim: "a candidate carrying fully_executed_proof still drafts a skill exactly as before this change — no regression on the eligible signal"
-      proof: "unit test: test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts"
+      proof: 'grep: test("W1-T4270: a candidate carrying fully_executed_proof still drafts a skill exactly as before" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
     - claim: "a mixed candidate matching both signals drafts a skill containing ONLY the eligible signal's step, never the outcome-only one"
-      proof: "unit test: test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts"
+      proof: 'grep: test("W1-T4270: a mixed candidate drafts only the eligible signal step, never the outcome-only one" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
     - claim: "mineProceduralCandidates still reports a clean_single_strike-only candidate in its raw output — this task narrows skill drafting, never the existing fact-line pipeline"
-      proof: "unit test: test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts"
+      proof: 'grep: test("W1-T4270: mineProceduralCandidates still reports a clean_single_strike-only candidate" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
   files: [src/lib/skill-workshop.ts, test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts]
   origin: "skill-draft-review#d625783bf2e72aed"
   plan_refs: ["W1-T87", "W1-T2766", "P13"]
