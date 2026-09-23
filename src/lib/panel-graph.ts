@@ -21,7 +21,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { IncomingMessage } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   loadPlan,
   loadPlanAtRef,
@@ -85,6 +85,15 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { fleetLaneDecisions, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
+import {
+  listThreadViews,
+  markThreadRead,
+  readMarksPath,
+  readReadMarks,
+  threadDetailView,
+  type InboxThreadItem,
+} from "./inbox-responder.js";
+import { appendThreadMessage, inboxThreadIdentity, proposalIdOfThread, readAllThreads } from "./inbox-thread.js";
 import {
   classifyProposal,
   declinedReasonInLedger,
@@ -1477,6 +1486,155 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
   };
 }
 
+// ── W1-T4088: the inbox as threads ─────────────────────────────────────────────────────────────
+
+const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["state"]>> = {
+  ready: "ready",
+  drafting: "drafting",
+  not_ready: "notReady",
+  declined: "declined",
+};
+
+/** Every operator-owned item with its plain message and state, off the SAME classification
+ *  `GET /v1/inbox` renders. */
+function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): InboxThreadItem[] {
+  const { proposals, classifications } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
+  const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
+  const items: InboxThreadItem[] = [];
+  for (const c of classifications) {
+    const state = CLASSIFICATION_TO_THREAD_STATE[c.state];
+    const proposal = proposals.find((p) => p.id === c.proposalId);
+    if (!state || !proposal || inboxOwner(proposal) !== "operator") continue;
+    items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state });
+  }
+  return items;
+}
+
+/** The thread store every inbox thread route and the daemon's responder share. */
+export function inboxThreadStorePath(inboxRoot: string): string {
+  return join(inboxRoot, "state", "inbox-threads.jsonl");
+}
+
+function readThreadsOr500(deps: PanelGraphDeps, res: ServerResponse) {
+  const all = readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
+  if (all.status === "unresolved") {
+    sendJson(res, 500, { error: "thread_store_unreadable", detail: all.reason });
+    return undefined;
+  }
+  return all.threads;
+}
+
+/** GET /v1/inbox/threads — the operator's threads: headline, first line of the latest message, who
+ *  it is waiting on, last activity, message count and unread. Waiting-on-you first. */
+export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+  return {
+    method: "GET",
+    path: "/v1/inbox/threads",
+    scope: "read",
+    handler: (_req, res) => {
+      const threads = readThreadsOr500(deps, res);
+      if (!threads) return;
+      const marks = readReadMarks(readMarksPath(join(deps.inboxRoot, "state")));
+      sendJson(res, 200, { threads: listThreadViews(operatorThreadItems(deps, readPlanSnapshot), threads, marks) });
+    },
+  };
+}
+
+/** GET /v1/inbox/thread?id=<threadId> — one thread's messages, oldest first, with the raw summary
+ *  as `details`. */
+export function buildInboxThreadRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+  return {
+    method: "GET",
+    path: "/v1/inbox/thread",
+    scope: "read",
+    handler: (req, res) => {
+      const threadId = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
+      const proposalId = proposalIdOfThread(threadId);
+      const item = proposalId ? operatorThreadItems(deps, readPlanSnapshot).find((i) => i.proposalId === proposalId) : undefined;
+      if (!item) {
+        sendJson(res, 404, { error: "not_found", detail: `no inbox thread "${threadId}"` });
+        return;
+      }
+      const threads = readThreadsOr500(deps, res);
+      if (!threads) return;
+      const marks = readReadMarks(readMarksPath(join(deps.inboxRoot, "state")));
+      sendJson(res, 200, threadDetailView(item, threads, marks));
+    },
+  };
+}
+
+interface ThreadReplyInput {
+  threadId: string;
+  text: string;
+}
+
+function validateThreadReply(body: unknown): { error: string } | ThreadReplyInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.threadId !== "string" || !proposalIdOfThread(body.threadId)) return { error: "threadId must name an inbox thread" };
+  if (typeof body.text !== "string" || !body.text.trim()) return { error: "text is required" };
+  if (body.text.length > 4000) return { error: "text must be 4000 characters or fewer" };
+  return { threadId: body.threadId, text: body.text.trim() };
+}
+
+/** The operator's display name the console passes (audit only, never an authorisation input). */
+function operatorName(req: IncomingMessage): string | undefined {
+  const raw = req.headers["x-remudero-operator"];
+  const name = typeof raw === "string" ? raw.trim() : "";
+  return name && name.length <= 80 && /^[\x20-\x7e]+$/.test(name) ? name : undefined;
+}
+
+/** POST /v1/inbox/thread/reply — the operator writes on a thread. LOW: it only adds a message; the
+ *  daemon's responder decides what the reply means and may itself take only reversible actions. */
+export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/inbox/thread/reply",
+    scope: "write",
+    // W1-T404: LOW — appends a message; a reply is an input, never a command (see inbox-responder.ts).
+    tier: "low",
+    handler: jsonAction(validateThreadReply, (input, req, res) => {
+      const proposalId = proposalIdOfThread(input.threadId)!;
+      const operator = operatorName(req);
+      appendThreadMessage(
+        inboxThreadIdentity(proposalId),
+        "reply",
+        input.text,
+        { threadStorePath: inboxThreadStorePath(deps.inboxRoot) },
+        operator ? { operator } : undefined,
+      );
+      appendPanelLedger(deps.ledgerPath, "inbox.thread_replied", proposalId, bearerTokenId(req), { thread_id: input.threadId });
+      sendJson(res, 200, { ok: true, threadId: input.threadId, waitingOn: "daemon" });
+    }),
+  };
+}
+
+interface ThreadReadInput {
+  threadId: string;
+  seq: number;
+}
+
+function validateThreadRead(body: unknown): { error: string } | ThreadReadInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.threadId !== "string" || !proposalIdOfThread(body.threadId)) return { error: "threadId must name an inbox thread" };
+  if (typeof body.seq !== "number" || !Number.isInteger(body.seq) || body.seq < 0) return { error: "seq must be a whole number" };
+  return { threadId: body.threadId, seq: body.seq };
+}
+
+/** POST /v1/inbox/thread/read — mark a thread read up to `seq`. LOW: bookkeeping only. */
+export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/inbox/thread/read",
+    scope: "write",
+    // W1-T404: LOW — a read mark; changes nothing but the unread flag.
+    tier: "low",
+    handler: jsonAction(validateThreadRead, (input, _req, res) => {
+      markThreadRead(readMarksPath(join(deps.inboxRoot, "state")), input.threadId, input.seq);
+      sendJson(res, 200, { ok: true });
+    }),
+  };
+}
+
 // ── POST /v1/inbox/approve, POST /v1/inbox/reframe — the operator's ratification bit, wired
 // through the write-token API from the card (W1-T193, MASTER-PLAN P25 ii-iii) ───────────────
 
@@ -1810,6 +1968,8 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
     buildDrainPreviewRoute(deps, readPlanSnapshot),
     buildPlanViewRoute(deps, readPlanSnapshot),
     buildInboxRoute(deps, readPlanSnapshot),
+    buildInboxThreadsRoute(deps, readPlanSnapshot),
+    buildInboxThreadRoute(deps, readPlanSnapshot),
   ];
 }
 
@@ -1823,6 +1983,8 @@ export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
     buildReframeProposalRoute(deps),
     buildDeclineProposalRoute(deps),
     buildRestoreProposalRoute(deps),
+    buildInboxThreadReplyRoute(deps),
+    buildInboxThreadReadRoute(deps),
     buildSetDailyCostCeilingRoute(deps),
     buildClearDailyCostCeilingRoute(deps),
   ];
