@@ -10229,6 +10229,12 @@ export async function runFixRung(opts: {
       ...predecessorTranscriptPromptLines(
         predecessorTranscriptPaths(opts.config.root, opts.taskId, { excludeRunId: opts.runId }),
       ),
+      // W1-T4207: the previous strike's refused commit, named from its own `fix.commit_refused` row.
+      ...lastCommitRefusalPromptLines(
+        (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
+        opts.taskId,
+        opts.task.files ?? [],
+      ),
     ].join("\n");
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
@@ -10341,6 +10347,7 @@ export async function runFixRung(opts: {
     // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
     // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
     let harnessCommitRefusalReason: string | undefined;
+    let harnessCommitUndeclared: readonly string[] = [];
     const harnessCommitCount = (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
       harnessOwnsGit: fixHarnessOwnsGit,
       commitCount: 0,
@@ -10349,8 +10356,9 @@ export async function runFixRung(opts: {
       declaredPaths: opts.task.files ?? [],
       log: deps.log,
       say: deps.say,
-      onRefusal: (reason) => {
+      onRefusal: (reason, undeclared = []) => {
         harnessCommitRefusalReason = reason;
+        harnessCommitUndeclared = undeclared;
       },
     });
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
@@ -10450,6 +10458,7 @@ export async function runFixRung(opts: {
         mode: fixMode,
         head_sha: priorHeadSha,
         reason: harnessCommitRefusalReason,
+        ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
       });
     }
     deps.log("fix.done", {
@@ -35586,6 +35595,51 @@ export function forceCashContainedRunSpawn(args: SpawnWorkerArgs, config: Config
   };
 }
 
+/** W1-T4207: at most this many undeclared paths ride a `fix.commit_refused` row; the rest are counted. */
+const COMMIT_REFUSED_PATH_CAP = 20;
+
+/** W1-T4207: the capped `undeclared` list (plus `undeclared_omitted`) a refusal row carries. */
+function undeclaredPathsLedgerFields(undeclared: readonly string[]): Record<string, unknown> {
+  if (undeclared.length === 0) return {};
+  const omitted = undeclared.length - COMMIT_REFUSED_PATH_CAP;
+  return {
+    undeclared: undeclared.slice(0, COMMIT_REFUSED_PATH_CAP),
+    ...(omitted > 0 ? { undeclared_omitted: omitted } : {}),
+  };
+}
+
+/**
+ * W1-T4207: prompt lines naming what this task's latest fix strike could not commit. A refusal
+ * returns the rung, so the next strike is a later invocation and the ledger is the only carrier.
+ * A later round whose `fix.done` is not `commit_refused` supersedes it.
+ */
+function lastCommitRefusalPromptLines(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  declaredFiles: readonly string[],
+): string[] {
+  let pending: Record<string, unknown> | undefined;
+  let last: Record<string, unknown> | undefined;
+  for (const line of ledgerLines) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "fix.commit_refused") pending = line;
+    if (line.step === "fix.done") {
+      last = line.subtype === "commit_refused" ? pending : undefined;
+      pending = undefined;
+    }
+  }
+  const paths = Array.isArray(last?.undeclared) ? last.undeclared.map(String) : [];
+  if (paths.length === 0) return [];
+  const omitted = typeof last?.undeclared_omitted === "number" ? ` (and ${last.undeclared_omitted} more)` : "";
+  return [
+    "",
+    `LAST STRIKE'S COMMIT WAS REFUSED (W1-T4207): the harness could not commit it — ${String(last?.reason)}. ` +
+      `Paths it could not commit: ${paths.join(", ")}${omitted}. Declared files: ${declaredFiles.join(", ")}. ` +
+      `Keep this strike's change inside \`files:\`; if the fix genuinely needs a path outside it, change ` +
+      `nothing there and say in your REPORT that the task needs amending.`,
+  ];
+}
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -35597,8 +35651,9 @@ export function harnessCommitForShellLessWorker(
     declaredPaths: readonly string[];
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
-    /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row. */
-    onRefusal?: (reason: string) => void;
+    /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
+     *  with the undeclared paths it refused to stage (W1-T4207; empty when none were computed). */
+    onRefusal?: (reason: string, undeclared?: readonly string[]) => void;
   },
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
@@ -35609,7 +35664,7 @@ export function harnessCommitForShellLessWorker(
   if (asked === undefined) {
     const reason = "no anchored COMMIT_MESSAGE line in the report";
     input.log("implement.harness_commit_refused", { reason });
-    input.onRefusal?.(reason);
+    input.onRefusal?.(reason, []);
     return input.commitCount;
   }
   const committed = commit(input.worktreePath, input.declaredPaths, asked);
@@ -35620,7 +35675,7 @@ export function harnessCommitForShellLessWorker(
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
   });
   if (!committed.committed) {
-    input.onRefusal?.(refusalReason);
+    input.onRefusal?.(refusalReason, committed.undeclared);
     return input.commitCount;
   }
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);

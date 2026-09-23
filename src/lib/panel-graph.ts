@@ -1904,7 +1904,8 @@ export function ratifyCliGateway(repoRoot: string, logDir: string): RatifyCliGat
   const rmdBin = join(repoRoot, "bin", "rmd");
   const spawnDetached = (args: string[], label: string) => {
     mkdirSync(logDir, { recursive: true });
-    const logFd = openSync(join(logDir, `${label}-${Date.now()}.log`), "a");
+    // A proposal id can hold a path (`symbol-no-caller:src/lib/retro.ts:x`); the log name must stay one file.
+    const logFd = openSync(join(logDir, `${label.replace(/[^\w.-]+/g, "_")}-${Date.now()}.log`), "a");
     try {
       const child = spawn(rmdBin, args, { cwd: repoRoot, detached: true, stdio: ["ignore", logFd, logFd] });
       child.unref();

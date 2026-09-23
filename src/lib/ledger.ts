@@ -484,6 +484,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T3868: sweep.ts reads this fix-lane refusal to release the unchanged-head claim after the
   // harness declined to create a commit; rotating it away would strand that head again.
   "fix.commit_refused",
+  // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
+  "fix.done",
   "fix.resolved",
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
