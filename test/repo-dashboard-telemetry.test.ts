@@ -129,7 +129,7 @@ function fixtureRoot(): string {
   return root;
 }
 
-async function getRepos(route: ReturnType<typeof buildRepoDashboardRoute>): Promise<{ repos: RepoDashboardEntry[] }> {
+async function readDashboard(route: ReturnType<typeof buildRepoDashboardRoute>): Promise<{ repos: RepoDashboardEntry[] }> {
   const server = createService({ tokens: { read: READ_TOKEN, write: "unused-write-token" }, routes: [route] });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
@@ -154,7 +154,7 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
     worker("r1", "2026-09-21T00:00:00.000Z", 2, { input: 7 }),
     verdict("r1", "merged", "2026-09-21T01:00:00.000Z"),
   ].map((l) => JSON.stringify(l)).join("\n") + "\n");
-  const body = await getRepos(buildRepoDashboardRoute({ root, ledgerPath, clock: fixedClock(NOW_MS) }));
+  const body = await readDashboard(buildRepoDashboardRoute({ root, ledgerPath, clock: fixedClock(NOW_MS) }));
   const [alpha] = body.repos;
   assert.deepEqual(alpha.health, { status: "unknown", queuedtasks: 1, errorrate: 0, last_run: "2026-09-21T01:00:00.000Z", alerts: null });
   assert.deepEqual(alpha.telemetry, { tokens7d: 7, modelsused: [], cost_7d: 2 });
@@ -165,11 +165,11 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
 
 test("GET /v1/repos leaves ledger fields null for an absent ledger and queued null for an unreadable plan", async () => {
   const root = fixtureRoot();
-  const missing = await getRepos(buildRepoDashboardRoute({ root, ledgerPath: join(root, "state", "ledger.ndjson"), clock: fixedClock(NOW_MS) }));
+  const missing = await readDashboard(buildRepoDashboardRoute({ root, ledgerPath: join(root, "state", "ledger.ndjson"), clock: fixedClock(NOW_MS) }));
   assert.deepEqual(missing.repos[0].telemetry, { tokens7d: null, modelsused: [], cost_7d: null });
   assert.equal(missing.repos[0].health.queuedtasks, null);
 
-  const injected = await getRepos(buildRepoDashboardRoute({
+  const injected = await readDashboard(buildRepoDashboardRoute({
     root,
     ledgerPath: "/unused",
     clock: fixedClock(NOW_MS),
