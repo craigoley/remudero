@@ -26,6 +26,7 @@ import {
   type RatificationPayload,
   type RatifyGateway,
   type ReadinessContext,
+  writeRatificationShards,
 } from "../src/lib/inbox.js";
 import type { Plan } from "../src/lib/plan.js";
 import { buildPlanPrBody, filingAcceptanceCriteria, regeneratePlanIndexFile } from "../src/lib/plan-pr-emitter.js";
@@ -440,11 +441,31 @@ test("applyStampToMasterPlan replaces an existing proposal bullet in place", () 
   assert.match(out, /- P26 \(plan\) — CAPTURED 2026-07-02\./, "the unrelated P26 bullet is untouched");
 });
 
-test("applyStampToMasterPlan appends the stamp when no existing bullet matches the proposal id", () => {
+test("applyStampToMasterPlan: a stamp for a proposal with no bullet leaves MASTER-PLAN.md unchanged (W1-T4350)", () => {
+  // Appending at EOF put every bulletless proposal's stamp on the SAME line, so any two open
+  // APPROVE PRs collided there on merge (measured 2026-09-23: 15/32). The ledger's
+  // ratify.approved row is the record now; this stops the write instead.
   const md = "# MASTER-PLAN\n\n- P26 (plan) — CAPTURED 2026-07-02.\n";
   const out = applyStampToMasterPlan(md, "P25", "- P25 (plan) — RATIFIED 2026-07-20 -> W1-T900.");
-  assert.match(out, /- P26 \(plan\) — CAPTURED 2026-07-02\./);
-  assert.match(out, /- P25 \(plan\) — RATIFIED 2026-07-20 -> W1-T900\.\s*$/);
+  assert.equal(out, md);
+  assert.doesNotMatch(out, /P25/);
+});
+
+test("applyStampToMasterPlan: a stamp for a proposal with a bullet still replaces that bullet in place, and that bullet is the ONLY line a mixed fold changes (W1-T4350)", () => {
+  // The in-place replace survives W1-T4350 unchanged. What this pins beyond the older replace
+  // test above: folded together with a BULLETLESS proposal's stamp (the codeql/skill-draft/
+  // follow-up shape), the bullet's own line is the whole diff — nothing lands at EOF, so the
+  // replaced line is unique to its proposal and cannot collide with another PR's stamp.
+  const md = "# MASTER-PLAN\n\n## Proposals\n\n- P25 (plan -> §7) — CAPTURED 2026-07-01.\n- P26 (plan) — CAPTURED 2026-07-02.\n";
+  const stamp = "- P25 (plan -> §7) — RATIFIED 2026-07-20 -> W1-T900.";
+  const alone = applyStampToMasterPlan(md, "P25", stamp);
+  const folded = applyStampToMasterPlan(alone, "P40", "- P40 (codeql) — RATIFIED 2026-07-20 -> W1-T901.");
+
+  const expected = md.replace("- P25 (plan -> §7) — CAPTURED 2026-07-01.", stamp);
+  assert.equal(alone, expected, "the bullet is replaced IN PLACE — same position, same line count");
+  assert.equal(folded, expected, "the bulletless P40 stamp adds nothing, so the P25 bullet is the only changed line");
+  const changed = md.split("\n").filter((line, i) => folded.split("\n")[i] !== line);
+  assert.deepEqual(changed, ["- P25 (plan -> §7) — CAPTURED 2026-07-01."]);
 });
 
 // ── Integration proof (the "dry-run" acceptance criterion, W1-T136) ─────────────────────────
@@ -570,4 +591,63 @@ test("integration: approveProposal against a REAL git repo — commitlint-clean 
   const criteria = parseAcceptanceBlock(capturedBody!);
   assert.ok(criteria.length > 0, "the PR body must be judgeable (#387's fail-closed bug)");
   assert.doesNotMatch(capturedBody!, /Remudero-Task:/);
+});
+
+test("integration: two ratification PRs filed together share no file — two approve branches off ONE base touch disjoint files and merge clean (W1-T4350)", () => {
+  // The board jam this task fixes (2026-09-23): every open APPROVE PR whose proposal had no
+  // MASTER-PLAN.md bullet appended its stamp at the SAME end-of-file line, so each merge
+  // dirtied the rest. Here two approves are filed off ONE base in a REAL git repo through the
+  // production write path (one shard per task, the stamp folded into MASTER-PLAN.md, the
+  // plan-index regenerated, a single `git add` of plan/ + MASTER-PLAN.md) and neither is merged
+  // before the other is filed — then each PR's changed-file set is read from git itself.
+  const dir = makeApproveFixtureRepo();
+  const env = gitEnv();
+  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env });
+
+  const fileApprove = (proposalId: string, taskId: string, title: string): string => {
+    const branch = `run-approve-${proposalId}`;
+    const payload: RatificationPayload = {
+      proposalId,
+      fragmentYaml: `- id: ${taskId}\n  title: ${title}\n  repo: remudero\n`,
+      stampLine: `- ${proposalId} (codeql) — RATIFIED 2026-09-23 -> ${taskId}.`,
+    };
+    const draft: DraftedCandidate = { ...payload, anchorFingerprint: "landed::MASTER-PLAN.md" };
+    const classification: InboxClassification = { proposalId, state: "ready", reasons: [], draft, draftStale: false };
+    const gateway: RatifyGateway = {
+      createRatificationBranch(p) {
+        git("checkout", "--quiet", "main");
+        git("checkout", "--quiet", "-b", branch);
+        writeRatificationShards(dir, p.fragmentYaml, p.proposalId, { mkdirSync, writeFileSync }, join);
+        const masterPlanPath = join(dir, "MASTER-PLAN.md");
+        writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), p.proposalId, p.stampLine), "utf8");
+        regeneratePlanIndexFile({ worktreePath: dir });
+        git("add", "-A", "--", "plan/", "MASTER-PLAN.md");
+        git("commit", "--quiet", "-m", approveCommitMessage(p));
+        return branch;
+      },
+      // No real `gh` — the PR is the branch; its diff against main is what GitHub would show.
+      openPlanPr: () => `https://github.com/example/example/pull/${proposalId}`,
+    };
+    const result = approveProposal(classification, gateway, { ledgerPath: ledgerPath(), runId: `RUN-${proposalId}` });
+    assert.equal(result.ok, true, `approve ${proposalId} must file`);
+    return branch;
+  };
+
+  const branchA = fileApprove("P31", "W1-T931", "first bulletless task");
+  const branchB = fileApprove("P32", "W1-T932", "second bulletless task");
+
+  const changedFiles = (branch: string) => git("diff", "--name-only", `main...${branch}`).split("\n").filter(Boolean).sort();
+  const filesA = changedFiles(branchA);
+  const filesB = changedFiles(branchB);
+  assert.deepEqual(filesA, ["plan/tasks.d/W1-T931-first-bulletless-task.yaml"], "PR A's diff is its shard alone");
+  assert.deepEqual(filesB, ["plan/tasks.d/W1-T932-second-bulletless-task.yaml"], "PR B's diff is its shard alone");
+  const shared = filesA.filter((f) => filesB.includes(f));
+  assert.deepEqual(shared, [], `the two ratification PRs must share no file, but both change: ${shared.join(", ")}`);
+
+  // And the consequence the jam was about: merging one leaves the other mergeable — both land
+  // on main with no conflict (execFileSync throws on a conflicted merge).
+  git("checkout", "--quiet", "main");
+  git("merge", "--quiet", "--no-edit", branchA);
+  git("merge", "--quiet", "--no-edit", branchB);
+  assert.equal(git("status", "--porcelain"), "", "both merges are clean");
 });

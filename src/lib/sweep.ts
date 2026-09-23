@@ -11083,7 +11083,7 @@ export interface CreditBackfillSummary {
    * W1-T3019 — WAS THE "NOT CREDITED" ANSWER PROVEN, OR JUST NOT FOUND YET?
    *
    * {@link readMergeCreditedTaskIds} already returns `complete`, and this rung discarded it. The
-   * walk stops at {@link CREDIT_SCAN_MAX_ROTATIONS} rotations; when it runs out with candidates
+   * walk stopped at a rotation cap (none by default since the cap was retired); with candidates
    * still unresolved it reports `complete: false`, and its own doc says those "get re-credited".
    * A correction taken on an UNPROVEN absence is the re-credit loop the module header describes as
    * closed — so the distinction has to be measurable before anyone can say whether it is.

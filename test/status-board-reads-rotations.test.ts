@@ -21,7 +21,7 @@ import { gzipSync } from "node:zlib";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readLedgerLines, readLedgerUnionBounded, STATUS_BOARD_MAX_ROTATIONS } from "../src/lib/status.js";
+import { readLedgerLines, readLedgerUnionBounded, STATUS_BOARD_WINDOW_MS } from "../src/lib/status.js";
 import { buildStatusBoard } from "../src/lib/status-board.js";
 
 const row = (step: string, extra: Record<string, unknown> = {}): string =>
@@ -116,20 +116,41 @@ test("it STOPS as soon as the predicate is satisfied — a newer rotation answer
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("the cap stops a search for a step that is never there — otherwise it walks all 669", () => {
+test("the status board reads a time window rather than a file count", () => {
+  // A 24-FILE cap covered a week only while every rotation re-copied a week-long core. Thirty
+  // rotations cut an hour apart are all inside the week and must all be read; three cut more than a
+  // week before the newest must stay shut, however few files that leaves.
   const rotations: Record<string, string[]> = {};
-  for (let i = 1; i <= 30; i++) {
-    rotations[`ledger.2026-07-${String(i).padStart(2, "0")}T00-00-00-000Z.ndjson`] = [row("run.start")];
-  }
+  const newestMs = Date.parse("2026-07-20T00:00:00.000Z");
+  const stampName = (ms: number): string => `ledger.${new Date(ms).toISOString().replace(/:/g, "-").replace(".", "-")}.ndjson`;
+  for (let h = 0; h < 30; h++) rotations[stampName(newestMs - h * 3_600_000)] = [row("run.start")];
+  const older = [1, 2, 3].map((d) => stampName(newestMs - STATUS_BOARD_WINDOW_MS - d * 86_400_000));
+  for (const name of older) rotations[name] = [row("run.start")];
   const opened: string[] = [];
   readLedgerUnionBounded(join(corpus({ live: [row("run.start")], rotations }), "ledger.ndjson"), {
     satisfied: (s) => s.has("never.written"),
     readFileBuffer: (p) => {
-      opened.push(p);
+      opened.push(p.split("/").pop()!);
       return Buffer.from(readFileSync(p));
     },
   });
-  assert.equal(opened.length, STATUS_BOARD_MAX_ROTATIONS, `an unsatisfiable predicate must stop at the cap, not at 30`);
+  assert.equal(opened.length, 30, "every rotation inside the window is read, past any file count");
+  assert.deepEqual(opened.filter((n) => older.includes(n)), [], "and none from before it");
+  assert.equal(STATUS_BOARD_WINDOW_MS, 7 * 86_400_000, "the window is the week the old cap covered");
+});
+
+test("a host that rotates slowly still reads its newest rotations from before the window", () => {
+  // The window must never read LESS than the old cap did: five rotations ten days apart all fall
+  // under the file floor, so the oldest one's summary still reaches the board.
+  const rotations: Record<string, string[]> = {
+    "ledger.2026-07-20T00-00-00-000Z.ndjson": [row("run.start")],
+    "ledger.2026-07-10T00-00-00-000Z.ndjson": [row("run.start")],
+    "ledger.2026-06-30T00-00-00-000Z.ndjson": [row("run.start")],
+    "ledger.2026-06-20T00-00-00-000Z.ndjson": [row("run.start")],
+    "ledger.2026-06-10T00-00-00-000Z.ndjson": [row("daemon.summary", { attempted: ["oldest"] })],
+  };
+  const union = readLedgerUnionBounded(join(corpus({ live: [row("run.start")], rotations }), "ledger.ndjson"), { satisfied: sawSummary });
+  assert.equal(union.filter((l) => l.step === "daemon.summary").length, 1, "a month-old summary is still found");
 });
 
 // ── THE PREFIX CONSUMER: whole lines, not a filtered step list ────────────────────────────────

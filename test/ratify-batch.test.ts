@@ -81,7 +81,7 @@ function fakeBatchGateway(prUrl = "https://github.com/craigoley/remudero/pull/70
 //    N stamps folded SEQUENTIALLY so the EOF-append that conflicts across branches cannot
 //    conflict inside a batch. ─────────────────────────────────────────────────────────────
 
-test("planRatificationBatch: N ready proposals fold into ONE masterPlanMd carrying every stamp, and every accepted member's shard file", () => {
+test("planRatificationBatch: N ready proposals fold into ONE masterPlanMd, and every accepted member's shard file — a bulletless member's stamp does NOT touch masterPlanMd (W1-T4350)", () => {
   const classifications = [ready("P1", "W1-T901", "task one"), ready("P2", "W1-T902", "task two"), ready("P3", "W1-T903", "task three")];
   const plan = planRatificationBatch(classifications, BASE_MASTER_PLAN);
   assert.equal(plan.ok, true);
@@ -98,18 +98,37 @@ test("planRatificationBatch: N ready proposals fold into ONE masterPlanMd carryi
     ["plan/tasks.d/W1-T901-task-one.yaml", "plan/tasks.d/W1-T902-task-two.yaml", "plan/tasks.d/W1-T903-task-three.yaml"].sort(),
   );
 
-  // Every stamp landed, and the pre-existing P900 bullet is untouched.
-  assert.match(plan.masterPlanMd, /- P900 \(plan\) — CAPTURED 2026-07-19\./);
-  assert.match(plan.masterPlanMd, /- P1 \(plan\) — RATIFIED 2026-08-30 -> W1-T901\./);
-  assert.match(plan.masterPlanMd, /- P2 \(plan\) — RATIFIED 2026-08-30 -> W1-T902\./);
-  assert.match(plan.masterPlanMd, /- P3 \(plan\) — RATIFIED 2026-08-30 -> W1-T903\./);
+  // None of P1/P2/P3 has an existing bullet in BASE_MASTER_PLAN, so W1-T4350 leaves the file
+  // byte-identical to the base — the PR's diff is the three shards alone, not a shared EOF line.
+  assert.equal(plan.masterPlanMd, BASE_MASTER_PLAN);
 
   // SEQUENTIAL FOLD, not three independent patches of the base: chaining applyStampToMasterPlan
   // by hand over ONE accumulator produces the EXACT same text — proving there is only ever ONE
-  // working copy in play, which is why a batch cannot hit the EOF-append conflict N parallel
-  // branches do.
+  // working copy in play, which is why a batch cannot hit the (now-removed) EOF-append conflict
+  // N parallel branches used to.
   const expected = classifications.reduce((md, c) => applyStampToMasterPlan(md, c.proposalId, c.draft!.stampLine), BASE_MASTER_PLAN);
   assert.equal(plan.masterPlanMd, expected);
+});
+
+test("planRatificationBatch: two disjoint batches planned off one base leave MASTER-PLAN.md byte-identical and name disjoint shards (W1-T4350)", () => {
+  // Two DISJOINT batches, as if filed as two separate PRs off the same base. Neither proposal
+  // has an existing MASTER-PLAN.md bullet, so W1-T4350's design means neither PR's diff touches
+  // MASTER-PLAN.md at all — the only files either PR changes are its own shard(s), which are
+  // already distinct by task id, so the two PRs share NO file.
+  const planA = planRatificationBatch([ready("P1", "W1-T901", "task one")], BASE_MASTER_PLAN);
+  const planB = planRatificationBatch([ready("P2", "W1-T902", "task two")], BASE_MASTER_PLAN);
+  assert.equal(planA.ok, true);
+  assert.equal(planB.ok, true);
+  if (!planA.ok || !planB.ok) return;
+
+  // Neither PR's MASTER-PLAN.md changed from the shared base, so filing both leaves NO diff on
+  // that file for either — the historical collision point is gone.
+  assert.equal(planA.masterPlanMd, BASE_MASTER_PLAN);
+  assert.equal(planB.masterPlanMd, BASE_MASTER_PLAN);
+
+  const filesA = new Set(planA.shardFiles.map((f) => f.relPath));
+  const filesB = new Set(planB.shardFiles.map((f) => f.relPath));
+  for (const f of filesA) assert.ok(!filesB.has(f), `PR A and PR B must share no file, but both touch ${f}`);
 });
 
 test("approveBatch: N ready proposals produce EXACTLY one createRatificationBranch call and one openPlanPr call, and one ratify.approved ledger line per accepted member sharing the SAME branch/pr_url", () => {

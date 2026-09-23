@@ -26,7 +26,7 @@ import { gzipSync } from "node:zlib";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CREDIT_SCAN_MAX_ROTATIONS, readLedgerLines, readMergeCreditedTaskIds } from "../src/lib/status.js";
+import { readLedgerLines, readMergeCreditedTaskIds } from "../src/lib/status.js";
 import { runCreditBackfill } from "../src/lib/sweep.js";
 
 const row = (o: Record<string, unknown>): string => JSON.stringify({ ts: "2026-08-12T00:00:00.000Z", ...o });
@@ -176,13 +176,45 @@ test("the walk STOPS as soon as every candidate is resolved — older rotations 
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("an unresolvable candidate stops at the CAP and reports complete:false — it does not walk 670", () => {
+/** Thirty rotations a day apart, newest first by name; `creditAt` puts one credit at that depth. */
+function thirtyRotations(creditAt: Record<number, string> = {}): Record<string, string[]> {
   const rotations: Record<string, string[]> = {};
-  for (let i = 1; i <= 30; i++) {
-    rotations[`ledger.2026-07-${String(i).padStart(2, "0")}T00-00-00-000Z.ndjson`] = [row({ task_id: "OTHER", step: "run.start" })];
+  for (let depth = 0; depth < 30; depth++) {
+    const name = `ledger.2026-07-${String(30 - depth).padStart(2, "0")}T00-00-00-000Z.ndjson`;
+    const id = creditAt[depth];
+    rotations[name] = [row({ task_id: "OTHER", step: "run.start" }), ...(id ? [credit(id)] : [])];
   }
+  return rotations;
+}
+
+test("a merge credit older than the newest twenty-four archives is still found", () => {
+  const dir = corpus({ live: [], rotations: thirtyRotations({ 29: "W1-T40" }) });
+  const r = readMergeCreditedTaskIds(join(dir, "ledger.ndjson"), { candidates: ["W1-T40"] });
+  assert.equal(r.credited.has("W1-T40"), true, "the thirtieth archive's credit is found — no file count hides it");
+  assert.equal(r.complete, true);
+  assert.equal(r.budgetExhausted, false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("the credit reader stops early once every candidate is resolved", () => {
+  // Uncapped is not unbounded: two candidates resolved at depths 3 and 25 open 26 of 30 archives.
   const opened: string[] = [];
-  const dir = corpus({ live: [], rotations });
+  const dir = corpus({ live: [], rotations: thirtyRotations({ 3: "W1-T41", 25: "W1-T42" }) });
+  const r = readMergeCreditedTaskIds(join(dir, "ledger.ndjson"), {
+    candidates: ["W1-T41", "W1-T42"],
+    readFileBuffer: (p) => {
+      opened.push(p);
+      return readFileSync(p);
+    },
+  });
+  assert.equal(opened.length, 26, "the walk stops on the archive that resolves the last candidate");
+  assert.equal(r.complete, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("an unresolvable candidate reads the whole corpus and reports a PROVEN absence", () => {
+  const opened: string[] = [];
+  const dir = corpus({ live: [], rotations: thirtyRotations() });
   const r = readMergeCreditedTaskIds(join(dir, "ledger.ndjson"), {
     candidates: ["NEVER-CREDITED"],
     readFileBuffer: (p) => {
@@ -190,8 +222,11 @@ test("an unresolvable candidate stops at the CAP and reports complete:false — 
       return readFileSync(p);
     },
   });
-  assert.equal(opened.length, CREDIT_SCAN_MAX_ROTATIONS, "the cap is the backstop for a task that is simply not credited");
+  assert.equal(opened.length, 30, "every archive there is");
   assert.equal(r.complete, false, "and it SAYS it did not resolve everything, rather than implying it did");
+  assert.equal(r.budgetExhausted, false, "no bound hid a file, so the absence is proven");
+  const capped = readMergeCreditedTaskIds(join(dir, "ledger.ndjson"), { candidates: ["NEVER-CREDITED"], maxRotations: 10 });
+  assert.equal(capped.budgetExhausted, true, "an explicit cap that hid files still says so");
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -208,7 +243,7 @@ test("the cap failing OPEN re-credits rather than stranding — the safe directi
   assert.equal(shallow.complete, false);
 
   const deep = readMergeCreditedTaskIds(join(dir, "ledger.ndjson"), { candidates: ["W1-T30"] });
-  assert.equal(deep.credited.has("W1-T30"), true, "and the default cap does find it");
+  assert.equal(deep.credited.has("W1-T30"), true, "and the uncapped default does find it");
   rmSync(dir, { recursive: true, force: true });
 });
 
