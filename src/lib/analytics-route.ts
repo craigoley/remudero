@@ -1879,6 +1879,10 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
     operatorAgentMemory: { value: snapshot.operatorAgentMemory, enumerable: false, writable: false },
   });
+  Object.defineProperties(snapshot.routingTelemetry, {
+    stepUps: { value: snapshot.routingTelemetry.stepUps, enumerable: false, writable: false },
+    preferenceOutcomes: { value: snapshot.routingTelemetry.preferenceOutcomes, enumerable: false, writable: false },
+  });
   return freezeAnalyticsSnapshot(snapshot);
 }
 
