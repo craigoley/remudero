@@ -62,6 +62,7 @@ import { readFileSync } from "node:fs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import {
+  GARDEN_BRANCH_RE,
   LINT_FILING_SUBJECT_RE,
   RUN_BRANCH_FILED_FORM,
   RUN_BRANCH_UNFILED_FORM,
@@ -179,6 +180,12 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPa
   }
   if (runShaped) {
     return { ok: true, message: `identified via its run-shaped head ref (${headRef})` };
+  }
+  // A gardener's own head (`gardenCheckout`): scheduled repo tending that builds no filed task and is
+  // not a fleet run, so it carries neither a trailer nor a run-shaped ref. Only the registered
+  // gardeners' shape is admitted, imported from src/run-task.ts rather than re-spelled.
+  if (GARDEN_BRANCH_RE.test(String(headRef ?? ""))) {
+    return { ok: true, message: `identified via its gardener head ref (${headRef})` };
   }
 
   // W1-T3680: asked LAST, so it can only ever ADMIT a head the three forms above already

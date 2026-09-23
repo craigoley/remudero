@@ -286,7 +286,7 @@ test("W1-T4095: the daemon starts the gardener beside a busy main loop", async (
   assert.equal(passedWhileBusy, true);
 });
 
-test("W1-T4095: the gardener's timer survives a failing pass and its state survives a bad file", async () => {
+test("W1-T4095: the gardener's seeded timer survives a failing pass and its state survives a bad file", async () => {
   const root = corpus();
   const rows: string[] = [];
   let calls = 0;
@@ -299,12 +299,16 @@ test("W1-T4095: the gardener's timer survives a failing pass and its state survi
         throw new Error("no worktree");
       },
       log: (s) => rows.push(s),
+      // Seeded: with a clock seed about 1 pass in 60 draws no acting class (0.125² that merge and refresh
+      // both draw under even odds), opens no workspace, and the assertion below reads a false failure.
+      seed: 1,
     },
     10,
   );
   await new Promise((resolve) => setTimeout(resolve, 40));
   pump.stop();
-  assert.ok(calls >= 1 && rows.includes("knowledge.gardener_failed"));
+  assert.ok(calls >= 1, "the seeded pass acted, so it reached the throwing workspace");
+  assert.ok(rows.includes("knowledge.gardener_failed"), "the throw was logged and the timer kept running");
   writeFileSync(gardenerStatePath(join(root, "state")), "{ torn");
   assert.deepEqual(readGardenerState(gardenerStatePath(join(root, "state"))).classes, initialGardenerState().classes);
   writeFileSync(gardenerStatePath(join(root, "state")), "null");

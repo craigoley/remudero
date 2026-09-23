@@ -1,0 +1,58 @@
+- id: W1-T4386
+  title: "A KNOWN FAILURE WAITS FOR A HUMAN EVEN WHEN ITS FIX IS KNOWN AND REVERSIBLE — let the SRE lane run a small allowlist of pre-approved reversible remediations with a before/after check and a ledger receipt, and interrupt the operator only on a user-visible fast burn or a fix that failed twice"
+  repo: remudero
+  depends_on: [W1-T4385]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator request 2026-09-23: an SRE gardener fed by console and daemon errors"
+  plan_refs: ["W1-T4385", "W1-T4356", "W1-T4390", "W1-T4391"]
+  files:
+    - src/run-task.ts
+    - src/lib/sre-runbooks.ts
+    - src/lib/sre-lane.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Operator rulings 2026-09-23: reversible fixes on an allowlist auto-run; interrupt the operator only on a
+    user-visible fast burn (console down or unusable, fleet built nothing for hours) or when the lane's own fix
+    failed twice. SECOND RULING the same day widened the allowlist to "most things, but it should have a watcher
+    of sorts to make sure it doesn't get in a loop or do anything harmful": the four runbooks below, every one
+    gated by the independent SRE governor (W1-T4390). Each was performed by hand that day: a stale managed
+    checkout (git merge --ff-only origin/main then npm ci, when clean and no borrowing worker runs), a CI red
+    unrelated to its diff (re-run the failed jobs once), a gateway 85 s behind main and a daemon running with
+    drifted limits (recycle), and a stale review (the review-now nudge).
+  design: |
+    A runbook = {id, matches(incident), precheck, act, verify, reversible, blastRadius}. THE INITIAL CATALOG:
+    (1) rerun-failed-ci-once — a red whose failing tests the PR's diff does not touch and that pass on main;
+        at most once per head sha. (2) catch-up-managed-checkout — fast-forward a clean managed checkout behind
+        origin/main, then reinstall, only while no worker borrows its node_modules. (3) recycle-stale-container —
+        deploy/recycle-container.sh for a daemon or gateway running code behind main or with limits drifted
+        from policy; it already pauses and waits for workers. (4) clear-stale-lock-or-nudge — remove a lock
+        whose owning pid is dead, or send the review-now nudge to a PR whose review stalled.
+    The lane runs one only when its precheck holds AND the governor's verdict for it is live (W1-T4390;
+    "shadow" records the action it would have taken without taking it). It verifies the incident cleared
+    afterwards and ledgers `sre.runbook` {id, fingerprint, mode, before, after, outcome}. A runbook that fails
+    twice for a fingerprint stops and escalates. ESCALATION: the existing needs-human issue path with the
+    incident's evidence, ASSIGNED TO THE OPERATOR, so GitHub delivers both an email and a GitHub Mobile push
+    (operator ruling 2026-09-23: no new notification service). Nothing else notifies.
+    WIRING: src/lib/sre-runbooks.ts exports runMatchingRunbook(incident, deps), which the lane pass in src/lib/sre-lane.ts calls before it files feedback; it also exports sreRunbookCatalog(deps), which src/run-task.ts calls to build the allowlisted runbooks it passes into startSreLane's deps (the composition root, so a test can inject its own catalog).
+  acceptance:
+    - claim: "a matching runbook runs only after its precheck and records a before-and-after receipt"
+      proof: "unit test: a matching runbook runs only after its precheck and records a before-and-after receipt"
+    - claim: "a runbook that fails twice stops and escalates with the evidence"
+      proof: "unit test: a runbook that fails twice stops and escalates with the evidence"
+    - claim: "an incident that is not a fast burn never interrupts the operator"
+      proof: "unit test: an incident that is not a fast burn never interrupts the operator"
+    - claim: "the SRE lane hands each incident to the runbook matcher before filing it"
+      proof: 'grep: runMatchingRunbook( in src/lib/sre-lane.ts'
+    - claim: "the daemon builds the allowlisted runbook catalog it hands the SRE lane"
+      proof: 'grep: sreRunbookCatalog( in src/run-task.ts'
+    - claim: "an escalation opens the needs-human issue assigned to the operator"
+      proof: "unit test: an escalation opens the needs-human issue assigned to the operator"
+    - claim: "a runbook the governor holds in shadow records its action without taking it"
+      proof: "unit test: a runbook the governor holds in shadow records its action without taking it"

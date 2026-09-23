@@ -177,6 +177,32 @@ macros:
       - "Investigation discipline"
       - "Coverage traps"
     args: true
+  # Idea from Matt Pocock's `improve-codebase-architecture` and `codebase-design`
+  # (mattpocock/skills, MIT); text written here (MASTER-PLAN §4F).
+  - name: architecture-scan
+    summary: "Find where the code is hardest to change, rank the candidates for making a module deeper, and hand the one I pick to /grill — no code changes."
+    expansion: |
+      Scan the codebase for places where a module is shallow: its interface is nearly as complex
+      as what it hides, one concept is spread over many small files, or a seam leaks. Do not
+      change any code.
+
+      1. SEED FROM EVIDENCE, NOT A HUNCH. Start where the code keeps changing (`git log` churn
+         over the last few hundred commits) and where this repo's own signals point: the output
+         of `npm run jscpd`, `npm run depcruise` and `npm run source-size-signal`. If I name an
+         area, start there instead.
+      2. READ THE DECISIONS FIRST. Read DECISIONS.md and docs/adr/ for the area. Do not propose
+         what a recorded decision already rejected unless the friction is real enough to reopen
+         it — then say so and name the decision.
+      3. TEST EACH CANDIDATE. Would deleting the module concentrate the complexity, or only move
+         it? Keep the candidates where it would concentrate.
+      4. REPORT, ranked, in the terminal or as docs/research/<slug>.md: for each candidate, the
+         files, the friction (OBSERVED with evidence, or INFERRED), the proposed deeper module,
+         how tests would get simpler, and a strength of Strong, Worth exploring or Speculative.
+      5. Ask which one to explore. Then run /grill on it; a confirmed design goes to
+         `rmd plan --mode=create` as its brief, never straight into code.
+    headlines:
+      - "Investigation discipline"
+    args: true
   - name: handoff
     summary: "Write a handoff so a fresh session can continue this work — state with evidence, the pending ledger, and the next prompt, paste-ready."
     expansion: |
@@ -205,6 +231,31 @@ macros:
       - "Ledger and evidence discipline"
       - "Plan and task hygiene"
     args: true
+  # Written for this repo. Matt Pocock's `resolving-merge-conflicts` (MIT) was read and not
+  # adopted: its "stage everything, never abort" breaks explicit-path staging, and sweep aborts a
+  # conflicted fleet rebase by design (rebaseDirtyFleetBranchViaGit, src/lib/sweep.ts).
+  - name: resolve-conflict
+    summary: "Resolve a merge or rebase conflict by keeping both sides' intent, staging only named paths, and proving the result with the local gate before pushing."
+    expansion: |
+      Resolve the conflict below. The goal is a result that keeps what BOTH sides meant, not one
+      that merely compiles.
+
+      1. For each conflicted hunk, read why each side changed it: `git log` on both branches for
+         that region, and the PR or task each commit names. Keep both intents; if they truly
+         contradict, stop and ask me which wins.
+      2. Stage explicit paths only — never `git add -A` or `git add .`. Before running any
+         census or test, check `git ls-files -u` is empty, so no file is still half-merged.
+      3. When both sides appended tests to the tail of one file, check the shared closing `});`
+         survived exactly once.
+      4. Regenerate generated files with the repo's own command, never by hand. Do not carry a
+         baseline or ledger change (for example scripts/comment-load-baseline.json) that you did
+         not make on purpose.
+      5. On someone else's branch, merge the base in; never rebase or force-push their history.
+      6. Run the local gate (`rmd preflight --ci-parity`) and push only when it passes. Report
+         which hunks you resolved and how, with the gate's summary line.
+    headlines:
+      - "CI and merging"
+    args: true
   - name: wait-what
     summary: "Your last message did not land — re-explain it in plain language, with context, and say what you need from me."
     expansion: |
@@ -218,6 +269,37 @@ macros:
 
       Do not add new material. Say the same thing more clearly, or say plainly that you were
       wrong and what is actually true.
+    args: true
+  # Idea from Matt Pocock's `writing-for-agents` (mattpocock/skills, MIT), reduced to this repo's
+  # own authoring rules (CLAUDE.md's preamble); text written here (MASTER-PLAN §4F).
+  - name: agent-doc
+    summary: "Write or revise text an agent will read — a macro row, a CLAUDE.md headline, a doctrine body, a worker procedure — to this repo's rules for it."
+    expansion: |
+      Write or revise the agent-facing text below. Every line of it is read by an agent on every
+      matching turn, so each line must change what the agent does.
+
+      - FIRST, CAN A CHECK DO IT? Nothing in CLAUDE.md is a gate. If the rule is mechanical, the
+        fix is a test, census or CI step that refuses the mistake by name; propose that instead
+        of prose, and write prose only for a judgement no check can make.
+      - STATE THE BEHAVIOUR. Say what to do, in the imperative, one rule per bullet. A rule that
+        only names what to avoid leaves the agent guessing the alternative.
+      - THE HEADLINE IS THE WHOLE RULE. In CLAUDE.md a bolded headline must be obeyable without
+        opening anything; its `→ doctrine/<section>/<rule>.md` pointer holds the evidence (the
+        measurement, the PR, the session). A pointer that does not resolve is a bug. A new rule is
+        three edits: the headline with its pointer, the body file, and `npm run agents-md`.
+      - COMPRESS. Cut words that change no behaviour, repeat another rule, or restate the heading.
+        Never shorten the 56 frozen pre-migration headlines or bodies
+        (test/fixtures/doctrine-pre-migration-W1-T3323.json); shorten the preamble or a newer
+        headline instead.
+      - CITE SYMBOLS, NOT LINE NUMBERS. Line numbers go stale; a symbol name can be searched.
+        Name the PR or task that earned the rule.
+      - A macro row or worker procedure follows the same rules. A worker procedure (`applies-to:`)
+        also spends the shared knowledge budget on every matching prompt, so it must be short.
+
+      Show the text as a diff against what exists, and say for each changed line which rule above
+      it serves.
+    headlines:
+      - "Plan and task hygiene"
     args: true
   # Idea from Matt Pocock's `retro` (mattpocock/skills, MIT); text written here. Named
   # `session-retro` because `rmd retro` is a verb that syncs the plan from the ledger — a
@@ -238,7 +320,8 @@ macros:
       1. GATE — a CI step, a census test or a lint that refuses the mistake by name. A rule
          stated only in prose can be broken silently, so prefer a refusal whenever the mistake
          is mechanical.
-      2. DOCTRINE — a CLAUDE.md headline and body, only for a judgement call no check can make.
+      2. DOCTRINE — a CLAUDE.md headline and body, only for a judgement call no check can make;
+         draft it with /agent-doc.
       3. LEARNING — a `learnings/*.yaml` entry scoped to the files where the fact applies.
       Check first whether a check or rule already exists but did not fire; if so, that is the
       finding, not a new one.
