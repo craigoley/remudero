@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { RunResult } from "../src/run-task.js";
+import { daemonCommand, type RunResult } from "../src/run-task.js";
+import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 
 // W1-T1065 — THE OPERATOR'S ONLY STOP CONTROL IS READ ONCE PER TICK AND ADMISSION HAPPENS
 // MINUTES LATER IN THE SAME TICK. `deps.checkPause`/`deps.checkStop` were each consulted
@@ -387,4 +389,106 @@ test("W1-T4191: the in-flight light sweep admits no worker while a pause holds",
     lines.some((l) => l.step === "daemon.sweep_light.held" && l.extra.phase === "dispatch"),
     "the withheld pass is named on the ledger, the same way the full-sweep retrigger names its hold",
   );
+});
+
+// W1-T4194 — a boot under PAUSE skipped `daemonBoot` whole, and with it the stale-inflight-lock
+// sweep, so a replaced container's dead-holder locks survived until someone unpaused. These drive
+// the REAL `daemonCommand` boot with an injected `daemonBoot` and `runDaemon`.
+function heldBootHome(): { home: string; root: string; planPath: string } {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4194-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  return { home, root, planPath };
+}
+
+async function withHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    return await fn();
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+}
+
+test("W1-T4194: a daemon booted under pause still sweeps a dead holders inflight lock", async () => {
+  const { home, root, planPath } = heldBootHome();
+  const inflight = join(root, "state", "inflight");
+  // A pid that has provably exited: the child is reaped before spawnSync returns.
+  const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+  acquireInflightLock(inflight, "DEAD-1", { run_id: "old-container", info: { pid: deadPid } });
+  acquireInflightLock(inflight, "LIVE-1", { run_id: "this-process" });
+  acquireInflightLock(inflight, "FOREIGN-1", { run_id: "other-host", info: { pid: deadPid, host: "operator-laptop.local" } });
+  let bootCalls = 0;
+  try {
+    const code = await withHome(home, () =>
+      daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+        daemonBoot: () => {
+          bootCalls++;
+          return undefined as never;
+        },
+        checkStop: () => undefined,
+        checkPause: () => "operator PAUSE across a recycle",
+        runDaemon: async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }),
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(bootCalls, 0, "everything else daemonBoot does stays held");
+    assert.equal(existsSync(join(inflight, "DEAD-1.lock")), false, "the dead holder's lock was swept despite the hold");
+    assert.equal(existsSync(join(inflight, "LIVE-1.lock")), true, "a live holder's lock is never widened into the sweep");
+    assert.equal(existsSync(join(inflight, "FOREIGN-1.lock")), true, "an unverifiable foreign-host lock is kept, as on an unheld boot");
+    const steps = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { step: string; reaped?: number });
+    assert.ok(steps.some((l) => l.step === "daemon.boot_held"), "the hold itself is still ledgered");
+    assert.ok(steps.some((l) => l.step === "daemon.inflight_sweep" && l.reaped === 1), "the held-boot sweep is ledgered with its count");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4194: a daemon booted under pause admits no work", async () => {
+  const { home, planPath } = heldBootHome();
+  let bootCalls = 0;
+  let summary: DaemonSummary | undefined;
+  try {
+    const code = await withHome(home, () =>
+      daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+        daemonBoot: () => {
+          bootCalls++;
+          return undefined as never;
+        },
+        checkStop: () => undefined,
+        checkPause: () => "operator PAUSE across a recycle",
+        // Feed the command's OWN wired controls into the real loop over a runnable plan.
+        runDaemon: async (_plan, wired): Promise<DaemonSummary> => {
+          let sleeps = 0;
+          summary = await runDaemon(fixturePlan(), {
+            refreshMerged: () => () => false,
+            runOne: async (id) => {
+              throw new Error(`runOne must never be called for ${id} under a boot-time pause`);
+            },
+            checkStop: () => (sleeps >= 2 ? "test done polling" : wired.checkStop?.()),
+            checkPause: wired.checkPause,
+            sleep: async () => {
+              sleeps++;
+            },
+          });
+          return summary;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+  assert.equal(bootCalls, 0, "the held boot never entered daemonBoot");
+  assert.ok(summary, "the real loop ran with the command's wired controls");
+  assert.deepEqual(summary.attempted, [], "no task was admitted while the boot-time pause held");
 });
