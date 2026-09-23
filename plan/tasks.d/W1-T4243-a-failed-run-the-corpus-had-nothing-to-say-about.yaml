@@ -1,4 +1,4 @@
-- id: W1-T4232
+- id: W1-T4243
   title: "NOTHING MEASURES WHERE THE KNOWLEDGE CORPUS IS SILENT — a run that fails after `selectLearnings` matched zero entries is a knowledge gap the ledger already records and no reader counts; report the miss rate on failed vs clean runs by code area so the next distillation targets where the corpus is blind, without filing anything"
   repo: remudero
   depends_on: []
@@ -9,7 +9,7 @@
   risk: high
   band_meaning: span
   origin: "research:agent-memory-scan-2026-09-23"
-  plan_refs: ["§4E", W1-T4014, W1-T4015, W1-T419, W1-T4231]
+  plan_refs: ["§4E", W1-T4014, W1-T4015, W1-T419, W1-T4241]
   files:
     - src/lib/knowledge-gaps.ts
     - src/lib/digest.ts
@@ -55,11 +55,11 @@
         its counts and window. Nothing is filed, and no learning is written.
   acceptance:
     - claim: "a failed run whose injected row matched zero learnings is counted as a miss in every area its task files touch"
-      proof: "unit test: W1-T4232: a failed zero-match run is a miss in every area it touches"
+      proof: "unit test: W1-T4243: a failed zero-match run is a miss in every area it touches"
     - claim: "an area whose zero-match rate is equal on clean and failed runs reads no-association, not blind"
-      proof: "unit test: W1-T4232: equal miss rates on clean and failed runs read no-association"
+      proof: "unit test: W1-T4243: equal miss rates on clean and failed runs read no-association"
     - claim: "masked arms and verdict-less runs are excluded and counted, and below the floor the area reads unmeasurable"
-      proof: "unit test: W1-T4232: masked and verdict-less runs are excluded and counted"
+      proof: "unit test: W1-T4243: masked and verdict-less runs are excluded and counted"
     - claim: "the gap fold is exported"
       proof: "grep: export function foldKnowledgeGaps( in src/lib/knowledge-gaps.ts"
     - claim: "the digest calls the gap fold"
@@ -68,4 +68,4 @@
     Rank areas by raw zero-match count and an area where every run, clean or failed, matches
     nothing must be wrongly reported `blind`; the no-association test must catch it. Count a
     masked arm-B run (learnings deliberately removed) as a miss and the exclusion test must fail.
-  note: "Measurement only. The companion W1-T4231 asks whether the knowledge we have helps; this asks where we have none."
+  note: "Measurement only. The companion W1-T4241 asks whether the knowledge we have helps; this asks where we have none."

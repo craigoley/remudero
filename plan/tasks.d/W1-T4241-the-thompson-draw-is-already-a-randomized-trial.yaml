@@ -1,4 +1,4 @@
-- id: W1-T4231
+- id: W1-T4241
   title: "THE THOMPSON DRAW ALREADY RANDOMIZES WHICH LEARNINGS A RUN RECEIVES, AND NOTHING READS THE EXPERIMENT — record each contested entry's selection propensity on `learnings.injected`, join injected-vs-dropped to the run's clean-merge outcome, and report a per-learning outcome effect (or `unmeasurable`) beside the worker's own `LEARNINGS_USED` claim"
   repo: remudero
   depends_on: []
@@ -77,11 +77,11 @@
         failure the self-improvement direction forbids. A follow-up can take it once readings exist.
   acceptance:
     - claim: "for a fixed seed and usage snapshot, selection output is unchanged and every contested entry carries a propensity strictly between 0 and 1"
-      proof: "unit test: W1-T4231: contested entries carry a propensity and selection is unchanged"
+      proof: "unit test: W1-T4241: contested entries carry a propensity and selection is unchanged"
     - claim: "the estimator weights injected and dropped observations by inverse propensity and returns unmeasurable with its counts below the per-arm floor"
-      proof: "unit test: W1-T4231: outcomes are weighted by inverse propensity with a per-arm floor"
+      proof: "unit test: W1-T4241: outcomes are weighted by inverse propensity with a per-arm floor"
     - claim: "a run with no terminal verdict is excluded and counted, never scored as a failure"
-      proof: "unit test: W1-T4231: a run with no terminal verdict is excluded and counted"
+      proof: "unit test: W1-T4241: a run with no terminal verdict is excluded and counted"
     - claim: "the estimator module exports the fold"
       proof: "grep: export function foldLearningOutcomes( in src/lib/knowledge-outcome.ts"
     - claim: "the injected ledger row carries contested propensities"

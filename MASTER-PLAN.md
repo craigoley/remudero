@@ -5681,17 +5681,17 @@ enforced by a gate, Thompson ranking on usage (W1-T4091), and a Letta-style back
 MISS-driven authoring (Brainfish, the LLM wiki's lint). Measured at f0e1fc43: **4 of 79 active
 learnings are unreachable by any tracked path** (17 of 160 globs are bare directories under an
 anchored matcher), and `selectLearnings`' seeded draw already randomizes the budget cut that nothing reads.
-**TAKEN — THREE SHARDS, FILED 2026-09-23:** **W1-T4230** an unreachable active learning is a CI refusal
+**TAKEN — THREE SHARDS, FILED 2026-09-23:** **W1-T4240** an unreachable active learning is a CI refusal
 (the lint half of the LLM wiki, applied as Graphiti-style invalidation at the PR that removes the
-referent) · **W1-T4231** the Thompson draw read as a randomized trial: per-learning outcome effect by
+referent) · **W1-T4241** the Thompson draw read as a randomized trial: per-learning outcome effect by
 inverse propensity, surfaced beside the `LEARNINGS_USED` claim, never fed back until readings exist ·
-**W1-T4232** knowledge-gap census: zero-match rate on failed vs clean runs by code area, measurement only.
+**W1-T4243** knowledge-gap census: zero-match rate on failed vs clean runs by code area, measurement only.
 **REFUSED, WITH THE REASON:** embeddings or a vector store (matching is deterministic by rule,
 learnings.ts header, and paraphrase-miss is a stated tradeoff); a knowledge graph (83 records do not
 need traversal); an LLM that rewrites the corpus whole (ACE's "context collapse" is the measured cost;
 the gardener's one-class deltas already avoid it); on-chain or content-addressed blob storage (git is
 the content-addressed, append-only substrate); time-based expiry (a lease that decays by age retires
-correct rules — W1-T4231's outcome reading is the evidence a retirement should wait for); a peer or
+correct rules — W1-T4241's outcome reading is the evidence a retirement should wait for); a peer or
 theory-of-mind model of the operator (W1-T3895 holds preferences with provenance and expiry); any NEW
 producer of filed work until W1-T4014 gives the existing ~7/day a release path; speculative sleep-time
 recon for frontier tasks (no measured share of wall-clock spent in recon on the critical path — the

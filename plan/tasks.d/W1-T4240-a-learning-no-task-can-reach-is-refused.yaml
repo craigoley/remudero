@@ -1,4 +1,4 @@
-- id: W1-T4230
+- id: W1-T4240
   title: "FOUR ACTIVE LEARNINGS CAN NEVER BE INJECTED — 17 of 160 `files:` globs are bare directory names (`test`, `src`, `plan/tasks.d`) that the anchored matcher reads as a file literally named `test`; repair them and make an unreachable active learning a CI refusal, so a PR that deletes a learning's last matching file must repoint or supersede it in the same change"
   repo: remudero
   depends_on: []
@@ -74,11 +74,11 @@
         could be reading nothing.
   acceptance:
     - claim: "an active learning whose every glob matches no tracked path is reported unreachable, through the same matcher selection uses"
-      proof: "unit test: W1-T4230: a learning whose every glob is dead is unreachable"
+      proof: "unit test: W1-T4240: a learning whose every glob is dead is unreachable"
     - claim: "the pure census is exported from the learnings module"
       proof: "grep: export function unreachableLearnings( in src/lib/learnings.ts"
     - claim: "no active learning in the live corpus carries a glob matching zero tracked files at head"
-      proof: "unit test: W1-T4230: every active learning in the live corpus is reachable"
+      proof: "unit test: W1-T4240: every active learning in the live corpus is reachable"
   falsifier: |
     Revert one repaired glob to its bare form (`test/**` back to `test`) and the live-corpus census
     must fail naming that entry. Replace `unreachableLearnings`' matcher with minimatch and the
