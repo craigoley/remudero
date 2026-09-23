@@ -1505,6 +1505,14 @@ function startInFlightTicker(
               }
             }
           }
+          // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds it
+          // while the batch drains. Withheld, never aborted: work already in flight finishes. STOP is not
+          // read here: it ends the daemon on its own, and fixtures bound this loop with it.
+          const lightHalt = deps.checkPause?.();
+          if (lightHalt) {
+            log("daemon.sweep_light.held", { phase: owner.phase, detail: lightHalt });
+            continue;
+          }
           try {
             await deps.sweepLight!();
           } catch (e) {
