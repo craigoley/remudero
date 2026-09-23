@@ -86,7 +86,9 @@ test("learnings-v2: only named schemas are structured; legacy versions stay V1",
 test("learnings-v2: the live corpus retains its baseline V1 artifact hash", () => {
   const corpus = loadLearningsCorpus(fileURLToPath(new URL("../learnings/", import.meta.url)));
   assert.equal(corpus.length, 83);
-  assert.equal(computeArtifactHash(corpus), "f13ba22db845dbb1e5cb21e737b69caa1a9fecd6e6cb5fc60a198a5c31437868");
+  // W1-T4240 repaired 17 dead `files:` globs; main's pre-repair corpus still hashes to the previous
+  // pin f13ba22d… under this code, so the V1 hashing is unchanged and only the data moved.
+  assert.equal(computeArtifactHash(corpus), "895bc1fc67b06a06b61cab05e31e916634d70360a6fddd481837cdf714253add");
 });
 
 test("learnings-v2: a V1 or legacy artifact carrying origin is refused before trust", () => {

@@ -26,9 +26,18 @@
 # REFUSES and names these instances rather than silently defaulting — see that script's own
 # no-instance refusal. The registry being absent keeps the legacy default byte-for-byte, so an
 # older checkout is unaffected.
+#
+# W1-T4227 — THE FLEET'S ONE REGISTRY (Account → Project → Repository → Instance). Each instance
+# also names its `project` (absent means project "default", a standalone repo) and its
+# `github_repo` (owner/name); `rmd serve` reads them through `parseInstanceRegistry`
+# (src/lib/instance-registry.ts) and serves GET /v1/registry. `repo:` keeps its meaning — the
+# bare name `rmd daemon --repo` is launched with. Both shell readers list `project`,
+# `github_repo` and `retired` as known-and-ignored, because they REFUSE any field they do not know.
 instances:
   core:
     repo: remudero
+    project: remudero
+    github_repo: craigoley/remudero
     container_name: remudero-daemon
     state_dir: /home/craigoleyagent/rmd-state2
     claude_dir: /home/craigoleyagent/.claude
@@ -37,6 +46,8 @@ instances:
     image: synthwatcholey0620.azurecr.io/remudero:latest
   site:
     repo: remudero-site
+    project: remudero
+    github_repo: craigoley/remudero-site
     container_name: remudero-site-daemon
     state_dir: /home/craigoleyagent/rmd-site-state
     claude_dir: /home/craigoleyagent/.claude
@@ -45,6 +56,8 @@ instances:
     image: synthwatcholey0620.azurecr.io/remudero:latest
   console:
     repo: remudero-console
+    project: remudero
+    github_repo: craigoley/remudero-console
     container_name: remudero-console-daemon
     state_dir: /mnt/rmd/remudero-console-state
     claude_dir: /home/craigoleyagent/.claude
