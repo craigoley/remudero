@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import {
   LEDGER_ROTATION_BACKSTOP_MULTIPLIER,
   flagAnomalousLedgerWriters,
@@ -240,5 +241,38 @@ test("W1-T4100: healing a future-dated name never overwrites another archive", (
     assert.equal(archivesIn(dir).filter((f) => f.startsWith("ledger.2027")).length, 0, "no future-dated name survives");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4100: a naming read or rename that fails never fails the rotation", () => {
+  const future = () => new Date("2027-10-14T21:24:52.494Z");
+  const refuse = (what: string) => (): never => {
+    throw new Error(`forced: ${what}`);
+  };
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["readdirSync", { readdirSync: refuse("readdir") }],
+    ["mtimeMs", { mtimeMs: refuse("stat") }],
+    ["renameSync", { renameSync: refuse("rename") }],
+  ];
+  for (const [seam, deps] of cases) {
+    const dir = tmpDir();
+    try {
+      const ledgerPath = join(dir, "ledger.ndjson");
+      writeFileSync(ledgerPath, "");
+      padPast(ledgerPath, 2000, 0);
+      const stale = join(dir, "ledger.2027-01-01T00-00-00-000Z.ndjson.gz");
+      writeFileSync(stale, "stale");
+      utimesSync(stale, new Date("2026-09-13T00:00:00.000Z"), new Date("2026-09-13T00:00:00.000Z"));
+      const result = rotateLedger(ledgerPath, { ceilingBytes: 2000, now: future, archiveFsDeps: { gzipSync, ...deps } });
+      assert.equal(result.rotated, true, `${seam}: a failed naming read still rotates`);
+      assert.ok(result.archivePath && statSync(result.archivePath).isFile(), `${seam}: the archive it names is on disk`);
+      if (seam !== "readdirSync") {
+        // No stat or no rename: the heal cannot happen, so the stale file and the requested name stand.
+        assert.ok(statSync(stale).isFile(), `${seam}: an unhealed archive is left exactly where it was`);
+        assert.ok(result.archivePath!.includes("2027-"), `${seam}: best-effort — the requested name stands`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
