@@ -40,10 +40,12 @@
  * (daemon.ts), not from this route.
  */
 
-import { statfsSync } from "node:fs";
+import { readFileSync, statfsSync } from "node:fs";
+import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
+import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
@@ -308,6 +310,93 @@ export function ghRateLimitWindow(
   return end;
 }
 
+/** One `/proc/pressure/<resource>` reading, as percentages of wall time over each window. */
+export interface PressureReading {
+  someAvg10: number;
+  someAvg60: number;
+  fullAvg10?: number;
+}
+
+/** W1-T4102: the host's cpu, io and memory pressure. `"unknown"` when a file cannot be read or
+ *  parsed — never a zero, which would read as an idle host exactly when the console most needs to
+ *  say the host is struggling. Inside a container `/proc/pressure` is still the HOST's. */
+export type HostPressure = Record<"cpu" | "io" | "memory", PressureReading | "unknown">;
+
+export function parsePressure(text: string): PressureReading | undefined {
+  const field = (line: string | undefined, key: string): number | undefined => {
+    const m = line?.match(new RegExp(`\\b${key}=([0-9.]+)`));
+    return m ? Number(m[1]) : undefined;
+  };
+  const lines = text.split("\n");
+  const some = lines.find((l) => l.startsWith("some "));
+  const full = lines.find((l) => l.startsWith("full "));
+  const someAvg10 = field(some, "avg10");
+  const someAvg60 = field(some, "avg60");
+  if (someAvg10 === undefined || someAvg60 === undefined) return undefined;
+  const fullAvg10 = field(full, "avg10");
+  return fullAvg10 === undefined ? { someAvg10, someAvg60 } : { someAvg10, someAvg60, fullAvg10 };
+}
+
+export function readHostPressure(read: (path: string) => string = (path) => readFileSync(path, "utf8")): HostPressure {
+  const one = (resource: string): PressureReading | "unknown" => {
+    try {
+      return parsePressure(read(`/proc/pressure/${resource}`)) ?? "unknown";
+    } catch {
+      // Deliberate: a kernel without PSI, or a sandbox that hides /proc, is "unknown", not idle.
+      return "unknown";
+    }
+  };
+  return { cpu: one("cpu"), io: one("io"), memory: one("memory") };
+}
+
+/** W1-T4102: how long serve's own event loop was blocked. MEASURED 2026-09-23: a bare 401 took
+ *  1-20 s while the host swapped serve out — the console saw "aborted" and could not say why. */
+export interface EventLoopLag {
+  p50Ms: number;
+  p99Ms: number;
+  maxMs: number;
+  /** How long the reading covers; short right after the monitor starts. */
+  windowMs: number;
+}
+
+const LAG_WINDOW_MS = 60_000;
+
+/** A rolling one-minute window over `perf_hooks.monitorEventLoopDelay`. Started on first read, so
+ *  a process that never serves the health route never runs the monitor. */
+export function createEventLoopLagMonitor(
+  clock: Clock = systemClock,
+  histogram: () => IntervalHistogram = () => monitorEventLoopDelay({ resolution: 20 }),
+): () => EventLoopLag | undefined {
+  let hist: IntervalHistogram | undefined;
+  let startedAt = 0;
+  return () => {
+    if (!hist) {
+      hist = histogram();
+      hist.enable();
+      startedAt = clock.now();
+      return undefined;
+    }
+    const ms = (ns: number) => Math.round(ns / 1e5) / 10;
+    const reading: EventLoopLag = {
+      p50Ms: ms(hist.percentile(50)),
+      p99Ms: ms(hist.percentile(99)),
+      maxMs: ms(hist.max),
+      windowMs: clock.now() - startedAt,
+    };
+    if (reading.windowMs >= LAG_WINDOW_MS) {
+      hist.reset();
+      startedAt = clock.now();
+    }
+    return hist.count === 0 && reading.maxMs === 0 ? undefined : reading;
+  };
+}
+
+let defaultLagMonitor: (() => EventLoopLag | undefined) | undefined;
+function defaultEventLoopLag(): EventLoopLag | undefined {
+  defaultLagMonitor ??= createEventLoopLagMonitor();
+  return defaultLagMonitor();
+}
+
 /** {@link buildDaemonHealthRoute}'s dependencies. */
 export interface DaemonHealthDeps {
   /** `<root>/state/ledger.ndjson` — the SAME ledger every other daemon-health/board reader tails. */
@@ -324,6 +413,10 @@ export interface DaemonHealthDeps {
   now?: () => number;
   /** Default poll interval when the winning `daemon.*` line carries none of its own. */
   defaultPollIntervalMs?: number;
+  /** W1-T4102: serve's event-loop lag; defaults to a lazily started process-wide monitor. */
+  eventLoopLag?: () => EventLoopLag | undefined;
+  /** W1-T4102: the host's pressure; defaults to reading `/proc/pressure`. */
+  hostPressure?: () => HostPressure;
 }
 
 /** `GET /v1/daemon-health`'s body — every field individually optional/absent (never a
@@ -338,6 +431,9 @@ export interface DaemonHealthSnapshot {
   nextPollAt?: string;
   diskFreeBytes?: number;
   rateLimitRemaining?: number;
+  /** Absent until the monitor has a reading. */
+  eventLoopLag?: EventLoopLag;
+  hostPressure: HostPressure;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -364,6 +460,8 @@ export function buildDaemonHealthRoute(deps: DaemonHealthDeps): Route {
         nextPollAt: poll.lastPollTs ? new Date(Date.parse(poll.lastPollTs) + poll.pollIntervalMs).toISOString() : undefined,
         diskFreeBytes: readDiskFreeBytes(deps.diskPath, deps.statfs),
         rateLimitRemaining: readGhRateLimitRemaining(deps.exec),
+        eventLoopLag: (deps.eventLoopLag ?? defaultEventLoopLag)(),
+        hostPressure: (deps.hostPressure ?? readHostPressure)(),
       };
       sendJson(res, 200, body);
     },
