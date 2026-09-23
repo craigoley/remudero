@@ -46,6 +46,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -221,12 +222,18 @@ function startServe(port: number) {
     JSON.stringify({ claudeBin: "/nonexistent/claude-not-installed", root: join(home, "Remudero"), installRoot: process.cwd() }),
   );
 
+  // W1-T4226: the booted server's board reads GitHub by shelling out to `gh`; answer them from a
+  // scripted shim (an empty repo) ahead of the shared refusal stub, so the process under test is
+  // a server reading an empty board, not one whose every GitHub read was refused.
+  const gh = ghShim([{ when: "api ", stdout: "[]" }], { kind: "serve-orphan-gh" });
+
   const out = openSync(join(home, "serve.out.log"), "a", 0o600);
   const child = spawn(join(repoRoot, "bin", "rmd"), ["serve", "--port", String(port), "--host", "127.0.0.1"], {
     stdio: ["ignore", out, out],
     env: {
       ...process.env,
       HOME: home,
+      PATH: `${gh.dir}:${process.env.PATH ?? ""}`,
       // REQUIRED, NOT TIDINESS, and this file was violating the repo's own rule. `bin/rmd` runs
       // `checkCliFreshness` before the verb, which does `git merge --ff-only origin/main` on the
       // checkout — a network git operation, from a test, against whatever ref CI happens to have

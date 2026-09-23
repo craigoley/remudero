@@ -313,6 +313,8 @@ test("W1-T3337: a withheld re-review stands the fix rung down without another wo
         log: (step, extra) => logs.push({ step, extra }),
         say: () => {},
         account: (worker) => worker,
+        // W1-T4226: the live PR-body read goes through the seam, never the refused real gh.
+        fetchPrBody: async () => "## Summary\nwithhold stale review verdicts\n",
         spawnWallClockBoundMs: 5_000,
       },
     });

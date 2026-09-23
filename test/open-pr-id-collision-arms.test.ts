@@ -51,6 +51,20 @@ function withPath<T>(dir: string, fn: () => T): T {
   }
 }
 
+/** W1-T4226: a PATH holding NO `gh` at all, so the spawn itself fails (ENOENT) — the "cannot run at
+ *  all" arm, owned by the test rather than borrowed from the shared refusal stub (which RUNS and
+ *  exits 1, i.e. the non-zero arm a sibling test already covers). Only for gh-only calls: nothing
+ *  else (git included) resolves on this PATH either. */
+function withNoGhOnPath<T>(fn: () => T): T {
+  const saved = process.env.PATH;
+  process.env.PATH = mkdtempSync(join(tmpdir(), "rmd-no-gh-"));
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
+
 // ── resolveOwnerRepoFromGit ───────────────────────────────────────────────────────────────────
 
 test("W1-T2324: resolveOwnerRepoFromGit parses owner/repo from the remote url", () => {
@@ -84,9 +98,9 @@ test("W1-T2324: currentBranch reads the checked-out branch, and is undefined on 
 
 test("W1-T2324: fetchOpenPrRows returns reachable:false when gh cannot run at all", () => {
   const root = scratchRepo("https://github.com/acme/widgets.git");
-  // An empty PATH dir shadows nothing, but `gh` is absent in this environment anyway — the arm
-  // under test is "spawn failed / non-zero exit", which is exactly CI's condition (no GH_TOKEN).
-  const res = mod.fetchOpenPrRows("acme", "widgets", root);
+  // The arm under test is "spawn failed" — no `gh` resolvable at all (W1-T4226: an explicit PATH
+  // with no gh, never the shared refusal stub, which runs and exits non-zero instead).
+  const res = withNoGhOnPath(() => mod.fetchOpenPrRows("acme", "widgets", root));
   assert.equal(res.reachable, false);
   assert.deepEqual(res.rows, [], "never degrades to rows that would read as 'no other PR claims it'");
 });
@@ -236,7 +250,8 @@ function repoAddingAnId(remoteUrl: string): string {
 
 test("W1-T2324: main SKIPS the open-PR check, loudly, when gh cannot be reached", () => {
   const root = repoAddingAnId("https://github.com/acme/widgets.git");
-  const r = runMain(["--base", "base-ref", "--cwd", root]);
+  // W1-T4226: the unreachable GitHub is this test's own `gh` failing, not the shared refusal stub.
+  const r = withPath(fakeGh("error connecting to api.github.com", 1), () => runMain(["--base", "base-ref", "--cwd", root]));
   const all = [...r.out, ...r.err].join("\n");
   assert.match(all, /open-PR collision check SKIPPED/, "a stated skip, never a silent pass");
   assert.match(all, /acme\/widgets/, "and it names the repo it could not read");

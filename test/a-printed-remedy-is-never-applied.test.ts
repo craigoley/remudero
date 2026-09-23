@@ -99,6 +99,10 @@ function fixRungBaseOpts(task: { id: string; title: string }) {
   };
 }
 
+// W1-T4226: the fix rung reads the live PR body after each worker round; hand it one through the
+// `fetchPrBody` seam instead of letting the shared stub refuse a real PR-body read.
+const fetchPrBody = async (prUrl: string): Promise<string> => `## Summary\nFix-rung fixture PR ${prUrl}\n`;
+
 function tmpLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-generator-fix-")), "ledger.ndjson");
 }
@@ -509,6 +513,7 @@ test("runFixRung (criterion 3, integration): a ci-log round with NO declared gen
       log: () => {},
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       packageScripts: REAL_SHAPED_SCRIPTS,
       runGeneratorScript: async (script) => {
         runScriptCalls.push(script);
@@ -549,6 +554,7 @@ test("runFixRung (criterion 3, integration, dep-absent): with the generator-fix 
       log: () => {},
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       // No `runGeneratorScript`/`commitGeneratorOutput`/`packageScripts` wired at all.
     },
   });
@@ -588,6 +594,7 @@ test("runFixRung (criterion 4, integration): a generator that cannot fix its own
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       packageScripts: REAL_SHAPED_SCRIPTS,
       runGeneratorScript: async (script) => {
         if (script === "docs-index:check") return { status: 1, stdout: "", stderr: "still stale after regeneration" };

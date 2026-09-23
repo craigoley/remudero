@@ -100,6 +100,13 @@ function fixRungBaseOpts(task: { id: string; title: string }) {
   };
 }
 
+// W1-T4226: the UNREAD body these rung tests name is supplied at the `fetchPrBody` seam — a read
+// that throws, so the rung records `fetch-failed` — instead of the shared stub refusing a real
+// PR-body read and producing the same substitute by accident.
+const unreadPrBody = async (prUrl: string): Promise<string> => {
+  throw new Error(`fixture: PR body for ${prUrl} could not be read`);
+};
+
 function tmpLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-fixrung-infra-fault-")), "ledger.ndjson");
 }
@@ -211,6 +218,7 @@ test("runFixRung (claims 1, 2, 3, 7): a review computed against an unread body (
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
       account: (r) => r,
+      fetchPrBody: unreadPrBody,
       updatePrBody: async () => {
         updatePrBodyCalls++;
       },
@@ -257,6 +265,7 @@ test("runFixRung (claim 8): the stand-down opens no escalation and writes nothin
       log: () => {},
       say: (msg) => sayLines.push(msg),
       account: (r) => r,
+      fetchPrBody: unreadPrBody,
     },
   });
 
@@ -303,6 +312,7 @@ test("runFixRung (claim 5): a round whose unread-body re-review ALSO carries an 
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
       account: (r) => r,
+      fetchPrBody: unreadPrBody,
     },
   });
 
