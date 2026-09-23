@@ -14,7 +14,7 @@
   files:
     - src/lib/serve.ts
     - deploy/serve-container.sh
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 on the fleet host: one gateway (remudero-serve, 0.0.0.0:4317) serves the core

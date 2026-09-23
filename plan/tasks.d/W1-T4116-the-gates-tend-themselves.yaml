@@ -12,7 +12,7 @@
   plan_refs: [W1-T4110, W1-T4115]
   files: [src/lib/gate-gardener.ts, src/run-task.ts, test/the-gates-tend-themselves.test.ts]
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4115 records per-gate fire, repair and override rates. A one-way baseline with slack is never tightened, a stale
