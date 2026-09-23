@@ -29788,10 +29788,10 @@ export function memoryLintCorpus(root: string): KnowledgeText[] {
   const corpus: KnowledgeText[] = [];
   const walk = (dir: string): void => {
     if (!existsSync(dir)) return;
-    for (const name of readdirSync(dir)) {
-      const path = join(dir, name);
-      if (statSync(path).isDirectory()) walk(path);
-      else if (name.endsWith(".md")) corpus.push({ id: relative(root, path), text: readFileSync(path, "utf8") });
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, ent.name);
+      if (ent.isDirectory()) walk(path);
+      else if (ent.isFile() && ent.name.endsWith(".md")) corpus.push({ id: relative(root, path), text: readFileSync(path, "utf8") });
     }
   };
   walk(join(root, "doctrine"));

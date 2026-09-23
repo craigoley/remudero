@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { writeAtomic } from "./fs-race-safe.js";
@@ -62,8 +62,9 @@ export function textContainment(a: string, b: string): number {
 }
 
 function memoryFiles(dir: string): string[] {
-  return readdirSync(dir)
-    .filter((f) => f.endsWith(".md") && f !== INDEX && f !== INDEX_ARCHIVE && statSync(join(dir, f)).isFile())
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith(".md") && e.name !== INDEX && e.name !== INDEX_ARCHIVE)
+    .map((e) => e.name)
     .sort();
 }
 
