@@ -19,11 +19,18 @@
  * (ENOENT) or an unauthenticated one, a bare shell-out throws WITHOUT this task's change. So each
  * claim asserts the shared stub's own refusal text — `test setup REFUSED` — which only
  * test/setup/tmp-hygiene.ts prints.
+ *
+ * W1-T4226: this file's own JOB is triggering the shared refusal, repeatedly and on purpose — so
+ * it opts in by name (below), and stays exempt from the exit-time check that now turns every
+ * OTHER, unexplained refusal into a failing file.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { ghShim } from "./helpers/gh-shim.js";
+import { allowGhRefusals } from "./setup/tmp-hygiene.js";
+
+allowGhRefusals("W1-T4119's own proof: every test below deliberately triggers the shared refusal");
 
 const LIVE_CALL = ["api", "repos/craigoley/remudero/pulls/6698/files"];
 const SHARED_REFUSAL = /test setup REFUSED/;
