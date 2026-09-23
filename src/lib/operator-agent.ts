@@ -13,7 +13,7 @@ import type { ServerResponse } from "node:http";
 import type { Route } from "./service.js";
 import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import {
   appendPanelLedger,
   bearerTokenId,
@@ -2570,10 +2570,33 @@ function validateEmergencyStopClear(body: unknown): { error: string } | { stopId
   };
 }
 
-function emergencyStopRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEARED_LEDGER_STEP],
-  }).rows;
+const EMERGENCY_STEPS = [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEARED_LEDGER_STEP];
+
+/** W1-T4334: archive-derived emergency rows per state dir, keyed by the archive file names. A rotated
+ *  archive never changes once written, so only a NEW name can change these rows. */
+const emergencyArchiveRows = new Map<string, { key: string; rows: Array<Record<string, unknown>> }>();
+
+/** W1-T4334 — the emergency rows in union order (archives, then live), parsing the archives once per
+ *  archive set: re-reading 900+ files on every status read and admission check froze the gateway's
+ *  event loop for 10-30 s under console load (CPU profile, 2026-09-23). */
+export function emergencyStopRows(ledgerPath: string, fsDeps: LedgerGrepFsDeps = realLedgerFs): Array<Record<string, unknown>> {
+  const stateDir = dirname(ledgerPath);
+  let names: string[];
+  try {
+    names = fsDeps.readdirSync(stateDir);
+  } catch {
+    // An unreadable state dir is an empty corpus, exactly as the union reader itself treats it.
+    names = [];
+  }
+  const key = names.filter((n) => n.startsWith("ledger.")).sort().join("\n");
+  let archived = emergencyArchiveRows.get(stateDir);
+  if (archived?.key !== key) {
+    const rows = readLedgerUnionRecordsSync(stateDir, { step: EMERGENCY_STEPS, readLiveRecords: () => [] }, fsDeps).rows;
+    archived = { key, rows };
+    emergencyArchiveRows.set(stateDir, archived);
+  }
+  const live = readLedgerUnionRecordsSync(stateDir, { step: EMERGENCY_STEPS }, { ...fsDeps, readdirSync: () => [] }).rows;
+  return [...archived.rows, ...live];
 }
 
 interface EmergencyControlState {
