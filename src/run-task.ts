@@ -22810,7 +22810,7 @@ export function creditedProofVisibility(
     })();
   const readCredited = deps.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds;
   const creditedIds = ledgerPath
-    ? readCredited(ledgerPath, { maxRotations: Number.MAX_SAFE_INTEGER }).credited
+    ? readCredited(ledgerPath).credited
     : new Set<string>();
 
   const creditedTasks = plan.tasks.filter((t) => creditedIds.has(t.id));
@@ -25037,10 +25037,10 @@ export async function defaultVerifyHumanCadenceResult(
       releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
-    // W1-T4083: measure the release judge over every retained rotation, remembering what older
+    // W1-T4083: measure the release judge over the board's week of rotations, remembering what older
     // rotations showed in a state file, so a judge that never escalates is caught.
     const auditStatePath = join(config.root, "state", "verify-human-release-audit.json");
-    const audit = runReleaseAudit(readLedgerUnionBounded(ledgerPath, { maxRotations: 400 }) as unknown as Record<string, unknown>[], {
+    const audit = runReleaseAudit(readLedgerUnionBounded(ledgerPath) as unknown as Record<string, unknown>[], {
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
       runId,
