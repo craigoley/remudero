@@ -1,0 +1,65 @@
+- id: W1-T4273
+  title: "code-scanning alert capture stays location-blind — RawAlert/renderAlertRaw gain path+line+message from most_recent_instance, so a rule-cleanup task has more than a rule id and an unreachable URL to act on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: medium
+  rationale: |
+    Filed while drafting the ratification for proposal codeql-quality:js/unneeded-defensive-code
+    (codeql-quality-intake.ts's own summary text: "CodeQL quality debt for rule
+    js/unneeded-defensive-code: 1 open alert tagged quality and maintainability (#144). Propose one
+    bounded cleanup task for this rule; do not auto-fix or dismiss alerts.") and hitting a wall
+    VERIFIED FROM SOURCE rather than assumed: RawAlert (src/lib/ops.ts:67-82) carries
+    source/id/severity/state/createdAt/summary/url/ruleId/toolName/ruleTags and NOTHING ELSE.
+    normalizeCodeScanningAlert (ops.ts:132-156) maps only rule.description/id/severity/tags from
+    GitHub's code-scanning alert JSON — it discards `most_recent_instance.location.{path,start_line,
+    end_line}` and `most_recent_instance.message.text`, the two fields GitHub's own API returns that
+    actually say WHERE the flagged code lives and WHY this instance fired.
+    renderAlertRaw (ops.ts:110-112) is what pollAlerts (ops.ts:566-576) writes VERBATIM into a new
+    `plan/feedback/fb-alert-<owner>-<repo>-<source>-<id>.yaml` entry's `raw` field on the next poll
+    that sees an open alert not yet captured — and that captured file is the ONLY repo-tracked
+    artifact anyone downstream of the daemon's own `gh`-holding process can ever read for it.
+    Confirmed live: no `plan/feedback/fb-alert-craigoley-remudero-code-scanning-144.yaml` exists yet,
+    and every sampled sibling entry (e.g. fb-alert-craigoley-remudero-code-scanning-9.yaml) carries
+    the SAME bare shape — "<owner>/<repo> <source> alert #<id> [<severity>]: <summary>\n\n<url>" — a
+    generic rule description plus a URL, never a location. This is not a #144-specific gap; it is the
+    whole alert-intake pipeline's structural blind spot, and it hits EVERY future codeql-quality
+    proposal for ANY rule the same way.
+    THE BLOCKER IS REAL, NOT HYPOTHETICAL: neither this Architect (Read/Grep/Glob only, no gh, no
+    network) nor a dispatched implement worker (settings/worker.json:47
+    excludedCommands: ["gh *"]; implement workers get no WebFetch either — research tools are
+    Architect-only per §7B, an injection-surface boundary) can ever learn WHERE alert #144's flagged
+    branch lives without this fix. The location can reach a worker only through a repo-tracked
+    artifact the host process writes — this task is what makes that artifact carry it.
+  design: |
+    Extend GhCodeScanningAlertJson + normalizeCodeScanningAlert (ops.ts) to read an OPTIONAL
+    `most_recent_instance: { location?: { path?, start_line?, end_line? }, message?: { text? } }`
+    from the raw API payload and carry it onto RawAlert as an OPTIONAL `location?: { path: string;
+    startLine?: number; endLine?: number }` and `instanceMessage?: string` — present only when the
+    API actually returned them, NEVER fabricated (mirrors the existing severity fallback's own
+    discipline at ops.ts:126-131: degrade to absent, never invent). dependabot/secret-scanning alerts
+    carry no location concept and stay untouched.
+    Extend renderAlertRaw to APPEND the location (as `path:startLine-endLine`) and the instance
+    message, when present, after the existing summary/url lines — the base format for an alert
+    WITHOUT location must stay BYTE-IDENTICAL to today, so the existing
+    "renderAlertRaw names source/id/severity/summary and carries the alert url" test
+    (test/ops.test.ts:324) is a regression lock, not something this task may weaken.
+    VERIFY GitHub's actual code-scanning alert JSON shape from its current REST API docs before
+    wiring field names — this note states the shape from memory and may drift; distrust it.
+    No change to pollAlerts's capture loop, to codeql-quality-intake.ts, or to any consumer beyond
+    ops.ts's own exports — this is additive, optional-field plumbing only.
+  acceptance:
+    - claim: "normalizeCodeScanningAlert extracts most_recent_instance.location (path/startLine/endLine) and most_recent_instance.message.text onto RawAlert when GitHub's response carries them, and leaves both fields absent — never fabricated — on a response that omits most_recent_instance"
+      proof: "unit test: test/ops.test.ts"
+    - claim: "renderAlertRaw appends the location and instance message when present, and is BYTE-IDENTICAL to today's format for an alert with no location — the existing renderAlertRaw test is unchanged and still passes"
+      proof: "unit test: test/ops.test.ts"
+    - claim: "dependabot and secret-scanning alerts, and any code-scanning alert whose API response omits most_recent_instance, are completely unaffected by this change — no regression on any existing normalizer test"
+      proof: "unit test: test/ops.test.ts"
+  origin: architect
+  plan_refs: ["§5D", "§7B"]
+  files: [src/lib/ops.ts, test/ops.test.ts]
+  status: queued
+  attempts: 0
