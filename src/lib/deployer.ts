@@ -137,7 +137,7 @@ export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: st
   try {
     hostConfig = JSON.parse(hostConfigJson) as Record<string, unknown>;
   } catch {
-    return undefined;
+    return undefined; // not a HostConfig at all — UNKNOWN, the same no-storm rule as a failed inspect
   }
   const drift: ResourcePolicyDrift[] = [];
   for (const field of Object.values(POLICY_FIELD_BY_FLAG)) {
