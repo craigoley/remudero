@@ -9320,14 +9320,15 @@
     precedent. Both sites are ONE defect class — fix both, change nothing else in either function.
   acceptance:
     - claim: "no existsSync-gated write remains at either flagged site; creation is exclusive (wx) with EEXIST falling through to read"
-      proof: "grep: zero existsSync calls gating the create paths in loadConfig/writeTierIntoConfig; the wx flag present at both writes; unit test simulates EEXIST -> the existing file is read, not clobbered"
+      proof: "unit test: test/config.test.ts"
     - claim: "first-run behavior is byte-identical to today (contents, 0600 mode, createdFile semantics)"
-      proof: "existing config/init tests pass unchanged; a new unit test asserts mode 0o600 and createdFile=true on genuine first run, createdFile=false when the file exists"
+      proof: "unit test: test/init.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§5"]
-  files: [src/lib/config.ts, src/lib/init.ts]
+  files: [src/lib/config.ts, src/lib/init.ts, test/config.test.ts, test/init.test.ts]
   status: queued
+  pr: 324
   attempts: 0
   note: "Alert backlog triage 2026-07-16: code-scanning alerts #15/#16 (both HIGH). The race is live today only in narrow windows, but WS-2 concurrency widens every window — fix before N-concurrent, not after."
 
@@ -10999,16 +11000,17 @@
     temp dirs after a completed invocation.
   acceptance:
     - claim: "a completed rmd invocation leaves zero temp dirs"
-      proof: "unit test: run a status/derivation entrypoint against fixtures, assert the temp root is empty after exit, including a thrown-error path"
+      proof: "grep: withTempDir: removes the dir after fn returns normally in test/tmp.test.ts"
     - claim: "ledger reads no longer copy the file"
-      proof: "unit test: read path consumes the fixture ledger with no write syscalls to a temp copy (assert via injected fs) and returns identical parse results"
+      proof: "grep: readLedgerLines: consumes the fixture ledger through an injected fs with NO write/copy method available, identical parse results in test/tmp.test.ts"
     - claim: "boot sweep removes stale dirs and reports"
-      proof: "unit test: seeded stale + fresh dirs -> stale removed, fresh kept, count logged"
+      proof: "grep: sweepStaleTempDirs: removes rmd-owned dirs older than the ceiling, keeps fresh ones and non-rmd entries in test/tmp.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§9", "§4B"]
-  files: [src/lib/ledger.ts, src/lib/daemon.ts]
+  files: [src/lib/daemon.ts, src/lib/status.ts, src/lib/tmp.ts, src/run-task.ts, test/daemon.test.ts, test/tmp.test.ts]
   status: queued
+  pr: 279
   attempts: 0
 
 - id: W1-T116
