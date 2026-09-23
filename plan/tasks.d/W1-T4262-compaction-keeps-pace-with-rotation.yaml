@@ -12,7 +12,9 @@
   origin: "daemon OOM crash loop 2026-09-23 (fixed at the reader by #6753); read on the host over origin/main a8cbc5fbc"
   plan_refs: [W1-T3368, W1-T4100]
   files: [src/lib/ledger-compact.ts, src/lib/ledger-compaction-rung.ts, src/run-task.ts, test/ledger-compaction-keeps-pace-with-rotation.test.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4262 — Every acceptance proof already holds on main.
   attempts: 0
   note: |
     reservation hand-off: unknown -> chore-file-W1-T4262

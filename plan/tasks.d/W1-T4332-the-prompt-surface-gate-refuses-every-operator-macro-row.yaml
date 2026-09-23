@@ -14,7 +14,9 @@
     - test/a-prompt-surface-edit-carries-its-own-fixture.test.ts
   origin: "operator-session#external-skill-scan-2026-09-23"
   plan_refs: ["W1-T3077", "W1-T2763", "W1-T3137"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4332 — Every acceptance proof already holds on main.
   attempts: 0
   rationale: |
     READ 2026-09-23 at origin/main a8cbc5fb. Names are symbols; re-verify at your head.

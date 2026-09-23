@@ -71,7 +71,9 @@
       proof: "grep: selectUpdateBranchTarget in src/lib/sweep.ts"
     - claim: "the production gateway materializes OpenPrView fields in one audited object literal"
       proof: "grep: buildOpenPrViews in src/run-task.ts"
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3980 — Every acceptance proof already holds on main.
   attempts: 0
   origin: oper#observed-console-pr-1579-codeql-thread-2026-09-21
   note: |
