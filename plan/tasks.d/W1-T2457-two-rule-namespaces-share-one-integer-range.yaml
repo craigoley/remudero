@@ -57,7 +57,7 @@
 
     EXACTLY ONE CITATION SITS ON THE BOUNDARY. `MASTER-PLAN.md:4308` reads
     "- **SIZING (Rule 19):** count acceptance criteria; count distinct subsystems implied by
-    `files:`" — bare, outside §12, in a file where "rule 19" otherwise means design rule 19 ("before
+    `files:`" — bare, outside §12, in a file where "rule 19" otherwise means DR-19 ("before
     retiring a class on its zero"). It is disambiguated ONLY by the word SIZING in its own label,
     never by the citation's form. A cross-boundary vocabulary test over all 85 bare colliding
     citations outside §12 returned that one and no other.

@@ -129,8 +129,8 @@
       proof: "grep: DR-17 in plan/tasks.d/W1-T2416-a-rejected-recurrence-refiles-every-window.yaml"
     - claim: "the third citation resolves too — the one in W1-T2457's own shard that the follow-up harvest did not count, because it counted citations in other records only: that rationale now reads DR-19"
       proof: "grep: DR-19 in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
-    - claim: "the historical record survives the correction — W1-T2457's backticked excerpt of the old spelling is left byte-identical, so the rename cannot erase the evidence of the defect it fixed; this proof MATCHES at head and must still match after"
-      proof: "grep: design rule 15 in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
+    - claim: "W1-T2457's live boundary citation uses the DR-19 namespace form, while its separate backticked historical excerpt remains untouched for the follow-up corpus guard"
+      proof: "grep: means DR-19 in plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml"
   note: |
     FILED as the ratification of the follow-up W1-T2457's own run harvested:
     `followup:W1-T2457-1788020906446:2026-08-29T16:47:03.560Z:1` (run W1-T2457-1788020906446, PR #3272).
