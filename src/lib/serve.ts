@@ -86,7 +86,7 @@ import {
   type IssueCloser,
   type PanelActionDeps,
 } from "./panel-actions.js";
-import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { buildPanelGraphRoutes, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
@@ -3592,7 +3592,14 @@ function assembleServeRoutes(
     env: deps.githubAppRefresh?.env,
   });
   githubCredential.state.armed = githubAppRefresh.armed;
-  const fleetControlDeps: PanelActionDeps = { root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
+  // W1-T4088: the thread store is wired in production at last — the SAME file the inbox thread
+  // routes and the daemon's responder use — so an escalation reply is accepted, not refused.
+  const fleetControlDeps: PanelActionDeps = {
+    root: deps.fleetControlRoot,
+    ledgerPath: deps.ledgerPath,
+    issues: deps.issues,
+    threadStorePath: inboxThreadStorePath(deps.fleetControlRoot),
+  };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   // W1-T288: the SAME fleetControlDeps root/ledgerPath, plus the (optional, injectable)
   // liveness-verdict deps -- never a second root, never a second ledger read primitive.
@@ -3681,10 +3688,9 @@ function assembleServeRoutes(
     buildEscalationMarkHandledRoute(fleetControlDeps),
     // W1-T2496: the prose-reply route — MOUNTED so it never joins the "declared but unreachable"
     // class this module's own history has three prior instances of (see the buildDrainFeedbackRoute
-    // note below). `fleetControlDeps` carries no `threadStorePath` (production wiring of the real
-    // thread-store path is a separate concern, mirroring escalate.ts's own OPTIONAL field, W1-T2494)
-    // — so this route currently refuses every real call with "no thread store configured", the SAME
-    // safe refusal it gives any thread it cannot confirm, never a silent unattached filing.
+    // note below). W1-T4088 gave `fleetControlDeps` its `threadStorePath`, so a reply to an
+    // escalation that has a thread is accepted; one with no thread is still refused, never filed
+    // unattached.
     buildEscalationReplyRoute(fleetControlDeps),
     // W1-T2696: the ping's own answer links. MOUNTED for the reason the note above states — a
     // declared-but-unreachable route is this module's recurring defect. Both are
