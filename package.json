@@ -41,6 +41,7 @@
     "cycle-ratchet": "node scripts/cycle-ratchet.mjs",
     "jscpd": "jscpd src scripts --config .jscpd.json",
     "claims": "node scripts/claims-check.mjs",
+    "diff-coverage:local": "node scripts/diff-coverage-local.mjs",
     "assertion-discrimination": "node scripts/assertion-discrimination-check.mjs",
     "learnings-index": "node scripts/generate-learnings-index.mjs",
     "learnings-index:check": "node scripts/generate-learnings-index.mjs --check",
