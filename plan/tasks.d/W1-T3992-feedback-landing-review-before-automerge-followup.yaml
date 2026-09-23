@@ -15,7 +15,9 @@
     - test/feedback-landing-union-writer.test.ts
   origin: "followup#5317-feedback-landing-review-2026-09-21"
   plan_refs: [W1-T530, W1-T913, W1-T3990]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3992 — Every acceptance proof already holds on main.
   priority: 1
   rationale: |
     OBSERVED on current origin/main 282d8fea7cd7e378087306f64802de83b9e97715 and in issue #5317:

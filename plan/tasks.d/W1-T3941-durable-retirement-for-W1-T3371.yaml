@@ -12,7 +12,9 @@
     - plan/tasks.d/W1-T3941-durable-retirement-for-W1-T3371.yaml
   origin: "operator-session#needs-me-review-2026-09-21"
   plan_refs: [W1-T3371, W1-T2392, W1-T3939]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3941 — Every acceptance proof already holds on main.
   attempts: 0
   note: |
     reservation hand-off: unknown -> run-W1-T3941-1789983141972
