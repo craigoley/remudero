@@ -85,6 +85,14 @@ test("W1-T4062: frontier preference outcomes are counted", () => {
           },
         },
       },
+      {
+        step: "worker.assignment",
+        worker_assignment: {
+          id: "assignment-kept-again",
+          selected: { provider: "claude", model: "claude-sonnet-4" },
+          routing: { capabilityPreference: { capability: "frontier", provider: "claude" } },
+        },
+      },
     ],
     "2026-09-22T20:00:00.000Z",
   );
@@ -95,7 +103,7 @@ test("W1-T4062: frontier preference outcomes are counted", () => {
       selectedProvider: "claude",
       selectedModel: "claude-sonnet-4",
       outcome: "kept",
-      count: 1,
+      count: 2,
     },
     {
       preferredProvider: "claude",
