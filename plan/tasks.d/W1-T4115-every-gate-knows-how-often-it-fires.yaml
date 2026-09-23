@@ -11,6 +11,7 @@
   origin: "operator ask 2026-09-23; research over origin/main d7b569e0d"
   plan_refs: []
   files: [src/lib/gate-fire-rate.ts, scripts/unwired-gate-check.mjs, src/run-task.ts, test/every-gate-knows-how-often-it-fires.test.ts]
+  priority: 2
   status: queued
   attempts: 0
   rationale: |
