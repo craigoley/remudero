@@ -5,10 +5,10 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
-import { lintPlan, lintTask } from "./task-linter.js";
+import { lintPlan, lintTask, promoteIntroducedPlanOnlyDiagnostics, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import type { GhFailureReason } from "./status.js";
@@ -20,7 +20,7 @@ export type DraftLintViolation = RelintViolation;
 import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
@@ -707,8 +707,10 @@ export interface ReadinessContext {
   isMerged: MergedResolver;
   /** Whether one evidence anchor is still grep-true (on main, in the real runner). */
   grepAnchorTrue: (anchor: EvidenceAnchor) => boolean;
-  /** Every OTHER proposal id currently open (not yet ratified) — the conflict source. */
-  openProposalIds: Set<string>;
+  /** Every OTHER proposal id currently open (not yet ratified) — the conflict source. Only `has` is read, so a
+   *  caller classifying N proposals can hand every one the SAME registry-wide set behind a self-excluding view
+   *  (W1-T4261) instead of copying it N times. */
+  openProposalIds: Pick<ReadonlySet<string>, "has">;
   /** True when the ledger already carries `ratify.approved` for this id — checked FIRST and overriding the registry's
    *  copy (W1-T190), which a crash between the two writes can leave stale. */
   isRatified: (proposalId: string) => boolean;
@@ -730,6 +732,52 @@ export interface ReadinessContext {
    *  `deps_merged` and surfaces as `deps_observable`. THE POLARITY DOES NOT FLIP — it still keeps the proposal out of
    *  READY (W1-T130). Only what is SAID changes. */
   depsUnobservable?: (taskId: string) => GhFailureReason | undefined;
+  /** W1-T4261: reuse of each draft's fragment parse and lint verdict across passes over the SAME plan object — see
+   *  {@link FragmentMemo}. Optional; absent recomputes both, exactly as before. */
+  fragmentMemo?: FragmentMemo;
+}
+
+/** One drafted fragment's parse and (lazily) its blocking lint messages against one plan. */
+interface FragmentVerdict {
+  parsed: { plan: Plan } | { error: string };
+  blocking?: string[];
+}
+
+/**
+ * W1-T4261 — a draft's fragment parse and its {@link blockingLintMessages} depend only on the fragment text, the
+ * proposal id (the parse error names it) and the base plan, so a pass whose plan object is the previous pass's reuses
+ * them. MEASURED on a 700-proposal fixture: the two were ~500 ms of a ~750 ms recompute, paid again whenever the
+ * ledger or registry moved. A different plan object empties the memo; {@link beginFragmentPass} keeps only what the
+ * previous pass used, so it holds at most two passes' drafts.
+ */
+export interface FragmentMemo {
+  plan?: Plan;
+  previous: Map<string, FragmentVerdict>;
+  current: Map<string, FragmentVerdict>;
+}
+
+export function createFragmentMemo(): FragmentMemo {
+  return { previous: new Map(), current: new Map() };
+}
+
+/** Start a classification pass: the previous pass's entries stay reachable for this one, older ones are dropped. */
+export function beginFragmentPass(memo: FragmentMemo): void {
+  memo.previous = memo.current;
+  memo.current = new Map();
+}
+
+function fragmentVerdict(memo: FragmentMemo | undefined, plan: Plan, fragmentYaml: string, proposalId: string): FragmentVerdict {
+  if (memo === undefined) return { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  if (memo.plan !== plan) {
+    memo.plan = plan;
+    memo.previous = new Map();
+    memo.current = new Map();
+  }
+  const key = `${proposalId}\u0000${fragmentYaml}`;
+  let verdict = memo.current.get(key) ?? memo.previous.get(key);
+  if (verdict === undefined) verdict = { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  memo.current.set(key, verdict);
+  return verdict;
 }
 
 /** The ledger's answer to "has this proposal already been ratified?". Re-derived on every read rather than trusted
@@ -770,6 +818,29 @@ export function declinedReasonInLedger(
     if (l.step === "panel.proposal_restored") reason = undefined;
   }
   return reason;
+}
+
+/**
+ * W1-T4261 — {@link isRatifiedInLedger} and {@link declinedReasonInLedger} for EVERY proposal, from ONE pass over the
+ * ledger. Each of those walks the whole ledger per call, and a classifier calls them once (or twice) per proposal, so
+ * an inbox pass over N proposals walked it ~2N times. Same rows, same order, same latest-wins decline/restore rule —
+ * a precomputed answer, never a different one; a non-string `task_id` matches no proposal in either form.
+ */
+export function ledgerProposalVerdicts(ledgerLines: { step?: unknown; task_id?: unknown; reason?: unknown }[]): {
+  isRatified: (proposalId: string) => boolean;
+  isDeclined: (proposalId: string) => string | undefined;
+  ratified: ReadonlySet<string>;
+  declined: ReadonlyMap<string, string>;
+} {
+  const ratified = new Set<string>();
+  const declined = new Map<string, string>();
+  for (const l of ledgerLines) {
+    if (typeof l.task_id !== "string") continue;
+    if (l.step === "ratify.approved") ratified.add(l.task_id);
+    else if (l.step === "panel.proposal_declined") declined.set(l.task_id, typeof l.reason === "string" ? l.reason : "declined by an operator");
+    else if (l.step === "panel.proposal_restored") declined.delete(l.task_id);
+  }
+  return { isRatified: (id) => ratified.has(id), isDeclined: (id) => declined.get(id), ratified, declined };
 }
 
 /**
@@ -890,8 +961,57 @@ export function blockingLintMessages(
   const results = lint(merged, () => ({}), fragmentIds);
   const out: string[] = [];
   for (const task of fragmentPlan.tasks) {
-    const violations = results.get(task.id)?.violations ?? [];
-    for (const v of violations.filter((x) => x.severity === "block")) out.push(`${task.id}: [${v.check}] ${v.message}`);
+    const baseTask = basePlan.tasks.find((t) => t.id === task.id);
+    const violations = filingBlockers(
+      results.get(task.id)?.violations ?? [],
+      baseTask ? lintTask(baseTask).violations : undefined,
+      baseTask === undefined,
+    );
+    for (const v of violations) out.push(`${task.id}: [${v.check}] ${v.message}`);
+  }
+  return out;
+}
+
+/**
+ * The violations `rmd lint-plan --base` BLOCKS on a drafted task once it lands as a plan-only shard.
+ * W1-T3814 promotes shared-proof, call-site and proof-scope from warn to block on a new or newly
+ * warned shard, but this module's two readers (the draft rung's self-lint and the readiness check)
+ * kept only `severity === "block"` from a plain lint, so a draft CI was certain to refuse read as
+ * READY. MEASURED 2026-09-23: 10 of 15 ratify PRs opened in one batch were refused on exactly this.
+ */
+export function filingBlockers(
+  violations: readonly LintViolation[],
+  base: readonly LintViolation[] | undefined,
+  newlyAdded: boolean,
+): DraftLintViolation[] {
+  return promoteIntroducedPlanOnlyDiagnostics(violations, base, newlyAdded).filter((v) => v.severity === "block");
+}
+
+/**
+ * A ratification stamp names the proposal it ratifies and exactly the tasks it files. The stamp is
+ * written into MASTER-PLAN.md verbatim, so a model-invented label becomes a permanent record: one
+ * draft for proof-debt:W1-T4048 stamped "- P25 (MASTER-PLAN §7/P25) — RATIFIED" (#6791), and one
+ * for proof-debt:W1-T3570 merged as "- P44 (…)" (#6789). Checked, not rewritten, because the
+ * operator approves the stamp `rmd inbox` shows them.
+ */
+export function stampLineViolations(proposalId: string, stampLine: string, fragmentIds: readonly string[]): DraftLintViolation[] {
+  const out: DraftLintViolation[] = [];
+  if (!stampLine.startsWith(`- ${proposalId} (`)) {
+    out.push({
+      check: "draft-stamp",
+      severity: "block",
+      message: `the STAMP line must open with "- ${proposalId} (": it names the proposal being ratified, never another P-number. Got ${JSON.stringify(stampLine.slice(0, 80))}`,
+    });
+  }
+  const listed = /->\s*([A-Za-z0-9-]+(?:\s*[/,]\s*[A-Za-z0-9-]+)*)/.exec(stampLine)?.[1].split(/[/,]/).map((id) => id.trim()) ?? [];
+  const named = [...new Set(listed)].sort();
+  const filed = [...new Set(fragmentIds)].sort();
+  if (named.join("/") !== filed.join("/")) {
+    out.push({
+      check: "draft-stamp",
+      severity: "block",
+      message: `the STAMP line's "-> <ids>" list must name exactly this fragment's tasks (${filed.join("/")}); it names ${named.join("/") || "none"}`,
+    });
   }
   return out;
 }
@@ -1017,7 +1137,8 @@ export function classifyProposal(
 
   const draftStale = isDraftStale(draft, proposal.evidenceAnchors);
 
-  const fragment = safeParseFragment(draft.fragmentYaml, proposal.id);
+  const verdict = fragmentVerdict(ctx.fragmentMemo, ctx.plan, draft.fragmentYaml, proposal.id);
+  const fragment = verdict.parsed;
   if ("error" in fragment) {
     reasons.push({ predicate: "lint_clean", detail: `draft-unclean: fragment failed to parse — ${fragment.error}` });
   } else {
@@ -1034,7 +1155,11 @@ export function classifyProposal(
         detail: `deps-unobservable: ${detail} — GitHub could not be read, this is not a claim that it is unmerged`,
       });
     }
-    const blocking = blockingLintMessages(ctx.plan, fragment.plan);
+    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan);
+    const blocking = [
+      ...verdict.blocking,
+      ...stampLineViolations(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id)).map((v) => `stamp: ${v.message}`),
+    ];
     if (blocking.length > 0) {
       reasons.push({ predicate: "lint_clean", detail: `draft-unclean: lint-plan violation(s) — ${blocking.join("; ")}` });
     }
@@ -1189,8 +1314,10 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     // W1-T509-adjacent, W1-T512: an absent or empty `files:` is fail-closed at dispatch — `overlappingPaths` reports
     // it as overlapping every candidate, so it can never batch.
     "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
-    "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`),",
-    "with the task-id list written as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
+    `exactly this shape: \`- ${proposal.id} (<one-line summary>) — RATIFIED <YYYY-MM-DD> -> <task ids>.\``,
+    `It opens with THIS proposal's id, ${proposal.id}, never another P-number, and its task-id list names`,
+    "every task in your fragment and nothing else, as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
+    "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
     'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
@@ -1335,7 +1462,7 @@ export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
-export function lintDraftedFragment(fragmentYaml: string, proposalId: string): DraftLintViolation[] {
+export function lintDraftedFragment(fragmentYaml: string, proposalId: string, stampLine?: string): DraftLintViolation[] {
   let tasks;
   try {
     tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
@@ -1343,9 +1470,8 @@ export function lintDraftedFragment(fragmentYaml: string, proposalId: string): D
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
-  for (const task of tasks) {
-    for (const v of lintTask(task).violations) if (v.severity === "block") violations.push(v);
-  }
+  for (const task of tasks) violations.push(...filingBlockers(lintTask(task).violations, undefined, true));
+  if (stampLine !== undefined) violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
   return violations;
 }
 
@@ -1387,7 +1513,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         });
         parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
         if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
-        violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id);
+        violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine);
         if (violations.length === 0) break; // lint-clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
@@ -1473,6 +1599,77 @@ export function gitGrepAnchorTrue(cwd: string, ref: string, anchor: EvidenceAnch
     if (err.status === 1) return false;
     throw err;
   }
+}
+
+/**
+ * W1-T4261 — answers {@link gitGrepAnchorTrue} once per (main commit, anchor). MEASURED 2026-09-23 on the fleet
+ * gateway: one `git grep` spawn per proposal per inbox pass was 39% of the serve process's CPU (693 proposals). A
+ * grep's answer is a pure function of the commit's tree and the anchor's pattern+path, so a cache keyed by the
+ * commit sha is exact; a new sha drops every entry. `sha` undefined (unresolvable) caches nothing.
+ */
+export interface AnchorGrepCache {
+  sha?: string;
+  results: Map<string, boolean>;
+}
+
+/** BACKSTOP, not the control: a new main sha is what normally empties {@link AnchorGrepCache}. This only stops one
+ *  sha's map outgrowing any registry this repo has held (693 proposals, one or two anchors each, on 2026-09-23). */
+export const ANCHOR_GREP_CACHE_MAX_ENTRIES = 20_000;
+
+export function createAnchorGrepCache(): AnchorGrepCache {
+  return { results: new Map() };
+}
+
+/** Look `anchor` up in `cache` for commit `sha`, running `grep` (against that sha) only on a miss. A throwing grep is
+ *  never cached — the error propagates exactly as the uncached call's would. */
+export function cachedAnchorGrep(
+  cache: AnchorGrepCache,
+  sha: string | undefined,
+  anchor: EvidenceAnchor,
+  grep: (ref: string, anchor: EvidenceAnchor) => boolean,
+): boolean {
+  if (sha === undefined) return grep("origin/main", anchor);
+  if (cache.sha !== sha || cache.results.size >= ANCHOR_GREP_CACHE_MAX_ENTRIES) {
+    cache.sha = sha;
+    cache.results.clear();
+  }
+  const key = JSON.stringify([anchor.pattern, anchor.path ?? null]);
+  const hit = cache.results.get(key);
+  if (hit !== undefined) return hit;
+  const answer = grep(sha, anchor);
+  cache.results.set(key, answer);
+  return answer;
+}
+
+/** A file's text, or undefined when it cannot be read — every caller below treats absent and unreadable alike. */
+export type ReadGitFile = (path: string) => string | undefined;
+
+function readGitFileOrUndefined(path: string): string | undefined {
+  try {
+    return fs.readFileSync(path, "utf8");
+  } catch (_err) {
+    // Absent, a directory, or unreadable all mean "this layout does not carry the ref here"; the resolver
+    // below tries the next place and finally answers undefined, which caches nothing.
+    return undefined;
+  }
+}
+
+/**
+ * W1-T4261 — `origin/main`'s sha read straight from the repo's ref files, never a subprocess: `.git` (a directory,
+ * or a worktree's `gitdir:` file), its `commondir`, then the loose ref and `packed-refs`. MEASURED: `git rev-parse`
+ * costs ~5 ms a spawn; these reads cost microseconds, so the memo can check the commit on every pass. Undefined for
+ * any layout this does not recognise (a symbolic ref, a reftable store) — the caller then caches nothing.
+ */
+export function readOriginMainSha(root: string, readText: ReadGitFile = readGitFileOrUndefined): string | undefined {
+  const dotGit = join(root, ".git");
+  const pointer = readText(dotGit);
+  const gitDir = pointer?.startsWith("gitdir:") ? resolvePath(root, pointer.slice("gitdir:".length).trim()) : dotGit;
+  const common = readText(join(gitDir, "commondir"));
+  const commonDir = common === undefined ? gitDir : resolvePath(gitDir, common.trim());
+  const loose = readText(join(commonDir, "refs", "remotes", "origin", "main"))?.trim();
+  if (loose !== undefined && /^[0-9a-f]{40,64}$/.test(loose)) return loose;
+  const packed = readText(join(commonDir, "packed-refs"));
+  return packed === undefined ? undefined : /^([0-9a-f]{40,64}) refs\/remotes\/origin\/main$/m.exec(packed)?.[1];
 }
 
 // ── Rendering (design (c): the reasoning rides with the recommendation) ──────────────────
@@ -1862,6 +2059,33 @@ export function writeDraftAttemptPair(draftsPath: string, attemptsPath: string, 
   fs.writeFileSync(attemptsTmpPath, JSON.stringify(nextAttempts, null, 2), "utf8");
   fs.renameSync(draftsTmpPath, draftsPath);
   fs.renameSync(attemptsTmpPath, attemptsPath);
+}
+
+/**
+ * W1-T4118 — drop cached drafts whose proposal has left the registry. The cache had writers and no collector:
+ * on 2026-09-23 482 of 728 drafts (8.5 MB) were orphans every inbox read still parsed. Runs under the registry's
+ * own lock, against the blob-plus-shard population that lock guards, and lands by temp file plus rename.
+ * `undefined` when it did not look: an unreadable registry would make every draft read as an orphan.
+ */
+export function pruneOrphanedDrafts(draftsPath: string, registryPath: string): { count: number; bytesBefore: number; bytesAfter: number } | undefined {
+  const blob = parseProposalRegistryResult(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
+  if (blob.kind !== "ok" || !fs.existsSync(draftsPath)) return undefined;
+  let result: { count: number; bytesBefore: number; bytesAfter: number } | undefined;
+  updateProposalRegistry(registryPath, (current) => {
+    const raw = fs.readFileSync(draftsPath, "utf8");
+    const drafts = parseDraftCache(raw);
+    const live = new Set(current.map((p) => p.id));
+    const kept = Object.fromEntries(Object.entries(drafts).filter(([id]) => live.has(id)));
+    const count = Object.keys(drafts).length - Object.keys(kept).length;
+    result = { count, bytesBefore: Buffer.byteLength(raw), bytesAfter: Buffer.byteLength(raw) };
+    if (count > 0) {
+      const text = JSON.stringify(kept, null, 2);
+      writeAtomic(draftsPath, text);
+      result.bytesAfter = Buffer.byteLength(text);
+    }
+    return null; // the registry itself is never rewritten here
+  });
+  return result;
 }
 
 /** `state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host has re-opened. ⚠ KEYED ON

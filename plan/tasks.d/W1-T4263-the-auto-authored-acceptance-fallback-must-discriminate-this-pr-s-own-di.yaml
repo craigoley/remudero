@@ -1,0 +1,123 @@
+- id: W1-T4263
+  title: "THE AUTO-AUTHORED ACCEPTANCE FALLBACK MUST DISCRIMINATE THIS PR'S OWN DIFF — PR_OPEN_TIME_ACCEPTANCE_FALLBACK, ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK, and repairRetroAcceptanceBlock's inline repair all grep a pre-existing, untouched symbol (acceptanceAuthorTimeCheck), which is guaranteed-stale for every untasked plan-only/retro PR under proof-discrimination's zero-allowance rule"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 40.00
+  origin: "retro#1789371541053"
+  plan_refs: ["W1-T3508", "W1-T1060", "W1-T911"]
+  files: [src/run-task.ts, test/acceptance-fallback-diff-anchor.test.ts, test/a-pr-opens-with-a-judgeable-body.test.ts, test/acceptance-gate-body-repair.test.ts, test/retro-acceptance-repair.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    HARVESTED from RETRO-1789371541053 (run DAEMON-1789370402276, R52's follow-up harvest, candidate
+    (i)): "repairRetroAcceptanceBlock (src/run-task.ts) is gated on bodyNeedsAcceptanceRepair, which
+    reads PR_OPEN_TIME_ACCEPTANCE_FALLBACK's generic always-stale grep proof as HEALTHY — so the
+    retro-specific repair never fires and every retro/plan-sync PR opened through ghPrCreateFillCommand
+    keeps failing proof-discrimination until a human patches the body by hand." Verified live in this
+    checkout, not taken on the retro's word alone.
+
+    W1-T3508 (already MERGED — its fix is live in source) replaced both fallbacks' original bare-prose
+    proof with `"grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts"` (run-task.ts,
+    PR_OPEN_TIME_ACCEPTANCE_FALLBACK and ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK), which fixed the
+    author-time proof-SHAPE refusal (acceptance-author-gate.mjs's authorTimeProofShapeRefusal) but
+    created exactly the defect this followup names: `acceptanceAuthorTimeCheck` is an exported function
+    that predates every retro/plan-sync PR and is untouched by their diffs, so the grep pattern matches
+    identically at the PR head and at its merge base. proof-discrimination-gate.mjs's own
+    evaluateProofDiscrimination treats "passes at both head and merge base" as FAIL ("they cannot
+    establish this PR's work"), and staleAllowanceFor returns 0 for a PR with NO resolvable
+    `Remudero-Task:` trailer — the exact shape of `ghPrCreateFillCommand`-opened retro/plan-sync PRs, per
+    its own doctrine comment: "an unfiled PR writes its own body criteria and has no backlog to inherit."
+    So this proof is not merely often-stale, it is stale BY CONSTRUCTION for the population it exists to
+    serve, with ZERO grandfathered tolerance.
+
+    Compounding it: `bodyNeedsAcceptanceRepair` (plan-pr-emitter.ts) checks only structural shape
+    (criteriaParsed, truncatedAtBullet, emptyProofs) — a single well-formed criterion with a non-empty,
+    dialect-valid (but always-stale) proof reads as fully healthy. So `repairRetroAcceptanceBlock`
+    (run-task.ts) — gated on that same predicate — returns "healthy" and never fires to swap in
+    something better. Its OWN inline fallback, reached only when the body is genuinely malformed, is
+    itself bare prose ("SHIPPED-log/NET-STATE/calibration-table updates and the COMPRESSION deletion are
+    in this diff…") with no `grep:`/`unit test:` dialect prefix at all — it never received W1-T3508's fix
+    and would re-trip acceptance-author-gate's proof-shape refusal the moment it actually ran.
+
+    `ghPrCreateFillCommand` is already a pure, network-free function that reads the worktree's own git
+    history locally (`fillDerivedBody`/`lastCommitSubject`, both against the `origin/main..HEAD` range)
+    to build the PR body — the diff this task needs is already one `git diff` away in that exact
+    function, using the exact range convention it already uses.
+  design: |
+    ONE shared, pure helper in src/run-task.ts, used at all three fallback-authoring sites:
+
+    `diffAnchoredAcceptanceCriterion(diffText: string): AcceptanceCriterion | undefined` — parses a
+    standard unified diff (`diff --git a/<path> b/<path>`, `+++ b/<path>`, `+<content>` hunk lines — the
+    shape both `git diff` and `gh pr diff` emit) and returns the FIRST criterion built from a genuinely
+    ADDED line that clears a safety bar: non-blank after trim, at least 8 characters, single-line, and
+    NOT containing the literal `" in "` delimiter sequence or anything else that would corrupt the
+    `grep: <pattern> in <path>` dialect parse (`DIALECT_GREP_PATH_RE` in review.ts). The criterion's
+    `proof` is `grep: <the exact trimmed added line> in <the file's b/-side path>`; its `claim` PRESERVES
+    the existing disclaimer wording verbatim ("not a claim that the underlying diff is correct, or that
+    any task's acceptance is met" — the Q2 boundary W1-T3508's own tests assert), extended to note the
+    proof targets THIS diff's own addition rather than a fixed pre-existing symbol. Returns `undefined`
+    when `diffText` is empty, unparseable, or every candidate line fails the safety bar (pure-deletion or
+    rename-only diffs, or every added line too short/generic to safely discriminate).
+
+    WIRE IT AT ALL THREE SITES, keeping a static self-referential constant (the CURRENT
+    `PR_OPEN_TIME_ACCEPTANCE_FALLBACK`/`ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK` content, renamed to make
+    clear it is now the LAST-RESORT fallback) for the `undefined` case only:
+    (1) `ghPrCreateFillCommand` (worktreePath already available, still zero-gh-spawn): read
+        `git -C worktreePath diff origin/main..HEAD -U0` locally (the same range `fillDerivedBody`
+        already uses) and pass it through the helper before falling back to the static constant.
+    (2) `acceptanceGateBodyRepair`: give it an optional diff source (a `diffText` parameter or an
+        injected reader keyed off the fix rung's own checkout, `opts.worktreePath`, at its one call
+        site ~line 8413) computed the same way, and route it through the same helper.
+    (3) `repairRetroAcceptanceBlock`: add a `diffText?: (url: string) => string` dep defaulting to
+        `gh pr diff <url>` (mirroring `defaultRetroChangedFiles`'s existing `gh pr diff <url>
+        --name-only` sibling in the same file), and replace its own inline bare-prose fallback
+        criterion with the SAME helper's output — closing the dialect defect at this third site too,
+        not only restoring the trigger.
+
+    WHEN THE HELPER RETURNS `undefined`, every one of the three sites falls back to the CURRENT static
+    self-referential proof AND ledgers a named diagnostic (`acceptance.fallback.diff_anchor_unavailable`,
+    carrying the reason: no-diff / unparseable / no-safe-candidate) — so the rare truly-unfixable case
+    (a deletion-only or rename-only PR body needing this fallback, expected to be virtually never for
+    these PR-authoring paths, which are always adding plan/doc/code content) stays OBSERVABLE rather than
+    silently reproducing today's mysterious, untraceable CI failure.
+
+    THE EXISTING LOCKED TEST MUST BE UPDATED, NOT WORKED AROUND: test/a-pr-opens-with-a-judgeable-body.ts
+    carries "W1-T3508 fallback proof target: both fallbacks retain the single-line grep proof for
+    acceptanceAuthorTimeCheck" — this assertion currently PINS the exact shape this task removes for the
+    diff-anchored path. Update it to assert the new diff-anchored shape on a fixture WITH a real added
+    line, and add a SEPARATE case asserting the static self-referential fallback survives unchanged on a
+    fixture with no derivable diff (the `undefined` path) — nothing about the last-resort behavior
+    regresses, only its trigger condition narrows to genuine no-anchor cases.
+  acceptance:
+    - claim: "a real unified-diff fixture carrying a genuine added line yields an Acceptance criterion whose grep proof names that exact added line and its exact file path, not the fixed acceptanceAuthorTimeCheck self-reference"
+      proof: 'grep: test("W1-T4263: a unified-diff fixture yields a grep proof naming the exact added line and its file path" in test/acceptance-fallback-diff-anchor.test.ts'
+    - claim: "the generated proof genuinely discriminates under the real reviewer machinery: run through parseWhitelistedProof/execWhitelistedProof against a merge-base checkout lacking the added line and a head checkout carrying it, it reports no-match at the merge base and pass at head — never the shape proof-discrimination-gate.mjs flags as passing at both"
+      proof: 'grep: test("W1-T4263: the diff-anchored proof misses at the merge base and passes at head under the real reviewer machinery" in test/acceptance-fallback-diff-anchor.test.ts'
+    - claim: "ghPrCreateFillCommand derives PR_OPEN_TIME_ACCEPTANCE_FALLBACK's criterion from the worktree's own origin/main..HEAD diff, and the previously-locked assertion that both fallbacks retain the fixed acceptanceAuthorTimeCheck grep is updated to assert the new diff-anchored shape on a fixture with a real addition, plus a separate case confirming the static fallback still applies when no diff-anchor is derivable"
+      proof: "unit test: test/a-pr-opens-with-a-judgeable-body.test.ts"
+    - claim: "acceptanceGateBodyRepair's fix-rung fallback is likewise diff-anchored from its own checkout's diff, so a body repaired after acceptance-author-gate's refusal carries a proof discriminating this PR's own diff rather than the always-stale symbol"
+      proof: "unit test: test/acceptance-gate-body-repair.test.ts"
+    - claim: "repairRetroAcceptanceBlock's own inline fallback criterion (currently bare prose with no grep:/unit test: dialect) is replaced by the same diff-anchored derivation, fed by a gh pr diff read mirroring repairRetroChangesetClaim's existing changedFiles dep, so a retro/plan-sync PR reaching this rung gets a proof that is both dialect-valid and diff-discriminating"
+      proof: "unit test: test/retro-acceptance-repair.test.ts"
+    - claim: "when no diff text is available or no candidate line clears the safety bar, every one of the three sites falls back to the current static self-referential proof and ledgers a named acceptance.fallback.diff_anchor_unavailable diagnostic naming the reason, so the rare unfixable case stays observable instead of silently reproducing today's untraceable failure"
+      proof: 'grep: test("W1-T4263: with no usable diff anchor every site keeps the static fallback and ledgers diff_anchor_unavailable" in test/acceptance-fallback-diff-anchor.test.ts'
+  falsifier: |
+    Revert the three call sites to construct their fallback from the fixed
+    `PR_OPEN_TIME_ACCEPTANCE_FALLBACK`/`ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK`/inline-prose constants
+    while leaving the new helper unwired. The new tests in test/acceptance-fallback-diff-anchor.test.ts
+    must turn evaluateProofDiscrimination's real result into a stale/FAIL verdict for a fixture PR
+    carrying a real diff, and the updated test/a-pr-opens-with-a-judgeable-body.test.ts assertion must
+    fail against the old fixed-symbol shape. A test that only checks a header exists or a proof is
+    non-empty does not discriminate this defect.
+  note: |
+    W1-T3508 (merged) fixed the proof-SHAPE refusal by introducing the self-referential
+    `acceptanceAuthorTimeCheck` grep — this task fixes the proof-DISCRIMINATION failure that fix
+    introduced, without reverting it: the static self-referential constant remains as the documented
+    last-resort fallback for the genuinely no-anchor case, never removed outright. This is the
+    single-concern successor W1-T3508's own rationale anticipated is possible ("the behavior change is
+    one mechanically verifiable proof string") but did not itself need to solve.

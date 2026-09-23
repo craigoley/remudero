@@ -1,0 +1,33 @@
+- id: W1-T4352
+  title: "RATIFICATION PRS OPEN WITH DRAFTS THE CURRENT LINTER REFUSES — a draft cached before a lint rule tightened still files verbatim, so lint-plan fails the PR (shared file-path proofs, Rule 19 sizing below risk high). Re-lint each draft at approve time and repair or refuse before the PR opens"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: "board jam 2026-09-23"
+  files:
+    - src/lib/inbox.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23: six open APPROVE PRs (#6798, #6799, #6801, #6802, #6804, #6807) failed lint-plan
+    on their own shards: several criteria sharing one `unit test: test/<file>.test.ts` proof
+    (shared-proof) and multi-concern tasks at risk low or medium (Rule 19 sizing). They were repaired by
+    hand (per-criterion short title proofs; risk high with band_meaning span). The draft was lint-clean
+    when drafted but not when approved, and nothing re-checks it in between.
+  design: |
+    At approve time, after placeholder ids are materialized, lint every drafted task with the same
+    linter lint-plan runs. A shared file-path proof is rewritten to a per-criterion title proof derived
+    from its claim; a sizing refusal raises risk to high with band_meaning span; any other violation
+    refuses the approve with the violation named, so no PR opens that CI will refuse.
+  acceptance:
+    - claim: "an approved draft with a shared file-path proof files one title proof per criterion"
+      proof: "unit test: an approved draft with a shared file-path proof files one title proof per criterion"
+    - claim: "an approved draft below the sizing bar files at risk high with a declared span"
+      proof: "unit test: an approved draft below the sizing bar files at risk high with a declared span"
+    - claim: "an approved draft with any other lint violation is refused before a PR opens"
+      proof: "unit test: an approved draft with any other lint violation is refused before a PR opens"

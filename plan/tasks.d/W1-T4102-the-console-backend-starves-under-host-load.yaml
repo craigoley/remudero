@@ -16,7 +16,7 @@
     - deploy/recycle-container.sh
     - deploy/resource-policy.sh
     - src/lib/daemon-health.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/amend-W1-T1081-fold-satisfied -> file/console-resilience-core

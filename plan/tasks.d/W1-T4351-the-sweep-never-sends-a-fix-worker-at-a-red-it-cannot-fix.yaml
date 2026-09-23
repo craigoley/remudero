@@ -1,0 +1,37 @@
+- id: W1-T4351
+  title: "THE SWEEP SPENDS ITS ONE THREAD ON FIX WORKERS THAT CAN NEVER COMMIT — it dispatches a ci-log fix at plan-only PRs (refused: the task declares no files) and at reds that main itself carries, three minutes each, so reviews and merges starve. Route those reds to a refresh or an escalation instead"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "board jam 2026-09-23"
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on the fleet ledger: one long daemon run walked the red PRs serially, each a
+    ci-log fix of about 3 minutes, and every commit was refused — fix.commit_refused "the task declares
+    no files, so there is no surface to stage" for plan-only PRs #6803, #6804 and #6807, and "no anchored
+    COMMIT_MESSAGE line in the report" for #6796 and #6775. Most of those reds were not the PR's own:
+    main was red on the deps-interface census (161 vs 160) until #6808, so every PR's coverage shard
+    failed it. Meanwhile green PRs waited on the same thread for their review lane.
+  design: |
+    Before a ci-log fix dispatch the sweep classifies the red: (a) a plan-only PR (diff limited to plan/
+    and MASTER-PLAN.md) never gets the code-fix lane — its lint red goes to the plan-repair path or an
+    escalation naming the violation; (b) a failing check that also fails on origin/main's latest run is
+    a base red — the sweep refreshes the branch (update-branch) once main is green, and never dispatches
+    a fix for it. Each non-dispatch is ledgered with its reason. The refusal counts per PR stay bounded.
+  acceptance:
+    - claim: "a plan-only PR's red never dispatches the code-fix lane"
+      proof: "unit test: a plan-only PR's red never dispatches the code-fix lane"
+    - claim: "a red that main also carries refreshes the branch instead of dispatching a fix"
+      proof: "unit test: a red that main also carries refreshes the branch instead of dispatching a fix"
+    - claim: "a red that is the PR's own still dispatches the fix lane"
+      proof: "unit test: a red that is the PR's own still dispatches the fix lane"

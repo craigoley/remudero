@@ -11,7 +11,7 @@
   origin: "feedback#fb-1790097003960-ef6a3c"
   plan_refs: []
   files: [src/run-task.ts, test/scope-guard-overrun.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).

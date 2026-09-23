@@ -35,7 +35,7 @@
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
 import { promises as fsPromises } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,7 +52,11 @@ import {
   type Scope,
   cloudflareAccessIdentityProvider,
   createCloudflareAccessKeyCache,
+  createOperatorJwksCache,
+  operatorJwksUrl,
+  operatorSessionIdentityProvider,
   type IdentityProvider,
+  type OperatorIdentityConfig,
   type ServiceOptions,
   type ServiceTokens,
   type SseRoute,
@@ -61,7 +65,8 @@ import {
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
-import type { GhFailureReason, GitHub } from "./status.js";
+import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
+import { buildInstanceGatewayRoutes, type InstanceGatewayOptions } from "./instance-gateway.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -95,7 +100,8 @@ import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operat
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
-import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
+import { buildDaemonHealthRoute, type DaemonHealthDeps, type GatewayCheckoutState } from "./daemon-health.js";
+import { checkServiceFreshness } from "./self-sync.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import {
@@ -140,8 +146,19 @@ import {
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
-import type { ModelApproval } from "./config-schema.js";
+import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import {
+  DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
+  InstanceRegistryError,
+  parseInstanceNames,
+  parseInstanceRegistry,
+  projectRegistry,
+  registryDrift,
+  type InstanceRegistry,
+  type RegistryDrift,
+} from "./instance-registry.js";
+import { daemonInstanceRegistryPath } from "./deployer.js";
 import {
   buildProviderAuthRoutes,
   ProviderAuthSessionStore,
@@ -217,6 +234,15 @@ export interface ServeDeps {
    */
   accessTeamDomain?: string;
   accessAudience?: string;
+  /**
+   * W1-T4244 — the console operator's Clerk session identity (`serve.operatorIdentity`). Defaulted
+   * from `loadConfig()` inside {@link buildServeServer} exactly like the Access values above;
+   * injectable so a test states it without a config file. Absent: no operator provider, and
+   * every request is authorised exactly as before this task.
+   */
+  operatorIdentity?: OperatorIdentityConfig;
+  /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
+  operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
   /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
    *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
   resolveCurrentSha?: () => string;
@@ -287,6 +313,9 @@ export interface ServeDeps {
    * follows (see `panelGraph.ratify`/`lastSeen`'s own docs, above).
    */
   daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
+  /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
+  gatewayCheckout?: () => Promise<GatewayCheckoutAssessment>;
+  staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit">;
   /**
    * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
    * clock / liveness bound — see panel-actions.ts's `ControlStatusDeps` for each field's real
@@ -377,6 +406,17 @@ export interface ServeDeps {
    * real state dir — the same seam `replay`/`peek` above both use.
    */
   selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
+  /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
+  registry?: {
+    /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */
+    repoRegistryPath?: string;
+    /** The fleet host's copy; defaults to {@link DEFAULT_HOST_INSTANCE_REGISTRY_PATH}. */
+    hostRegistryPath?: string;
+    clock?: Clock;
+    /** Async on purpose: a console read route never blocks the event loop (W1-T3192's census). */
+    readText?: (path: string) => Promise<string>;
+  };
+  instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
    * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
@@ -2504,6 +2544,10 @@ ${consoleShellClientSource(phaseElapsedThresholdsMs)}
 </html>
 `;
 }
+/** The checkout this process's code was loaded from — `src/lib/serve.ts` walks up three levels. */
+export function serveRepoDir(): string {
+  return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+}
 /** What {@link resolveConsoleSha} reports when the sha genuinely cannot be resolved. */
 export const CONSOLE_SHA_UNKNOWN = "unknown";
 /**
@@ -2530,8 +2574,7 @@ export function resolveConsoleSha(
     execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).toString(),
 ): string {
   try {
-    const moduleDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-    const sha = exec(moduleDir).trim();
+    const sha = exec(serveRepoDir()).trim();
     return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : CONSOLE_SHA_UNKNOWN;
   } catch {
     return CONSOLE_SHA_UNKNOWN;
@@ -2700,6 +2743,150 @@ export function consoleRecyclePatienceMs(
  *  up, against the 3h25m of stale service the edge-only trigger actually produced. */
 export const RECYCLE_RECHECK_MS = 60_000;
 
+/** W1-T4229 BACKSTOP: a hung fetch must not hold the checkout read open past the next re-check. */
+export const GATEWAY_FETCH_TIMEOUT_MS = 60_000;
+
+/** One read of the gateway's own checkout, and whether it warrants the freshness restart. */
+export interface GatewayCheckoutAssessment {
+  state: GatewayCheckoutState;
+  /** Behind AND clean: the entrypoint fast-forwards only a clean tree on boot. */
+  restartDue: boolean;
+}
+
+/** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
+export interface GatewayCheckoutDeps {
+  repoDir: string;
+  env?: Record<string, string | undefined>;
+  git?: (args: string[]) => string;
+  /** The network half, run OFF the event loop. Defaults to an async `git fetch --quiet origin`. */
+  fetch?: () => Promise<void>;
+  clock?: Clock;
+}
+
+function defaultGatewayFetch(repoDir: string): () => Promise<void> {
+  return () =>
+    new Promise((resolve, reject) => {
+      execFile("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { timeout: GATEWAY_FETCH_TIMEOUT_MS }, (err) =>
+        err ? reject(err) : resolve(),
+      );
+    });
+}
+
+/** `status --porcelain` lines to paths. Read raw: the status column can start with a space. */
+function porcelainPaths(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split("\n")
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean);
+}
+
+/** W1-T4229 — {@link checkServiceFreshness}'s read with an async fetch and NO material-path filter
+ *  (managed-repos.json, behind the measured `[]`, is "immaterial"); unreadable is "unknown", never 0. */
+export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<GatewayCheckoutAssessment> {
+  const env = deps.env ?? process.env;
+  const git = deps.git ?? ((args: string[]) => execFileSync("git", ["-C", deps.repoDir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const clock = deps.clock ?? systemClock;
+  const readOrUnknown = <T>(read: () => T): T | "unknown" => {
+    try {
+      return read();
+    } catch {
+      // Unreadable reads "unknown", never a healthy default; the caller shows it.
+      return "unknown";
+    }
+  };
+  const localState = (detail: string): GatewayCheckoutState => ({
+    head: readOrUnknown(() => git(["rev-parse", "HEAD"]).trim()),
+    behindBy: "unknown",
+    dirty: readOrUnknown(() => git(["status", "--porcelain", "-uno"]).trim().length > 0),
+    checkedAt: clock.iso(),
+    detail,
+  });
+  const refuse = (): string => {
+    throw new Error("guard probe");
+  };
+  if (checkServiceFreshness(deps.repoDir, env, { git: refuse }).status === "guarded") {
+    return { state: localState("guarded environment: freshness is not assessed here"), restartDue: false };
+  }
+  let fetchError: string | undefined;
+  try {
+    await (deps.fetch ?? defaultGatewayFetch(deps.repoDir))();
+  } catch (err) {
+    // Carried into the read below, which reports `degraded` rather than trusting a stale ref.
+    fetchError = err instanceof Error ? err.message : String(err);
+  }
+  const seen = new Map<string, string>();
+  const svc = checkServiceFreshness(deps.repoDir, env, {
+    git: (args) => {
+      if (args[0] === "fetch") {
+        if (fetchError !== undefined) throw new Error(fetchError);
+        return "";
+      }
+      const out = git(args);
+      seen.set(args.join(" "), out);
+      return out;
+    },
+  });
+  if (svc.status !== "assessed") {
+    return { state: localState(svc.status === "degraded" ? svc.reason : "guarded"), restartDue: false };
+  }
+  const dirtyPaths = porcelainPaths(seen.get("status --porcelain -uno"));
+  const behindBy: number | "unknown" =
+    svc.behind === null
+      ? 0
+      : readOrUnknown(() => {
+          const n = Number(git(["rev-list", "--count", "HEAD..origin/main"]).trim());
+          if (!Number.isInteger(n) || n < 0) throw new Error(`unparseable rev-list count: ${n}`);
+          return n;
+        });
+  const state: GatewayCheckoutState = {
+    head: (seen.get("rev-parse HEAD") ?? "unknown").trim() || "unknown",
+    behindBy,
+    dirty: svc.dirty,
+    ...(svc.dirty ? { dirtyPaths } : {}),
+    checkedAt: clock.iso(),
+  };
+  // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
+  return { state, restartDue: !svc.dirty && svc.behind !== null && behindBy !== 0 };
+}
+
+/** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
+export const SERVE_RESTART_DRAIN_BOUND_MS = 10_000;
+
+export type DrainableServer = Pick<Server, "close" | "closeIdleConnections" | "closeAllConnections">;
+
+/** Node never closes a socket that goes idle AFTER close(); unswept, a restart waited ~4 s. */
+const DRAIN_IDLE_SWEEP_MS = 50;
+
+/** Let in-flight requests finish; resolves at the last close or the bound, and never rejects. */
+export function drainServer(
+  server: DrainableServer,
+  boundMs: number = SERVE_RESTART_DRAIN_BOUND_MS,
+  schedule: (run: () => void, ms: number) => () => void = (run, ms) => {
+    const timer = setTimeout(run, ms);
+    timer.unref?.();
+    return () => clearTimeout(timer);
+  },
+): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      cancel();
+      clearInterval(sweep);
+      resolve();
+    };
+    const cancel = schedule(() => {
+      server.closeAllConnections();
+      finish();
+    }, boundMs);
+    const sweep = setInterval(() => server.closeIdleConnections(), DRAIN_IDLE_SWEEP_MS);
+    sweep.unref?.();
+    server.close(() => finish());
+    server.closeIdleConnections();
+  });
+}
+
 /** {@link gateStaleCodeExit}'s constructor deps — every side effect injectable, same discipline
  *  {@link gatePrewarmOnClients} already follows for this module's other refcount gate. */
 export interface StaleCodeExitDeps {
@@ -2730,6 +2917,10 @@ export interface StaleCodeExitDeps {
   /** Synchronous cleanup immediately before the process exit. The analytics cache supplies its
    * stop hook here because `process.exit` does not emit the HTTP server's `close` event. */
   beforeExit?: () => void;
+  /** W1-T4229: {@link assessGatewayCheckout}, run at each re-check. */
+  assessCheckout?: () => Promise<GatewayCheckoutAssessment>;
+  /** W1-T4229: {@link drainServer}; absent, the exit is immediate as before. */
+  drain?: () => Promise<void>;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -2741,6 +2932,10 @@ export interface StaleCodeExitGate {
   /** Wrap a HIGH-tier write route so its full request lifetime — call-in to the response actually
    *  finishing or the connection closing — counts as in-flight. */
   wrapWrite(route: Route): Route;
+  checkout(): GatewayCheckoutState | undefined;
+  /** What the cadence runs; resolves once its checkout read has landed and been acted on. */
+  recheck(): Promise<void>;
+  stop(): void;
 }
 /**
  * W1-T2229 design: the console notices its OWN code is stale and ends its own process — at a
@@ -2804,18 +2999,25 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   /** When the code FIRST read stale, so patience is measured from the change landing rather than
    *  from whenever a re-check happened to notice it. Cleared if it somehow reads fresh again. */
   let staleSince: number | undefined;
+  let checkout: GatewayCheckoutAssessment | undefined;
+  let exiting = false;
+  let dirtyReported: string | undefined;
 
   const maybeExit = (): void => {
-    // NEVER NEGOTIABLE, AND NOT SUBJECT TO PRESSURE: this module drains nothing, so an exit
-    // mid-write drops the request and orphans whatever it handed off.
+    if (exiting) return;
+    // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
-    if (!isConsoleCodeStale(deps.bootSha, currentSha)) {
+    const codeStale = isConsoleCodeStale(deps.bootSha, currentSha);
+    const checkoutBehind = checkout?.restartDue === true;
+    if (!codeStale && !checkoutBehind) {
       staleSince = undefined;
       return;
     }
     staleSince ??= clock.now();
-    const commitsBehind = commitsBehindOf(deps.bootSha);
+    const localBehind = codeStale ? commitsBehindOf(deps.bootSha) : undefined;
+    const originBehind = checkoutBehind && typeof checkout?.state.behindBy === "number" ? checkout.state.behindBy : undefined;
+    const commitsBehind = localBehind === undefined && originBehind === undefined ? undefined : (localBehind ?? 0) + (originBehind ?? 0);
     const lastRead = deps.lastReadAt?.();
     const msSinceLastRead = lastRead === undefined ? undefined : Math.max(0, clock.now() - lastRead);
     const patienceMs = consoleRecyclePatienceMs(clients, commitsBehind, msSinceLastRead);
@@ -2824,16 +3026,67 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     // below keeps asking, and the backlog grows on its own — which is what turns a watched
     // console from "never" into "soon enough" without ever reading a threshold.
     if (staleForMs < patienceMs) return;
-    log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites, commitsBehind, staleForMs, patienceMs, msSinceLastRead });
+    log("serve.stale_code_exit", {
+      bootSha: deps.bootSha,
+      currentSha,
+      clients,
+      inFlightWrites,
+      commitsBehind,
+      staleForMs,
+      patienceMs,
+      msSinceLastRead,
+      ...(checkoutBehind ? { reason: "checkout_behind", checkout: checkout?.state } : {}),
+    });
+    exiting = true;
     stopRecheck();
-    deps.beforeExit?.();
-    exit(0);
+    // exit(0): unless-stopped restarts it and entrypoint.sh's sync_tree fast-forwards the clone.
+    const finish = (): void => {
+      deps.beforeExit?.();
+      exit(0);
+    };
+    if (!deps.drain) return finish();
+    deps.drain().then(finish, (err: unknown) => {
+      // A failed drain still ends in the restart it was preparing; the reason is kept.
+      log("serve.drain_failed", { reason: err instanceof Error ? err.message : String(err) });
+      finish();
+    });
+  };
+  const noteCheckout = (next: GatewayCheckoutAssessment): void => {
+    checkout = next;
+    const { state } = next;
+    if (state.dirty !== true || typeof state.behindBy !== "number" || state.behindBy === 0) return;
+    // NEVER OVERWRITTEN; reported once per distinct head and path set, not once a minute.
+    const key = `${state.head} ${(state.dirtyPaths ?? []).join(",")}`;
+    if (key === dirtyReported) return;
+    dirtyReported = key;
+    log("serve.gateway_checkout_dirty", { head: state.head, behindBy: state.behindBy, dirtyPaths: state.dirtyPaths });
+  };
+  let assessing: Promise<void> | undefined;
+  const recheck = (): Promise<void> => {
+    if (deps.assessCheckout && !assessing && !exiting) {
+      assessing = deps.assessCheckout().then(noteCheckout, (err: unknown) => {
+        log("serve.gateway_checkout_unreadable", { reason: err instanceof Error ? err.message : String(err) });
+      }).finally(() => {
+        assessing = undefined;
+      });
+    }
+    maybeExit();
+    return assessing ? assessing.then(maybeExit) : Promise.resolve();
   };
   // STARTED HERE, NOT FROM INSIDE AN EDGE. Starting it lazily from `maybeExit` would reproduce
   // the exact defect this fixes: a console with a tab left open fires no edge at all, so the
   // re-check that is supposed to notice that would itself never be scheduled.
-  const stopRecheck = scheduleRecheck(maybeExit, RECYCLE_RECHECK_MS);
+  let stopped = false;
+  const stopTimer = scheduleRecheck(() => void recheck(), RECYCLE_RECHECK_MS);
+  const stopRecheck = (): void => {
+    if (stopped) return;
+    stopped = true;
+    stopTimer();
+  };
   return {
+    checkout: () => checkout?.state,
+    recheck,
+    stop: stopRecheck,
     wrapSse(route) {
       return {
         ...route,
@@ -2907,6 +3160,73 @@ export function buildVersionRoute(sha: string): Route {
     },
   };
 }
+/** W1-T4227 — `GET /v1/registry`'s inputs. Both paths and the reader are injectable for tests. */
+/** How the host copy compared: `unreadable`/`malformed` are notes, never a failed response. */
+export type HostRegistryState = "in_sync" | "drifted" | "unreadable" | "malformed";
+
+/**
+ * W1-T4227 — `GET /v1/registry`: the fleet as projects → repos → instances, from the ONE registry
+ * (`.remudero/daemon-instances.yaml`) through {@link parseInstanceRegistry}. The body is built by
+ * {@link projectRegistry} from names and repos only — never a path, state dir, credential dir,
+ * image or token, even though the registry rows carry the first four. `source` names WHICH
+ * registry answered (`"repo"`), not where it lives on disk.
+ *
+ * DRIFT: when the host copy is readable and declares a different instance set, the body carries
+ * `drift: { hostOnly, repoOnly }`. A host copy that cannot be read (every dev machine, the console
+ * container) or parsed is a `hostRegistry` NOTE and no `drift` field — never an error, because the
+ * repo registry answered and the host copy is only the thing being checked against it.
+ */
+export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string };
+
+export function buildRegistryRoute(deps: RegistryRouteInput): Route {
+  const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
+  const clock = deps.clock ?? systemClock;
+  const hostPath = deps.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH;
+  return {
+    method: "GET",
+    path: "/v1/registry",
+    scope: "read",
+    handler: async (_req, res) => {
+      let registry: InstanceRegistry;
+      try {
+        registry = parseInstanceRegistry(await readText(deps.repoRegistryPath));
+      } catch (error) {
+        // Path-free refusal: fs errors embed the absolute path, so echo only the parser's code.
+        const code = error instanceof InstanceRegistryError ? error.code : "unreadable";
+        sendJson(res, 503, { error: "registry_unavailable", reason: code });
+        return;
+      }
+      const repoNames = registry.instances.filter((i) => i.live).map((i) => i.name);
+      let hostRegistry: HostRegistryState;
+      let drift: RegistryDrift | undefined;
+      let hostText: string | undefined;
+      try {
+        hostText = await readText(hostPath);
+      } catch {
+        // An absent/unreadable host copy is the normal case off the fleet host; it is a note.
+        hostText = undefined;
+      }
+      if (hostText === undefined) {
+        hostRegistry = "unreadable";
+      } else {
+        try {
+          drift = registryDrift(repoNames, parseInstanceNames(hostText));
+          hostRegistry = drift ? "drifted" : "in_sync";
+        } catch {
+          // A host copy outside the shell grammar cannot be compared; say so rather than guess.
+          hostRegistry = "malformed";
+        }
+      }
+      sendJson(res, 200, {
+        ...projectRegistry(registry),
+        source: "repo",
+        generatedAt: clock.iso(),
+        hostRegistry,
+        ...(drift ? { drift } : {}),
+      });
+    },
+  };
+}
 /**
  * The "github credential" glance chip's inner text — rendered SERVER-SIDE, the same
  * "no client-script risk" discipline the sibling "console build" chip already follows (see that
@@ -2977,6 +3297,41 @@ function accessConfig(): { accessTeamDomain?: string; accessAudience?: string } 
     // both must mean "no Access provider" rather than a failed boot.
     return {};
   }
+}
+
+/** W1-T4244 — `serve.operatorIdentity` off `loadConfig()`, tolerantly, {@link accessConfig}'s
+ *  precedent: an unreadable config composes no operator provider rather than failing the boot. */
+export function operatorIdentityConfig(read: () => Pick<Config, "serve"> = loadConfig): OperatorIdentityConfig | undefined {
+  try {
+    return read().serve?.operatorIdentity;
+  } catch {
+    // Deliberate: an unreadable config and an unconfigured one both mean "no operator provider".
+    return undefined;
+  }
+}
+
+/**
+ * W1-T4244 — COMPOSE THE OPERATOR-SESSION PROVIDER, OR NOTHING. Absent config, or one with no
+ * issuer / no allowed origin / no operator, composes NO provider: a verifier with an empty
+ * allowlist grants nobody, and saying so at boot beats an operator discovering it as a 403. The
+ * key set is fetched lazily, on the first request that carries a session, never at boot.
+ */
+export function operatorSessionProvider(
+  config: OperatorIdentityConfig | undefined,
+  io: { fetchImpl?: typeof fetch; clock?: Clock; log?: (step: string, extra?: Record<string, unknown>) => void } = {},
+): IdentityProvider | undefined {
+  if (!config) return undefined;
+  const issuer = config.issuer?.trim();
+  if (!issuer || !(config.allowedOrigins?.length > 0) || !(config.operatorUserIds?.length > 0)) {
+    io.log?.("serve.operator_identity_incomplete", {
+      issuer: Boolean(issuer),
+      allowed_origins: config.allowedOrigins?.length ?? 0,
+      operator_user_ids: config.operatorUserIds?.length ?? 0,
+    });
+    return undefined;
+  }
+  const keys = createOperatorJwksCache({ jwksUrl: operatorJwksUrl({ ...config, issuer }), fetchImpl: io.fetchImpl, clock: io.clock, log: io.log });
+  return operatorSessionIdentityProvider({ ...config, issuer, keys, clock: io.clock, log: io.log });
 }
 
 export function accessIdentityProviders(opts: {
@@ -3628,6 +3983,7 @@ function assembleServeRoutes(
     exec: deps.daemonHealth?.exec,
     now: deps.daemonHealth?.now,
     defaultPollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs,
+    gatewayCheckout: deps.daemonHealth?.gatewayCheckout,
   };
   // W1-T333: `root` defaults to the SAME fleetControlRoot every other console write surface
   // already resolves `state/` against (daemonHealthDeps.diskPath above follows the identical
@@ -3769,6 +4125,11 @@ function assembleServeRoutes(
       deps.resolveCurrentSha ?? resolveConsoleSha,
     ),
     buildVersionRoute(consoleSha),
+    // W1-T4227: the fleet's one registry, read-only — see buildRegistryRoute's own doc.
+    buildRegistryRoute({
+      ...deps.registry,
+      repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+    }),
     // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
     // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to
     // "never live" so a caller that omits it (a bare test) never fabricates liveness.
@@ -3818,6 +4179,17 @@ function assembleServeRoutes(
     }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps);
+  routes.push(
+    ...buildInstanceGatewayRoutes(routes, {
+      registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
+      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log }),
+      issues: deps.issues,
+      controlStatus: deps.controlStatus,
+      log: deps.log,
+      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board }),
+      ...deps.instances,
+    }),
+  );
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails
   // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.
@@ -3895,6 +4267,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // reported nobody watching and the daemon recycled out from under an operator mid-read. See
   // {@link readAttention}.
   let lastReadAt: number | undefined;
+  let drainTarget: Server | undefined;
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
@@ -3903,6 +4276,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       liveAnalyticsCache.stop();
     },
     lastReadAt: () => lastReadAt,
+    assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
+    drain: () => (drainTarget ? drainServer(drainTarget) : Promise.resolve()),
+    ...deps.staleExitSeams,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
   // file and this line pushed src/lib/serve.ts from 2 to 3; `systemClock` is the target the
@@ -3917,7 +4293,14 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       prewarm.noteRead();
     });
   const routeAssembly = assembleServeRoutes(
-    { ...deps, consoleSha, confirmNonces, liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current },
+    {
+      ...deps,
+      consoleSha,
+      confirmNonces,
+      liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
+      // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
+      daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
+    },
     analyticsCache.current,
     operatorAgentMemory,
   );
@@ -3949,6 +4332,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       audience: deps.accessAudience ?? accessConfig().accessAudience,
       log: deps.log,
     }),
+    // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
+    operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
     // Absent build -> no mount -> `/console/*` is a plain 404 rather than a shell with no assets.
     staticMount:
@@ -3971,8 +4356,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // refused without a nonce and satisfied with one; the bearer write token stays PINNED at "low"
     // (W1-T404's own ruling, not raised here) and so never reaches a MIDDLE or HIGH route at all,
     // nonce or not -- see ServiceOptions.enforceWriteTiers's own doc and bearerTokenProvider's.
+    // W1-T4244: the operator's own verified session (above) is how the console reaches MIDDLE,
+    // and HIGH after a recent step-up; the bearer token is still pinned at LOW.
     enforceWriteTiers: true,
   });
+  drainTarget = server;
+  server.on("close", staleExit.stop);
   server.on("close", prewarm.stop);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);

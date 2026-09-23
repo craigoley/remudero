@@ -25,7 +25,12 @@ import { appendPanelLedger } from "./panel-actions.js";
  *
  * PACE, NOT A CAP. It files no more in a day than the fleet merged in the last day, minus what it
  * already filed in that day, so filing follows real throughput, rises when the fleet is fast, and
- * stops on its own when the fleet falls behind.
+ * stops on its own when the fleet falls behind. It hands over ONE finding a pass: concurrent
+ * `rmd approve` runs fetch the same checkout and fail on each other's ref locks (2026-09-23: 47
+ * spawned in one second, 162 failed).
+ *
+ * ITS MEMORY IS ITS OWN STORE, `state/fleet-lane-decisions.json`, never the live ledger, which
+ * rotates every few minutes: read from the ledger, every decision was forgotten and re-made.
  *
  * Each kind can be switched off with `state/FLEET_LANE_OFF-<kind>` (the PAUSE pattern); a
  * switched-off kind is left untouched. Every decision writes `fleet_lane.decided` with a plain reason.
@@ -122,9 +127,24 @@ const PLAIN_REASON: Record<FleetLaneDecision, string> = {
   merge: "Folded into an older finding about the same thing, so the fleet does the work once.",
 };
 
-function decide(deps: FleetLaneDeps, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
+export function fleetLaneStorePath(stateDir: string): string {
+  return `${stateDir}/fleet-lane-decisions.json`;
+}
+
+export type DecisionStore = Record<string, { decision: FleetLaneDecision; ts: string }>;
+
+/** Every decision the lane has made. An unreadable store THROWS: read as empty, every finding would
+ *  be decided again — the defect this store replaces — so the pass fails loudly instead. */
+export function readFleetLaneStore(stateDir: string): DecisionStore {
+  const raw = readJson(fleetLaneStorePath(stateDir));
+  return raw === undefined ? {} : (JSON.parse(raw) as DecisionStore);
+}
+
+function decide(deps: FleetLaneDeps, store: DecisionStore, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
   const reason = PLAIN_REASON[decision];
   if (machineTokens(reason).length > 0) throw new Error(`fleet-lane: reason for ${decision} is not plain`);
+  store[proposalId] = { decision, ts: (deps.clock ?? systemClock).iso() };
+  writeAtomic(fleetLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
   appendPanelLedger(deps.ledgerPath, "fleet_lane.decided", proposalId, ORIGIN, { decision, reason, ...extra });
 }
 
@@ -141,15 +161,13 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
   const states = readClassificationStates(deps.stateDir);
   if (!states) return { filed: [], merged: [], room: 0 };
   const ledger = readLedger(deps.ledgerPath);
+  const store = readFleetLaneStore(deps.stateDir);
   const proposals = parseProposalRegistry(readJson(`${deps.stateDir}/inbox-proposals.json`));
   const drafts = parseDraftCache(readJson(`${deps.stateDir}/inbox-drafts.json`));
   // A merge is final (the finding is declined). A file is retried after a day if the finding is
   // still open — `rmd approve` refuses one that is not ready, and that must not strand it.
-  const decidedIds = new Set(
-    ledger
-      .filter((l) => l.step === "fleet_lane.decided" && (l.decision === "merge" || (typeof l.ts === "string" && now - Date.parse(l.ts) < DAY_MS)))
-      .map((l) => String(l.task_id)),
-  );
+  const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
+  const decidedIds = new Set(Object.entries(store).filter(([, d]) => d.decision === "merge" || withinDay(d.ts)).map(([id]) => id));
   const open = proposals.filter(
     (p: Proposal) =>
       inboxOwner(p) === "fleet" &&
@@ -168,7 +186,7 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
     const subject = findingSubject(p.id);
     const keeper = subject ? keeperBySubject.get(subject) : undefined;
     if (subject && keeper) {
-      decide(deps, p.id, "merge", { into: keeper });
+      decide(deps, store, p.id, "merge", { into: keeper });
       appendPanelLedger(deps.ledgerPath, "panel.proposal_declined", p.id, ORIGIN, { reason: `${PLAIN_REASON.merge} (${keeper})` });
       merged.push(p.id);
       continue;
@@ -178,9 +196,7 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
   }
 
   // FILE: drafted findings, oldest of the most common kind first, at the fleet's own pace.
-  const filedToday = ledger.filter(
-    (l) => l.step === "fleet_lane.decided" && l.decision === "file" && typeof l.ts === "string" && now - Date.parse(l.ts) < DAY_MS,
-  ).length;
+  const filedToday = Object.values(store).filter((d) => d.decision === "file" && withinDay(d.ts)).length;
   const room = Math.max(0, deps.mergedLastDay() - filedToday);
   const kindCount = new Map<string, number>();
   for (const p of survivors) kindCount.set(inboxKind(p.id), (kindCount.get(inboxKind(p.id)) ?? 0) + 1);
@@ -190,17 +206,22 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
     .sort((a, b) => (kindCount.get(inboxKind(b.p.id)) ?? 0) - (kindCount.get(inboxKind(a.p.id)) ?? 0) || a.order - b.order)
     .map(({ p }) => p);
   const filed: string[] = [];
-  for (const p of drafted.slice(0, room)) {
-    decide(deps, p.id, "file");
+  for (const p of drafted.slice(0, Math.min(room, 1))) {
+    decide(deps, store, p.id, "file");
     deps.approve(p.id);
     filed.push(p.id);
   }
   return { filed, merged, room: room - filed.length };
 }
 
-/** The latest fleet-lane decision per finding, for `GET /v1/inbox`'s fleet list. */
-export function fleetLaneDecisions(ledger: Array<{ step?: unknown; task_id?: unknown; decision?: unknown; reason?: unknown }>): Map<string, { decision: FleetLaneDecision; reason: string }> {
+/** The latest fleet-lane decision per finding, for `GET /v1/inbox`'s fleet list: the lane's own store
+ *  first, so a decision outlives the live ledger's rotation, then any newer ledger row's reason. */
+export function fleetLaneDecisions(
+  ledger: Array<{ step?: unknown; task_id?: unknown; decision?: unknown; reason?: unknown }>,
+  store: DecisionStore = {},
+): Map<string, { decision: FleetLaneDecision; reason: string }> {
   const out = new Map<string, { decision: FleetLaneDecision; reason: string }>();
+  for (const [id, d] of Object.entries(store)) out.set(id, { decision: d.decision, reason: PLAIN_REASON[d.decision] });
   for (const l of ledger) {
     if (l.step !== "fleet_lane.decided" || typeof l.task_id !== "string") continue;
     if (l.decision !== "file" && l.decision !== "merge") continue;
