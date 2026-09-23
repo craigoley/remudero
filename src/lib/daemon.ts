@@ -18,6 +18,7 @@ import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
 import { startFleetLane, triageFleetLane, type FleetLaneDeps } from "./fleet-lane.js";
 import { startKnowledgeGardener, type GardenerDeps } from "./knowledge-gardener.js";
+import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import type {
   CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
@@ -956,6 +957,8 @@ export interface DaemonDeps {
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
   knowledgeGardener?: GardenerDeps;
+  /** W1-T4088: answers operator replies on inbox threads, on its own timer beside the main loop. */
+  inboxResponder?: InboxResponderDeps;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
    * commands. It is injected so this scheduler module never grows a second repair implementation. */
   runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
@@ -2217,11 +2220,14 @@ export async function runDaemon(
   // W1-T4089: the fleet's own findings, filed at the pace the fleet merges work.
   const fleetLaneDeps = deps.fleetLane;
   const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLane(fleetLaneDeps), pollIntervalMs, log) : undefined;
+  // W1-T4088: the same pattern — an operator's reply is answered within a poll interval.
+  const inboxResponder = deps.inboxResponder ? startInboxResponder(deps.inboxResponder, pollIntervalMs, log) : undefined;
   const gardenerRef: { stop: () => void } = { stop: () => {} };
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     prActionPumpRef.stop();
     plainBackfill?.stop();
     fleetLane?.stop();
+    inboxResponder?.stop();
     gardenerRef.stop();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });

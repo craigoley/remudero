@@ -52,7 +52,17 @@ export interface ThreadMessage {
   /** Epoch millis, from {@link ThreadStoreDeps.now} (real callers: `Date.now`; tests: a fake
    *  clock, so ordering is assertable without a real wall-clock race). */
   ts: number;
+  extra?: ThreadMessageExtra;
 }
+
+export interface ThreadMessageExtra {
+  did?: { action: InboxThreadAction; undo?: string };
+  suggestedAction?: InboxThreadAction;
+  question?: boolean;
+  operator?: string;
+}
+
+export type InboxThreadAction = "approve" | "decline" | "edit" | "restore";
 
 export interface ThreadStoreDeps {
   /** Path to the append-only JSONL file every thread's messages are interleaved in — one row per
@@ -147,6 +157,7 @@ export function appendThreadMessage(
   role: ThreadMessageRole,
   body: string,
   deps: ThreadStoreDeps,
+  extra?: ThreadMessageExtra,
 ): string {
   const threadId = deriveThreadId(identity);
   const existing = readThread(threadId, deps);
@@ -154,7 +165,7 @@ export function appendThreadMessage(
     throw new Error(`inbox-thread: cannot append to ${threadId} — ${existing.reason}`);
   }
   const now = deps.now ?? Date.now;
-  const message: ThreadMessage = { threadId, role, body, seq: existing.messages.length + 1, ts: now() };
+  const message: ThreadMessage = { threadId, role, body, seq: existing.messages.length + 1, ts: now(), ...(extra ? { extra } : {}) };
   mkdirSync(dirname(deps.threadStorePath), { recursive: true });
   const fd = openSync(deps.threadStorePath, "a");
   try {
@@ -163,4 +174,50 @@ export function appendThreadMessage(
     closeSync(fd);
   }
   return threadId;
+}
+
+export const INBOX_THREAD_CLASS = "inbox";
+
+export function inboxThreadIdentity(proposalId: string): ThreadIdentity {
+  return { taskId: proposalId, class: INBOX_THREAD_CLASS };
+}
+
+export function inboxThreadId(proposalId: string): string {
+  return deriveThreadId(inboxThreadIdentity(proposalId));
+}
+
+const INBOX_THREAD_SUFFIX = `::${INBOX_THREAD_CLASS}::-::-`;
+
+export function proposalIdOfThread(threadId: string): string | undefined {
+  if (!threadId.startsWith("thread:") || !threadId.endsWith(INBOX_THREAD_SUFFIX)) return undefined;
+  const id = threadId.slice("thread:".length, -INBOX_THREAD_SUFFIX.length);
+  return id.length > 0 ? id : undefined;
+}
+
+export function readAllThreads(
+  deps: ThreadStoreDeps,
+): { status: "ok"; threads: Map<string, ThreadMessage[]> } | { status: "unresolved"; reason: string } {
+  const threads = new Map<string, ThreadMessage[]>();
+  if (!existsSync(deps.threadStorePath)) return { status: "ok", threads };
+  let raw: string;
+  try {
+    raw = readFileSync(deps.threadStorePath, "utf8");
+  } catch (err) {
+    return { status: "unresolved", reason: String((err as Error)?.message ?? err) };
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: ThreadMessage;
+    try {
+      parsed = JSON.parse(trimmed) as ThreadMessage;
+    } catch {
+      return { status: "unresolved", reason: `unparseable line in ${deps.threadStorePath}` };
+    }
+    const list = threads.get(parsed.threadId) ?? [];
+    list.push(parsed);
+    threads.set(parsed.threadId, list);
+  }
+  for (const list of threads.values()) list.sort((a, b) => a.seq - b.seq);
+  return { status: "ok", threads };
 }
