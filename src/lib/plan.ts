@@ -840,6 +840,7 @@ export function machineFilingAdmissionViolations(
   context: MachineFilingAdmissionContext,
 ): string[] {
   if (task.author_class !== "machine") return [];
+  if (task.status === "blocked" && task.retirement !== undefined) return []; // W1-T4111: retired on purpose
 
   const reasons: string[] = [];
   if (task.status === "blocked") {
