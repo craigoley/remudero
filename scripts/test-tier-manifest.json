@@ -937,6 +937,7 @@
     "test/inbox-registry-atomic.test.ts": 17132,
     "test/inbox-registry-lock-is-holder-stale.test.ts": 1472,
     "test/inbox.test.ts": 864,
+    "test/incident-events.test.ts": 0,
     "test/inflight-contention-does-not-durably-block.test.ts": 0,
     "test/inflight-liveness-anchor.test.ts": 974,
     "test/inflight-lock.test.ts": 453,

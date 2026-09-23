@@ -53,6 +53,7 @@ import {
   cloudflareAccessIdentityProvider,
   createCloudflareAccessKeyCache,
   createOperatorJwksCache,
+  ingestTokenProvider,
   operatorJwksUrl,
   operatorSessionIdentityProvider,
   type IdentityProvider,
@@ -62,6 +63,11 @@ import {
   type SseRoute,
   type WriteTier,
 } from "./service.js";
+import {
+  buildIncidentEventsRoute,
+  INCIDENT_INGEST_ROUTE_METHOD,
+  INCIDENT_INGEST_ROUTE_PATH,
+} from "./incident-events.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -4183,6 +4189,11 @@ function assembleServeRoutes(
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
       log: deps.log,
     }),
+    // W1-T4383: the SRE gardener's phase 1 — a scrubbed, fingerprinted, grouped incident event.
+    // Reachable by the ordinary write bearer like any other write-scoped route, AND by the
+    // ingest-only token (`assembleServeServer`'s `providers` wiring, below) — the only route that
+    // token can ever reach.
+    buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps);
   routes.push(
@@ -4327,17 +4338,29 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // no idea which directory was searched, so the path is in the line.
     deps.log?.("serve.console_build_missing", { kind: consoleBuild.kind, root: consoleBuild.root, reason: consoleBuild.reason });
   }
+  // W1-T4383: `ingest` is env-sourced (RMD_SERVE_INGEST_TOKEN), never persisted to the
+  // read/write token store — a caller-supplied `deps.tokens.ingest` (a test) always wins, so
+  // production's env read is a pure default, never a silent override of an explicit value.
+  const tokens: ServiceTokens = { ...deps.tokens, ingest: deps.tokens.ingest ?? process.env.RMD_SERVE_INGEST_TOKEN };
   const server = createService({
-    tokens: deps.tokens,
+    tokens,
     identity: deps.identity,
     // W1-T996: APPENDED through the seam, never by reordering `createService`'s built-in array —
     // the token-first order is the pre-seam W1-T371 contract, and preserving it is what keeps
     // every CLI caller unaffected. Empty unless BOTH Access config values are present.
-    providers: accessIdentityProviders({
-      teamDomain: deps.accessTeamDomain ?? accessConfig().accessTeamDomain,
-      audience: deps.accessAudience ?? accessConfig().accessAudience,
-      log: deps.log,
-    }),
+    // W1-T4383: the ingest-only token's grantor is appended the SAME way — absent whenever
+    // `tokens.ingest` is unset, so an install that never configures it is byte-identical to
+    // before this task.
+    providers: [
+      ...accessIdentityProviders({
+        teamDomain: deps.accessTeamDomain ?? accessConfig().accessTeamDomain,
+        audience: deps.accessAudience ?? accessConfig().accessAudience,
+        log: deps.log,
+      }),
+      ...(tokens.ingest
+        ? [ingestTokenProvider({ token: tokens.ingest, method: INCIDENT_INGEST_ROUTE_METHOD, path: INCIDENT_INGEST_ROUTE_PATH })]
+        : []),
+    ],
     // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
     operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(loadConfig, { log: deps.log }), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
