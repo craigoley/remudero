@@ -24,6 +24,7 @@ test("the SHIPPED .remudero/managed-repos.json keeps remudero's own public issue
     { owner: "craigoley", repo: "remudero-site" },
     { owner: "craigoley", repo: "remudero-console" },
   ]);
+  assert.ok(!loadManagedRepos(REPO_ROOT).some((r) => r.repo === "remudero"), "remudero's own tracker is not polled");
 });
 
 test("loadManagedRepos on a missing file returns [] — not an error", () => {
