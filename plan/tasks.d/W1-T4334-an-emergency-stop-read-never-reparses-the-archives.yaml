@@ -1,0 +1,39 @@
+- id: W1-T4334
+  title: "EVERY EMERGENCY-STOP READ PARSES THE WHOLE LEDGER ON THE EVENT LOOP — the status route and each admission check re-read 900+ files synchronously, freezing the gateway for 10-30 s under console load. Parse the immutable archives once per archive set and re-read only the live ledger"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: "gateway CPU profile 2026-09-23"
+  plan_refs: ["W1-T3900", "W1-T4261"]
+  files:
+    - src/lib/operator-agent.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 about 14:58Z on the fleet gateway (current main, #6756 and #6765 deployed): a
+    console route sweep drove /v1/status to a 30 s timeout and a plain 404 to 29 s. A 20 s CDP sampling
+    profile under that load put 48.9% of all samples (about 98% of non-idle time) under
+    activeEmergencyStops -> readEmergencyControlState -> readLedgerUnionRecordsSync, which reads and
+    parses every ledger archive (908 files in rmd-state2/state) synchronously on each call. It runs for
+    GET /v1/operator-agent/emergency/status (the Incidents page) and for every admission check.
+  design: |
+    Rotated archives never change once written. Cache the archive-derived emergency rows keyed by the
+    set of archive file names, read through readLedgerUnionRecordsSync with an empty live reader, and on
+    each call read only the live ledger (about 4 MB) for the two emergency steps. Archive rows are applied
+    before live rows, as the union reader orders them today, so first-issued-wins is unchanged. A new
+    archive name invalidates the cache.
+  acceptance:
+    - claim: "a second emergency read reuses the parsed archives"
+      proof: "unit test: a second emergency read reuses the parsed archives"
+    - claim: "a stop written to the live ledger after the first read is seen on the next"
+      proof: "unit test: a stop written to the live ledger after the first read is seen on the next"
+    - claim: "a new archive file invalidates the cached archive rows"
+      proof: "unit test: a new archive file invalidates the cached archive rows"
+  falsifier: |
+    CLOSE IF a CPU profile of the gateway under console load no longer shows readLedgerUnionRecordsSync
+    under activeEmergencyStops.

@@ -11,6 +11,7 @@
   origin: "knowledge-system audit 2026-09-22"
   plan_refs: [W1-T4095]
   files: [src/lib/narrative-fold.ts, src/run-task.ts, scripts/decisions-status.mjs, scripts/forensics-split.mjs, test/a-settled-record-moves-out-of-the-way.test.ts]
+  priority: 2
   status: queued
   attempts: 0
   rationale: |

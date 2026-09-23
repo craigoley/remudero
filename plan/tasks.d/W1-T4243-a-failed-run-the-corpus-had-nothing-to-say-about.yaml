@@ -1,71 +1,80 @@
 - id: W1-T4243
-  title: "NOTHING MEASURES WHERE THE KNOWLEDGE CORPUS IS SILENT — a run that fails after `selectLearnings` matched zero entries is a knowledge gap the ledger already records and no reader counts; report the miss rate on failed vs clean runs by code area so the next distillation targets where the corpus is blind, without filing anything"
+  title: "NOTHING MEASURES KNOWLEDGE OVER MORE THAN A DAY — add one knowledge-measurement cadence rung that reads a multi-week step-filtered ledger union plus the plan, and reports both where the corpus is SILENT (failed runs that matched zero learnings, by code area) and what the knowledge it has DOES (W1-T4241's outcome fold, cumulated), without filing anything"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T4241]
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 30.00
+  budget_usd: 45.00
   risk: high
   band_meaning: span
   origin: "research:agent-memory-scan-2026-09-23"
-  plan_refs: ["§4E", W1-T4014, W1-T4015, W1-T419, W1-T4241]
+  plan_refs: ["§4E", W1-T4014, W1-T4015, W1-T419, W1-T4241, W1-T4092, W1-T4100]
   files:
     - src/lib/knowledge-gaps.ts
+    - src/lib/measurement-cadence.ts
     - src/lib/digest.ts
+    - plan/policy.yaml
     - test/a-failed-run-the-corpus-had-nothing-to-say-about-is-counted.test.ts
   status: queued
   attempts: 0
   rationale: |
-    OBSERVED at origin/main f0e1fc43: every implement run writes `learnings.injected` with
-    `matched` / `matched_ids` / `dropped` (src/run-task.ts, W1-T419), and every run ends in a
-    `verdict` row carrying the same `run_id` (src/lib/ledger.ts). A grep of src/lib/retro.ts,
-    digest.ts, measurement-cadence.ts and knowledge-gardener.ts, and of plan/tasks.d, finds no
-    reader that asks the complementary question: which failed runs had ZERO matched learnings,
-    and in which part of the code do they cluster.
+    AMENDED 2026-09-23, BEFORE ANY BUILD, BY THE SESSION THAT FILED IT — the first design could not work.
 
-    EXTERNAL PATTERN (research:agent-memory-scan-2026-09-23): Brainfish's knowledge base treats
-    "failed searches and content gaps" as the authoring backlog (vendor claim; unverified beyond
-    their product pages), and Karpathy's LLM-wiki lint lists "concepts mentioned but lacking
-    pages". The shared idea is that a memory system should measure its misses, not only its hits.
-    This repo's miners (ci-failure-corpus, the retro's procedural candidates) all start from
-    FAILURES; none starts from the corpus's SILENCE.
+    (1) THE ORIGINAL CONSUMER SEES ABOUT A DAY. The first design rendered this census in the daily digest.
+        OBSERVED: `buildDigest` reads `readDigestWindow(ledgerPath, sinceIso)`, a union windowed to the
+        digest's own `since` and capped by DIGEST_MAX_ARCHIVES / DIGEST_MAX_ROWS (src/lib/digest.ts). A
+        per-area rate over one day's runs is mostly below any honest floor.
+    (2) THE DIGEST CANNOT NAME AN AREA. OBSERVED: no per-run ledger row reliably carries the task's
+        `files:` — only `scope_guard.*` rows do, and only when that guard fires (src/run-task.ts). The digest
+        is "ledger lines in, string out" and never loads the plan.
+    (3) W1-T4241 HAS THE SAME HORIZON PROBLEM. Its outcome fold ships with the digest as its only consumer
+        and says so in its own comment: a daily read leaves most learnings below the per-arm floor. Its
+        propensities accumulate on `learnings.injected` rows from day one; nothing yet reads them cumulatively.
+    (4) THE RUNG THAT HAS BOTH ALREADY EXISTS. OBSERVED: src/lib/measurement-cadence.ts reads step-filtered
+        unions through `resolveLedgerUnion(stateDir, <step pattern>)` (the wipe-test and ci-learning rungs)
+        and loads plan records (`loadPlanFromYaml`). A step-filtered read keeps memory to the three steps
+        needed, so a multi-week window is affordable where a full digest read is not (the union runs ~13
+        rotations an hour, W1-T4100).
 
-    WHY A RATE AND NOT A COUNT: a zero-match run proves nothing alone. Some areas legitimately have
-    no lessons yet. The signal is a zero-match rate that is higher on non-clean runs than on clean
-    runs in the same area. If the two rates are equal, coverage is not associated with failure
-    there, and the report must say that instead of ranking the area.
+    EXTERNAL PATTERN (research:agent-memory-scan-2026-09-23): Brainfish treats failed searches as the authoring
+    backlog (vendor claim); Karpathy's LLM-wiki lint lists concepts lacking pages; ACE/ExpeL keep per-item
+    outcome counters. One rung measuring both SILENCE and EFFECT is the combined form, and it files nothing:
+    W1-T4014 measured the learning loop producing ~7 proposals a day and releasing 0.
 
-    WHY IT FILES NOTHING (W1-T4014): the learning loop already produces about 7 proposals a day and
-    releases 0. Another producer would deepen that queue. This task produces a measurement an
-    operator, W1-T4015's corpus selection, or a later retro can read. Turning it into filed work
-    waits on W1-T4014's release path.
+    MEASURED 2026-09-23 by replaying `selectLearnings` over all 2,207 plan records at 50de4b6a: 652 (30%) match
+    zero learnings, so the silence population is large enough to measure.
   design: |
-    (i) A PURE fold in a new src/lib/knowledge-gaps.ts over ledger-union rows (src/lib/ledger-union.ts;
-        report the union's covered window): join `learnings.injected` to the run's terminal
-        `verdict` by `run_id`, and classify each run as clean (the retro's `clean_single_strike`
-        definition: merged with zero `fix.dispatch`) or not clean. Masked wipe-test arms and
-        verdict-less runs are excluded and counted.
-    (ii) Key each run by code AREA: the first two path segments of each file in the task's `files:`
-        (for example `src/lib`, `scripts`, `plan/tasks.d`). A multi-area task counts once per area.
-    (iii) Per area, emit n_clean, n_failed, the zero-match rate in each, and a verdict: `blind`
-        (failed-run miss rate exceeds the clean-run miss rate by a named margin with n_failed at
-        or above a named floor), `covered`, `no-association`, or `unmeasurable` below the floor.
-    (iv) src/lib/digest.ts renders the `blind` areas, highest failed-run miss count first, each with
-        its counts and window. Nothing is filed, and no learning is written.
+    (i) A PURE `foldKnowledgeGaps(rows, taskFilesById)` in src/lib/knowledge-gaps.ts: join `learnings.injected`
+        to the run's LAST `verdict` by `run_id`; clean = merged with zero `fix.dispatch` (the retro's
+        `clean_single_strike`, via `fixDispatchCountByRun`); masked arms and verdict-less runs excluded and
+        counted. Key each run by AREA = the first two path segments of each file its task declares (from
+        `taskFilesById`, the plan), once per area. Per area: n_clean, n_failed, zero-match rate in each, and a
+        verdict `blind | covered | no-association | unmeasurable` with a named margin and floor. A run whose
+        task id is not in the plan is counted as unmapped, never dropped silently.
+    (ii) ONE CADENCE RUNG in src/lib/measurement-cadence.ts, gated by a new `knowledgeMeasurementCadence`
+        policy knob (plan/policy.yaml, default daily, window 30 days): read
+        `resolveLedgerUnion(stateDir, /learnings\.injected|verdict|fix\.dispatch/)`, keep rows inside the
+        window, load task files from the plan, run `foldKnowledgeGaps` AND W1-T4241's `foldLearningOutcomes`
+        over the same rows, and ledger ONE `knowledge.measured` row carrying both reports, the window actually
+        covered, and the union's archive counts (so an incomplete read is visible, never a quiet zero).
+    (iii) src/lib/digest.ts renders the LATEST `knowledge.measured` row in its window: the `blind` areas and the
+        learnings with a measurable effect. The digest reads the rung's product; it never re-reads the union.
+    (iv) Files nothing and writes no learning (W1-T4014).
   acceptance:
     - claim: "a failed run whose injected row matched zero learnings is counted as a miss in every area its task files touch"
-      proof: "unit test: W1-T4243: a failed zero-match run is a miss in every area it touches"
-    - claim: "an area whose zero-match rate is equal on clean and failed runs reads no-association, not blind"
-      proof: "unit test: W1-T4243: equal miss rates on clean and failed runs read no-association"
-    - claim: "masked arms and verdict-less runs are excluded and counted, and below the floor the area reads unmeasurable"
-      proof: "unit test: W1-T4243: masked and verdict-less runs are excluded and counted"
+      proof: "unit test: test/a-failed-run-the-corpus-had-nothing-to-say-about-is-counted.test.ts"
     - claim: "the gap fold is exported"
       proof: "grep: export function foldKnowledgeGaps( in src/lib/knowledge-gaps.ts"
-    - claim: "the digest calls the gap fold"
-      proof: "grep: foldKnowledgeGaps( in src/lib/digest.ts"
+    - claim: "the cadence rung folds gaps over the multi-week union"
+      proof: "grep: foldKnowledgeGaps( in src/lib/measurement-cadence.ts"
+    - claim: "the same rung cumulates the outcome fold"
+      proof: "grep: foldLearningOutcomes( in src/lib/measurement-cadence.ts"
+    - claim: "the digest renders the rung's product"
+      proof: "grep: knowledge\\.measured in src/lib/digest.ts"
   falsifier: |
-    Rank areas by raw zero-match count and an area where every run, clean or failed, matches
-    nothing must be wrongly reported `blind`; the no-association test must catch it. Count a
-    masked arm-B run (learnings deliberately removed) as a miss and the exclusion test must fail.
-  note: "Measurement only. The companion W1-T4241 asks whether the knowledge we have helps; this asks where we have none."
+    Rank areas by raw zero-match count and an area where every run, clean or failed, matches nothing is wrongly
+    `blind`; the no-association case must catch it. Count a masked arm-B run as a miss and the exclusion case
+    must fail. Drop runs whose task id is missing from the plan without counting them and the unmapped count
+    must fail. Read the digest window instead of the union in the rung and a 30-day fixture must under-count.
+  note: "Measurement only. Amended before build: the first design's digest consumer saw about a day and had no source for task files. One rung now serves this census and W1-T4241's cumulative outcome reading."

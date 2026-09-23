@@ -1,0 +1,16 @@
+violation: none
+rule: >
+  W1-T4240 / W1-T3077: a learnings edit is a prompt-surface change, and the knowledge gardener opens
+  such PRs unattended. EDITING an existing operator_impact:true entry is not ADDING one, so the
+  troubleshooting and drill coverage items must not demand a write-up, and a correct repair whose
+  proof executes must arm. A regression here stalls the self-maintenance loop silently.
+verdict:
+  state: success
+  testTheater: false
+  criteriaTampered: false
+  capped: false
+arm: true
+changesetContradictions: []
+criteria:
+  - met: true
+    proof_exec: executed_pass
