@@ -1519,6 +1519,7 @@
     "test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts": 235,
     "test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts": 0,
     "test/the-cash-cap-rises-only-on-a-squeeze-day.test.ts": 0,
+    "test/the-cash-ladder-takes-a-successor-once-it-is-ready.test.ts": 0,
     "test/the-cash-ladder-walks-past-a-deployment-it-cannot-use.test.ts": 0,
     "test/the-cash-lane-reports-whether-it-can-spend.test.ts": 0,
     "test/the-census-admission-set-is-derived-not-enumerated.test.ts": 11465,
