@@ -5,7 +5,8 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 25.00
   files: [.claude/skills/implement-clean-single-strike-a4ce515f/SKILL.md, test/the-first-ratified-skill-reaches-implement-workers.test.ts]
   origin: architect
@@ -207,15 +208,15 @@
     `.claude/skills/`, or adding new signals to `PROCEDURAL_SUCCESS_SIGNALS`.
   acceptance:
     - claim: "the file .claude/skills/implement-clean-single-strike-a4ce515f/SKILL.md exists and its content, reconstructed independently from its OWN parsed evidence through the real renderSkillDraft generator, matches byte-for-byte (never a hand-typed duplicate string)"
-      proof: "unit test: test/the-first-ratified-skill-reaches-implement-workers.test.ts"
+      proof: "unit test: the file .claude skills implement-clean-single-strike-a4ce515f SKILL.md exists and its"
     - claim: "the reconstructed candidate's proceduralCandidateHash equals a4ce515f0f097a31 (the proposal id's own hash) and carries exactly 78 supporting runs — pinning the evidence set against fabrication or drift"
-      proof: "unit test: test/the-first-ratified-skill-reaches-implement-workers.test.ts"
+      proof: "unit test: the reconstructed candidate s proceduralCandidateHash equals a4ce515f0f097a31 the proposal"
     - claim: "loadInjectableSkills over the repo's real .claude/skills directory finds the skill with appliesTo including 'implement', and selectSkillsForTask(..., 'implement', DEFAULT_KNOWLEDGE_BUDGET_CHARS) selects it — proving the file actually reaches a future implement worker's prompt through the merged W1-T3101 pathway, not merely that it exists on disk"
-      proof: "unit test: test/the-first-ratified-skill-reaches-implement-workers.test.ts"
+      proof: "unit test: loadInjectableSkills over the repo s real .claude skills directory"
     - claim: "selectSkillsForTask does NOT select this skill for a non-matching task class ('review') — the falsifier proving applies-to scoping is honored rather than the skill leaking into every task type"
-      proof: "unit test: test/the-first-ratified-skill-reaches-implement-workers.test.ts"
+      proof: "unit test: selectSkillsForTask does NOT select this skill for a non-matching"
     - claim: "the ratified content still passes scanSkillDraft against the worker's CURRENT allowlist (settings/worker.json) — re-verified at ratification time rather than trusted from the original staging-time scan"
-      proof: "unit test: test/the-first-ratified-skill-reaches-implement-workers.test.ts"
+      proof: "unit test: the ratified content still passes scanSkillDraft against the worker"
   note: |
     FIRST-EVER ratification through the skill-workshop pipeline (stage -> approve -> file -> select ->
     inject). The proposal's own "NOT reachable by a worker today" line refers ONLY to the runtime's
