@@ -1,0 +1,40 @@
+- id: W1-T4225
+  title: "W1-T3115's PRODUCTION reviewRunner TEST PASSES OR FAILS ON THE CHECKOUT'S GIT STATE, NOT ON THE CODE — it builds sweep effects without the reviewer-code freshness seam, so any local commit that touches reviewer code sends the real review down the fresh-tree path, which never sees the fake gh and resolves instead of rejecting: inject a fresh reading, as the sibling suite already does"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "session: 2026-09-23 backlog triage — flaky test found while gating W1-T4190..W1-T4192"
+  plan_refs: ["W1-T3115", "W1-T3618", "W1-T3723"]
+  files: [test/review-command-plan-filing-provenance.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 in a clean worktree of origin/main b5c2804:
+    - `test/review-command-plan-filing-provenance.test.ts`'s test "W1-T3115: buildSweepEffects's own PRODUCTION
+      reviewRunner default is actually reached and threads isPlanFiling into a real reviewCommand call" PASSES on
+      origin/main, and FAILS ("Missing expected rejection.") after a one-line no-op comment commit on src/run-task.ts.
+      Repeated twice each way, alternating: deterministic.
+    - The logged path on the failing run is `review.ran_from_fresh_tree` (code_sha = the local commit, origin_main_sha =
+      the fetched main, changed_paths 48, exit_code 1), then `sweep.post_review.done`. `buildReviewerCodeFreshnessGate`
+      (src/run-task.ts) sees the checkout's HEAD differ from fetched origin/main in reviewer code and re-runs the review
+      as a subprocess from a fresh worktree. That child never sees the test's fake `gh` shim, exits 1, and postReview
+      RESOLVES, so `assert.rejects` fails.
+    - The test calls `buildSweepEffects` without `reviewerCodeFreshnessImpl`, the W1-T3618 seam that exists for exactly
+      this, so the default reads the real checkout. test/build-sweep-effects-takes-one-deps-object.test.ts already
+      passes `reviewerCodeFreshnessImpl: () => ({ status: "fresh", ... })` for the same reason.
+    Who pays: every local run and every worker whose branch commits reviewer code. They see a red that CI does not show,
+    and nothing in the output points at the checkout.
+  design: |
+    (i) The test passes `reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha, originMainSha: codeSha,
+        advance: "none" })`, so the review it drives is the ordinary in-process one its title claims to reach.
+    (ii) No production code changes. The fresh-tree path keeps its own coverage in its own suites.
+  acceptance:
+    - claim: "the PRODUCTION reviewRunner test passes after a local commit that touches reviewer code"
+      proof: 'grep: reviewerCodeFreshnessImpl: () => ({ status: "fresh" in test/review-command-plan-filing-provenance.test.ts'
+  falsifier: |
+    Remove the injected freshness reading, commit a no-op comment to src/run-task.ts in a worktree, and the test fails
+    with "Missing expected rejection." Restore it and the test passes on both trees.

@@ -5,7 +5,9 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing: W1-T3771 carries the same origin and landed first (W1-T4190).
   attempts: 0
   origin: "ci-learning:5861:coverage-shard (3/4)"
   ci_learning_prs: [5861, 5907, 5911, 5911, 5926, 5927, 5938, 5941, 6002, 6006, 6007, 6029]
