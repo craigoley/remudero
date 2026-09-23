@@ -319,6 +319,10 @@ EOF_TR
   if [ "$tr_full" -gt 0 ] && [ -n "$tr_cwd" ] && [ -d "$tr_proc" ]; then
     for tr_f in $(grep -alF -e '--test' "$tr_proc"/[0-9]*/cmdline 2>/dev/null || true); do
       tr_pid_dir="${tr_f%/cmdline}"
+      # Only a process whose executable IS node: a shell whose command text merely names
+      # `node --test` (measured on the fleet: an ssh `bash -c` wrapper) is not a live run.
+      tr_argv0=""; IFS= read -r -d '' tr_argv0 < "$tr_f" 2>/dev/null || true
+      case "${tr_argv0##*/}" in node|nodejs) : ;; *) continue ;; esac
       tr_pcwd="$(readlink "$tr_pid_dir/cwd" 2>/dev/null || true)"
       case "$tr_pcwd/" in "$tr_cwd"/*) : ;; *) continue ;; esac
       tr_classify "$(tr '\0' ' ' < "$tr_f" 2>/dev/null || true)"

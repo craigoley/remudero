@@ -145,6 +145,20 @@ test("W1-T4106: a single-file test run is allowed alongside a live suite", () =>
   }
 });
 
+test("a shell whose command text merely names node --test is not a live run", () => {
+  // MEASURED on the fleet: an ssh `bash -c '... node --test ...'` wrapper was matched as a live run.
+  const f = fixture();
+  try {
+    liveProcess(f, 8181, ["bash", "-c", "cd src && node --test --import tsx test/*.test.ts"], f.worktree);
+    liveProcess(f, 8182, ["/usr/local/bin/node", "--test", "test/a.test.ts", "test/b.test.ts"], f.sibling);
+    assert.equal(run("node --import tsx --test", f.worktree, f.proc).status, 0, "a shell is not a node process");
+    liveProcess(f, 8183, ["/usr/local/bin/node", "--test", "test/a.test.ts", "test/b.test.ts"], f.worktree);
+    assert.equal(run("node --import tsx --test", f.worktree, f.proc).status, 2, "control: a real node run by full path is live");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4106: the parallel-suite refusal names the sequential preflight route", () => {
   const f = fixture();
   try {
