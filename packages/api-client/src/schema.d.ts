@@ -109,6 +109,33 @@ export interface components {
       source: "managed-repos";
       repos: (RepoDashboardEntry)[];
     };
+    /** W1-T4227 -- GET /v1/registry: the fleet as projects -> repos -> instances, read from the one registry (`.remudero/daemon-instances.yaml`, src/lib/instance-registry.ts). It carries names, repos and instance prefixes ONLY -- never a path, state dir, credential dir, image or token. `drift` is present only when the host's copy is readable and names a different instance set; `hostRegistry` says how that comparison went. */
+    RegistryResult: {
+      projects: (RegistryProject)[];
+      source: "repo";
+      generatedAt: string;
+      hostRegistry: "in_sync" | "drifted" | "unreadable" | "malformed";
+      drift?: RegistryDrift;
+    };
+    RegistryProject: {
+      /** The project id; an instance that names none belongs to "default". */
+      id: string;
+      repos: (RegistryRepo)[];
+    };
+    RegistryRepo: {
+      /** owner/name on GitHub. */
+      repo: string;
+      instances: (RegistryInstance)[];
+    };
+    RegistryInstance: {
+      name: string;
+      /** The `/v1/i/<name>` prefix the instance is reached under. */
+      prefix: string;
+    };
+    RegistryDrift: {
+      hostOnly: (string)[];
+      repoOnly: (string)[];
+    };
     /** W1-T163 -- one "since you last checked" row (src/lib/recap.ts): a single ledger event after the caller's per-token marker. */
     RecapEvent: {
       kind: "merged" | "blocked" | "escalated" | "question_answered" | "retro";
@@ -1068,6 +1095,16 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/registry": {
+    get: {
+      responses: {
+          "200": RegistryResult;
+          "401": Error;
+          "403": Error;
+          "503": Error;
         };
     };
   };

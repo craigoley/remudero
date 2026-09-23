@@ -5701,6 +5701,52 @@ trigger-scoped knowledge (file, symbol and error-signature matching, W1-T3081/W1
 bodies (W1-T4094); verified-procedure skill libraries à la Voyager/AWM (`mineProceduralCandidates`,
 W1-T2766); human approval before a durable write (a `learnings/` PR is the approval).
 
+## 4F. External scan (2026-09-23): popular agent skills — taken, refused, already held
+
+[research: agent-skills-scan-2026-09-23] Read at source: `mattpocock/skills` (c55ee46, MIT, 38 skills),
+`obra/superpowers` (5bf4e78, MIT, 15 skills) and `anthropics/skills` (34040c9, per-skill licences). The
+skills.sh leaderboard was blocked by the scan's proxy; its top installs by search snippet are frontend and
+framework guides (React, web design, Remotion), none of which applies to this Node harness.
+**THE LICENCE FINDING:** both community sets are MIT, which Apache-2.0 may absorb only with the MIT notice
+kept. Every row taken here is REWRITTEN against this repo's doctrine, so no text and no notice enters the
+tree; the sources are credited in `settings/macros.yaml` anyway.
+**THE SUPPLY-CHAIN FINDING:** a plugin or `skills.sh` install is a subscription — its author can change the
+instructions an operator session runs, with no review here. Rows in `settings/macros.yaml` are reviewed in a
+PR and byte-checked by `macro-skills:check`. Nothing is installed.
+**TAKEN AS OPERATOR MACROS — WRITTEN AND TESTED, HELD BEHIND W1-T4332:** `/grill` (Pocock `grilling`: rounds
+over the decision
+frontier, a recommended answer per question, facts looked up not asked; added here: a falsifier per
+recommendation, OBSERVED/INFERRED labels, rulings that stand, and a hand-off to `rmd plan --mode=create`) ·
+`/diagnose` (Pocock `diagnosing-bugs` and superpowers `systematic-debugging`: a red-capable loop before any
+theory; added here: git-log-first, per-step counts, the two-patch stop, undo-the-fix proof) · `/handoff`
+(Pocock `handoff`: state at head with OBSERVED labels, settled rulings, a pending ledger, unreserved ids named
+as floors, and a paste-ready RECON/IMPLEMENT prompt) · `/wait-what` (Pocock `wait-what`, re-based on ISO
+24495-1 plain language). All four are `disable-model-invocation`, so no worker and no model-chosen turn
+loads them. They pass `macro-skills:check` and their own boundary test, but `prompt-surface-gate` refuses
+any data edit to `settings/macros.yaml` without a judge golden verdict the rows cannot affect, so they land
+as a ready patch after W1-T4332.
+**TAKEN AS OUR OWN BUILD — THREE SHARDS, FILED 2026-09-23:** **W1-T4330** the diagnose rung's report must
+carry
+a reproduction command (or an explicit NONE) and a falsifier — Pocock's phase-1 criterion applied to the rung
+that already runs after two strikes · **W1-T4331** a macro citing a missing `rmd` verb is refused, the way a
+missing headline already is · **W1-T4332** `prompt-surface-gate` stops treating operator-only macro rows as
+a worker prompt surface, and refuses again the day a row could reach a model unasked.
+**ALREADY HELD:** triage (`rmd triage` grounds, researches, then grills intake) · to-spec, to-tickets and
+wayfinder (`rmd plan --mode=create|clarify|expand`) · retro (`rmd retro`, plus the gardener framework and
+`mineProceduralCandidates`) · verification-before-completion (the `ci-state-forensics` and `proof-preflight`
+procedures, and the CLAUDE.md evidence rules) · git-guardrails (`hooks/deny-floor.sh` on both lanes) ·
+skill-creator and the document skills (provided by the Claude Code harness itself).
+**REFUSED, WITH THE REASON:** a worker-injected (`applies-to:`) copy of any of these — it spends the shared
+knowledge budget on every matching prompt, and W1-T3379's report needs ten selected runs and ten controls
+before it can say whether a procedure helps; `type: diagnose` has 8 shards of 1938, so a diagnose-class
+procedure would stay unmeasurable · superpowers `writing-skills` pressure-testing as a gate on the approved
+tree — its per-PR model cost buys little while the tree holds two procedures; revisit when a third is
+proposed · `domain-modeling` / CONTEXT.md glossaries — DECISIONS.md and the doctrine index already hold the
+vocabulary · `subagent-driven-development`, `executing-plans` and `using-git-worktrees` — the daemon,
+`run-task`
+and worktree isolation are this repo's core product, not a skill to borrow · frontend, art and brand skills
+— no surface here uses them.
+
 ## 5. Principles engine
 
 Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet
@@ -7240,3 +7286,4 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
 - W1-T3076 (a retirement-carrying dependency is excluded from `unmetDependencies` so it can never permanently block a dependent, and `planHealthSweep` stops re-linting and re-proposing corrective work against retired shards — operationalizing the operator's 2026-09-09 chosen-bound ruling "(a) first, then (c); NOT (b)" before any closure-rate governor is built) — RATIFIED 2026-09-09 -> W1-T3397/W1-T3399.
 - verify-human:W1-T370 (plan) — RATIFIED 2026-09-10 -> W1-T3392/W1-T3393.
 - W1-T3075 (the dispatch frontier's id-order starves new value: after explicit priority, use measured expected value by deterministic task class; dependency fan-out breaks equal or unmeasured values) — RATIFIED 2026-09-11 -> W1-T3412/W1-T3416. The operator selected the prepared `(b) then (c)` recommendation. The value term is gated on a complete union, W1-T3074's population floor, and two-cycle stability; a failed gate retains priority/scope/id order rather than inventing a rate. W1-T3416 removes the stale `NOT YET RULED` record so this is the sole operative statement.
+- P44 (proof-debt: W1-T3570 grep-path-absent criteria repair) — RATIFIED 2026-09-15 -> W1-T4290.

@@ -77,7 +77,20 @@ export interface Config {
    *  change: this is the one field that makes "configuration, never a hardcoded list" true for
    *  the survey's default. Absent ⇒ the CLI's own three-repository fallback (run-task.ts). */
   fleetRepos?: string[];
-  serve?: { host?: string; port?: number; identityCapability?: string; trustedProxy?: string };
+  serve?: {
+    host?: string;
+    port?: number;
+    identityCapability?: string;
+    trustedProxy?: string;
+    /** W1-T4244: the console operator's Clerk session identity. Absent: the provider is off. */
+    operatorIdentity?: {
+      issuer: string;
+      jwksUrl?: string;
+      allowedOrigins: string[];
+      operatorUserIds: string[];
+      stepUpWindowMinutes?: number;
+    };
+  };
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
   workerProviders?: {
@@ -286,6 +299,16 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
       configField("port", "number", true, undefined, "config.json", "Console bind port.", numberShape),
       configField("identityCapability", "string", true, undefined, "config.json", "Tailnet identity capability.", stringShape),
       configField("trustedProxy", "string", true, undefined, "config.json", "Trusted identity proxy kind.", stringShape),
+      configField("operatorIdentity", "object", true, undefined, "config.json", "Console operator Clerk session identity (W1-T4244).", {
+        kind: "object",
+        fields: [
+          configField("issuer", "string", false, undefined, "config.json", "Clerk issuer, matched exactly against iss.", stringShape),
+          configField("jwksUrl", "string", true, "<issuer>/.well-known/jwks.json", "config.json", "Clerk public key set URL.", stringShape),
+          configField("allowedOrigins", "string[]", false, undefined, "config.json", "Console origins accepted in azp.", stringArrayShape),
+          configField("operatorUserIds", "string[]", false, undefined, "config.json", "Clerk user ids allowed to act.", stringArrayShape),
+          configField("stepUpWindowMinutes", "number", true, 10, "config.json", "Minutes a verified factor keeps high tier.", numberShape),
+        ],
+      }),
     ],
   }),
   configField("relay", "object", true, undefined, "config.json", "Outbound relay connection settings.", {

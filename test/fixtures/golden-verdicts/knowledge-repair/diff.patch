@@ -1,0 +1,25 @@
+diff --git a/learnings/failures.yaml b/learnings/failures.yaml
+index 1111111..2222222 100644
+--- a/learnings/failures.yaml
++++ b/learnings/failures.yaml
+@@
+ - id: a-killed-run-prints-no-summary
+   subsystem: testing
+   lifecycle: active
+   operator_impact: true
+-  files: [test]
++  files: ["test/setup/**", scripts/test-with-retry.mjs]
+   fact: >-
+     A killed test run prints no `# tests` summary; a count read from it is not a result.
+diff --git a/test/a-learning-is-reachable.test.ts b/test/a-learning-is-reachable.test.ts
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/test/a-learning-is-reachable.test.ts
+@@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++test("every active learning is reachable by some tracked path", () => {
++  assert.deepEqual(["test/setup/tmp-hygiene.ts"].filter((p) => /^test\/setup\/.*$/.test(p)).length, 1);
++});
