@@ -82,6 +82,7 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
+import { inboxOwner } from "./inbox-owner.js";
 import {
   classifyProposal,
   declinedReasonInLedger,
@@ -1291,6 +1292,13 @@ export interface InboxNotReadyItem {
   reasons: PredicateFailure[];
 }
 
+/** W1-T4086: one fleet-owned proposal in `GET /v1/inbox`'s `fleet` list, with the lane it sits in. */
+export interface InboxFleetItem {
+  proposalId: string;
+  summary: string;
+  lane: "ready" | "drafting" | "notReady" | "declined";
+}
+
 /** The drafted fragment's task ids + titles. A ready fragment already passed classifyProposal's
  *  own parse+lint checks, so this re-parse is expected to always succeed — the catch is
  *  defense-in-depth, exported so that branch stays directly unit-testable. */
@@ -1421,7 +1429,23 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
           return fresh.length === current.length ? null : fresh;
         });
       }
-      sendJson(res, 200, { ready, drafting, notReady, declined });
+      // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
+      // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
+      // lanes stay unchanged for one release so the console can move over without a break.
+      const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+      const needsYou = {
+        ready: ready.filter(isOperator),
+        drafting: drafting.filter(isOperator),
+        notReady: notReady.filter(isOperator),
+        declined: declined.filter(isOperator),
+      };
+      const fleet: InboxFleetItem[] = [
+        ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "ready" as const })),
+        ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "drafting" as const })),
+        ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "notReady" as const })),
+        ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "declined" as const })),
+      ].filter((i) => !isOperator(i));
+      sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet });
     },
   };
 }

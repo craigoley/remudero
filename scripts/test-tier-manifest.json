@@ -1592,6 +1592,7 @@
     "test/the-hook-spawns-no-test-suite.test.ts": 0,
     "test/the-hung-worker-check-counts-real-processes.test.ts": 0,
     "test/the-implement-lane-s-model-lives-on-the-run-not-the-verdict-row.test.ts": 1058,
+    "test/the-inbox-holds-only-what-needs-a-human.test.ts": 0,
     "test/the-interactive-lane-pays-the-whole-file.test.ts": 0,
     "test/the-judge-sees-the-evidence-the-shard-carries.test.ts": 0,
     "test/the-knowledge-budget-measures-what-a-task-pays.test.ts": 0,
