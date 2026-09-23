@@ -24,7 +24,7 @@ import {
   registryDrift,
   type InstanceRegistryErrorCode,
 } from "../src/lib/instance-registry.js";
-import { buildRegistryRoute, type RegistryRouteDeps } from "../src/lib/serve.js";
+import { buildRegistryRoute, type RegistryRouteInput } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -87,7 +87,7 @@ async function invoke(route: Route): Promise<{ status: number; text: string; bod
   return { status, text, body: JSON.parse(text) as Record<string, unknown> };
 }
 
-function routeOver(dir: string, repoText: string | undefined, hostText: string | undefined, over: Partial<RegistryRouteDeps> = {}): Route {
+function routeOver(dir: string, repoText: string | undefined, hostText: string | undefined, over: Partial<RegistryRouteInput> = {}): Route {
   const repoRegistryPath = join(dir, "repo-registry.yaml");
   const hostRegistryPath = join(dir, "host-registry.yaml");
   if (repoText !== undefined) writeFileSync(repoRegistryPath, repoText);
