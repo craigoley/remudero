@@ -69,8 +69,9 @@ test("W1-T2445: closed_unmerged reaches the ledger as a reason and not a tally",
   assert.deepEqual(result.row?.held_branches, ["needs-review"]);
 });
 
-test("W1-T2445: reporting the names does not add a deletion path", () => {
+test("W1-T2445: the reaper reports held names without adding a deletion path", () => {
   const result = runReaper();
+  assert.match(result.output, /held branches:\s+needs-review — .* \[no_pr_ever\]/);
   const destructive = result.calls.filter((call) =>
     call.includes("--delete") || call.includes("refs/heads/") && call.includes("push") || call.includes("-D") || call.includes("--force"),
   );
