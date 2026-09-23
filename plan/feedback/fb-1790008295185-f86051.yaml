@@ -13,9 +13,9 @@ raw: "Inbox foundations: expose a bounded, authenticated thread-read contract
   is the dependency for the private console email-like inbox."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6674
 summary: null
 expansion: null
 submission_key: null

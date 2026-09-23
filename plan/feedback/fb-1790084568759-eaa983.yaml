@@ -34,9 +34,9 @@ raw: "THE TASK-ID EXISTENCE GATE DOES NOT SCAN plan/, SO A PLAN RECORD MAY CITE
   cheap shape, and the script already takes --dir."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

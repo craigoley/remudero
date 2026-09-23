@@ -10,9 +10,9 @@ raw: "Console daemon manual review fails when its image runs from /app outside a
   enough to post a verdict."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

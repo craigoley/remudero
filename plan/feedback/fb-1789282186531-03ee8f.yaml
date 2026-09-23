@@ -15,9 +15,9 @@ attachments:
   - https://github.com/craigoley/remudero-site
   - https://github.com/craigoley/remudero-site/pull/8
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5423
 summary: null
 expansion: null
 submission_key: null

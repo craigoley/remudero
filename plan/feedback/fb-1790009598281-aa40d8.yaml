@@ -8,9 +8,9 @@ raw: "Operator decision supplement for fb-1790008295185-f86051: Compose starts a
   conversation model."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6674
 summary: null
 expansion: null
 submission_key: null

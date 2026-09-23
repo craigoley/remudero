@@ -17,9 +17,9 @@ raw: "CI REPAIR WORKTREE RECOVERY: PR 5437 is blocked after the daemon emitted
   replacement repair reaches a new head or records a bounded refusal reason."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6208
 summary: null
 expansion: null
 submission_key: null

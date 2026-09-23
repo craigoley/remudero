@@ -15,9 +15,9 @@ attachments:
   - https://github.com/craigoley/remudero-site/pull/8
   - https://vercel.com/docs/deployments/troubleshoot-project-collaboration
 origin: issue
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

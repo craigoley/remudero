@@ -15,7 +15,7 @@ raw: "Regression discovered in merged W1-T3532 lifecycle PR #5423: it deletes
   fresh review emitted only advisory scope violations and auto-armed merge."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null

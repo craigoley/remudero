@@ -56,9 +56,9 @@ raw: "THE REVIEWER RECOVERS A TASK ID FROM THE RUN BRANCH AND THE CI GATE DOES
   run-branch head and comparing the criteria counts."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

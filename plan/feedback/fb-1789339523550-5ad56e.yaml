@@ -23,9 +23,9 @@ raw: "GRACEFUL RECYCLE MUST NOT DEADLOCK ACROSS AN AUTOMATIC CONTAINER RESTART.
   Docker restart, manual lock deletion, or timeout."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

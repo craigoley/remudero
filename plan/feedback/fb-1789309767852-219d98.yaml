@@ -9,9 +9,9 @@ raw: "Worktree reproducibility: linkWorktreeNodeModules symlinked a worktree cut
   checkout input is detected and execution is refused or safely repaired."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

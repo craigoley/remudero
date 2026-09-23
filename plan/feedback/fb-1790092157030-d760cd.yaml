@@ -37,7 +37,7 @@ raw: "NEGATIVE RESULT, RECORDED SO IT IS NOT RE-FILED: THE POST-REVIEW STALL
   only."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null

@@ -12,9 +12,9 @@ raw: "Azure runtime evidence: rmd inbox and rmd triage cut worktrees at
   synchronized canonical root."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

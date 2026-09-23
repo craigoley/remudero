@@ -131,9 +131,9 @@ raw: >-
   record was written, not only after.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6617
 summary: null
 expansion: null
 submission_key: null
