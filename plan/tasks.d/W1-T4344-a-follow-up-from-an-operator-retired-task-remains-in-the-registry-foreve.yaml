@@ -22,11 +22,11 @@
     projectPlan pass; do not add a per-proposal GitHub read.
   acceptance:
     - claim: "the exact follow-up shape sourced from W1-T2729 is removed when its task record carries retirement: withdrawn, and its outcome names withdrawal rather than claiming a merge"
-      proof: "unit test: test/routed-followups-retire.test.ts"
+      proof: "unit test: the exact follow-up shape sourced from W1-T2729 is removed"
     - claim: "a blocked task with no retirement metadata remains in the registry, so neither generic blocked state nor a closed-unmerged PR authorizes retirement"
-      proof: "unit test: test/routed-followups-retire.test.ts"
+      proof: "unit test: a blocked task with no retirement metadata remains in"
     - claim: "an unreadable plan-health projection retires nothing and does not write the registry"
-      proof: "unit test: test/routed-followups-retire.test.ts"
+      proof: "unit test: an unreadable plan-health projection retires nothing and does not"
     - claim: "the production caller derives merged and explicit-retirement referents from its one completed plan-health projection, never a per-follow-up GitHub read"
       proof: "unit test: test/the-followup-retirement-arm-has-a-call-site.test.ts"
   origin: architect
