@@ -30669,7 +30669,7 @@ export async function daemonCommand(
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];
           const exitCode = request.action === "fix"
-            ? await (deps.fixCommand ?? fixCommand)(args)
+            ? await (deps.fixCommand ?? fixCommand)([...args, "--requested"])
             : await (deps.reviewCommand ?? reviewCommand)(String(request.prNumber), ["--repo", target.repo]);
           return exitCode === 0
             ? { outcome: "completed", detail: `${request.action} command accepted PR #${request.prNumber}` }
@@ -37260,6 +37260,16 @@ export interface FixDeps {
  *   - anything else (no block evidence: mergeable,
  *     stale, contradictory-failure)                   -> refused, naming the reason.
  */
+/**
+ * W1-T4077 — THE CONSOLE'S "FIX NOW". The operator asking for a fix IS the decision to try again, so the strike
+ * count does not turn the request into an escalation: the PR routes as a fresh attempt. Nothing else is relaxed —
+ * {@link routeFix} still refuses a merged or closed PR and a PR with no failure evidence, and the dispatched round
+ * keeps the fix rung's own branch claim and cost ceiling. The strike ledger itself is not touched.
+ */
+export function requestedFixView(pr: OpenPrView): OpenPrView {
+  return { ...pr, priorStrikes: 0 };
+}
+
 export async function routeFix(
   prState: string | undefined,
   pr: OpenPrView,
@@ -37353,7 +37363,9 @@ export async function fixCommand(
   deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix } = {},
 ): Promise<number> {
   const prArg = rest[0];
-  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], []);
+  // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
+  // again, so the strike count does not turn it into an escalation; every other refusal still applies.
+  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], ["--requested"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -37370,6 +37382,7 @@ export async function fixCommand(
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
   const runId = `FIX-${Date.now()}`;
+  const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
 
@@ -37454,9 +37467,20 @@ export async function fixCommand(
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
   });
-  const { outcome, reason } = await (deps.route ?? routeFix)(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
+  const { outcome, reason } = await (deps.route ?? routeFix)(
+    raw.state,
+    operatorRequested ? requestedFixView(pr) : pr,
+    effects,
+    DEFAULT_SWEEP_POLICY,
+  );
 
-  log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, { pr_number: prNumber, task_id: taskId, outcome, reason });
+  log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, {
+    pr_number: prNumber,
+    task_id: taskId,
+    outcome,
+    reason,
+    ...(operatorRequested ? { operator_requested: true } : {}),
+  });
   if (outcome === "fixed") {
     console.log(`### rmd fix — PR #${prNumber} (${taskId}): ${reason} — dispatched the fix rung.`);
     return 0;

@@ -291,7 +291,7 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
 const TAILNET_CAP = "remudero:console";
 
 /** HIGH-tier routes also need the server-issued second factor — confirm, then replay with it. */
-const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run", "/v1/pr-actions"]);
+const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"]);
 
 async function post(
   base: string,

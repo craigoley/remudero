@@ -519,6 +519,8 @@ export interface PrActionRequest {
   prNumber: number;
   origin: string;
   requestedAt: string;
+  /** W1-T4077: the display name the console reports for who clicked — audit only, never an authorisation input. */
+  operator?: string;
 }
 
 const PR_ACTION_PREFIX = "PR_ACTION_REQUESTED-";
@@ -542,8 +544,14 @@ export function prActionFilePath(root: string, action: PrActionName, prNumber: n
  * Record one idempotent PR action request. Re-requesting the exact action for the exact PR updates
  * its observed request time but cannot create a second concurrent daemon action.
  */
-export function requestPrAction(root: string, action: PrActionName, prNumber: number, origin: string): PrActionRequest {
-  const request: PrActionRequest = { action, prNumber, origin, requestedAt: systemClock.iso() };
+export function requestPrAction(
+  root: string,
+  action: PrActionName,
+  prNumber: number,
+  origin: string,
+  operator?: string,
+): PrActionRequest {
+  const request: PrActionRequest = { action, prNumber, origin, requestedAt: systemClock.iso(), ...(operator ? { operator } : {}) };
   const path = prActionFilePath(root, action, prNumber);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(request, null, 2));
@@ -569,13 +577,30 @@ export function pendingPrActions(root: string): PrActionRequest[] {
     try {
       const value = JSON.parse(readFileSync(join(dir, name), "utf8"));
       if (isPrActionName(value?.action) && isSafePrNumber(value?.prNumber) && typeof value?.origin === "string" && typeof value?.requestedAt === "string") {
-        requests.push({ action: value.action, prNumber: value.prNumber, origin: value.origin, requestedAt: value.requestedAt });
+        requests.push({
+          action: value.action,
+          prNumber: value.prNumber,
+          origin: value.origin,
+          requestedAt: value.requestedAt,
+          ...(typeof value?.operator === "string" ? { operator: value.operator } : {}),
+        });
       }
     } catch {
       // A corrupt state marker is not actionable. Leave it in place for forensic inspection.
     }
   }
   return requests.sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
+}
+
+/** W1-T4077: the operator's off switch for one console PR action — a state marker, the same instant, no-PR
+ *  pattern as PAUSE. Both actions are on unless their marker exists. */
+export function prActionSwitchOffPath(root: string, action: PrActionName): string {
+  if (!isPrActionName(action)) throw new Error(`prActionSwitchOffPath: unsafe action ${JSON.stringify(action)}`);
+  return join(root, "state", `CONSOLE_PR_ACTION_OFF-${action}`);
+}
+
+export function isPrActionSwitchedOff(root: string, action: PrActionName): boolean {
+  return existsSync(prActionSwitchOffPath(root, action));
 }
 
 /** Clear the one marker the daemon just reached a terminal outcome for. */
