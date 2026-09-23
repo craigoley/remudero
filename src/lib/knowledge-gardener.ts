@@ -1,11 +1,28 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
-import { systemClock, type Clock } from "./clock.js";
+import { systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildKnowledgeInventory, danglingWhyPointers, inventoryTotals, type KnowledgeItem } from "./knowledge-inventory.js";
-import { learningValue, readLearningUsage, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
+import {
+  gardenStatePath,
+  initialGardenState,
+  judgeGardenPending,
+  planGarden,
+  readGardenState,
+  runGarden,
+  startGarden,
+  type GardenCheckout,
+  type GardenerDeps,
+  type GardenPlan as GenericPlan,
+  type GardenSpec,
+  type GardenState,
+  type Outcome,
+  type PendingVerdict,
+  type PrState,
+} from "./gardener.js";
+import { learningValue, readLearningUsage, sampleBeta, type LearningUsage } from "./knowledge-value.js";
 import { lintMemoryDir, textContainment } from "./memory-lint.js";
 
 /**
@@ -26,8 +43,11 @@ import { lintMemoryDir, textContainment } from "./memory-lint.js";
  * beyond one standard error credits or debits it. No new PR opens while one awaits its outcome.
  *
  * SELF-PACED: a pass runs only when the knowledge or its usage changed. Each class has an off switch,
- * `state/KNOWLEDGE_OFF-<class>`.
+ * `state/KNOWLEDGE_OFF-<class>`. The loop itself is the general gardener (gardener.ts, W1-T4110); this
+ * module is its knowledge spec.
  */
+
+export { gardenPrState, type GardenerDeps, type PendingVerdict, type PrState } from "./gardener.js";
 
 export type GardenActionClass = "merge" | "retire" | "refresh";
 export const GARDEN_ACTION_CLASSES: readonly GardenActionClass[] = ["merge", "retire", "refresh"];
@@ -46,36 +66,38 @@ export interface UsageTotals {
   used: number;
 }
 
+/** The knowledge gardener's state, with each class judged on learnings offered and used. */
 export interface GardenerState {
-  classes: Record<GardenActionClass, { alpha: number; beta: number }>;
+  classes: GardenState<GardenActionClass>["classes"];
   lastPass?: { fingerprint: string };
-  /** The cheap modification-time fingerprint of the last look, so an idle tick reads nothing more. */
   lastCheap?: string;
-  /** The one action class whose PR is awaiting its outcome. While it waits, no new PR is opened. */
   pending?: { prUrl: string; actionClass: GardenActionClass; baseline: UsageTotals; atMerge?: UsageTotals };
 }
 
-export type PrState = "open" | "merged" | "closed" | "unknown";
+const toOutcome = (u: UsageTotals): Outcome => ({ trials: u.offered, successes: u.used });
+const fromOutcome = (o: Outcome): UsageTotals => ({ offered: o.trials, used: o.successes });
+
+function toGeneric(state: GardenerState): GardenState<GardenActionClass> {
+  const p = state.pending;
+  return { ...state, pending: p && { ...p, baseline: toOutcome(p.baseline), atMerge: p.atMerge && toOutcome(p.atMerge) } };
+}
+
+function fromGeneric(state: GardenState<GardenActionClass>): GardenerState {
+  const p = state.pending;
+  return { ...state, pending: p && { ...p, baseline: fromOutcome(p.baseline), atMerge: p.atMerge && fromOutcome(p.atMerge) } };
+}
 
 /** A new class starts optimistic (Beta(3, 1)): it acts most passes until its outcomes say otherwise. */
 export function initialGardenerState(): GardenerState {
-  return { classes: { merge: { alpha: 3, beta: 1 }, retire: { alpha: 3, beta: 1 }, refresh: { alpha: 3, beta: 1 } } };
+  return fromGeneric(initialGardenState(GARDEN_ACTION_CLASSES));
 }
 
 export function gardenerStatePath(stateDir: string): string {
-  return `${stateDir}/knowledge-gardener.json`;
+  return gardenStatePath(stateDir, "knowledge");
 }
 
 export function readGardenerState(path: string): GardenerState {
-  if (!existsSync(path)) return initialGardenerState();
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as GardenerState;
-    return parsed && parsed.classes ? { ...initialGardenerState(), ...parsed } : initialGardenerState();
-  } catch {
-    // deliberate: an unreadable state restarts every class at its optimistic prior; nothing is lost
-    // that the next passes cannot re-learn.
-    return initialGardenerState();
-  }
+  return fromGeneric(readGardenState(path, GARDEN_ACTION_CLASSES));
 }
 
 /** Share of a fact's phrasing that must repeat another active fact for the two to be merged. A
@@ -130,40 +152,13 @@ export function usageTotals(usage: LearningUsage): UsageTotals {
   return { offered: counts.reduce((s, c) => s + c.offered, 0), used: counts.reduce((s, c) => s + c.used, 0) };
 }
 
-export type PendingVerdict = "none" | "waiting" | "credit" | "debit";
-
-/**
- * Judge the pending action class, if any. A closed (unmerged) PR is a debit. After the merge, the
- * used share of learnings offered SINCE the merge is compared with the share before the pass; the
- * class is credited or debited only once the difference exceeds one standard error of that share
- * (so noise never counts either way), and otherwise keeps waiting for more evidence.
- */
+/** Judge the pending class on the used share of learnings offered (gardener.ts's judgeGardenPending). */
 export function judgePending(state: GardenerState, now: UsageTotals, prState: PrState): { state: GardenerState; verdict: PendingVerdict } {
-  const pending = state.pending;
-  if (!pending) return { state, verdict: "none" };
-  const settle = (credit: boolean): { state: GardenerState; verdict: PendingVerdict } => {
-    const c = state.classes[pending.actionClass];
-    const classes = { ...state.classes, [pending.actionClass]: credit ? { ...c, alpha: c.alpha + 1 } : { ...c, beta: c.beta + 1 } };
-    return { state: { ...state, classes, pending: undefined }, verdict: credit ? "credit" : "debit" };
-  };
-  if (prState === "closed") return settle(false);
-  if (prState !== "merged") return { state, verdict: "waiting" };
-  if (!pending.atMerge) return { state: { ...state, pending: { ...pending, atMerge: now } }, verdict: "waiting" };
-  const offered = now.offered - pending.atMerge.offered;
-  if (offered <= 0) return { state, verdict: "waiting" };
-  const after = (now.used - pending.atMerge.used) / offered;
-  const before = pending.baseline.offered > 0 ? pending.baseline.used / pending.baseline.offered : 0.5;
-  const se = Math.sqrt(Math.max(before * (1 - before), 1 / (4 * offered)) / offered);
-  if (after - before > se) return settle(true);
-  if (before - after > se) return settle(false);
-  return { state, verdict: "waiting" };
+  const judged = judgeGardenPending(toGeneric(state), toOutcome(now), prState);
+  return { state: fromGeneric(judged.state), verdict: judged.verdict };
 }
 
-export interface GardenPlan {
-  actions: GardenAction[];
-  /** Which classes this pass's draw let act. */
-  acting: GardenActionClass[];
-}
+export type GardenPlan = GenericPlan<GardenActionClass, GardenAction>;
 
 export function planGardenPass(opts: {
   items: KnowledgeItem[];
@@ -172,13 +167,7 @@ export function planGardenPass(opts: {
   rng: () => number;
   switchedOff?: (c: GardenActionClass) => boolean;
 }): GardenPlan {
-  // Every class draws from its record; of those that drew at least even odds, the ONE with the highest
-  // draw and something to do acts this pass, so each outcome is credited to exactly one class.
-  const draws = GARDEN_ACTION_CLASSES.map((c) => ({ c, draw: opts.switchedOff?.(c) ? -1 : sampleBeta({ ...opts.state.classes[c], mean: 0 }, opts.rng) }));
-  const eligible = draws.filter((d) => d.draw >= 0.5).sort((a, b) => b.draw - a.draw).map((d) => d.c);
-  const all = candidateActions(opts);
-  const chosen = eligible.find((c) => all.some((a) => a.class === c));
-  return { actions: chosen ? all.filter((a) => a.class === chosen) : [], acting: chosen ? [chosen] : [] };
+  return planGarden({ classes: GARDEN_ACTION_CLASSES, state: toGeneric(opts.state), rng: opts.rng, switchedOff: opts.switchedOff, candidates: () => candidateActions(opts) });
 }
 
 function candidateActions(opts: { items: KnowledgeItem[]; usage: LearningUsage; rng: () => number }): GardenAction[] {
@@ -331,41 +320,10 @@ export function appendGardenLog(root: string, at: Date, actions: GardenAction[],
   return heading;
 }
 
-/** Where a landed PR stands, read over REST with the given fetcher. */
-export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): PrState {
-  const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
-  if (!n) return "unknown";
-  try {
-    const pr = fetch(["api", `repos/${owner}/${repo}/pulls/${n}`]) as { merged?: boolean; state?: string };
-    return pr.merged ? "merged" : pr.state === "closed" ? "closed" : "open";
-  } catch {
-    // deliberate: an unreadable PR is "unknown", which keeps the pending class waiting, never judged on a guess.
-    return "unknown";
-  }
-}
-
 /** A place to make the pass's changes and land them as one PR. */
-export interface GardenWorkspace {
-  /** The checkout the changes are made in (a fresh worktree of origin/main). */
-  root: string;
+export interface GardenWorkspace extends GardenCheckout {
   /** Re-run learnings assertions in the workspace (the REFRESH action); returns changed paths. */
   refreshAssertions: () => string[];
-  /** Commit the given paths and open the PR; returns its URL, or undefined when nothing landed. */
-  land: (opts: { paths: string[]; title: string; body: string }) => string | undefined;
-  dispose: () => void;
-}
-
-export interface GardenerDeps {
-  stateDir: string;
-  /** Where to read the current corpus from for planning (the daemon's own checkout). */
-  repoRoot: string;
-  memoryDirs?: string[];
-  openWorkspace: () => GardenWorkspace;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-  /** Where a landed PR stands, so its action class is judged by the PR's outcome. */
-  prState?: (prUrl: string) => PrState;
-  seed?: number;
-  clock?: Clock;
 }
 
 function prBody(actions: GardenAction[], located: Record<string, string>, heading: string): string {
@@ -383,76 +341,49 @@ function prBody(actions: GardenAction[], located: Record<string, string>, headin
   return lines.join("\n");
 }
 
-/** One gardener pass. Returns what it did. */
-export function runGardenPass(deps: GardenerDeps): { ran: boolean; plan?: GardenPlan; prUrl?: string; scorecard?: KnowledgeScorecard } {
-  const statePath = gardenerStatePath(deps.stateDir);
-  const cheap = cheapFingerprint(deps.repoRoot, deps.stateDir);
-  if (readGardenerState(statePath).lastCheap === cheap) return { ran: false };
-  const items = buildKnowledgeInventory(deps.repoRoot, { memoryDirs: deps.memoryDirs });
-  const usage = readLearningUsage(`${deps.stateDir}/learnings-usage.json`);
-  const fingerprint = gardenFingerprint(items, usage);
-  let state = readGardenerState(statePath);
-  if (state.lastPass?.fingerprint === fingerprint) {
-    writeAtomic(statePath, JSON.stringify({ ...state, lastCheap: cheap }, null, 2) + "\n");
-    return { ran: false };
-  }
-  const totals = usageTotals(usage);
-  const judged = judgePending(state, totals, state.pending ? (deps.prState?.(state.pending.prUrl) ?? "unknown") : "unknown");
-  state = judged.state;
-  if (judged.verdict === "credit" || judged.verdict === "debit") deps.log("knowledge.gardener_judged", { verdict: judged.verdict, classes: state.classes });
+interface KnowledgeInventory {
+  items: KnowledgeItem[];
+  usage: LearningUsage;
+}
+
+/** The knowledge base as a gardener spec: its corpus, its evidence and its actions. */
+export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): GardenSpec<GardenActionClass, KnowledgeInventory, GardenAction, GardenWorkspace> {
   const clock = deps.clock ?? systemClock;
-  const rng = seededRandom(deps.seed ?? clock.now());
-  const plan = state.pending ? { actions: [], acting: [] } : planGardenPass({
-    items,
-    usage,
-    state,
-    rng,
-    switchedOff: (c) => existsSync(join(deps.stateDir, `KNOWLEDGE_OFF-${c}`)),
-  });
-  const scorecard = buildScorecard({ items, usage, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs });
-  let prUrl: string | undefined;
-  if (plan.actions.length > 0) {
-    const ws = deps.openWorkspace();
-    try {
+  return {
+    name: "knowledge",
+    classes: GARDEN_ACTION_CLASSES,
+    cheapFingerprint: () => cheapFingerprint(deps.repoRoot, deps.stateDir),
+    inventory: () => ({
+      items: buildKnowledgeInventory(deps.repoRoot, { memoryDirs: deps.memoryDirs }),
+      usage: readLearningUsage(`${deps.stateDir}/learnings-usage.json`),
+    }),
+    fingerprint: (inv) => gardenFingerprint(inv.items, inv.usage),
+    // Every class here is judged on the same evidence: whether workers use the learnings they are offered.
+    metric: (inv) => toOutcome(usageTotals(inv.usage)),
+    candidates: (inv, rng) => candidateActions({ ...inv, rng }),
+    scorecard: (inv, plan) => ({ ...buildScorecard({ ...inv, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs }) }),
+    apply: (ws, plan, card) => {
       const applied = applyLearningActions(resolveRepoLayout(ws.root).learningsDir, plan.actions);
       const refreshed = plan.acting.includes("refresh") ? ws.refreshAssertions() : [];
       const changed = [...new Set([...applied.paths, ...refreshed])];
-      if (changed.length > 0) {
-        const heading = appendGardenLog(ws.root, clock.date(), plan.actions, scorecard);
-        const paths = [...changed, GARDEN_LOG].sort();
-        prUrl = ws.land({
-          paths,
-          title: `chore(knowledge): the gardener folds and retires ${plan.actions.filter((a) => a.class !== "refresh").length} learnings`,
-          body: prBody(plan.actions, applied.located, heading),
-        });
-      }
-    } finally {
-      ws.dispose();
-    }
-  }
-  deps.log("knowledge.scorecard", { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null });
-  // Only a class whose changes actually landed as a PR is judged, and only by that PR's outcome.
-  const pending = prUrl && plan.acting[0] ? { prUrl, actionClass: plan.acting[0], baseline: totals } : state.pending;
-  writeAtomic(statePath, JSON.stringify({ ...state, pending, lastCheap: cheap, lastPass: { fingerprint } }, null, 2) + "\n");
-  return { ran: true, plan, prUrl, scorecard };
+      if (changed.length === 0) return undefined;
+      const heading = appendGardenLog(ws.root, clock.date(), plan.actions, card as unknown as KnowledgeScorecard);
+      return {
+        paths: [...changed, GARDEN_LOG].sort(),
+        title: `chore(knowledge): the gardener folds and retires ${plan.actions.filter((a) => a.class !== "refresh").length} learnings`,
+        body: prBody(plan.actions, applied.located, heading),
+      };
+    },
+  };
 }
 
-/** Run a pass on its own timer beside the main loop, never two at once. */
-export function startKnowledgeGardener(deps: GardenerDeps, intervalMs: number): { stop: () => void } {
-  let running = false;
-  const tick = () => {
-    if (running) return;
-    running = true;
-    try {
-      runGardenPass(deps);
-    } catch (e) {
-      deps.log("knowledge.gardener_failed", { error: String((e as Error)?.message ?? e) });
-    } finally {
-      running = false;
-    }
-  };
-  tick();
-  const timer = setInterval(tick, intervalMs);
-  timer.unref?.();
-  return { stop: () => clearInterval(timer) };
+/** One knowledge gardener pass. Returns what it did. */
+export function runGardenPass(deps: GardenerDeps<GardenWorkspace>): { ran: boolean; plan?: GardenPlan; prUrl?: string; scorecard?: KnowledgeScorecard } {
+  const result = runGarden(knowledgeGardenSpec(deps), deps);
+  return { ...result, scorecard: result.scorecard as unknown as KnowledgeScorecard | undefined };
+}
+
+/** Run knowledge passes on their own timer beside the main loop, never two at once. */
+export function startKnowledgeGardener(deps: GardenerDeps<GardenWorkspace>, intervalMs: number): { stop: () => void } {
+  return startGarden(knowledgeGardenSpec(deps), deps, intervalMs);
 }

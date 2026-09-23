@@ -17,7 +17,8 @@
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
 import { startFleetLane, triageFleetLane, type FleetLaneDeps } from "./fleet-lane.js";
-import { startKnowledgeGardener, type GardenerDeps } from "./knowledge-gardener.js";
+import type { GardenerDeps } from "./gardener.js";
+import { startKnowledgeGardener, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import type {
   CiLearningCadenceRunResult,
@@ -956,7 +957,7 @@ export interface DaemonDeps {
   fleetLane?: FleetLaneDeps;
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
-  knowledgeGardener?: GardenerDeps;
+  knowledgeGardener?: GardenerDeps<GardenWorkspace>;
   /** W1-T4088: answers operator replies on inbox threads, on its own timer beside the main loop. */
   inboxResponder?: InboxResponderDeps;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
