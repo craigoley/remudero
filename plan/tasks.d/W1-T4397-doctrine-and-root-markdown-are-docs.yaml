@@ -1,0 +1,35 @@
+- id: W1-T4397
+  title: "A DOCTRINE OR ROOT-MARKDOWN EDIT PAYS FOR A FULL SOURCE RUN — AGENTS.md, CLAUDE.md, LEARNINGS.md and doctrine/ are neither plan scope nor docs/, so diff-class calls #6855 SOURCE and it ran ~100 job-minutes; classify them DOCS and make the plan-reading lane select the suites that read them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: [W1-T3191]
+  files: [scripts/diff-class.mjs, test/doctrine-and-root-markdown-are-docs.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED on PR #6855 (docs(doctrine): AGENTS.md, CLAUDE.md, doctrine/): classified SOURCE, 101 job-minutes.
+  design: |
+    (i) isDocsPath covers root *.md files and doctrine/**. (ii) namesPlanOrDocsPath also matches suites that name
+    doctrine/ or a root markdown file, so test/the-doctrine-index-points-at-every-body.test.ts and the CLAUDE.md census
+    suites still run for such a diff — the reclassification must not drop the suites that guard those files.
+    (iii) package.json, *.json config and anything under .github/ stay SOURCE.
+  acceptance:
+    - claim: "doctrine and root markdown classify as docs"
+      proof: 'grep: test("W1-T4397: doctrine and root markdown classify as docs" in test/doctrine-and-root-markdown-are-docs.test.ts'
+    - claim: "the suites that read doctrine still run for a doctrine edit"
+      proof: 'grep: test("W1-T4397: the suites that read doctrine still run for a doctrine edit" in test/doctrine-and-root-markdown-are-docs.test.ts'
+  falsifier: |
+    Classify doctrine DOCS without widening namesPlanOrDocsPath and the second test finds the doctrine index suite unselected.

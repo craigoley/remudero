@@ -1,0 +1,32 @@
+- id: W1-T4396
+  title: "THE 107 SLOWEST TEST FILES NEVER RUN ON MAIN — test-slow runs only on pull_request and the push lane runs --run fast, so the slow tier is checked only when a PR happens to be SOURCE; run it on main after merge so a regression in a slow suite is found the day it lands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: [W1-T3207]
+  files: [.github/workflows/ci.yml, test/the-slow-tier-runs-on-main.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    INFERRED from ci.yml: test-slow has an if: on pull_request, and the push lane selects the fast tier only.
+  design: |
+    (i) The push lane runs the slow tier too, as its own job so it does not lengthen the fast shards' critical path.
+    (ii) It uses scripts/test-with-retry.mjs like the other lanes. (iii) When W1-T4406 moves the full suite into the
+    merge queue, this job moves with it; until then main is the only place it can run.
+  acceptance:
+    - claim: "the push lane runs the slow tier"
+      proof: 'grep: test("W1-T4396: the push lane runs the slow tier" in test/the-slow-tier-runs-on-main.test.ts'
+  falsifier: |
+    Leave test-slow pull_request-only and the test finds no push-triggered job selecting the slow tier.

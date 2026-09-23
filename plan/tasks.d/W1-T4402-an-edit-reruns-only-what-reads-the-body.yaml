@@ -1,0 +1,33 @@
+- id: W1-T4402
+  title: "EDITING A PULL REQUEST'S BODY RE-RUNS WORKFLOWS THAT NEVER READ IT — acceptance-author-gate has 10,499 runs against ~8,460 PR CI runs because the edited trigger fires it on every body change; keep edited only on workflows that read the title or body, and prove each keeper does"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: []
+  files: [.github/workflows/ci-gate.yml, .github/workflows/acceptance-author-gate.yml, .github/workflows/proof-discrimination-gate.yml, .github/workflows/pr-title-lint.yml, test/an-edit-reruns-only-what-reads-the-body.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED: ~52k job-min/month in small workflows inflated by edited.
+  design: |
+    (i) For each workflow with an edited trigger, the test checks that its script reads the PR title or body;
+    any that does not loses the trigger. (ii) Title lint keeps edited (it reads the title); body readers keep it and
+    add a types filter so only title/body changes fire them, not label or assignee edits.
+  acceptance:
+    - claim: "only workflows that read the body keep the edited trigger"
+      proof: 'grep: test("W1-T4402: only workflows that read the body keep the edited trigger" in test/an-edit-reruns-only-what-reads-the-body.test.ts'
+  falsifier: |
+    Add edited to a workflow that reads no body and the test names it.

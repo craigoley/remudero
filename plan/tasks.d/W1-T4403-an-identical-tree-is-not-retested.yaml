@@ -1,0 +1,38 @@
+- id: W1-T4403
+  title: "THE SAME TREE IS TESTED AGAIN AND AGAIN — reruns, no-op rebases and repair pushes that restore a tree re-run the full ~100-minute CI on content that already passed; remember a green result per tree hash and let an identical tree reuse it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: []
+  files: [.github/workflows/ci.yml, scripts/tree-pass-cache.mjs, test/an-identical-tree-is-not-retested.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED: same-sha reruns (e.g. #6800) and ~3 PR runs per merge; INFERRED many repeats test an unchanged tree.
+  design: |
+    (i) Key: git tree hash of HEAD + lockfile hash + node version + a hash of the workflow file; written only
+    after an all-green run (actions/cache). (ii) A later run with the same key reports each test job as passed from
+    the cache, naming the run it reuses. (iii) Suites that depend on the clock or the network (the expiring-fixture
+    census and any suite tagged non-hermetic) always run. (iv) A cache miss or unreadable entry runs everything.
+  acceptance:
+    - claim: "an identical tree reuses the recorded pass"
+      proof: 'grep: test("W1-T4403: an identical tree reuses the recorded pass" in test/an-identical-tree-is-not-retested.test.ts'
+    - claim: "a non-hermetic suite always runs"
+      proof: 'grep: test("W1-T4403: a non-hermetic suite always runs" in test/an-identical-tree-is-not-retested.test.ts'
+    - claim: "a changed lockfile or workflow is a cache miss"
+      proof: 'grep: test("W1-T4403: a changed lockfile or workflow is a cache miss" in test/an-identical-tree-is-not-retested.test.ts'
+  falsifier: |
+    Key on the commit sha instead of the tree hash and the first test finds a rebased identical tree re-tested.
