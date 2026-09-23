@@ -18,6 +18,8 @@ import {
   findingSubject,
   fleetLaneDecisions,
   fleetLaneOffPath,
+  fleetLaneStorePath,
+  readFleetLaneStore,
   mergedInLastDay,
   startFleetLane,
   triageFleetLane,
@@ -78,8 +80,9 @@ test("W1-T4089: a fleet finding is filed, merged or retired with a plain reason"
   const f = fx({ [A1]: "ready", [A2]: "ready", [P1]: "ready", [RETIRED]: "retired", [VH]: "ready" }, [A1, A2, P1, RETIRED, VH]);
   const pass = triageFleetLane(f.deps(10));
   assert.deepEqual(pass.merged, [A2], "the second finding about the same file is folded into the first");
-  assert.deepEqual([...pass.filed].sort(), [A1, P1].sort());
-  assert.deepEqual([...f.approved].sort(), [A1, P1].sort(), "filed through the ordinary approve");
+  assert.equal(pass.filed.length, 1, "one finding a pass: concurrent approves race on one checkout");
+  triageFleetLane(f.deps(10));
+  assert.deepEqual([...f.approved].sort(), [A1, P1].sort(), "filed through the ordinary approve, one per pass");
   assert.ok(!f.approved.includes(RETIRED), "a finding the inbox retired is never filed");
   assert.ok(!f.approved.includes(VH), "an operator item is never the fleet's to file");
   const decided = f.ledger().filter((l) => l.step === "fleet_lane.decided");
@@ -94,12 +97,29 @@ test("W1-T4089: a fleet finding is filed, merged or retired with a plain reason"
 test("W1-T4089: filing follows the fleet merge rate", () => {
   const ids = [P1, P2, F1, "proof-debt:W1-T5", "proof-debt:W1-T6"];
   const f = fx(Object.fromEntries(ids.map((id) => [id, "ready"])), ids);
-  assert.equal(triageFleetLane(f.deps(2)).filed.length, 2, "two merged in the last day: two filed");
+  assert.equal(triageFleetLane(f.deps(2)).filed.length, 1, "two merged in the last day: one filed this pass");
+  assert.equal(triageFleetLane(f.deps(2)).filed.length, 1, "and the second on the next");
   assert.equal(triageFleetLane(f.deps(2)).filed.length, 0, "the day's room is spent");
-  assert.equal(triageFleetLane(f.deps(4)).filed.length, 2, "the fleet sped up: room for two more");
+  assert.equal(triageFleetLane(f.deps(4)).filed.length, 1, "the fleet sped up: room for more");
+  assert.equal(triageFleetLane(f.deps(4)).filed.length, 1);
   assert.equal(triageFleetLane(f.deps(0)).filed.length, 0, "a fleet that merged nothing gets nothing new");
   // Oldest of the most common kind first.
   assert.deepEqual(f.approved.slice(0, 2), [P1, P2]);
+});
+
+test("the fleet lane remembers its decisions after the live ledger rotates", () => {
+  // 2026-09-23: the lane read its past decisions from the live ledger, which rotates every few
+  // minutes, so each pass forgot them and re-filed 47 findings about seven times each.
+  const f = fx({ [P1]: "ready", [P2]: "ready" }, [P1, P2]);
+  assert.deepEqual(triageFleetLane(f.deps(5)).filed, [P1]);
+  writeFileSync(f.ledgerPath, ""); // the live ledger rotated away
+  assert.deepEqual(triageFleetLane(f.deps(5)).filed, [P2], "P1 is not filed a second time");
+  assert.deepEqual(triageFleetLane(f.deps(5)).filed, []);
+  assert.deepEqual(f.approved, [P1, P2]);
+  assert.equal(readFleetLaneStore(f.stateDir)[P1]?.decision, "file");
+  // A store that cannot be read stops the pass rather than forgetting every decision.
+  writeFileSync(fleetLaneStorePath(f.stateDir), "{ torn");
+  assert.throws(() => triageFleetLane(f.deps(5)));
 });
 
 test("W1-T4089: two findings with the same subject become one task", () => {

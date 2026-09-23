@@ -66,7 +66,7 @@
 - id: docs-are-a-gated-artifact
   subsystem: docs
   lifecycle: active
-  files: [ src/run-task.ts, docs ]
+  files: [ src/run-task.ts, "docs/**" ]
   fact: >-
     Docs are a gated artifact: GENERATED docs (rmd --help / CLI reference / API
     ref / CHANGELOG) drift unless CI enforces byte-equality (regenerate + diff =
@@ -178,7 +178,7 @@
 - id: task-credit-needs-an-anchored-trailer
   subsystem: plan
   lifecycle: active
-  files: [ plan/tasks.yaml, plan/tasks.d, src/run-task.ts ]
+  files: [ plan/tasks.yaml, "plan/tasks.d/**", src/run-task.ts ]
   fact: >-
     git log --grep <id> is a SUBSTRING match and credits commits that merely
     MENTION an id. Measured: --grep W1-T1282 returned 2 commits — one of them a
@@ -283,7 +283,7 @@
 - id: a-roster-error-needs-a-second-derivation
   subsystem: proofs
   lifecycle: active
-  files: [ plan/tasks.yaml, plan/tasks.d ]
+  files: [ plan/tasks.yaml, "plan/tasks.d/**" ]
   fact: >-
     A hand-derived roster has no visible error signal unless a second
     independent derivation checks it. Two censuses of the same wall-clock test
@@ -332,7 +332,7 @@
 - id: next-task-id-max-across-both-plan-sources
   subsystem: plan
   lifecycle: active
-  files: [ plan/tasks.yaml, plan/tasks.d ]
+  files: [ plan/tasks.yaml, "plan/tasks.d/**" ]
   fact: >-
     Compute a new task id from the max across BOTH `plan/tasks.yaml` AND every
     `plan/tasks.d/*.yaml` shard. "Next number after the last one I saw" collides
@@ -469,7 +469,7 @@
 - id: state-is-scratch-land-findings-in-a-tracked-artifact
   subsystem: ledger
   lifecycle: active
-  files: [ plan/feedback, src/lib/feedback-landing.ts ]
+  files: [ "plan/feedback/**", src/lib/feedback-landing.ts ]
   fact: >-
     A report written to `state/` is SCRATCH, not a record — land the finding in
     a TRACKED artifact in the same session, and never let a tracked artifact
