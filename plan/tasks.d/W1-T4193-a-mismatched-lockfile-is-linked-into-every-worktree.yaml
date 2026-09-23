@@ -1,5 +1,5 @@
 - id: W1-T4193
-  title: "A WORKTREE WHOSE LOCKFILE DIFFERS FROM THE CANONICAL node_modules IS LINKED ANYWAY — linkWorktreeNodeModules detects the mismatch, warns and returns linked-lockfile-mismatch, and worktreeAdd ignores the result, so a worker's proofs run against dependencies its own commit never asked for (four feedback reports from core, site and console): refuse the dispatch on a mismatch, and never link a satellite repo's worktree to the core install's node_modules"
+  title: "AN IMPLEMENT WORKTREE WHOSE LOCKFILE DIFFERS FROM THE SAME PACKAGE'S LINKED node_modules RUNS ANYWAY — linkWorktreeNodeModules detects the mismatch, warns and returns linked-lockfile-mismatch, and worktreeAdd ignores the result, so a core worker's proofs run against dependencies its own commit never asked for: defer the implement dispatch on a same-package mismatch, and record (never refuse) a satellite worktree linked to another package's tree"
   repo: remudero
   depends_on: []
   type: implement
@@ -9,8 +9,8 @@
   risk: high
   band_meaning: span
   origin: "feedback#fb-1789309767852-219d98"
-  plan_refs: ["W1-T2777", "W1-T2716"]
-  files: [src/lib/worker.ts, src/run-task.ts, test/worktree-node-modules-lockfile-mismatch.test.ts]
+  plan_refs: ["W1-T2777", "W1-T2716", "W1-T3041", "W1-T4003", "W1-T4260"]
+  files: [src/lib/worker.ts, src/run-task.ts, src/lib/drain.ts, test/worktree-node-modules-lockfile-mismatch.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -28,20 +28,45 @@
     risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
 
     VALUE (triage estimate): high.
+
+    NARROWED 2026-09-23 (operator direction: rmd runs one daemon per repo, and a change to core must not break the
+    other two). Found while reviewing a build of the first design (local commit 2b2ec9b8, not shipped):
+    OBSERVED (.remudero/daemon-instances.yaml): three containers from ONE image run `rmd daemon --repo remudero`,
+    `--repo remudero-site` and `--repo remudero-console`. In each, the rmd install is $HOME/Remudero/remudero (core,
+    `npm ci` at boot in deploy/entrypoint.sh) and target clones live at $HOME/Remudero/repos/<repo>, which carry no
+    node_modules (W1-T2716's live measurement). So EVERY worktree in all three containers links core's install root.
+    OBSERVED: remudero-console and remudero-site (package names remudero-console / remudero-site) need next, react,
+    @clerk/nextjs and their own vitest and typescript; core's tree has none of the first three and pins typescript ^7.
+    Neither satellite has a hooks/ dir, so the W1-T137 reason for linking (commitlint for hooks/commit-msg) is core-only.
+    CONSEQUENCE FOR THE FIRST DESIGN: its clause (ii) would refuse every satellite dispatch forever, because
+    ensureInstallFresh refreshes only the install root; and throwing from worktreeAdd itself reached the fix, review and
+    lane callers plus proof-amendment.ts, of which only runTaskBody releases the dispatch claim; and runDrainLanes
+    (src/lib/drain.ts) reads the rejected lane as drain.lane_error, ending a recycle drain in error.
+    OBSERVED (src/lib/daemon.ts stopForFreshness): every daemon installs BEFORE a freshness restart, so a SAME-package
+    mismatch against the install root clears on the next freshness restart. That is what makes clause (i) a deferral.
+    The satellite fix proper (a repo- and lockfile-keyed dependency tree) is W1-T4260.
+    SUPERSEDES: W1-T4003's stated claim that the root link and its lockfile-mismatch warning remain the shared-install
+    baseline, for the implement lane on a same-package mismatch only. Every other caller keeps that baseline.
   design: |
-    (i) A lockfile mismatch at worktree creation is a refusal the dispatcher sees, not a warning: the run records a
-        named outcome and does not spawn the worker. (ii) A repo whose own checkout has no node_modules is never linked to
-        the install root's tree; it is refused with the same outcome. (iii) Never run `npm ci`/`npm install` inside the
-        worktree: the node_modules symlink is shared and an install's clear phase empties it (the plan header's binding
-        rule). Refreshing the canonical checkout is the remedy, and the refusal names it.
-    (iv) The refusal is a deferral, never a strike: ensureInstallFresh refreshes the canonical checkout, so a mismatch is
-        transient. src/run-task.ts is in files: because a throw from worktreeAdd reaches runTaskBody's worktree-add catch,
-        which releases the dispatch claim only for WorktreeBaseStaleError (and then returns failed, a strike). Any other
-        throw leaves the claim held, and every later dispatch meets it as taken (found 2026-09-23 at 862593fb). Throw a
-        typed error with reasonClass blocked_toolchain, the shape the daemon already defers without a strike, and give it
-        its own arm there that logs a named line, removes the worktree and releases the claim.
+    (i) OPT-IN, IMPLEMENT LANE ONLY. worktreeAdd gains an option that only runTaskBody's implement path sets. With it,
+        a mismatch between the worktree's install inputs and the linked tree's, where BOTH package.json files name the
+        same package, throws a typed error with reasonClass blocked_toolchain and names the remedy (the install root
+        refreshes on the next freshness restart). Without the option, behaviour is byte-identical to today: warn and link.
+    (ii) A CROSS-PACKAGE LINK IS RECORDED, NEVER REFUSED. When the worktree's package name differs from the linked tree's
+        (a satellite linked to core's install root), log worktree.node_modules_cross_package with both names and both
+        paths, and keep today's link. No satellite dispatch changes outcome in this task.
+    (iii) runTaskBody's worktree-add catch gets its own arm for the typed error: log worktree.node_modules_refused,
+        remove the worktree, release the dispatch claim through the holder arm (a failed release is logged and never
+        replaces the typed error), and rethrow so the daemon's spawn-infra path defers it without a strike.
+    (iv) runDrainLanes treats that typed error as a deferral of the lane, not drain.lane_error.
+    (v) Never run `npm ci`/`npm install` inside the worktree: the node_modules symlink is shared and an install's clear
+        phase empties it (the plan header's binding rule).
   acceptance:
     - claim: "a lockfile mismatch refuses the worktree instead of linking it"
       proof: 'grep: test("W1-T4193: a lockfile mismatch refuses the worktree instead of linking it" in test/worktree-node-modules-lockfile-mismatch.test.ts'
-    - claim: "a repo with no node_modules of its own is never linked to the install roots tree"
-      proof: 'grep: test("W1-T4193: a repo with no node_modules of its own is never linked to the install roots tree" in test/worktree-node-modules-lockfile-mismatch.test.ts'
+    - claim: "a satellite worktree linked to another packages tree is recorded and never refused"
+      proof: 'grep: test("W1-T4193: a satellite worktree linked to another packages tree is recorded and never refused" in test/worktree-node-modules-lockfile-mismatch.test.ts'
+    - claim: "a worktree created without the implement option keeps the warn-and-link baseline"
+      proof: 'grep: test("W1-T4193: a worktree created without the implement option keeps the warn-and-link baseline" in test/worktree-node-modules-lockfile-mismatch.test.ts'
+    - claim: "a refused implement lane in rmd drain defers instead of failing the drain"
+      proof: 'grep: test("W1-T4193: a refused implement lane in rmd drain defers instead of failing the drain" in test/worktree-node-modules-lockfile-mismatch.test.ts'
