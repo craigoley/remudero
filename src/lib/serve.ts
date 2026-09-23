@@ -2767,6 +2767,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     try {
       return read();
     } catch {
+      // Unreadable reads "unknown", never a healthy default; the caller shows it.
       return "unknown";
     }
   };
@@ -2777,7 +2778,6 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     checkedAt: clock.iso(),
     detail,
   });
-  // A guarded environment answers before any git call, so a refusing runner probes just the guard.
   const refuse = (): string => {
     throw new Error("guard probe");
   };
@@ -2788,6 +2788,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   try {
     await (deps.fetch ?? defaultGatewayFetch(deps.repoDir))();
   } catch (err) {
+    // Carried into the read below, which reports `degraded` rather than trusting a stale ref.
     fetchError = err instanceof Error ? err.message : String(err);
   }
   const seen = new Map<string, string>();
@@ -2985,7 +2986,6 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
     const codeStale = isConsoleCodeStale(deps.bootSha, currentSha);
-    // W1-T4229: nothing moves the gateway's clone, so its on-disk sha alone never reads stale.
     const checkoutBehind = checkout?.restartDue === true;
     if (!codeStale && !checkoutBehind) {
       staleSince = undefined;
