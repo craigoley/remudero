@@ -5685,7 +5685,7 @@ anchored matcher), and `selectLearnings`' seeded draw already randomizes the bud
 (the lint half of the LLM wiki, applied as Graphiti-style invalidation at the PR that removes the
 referent) · **W1-T4241** the Thompson draw read as a randomized trial: per-learning outcome effect by
 inverse propensity, surfaced beside the `LEARNINGS_USED` claim, never fed back until readings exist ·
-**W1-T4243** knowledge-gap census: zero-match rate on failed vs clean runs by code area, measurement only.
+**W1-T4243** one knowledge-measurement cadence rung over a multi-week step-filtered union: where the corpus is silent (zero-match rate on failed vs clean runs by code area) and W1-T4241's outcome fold cumulated, measurement only (amended before build: a digest consumer sees about a day).
 **REFUSED, WITH THE REASON:** embeddings or a vector store (matching is deterministic by rule,
 learnings.ts header, and paraphrase-miss is a stated tradeoff); a knowledge graph (83 records do not
 need traversal); an LLM that rewrites the corpus whole (ACE's "context collapse" is the measured cost;
