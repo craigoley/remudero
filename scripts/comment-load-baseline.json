@@ -226,6 +226,7 @@
   "src/lib/fleet-control.ts": 500,
   "src/lib/flight-judge.ts": 170,
   "src/lib/flight-signals.ts": 86,
+  "src/lib/flush-exit.ts": 27,
   "src/lib/follow-up-policy.ts": 250,
   "src/lib/followup-dedup-census.ts": 172,
   "src/lib/fs-race-safe.ts": 179,
