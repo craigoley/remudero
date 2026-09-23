@@ -1,0 +1,39 @@
+- id: W1-T4119
+  title: "TWO TESTS CALL THE REAL GITHUB WHENEVER `gh` IS ON PATH — test/policy.test.ts hung on a live `gh api repos/craigoley/remudero/pulls/6698/files` and review-command-plan-filing-provenance fails on clean main; make the shared test setup shadow `gh` with a stub that refuses, so no test reaches the network unless it opts in by name"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  origin: "operator-report#console-not-working-2026-09-23"
+  plan_refs: ["W1-T4105", "W1-T3115"]
+  files:
+    - test/setup/tmp-hygiene.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 while building W1-T4105: `test/policy.test.ts` made a real
+    `gh api repos/craigoley/remudero/pulls/6698/files` call — a live PR number — and hung until it was
+    killed; with `gh` shadowed on PATH it passed 70/70. `test/review-command-plan-filing-provenance.test.ts`
+    (W1-T3115) is red on clean main for the same reason. A test that reads live GitHub state spends the
+    operator's API budget (the per-user secondary limit was tripped the same night), depends on which
+    PRs happen to be open, and reads as flaky when it is deterministic on a machine with no `gh`.
+
+    Every test already imports test/setup/tmp-hygiene.ts (package.json test:ci and ci-parity's shard
+    args both pass `--import ./test/setup/tmp-hygiene.ts`), so it is the one place that can guarantee it
+    for all of them.
+  design: |
+    tmp-hygiene.ts prepends a per-process directory holding a `gh` stub to PATH. The stub exits 1 and
+    prints the argv it was refused, so an accidental call fails fast and names itself. A test that
+    genuinely needs a fake `gh` still puts its own stub first on PATH, exactly as today. Fix the two
+    offenders to inject their GitHub reads instead of shelling out.
+  acceptance:
+    - claim: "a test that shells out to gh without its own stub is refused by the shared setup"
+      proof: "unit test: a test that shells out to gh without its own stub is refused by the shared setup"
+    - claim: "a test's own gh stub still takes precedence over the shared one"
+      proof: "unit test: a test's own gh stub still takes precedence over the shared one"
+    - claim: "the refusal names the argv it refused"
+      proof: "unit test: the shared gh refusal names the argv it refused"
