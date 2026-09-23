@@ -8,6 +8,7 @@ import {
   buildSuccessorEscalation,
   classifySuccessor,
   findSuccessors,
+  MODEL_ID_RE,
   parseModelId,
   watchSuccessorModels,
   type CatalogSnapshot,
@@ -57,6 +58,16 @@ test("W1-T4080: parseModelId reads family and generation, and refuses a non-matc
   assert.deepEqual(parseModelId("gpt-5.6-terra"), { family: "terra", generation: 5.6 });
   assert.equal(parseModelId("gpt-oss-120b"), undefined);
   assert.equal(parseModelId("not-a-model"), undefined);
+});
+
+test("W1-T4080: MODEL_ID_RE accepts a gpt-<generation>-<family> id and rejects everything else", () => {
+  // The healthy arm — a real routed/catalog id matches.
+  assert.equal(MODEL_ID_RE.test("gpt-6-luna"), true);
+  assert.equal(MODEL_ID_RE.test("gpt-5.6-terra"), true);
+  // The unhealthy arm — an id with no generation segment, or no family segment, is refused.
+  assert.equal(MODEL_ID_RE.test("gpt-oss-120b"), false);
+  assert.equal(MODEL_ID_RE.test("gpt-6"), false);
+  assert.equal(MODEL_ID_RE.test("not-a-model"), false);
 });
 
 // ── Acceptance (1): a higher generation in a routed family is a successor ────

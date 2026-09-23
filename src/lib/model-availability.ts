@@ -39,7 +39,7 @@ export interface ParsedModelId {
 /** `gpt-<generation>-<family>`, the only shape every routed and catalog-listed id in this
  *  codebase takes (`gpt-6-luna`, `gpt-5.6-terra`, `gpt-6-astra`, ...). Anything else is not a
  *  member of a family this watch can compare generations within, and is left alone. */
-const MODEL_ID_RE = /^gpt-([0-9]+(?:\.[0-9]+)?)-([a-z][a-z0-9]*)$/i;
+export const MODEL_ID_RE = /^gpt-([0-9]+(?:\.[0-9]+)?)-([a-z][a-z0-9]*)$/i;
 
 export function parseModelId(id: string): ParsedModelId | undefined {
   const m = MODEL_ID_RE.exec(id);
