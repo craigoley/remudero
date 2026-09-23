@@ -53,11 +53,11 @@
     ops.ts's own exports — this is additive, optional-field plumbing only.
   acceptance:
     - claim: "normalizeCodeScanningAlert extracts most_recent_instance.location (path/startLine/endLine) and most_recent_instance.message.text onto RawAlert when GitHub's response carries them, and leaves both fields absent — never fabricated — on a response that omits most_recent_instance"
-      proof: "unit test: test/ops.test.ts"
+      proof: 'grep: test("W1-T4273: normalizeCodeScanningAlert extracts most_recent_instance location and message, absent when omitted" in test/ops.test.ts'
     - claim: "renderAlertRaw appends the location and instance message when present, and is BYTE-IDENTICAL to today's format for an alert with no location — the existing renderAlertRaw test is unchanged and still passes"
-      proof: "unit test: test/ops.test.ts"
+      proof: 'grep: test("W1-T4273: renderAlertRaw appends location and instance message, byte-identical without a location" in test/ops.test.ts'
     - claim: "dependabot and secret-scanning alerts, and any code-scanning alert whose API response omits most_recent_instance, are completely unaffected by this change — no regression on any existing normalizer test"
-      proof: "unit test: test/ops.test.ts"
+      proof: 'grep: test("W1-T4273: dependabot, secret-scanning and instance-less code-scanning alerts normalize unchanged" in test/ops.test.ts'
   origin: architect
   plan_refs: ["§5D", "§7B"]
   files: [src/lib/ops.ts, test/ops.test.ts]

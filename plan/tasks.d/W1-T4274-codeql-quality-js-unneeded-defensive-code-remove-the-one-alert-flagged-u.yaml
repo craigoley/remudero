@@ -45,9 +45,9 @@
     fix lands, per the proposal's own "do not auto-fix or dismiss alerts" instruction.
   acceptance:
     - claim: "the flagged branch, located from the alert's own captured instance data (never guessed, never fetched live), is confirmed redundant from the code's own reachable-state logic and is removed/simplified, with a regression test pinning behavior for the specific input class the removed check used to guard"
-      proof: "unit test: test/codeql-unneeded-defensive-code-144.test.ts"
+      proof: 'grep: test("W1-T4274: the input class the removed defensive check guarded keeps its behavior" in test/codeql-unneeded-defensive-code-144.test.ts'
     - claim: "the diff is confined to the one flagged site plus its regression test — no sweep across other CodeQL findings, and nothing in the diff calls the GitHub API to dismiss or mutate the alert's state directly"
-      proof: "unit test: test/codeql-unneeded-defensive-code-144.test.ts"
+      proof: 'grep: test("W1-T4274: the fix is confined to the flagged site and never calls the GitHub API to dismiss the alert" in test/codeql-unneeded-defensive-code-144.test.ts'
   origin: architect
   plan_refs: ["§5D"]
   files: [test/codeql-unneeded-defensive-code-144.test.ts]
