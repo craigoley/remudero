@@ -401,11 +401,7 @@ export interface ServeDeps {
    * real state dir — the same seam `replay`/`peek` above both use.
    */
   selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
-  /**
-   * W1-T4227: `GET /v1/registry`'s inputs. `repoRegistryPath` defaults to the registry on
-   * `questionsRoot` (repoRoot) through the house layout (`daemonInstanceRegistryPath`), the same
-   * file `recycle-container.sh` resolves; `hostRegistryPath` to the fleet host's copy.
-   */
+  /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
   registry?: Partial<RegistryRouteDeps>;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
@@ -2976,8 +2972,7 @@ export function buildRegistryRoute(deps: RegistryRouteDeps): Route {
       try {
         registry = parseInstanceRegistry(await readText(deps.repoRegistryPath));
       } catch (error) {
-        // Named, path-free refusal: the fs error message embeds the absolute path, so only the
-        // parser's own code (or a bare "unreadable") is ever echoed to the caller.
+        // Path-free refusal: fs errors embed the absolute path, so echo only the parser's code.
         const code = error instanceof InstanceRegistryError ? error.code : "unreadable";
         sendJson(res, 503, { error: "registry_unavailable", reason: code });
         return;
