@@ -156,6 +156,7 @@
     "test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts": 1361,
     "test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts": 707,
     "test/a-plan-record-may-name-a-type-nothing-can-route.test.ts": 0,
+    "test/a-playwright-bump-rebuilds-the-image.test.ts": 0,
     "test/a-polling-reader-warms-the-board-gateway.test.ts": 0,
     "test/a-pr-names-the-lane-that-owns-it.test.ts": 0,
     "test/a-pr-opens-with-a-judgeable-body.test.ts": 1988,

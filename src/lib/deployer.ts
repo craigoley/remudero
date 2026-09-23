@@ -324,6 +324,114 @@ export function bakedPathCommitsBehind(
 }
 
 /**
+ * W1-T4061 — the ROOT lockfile, deliberately NOT in {@link IMAGE_BAKED_PATHS}: it changed 12
+ * times in the 30 days to 2026-09-22, almost all unrelated dependency bumps, so watching the
+ * whole file the way IMAGE_BAKED_PATHS does would rebuild and recycle about a dozen times a
+ * month for nothing. Only a change to the pinned playwright-core version — the exact field
+ * `deploy/Dockerfile` resolves PW_VERSION from (its REQ 15) — is real image drift.
+ */
+export const ROOT_LOCKFILE_PATH = "package-lock.json";
+
+/** The npm-lockfile key `deploy/Dockerfile` itself reads to pick the image's Chromium build, so
+ *  the workflow guard and this drift check can never disagree about which field is authoritative. */
+const PLAYWRIGHT_CORE_LOCKFILE_KEY = "node_modules/playwright-core";
+
+/** Pulls the pinned playwright-core version out of a `package-lock.json`'s TEXT. Returns
+ *  undefined for anything that does not parse as JSON or does not carry the key — never throws,
+ *  so a caller can fail closed ("can't tell" -> "no drift") instead of crashing the trigger. */
+export function extractPlaywrightCoreVersion(lockfileText: string): string | undefined {
+  try {
+    const parsed = JSON.parse(lockfileText) as { packages?: Record<string, { version?: string }> };
+    return parsed.packages?.[PLAYWRIGHT_CORE_LOCKFILE_KEY]?.version;
+  } catch {
+    return undefined; // not parseable JSON — unreadable, never a false "no version present"
+  }
+}
+
+/**
+ * True IFF the pinned playwright-core version differs between two `package-lock.json` texts —
+ * the one change in that file W1-T4061 exists to catch. An unparseable or version-less lockfile
+ * on EITHER side answers false: fail-closed against building on noise, the same "unknown never
+ * reads as stale" rule {@link bakedPathCommitsBehind} keeps for the image sha it takes.
+ */
+export function playwrightCoreVersionChanged(
+  oldLockfileText: string | undefined,
+  newLockfileText: string | undefined,
+): boolean {
+  const oldVersion = oldLockfileText === undefined ? undefined : extractPlaywrightCoreVersion(oldLockfileText);
+  const newVersion = newLockfileText === undefined ? undefined : extractPlaywrightCoreVersion(newLockfileText);
+  if (oldVersion === undefined || newVersion === undefined) return false;
+  return oldVersion !== newVersion;
+}
+
+/**
+ * W1-T4061 — how many playwright-core VERSION commits the image is behind, read off
+ * {@link ROOT_LOCKFILE_PATH} rather than {@link IMAGE_BAKED_PATHS}. Compares the pinned version
+ * at the running image's build sha against the version at `origin/main`: a version CHANGE counts
+ * as one drift commit, an unrelated edit to the same file (a dependency bump the Playwright
+ * pin never moved) counts as zero — so the recycle tick fires for a Playwright bump and for
+ * nothing else in that file (the task's own falsifier).
+ *
+ * UNKNOWN (undefined) when either side cannot be read, never coerced to zero — the same contract
+ * {@link bakedPathCommitsBehind} keeps.
+ */
+export function playwrightCoreVersionCommitsBehind(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string,
+): number | undefined {
+  const sha = imageBuildSha?.trim();
+  if (!sha) return undefined;
+  let oldLockfile: string;
+  let newLockfile: string;
+  try {
+    oldLockfile = runGit(["show", `${sha}:${ROOT_LOCKFILE_PATH}`]);
+    newLockfile = runGit(["show", `origin/main:${ROOT_LOCKFILE_PATH}`]);
+  } catch {
+    return undefined; // an unknown sha, a shallow clone, no git — UNKNOWN, never zero
+  }
+  return playwrightCoreVersionChanged(oldLockfile, newLockfile) ? 1 : 0;
+}
+
+/**
+ * W1-T4061 — the newest `origin/main` commit that actually MOVED the pinned playwright-core
+ * version, walking {@link ROOT_LOCKFILE_PATH}'s own history newest-first rather than reading the
+ * newest commit that merely TOUCHED the file (which is very often an unrelated bump that never
+ * changed the pin, and would misname itself as "the" image input). Mirrors the walk
+ * `acr-build.yml`'s own guard step does over the same two fields, so the sha this reports is
+ * exactly the sha that workflow tags when it decides to build.
+ */
+export function newestPlaywrightVersionChangeSha(
+  runGit: (args: readonly string[]) => string,
+): string | undefined {
+  let touchingShas: string[];
+  try {
+    touchingShas = runGit(["log", "--format=%H", "origin/main", "--", ROOT_LOCKFILE_PATH])
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return undefined; // no git answer at all — UNKNOWN, same contract as bakedPathCommitsBehind
+  }
+  for (const sha of touchingShas) {
+    let after: string;
+    try {
+      after = runGit(["show", `${sha}:${ROOT_LOCKFILE_PATH}`]);
+    } catch {
+      continue; // an unreadable blob for this commit — skip it, never treat as a change
+    }
+    let before: string | undefined;
+    try {
+      before = runGit(["show", `${sha}^:${ROOT_LOCKFILE_PATH}`]);
+    } catch {
+      before = undefined; // the commit that first added the file
+    }
+    const addedWithVersion = before === undefined && extractPlaywrightCoreVersion(after) !== undefined;
+    if (addedWithVersion || playwrightCoreVersionChanged(before, after)) return sha;
+  }
+  return undefined;
+}
+
+/**
  * Deploy IFF a trigger is present AND the fleet is not already running the checkout's code.
  * Either of two independent reasons suffices: BEHIND (fast-forward + restart) or RUNNING STALE
  * (checkout current, daemon not on it yet — restart only). Comparing the checkout alone used to
@@ -1581,14 +1689,38 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       } catch {
         return undefined; // container down / no docker — UNKNOWN, never "current"
       }
-      return bakedPathCommitsBehind(sha, (args) => git([...args]));
+      const baked = bakedPathCommitsBehind(sha, (args) => git([...args]));
+      // W1-T4061 — a playwright-core version bump is image drift too, even though it lands only
+      // in the root lockfile (never in IMAGE_BAKED_PATHS). UNKNOWN only when BOTH readings are:
+      // one known signal must never be swallowed by the other going unreadable.
+      const playwright = playwrightCoreVersionCommitsBehind(sha, (args) => git([...args]));
+      if (baked === undefined && playwright === undefined) return undefined;
+      return (baked ?? 0) + (playwright ?? 0);
     },
     newestBakedSha: () => {
+      let newestBaked: string | undefined;
       try {
-        return git(["log", "-1", "--format=%H", "origin/main", "--", ...IMAGE_BAKED_PATHS]).trim() || undefined;
+        newestBaked = git(["log", "-1", "--format=%H", "origin/main", "--", ...IMAGE_BAKED_PATHS]).trim() || undefined;
       } catch {
-        return undefined; // no git answer — the tick treats the image's publication as UNKNOWN and waits
+        newestBaked = undefined; // no git answer — the tick treats the image's publication as UNKNOWN and waits
       }
+      // W1-T4061 — the newest commit that actually MOVED the playwright-core pin, not merely the
+      // newest commit that touched the root lockfile (an unrelated bump landing after it would
+      // otherwise misname itself as "the" image input, and imagePublished would look up a tag
+      // acr-build.yml's own guard never created for that commit).
+      const newestPlaywright = newestPlaywrightVersionChangeSha((args) => git([...args]));
+      if (!newestPlaywright) return newestBaked;
+      if (!newestBaked) return newestPlaywright;
+      try {
+        const bakedDistance = Number.parseInt(git(["rev-list", "--count", `${newestBaked}..origin/main`]).trim(), 10);
+        const playwrightDistance = Number.parseInt(git(["rev-list", "--count", `${newestPlaywright}..origin/main`]).trim(), 10);
+        if (Number.isFinite(bakedDistance) && Number.isFinite(playwrightDistance)) {
+          return playwrightDistance <= bakedDistance ? newestPlaywright : newestBaked;
+        }
+      } catch {
+        // fall through to the baked-path reading below
+      }
+      return newestBaked;
     },
     // The build tags each image with the commit that triggered it (acr-build.yml), so a tag for
     // the newest image-input commit exists exactly when that image is published.
