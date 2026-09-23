@@ -310,16 +310,14 @@ export function ghRateLimitWindow(
   return end;
 }
 
-/** One `/proc/pressure/<resource>` reading, as percentages of wall time over each window. */
+/** One `/proc/pressure/<resource>` reading (percent of wall time). */
 export interface PressureReading {
   someAvg10: number;
   someAvg60: number;
   fullAvg10?: number;
 }
 
-/** W1-T4102: the host's cpu, io and memory pressure. `"unknown"` when a file cannot be read or
- *  parsed — never a zero, which would read as an idle host exactly when the console most needs to
- *  say the host is struggling. Inside a container `/proc/pressure` is still the HOST's. */
+/** W1-T4102: the HOST's pressure (also inside a container); `"unknown"`, never zero, when unreadable. */
 export type HostPressure = Record<"cpu" | "io" | "memory", PressureReading | "unknown">;
 
 export function parsePressure(text: string): PressureReading | undefined {
@@ -342,27 +340,24 @@ export function readHostPressure(read: (path: string) => string = (path) => read
     try {
       return parsePressure(read(`/proc/pressure/${resource}`)) ?? "unknown";
     } catch {
-      // Deliberate: a kernel without PSI, or a sandbox that hides /proc, is "unknown", not idle.
+      // Deliberate: no PSI or a hidden /proc is "unknown", not idle.
       return "unknown";
     }
   };
   return { cpu: one("cpu"), io: one("io"), memory: one("memory") };
 }
 
-/** W1-T4102: how long serve's own event loop was blocked. MEASURED 2026-09-23: a bare 401 took
- *  1-20 s while the host swapped serve out — the console saw "aborted" and could not say why. */
+/** W1-T4102: serve's own event-loop blocking (a bare 401 took 1-20 s on 2026-09-23). */
 export interface EventLoopLag {
   p50Ms: number;
   p99Ms: number;
   maxMs: number;
-  /** How long the reading covers; short right after the monitor starts. */
   windowMs: number;
 }
 
 const LAG_WINDOW_MS = 60_000;
 
-/** A rolling one-minute window over `perf_hooks.monitorEventLoopDelay`. Started on first read, so
- *  a process that never serves the health route never runs the monitor. */
+/** A rolling one-minute `monitorEventLoopDelay` window, started on first read. */
 export function createEventLoopLagMonitor(
   clock: Clock = systemClock,
   histogram: () => IntervalHistogram = () => monitorEventLoopDelay({ resolution: 20 }),
@@ -413,9 +408,7 @@ export interface DaemonHealthDeps {
   now?: () => number;
   /** Default poll interval when the winning `daemon.*` line carries none of its own. */
   defaultPollIntervalMs?: number;
-  /** W1-T4102: serve's event-loop lag; defaults to a lazily started process-wide monitor. */
   eventLoopLag?: () => EventLoopLag | undefined;
-  /** W1-T4102: the host's pressure; defaults to reading `/proc/pressure`. */
   hostPressure?: () => HostPressure;
 }
 
@@ -431,7 +424,6 @@ export interface DaemonHealthSnapshot {
   nextPollAt?: string;
   diskFreeBytes?: number;
   rateLimitRemaining?: number;
-  /** Absent until the monitor has a reading. */
   eventLoopLag?: EventLoopLag;
   hostPressure: HostPressure;
 }

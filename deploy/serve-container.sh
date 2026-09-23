@@ -545,12 +545,8 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ] && [ "${REPLACE}" -ne 1 ] && [ "${DRY_RUN}" -
   exit 1
 fi
 
-# W1-T4102: serve's share of the host — protected memory (cgroup memory.low) and a CPU weight above
-# every build daemon, from the one policy file recycle-container.sh also reads. Absent (an isolated
-# fixture copy), serve launches exactly as before and the log says the policy was not applied.
-RESOURCE_POLICY_SERVE_ARGS=()
+RESOURCE_POLICY_SERVE_ARGS=() # W1-T4102: serve's host share; see deploy/resource-policy.sh
 if [ -f "${SCRIPT_ROOT}/deploy/resource-policy.sh" ]; then
-  # shellcheck source=./resource-policy.sh
   . "${SCRIPT_ROOT}/deploy/resource-policy.sh"
   resource_policy_serve_args
   echo "serve-container: resource policy — ${RESOURCE_POLICY_NOTE}"
