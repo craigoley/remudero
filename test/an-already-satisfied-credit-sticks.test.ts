@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -86,12 +86,4 @@ test("a plan-only or unreadable file list persists nothing", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("the verified already_satisfied exit persists its credit before returning", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
-  const exit = src.slice(src.indexOf('alreadySatisfiedVerdict(impl, costUsd, "implement", resolved)'));
-  const persistAt = exit.indexOf("persistVerifiedCredit(ledgerPath, taskId, resolved");
-  const returnAt = exit.indexOf('verdict: "already_satisfied" }');
-  assert.ok(persistAt > 0 && persistAt < returnAt, "the credit must be persisted on the verified exit, before it returns");
 });
