@@ -256,6 +256,8 @@
   "src/lib/isolation.ts": 227,
   "src/lib/issues-intake.ts": 67,
   "src/lib/knowledge-dedup.ts": 98,
+  "src/lib/knowledge-gardener.ts": 250,
+  "src/lib/knowledge-inventory.ts": 250,
   "src/lib/knowledge-value.ts": 250,
   "src/lib/last-seen.ts": 41,
   "src/lib/launchd.ts": 148,

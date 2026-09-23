@@ -146,6 +146,7 @@ import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./li
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -29928,6 +29929,39 @@ export function plainInboxWriter(
   }
 }
 
+export function knowledgeGardenWorkspace(opts: {
+  repoDir: string;
+  worktreesRoot: string;
+  owner: string;
+  repo: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  fetcher?: GhApiFetcher;
+  clock?: Clock;
+}): GardenWorkspace {
+  const branch = `knowledge-garden-${(opts.clock ?? systemClock).now()}`;
+  const root = join(opts.worktreesRoot, branch);
+  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return {
+    root,
+    refreshAssertions: () => {
+      execFileSync(process.execPath, [join(root, "scripts", "learnings-assert-check.mjs"), "--dir", join(root, "learnings")], { cwd: root, stdio: "pipe" });
+      return git("status", "--porcelain", "--", "learnings")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => line.slice(3));
+    },
+    land: ({ paths, title, body }) => {
+      git("add", "--", ...paths);
+      git("commit", "-q", "-m", `${title}\n\nTended by the knowledge gardener (W1-T4095).`);
+      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+      assertLiveWriteAllowed("gh-pr-create", `opening a knowledge garden PR against ${opts.owner}/${opts.repo}`);
+      return createPlanPrRest(opts.fetcher ?? ghJson, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
+    },
+    dispose: () => worktreeRemove(opts.repoDir, root),
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -30884,6 +30918,18 @@ export async function daemonCommand(
         // commands. Their own disposition, strike, worktree and review-lock gates remain the
         // authority -- an action request is never a bypass.
         pendingPrActions: () => pendingPrActions(config.root),
+        ...(target.isSelf
+          ? {
+              knowledgeGardener: {
+                stateDir: join(config.root, "state"),
+                repoRoot,
+                openWorkspace: () =>
+                  knowledgeGardenWorkspace({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                log,
+              },
+            }
+          : {}),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
         plainBackfill: {
           stateDir: join(config.root, "state"),

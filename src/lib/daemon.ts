@@ -16,6 +16,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
+import { startKnowledgeGardener, type GardenerDeps } from "./knowledge-gardener.js";
 import type {
   CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
@@ -949,6 +950,9 @@ export interface DaemonDeps {
   /** W1-T4087: writes plain-language messages for operator-owned inbox items that have none yet,
    *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
   plainBackfill?: PlainBackfillDeps;
+  /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
+   *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
+  knowledgeGardener?: GardenerDeps;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
    * commands. It is injected so this scheduler module never grows a second repair implementation. */
   runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
@@ -2199,14 +2203,17 @@ export async function runDaemon(
   const prActionPumpRef: { stop: () => void } = { stop: () => {} };
   // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
+  const gardenerRef: { stop: () => void } = { stop: () => {} };
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     prActionPumpRef.stop();
     plainBackfill?.stop();
+    gardenerRef.stop();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
   };
   prActionPumpRef.stop = startPrActionPump(deps, pollIntervalMs, log).stop;
+  if (deps.knowledgeGardener) gardenerRef.stop = startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs).stop;
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
