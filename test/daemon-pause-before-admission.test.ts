@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { RunResult } from "../src/run-task.js";
 
 // W1-T1065 — THE OPERATOR'S ONLY STOP CONTROL IS READ ONCE PER TICK AND ADMISSION HAPPENS
@@ -333,5 +334,57 @@ test("daemon pause: the heartbeat records that a pause has been seen while the b
     heartbeats.some((l) => l.extra.pause_seen === true),
     "a later heartbeat, once the hold existed while A was STILL in flight, recorded pause_seen=true — " +
       "distinguishing seen-and-draining from not-seen-at-all, without aborting A",
+  );
+});
+
+test("W1-T4191: the in-flight light sweep admits no worker while a pause holds", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-pause-light-sweep-`));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let releaseRunOne: (() => void) | undefined;
+  const runOneGate = new Promise<void>((resolve) => {
+    releaseRunOne = resolve;
+  });
+  let paused = false;
+  let lightBeforePause = 0;
+  let lightWhilePaused = 0;
+  let sleeps = 0;
+  const sleep: DaemonDeps["sleep"] = async () => {
+    sleeps++;
+    // The hold appears only after the ticker has had a chance to run one light pass, and the batch
+    // keeps draining for several more ticks, each of which could admit a fix or review worker.
+    if (sleeps === 2) {
+      requestPause(root, "operator hold created while the batch drains");
+      paused = true;
+    }
+    if (sleeps >= 6) releaseRunOne?.();
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        await runOneGate;
+        merged.add(id);
+        return okResult(id);
+      },
+      sweepLight: async () => {
+        if (paused) lightWhilePaused++;
+        else lightBeforePause++;
+      },
+      checkStop: () => stopDetail(root),
+      checkPause: () => pauseDetail(root),
+      sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.deepEqual(s.merged, ["A"], "the admitted batch still drains under the pause");
+  assert.ok(lightBeforePause >= 1, `control: the ticker ran the light sweep before the pause (saw ${lightBeforePause})`);
+  assert.equal(lightWhilePaused, 0, "no light-sweep pass, and so no fix or review admission, ran while the pause held");
+  assert.ok(
+    lines.some((l) => l.step === "daemon.sweep_light.held" && l.extra.phase === "dispatch"),
+    "the withheld pass is named on the ledger, the same way the full-sweep retrigger names its hold",
   );
 });
