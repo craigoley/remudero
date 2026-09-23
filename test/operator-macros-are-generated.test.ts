@@ -375,6 +375,7 @@ test("external-scan macros: grill, diagnose, handoff and wait-what render operat
     diagnose: [/never a\s+patch/, /Until this command exists, do not read code to build a\s+theory/, /If two patches have not moved the symptom, stop/, /undo it, show red, restore it, show green/],
     handoff: [/never inside the\s+repository/, /Redact every secret/, /FLOOR, not a claim/, /RECON or\s+IMPLEMENT/],
     "wait-what": [/ISO 24495-1/, /Do not add new material/],
+    "session-retro": [/prefer a refusal whenever the mistake\s+is mechanical/, /that is the\s+finding, not a new one/, /Propose only\. Do not edit CLAUDE\.md/],
   };
   for (const [name, patterns] of Object.entries(boundaries)) {
     const text = rendered.get(name);
