@@ -11,7 +11,7 @@
   origin: "feedback#fb-1789339526952-673d48"
   plan_refs: ["W1-T3491", "W1-T1065", "W1-T254"]
   files: [src/lib/daemon.ts, test/daemon-pause-before-admission.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 AT origin/main b5c2804.

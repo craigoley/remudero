@@ -1,0 +1,136 @@
+- id: W1-T4345
+  title: "THE AZURE POLE DECLARES NOTHING ON A RATIONALE THAT HEALED — HOST_PARITY_BASELINE's container pole is asserted empty from a 16-failure set measured at 3a5c677 whose 14 largest were `jq` absent from the image, and deploy/Dockerfile now installs jq with a build-time probe; the container's real divergence set has never been re-measured, so every FIX round in a worktree re-derives is-this-pre-existing by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 30.00
+  files:
+    - src/lib/host-parity.ts
+    - test/host-parity-azure-pole.test.ts
+  origin: "followup#DAEMON-1788783316728-w1-t3020-sandbox-suite-reds-2026-09-07"
+  plan_refs: ["W1-T2790", "W1-T2785", "W1-T2776", "W1-T2234"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE REPORT THAT PROMPTS THIS, ATTRIBUTED RATHER THAN ADOPTED. W1-T3020's run (PR #4394)
+    reports ~19 local full-suite failures in a container worktree — a node-version banner check,
+    a secrets baseline, a process-group kill, and host-mount-table tests — none of which
+    reproduce in GitHub Actions. That count and that clustering are REPORTED, not measured here,
+    and this task's first act is to re-measure rather than to inherit them. A figure carried in
+    prose is exactly what W1-T2790's own note corrects itself for ("EIGHT entries — counted from
+    the array, correcting a figure of seven this session carried in prose before checking").
+
+    THE INSTRUMENT FOR THIS ALREADY EXISTS AND ITS ANSWER FOR THIS HOST IS EMPTY.
+    `resolveHostPole` (src/lib/host-parity.ts) returns `azure` for a container that is not a CI
+    runner — a distinction W1-T2735's filing paid for, because the container previously
+    self-reported as `ci` and was diffed against a baseline describing a machine it is not.
+    `diffHostParity` then splits an observed failure set into `undeclared` / `healed` /
+    `declaredSeen`. The machinery is built. `HOST_PARITY_BASELINE` declares FIVE entries, and
+    NOT ONE carries `pole: "azure"` — verified by reading the array at this sha.
+
+    THE EMPTINESS IS DELIBERATE, DOCUMENTED, AND NOW OUT OF DATE. The file's own comment states
+    the reasoning in full: the azure glob "MEASURED 16 failures at `3a5c677` (6,656 tests), and
+    not one of them belongs here" — 14 because `jq` was absent from the image ("a MISSING
+    DEPENDENCY IN A CONTAINER ... fixed in the image rather than blessed here"), 2 because
+    `teardownProcessGroup` is a known whole-suite flake ("a flake is not a divergence"). BOTH
+    exclusions were right. But `deploy/Dockerfile:116` now installs `jq` alongside
+    `bubblewrap socat procps lsof`, with a build-time `jq --version` probe at :123, so the 14
+    have healed and the justification for declaring the pole empty no longer describes the host.
+    Nothing re-measured it. `test/host-parity-azure-pole.test.ts` pins the result in as many
+    words — "azure declares NOTHING today, and that is asserted rather than assumed" — which is
+    honest bookkeeping of a fact that has since moved.
+
+    WHAT THE GAP COSTS, IN THE SHAPE THIS FLEET ALREADY PAID FOR. W1-T3018 (filed today) records
+    a session in this container reading environmental reds as "origin/main is 189-red", carrying
+    the false claim into the bodies of TWO merged PRs, both needing correcting comments. The
+    cause there was an absent Chromium build; the class is the same one this task addresses from
+    the other end — a host whose expected failure set is undeclared manufactures false claims
+    about the code, at scale, every run.
+
+    THIS DOES NOT ANSWER W1-T2790 AND MUST NOT BE READ AS ANSWERING IT. That open question asks
+    whether the PREDICTIVE registry (`HOST_CAUSED_SUITE_REDS`) should be DERIVED from a real run
+    rather than hand-written. This task touches only the OBSERVATIONAL baseline, and populating
+    an observational list from a measured run is what that list is for under either arm — it is
+    also the input a derived registry would need. Nothing here hand-writes a prediction.
+  design: |
+    (i) MEASURE FIRST, AT A NAMED SHA, IN THE CONTAINER. Run the suite on the azure pole and
+    record the observed failure identities (`test/<file>.test.ts::<title>`, the identity
+    `DivergenceId` already uses) together with the sha and the date. The report is the input;
+    the reported ~19 is a hypothesis to be confirmed or corrected, and a corrected count is a
+    finding worth stating rather than a discrepancy to smooth over.
+
+    (ii) RE-RUN EACH CANDIDATE IN ISOLATION BEFORE DECLARING IT. This is the discipline the
+    file's own comment already records for the mini's baseline ("Every entry was re-run IN
+    ISOLATION rather than trusted from a whole-suite run"), and it is what separates a
+    divergence from a whole-suite flake. A candidate that passes in isolation is NOT declared.
+
+    (iii) FOUR DISPOSITIONS, AND ONLY ONE OF THEM IS A DECLARATION. Per cluster:
+      DECLARE — a genuine host divergence, entered with a reason naming the host fact that
+        differs from the ci runner (a reason is the whole content of an entry; "an entry with no
+        reason is an absent entry wearing a costume").
+      IMAGE FIX — a missing dependency or a wrong build in the image. NEVER declared. The `jq`
+        precedent is binding and is quoted in the file: declaring it "would mute a defect and
+        then decay into the mute button this file's header warns about." File it; do not bless
+        it.
+      FLAKE — refused, per the same file's rule. The `teardownProcessGroup` /
+        `test/worker-containment` pair is already named there as a flake and stays out.
+      REAL DEFECT THE CONTAINER EXPOSES — a genuine bug the Actions runner happens not to reach.
+        This is the most valuable disposition and the one a declaration would bury: file it as
+        its own task, do not fix it here (one concern), and do not declare it.
+
+    (iv) THE PINNED EMPTINESS TEST IS UPDATED, NOT DELETED. `test/host-parity-azure-pole.test.ts`
+    asserts azure's emptiness on purpose. Replace that assertion with one that survives
+    population — the azure set is non-empty, every entry is scoped to `azure`, and every entry
+    carries a non-empty reason — so the pin keeps doing its job against the new state instead of
+    being removed because it became inconvenient.
+
+    (v) THE STALE JUSTIFICATION IS CORRECTED IN PLACE. The comment above `HOST_PARITY_BASELINE`
+    still explains azure's emptiness with the 14-jq set. Leaving it would send the next reader to
+    a dependency that shipped. Correct it to the measured state, keeping the jq episode as the
+    recorded PRECEDENT for the IMAGE FIX disposition — it is the best example of it in the repo.
+
+    (vi) OUT OF SCOPE, DELIBERATELY: any entry in `HOST_CAUSED_SUITE_REDS`, any change to
+    `runHostParity`'s report-not-a-gate contract, and the derivation question (W1-T2790).
+  acceptance:
+    - claim: "the azure pole's declared set is populated from a measured container run, and every azure entry carries a non-empty reason naming the host fact that differs from the ci runner"
+      proof: "unit test: every azure declaration names the host fact that differs from the ci runner, in a non-empty reason"
+    - claim: "a failure caused by a missing image dependency is NOT declared — the jq precedent holds, and such a cause is recorded as an image fix instead of being blessed into the baseline"
+      proof: "unit test: an image-dependency cause is absent from the azure baseline and is recorded as an image fix"
+    - claim: "a known whole-suite flake is refused a declaration — the teardownProcessGroup pair the file already names as a flake stays out of the baseline"
+      proof: "unit test: the teardownProcessGroup flake is refused an azure declaration"
+    - claim: "the emptiness assertion is replaced by one that survives population — the azure set is non-empty and every entry in it is scoped to the azure pole"
+      proof: "unit test: the azure declared set is non-empty and every entry is scoped to azure"
+  falsifier: |
+    Close without implementation if a measured run on the azure pole reports zero undeclared
+    divergences — that would mean the empty declaration is still accurate and the reported ~19
+    were all image fixes, flakes or defects, which is itself the finding and must be recorded.
+    A version that declares a missing image dependency FAILS this task: it converts a fixable
+    defect into permanent silence, and it is the exact move the file's own azure comment refuses
+    by name. A version that declares a candidate observed only in a whole-suite run, without an
+    isolated re-run, also fails — a flake declared as a divergence mutes a test forever.
+    Deleting the emptiness assertion rather than replacing it fails too: the pin exists so the
+    baseline's state is asserted rather than assumed, and that property must survive this change.
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius. The two
+    declared files are the registry (`src/lib/host-parity.ts`) and the test that pins it
+    (`test/host-parity-azure-pole.test.ts`), which the linter reads as two concerns. They are one
+    act — an entry no falsifier grades is a claim nobody checked — and this is the same shape and
+    the same pairing W1-T2785 recorded for the sibling registry.
+
+    THE REPORTED CLUSTERS, CARRIED VERBATIM SO THE MEASUREMENT HAS SOMETHING TO CHECK ITSELF
+    AGAINST, and NOT adopted as fact: node-version banner check, secrets baseline, process-group
+    kill, host-mount-table tests, ~19 failures total, from W1-T3020's run (PR #4394,
+    DAEMON-1788783316728). Two of these are worth naming in advance because a disposition is
+    already suggested by the repo's own record: the process-group cluster is very likely the
+    `teardownProcessGroup` flake this file ALREADY names (disposition FLAKE, refused), and a
+    node-version cluster may be W1-T2770's node-vs-`.nvmrc` drift, which is registered in the
+    OTHER registry and is pole-agnostic — the only one of that registry's sixteen entries whose
+    predicate can be true on a Linux container. Neither prejudges the measurement.
+
+    SIBLING, NOT DEPENDENCY: W1-T4346 fixes what the predictive registry SAYS to a host it has never
+    been measured against, and deliberately does not depend on this task — a hard edge would
+    strand a polarity fix behind a measurement.
