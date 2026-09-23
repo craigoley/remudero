@@ -12,7 +12,9 @@
   plan_refs: [W1-T4110, W1-T4115]
   files: [src/lib/gate-gardener.ts, src/run-task.ts, test/the-gates-tend-themselves.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4116 — Every acceptance proof already holds on main.
   attempts: 0
   rationale: |
     W1-T4115 records per-gate fire, repair and override rates. A one-way baseline with slack is never tightened, a stale
