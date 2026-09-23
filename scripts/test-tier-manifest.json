@@ -1602,6 +1602,7 @@
     "test/the-followup-rung-amplifies-the-ledger.test.ts": 0,
     "test/the-forward-reference-carve-out-is-asymmetric.test.ts": 0,
     "test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts": 1099,
+    "test/the-gateway-reads-current-code.test.ts": 0,
     "test/the-git-reclaim-warns-when-its-target-has-a-live-sibling.test.ts": 0,
     "test/the-golden-suite-has-every-piece-except-a-producer.test.ts": 1682,
     "test/the-hand-run-census-names-the-verb-not-the-step.test.ts": 0,
