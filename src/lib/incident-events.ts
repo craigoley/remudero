@@ -73,9 +73,15 @@ export interface ScrubbedIncidentEvent {
   sha?: string;
 }
 
+// PRIMARY CONTROL (W1-T1266): the deliberate cap `scrubIncidentEvent` enforces on every stored
+// message — not a fallback for something else already having failed.
 export const INCIDENT_MESSAGE_MAX_CHARS = 500;
+// PRIMARY CONTROL: the deliberate cap `scrubIncidentEvent` enforces on the frames array before
+// anything downstream (fingerprinting, storage) ever sees it.
 export const INCIDENT_FRAMES_MAX = 20;
 export const INCIDENT_FINGERPRINT_FRAME_COUNT = 3;
+// PRIMARY CONTROL: the deliberate per-fingerprint-per-minute rate the sampler enforces — the
+// mechanism itself, not a backstop for a separate control that failed.
 export const INCIDENT_SAMPLE_CAP_PER_MINUTE = 20;
 
 // ── scrub ─────────────────────────────────────────────────────────────────────────────────────
