@@ -26,6 +26,7 @@ import {
   newestPlaywrightVersionChangeSha,
   playwrightCoreVersionChanged,
   playwrightCoreVersionCommitsBehind,
+  realDeployDeps,
 } from "../src/lib/deployer.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
@@ -165,4 +166,73 @@ test("W1-T4061: no playwright-core version change anywhere in history reads as u
     }),
     undefined,
   );
+});
+
+// ── realDeployDeps().newestBakedSha(): the tie-break between the baked-path signal and the
+//    playwright-core signal, when BOTH resolve to a real (different) commit ──────────────────
+//
+// `newestBakedSha` names the commit `imagePublished` looks a tag up FOR — so when the baked-path
+// reading and the playwright-core reading disagree, it must report whichever one is CLOSER to
+// `origin/main` (fewer commits behind), since that is the commit acr-build.yml's own guard most
+// recently tagged. Ties go to the playwright reading (`<=`), matching the fix's premise that a
+// playwright bump is the more specific signal of the two.
+
+function fakeRealDeployDeps(execFile: (cmd: string, args: string[]) => string) {
+  return realDeployDeps({
+    installPath: "/repo",
+    stateRoot: "/state",
+    daemonLabel: "com.remudero.daemon",
+    serveLabel: "com.remudero.serve",
+    servePort: 4317,
+    uid: 502,
+    ledgerPath: "/state/ledger.ndjson",
+    log: () => {},
+    sleep: () => {},
+    execFile,
+  });
+}
+
+test("W1-T4061: newestBakedSha prefers whichever of the two signals is closer to origin/main", () => {
+  const bakedSha = "b".repeat(40);
+  const playwrightSha = "p".repeat(40);
+
+  // playwrightSha is CLOSER to origin/main (1 commit behind) than bakedSha (3 commits behind) —
+  // the playwright-core move is the more recent image input, so it must win.
+  const closerPlaywright = (cmd: string, args: string[]): string => {
+    if (cmd !== "git") throw new Error(`unexpected exec ${cmd}`);
+    if (args.includes("-1") && args.includes("--format=%H")) return `${bakedSha}\n`; // IMAGE_BAKED_PATHS query
+    if (!args.includes("-1") && args.includes("--format=%H")) return `${playwrightSha}\n`; // playwright-core log walk
+    if (args.includes("show") && args.at(-1) === `${playwrightSha}:${ROOT_LOCKFILE_PATH}`) return PLAYWRIGHT_BUMP_LOCK;
+    if (args.includes("show") && args.at(-1) === `${playwrightSha}^:${ROOT_LOCKFILE_PATH}`) return OLD_LOCK;
+    if (args.includes("rev-list") && args.at(-1) === `${bakedSha}..origin/main`) return "3\n";
+    if (args.includes("rev-list") && args.at(-1) === `${playwrightSha}..origin/main`) return "1\n";
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+  assert.equal(fakeRealDeployDeps(closerPlaywright).newestBakedSha?.(), playwrightSha);
+
+  // Now bakedSha is CLOSER (1 vs 3) — the baked-path signal wins instead.
+  const closerBaked = (cmd: string, args: string[]): string => {
+    if (cmd !== "git") throw new Error(`unexpected exec ${cmd}`);
+    if (args.includes("-1") && args.includes("--format=%H")) return `${bakedSha}\n`;
+    if (!args.includes("-1") && args.includes("--format=%H")) return `${playwrightSha}\n`;
+    if (args.includes("show") && args.at(-1) === `${playwrightSha}:${ROOT_LOCKFILE_PATH}`) return PLAYWRIGHT_BUMP_LOCK;
+    if (args.includes("show") && args.at(-1) === `${playwrightSha}^:${ROOT_LOCKFILE_PATH}`) return OLD_LOCK;
+    if (args.includes("rev-list") && args.at(-1) === `${bakedSha}..origin/main`) return "1\n";
+    if (args.includes("rev-list") && args.at(-1) === `${playwrightSha}..origin/main`) return "3\n";
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+  assert.equal(fakeRealDeployDeps(closerBaked).newestBakedSha?.(), bakedSha);
+
+  // An unparseable rev-list answer on either side falls through to the baked-path reading rather
+  // than throwing or picking an arbitrary sha.
+  const unparseableDistance = (cmd: string, args: string[]): string => {
+    if (cmd !== "git") throw new Error(`unexpected exec ${cmd}`);
+    if (args.includes("-1") && args.includes("--format=%H")) return `${bakedSha}\n`;
+    if (!args.includes("-1") && args.includes("--format=%H")) return `${playwrightSha}\n`;
+    if (args.includes("show") && args.at(-1) === `${playwrightSha}:${ROOT_LOCKFILE_PATH}`) return PLAYWRIGHT_BUMP_LOCK;
+    if (args.includes("show") && args.at(-1) === `${playwrightSha}^:${ROOT_LOCKFILE_PATH}`) return OLD_LOCK;
+    if (args.includes("rev-list")) return "not-a-number\n";
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+  assert.equal(fakeRealDeployDeps(unparseableDistance).newestBakedSha?.(), bakedSha);
 });
