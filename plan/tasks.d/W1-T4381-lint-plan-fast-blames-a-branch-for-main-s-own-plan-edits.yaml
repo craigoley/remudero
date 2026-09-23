@@ -1,0 +1,43 @@
+- id: W1-T4381
+  title: "lint-plan:fast BLAMES A BRANCH FOR MAIN'S OWN PLAN EDITS — it diffs the checkout against the TIP of origin/main, not the merge-base, so any plan record main changes after a branch forks reads as changed in that branch and is linted in its older form; ci-parity's live lint-plan:fast test then reds unrelated PRs every time main reconciles a task: diff against the merge-base"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "session: 2026-09-23 backlog triage — ci-parity red twice on plan-only PR #6737"
+  plan_refs: ["W1-T4003"]
+  files: [src/run-task.ts, test/lint-plan-fast-scopes-to-the-merge-base.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 at origin/main. Names are symbols; re-verify at your head.
+
+    OBSERVED: package.json `lint-plan:fast` runs `scripts/lint-plan-offline.mjs --base origin/main`. The lint-plan
+    verb loads `<baseRef>:plan/tasks.yaml` plus the base shards and scopes to `changedTaskIds(oldPlan.tasks,
+    plan.tasks)` (src/run-task.ts, the `--base` arm). With baseRef = origin/main, that compares against main's TIP.
+    OBSERVED twice on PR #6737 (plan-only, touching W1-T3768, W1-T4193, W1-T4195, W1-T4225):
+    - `ci-shard (3/4)` failed on test/ci-parity.test.ts "lint-plan:fast (the fast-gate's own script): runs for real,
+      unmocked, on this checkout" with `✗ W1-T115: 3 violation(s) (0 pre-existing on base origin/main)`. W1-T115 was
+      not in the diff; #6740 had just reconciled it on main.
+    - Earlier the same shape named W1-T67, reconciled on main by #6736.
+    Merging main into the branch cleared both, which is the signature: the branch carried main's OLD copy of a record
+    main had since fixed. The test's own comment says it reads "the merge-base diff"; the code reads the tip.
+    ci.yml's required lint-plan job uses `--base HEAD^1` on the merge ref and is not affected.
+
+    Who pays: every open PR, each time main merges a plan reconcile (several an hour on 2026-09-23), with a red
+    coverage/ci shard that names a task the PR never touched.
+  design: |
+    (i) lint-plan:fast scopes to the MERGE-BASE of HEAD and origin/main, not origin/main's tip: a record main changed
+        after the fork is not in the branch's scope. A record the branch itself changed still is.
+    (ii) The run still names its scope (`new/changed vs origin/main`, or a form that names the merge-base), because
+        test/ci-parity.test.ts asserts it does.
+    (iii) Only the `--base` resolution changes. The default (open-only) and `--all` modes are untouched.
+  acceptance:
+    - claim: "a record main changed after the fork is not linted as this branch's change"
+      proof: 'grep: test("W1-T4381: a record main changed after the fork is not linted as this branchs change" in test/lint-plan-fast-scopes-to-the-merge-base.test.ts'
+    - claim: "a record the branch changed is still in scope"
+      proof: 'grep: test("W1-T4381: a record the branch changed is still in scope" in test/lint-plan-fast-scopes-to-the-merge-base.test.ts'
