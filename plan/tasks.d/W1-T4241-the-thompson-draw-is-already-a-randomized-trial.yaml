@@ -16,7 +16,7 @@
     - src/run-task.ts
     - src/lib/digest.ts
     - test/a-learning-is-credited-by-the-outcome-of-the-runs-it-reached.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at origin/main f0e1fc43.
