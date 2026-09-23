@@ -32,6 +32,9 @@ const provenance = (sessionId: string): ReviewEvaluatorProvenance => ({
   effort: "high",
   sessionId,
 });
+// W1-T4226: the fix rung reads the live PR body after its strike; hand it one through the
+// `fetchPrBody` seam instead of letting the shared stub refuse a real PR-body read.
+const fetchPrBody = async (prUrl: string): Promise<string> => `PR body for ${prUrl}`;
 const verdict = (state: ReviewState): ReviewVerdict => ({
   state,
   criteria: [],
@@ -368,6 +371,7 @@ test("W1-T2722: a conflicting computed success is held at failure and the fix ru
         log: (step, extra) => events.push({ step, extra }),
         say: () => {},
         account: (result) => result,
+        fetchPrBody,
       },
     });
 
@@ -461,6 +465,7 @@ test("W1-T2722 (FALSIFIER): the SAME fixture without the conflict disposition ne
         log: (step, extra) => events.push({ step, extra }),
         say: () => {},
         account: (result) => result,
+        fetchPrBody,
       },
     });
 

@@ -28,6 +28,7 @@ import {
 } from "../src/lib/plan.js";
 import { nextRunnable, tallyDispatchFilters } from "../src/lib/drain.js";
 import { lintPlanCommand } from "../src/run-task.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -190,13 +191,23 @@ async function runLintPlanCapturing(args: string[]): Promise<{ exitCode: number;
   console.log = (m: string) => logs.push(m);
   console.error = (m: string) => errors.push(m);
   console.warn = () => {};
+  // W1-T4226: whole-plan credit scoping reads GitHub; the offline seam plus a recording fake keeps
+  // this run off the refused `gh`, and the assertion proves no gateway was ever built.
+  const gatewaysBuilt: string[] = [];
   try {
-    const exitCode = await lintPlanCommand(args);
+    const exitCode = await lintPlanCommand(args, {
+      offline: true,
+      ghGateway: (owner, repo) => {
+        gatewaysBuilt.push(`${owner}/${repo}`);
+        return fakeGitHub();
+      },
+    });
     return { exitCode, stdout: logs.join("\n"), stderr: errors.join("\n") };
   } finally {
     console.log = origLog;
     console.error = origError;
     console.warn = origWarn;
+    assert.deepEqual(gatewaysBuilt, [], "an offline lint-plan run builds no GitHub gateway");
   }
 }
 

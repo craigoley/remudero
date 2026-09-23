@@ -342,6 +342,8 @@ async function runContractRefreshRung(over: {
       log: () => {},
       say: () => {},
       account: (r) => r,
+      // W1-T4226: the live PR-body read goes through `deps.fetchPrBody`, not the refused gh read.
+      fetchPrBody: async () => "## Summary\n\nfix-rung fixture PR body.\n\nRemudero-Task: W1-T3557X\n",
       ...(over.resolveTaskContractAtHead ? { resolveTaskContractAtHead: over.resolveTaskContractAtHead } : {}),
     },
   });

@@ -24,6 +24,10 @@ import { reviewInputDigest, type CriterionVerdict, type ReviewVerdict } from "..
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
+// W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
+// injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
+const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
+
 const TASK_ID = "W1-T3309-FIXTURE";
 const PR_URL = "https://github.com/craigoley/remudero/pull/3309";
 const BODY = `Remudero-Task: ${TASK_ID}`;
@@ -173,6 +177,7 @@ test("an ordinary fix.dispatch records its claim set, and its first exact recurr
     deps: {
       spawn: async () => workerResult(),
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => ordinaryReview("success"),
       push: () => {},
       issues: { create: () => "https://github.com/craigoley/remudero/issues/3309" },
@@ -270,6 +275,7 @@ test("the first entanglement records its structured cause but opens a prerequisi
     deps: {
       spawn: async () => workerResult("REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/9001"),
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       readPrerequisiteState: async () => ({ ok: true, state: "OPEN" }) as never,
       runReview: async () => { throw new Error("an open prerequisite parks before ordinary review"); },
       push: () => { throw new Error("the entangled branch is not pushed in place"); },

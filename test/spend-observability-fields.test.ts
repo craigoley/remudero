@@ -63,6 +63,10 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 
+// W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
+// injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
+const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
+
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 const JUDGE_MOUNT: Mount = { model: "haiku", effort: "low", maxTurns: 40, contextBudget: 40000 };
@@ -255,6 +259,7 @@ async function driveOneFixRound(spawnResult: WorkerResult): Promise<Array<{ step
     deps: {
       spawn: async () => spawnResult,
       waitForCiGreen: async () => ({ state: "green" }) as never,
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => review("success", [criterion({ claim: "criterion A", met: true })], "head1") as never,
       push: () => {},
       issues,

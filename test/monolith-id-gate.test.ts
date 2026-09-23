@@ -83,12 +83,16 @@ test("lint-plan without --base PRINTS the skip note, so a check that cannot run 
   // Trap 1's other half. Silence would be worse than the check not existing: whole-plan is the mode
   // people run by hand, and a check that quietly does nothing there is one nobody notices is broken.
   const { lintPlanCommand } = await import("../src/run-task.js");
+  const { fakeGitHub } = await import("./helpers/fake-github.js");
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
 
   // INSIDE the repo root on purpose: lintPlanCommand refuses a --plan that resolves outside it
   // (run-task.ts's repo-root identity guard), so a tmpdir fixture never reaches the check at all.
   const dir = mkdtempSync(join(process.cwd(), ".rmd-monolith-note-"));
+  // W1-T4226: whole-plan credit scoping reads GitHub; the offline seam plus a recording fake keeps
+  // this run off the refused `gh`, and the assertion proves no gateway was ever built.
+  const gatewaysBuilt: string[] = [];
   const said: string[] = [];
   const origLog = console.log;
   console.log = (m?: unknown) => void said.push(String(m));
@@ -98,11 +102,18 @@ test("lint-plan without --base PRINTS the skip note, so a check that cannot run 
       planPath,
       "- id: W1-T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: human\n",
     );
-    await lintPlanCommand(["--plan", planPath]);
+    await lintPlanCommand(["--plan", planPath], {
+      offline: true,
+      ghGateway: (owner, repo) => {
+        gatewaysBuilt.push(`${owner}/${repo}`);
+        return fakeGitHub();
+      },
+    });
   } finally {
     console.log = origLog;
     rmSync(dir, { recursive: true, force: true });
   }
+  assert.deepEqual(gatewaysBuilt, [], "an offline lint-plan run builds no GitHub gateway");
 
   assert.ok(
     said.some((l) => /monolith-filing check is SKIPPED/.test(l)),

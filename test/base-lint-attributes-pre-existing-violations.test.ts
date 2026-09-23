@@ -34,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { lintPlanCommand } from "../src/run-task.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -413,13 +414,23 @@ test("no run without --base performs a second lint pass: the annotation never ap
     // Whole-plan mode reads `--plan` directly with no base resolution at all.
     writeFileSync(planPath, LANDMINE_TASK("whole-plan mode", "works"), "utf8");
 
+    // W1-T4226: whole-plan mode's credit scoping reads GitHub; the offline seam plus a recording
+    // fake keeps it from shelling out to the refused `gh` (and proves no gateway was built).
+    const gatewaysBuilt: string[] = [];
     const cap = captureConsole();
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath]);
+      code = await lintPlanCommand(["--plan", planPath], {
+        offline: true,
+        ghGateway: (owner, repo) => {
+          gatewaysBuilt.push(`${owner}/${repo}`);
+          return fakeGitHub();
+        },
+      });
     } finally {
       cap.restore();
     }
+    assert.deepEqual(gatewaysBuilt, [], "the offline whole-plan run builds no GitHub gateway");
 
     assert.equal(code, 1, "the task still genuinely fails");
     const line = cap.errLines.find((l) => l.startsWith("✗ ZZ-Landmine:"));

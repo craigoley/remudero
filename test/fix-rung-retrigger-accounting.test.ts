@@ -14,6 +14,10 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
+// W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
+// injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
+const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
+
 /**
  * W1-T2403 — THE FIX RUNG SPENDS A WORKER TO RE-RUN A JOB, AND THE RETRIGGER CONSUMES A STRIKE.
  *
@@ -184,6 +188,7 @@ test("W1-T2403: a retrigger-shaped round is logged fix.retrigger (never fix.disp
       },
       readRoundCommits: async () => [commitsPerRound[spawnCalls - 1]],
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () =>
         spawnCalls === 1
           ? fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], "sha-1")
@@ -231,6 +236,7 @@ test("W1-T2403: an all-retrigger rung is bounded by retriggerCap (never strikeCa
       },
       readRoundCommits: async () => [RETRIGGER_COMMIT],
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       // A DISTINCT head every round — the empty commit still gets its own sha on GitHub — so the
       // review false-block escape (a DIFFERENT guard than this task's own) never intercepts it.
       runReview: async () =>
@@ -278,6 +284,7 @@ test("W1-T2403: a real defect (never retrigger-shaped) still spends real strikes
       },
       readRoundCommits: async () => [REAL_FIX_COMMIT],
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () =>
         fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], `sha-${spawnCalls}`),
       push: () => {},

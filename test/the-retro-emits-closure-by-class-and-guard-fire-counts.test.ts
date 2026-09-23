@@ -37,6 +37,7 @@ import {
 } from "../src/lib/retro.js";
 import { retroCommand } from "../src/run-task.js";
 import { offlineGithub } from "./setup/offline-github.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -283,6 +284,20 @@ test("retroCommand --dry-run prints the two operator tables and carries the prio
   const root = mkdtempSync(join(tmpdir(), "rmd-retro-closure-root-"));
   const savedHome = process.env.HOME;
   process.env.HOME = fakeHome;
+  // W1-T4226: the SHIPPED-union gateway (retroShippedGithubGateway) has no dep seam and shells out
+  // to `gh` in-process; answer it from a scripted shim ahead of the shared refusal stub — quota
+  // available, and no merged PR carries this fixture's trailer — so the retro renders against a
+  // reachable, empty GitHub rather than one whose every read was refused.
+  const gh = ghShim(
+    [
+      { when: "search/issues", stdout: '{"items":[]}' },
+      { when: "rate_limit", stdout: "5000" },
+      { when: "api user", stdout: "fixture-user" },
+    ],
+    { kind: "retro-closure-gh" },
+  );
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${savedPath ?? ""}`;
   try {
     const state = join(root, "state");
     mkdirSync(state, { recursive: true });
@@ -323,6 +338,8 @@ test("retroCommand --dry-run prints the two operator tables and carries the prio
   } finally {
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    rmSync(gh.dir, { recursive: true, force: true });
     rmSync(fakeHome, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }

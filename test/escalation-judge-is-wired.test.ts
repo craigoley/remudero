@@ -125,6 +125,8 @@ async function rungThatEscalates(judge: (e: Escalation) => Promise<EscalationJud
       log: () => {},
       say: () => {},
       account: (r) => r,
+      // W1-T4226: each strike's live PR-body read goes through the seam, never the refused real gh.
+      fetchPrBody: async () => "## Summary\nSome task\n",
     },
   });
   return { issueCalls, ledgerPath, judged };

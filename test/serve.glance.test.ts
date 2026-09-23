@@ -12,6 +12,7 @@ import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
 import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
@@ -104,7 +105,8 @@ function fixtureDeps(root: string, tasks: Task[], opts: FixtureOpts = {}): Serve
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     pollMs: opts.pollMs ?? 50,
     phaseElapsedThresholdsMs: opts.phaseElapsedThresholdsMs,
-    daemonHealth: opts.daemonHealth,
+    // W1-T4226: /v1/daemon-health reads `gh api rate_limit` -- fake it, never shell the refused gh.
+    daemonHealth: { exec: fakeGhRateLimitExec(), ...opts.daemonHealth },
     accountUsage: opts.accountUsage,
   };
 }

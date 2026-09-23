@@ -43,6 +43,7 @@ import {
 } from "../src/lib/feedback.js";
 import { escalate, renderIssueBody, summarizeEscalation, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
 import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -539,6 +540,8 @@ function fixtureDeps(rootDir: string): ServeDeps {
     fleetControlRoot: rootDir,
     questionsRoot: rootDir,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T4226: /v1/daemon-health reads `gh api rate_limit` -- fake it, never shell the refused gh.
+    daemonHealth: { exec: fakeGhRateLimitExec() },
     pollMs: 50,
   };
 }

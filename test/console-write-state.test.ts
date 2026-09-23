@@ -28,6 +28,7 @@ import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
 import { prReferentFromIssueText } from "../src/lib/escalate.js";
 import { buildEscalationReconcileCandidates } from "../src/run-task.js";
 import { runEscalationReconcile } from "../src/lib/sweep.js";
@@ -98,6 +99,8 @@ function fixtureDeps(): ServeDeps {
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T4226: /v1/daemon-health reads `gh api rate_limit` -- fake it, never shell the refused gh.
+    daemonHealth: { exec: fakeGhRateLimitExec() },
     pollMs: 50,
   };
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2376,6 +2377,8 @@ test("W1-T70 (end-to-end): reviewCommand resolves the LAST-LINE trailer id (not 
       seenTaskId = args.task.id;
       return { ...fakeReview("success", []), capped: true };
     },
+    // W1-T4226: the pending post's lifecycle read goes through this seam, not the refused `gh api`.
+    postReviewPending: async () => ({ posted: true }),
   });
   // The genuine LAST line ("W1-T70"), never the mid-prose quotation ("W1-T20c").
   assert.equal(seenTaskId, "W1-T70");
@@ -3023,6 +3026,12 @@ function fixRungBaseOpts() {
   };
 }
 
+/** W1-T4226: the rung's live PR reads go through `deps.fetchPrBody` / `deps.fetchPrDiffFiles`,
+ *  never the refused `gh pr view --json body|files` — a plain body carrying this fixture task's
+ *  own trailer (no changeset claim to repair), and a one-file changeset. */
+const fakePrBody = async (): Promise<string> => "## Summary\n\nfix-rung fixture PR body.\n\nRemudero-Task: W1-TX\n";
+const fakePrDiffFiles = async (): Promise<string[]> => ["src/lib/fixture.ts"];
+
 function tmpLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-fixrung-")), "ledger.ndjson");
 }
@@ -3425,6 +3434,7 @@ test("runFixRung: a seeded blocked_review with TWO unmet criteria dispatches ONE
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -3479,6 +3489,7 @@ test("runFixRung (W1-T166 criterion 1): a mix of visible + holdout unmet criteri
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-holdout" });
@@ -3529,6 +3540,7 @@ test("runFixRung (W1-T166): when EVERY unmet criterion is holdout, the fix promp
     strikeCap: 1,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-holdout-only" });
@@ -3565,6 +3577,7 @@ test("runFixRung (W1-T256): in body-coverage mode the re-review judges the FRESH
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrDiffFiles: fakePrDiffFiles,
       // The fix worker edits the PR BODY (gh pr edit); its OWN chat text never echoes the proof.
       spawn: async () => result({ sessionId: "fix-1", text: "edited the PR body; nothing here echoes the proof keywords" }),
       waitForCiGreen: async () => "green",
@@ -3606,6 +3619,7 @@ test("runFixRung (W1-T256): a THROWING fetchPrBody falls back to the worker text
     strikeCap: 1,
     initialReview: failing,
     deps: {
+      fetchPrDiffFiles: fakePrDiffFiles,
       spawn: async () => result({ sessionId: "fix-1", text: "WORKER-CHAT-FALLBACK" }),
       waitForCiGreen: async () => "green",
       fetchPrBody: async () => {
@@ -3639,6 +3653,7 @@ test("runFixRung: the fix worker amends the SAME run branch — its spawn's cwd 
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -3678,6 +3693,7 @@ test("runFixRung: strike 1 RESUMES the failing implement session; strike 2 is a 
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -3718,6 +3734,7 @@ test("runFixRung: only the FINAL fresh strike steps up to the step_up mount; ear
       strikeCap,
       initialReview: failingAt("sha-0"),
       deps: {
+        fetchPrBody: fakePrBody,
         spawn: async (args) => {
           spawnCalls.push(args);
           return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -3759,6 +3776,7 @@ test("runFixRung: a second block after N strikes escalates rather than looping (
     strikeCap: 2,
     initialReview: stillFailing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -3819,6 +3837,7 @@ test("runFixRung (W1-T58 acceptance 1): an ORDINARY seeded blocked_review (no cr
     strikeCap: 2,
     initialReview: stillFailing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -3853,6 +3872,7 @@ test("runFixRung (W1-T58 acceptance 1): an ORDINARY seeded blocked_review (no cr
     strikeCap: 2,
     initialReview: stillFailing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         escSpawnCalls.push(args);
         return result({ sessionId: `fix-session-${escSpawnCalls.length}` });
@@ -3956,6 +3976,7 @@ test("runFixRung: a CI regression after a fix attempt does not stall the rung �
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -4027,6 +4048,8 @@ test("runFixRung: a stale failing verdict heals in ONE strike once the body edit
     strikeCap: 2,
     initialReview: staleFailing,
     deps: {
+      fetchPrDiffFiles: fakePrDiffFiles,
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -4069,6 +4092,7 @@ test("runFixRung: a seeded blocked_ci (ciFailures, no review posted yet) dispatc
     initialReview: noReviewYet,
     ciFailures,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -4108,6 +4132,7 @@ test("runFixRung: once CI goes green and a real review posts (even a failing one
     initialReview: noReviewYet,
     ciFailures: [{ name: "ci", logTail: "tsc: error TS2322" }],
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -4191,6 +4216,7 @@ test("runFixRung: a seeded conflicted dispatch (mergeConflict, no review posted 
     initialReview: noReviewYet,
     mergeConflict,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -4456,6 +4482,7 @@ test("runFixRung: a PR that goes MERGED mid-rung (after round 1's strike, before
     strikeCap: 1, // one strike, then straight to the exhaustion check
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async () => result({ sessionId: "fix-session-1" }),
       waitForCiGreen: async () => "green",
       // Still failing — heads toward exhaustion — but a GENUINE deficiency:
@@ -4493,6 +4520,7 @@ test("runFixRung: a FAILED/INDETERMINATE read at the EXHAUSTION check (site ii) 
     strikeCap: 1,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async () => result({ sessionId: "fix-session-1" }),
       waitForCiGreen: async () => "green",
       // A GENUINE deficiency: the strike lands a real, distinct commit that
@@ -4616,6 +4644,7 @@ test("runFixRung: a fix round with NO diff change that re-fails the SAME criteri
     strikeCap: 2, // TWO strikes available — the escape must fire on strike 1 alone
     initialReview,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -4659,6 +4688,7 @@ test("runFixRung: when the DETERMINISTIC floor passes but the spawned reviewer b
     strikeCap: 2,
     initialReview,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -4713,6 +4743,7 @@ test("runFixRung: a GENUINE deficiency — a fix round that ADDS work (changed h
     strikeCap: 2,
     initialReview,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -4758,6 +4789,7 @@ test("runFixRung: readLiveState omitted ⇒ behaves EXACTLY as before this check
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -4789,6 +4821,7 @@ test("runFixRung: a FAILED/INDETERMINATE live-state read does NOT stand down —
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -5112,6 +5145,7 @@ test("runFixRung: an operator's answer is threaded as an added constraint on EVE
     initialReview: stillFailing,
     constraint: answer,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -5146,6 +5180,7 @@ test("runFixRung: resetStrikeCounterOnAnswer=true (default) grants a FRESH full 
     initialReview: failing,
     constraint: "try approach Y instead",
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
@@ -6255,13 +6290,23 @@ test("drainCommand (W1-T144): a completed drain over an empty plan reaches the p
   const planPath = join(mkdtempSync(join(tmpdir(), "rmd-drain-push-plan-")), "tasks.yaml");
   writeFileSync(planPath, "[]\n");
   const sent: string[] = [];
-  const code = await drainCommand([], {
-    config, planPath, skipGitSync: true, githubFactory: () => OFFLINE_GITHUB,
-    // The default headroom source now opens a real SDK session (SDK-preferred, CLI fallback), so
-    // this behavioral test injects one — the same reason it already injects github and notify.
-    readUsage: () => undefined,
-    notifyChannel: { send: (m: string) => { sent.push(m); return true; } } as never,
-  });
+  // W1-T4226: drainCommand's closed-run-branch sweep (`readRunBranchClosedPrsOutput`) has no deps
+  // seam of its own, so a scripted PATH `gh` answers it (no closed PRs) instead of the refused stub.
+  const gh = ghShim([{ when: "pulls?state=closed", stdout: "[]" }]);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${savedPath ?? ""}`;
+  let code: number;
+  try {
+    code = await drainCommand([], {
+      config, planPath, skipGitSync: true, githubFactory: () => OFFLINE_GITHUB,
+      // The default headroom source now opens a real SDK session (SDK-preferred, CLI fallback), so
+      // this behavioral test injects one — the same reason it already injects github and notify.
+      readUsage: () => undefined,
+      notifyChannel: { send: (m: string) => { sent.push(m); return true; } } as never,
+    });
+  } finally {
+    process.env.PATH = savedPath;
+  }
   assert.equal(code, 0, "an empty plan is a clean drain (nothing runnable) — exit 0, and the rundown push ran");
   assert.equal(sent.length, 1, "the post-drain rundown pushed exactly once through the injected channel");
   rmSync(config.root, { recursive: true, force: true });
@@ -8923,6 +8968,7 @@ test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung r
     strikeCap: 2,
     initialReview: failing,
     deps: {
+      fetchPrBody: fakePrBody,
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: `fix-session-${spawnCalls.length}` });

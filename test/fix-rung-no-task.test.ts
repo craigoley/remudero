@@ -529,6 +529,10 @@ function fixRungTestLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-w1-t1095-ledger-")), "ledger.ndjson");
 }
 
+// W1-T4226: every dispatched strike reads the live PR body back; hand it one through the
+// `fetchPrBody` seam instead of letting the shared stub refuse a real PR-body read.
+const fixRungTestFetchPrBody = async (prUrl: string): Promise<string> => `## Summary\nSome task blocked on a prerequisite (${prUrl})\n`;
+
 function fixRungTestIssues(calls: Array<{ title: string; body: string; labels: string[] }> = []): IssueGateway {
   return {
     create(title, body, labels) {
@@ -617,6 +621,7 @@ test("W1-T1095: an out-of-diff blocker parks against a prerequisite instead of r
       log,
       say: () => {},
       account: (r) => r,
+      fetchPrBody: fixRungTestFetchPrBody,
       // No `readPrerequisiteState` at all — omitted behaves as "not yet merged" (fail-safe).
     },
   });
@@ -649,6 +654,7 @@ test("W1-T1095: a parked pull request consumes no strike", async () => {
       log,
       say: () => {},
       account: (r) => r,
+      fetchPrBody: fixRungTestFetchPrBody,
     },
   });
   assert.equal(outcome.outcome, "parked");
@@ -680,6 +686,7 @@ test("W1-T1095: a parked pull request resumes when its prerequisite merges", asy
         log,
         say: () => {},
         account: (r) => r,
+        fetchPrBody: fixRungTestFetchPrBody,
         readPrerequisiteState: (n): LiveStateResult => {
           assert.equal(n, 2363);
           return { ok: true, state: "OPEN" };
@@ -711,6 +718,7 @@ test("W1-T1095: a parked pull request resumes when its prerequisite merges", asy
         log,
         say: () => {},
         account: (r) => r,
+        fetchPrBody: fixRungTestFetchPrBody,
         readPrerequisiteState: (n): LiveStateResult => {
           assert.equal(n, 2363);
           return { ok: true, state: "MERGED" };
@@ -746,6 +754,7 @@ test("W1-T1095: every rung termination writes a reason", async () => {
         log,
         say: () => {},
         account: (r) => r,
+        fetchPrBody: fixRungTestFetchPrBody,
       },
     });
     assert.equal(outcome.outcome, "fixed");
@@ -773,6 +782,7 @@ test("W1-T1095: every rung termination writes a reason", async () => {
         log,
         say: () => {},
         account: (r) => r,
+        fetchPrBody: fixRungTestFetchPrBody,
       },
     });
     assert.equal(outcome.outcome, "escalated");
@@ -804,6 +814,7 @@ test("W1-T1095: every rung termination writes a reason", async () => {
         log,
         say: () => {},
         account: (r) => r,
+        fetchPrBody: fixRungTestFetchPrBody,
         readLiveState: async (): Promise<LiveStateResult> => ({ ok: true, state: "CLOSED" }),
       },
     });
@@ -830,6 +841,7 @@ test("W1-T1095: every rung termination writes a reason", async () => {
         log,
         say: () => {},
         account: (r) => r,
+        fetchPrBody: fixRungTestFetchPrBody,
         spawnWallClockBoundMs: 20,
       },
     });
@@ -858,6 +870,7 @@ test("W1-T1095: every rung termination writes a reason", async () => {
         log,
         say: () => {},
         account: (r) => r,
+        fetchPrBody: fixRungTestFetchPrBody,
       },
     });
     assert.equal(outcome.outcome, "parked");
@@ -894,6 +907,7 @@ test("W1-T1095: in-diff work still stops at the existing strike ceiling", async 
       log,
       say: () => {},
       account: (r) => r,
+      fetchPrBody: fixRungTestFetchPrBody,
     },
   });
   assert.equal(outcome.outcome, "escalated", "in-diff work still exhausts and escalates, never parks");
@@ -1200,6 +1214,7 @@ test("W1-T1095: a resumed pull request behind its base rebases instead of spendi
       log,
       say: () => {},
       account: (r) => r,
+      fetchPrBody: fixRungTestFetchPrBody,
       readPrerequisiteState: (): LiveStateResult => ({ ok: true, state: "MERGED" }),
       ledgerLines: () => [],
       readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 2 }),
@@ -1242,6 +1257,7 @@ test("W1-T1095: a resumed pull request behind its base rebases instead of spendi
       log: log2,
       say: () => {},
       account: (r) => r,
+      fetchPrBody: fixRungTestFetchPrBody,
       readPrerequisiteState: (): LiveStateResult => ({ ok: true, state: "MERGED" }),
       ledgerLines: () => [],
       readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 0 }),

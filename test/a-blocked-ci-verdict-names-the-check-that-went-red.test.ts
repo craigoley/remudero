@@ -52,6 +52,9 @@ function pollDeps(
       throw new Error(`unexpected REST request: ${request}`);
     },
     sleep: async () => {},
+    // W1-T4226: branch protection read through its seam, never the refused real gh — an
+    // unprotected branch, so every check in the scripted rollup votes on the gate.
+    requiredContexts: () => undefined,
   };
 }
 

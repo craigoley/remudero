@@ -143,6 +143,8 @@ test("W1-T2261 (acceptance 1): the fix-rung spawn's own args carry this run's ru
         return fakeWorkerResult();
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => fakeReview("success", "sha-1"),
       push: () => {},
       issues: NEVER_ISSUES,
@@ -200,6 +202,8 @@ test("W1-T2261 (acceptance 2, end-to-end): a fix-rung spawn abandoned by the bou
         return new Promise<WorkerResult>(() => {}); // never returns
       },
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => fakeReview("failure"),
       push: () => {},
       issues: NEVER_ISSUES,
@@ -283,6 +287,8 @@ test("W1-T2261 (acceptance 3, wired through the rung): the SAME log-threading pa
     deps: {
       spawn: () => new Promise<WorkerResult>(() => {}),
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => fakeReview("failure"),
       push: () => {},
       issues: NEVER_ISSUES,
@@ -323,6 +329,8 @@ test("W1-T2261 (acceptance 4): a spawn that resolves well within the bound never
     deps: {
       spawn: async () => fakeWorkerResult(),
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => fakeReview("success", "sha-2"),
       push: () => {},
       issues: NEVER_ISSUES,
@@ -365,6 +373,8 @@ test("W1-T2261 (acceptance 5): a reclaimWorker that throws leaves the rung's out
     deps: {
       spawn: () => new Promise<WorkerResult>(() => {}),
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => fakeReview("failure"),
       push: () => {},
       issues: NEVER_ISSUES,
