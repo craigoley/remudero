@@ -930,6 +930,7 @@
     "test/instrument-surface-fast-lane.test.ts": 681,
     "test/intake-rungs-run-on-the-daemon-cadence.test.ts": 0,
     "test/intake-triggers-read-their-own-depth.test.ts": 1117,
+    "test/interactive-reads-use-the-app-budget.test.ts": 0,
     "test/inverse-scope-advisory-section.test.ts": 1118,
     "test/investigate-task-routing.test.ts": 1870,
     "test/isolation-wiring.test.ts": 1870,

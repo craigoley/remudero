@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import { clockFromMillisFn, systemClock } from "./clock.js";
 import { RmdError } from "./errors.js";
+import { refreshInstallationToken } from "./github-app.js";
 
 /** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
 export const DEFAULT_GH_CALL_TIMEOUT_MS = 60_000;
@@ -680,6 +681,11 @@ export interface GhReadCadenceDeps {
   stamp?(path: string | undefined): void;
   sleepSync?(ms: number): void;
   warn?(line: string): void;
+  /** W1-T4085: forces the bucket a read is accounted against, overriding `ghArgvBucketHint`'s own
+   *  guess from the argv shape. `routeInteractiveGhRead` is the one caller: once a read is riding
+   *  the installation token, it must stamp the APP bucket, never whatever bucket the argv alone
+   *  would have implied (e.g. `search`), or the two budgets would bleed into each other. */
+  bucketOverride?: string;
 }
 
 /** ONE LINE PER PROCESS. An advisory that prints on every paced read is noise the daemon's log
@@ -755,7 +761,7 @@ export function resetGhCadenceAdvisoryForTest(): void {
  */
 export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps = {}): GhReadCadenceDecision {
   const env = deps.env ?? process.env;
-  const bucket = ghArgvBucketHint(args);
+  const bucket = deps.bucketOverride ?? ghArgvBucketHint(args);
   const stampPath = ghReadCadenceStampPath(env, bucket);
   const readStampMs = deps.readStampMs ?? readGhReadCadenceStampMs;
   const stamp = deps.stamp ?? stampGhRead;
@@ -813,5 +819,106 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     if (stampedAt === undefined) ghCadenceOwnStampMs.delete(stampPath);
     else ghCadenceOwnStampMs.set(stampPath, stampedAt);
     return decision;
+  });
+}
+
+// ── W1-T4085 — INTERACTIVE READS SPEND THE OPERATOR'S OWN GITHUB BUDGET ─────────────────────────
+//
+// `applyGhReadCadence`'s stamp is deliberately SHARED across every session on the host — the
+// secondary limit counts per USER, not per process. But that also refuses one session's own read
+// behind another session's, seconds apart and unrelated. OBSERVED 2026-09-22: two interactive
+// sessions, reads refused "0s after the last one" repeatedly, escaped only by the on-the-record
+// override `RMD_GH_COOLDOWN_S=0`, spent several times in one session.
+//
+// FIX: the fleet's GitHub App installation (github-app.ts) already carries `core`/`graphql`
+// buckets wholly separate from any interactive identity, using ids/key the host already has
+// (`GH_APP_ID`/`GH_APP_INSTALLATION_ID`/`GH_APP_PRIVATE_KEY_PATH`). Routing a READ through a
+// freshly minted installation token spends against THAT budget, paced on its own stamp
+// (`GH_APP_READ_BUCKET`) so it can never fight the shared window (design i).
+//
+// WRITES NEVER MOVE (design ii): authorship matters, and a write is already cadence-exempt, so
+// `routeInteractiveGhRead` short-circuits BEFORE ever calling `mint` — provably unattempted, not
+// merely unused. A FAILED MINT IS NOT A FAILURE (design iii): every unconfigured host (no
+// `GH_APP_*`) falls straight back to `applyGhReadCadence`'s ordinary shared floor, unchanged.
+
+/** The separate limiter an app-token-routed read spends against — never `search`, never the
+ *  bucket-less general one. */
+export const GH_APP_READ_BUCKET = "app";
+
+export interface GhAppTokenMint {
+  ok: boolean;
+  /** Present only when `ok`. */
+  token?: string;
+}
+
+/** Injectable so a test drives every branch with no network and no real private key. */
+export type GhAppTokenMinter = (env: NodeJS.ProcessEnv) => Promise<GhAppTokenMint>;
+
+/** Mints into a SCRATCH COPY of `env` — `refreshInstallationToken` writes `GH_TOKEN` onto
+ *  whatever env it is given, and the ambient env is what a later WRITE still needs untouched. */
+async function defaultMintGhAppToken(env: NodeJS.ProcessEnv): Promise<GhAppTokenMint> {
+  const scratch: NodeJS.ProcessEnv = { ...env };
+  let result: Awaited<ReturnType<typeof refreshInstallationToken>>;
+  try {
+    result = await refreshInstallationToken({ env: scratch });
+  } catch {
+    return { ok: false }; // fail open (design iii) — never an unhandled rejection
+  }
+  return result.ok && scratch.GH_TOKEN ? { ok: true, token: scratch.GH_TOKEN } : { ok: false };
+}
+
+export interface InteractiveGhReadDeps extends GhReadCadenceDeps {
+  mint?: GhAppTokenMinter;
+}
+
+export interface InteractiveGhReadRoute {
+  /** `true` only when this read is riding the freshly minted app token on its own stamp. */
+  usesAppToken: boolean;
+  /** Env overlay for the actual `gh` child process — `{}` whenever the ambient identity is kept. */
+  envOverlay: NodeJS.ProcessEnv;
+  decision: GhReadCadenceDecision;
+}
+
+/**
+ * Routes ONE interactive `gh` call to the identity and stamp it should spend against — a write
+ * (design ii) or a failed mint (design iii) is untouched on the shared floor; a minted read
+ * (design i) is paced on `GH_APP_READ_BUCKET` and carries the token as an env overlay.
+ */
+export async function routeInteractiveGhRead(
+  args: readonly string[],
+  deps: InteractiveGhReadDeps = {},
+): Promise<InteractiveGhReadRoute> {
+  if (ghArgvIsWrite(args) || ghArgvIsCadenceExempt(args)) {
+    return { usesAppToken: false, envOverlay: {}, decision: applyGhReadCadence(args, deps) };
+  }
+  const env = deps.env ?? process.env;
+  const mint = deps.mint ?? defaultMintGhAppToken;
+  let minted: GhAppTokenMint;
+  try {
+    minted = await mint(env);
+  } catch {
+    minted = { ok: false };
+  }
+  if (!minted.ok || !minted.token) {
+    return { usesAppToken: false, envOverlay: {}, decision: applyGhReadCadence(args, deps) };
+  }
+  const decision = applyGhReadCadence(args, { ...deps, bucketOverride: GH_APP_READ_BUCKET });
+  return { usesAppToken: true, envOverlay: { GH_TOKEN: minted.token }, decision };
+}
+
+/**
+ * The wired entry point: routes, then actually spawns `gh` with the routed identity. This is the
+ * one function an interactive caller needs — it never double-paces, because the routing above is
+ * the ONLY place that calls `applyGhReadCadence` for this call; the spawn below goes through the
+ * unpaced `ghExecFile` building block.
+ */
+export function ghInteractiveRead(
+  args: readonly string[],
+  opts: ExecFileSyncOptions & { deps?: InteractiveGhReadDeps } = {},
+): Promise<string | Buffer> {
+  const { deps = {}, ...execOpts } = opts;
+  return routeInteractiveGhRead(args, deps).then((route) => {
+    const env = { ...(execOpts.env ?? deps.env ?? process.env), ...route.envOverlay };
+    return ghExecFile("gh", [...args], { ...execOpts, env });
   });
 }

@@ -277,7 +277,22 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       # Match src/lib/github-transport.ts exactly. RMD_GH_CACHE_HOME is the explicit host-wide
       # override; XDG/HOME remain the normal fallback for existing installs.
       gh_state_dir="${RMD_GH_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/remudero"
-      gh_stamp="$gh_state_dir/gh-last-read"
+      # W1-T4085: AN APP-TOKEN-ROUTED READ GETS ITS OWN STAMP, NEVER THE SHARED ONE. This hook
+      # cannot mint an installation token itself — the file header's own contract is "no network"
+      # — so minting stays in src/lib/github-transport.ts's `routeInteractiveGhRead`, which hands
+      # its caller an inline `GH_TOKEN=<minted token> gh …` to run. What THIS hook must still get
+      # right is accounting: a call already carrying that inline assignment is spending the fleet
+      # App's own separate secondary-limit budget, not the operator's, so pacing it against the
+      # SAME `gh-last-read` stamp as every other interactive session would just rename which read
+      # burns the shared window — the exact tax this task exists to stop paying. Detected the same
+      # way rule 7's `RMD_GH_COOLDOWN_S=` override is: from the command TEXT, because an env-only
+      # signal never reaches this spawned-fresh process. A command with no such prefix is entirely
+      # unaffected and paces on the shared stamp exactly as it did before this task (design iii).
+      gh_bucket=""
+      if printf '%s' "$cmd" | grep -Eq '(^|[;&|]|[[:space:]])GH_TOKEN=[^[:space:]]+[[:space:]]+gh([[:space:]]|$)'; then
+        gh_bucket="-app"
+      fi
+      gh_stamp="$gh_state_dir/gh-last-read${gh_bucket}"
       mkdir -p "$gh_state_dir" 2>/dev/null || true
       gh_now="$(date +%s 2>/dev/null || echo 0)"
       # Serialize the read/check/stamp section with the in-process transport. Without this two
