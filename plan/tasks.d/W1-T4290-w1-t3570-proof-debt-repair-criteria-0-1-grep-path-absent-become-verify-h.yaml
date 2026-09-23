@@ -1,0 +1,89 @@
+- id: W1-T4290
+  title: "W1-T3570 proof-debt repair — criteria 0/1 (grep-path-absent) become verify:human demonstration proofs, since a comparative-economics report (drafts-per-dollar vs a stated Claude baseline, ending widen/hold/stop) cannot be honestly gated by a keyword/grep match (the dead-proof-floor class, W1-T128/W1-T161/W1-T219 lineage)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "rmd proof-queue-audit flags W1-T3570's two acceptance criteria as grep-path-absent — each
+    carries a `grep: <pattern> in <path>` proof whose <path> does not exist in the checkout and is not
+    among W1-T3570's own files:, so the criterion can NEVER resolve regardless of how well the underlying
+    task is done. This is the dead-proof-floor class this codebase has repeatedly closed (W1-T128's
+    unrunnable dialect proofs, W1-T161's false-block from a proof shape that cannot match its target,
+    W1-T219's zero-keyword auto-pass and pathless-grep certification) — a proof that promises execution
+    and cannot deliver it is worse than an honest prose claim, because it reads as verified when nothing
+    was ever checked (Standing rule 22: claimed vs evidenced).
+    THE CONTENT ITSELF RULES OUT A STRUCTURAL-GREP FIX. Criterion 0 asks whether the report names >= 20
+    terminal inbox-draft outcomes with RECEIPT-BACKED acceptance/relint/abandonment classifications and
+    Azure-cash totals; criterion 1 asks whether it states a genuine accepted-drafts-per-dollar comparison
+    against a stated Claude baseline and reaches ONE of widen/hold/stop. A grep proof can only check that
+    SOME text pattern appears somewhere in a file — it cannot check that a claimed count is true, that a
+    receipt genuinely backs an outcome, that an Azure-cash total matches real billing, or that a
+    comparative verdict is soundly reasoned. Requiring the report to spell out fixed marker strings for
+    grep to find would not fix this: it would just teach the report-writer to fabricate the marker, which
+    is exactly the keyword-theater failure mode W1-T128/W1-T161/W1-T219 exist to prevent. The house
+    precedent for genuinely evidence-dependent economics/calibration reports is verify:human with a
+    demonstration proof (W1-T133's mutation-economics audit — 'MEASURED... not assumed'; W1-T71's rmd
+    receipt; W1-T167's model-routing calibration) — a human reads the pasted report and checks it against
+    reality, which is the only honest gate for this content."
+  design: |
+    VERIFY W1-T3570's current entry in plan/tasks.yaml FROM SOURCE before editing — this fragment was
+    drafted from the proof-queue-audit finding's claim text alone (the two criteria's `claim:` strings,
+    quoted verbatim in the proposal and reproduced below), NOT from W1-T3570's full entry, which was not
+    available at drafting time. Locate the task by `id: W1-T3570`, then locate its two criteria by
+    matching their claim text:
+      - claim "the report identifies at least 20 terminal inbox-draft outcomes with receipt-backed
+        acceptance, relint, abandonment, and Azure-cash totals" (criterion 0)
+      - claim "the report compares accepted drafts per dollar against a stated Claude baseline and ends
+        with one widen, hold, or stop verdict" (criterion 1)
+    EDIT EXACTLY THREE THINGS on W1-T3570, nothing else:
+    (1) criterion 0's `proof:` becomes:
+        "demonstration: the report is pasted in full; at least 20 terminal inbox-draft outcomes are
+        visible, each classified receipt-backed acceptance, relint, or abandonment, with an Azure-cash
+        figure per outcome and an aggregate total stated"
+    (2) criterion 1's `proof:` becomes:
+        "demonstration: the report is pasted in full; it states an accepted-drafts-per-dollar figure
+        compared against a named Claude baseline figure, and ends with exactly one of widen, hold, or
+        stop as its verdict"
+    (3) the task-level `verify:` field becomes `human`, and a note is appended (create the `note:` field
+        if absent) containing, verbatim, the marker:
+        "PROOF-DEBT REPAIR rmd proof-queue-audit flagged W1-T3570 criteria 0 and 1 as grep-path-absent;
+        converted to verify:human demonstration proofs since the report's outcome counts, receipts, and
+        Azure-cash totals cannot be honestly certified by pattern matching (W1-T133/W1-T71/W1-T167
+        precedent). Task-level verify changed to human, eliminating the grep-path-absent failure mode
+        structurally for these two criteria."
+    SCOPE FENCE: touch ONLY these three edits on W1-T3570. Its `title:`, `type:`, `files:`, `depends_on:`,
+    `risk:`, `rationale:`, and `design:` are UNCHANGED — this is a proof-dialect repair, never a scope
+    change (Standing rule 15: never edit criteria to match a diff; this is the Architect-sanctioned
+    exception the header's `satisfied_by`/`origin:` discipline reserves for exactly this class of fix).
+    No other task anywhere in plan/tasks.yaml or plan/tasks.d/ is touched.
+    EDGE CASE: if W1-T3570 carries MORE than these two acceptance criteria, leave every other criterion's
+    proof untouched — only the task-level `verify:` field moves to `human` for all of them collectively
+    (this schema has no per-criterion verify override), and only criteria 0 and 1 as identified above get
+    new proof text.
+    WHY NOT A STRUCTURAL-GREP FIX INSTEAD: considered and rejected — see rationale. Requiring the report
+    to emit fixed count/verdict marker strings for grep to find would restore an executable dialect
+    proof, but it would certify only that the marker was WRITTEN, never that it was TRUE, which is the
+    exact keyword-theater shape this repo has fixed three times over (W1-T128, W1-T161, W1-T219). Do not
+    reintroduce it here.
+  acceptance:
+    - claim: "W1-T3570 criterion 0's proof no longer cites a grep path absent from the checkout — it becomes a verify:human demonstration requiring the report to visibly name at least 20 terminal inbox-draft outcomes, each classified receipt-backed acceptance, relint, or abandonment, with an Azure-cash figure per outcome and an aggregate total"
+      proof: "grep: at least 20 terminal inbox-draft outcomes are visible in plan/tasks.yaml"
+    - claim: "W1-T3570 criterion 1's proof no longer cites a grep path absent from the checkout — it becomes a verify:human demonstration requiring the report to state an accepted-drafts-per-dollar figure against a named Claude baseline and end with exactly one of widen, hold, or stop as its verdict"
+      proof: "grep: ends with exactly one of widen, hold, or stop as its verdict in plan/tasks.yaml"
+    - claim: "W1-T3570's task-level verify field is changed to human, with a marker note recording the repair and its rationale — the grep-path-absent failure mode cannot recur on these two criteria because neither carries an executable grep/unit-test dialect proof any longer"
+      proof: "grep: PROOF-DEBT REPAIR rmd proof-queue-audit in plan/tasks.yaml"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [plan/tasks.yaml]
+  status: queued
+  attempts: 0
+  note: "Drafted from the proof-queue-audit finding's claim text alone (W1-T3570's full entry was not in
+    context at drafting time) — the implementer verifies the task from source before editing, per the
+    distrust-the-prompt discipline this codebase applies everywhere. Diff is scoped to exactly three
+    edits on one task: two proof: rewrites and one verify: field flip, plus an appended marker note. No
+    other task is touched. This is a proof-dialect repair (§5C, the same class as W1-T101/W1-T219), not a
+    scope or content change to W1-T3570 — the report's actual requirements are unchanged, only how they
+    are gated."

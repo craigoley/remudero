@@ -203,6 +203,8 @@ if [ -n "$INSTANCE_NAME" ]; then
       codex_dir) codex_dir="$value" ;;
       container_config_dir) container_config_dir="$value" ;;
       service_user|max_old_space_mb|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log|gh_app_id|gh_app_installation_id|gh_app_private_key_path) : ;;
+      # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
+      project|github_repo|retired) : ;;
       *) echo "recycle-container: REFUSING -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
     esac
   done <<EOF
