@@ -96,7 +96,12 @@ function num(v: unknown): number {
 }
 
 function namesRepo(value: string | undefined, repo: ManagedRepo): boolean {
-  return value === `${repo.owner}/${repo.repo}` || value === repo.repo;
+  const left = value === `${repo.owner}/${repo.repo}`;
+  if (left) { (globalThis as any).__leftHit = ((globalThis as any).__leftHit || 0) + 1; return true; }
+  const right = value === repo.repo;
+  (globalThis as any).__rightHit = ((globalThis as any).__rightHit || 0) + 1;
+  if (right) (globalThis as any).__rightTrue = ((globalThis as any).__rightTrue || 0) + 1;
+  return right;
 }
 
 /** Worker rows carry `billing_mode` beside `total_cost_usd` (worker.ts's workerLedgerFields). A
