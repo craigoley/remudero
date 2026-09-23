@@ -686,6 +686,9 @@ export interface GhReadCadenceDeps {
    *  the installation token, it must stamp the APP bucket, never whatever bucket the argv alone
    *  would have implied (e.g. `search`), or the two budgets would bleed into each other. */
   bucketOverride?: string;
+  /** W1-T4085: mints the installation token `routeInteractiveGhRead` rides; ignored by the cadence
+   *  itself. Injectable so a test drives every branch with no network and no real private key. */
+  mint?: GhAppTokenMinter;
 }
 
 /** ONE LINE PER PROCESS. An advisory that prints on every paced read is noise the daemon's log
@@ -867,10 +870,6 @@ async function defaultMintGhAppToken(env: NodeJS.ProcessEnv): Promise<GhAppToken
   return result.ok && scratch.GH_TOKEN ? { ok: true, token: scratch.GH_TOKEN } : { ok: false };
 }
 
-export interface InteractiveGhReadDeps extends GhReadCadenceDeps {
-  mint?: GhAppTokenMinter;
-}
-
 export interface InteractiveGhReadRoute {
   /** `true` only when this read is riding the freshly minted app token on its own stamp. */
   usesAppToken: boolean;
@@ -886,7 +885,7 @@ export interface InteractiveGhReadRoute {
  */
 export async function routeInteractiveGhRead(
   args: readonly string[],
-  deps: InteractiveGhReadDeps = {},
+  deps: GhReadCadenceDeps = {},
 ): Promise<InteractiveGhReadRoute> {
   if (ghArgvIsWrite(args) || ghArgvIsCadenceExempt(args)) {
     return { usesAppToken: false, envOverlay: {}, decision: applyGhReadCadence(args, deps) };
@@ -914,7 +913,7 @@ export async function routeInteractiveGhRead(
  */
 export function ghInteractiveRead(
   args: readonly string[],
-  opts: ExecFileSyncOptions & { deps?: InteractiveGhReadDeps } = {},
+  opts: ExecFileSyncOptions & { deps?: GhReadCadenceDeps } = {},
 ): Promise<string | Buffer> {
   const { deps = {}, ...execOpts } = opts;
   return routeInteractiveGhRead(args, deps).then((route) => {
