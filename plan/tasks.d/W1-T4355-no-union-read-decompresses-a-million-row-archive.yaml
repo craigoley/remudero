@@ -8,7 +8,7 @@
   budget_usd: 30.00
   risk: medium
   origin: "research:turbopuffer-scan-2026-09-23"
-  plan_refs: [W1-T4262, W1-T3368, W1-T4243, W1-T4100]
+  plan_refs: [W1-T4262, W1-T3368, W1-T4243, W1-T4100, W1-T4393]
   files:
     - src/lib/ledger-compact.ts
     - test/no-union-read-decompresses-a-million-row-archive.test.ts
@@ -45,6 +45,10 @@
     (iv) An archive ALREADY over the ceiling is re-split by the next pass, so the host's two existing
         million-row archives drain without an operator step.
     (v) No reader changes: the bound lives where archives are made.
+    (vi) AMENDED 2026-09-23 after #6876 merged: compaction now writes ONE ARCHIVE PER UTC DAY (compactRotations's
+        byDay split), so the ceiling applies to each per-day output. A day over the ceiling is written as several
+        archives that stay inside that day, in ts order, and never merge across a day boundary. The existing
+        million-row archives predate the split: the re-split in (iv) must also respect day boundaries.
   acceptance:
     - claim: "merges stay under the ceiling, oversized outputs split, and an existing oversized archive is re-split"
       proof: "unit test: test/no-union-read-decompresses-a-million-row-archive.test.ts"
@@ -55,4 +59,6 @@
     produce one archive over the ceiling, failing the test. Truncate instead of splitting and the row-count
     equality between sources and outputs must fail. Remove the re-split pass and a fixture holding one
     over-ceiling archive must still hold it after a pass.
+    Split an over-ceiling day across a day boundary, and a fixture holding one over-ceiling day must yield an archive
+    containing rows from two UTC days, failing the same test.
   note: "Rescoped from the step-index idea (research:turbopuffer-scan-2026-09-23) after the host recon and a synthetic measurement showed the step index skips 0 of 34 files and read cost follows the largest archive. The future-dated archive name the recon also found (2027-10-14) is W1-T4100's, not this task's."
