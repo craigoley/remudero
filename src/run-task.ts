@@ -1311,6 +1311,8 @@ import {
   type EscalationReconcileSummary,
   type FixClass,
   type FixDispatchEvidence,
+  type FixDispatchSnapshot,
+  type FixSuperseded,
   type InstrumentEntanglementPaths,
   type LiveStateResult,
   type MemoryGovernorResult,
@@ -7159,6 +7161,7 @@ export interface FixRungOutcome {
    * with a second reason source — see {@link branchAuthorshipStandDownReason}.
    */
   standDownReason?: string;
+  superseded?: FixSuperseded;
   /**
    * W1-T1095: set only when `outcome === "parked"` — the prerequisite PR number
    * {@link outOfDiffBlockerFor} found. The rung spent ZERO strikes reaching this outcome
@@ -8442,12 +8445,15 @@ async function spawnFixWorkerBounded(
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     spawnWallClockBoundMs?: number;
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
   args: SpawnWorkerArgs,
-  ctx: { runId: string; taskId: string },
+  ctx: { runId: string; taskId: string; snapshot?: FixDispatchSnapshot },
 ): Promise<
-  { kind: "spawned"; result: WorkerResult; elapsedMs: number } | { kind: "abandoned"; elapsedMs: number }
+  | { kind: "spawned"; result: WorkerResult; elapsedMs: number }
+  | { kind: "abandoned"; elapsedMs: number }
+  | { kind: "superseded"; elapsedMs: number; superseded: FixSuperseded }
 > {
   // W1-T1219: this bound is the FIX-RUNG SPAWN's own — see `fixSpawnWallClockBoundMs`'s own
   // plan/policy.yaml row for why it is no longer `sweepWallClockBoundMs` (the sweep-tick bound,
@@ -8460,17 +8466,39 @@ async function spawnFixWorkerBounded(
   const bound = new Promise<"abandoned">((resolve) => {
     timer = setTimeout(() => resolve("abandoned"), boundMs);
   });
+  // W1-T4105: a third arm, the PR moving on, stops the worker through the same record-then-reclaim path.
+  const watchStop = new AbortController();
+  const superseded =
+    deps.watchSuperseded && ctx.snapshot?.headSha
+      ? deps.watchSuperseded(ctx.snapshot, watchStop.signal).then(
+          (s) => (s ? { superseded: s } : new Promise<never>(() => {})),
+          () => new Promise<never>(() => {}),
+        )
+      : new Promise<never>(() => {});
   try {
-    const winner = await Promise.race([spawnPromise, bound]);
-    if (winner === "abandoned") {
+    const winner = await Promise.race([spawnPromise, bound, superseded]);
+    if (winner === "abandoned" || "superseded" in winner) {
       const elapsedMs = Date.now() - startedAt;
-      deps.log("fix.spawn_abandoned", {
-        run_id: ctx.runId,
-        task_id: ctx.taskId,
-        elapsed_ms: elapsedMs,
-        bound_ms: boundMs,
-        reason: "spawn wall-clock bound exceeded",
-      });
+      if (winner === "abandoned") {
+        deps.log("fix.spawn_abandoned", {
+          run_id: ctx.runId,
+          task_id: ctx.taskId,
+          elapsed_ms: elapsedMs,
+          bound_ms: boundMs,
+          reason: "spawn wall-clock bound exceeded",
+        });
+      } else {
+        deps.log("fix.superseded", {
+          run_id: ctx.runId,
+          task_id: ctx.taskId,
+          condition: winner.superseded.condition,
+          old_head: winner.superseded.oldHead,
+          new_head: winner.superseded.newHead,
+          elapsed_ms: elapsedMs,
+          worktree_path: args.cwd,
+          strike_spent: false,
+        });
+      }
       try {
         await deps.reclaimWorker?.({ runId: ctx.runId, taskId: ctx.taskId, elapsedMs });
       } catch (e) {
@@ -8480,8 +8508,7 @@ async function spawnFixWorkerBounded(
           error: String((e as Error)?.message ?? e),
         });
       }
-      // Never leave the real spawn's eventual outcome unhandled — it may still resolve or
-      // throw well after this rung has moved on (returned `spawn_abandoned` to its caller).
+      // The real spawn may settle long after this rung moved on; never leave that unhandled.
       spawnPromise.then(
         () => {},
         (e) => {
@@ -8492,11 +8519,12 @@ async function spawnFixWorkerBounded(
           });
         },
       );
-      return { kind: "abandoned", elapsedMs };
+      return winner === "abandoned" ? { kind: "abandoned", elapsedMs } : { kind: "superseded", elapsedMs, superseded: winner.superseded };
     }
     return { kind: "spawned", result: winner, elapsedMs: Date.now() - startedAt };
   } finally {
     if (timer) clearTimeout(timer);
+    watchStop.abort();
   }
 }
 
@@ -8968,6 +8996,7 @@ export async function runFixRung(opts: {
      * precondition for it.
      */
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    watchSuperseded?: (snapshot: FixDispatchSnapshot, signal: AbortSignal) => Promise<FixSuperseded | undefined>;
     /**
      * W1-T1095 (capability 1's resume half): an OPTIONAL fresh live-state read of an
      * ARBITRARY prerequisite PR number (never `opts.prUrl` itself) — consulted ONLY when
@@ -10240,7 +10269,17 @@ export async function runFixRung(opts: {
     try {
       // W1-T1044: bounds this ONE spawn by wall-clock elapsed time — see
       // spawnFixWorkerBounded's own doc for the measured incident this closes.
-      const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, { runId: opts.runId, taskId: opts.taskId });
+      const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, {
+        runId: opts.runId,
+        taskId: opts.taskId,
+        snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
+      });
+      if (spawnOutcome.kind === "superseded") {
+        const s = spawnOutcome.superseded;
+        const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
+        deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s };
+      }
       if (spawnOutcome.kind === "abandoned") {
         deps.say(
           `fix rung: ABANDONED strike ${attempt}/${opts.strikeCap} — worker spawn exceeded its ` +
