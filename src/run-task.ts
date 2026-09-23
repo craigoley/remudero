@@ -23249,8 +23249,27 @@ export function creditedMergedIdsFrom(statusByTaskId: Map<string, StatusProjecti
   return new Set([...statusByTaskId].filter(([, proj]) => proj.merged && !proj.indeterminate).map(([id]) => id));
 }
 
+/** W1-T4381: `git merge-base <baseRef> HEAD` for `lint-plan --merge-base`. When git cannot answer
+ *  (a shallow clone, unrelated histories, an unknown ref) the scope stays at `baseRef` itself and
+ *  says so, so a run that fell back is never mistaken for one that was scoped. */
+export function lintScopeMergeBase(
+  checkoutRoot: string,
+  baseRef: string,
+  runGit: (args: string[]) => string = (args) => execFileSync("git", ["-C", checkoutRoot, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+): string {
+  try {
+    return runGit(["merge-base", baseRef, "HEAD"]).trim();
+  } catch (e) {
+    console.error(
+      `### rmd lint-plan: no merge-base of ${baseRef} and HEAD (${String((e as Error).message).split("\n")[0]}) — ` +
+        `scoping to ${baseRef} itself, so a record ${baseRef} changed after the fork can read as this branch's change`,
+    );
+    return baseRef;
+  }
+}
+
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all"]);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all", "--merge-base"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -23277,6 +23296,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     return 2;
   }
   const baseRef = flagValue(rest, "--base");
+  // W1-T4381: `--merge-base` scopes to the fork point of HEAD and `--base`, so a record main
+  // changed after the fork is never linted as this branch's change. ci.yml's `--base HEAD^1` on a
+  // merge ref already has that scope; a local checkout diffed against origin/main's TIP does not.
+  const scopeBase = baseRef && rest.includes("--merge-base") ? lintScopeMergeBase(checkoutRoot, baseRef) : baseRef;
+  const baseLabel = scopeBase === baseRef ? baseRef : `${baseRef} at merge-base ${scopeBase!.slice(0, 12)}`;
   let plan: Plan;
   let planRaw: string;
   try {
@@ -23305,7 +23329,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       if (cached !== undefined) return cached;
       let exists = false;
       try {
-        execFileSync("git", ["-C", checkoutRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
+        execFileSync("git", ["-C", checkoutRoot, "cat-file", "-e", `${scopeBase}:${rel}`], { stdio: "ignore" });
         exists = true;
       } catch (e) {
         void e;
@@ -23324,7 +23348,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // matches exactly what `loadPlan` would see from a real checkout at `baseRef`.
     const tmpDir = makeTempDir("lint-plan-base");
     try {
-      const oldRaw = execFileSync("git", ["show", `${baseRef}:${relPath}`], {
+      const oldRaw = execFileSync("git", ["show", `${scopeBase}:${relPath}`], {
         cwd: checkoutRoot,
         encoding: "utf8",
         // maxBuffer: the SAME blob syncPlanFromOrigin reads at :576, so it overflows Node's 1 MiB
@@ -23333,7 +23357,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       });
       const tmpFile = join(tmpDir, "tasks.yaml");
       writeFileSync(tmpFile, oldRaw, "utf8");
-      materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, baseRef);
+      materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, scopeBase);
       // A BASE THAT DOES NOT PARSE IS NOT THIS PR'S DEFECT, AND MUST NOT BE ITS FAILURE.
       // `loadPlan` refuses a tree carrying a duplicate id, and the base tree is whatever
       // origin/main happens to be — so one bad merge to main turned this REQUIRED check red on
@@ -23373,7 +23397,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // That precision buys the reverse case for free: a task moved from a shard INTO the monolith is
       // absent from the base monolith and trips, while the RIGHT migration (monolith -> shard) simply
       // leaves the set and never does.
-      const baseMonolithIds = new Set(parseTasksFromYaml(oldRaw, `${baseRef}:${relPath}`).map((t) => t.id));
+      const baseMonolithIds = new Set(parseTasksFromYaml(oldRaw, `${scopeBase}:${relPath}`).map((t) => t.id));
       const headMonolithRaw = readFileSync(planPath, "utf8");
       const headMonolithIds = parseTasksFromYaml(headMonolithRaw, planPath).map((t) => t.id);
       newMonolithIds = new Set(headMonolithIds.filter((id) => !baseMonolithIds.has(id)));
@@ -23408,7 +23432,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of statusFlipCarve) scope.delete(id);
       statusFlipCarvedIds = [...statusFlipCarve].sort();
-      const diffText = execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
+      const diffText = execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", "--unified=0", `${scopeBase}...HEAD`, "--", "src"], {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
       });
@@ -23603,7 +23627,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       if (planOnlyFilingDiff === undefined) {
         try {
           planOnlyFilingDiff = planOnlyDiff(
-            execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", `${baseRef}...HEAD`], {
+            execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", `${scopeBase}...HEAD`], {
               encoding: "utf8",
               maxBuffer: 1 << 26,
             }),
@@ -23713,7 +23737,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         }
       }
       const attribution =
-        baseBlockingCount !== undefined ? ` (${baseBlockingCount} pre-existing on base ${baseRef})` : "";
+        baseBlockingCount !== undefined ? ` (${baseBlockingCount} pre-existing on base ${baseLabel})` : "";
       console.error(`✗ ${task.id}: ${blocking.length} violation(s)${attribution}`);
       for (const v of blocking) console.error(`    [${v.check}] ${v.message}`);
     }
@@ -23786,7 +23810,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       statusFlipCarvedIds.length > 0
         ? ` (${statusFlipCarvedIds.length} status-flip-only, excluded from --base scope: ${statusFlipCarvedIds.join(", ")})`
         : "";
-    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseRef})${carvedNote} — ${failing} failing, ${warned} warning(s)`;
+    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseLabel})${carvedNote} — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
       `${checked} task(s) checked (open tasks only) [scoped by ${wholePlanScopeKey}` +
