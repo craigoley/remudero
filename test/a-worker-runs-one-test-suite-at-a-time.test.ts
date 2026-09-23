@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Task } from "../src/lib/plan.js";
-import { ONE_TEST_SUITE_AT_A_TIME_LINE, renderFixPrompt, renderImplementPrompt } from "../src/lib/prompt-render.js";
+import { ONE_TEST_SUITE_AT_A_TIME_LINE, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts } from "../src/lib/prompt-render.js";
 
 // W1-T4106 — MEASURED 2026-09-23: a fix-rung worker backgrounded four coverage suites at once from its
 // Bash tool (~28 test processes on a 15.6 GiB host) and the swap storm took the console down. The deny
@@ -179,6 +179,7 @@ test("W1-T4106: the parallel-suite refusal names the sequential preflight route"
   };
   assert.match(ONE_TEST_SUITE_AT_A_TIME_LINE, /`rmd preflight --coverage`/);
   assert.ok(renderImplementPrompt(task, "", "RUN-4106").includes(ONE_TEST_SUITE_AT_A_TIME_LINE));
+  assert.ok(renderImplementPromptWithParts(task, "", "RUN-4106").prompt.includes(ONE_TEST_SUITE_AT_A_TIME_LINE));
   const fix = renderFixPrompt({
     task, round: 1, branch: "run-W1-T4106X-1", evidence: { review: { unmetCriteria: [], summary: "s" } },
   });
