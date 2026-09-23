@@ -23,6 +23,7 @@ import {
   type PanelGraphDeps,
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
+import { plainTemplate } from "../src/lib/inbox-plain.js";
 import { bearerTokenId } from "../src/lib/panel-actions.js";
 import {
   captureFeedback,
@@ -1362,7 +1363,10 @@ test("GET /v1/inbox: a proposal with an in-flight draft (state/inbox-draft-infli
     assert.equal(res.status, 200);
     const body = (await res.json()) as { ready: unknown[]; drafting: Array<{ proposalId: string; spawnedAt: string }> };
     assert.deepEqual(body.ready, []);
-    assert.deepEqual(body.drafting, [{ proposalId: "P901", summary: "mid-draft", spawnedAt }]);
+    // W1-T4087: every item also carries its plain message; with nothing stored, its kind's template.
+    assert.deepEqual(body.drafting, [
+      { proposalId: "P901", summary: "mid-draft", plain: plainTemplate({ id: "P901", summary: "mid-draft" }), spawnedAt },
+    ]);
   });
 });
 
