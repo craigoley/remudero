@@ -1611,6 +1611,7 @@
     "test/the-inbox-holds-only-what-needs-a-human.test.ts": 0,
     "test/the-interactive-lane-pays-the-whole-file.test.ts": 0,
     "test/the-judge-sees-the-evidence-the-shard-carries.test.ts": 0,
+    "test/the-knowledge-base-tends-itself.test.ts": 0,
     "test/the-knowledge-budget-measures-what-a-task-pays.test.ts": 0,
     "test/the-last-attempt-steps-up-to-opus-or-sol.test.ts": 0,
     "test/the-ledger-archive-is-compacted-never-truncated.test.ts": 0,
