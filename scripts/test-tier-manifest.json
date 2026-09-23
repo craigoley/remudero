@@ -1550,6 +1550,7 @@
     "test/the-codex-lane-auto-loads-no-doctrine.test.ts": 0,
     "test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts": 1274,
     "test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts": 1125,
+    "test/the-console-backend-keeps-its-share-of-the-host.test.ts": 0,
     "test/the-console-can-see-approvals-and-step-ups.test.ts": 0,
     "test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts": 0,
     "test/the-console-draws-the-graph-it-computes.test.ts": 1612,

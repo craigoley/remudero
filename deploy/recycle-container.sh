@@ -1356,9 +1356,23 @@ echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 # Bash 3.2 treats an empty array as unset under `set -u`, even when it was initialized with `=()`.
 # Build one non-empty argv instead: the mandatory daemon/runtime arguments keep its expansion safe,
 # while optional mounts are appended only when their host directories actually exist.
+# W1-T4102: a build daemon's share of the host — a low CPU weight and a memory ceiling that leaves
+# the console backend's reserve free, so a worker's test fan-out pages its own container rather than
+# serve. The same policy file serve-container.sh reads. Absent (an isolated fixture copy), the
+# daemon launches exactly as before and the log says so.
+RESOURCE_POLICY_BUILD_ARGS=()
+if [ -f "${SCRIPT_DIR:-}/resource-policy.sh" ]; then
+  # shellcheck source=./resource-policy.sh
+  . "${SCRIPT_DIR}/resource-policy.sh"
+  resource_policy_build_args
+  echo "recycle-container: resource policy — ${RESOURCE_POLICY_NOTE}"
+else
+  echo "recycle-container: resource policy NOT applied — ${SCRIPT_DIR:-<unknown>}/resource-policy.sh is absent"
+fi
 DOCKER_RUN_ARGS=(
   -d --name "${CONTAINER_NAME}"
   --restart=on-failure:5
+  "${RESOURCE_POLICY_BUILD_ARGS[@]+"${RESOURCE_POLICY_BUILD_ARGS[@]}"}"
   --cap-drop ALL
   --security-opt seccomp=unconfined
   --security-opt apparmor=unconfined
