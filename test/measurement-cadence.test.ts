@@ -16,7 +16,7 @@ import {
   type MeasurementCadencePolicy,
 } from "../src/lib/measurement-cadence.js";
 import { loadPolicy, policyPath } from "../src/lib/policy.js";
-import { daemonCommand, buildMeasurementCadenceDaemonHooks } from "../src/run-task.js";
+import { daemonCommand, buildMeasurementCadenceDaemonHooks, buildSuccessorAlertHandler } from "../src/run-task.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
 
@@ -401,6 +401,36 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("THE SUCCESSOR ALERT WIRING: an escalated catalog alert reaches the durable escalation seam", async () => {
+  let escalatedTask: string | undefined;
+  const handler = buildSuccessorAlertHandler({
+    ledgerPath: "/tmp/model-catalog-ledger.ndjson",
+    runId: "MODEL-SUCCESSOR-CADENCE-test",
+    resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
+    issueGateway: (() => ({}) as never),
+    successorEscalate: (escalation) => {
+      escalatedTask = escalation.taskId;
+      assert.equal(escalation.class, "MANUAL");
+      assert.match(escalation.summary, /gpt-6-luna/);
+      assert.match(escalation.detail, /Azure cash lane/);
+      return "https://github.test/issues/model-catalog";
+    },
+  });
+  const issueUrl = handler({
+    key: "gpt-6-luna:announced",
+    model: "gpt-6-luna",
+    family: "luna",
+    generation: 6,
+    state: "announced",
+    sources: ["codex"],
+    gated: false,
+    nextStep: "deploy gpt-6-luna on the Azure cash lane",
+    actionable: true,
+  });
+  assert.equal(issueUrl, "https://github.test/issues/model-catalog");
+  assert.equal(escalatedTask, "MODEL-CATALOG");
 });
 
 // ── THE CONSUMER: runDaemon's poll loop actually consults + acts on the hook ───────────────────
