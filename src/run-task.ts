@@ -147,6 +147,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
+import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { renderAnchorBlock } from "./lib/compaction.js";
@@ -14632,7 +14633,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         globalArtifactPath: globalArtifactPath(config),
       },
       taskFiles: task.files,
-      selectionContext: { text: learningsSelectionText },
+      selectionContext: {
+        text: learningsSelectionText,
+        usage: readLearningUsage(learningUsagePath(join(config.root, "state"))),
+        seed: seedOf(runId),
+      },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
@@ -15069,7 +15074,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       });
     }
 
-    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds);
+    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
@@ -29746,13 +29751,14 @@ export function logLearningsUsed(
   log: (step: string, extra?: Record<string, unknown>) => void,
   text: string,
   injectedIds: readonly string[],
+  usagePath?: string,
 ): void {
   const parsed = parseLearningsUsed(text, injectedIds);
-  if (!parsed) {
-    log("learnings.used", { silent: true, injected_ids: [...injectedIds] });
-    return;
-  }
-  log("learnings.used", { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused });
+  const row = parsed
+    ? { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused }
+    : { silent: true, injected_ids: [...injectedIds] };
+  log("learnings.used", row);
+  if (usagePath) recordLearningUsage(usagePath, row);
 }
 
 export function memoryLintCommand(rest: string[]): number {
