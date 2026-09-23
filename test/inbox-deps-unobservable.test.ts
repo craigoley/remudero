@@ -131,7 +131,8 @@ function draftFor(proposalId: string, fragmentYaml: string): DraftedCandidate {
   return {
     proposalId,
     fragmentYaml,
-    stampLine: `- ${proposalId} (plan) — RATIFIED 2026-08-15 -> NEW-1.`,
+    // The stamp names exactly the fragment's own tasks — stampLineViolations refuses any other list.
+    stampLine: `- ${proposalId} (plan) — RATIFIED 2026-08-15 -> ${[...fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]).join("/")}.`,
     anchorFingerprint: anchorFingerprint([ANCHOR]),
   };
 }

@@ -183,6 +183,7 @@
     "test/a-pull-request-cannot-file-and-credit-the-same-task.test.ts": 0,
     "test/a-push-does-not-re-ask-a-head-independent-question.test.ts": 0,
     "test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts": 769,
+    "test/a-ratification-draft-is-refused-before-it-reaches-ci.test.ts": 0,
     "test/a-ratification-pr-can-actually-land.test.ts": 0,
     "test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts": 0,
     "test/a-recap-checkpoint-advances-when-it-is-read.test.ts": 0,
