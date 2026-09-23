@@ -103,6 +103,7 @@ export const OPERATOR_AGENT_PROMOTION_DECISION_STEP = "panel.operator_agent_prom
 export const OPERATOR_AGENT_PROMOTION_ADVANCE_STEP = "panel.operator_agent_promotion_advance";
 export const OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP = "panel.operator_agent_promotion_rollback";
 export const OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP = "panel.operator_agent_consequence_preflight";
+export const OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP = "panel.operator_agent_consequence_decision";
 export const CONTEXT_ITEM_VERSION = "context-item-v1" as const;
 export const CONTEXT_ITEM_STEP = "panel.context_item";
 export const CONTEXT_REVOKED_STEP = "panel.context_revoked";
@@ -413,6 +414,7 @@ type PromotionAdvanceInput = {
   assistantTrust?: PromotionAdvanceAssistantTrustInput;
 };
 type PromotionRollbackInput = { promotionId: string; rollback: PromotionRollback };
+type ConsequenceDecisionInput = { consequenceId: string; decision: "approve" | "refuse"; reason?: string };
 
 const MAX_ID = 160;
 const MAX_REPO = 200;
@@ -1017,6 +1019,23 @@ function validateConsequencePreflightInput(body: unknown): { error: string } | C
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   if (!isRecord(body.action)) return { error: "action is required" };
   return { action: body.action as unknown as ConsequenceActionInput };
+}
+
+function validateConsequenceDecisionInput(body: unknown): { error: string } | ConsequenceDecisionInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!boundedString(body.consequenceId, MAX_ID)) return { error: "consequenceId is required" };
+  if (body.decision !== "approve" && body.decision !== "refuse") return { error: "decision must be approve or refuse" };
+  if (body.reason !== undefined && !boundedString(body.reason, MAX_NOTE)) return { error: "reason must be a bounded string" };
+  // The console shipped `note` before this core route existed. Accepting it as an alias keeps the
+  // gateway backwards-compatible while the durable ledger uses one stable field (`reason`).
+  if (body.note !== undefined && !boundedString(body.note, MAX_NOTE)) return { error: "note must be a bounded string" };
+  if (body.reason !== undefined && body.note !== undefined) return { error: "provide reason or note, not both" };
+  const reason = body.reason !== undefined ? body.reason : body.note;
+  return {
+    consequenceId: body.consequenceId.trim(),
+    decision: body.decision,
+    ...(reason !== undefined ? { reason: reason.trim() } : {}),
+  };
 }
 
 function readExperimentRows(ledgerPath: string): Array<Record<string, unknown>> {
@@ -2053,9 +2072,11 @@ const PENDING_CONSEQUENCE_CODES: ReadonlySet<string> = new Set(["missing-approve
 const APPROVAL_CONSEQUENCE_CLASSES: ReadonlySet<string> = new Set(["financial", "irreversible"]);
 const MAX_CONSEQUENCE_TARGET = 320;
 const MAX_CONSEQUENCE_RECOVERY = 1_000;
+const DEFAULT_CONSEQUENCE_REFUSAL_REASON = "operator refused this consequence";
 const FINANCIAL_ONLY_RECOVERY =
   "financial action: consequence-policy-v1 records no recovery path for a transfer; treat it as unrecoverable once executed";
 const CONSEQUENCE_WRITE_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
+const CONSEQUENCE_DECISION_PATH = `${OPERATOR_AGENT_CONSEQUENCES_PATH}/decision`;
 
 /** What an operator must see to approve, persisted on the preflight ledger row. */
 export interface ConsequenceApprovalProjection {
@@ -2086,8 +2107,24 @@ export interface PendingConsequenceRecord {
   recoveryStatement: string;
   freshness: "verified" | "stale";
   observedAt: string;
-  receipts: never[];
+  receipts: ConsequenceDecisionReceipt[];
   source: string;
+}
+
+export interface ConsequenceDecisionReceipt {
+  kind: "approve" | "refuse";
+  at: string;
+  issuer?: string;
+  note?: string;
+}
+
+interface StoredConsequenceDecision {
+  consequenceId: string;
+  decision: "approve" | "refuse";
+  at: string;
+  actor?: string;
+  nonceId?: string;
+  reason?: string;
 }
 
 function earliestIso(values: ReadonlyArray<string | undefined>): string | undefined {
@@ -2133,6 +2170,72 @@ function storedApprovalProjection(value: unknown): ConsequenceApprovalProjection
   return value as unknown as ConsequenceApprovalProjection;
 }
 
+function consequenceRows(deps: OperatorAgentRouteDependencies): Array<Record<string, unknown>> {
+  return readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
+    step: [OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP],
+  }).rows;
+}
+
+function latestConsequenceRows(deps: OperatorAgentRouteDependencies): {
+  preflights: Map<string, Record<string, unknown>>;
+  decisions: Map<string, StoredConsequenceDecision>;
+} {
+  const preflights = new Map<string, Record<string, unknown>>();
+  const decisions = new Map<string, StoredConsequenceDecision>();
+  for (const row of consequenceRows(deps)) {
+    if (row.step === OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP) {
+      if (typeof row.action_id === "string" && row.action_id) preflights.set(row.action_id, row);
+      continue;
+    }
+    if (row.step !== OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP) continue;
+    if (typeof row.consequence_id !== "string" || !row.consequence_id) continue;
+    if (row.decision !== "approve" && row.decision !== "refuse") continue;
+    if (typeof row.at !== "string" || !Number.isFinite(Date.parse(row.at))) continue;
+    const actor = typeof row.actor === "string" && row.actor ? row.actor : typeof row.origin === "string" && row.origin ? row.origin : undefined;
+    const reason = typeof row.reason === "string" && row.reason ? row.reason : undefined;
+    decisions.set(row.consequence_id, {
+      consequenceId: row.consequence_id,
+      decision: row.decision,
+      at: new Date(row.at).toISOString(),
+      ...(actor ? { actor } : {}),
+      ...(typeof row.nonce_id === "string" && row.nonce_id ? { nonceId: row.nonce_id } : {}),
+      ...(reason ? { reason } : {}),
+    });
+  }
+  return { preflights, decisions };
+}
+
+function consequenceDecisionReceipt(decision: StoredConsequenceDecision): ConsequenceDecisionReceipt {
+  return {
+    kind: decision.decision,
+    at: decision.at,
+    ...(decision.actor ? { issuer: decision.actor } : {}),
+    ...(decision.reason ? { note: decision.reason } : {}),
+  };
+}
+
+function currentConsequence(
+  deps: OperatorAgentRouteDependencies,
+  consequenceId: string,
+  nowMs: number,
+):
+  | { kind: "found"; row: Record<string, unknown>; projection: ConsequenceApprovalProjection; decision?: StoredConsequenceDecision }
+  | { kind: "expired"; expiresAt: string }
+  | { kind: "not_found" }
+  | { kind: "not_pending" } {
+  const { preflights, decisions } = latestConsequenceRows(deps);
+  const row = preflights.get(consequenceId);
+  if (!row || row.ready !== false || typeof row.code !== "string" || !PENDING_CONSEQUENCE_CODES.has(row.code)) {
+    return { kind: row ? "not_pending" : "not_found" };
+  }
+  const projection = storedApprovalProjection(row.approval);
+  if (!projection || typeof row.at !== "string") return { kind: "not_found" };
+  if (Date.parse(projection.expiresAt) <= nowMs) return { kind: "expired", expiresAt: projection.expiresAt };
+  const decision = decisions.get(consequenceId);
+  if (decision && Date.parse(decision.at) >= Date.parse(row.at)) return { kind: "not_pending" };
+  return { kind: "found", row, projection, ...(decision ? { decision } : {}) };
+}
+
 export interface PendingConsequenceRead {
   state: "verified";
   consequences: PendingConsequenceRecord[];
@@ -2151,13 +2254,10 @@ export interface PendingConsequenceRead {
 export function readPendingConsequences(deps: OperatorAgentRouteDependencies): PendingConsequenceRead {
   const clock = clockFromMillisFn(deps.now);
   const nowMs = clock.now();
-  const latest = new Map<string, Record<string, unknown>>();
-  for (const row of readLedgerUnionRecordsSync(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP }).rows) {
-    if (typeof row.action_id === "string" && row.action_id) latest.set(row.action_id, row);
-  }
+  const { preflights, decisions } = latestConsequenceRows(deps);
   const pending: PendingConsequenceRecord[] = [];
   let unprojected = 0;
-  for (const [consequenceId, row] of latest) {
+  for (const [consequenceId, row] of preflights) {
     if (row.ready !== false || typeof row.code !== "string" || !PENDING_CONSEQUENCE_CODES.has(row.code)) continue;
     if (typeof row.consequence_class !== "string" || !APPROVAL_CONSEQUENCE_CLASSES.has(row.consequence_class)) continue;
     const projection = storedApprovalProjection(row.approval);
@@ -2166,6 +2266,12 @@ export function readPendingConsequences(deps: OperatorAgentRouteDependencies): P
       continue;
     }
     if (Date.parse(projection.expiresAt) <= nowMs) continue;
+    const decision = decisions.get(consequenceId);
+    if (decision && Date.parse(decision.at) >= Date.parse(row.at)) {
+      // An approve is terminal and leaves the pending projection. A refuse remains visible so the
+      // operator can see the durable reason in the same bounded receipt projection.
+      if (decision.decision === "approve") continue;
+    }
     const stale = projection.evidenceFreshUntil !== undefined && Date.parse(projection.evidenceFreshUntil) <= nowMs;
     pending.push({
       consequenceId,
@@ -2180,7 +2286,7 @@ export function readPendingConsequences(deps: OperatorAgentRouteDependencies): P
       recoveryStatement: projection.recoveryStatement,
       freshness: stale ? "stale" : "verified",
       observedAt: row.at,
-      receipts: [],
+      receipts: decision && Date.parse(decision.at) >= Date.parse(row.at) ? [consequenceDecisionReceipt(decision)] : [],
       source: OPERATOR_AGENT_CONSEQUENCES_SOURCE,
     });
   }
@@ -2205,6 +2311,81 @@ export function buildOperatorAgentConsequencesReadRoute(deps: OperatorAgentRoute
     path: "/v1/operator-agent/consequences",
     scope: "read",
     handler: (_req, res) => sendJson(res, 200, readPendingConsequences(deps)),
+  };
+}
+
+/** POST /v1/operator-agent/consequences/decision — the nonce-protected approval decision writer.
+ *  The service's HIGH-tier dispatcher consumes the exact action-bound nonce before this handler is
+ *  reached. The handler also requires the header so a direct route invocation cannot accidentally
+ *  turn the route into an unguarded write when a caller constructs a service without enforcement.
+ */
+export function buildOperatorAgentConsequencesDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: CONSEQUENCE_DECISION_PATH,
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateConsequenceDecisionInput, (input, req, res) => {
+      const rawNonce = req.headers["x-confirm-nonce"];
+      const nonce = Array.isArray(rawNonce) ? rawNonce[0] : rawNonce;
+      if (!nonce || !nonce.trim()) {
+        sendJson(res, 403, { error: "confirm_nonce_required", consequenceId: input.consequenceId });
+        return;
+      }
+
+      const current = currentConsequence(deps, input.consequenceId, clockFromMillisFn(deps.now).now());
+      if (current.kind === "not_found") {
+        sendJson(res, 404, {
+          error: "not_found",
+          consequenceId: input.consequenceId,
+          detail: `no pending consequence "${input.consequenceId}" exists`,
+        });
+        return;
+      }
+      if (current.kind === "expired") {
+        sendJson(res, 409, {
+          error: "expired_consequence",
+          consequenceId: input.consequenceId,
+          detail: `consequence "${input.consequenceId}" expired at ${current.expiresAt}`,
+        });
+        return;
+      }
+      if (current.kind === "not_pending") {
+        sendJson(res, 409, {
+          error: "consequence_not_pending",
+          consequenceId: input.consequenceId,
+          detail: `consequence "${input.consequenceId}" is no longer pending`,
+        });
+        return;
+      }
+
+      const at = clockFromMillisFn(deps.now).iso();
+      const actor = bearerTokenId(req);
+      const nonceId = createHash("sha256").update(nonce).digest("hex").slice(0, 32);
+      const reason = input.reason ?? (input.decision === "refuse" ? DEFAULT_CONSEQUENCE_REFUSAL_REASON : undefined);
+      const row = {
+        consequence_id: input.consequenceId,
+        decision: input.decision,
+        actor,
+        nonce_id: nonceId,
+        at,
+        ...(reason ? { reason } : {}),
+      };
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP, input.consequenceId, actor, row);
+      deps.memory?.record({ step: OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP, ...row });
+      sendJson(res, 200, {
+        ok: true,
+        consequenceId: input.consequenceId,
+        decision: input.decision,
+        at,
+        receipt: {
+          kind: input.decision,
+          at,
+          issuer: actor,
+          ...(reason ? { note: reason } : {}),
+        },
+      });
+    }),
   };
 }
 
@@ -2678,6 +2859,7 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentPromotionRollbackRoute(deps),
     buildOperatorAgentConsequencePreflightRoute(deps),
     buildOperatorAgentConsequencesReadRoute(deps),
+    buildOperatorAgentConsequencesDecisionRoute(deps),
     ...buildOperatorAgentConsequencesWriteRefusalRoutes(),
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),

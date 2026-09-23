@@ -9,11 +9,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 
-import { createService } from "../src/lib/service.js";
+import { createConfirmNonceStore, createService, makeConfirmNonceRoute, type IdentityProvider } from "../src/lib/service.js";
 import { appendPanelLedger } from "../src/lib/panel-actions.js";
 import {
   buildOperatorAgentRoutes,
   MAX_PENDING_CONSEQUENCES,
+  OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP,
   OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP,
   OPERATOR_AGENT_CONSEQUENCES_SOURCE,
   type PendingConsequenceRead,
@@ -24,14 +25,27 @@ const iso = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
 const READ_TOKEN = "consequences-list-read-token";
 const WRITE_TOKEN = "consequences-list-write-token";
 const LIST = "/v1/operator-agent/consequences";
+const DECISION = "/v1/operator-agent/consequences/decision";
+const HIGH_HEADER = "x-test-high-operator";
+const HIGH_AUTH = { [HIGH_HEADER]: "present" };
+
+const highOperator: IdentityProvider = {
+  name: "test-high-operator",
+  grant: (req) => req.headers[HIGH_HEADER] === "present" ? new Set(["read", "write"] as const) : undefined,
+  writeTier: "high",
+};
 
 async function withServer(fn: (ctx: { base: string; ledgerPath: string }) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rmd-consequences-list-"));
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
+  const nonces = createConfirmNonceStore(() => "decision-test-nonce", () => NOW);
   const server = createService({
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
-    routes: buildOperatorAgentRoutes({ ledgerPath, now: () => NOW }),
+    providers: [highOperator],
+    routes: [{ ...makeConfirmNonceRoute(nonces), tier: "low" }, ...buildOperatorAgentRoutes({ ledgerPath, now: () => NOW })],
+    enforceWriteTiers: true,
+    confirmNonces: nonces,
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -40,6 +54,22 @@ async function withServer(fn: (ctx: { base: string; ledgerPath: string }) => Pro
   } finally {
     server.close();
   }
+}
+
+async function confirmedDecision(base: string, body: unknown): Promise<Response> {
+  const payload = JSON.stringify(body);
+  const issue = await fetch(`${base}/v1/confirm`, {
+    method: "POST",
+    headers: { ...HIGH_AUTH, "content-type": "application/json" },
+    body: JSON.stringify({ method: "POST", path: DECISION, payload }),
+  });
+  assert.equal(issue.status, 200);
+  const { nonce } = (await issue.json()) as { nonce: string };
+  return fetch(`${base}${DECISION}`, {
+    method: "POST",
+    headers: { ...HIGH_AUTH, "content-type": "application/json", "x-confirm-nonce": nonce },
+    body: payload,
+  });
 }
 
 async function preflight(base: string, action: unknown): Promise<number> {
@@ -251,5 +281,99 @@ test("the consequence list refuses a write verb by name", async () => {
     }
     // Nothing was recorded by the refused writes: the queue is still empty.
     assert.deepEqual((await readList(base)).body.consequences, []);
+  });
+});
+
+test("an approved consequence is ledgered and leaves the pending list", async () => {
+  await withServer(async ({ base, ledgerPath }) => {
+    assert.equal(await preflight(base, financialAction("cq-approved")), 409);
+    const decision = await confirmedDecision(base, { consequenceId: "cq-approved", decision: "approve" });
+    assert.equal(decision.status, 200);
+    assert.deepEqual(await decision.json().then((body) => (body as { decision: string }).decision), "approve");
+    assert.equal((await readList(base)).body.consequences.some((item) => item.consequenceId === "cq-approved"), false);
+
+    const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    const row = rows.find((candidate) => candidate.step === OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP && candidate.consequence_id === "cq-approved");
+    assert.ok(row, "the approval must append a decision row");
+    assert.equal(row?.decision, "approve");
+    assert.equal(typeof row?.actor, "string");
+    assert.equal(typeof row?.nonce_id, "string");
+    assert.equal((row?.nonce_id as string).length, 32, "the ledger carries only a bounded nonce id, never the nonce secret");
+  });
+});
+
+test("a refused consequence is ledgered with its reason as a receipt", async () => {
+  await withServer(async ({ base, ledgerPath }) => {
+    assert.equal(await preflight(base, financialAction("cq-refused")), 409);
+    const decision = await confirmedDecision(base, {
+      consequenceId: "cq-refused",
+      decision: "refuse",
+      reason: "operator rejected the transfer",
+    });
+    assert.equal(decision.status, 200);
+    const listed = (await readList(base)).body.consequences.find((item) => item.consequenceId === "cq-refused");
+    assert.ok(listed, "a refusal stays visible so the operator can read its receipt");
+    assert.deepEqual(listed?.receipts[0] && { kind: listed.receipts[0].kind, note: listed.receipts[0].note }, {
+      kind: "refuse",
+      note: "operator rejected the transfer",
+    });
+    const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    const row = rows.find((candidate) => candidate.step === OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP && candidate.consequence_id === "cq-refused");
+    assert.equal(row?.reason, "operator rejected the transfer");
+  });
+});
+
+test("a consequence decision without a valid nonce is refused", async () => {
+  await withServer(async ({ base, ledgerPath }) => {
+    assert.equal(await preflight(base, financialAction("cq-no-nonce")), 409);
+    const payload = JSON.stringify({ consequenceId: "cq-no-nonce", decision: "approve" });
+    const missing = await fetch(`${base}${DECISION}`, { method: "POST", headers: { ...HIGH_AUTH, "content-type": "application/json" }, body: payload });
+    assert.equal(missing.status, 403);
+    assert.equal(((await missing.json()) as { error: string }).error, "confirm_nonce_required");
+
+    const stale = await fetch(`${base}${DECISION}`, {
+      method: "POST",
+      headers: { ...HIGH_AUTH, "content-type": "application/json", "x-confirm-nonce": "not-issued" },
+      body: payload,
+    });
+    assert.equal(stale.status, 403);
+    assert.equal(((await stale.json()) as { error: string }).error, "confirm_nonce_required");
+    const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(lines.filter((line) => line.includes(OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP)).length, 0);
+  });
+});
+
+test("a decision on an expired or unknown consequence is refused by name", async () => {
+  await withServer(async ({ base, ledgerPath }) => {
+    const unknown = await confirmedDecision(base, { consequenceId: "cq-unknown-by-name", decision: "refuse" });
+    assert.equal(unknown.status, 404);
+    const unknownBody = (await unknown.json()) as { detail: string };
+    assert.match(unknownBody.detail, /cq-unknown-by-name/);
+
+    appendPanelLedger(ledgerPath, OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, "cq-expired-by-name", "test", {
+      action_id: "cq-expired-by-name",
+      consequence_class: "financial",
+      ready: false,
+      code: "missing-approvers",
+      at: iso(0),
+      approval: {
+        target: "vendor:cq-expired-by-name",
+        amount: 40,
+        currency: "USD",
+        ceiling: 100,
+        coolingOffMs: 0,
+        coolingOffUntil: iso(0),
+        expiresAt: iso(-1),
+        approverRequired: true,
+        recoveryStatement: "none",
+      },
+    });
+    const expired = await confirmedDecision(base, { consequenceId: "cq-expired-by-name", decision: "approve" });
+    assert.equal(expired.status, 409);
+    const expiredBody = (await expired.json()) as { error: string; detail: string };
+    assert.equal(expiredBody.error, "expired_consequence");
+    assert.match(expiredBody.detail, /cq-expired-by-name/);
+    const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(lines.filter((line) => line.includes(OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP)).length, 0);
   });
 });
