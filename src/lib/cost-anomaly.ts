@@ -247,7 +247,7 @@ export function costAnomalyLine(finding: CostAnomalyFinding): LedgerLine {
 export interface CostAnomalyDeps {
   ledgerPath: string;
   /** Defaults to the real `appendLedger` — injectable so a test spies on writes instead of
-   *  touching disk (same shape as `src/lib/retro.ts`'s `MutationGateVerdictDeps`). */
+   *  touching disk (same shape as `src/lib/ledger.ts`'s `LedgerWriterDeps`). */
   writeLedger?: (path: string, line: LedgerLine) => void;
 }
 

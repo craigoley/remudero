@@ -11,6 +11,7 @@ import {
   MODEL_ID_RE,
   parseModelId,
   watchSuccessorModels,
+  watchSuccessorModelsBestEffort,
   type CatalogSnapshot,
   type ModelAvailabilityAlertedEntry,
   type RoutedLadderRow,
@@ -228,4 +229,35 @@ test("W1-T4080: watchSuccessorModels still escalates a gated successor, naming i
   const lines = readLines(ledger);
   const read = lines.find((l) => l.step === "model-availability.read");
   assert.equal(read?.gated, "astra");
+});
+
+test("W1-T4080: the cadence's best-effort watch runs the watch and reports it as watched", async () => {
+  const ledger = ledgerPath();
+  const escalated: Escalation[] = [];
+  const outcome = await watchSuccessorModelsBestEffort(async () => ({
+    catalog: catalog({ listed: ["gpt-6-luna"] }),
+    routed: ROUTED,
+    deps: {
+      escalate: (e) => {
+        escalated.push(e);
+        return "https://example.invalid/issues/1";
+      },
+      ledgerPath: ledger,
+      runId: "TEST-RUN-BEST-EFFORT",
+    },
+  }));
+  assert.equal(outcome.status, "watched");
+  assert.equal(outcome.status === "watched" ? outcome.result.alerted.length : -1, 1);
+  assert.equal(escalated.length, 1);
+});
+
+test("W1-T4080: a failed catalog read never throws out of the cadence, and escalates nothing", async () => {
+  const escalated: Escalation[] = [];
+  const boom = new Error("cash catalog unreachable");
+  const outcome = await watchSuccessorModelsBestEffort(async () => {
+    throw boom;
+  });
+  // The failure is CARRIED, not erased: a caller can tell "the watch failed" from "nothing to alert".
+  assert.deepEqual(outcome, { status: "failed", error: boom });
+  assert.equal(escalated.length, 0);
 });

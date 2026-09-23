@@ -146,6 +146,8 @@ import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./li
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
+import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { renderAnchorBlock } from "./lib/compaction.js";
@@ -965,7 +967,7 @@ import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, 
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { readModelAvailabilitySnapshot, watchSuccessorModels } from "./lib/model-availability.js";
+import { readModelAvailabilitySnapshot, watchSuccessorModelsBestEffort } from "./lib/model-availability.js";
 import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
@@ -14632,7 +14634,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         globalArtifactPath: globalArtifactPath(config),
       },
       taskFiles: task.files,
-      selectionContext: { text: learningsSelectionText },
+      selectionContext: {
+        text: learningsSelectionText,
+        usage: readLearningUsage(learningUsagePath(join(config.root, "state"))),
+        seed: seedOf(runId),
+      },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
@@ -15069,7 +15075,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       });
     }
 
-    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds);
+    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
@@ -25026,25 +25032,15 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       const planReconcileOption =
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
-      // W1-T4080: ON THE MEASUREMENT CADENCE, NOT PER TICK (design (i)) — read the cash
-      // data-plane catalog and raise one operator alert per successor model per state (design
-      // (iii)). Best-effort, like every other read this cadence folds in above: a catalog read
-      // or escalation failure here must never cost the rest of the cadence its report.
-      try {
+      await watchSuccessorModelsBestEffort(async () => {
         const config = configFor();
-        const mounts = loadMounts(mountsPath(repoRoot));
-        const { owner, repo } = resolveOwnerRepo();
         const ledgerPath = ledgerPathFor(config);
-        const { catalog, routed } = await readModelAvailabilitySnapshot(config, mounts);
-        await watchSuccessorModels(catalog, routed, {
-          escalate: (e) => escalate(e, { issues: ghIssueGateway(owner, repo), ledgerPath, runId: coverageRunId }),
-          ledgerPath,
-          runId: coverageRunId,
-        });
-      } catch {
-        // best-effort — see this block's own comment above; the successor watch never blocks
-        // the measurement cadence report below.
-      }
+        const { owner, repo } = resolveOwnerRepo();
+        const { catalog, routed } = await readModelAvailabilitySnapshot(config, loadMounts(mountsPath(repoRoot)));
+        const escalateSuccessor = (e: Escalation) =>
+          escalate(e, { issues: ghIssueGateway(owner, repo), ledgerPath, runId: coverageRunId });
+        return { catalog, routed, deps: { escalate: escalateSuccessor, ledgerPath, runId: coverageRunId } };
+      });
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -29765,13 +29761,59 @@ export function logLearningsUsed(
   log: (step: string, extra?: Record<string, unknown>) => void,
   text: string,
   injectedIds: readonly string[],
+  usagePath?: string,
 ): void {
   const parsed = parseLearningsUsed(text, injectedIds);
-  if (!parsed) {
-    log("learnings.used", { silent: true, injected_ids: [...injectedIds] });
-    return;
+  const row = parsed
+    ? { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused }
+    : { silent: true, injected_ids: [...injectedIds] };
+  log("learnings.used", row);
+  if (usagePath) recordLearningUsage(usagePath, row);
+}
+
+export function memoryLintCommand(rest: string[]): number {
+  const out = (line: string) => console.log(line);
+  const fix = rest.includes("--fix");
+  const mergeAt = rest.indexOf("--merge");
+  const mergeFrom = mergeAt >= 0 ? rest[mergeAt + 1] : undefined;
+  const dirs = rest.filter((a, i) => !a.startsWith("--") && !(mergeAt >= 0 && i === mergeAt + 1));
+  if (dirs.length === 0 || (mergeAt >= 0 && !mergeFrom)) {
+    out("usage: rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...");
+    return 2;
   }
-  log("learnings.used", { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused });
+  const corpus = memoryLintCorpus(repoRoot);
+  if (mergeFrom) {
+    const { moved } = mergeMemoryDirs(mergeFrom, dirs[0]!);
+    out(`merged ${moved.length} memories from ${mergeFrom} into ${dirs[0]}`);
+  }
+  let findings = 0;
+  for (const dir of dirs) {
+    if (fix) {
+      const { removed, added } = fixMemoryDir(dir);
+      out(`fixed ${dir}: removed ${removed.length} dangling index lines, listed ${added.length} files`);
+    }
+    const report = lintMemoryDir(dir, corpus);
+    findings += report.dangling.length + report.unlisted.length + report.missingFrontmatter.length + report.duplicates.length + (report.index.load === "ok" ? 0 : 1);
+    out(renderMemoryLint(report));
+  }
+  return findings > 0 && !fix ? 1 : 0;
+}
+
+export function memoryLintCorpus(root: string): KnowledgeText[] {
+  const corpus: KnowledgeText[] = [];
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, ent.name);
+      if (ent.isDirectory()) walk(path);
+      else if (ent.isFile() && ent.name.endsWith(".md")) corpus.push({ id: relative(root, path), text: readFileSync(path, "utf8") });
+    }
+  };
+  walk(join(root, "doctrine"));
+  if (existsSync(join(root, "learnings"))) {
+    for (const e of loadLearningsCorpus(join(root, "learnings"))) corpus.push({ id: `learnings#${e.id}`, text: e.fact });
+  }
+  return corpus;
 }
 
 export async function daemonCommand(
@@ -43402,6 +43444,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set.",
   },
   {
+    name: "memory-lint",
+    syntax: "rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...",
+    summary: "Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.",
+    detail: "W1-T4098: reads each <memory-dir> (a Claude Code auto-memory directory holding MEMORY.md and one file per memory) and reports index lines whose link target is gone, memory files the index does not list, files without a name/description frontmatter block, the index's size against Claude Code's load limit (200 lines / about 25 KB), and memories whose phrasing repeats a doctrine rule or a learning in this repo. --fix makes only safe index edits (moves dangling lines to MEMORY.archive.md, lists unlisted files) and never deletes a memory file. --merge <from-dir> moves every memory from <from-dir> into the first <memory-dir> and rebuilds both indexes. Exits non-zero when anything is reported and --fix was not given.",
+  },
+  {
     name: "ledger-grep",
     syntax: "rmd ledger-grep <pattern>",
     summary: "Grep the deduplicated union of every ledger archive and the live ledger file.",
@@ -44330,6 +44378,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => checkProofCommand(rest)],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
   ["ci-failures", (rest) => ciFailuresCommand(rest)],

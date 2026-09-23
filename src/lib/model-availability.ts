@@ -232,6 +232,30 @@ function priorAlertedState(lines: Array<Record<string, unknown>>, model: string)
   return last;
 }
 
+/** The two outcomes of {@link watchSuccessorModelsBestEffort}: the watch ran, or it failed and
+ *  the error is carried rather than rethrown. */
+export type SuccessorWatchOutcome =
+  | { status: "watched"; result: ModelAvailabilityResult }
+  | { status: "failed"; error: unknown };
+
+/**
+ * The successor watch as the measurement cadence runs it (W1-T4080 design (i): on the cadence, not
+ * per tick). BEST-EFFORT BY DESIGN, like every other read the cadence folds in: `prepare` builds
+ * the snapshot and escalation deps, and a throw from it or from the watch is returned as
+ * `{ status: "failed" }` rather than rethrown, so a catalog read or escalation failure never costs
+ * the cadence the rest of its report.
+ */
+export async function watchSuccessorModelsBestEffort(
+  prepare: () => Promise<{ catalog: CatalogSnapshot; routed: readonly RoutedLadderRow[]; deps: ModelAvailabilityDeps }>,
+): Promise<SuccessorWatchOutcome> {
+  try {
+    const { catalog, routed, deps } = await prepare();
+    return { status: "watched", result: await watchSuccessorModels(catalog, routed, deps) };
+  } catch (error) {
+    return { status: "failed", error };
+  }
+}
+
 /**
  * Run the watch over one catalog snapshot: find every successor, ledger the reading (ALWAYS —
  * design (iii)'s second half), and escalate exactly once per (model, state) pair.

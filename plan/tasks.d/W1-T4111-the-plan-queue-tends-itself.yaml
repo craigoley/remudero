@@ -1,0 +1,37 @@
+- id: W1-T4111
+  title: "THE PLAN QUEUE ONLY GROWS — 221 queued shards (217 never attempted), 103 blocked, 42 ci-learning tasks filed since 2026-09-15 with 0 done and 10 duplicate titles (origin ci-learning:5505:ci-gate filed 4 times), and existing duplicates are never merged because `bestNearDuplicate` only refuses new ones at filing: add a plan-queue gardener that folds duplicates, reprioritizes by dispatch value, and proposes retirement for review"
+  repo: remudero
+  depends_on: [W1-T4110]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23; research over origin/main d7b569e0d, counts re-verified the same day"
+  plan_refs: [W1-T4110]
+  files: [src/lib/plan-gardener.ts, src/run-task.ts, test/the-plan-queue-tends-itself.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23: plan/tasks.d holds 1,537 merged, 221 queued and 103 blocked shards (92 of the blocked already carry
+    `retirement:`). Filing-time dedup (`bestNearDuplicate`, knowledge-dedup.ts) stops a new duplicate but nothing merges
+    ones already filed; plan.ts states retirement is operator-only and never auto-written; no filer learns that its
+    tasks never ship.
+  design: |
+    (i) Classes: MERGE — a queued task that near-duplicates an older queued one gets `superseded_by` (text surgery, same
+        shape as plan-reconcile); REPRIORITIZE — `priority:` follows dispatch-value evidence (dispatch-value.ts); RETIRE —
+        a stale queued task whose referent is gone is PROPOSED for retirement with `review: "operator"` (W1-T4110), so
+        the PR is never auto-merged and a person makes the call, as doctrine requires.
+    (ii) Metrics per class: MERGE — a merged-away task not re-filed within the window; REPRIORITIZE — share of raised
+         tasks that dispatch and merge; RETIRE — the operator's merge rate on the proposals.
+    (iii) Emits through plan-pr-emitter.ts so every PR passes the plan-PR gates.
+  acceptance:
+    - claim: "a duplicate queued task is folded into the older one"
+      proof: 'grep: test("W1-T4111: a duplicate queued task is folded into the older one" in test/the-plan-queue-tends-itself.test.ts'
+    - claim: "a retirement is only ever proposed for operator review"
+      proof: 'grep: test("W1-T4111: a retirement is only ever proposed for operator review" in test/the-plan-queue-tends-itself.test.ts'
+    - claim: "the daemon wires the plan gardener"
+      proof: 'grep: planGardenSpec( in src/run-task.ts'
+  falsifier: |
+    Let the retire class auto-merge and the second test goes red.

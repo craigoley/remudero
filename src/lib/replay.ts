@@ -29,7 +29,7 @@
  * literature's curve, never front-loaded to "curate every class now".
  */
 
-import { appendLedger, type LedgerLine } from "./ledger.js";
+import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
 
 /** The three workflow classes {@link SEEDED_GOLDENS} spans (design note, verbatim). */
 export type GoldenClass = "plan-filing" | "src-fix" | "doc-fix-rung";
@@ -178,17 +178,10 @@ export function replayResultLine(runId: string, taskId: string, result: ReplayRe
   };
 }
 
-/** Dependencies for {@link recordReplayResults} — an injectable writer so a
- *  test spies on it instead of touching disk (mirrors `MutationGateVerdictDeps`). */
-export interface RecordReplayResultsDeps {
-  ledgerPath: string;
-  writeLedger?: typeof appendLedger;
-}
-
 /** Append one {@link replayResultLine} per result — the write side a
  *  production replay-against-sandbox caller invokes after `replayGoldens`
  *  returns; a unit test never needs this (it reads `ReplayResult[]` directly). */
-export function recordReplayResults(runId: string, taskId: string, results: ReplayResult[], deps: RecordReplayResultsDeps): void {
+export function recordReplayResults(runId: string, taskId: string, results: ReplayResult[], deps: LedgerWriterDeps): void {
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const result of results) {
     writeLedger(deps.ledgerPath, replayResultLine(runId, taskId, result));

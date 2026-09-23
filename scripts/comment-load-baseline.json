@@ -253,6 +253,7 @@
   "src/lib/isolation.ts": 227,
   "src/lib/issues-intake.ts": 67,
   "src/lib/knowledge-dedup.ts": 98,
+  "src/lib/knowledge-value.ts": 250,
   "src/lib/last-seen.ts": 41,
   "src/lib/launchd.ts": 148,
   "src/lib/learnings.ts": 500,
@@ -270,7 +271,9 @@
   "src/lib/main-health-rung.ts": 10,
   "src/lib/managed-repos.ts": 20,
   "src/lib/measurement-cadence.ts": 750,
+  "src/lib/memory-lint.ts": 250,
   "src/lib/merge-state.ts": 250,
+  "src/lib/model-availability.ts": 106,
   "src/lib/model-gate.ts": 16,
   "src/lib/mount-exploration.ts": 250,
   "src/lib/mount-recommender.ts": 195,
@@ -386,6 +389,6 @@
   "src/lib/worker.ts": 1750,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 17000,
+  "src/run-task.ts": 16787,
   "src/spike.ts": 18
 }

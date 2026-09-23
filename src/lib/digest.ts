@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import { readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 
+import { foldLearningUsage, leastUsefulLearnings } from "./knowledge-value.js";
 import { readLedgerLines } from "./status.js";
 import { ledgerRotationEntries, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-grep.js";
 import { notify, type NotifyChannel, type NotifyDeps } from "./notify.js";
@@ -416,6 +417,7 @@ export interface DigestSummary {
   inbox?: InboxPollSummary;
   /** Cache-hit ratio totals for this window. See {@link aggregateCacheHitTotals}. */
   cacheHit?: CacheHitTotals;
+  learningUsefulness?: LearningUsefulness;
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
    *  `.fired` duplicates it and `.skipped` is the cadence working as intended. */
   boardReview?: BoardReviewDigestSnapshot;
@@ -560,6 +562,34 @@ export function renderPromptParts(s: PromptPartsSummary | undefined): string {
 }
 
 /** Reduce the day's ledger lines to the counts a digest reports. Pure over its input. */
+export interface LearningUsefulness {
+  reports: number;
+  silent: number;
+  offered: number;
+  used: number;
+  leastUseful: Array<{ id: string; offered: number; used: number; mean: number }>;
+}
+
+export function summarizeLearningUsefulness(lines: LedgerLine[], n = 10): LearningUsefulness | undefined {
+  const rows = lines.filter((l) => l.step === "learnings.used");
+  if (rows.length === 0) return undefined;
+  const usage = foldLearningUsage(rows as Array<Record<string, unknown>>);
+  const counts = Object.values(usage);
+  return {
+    reports: rows.filter((r) => r.silent !== true).length,
+    silent: rows.filter((r) => r.silent === true).length,
+    offered: counts.reduce((sum, c) => sum + c.offered, 0),
+    used: counts.reduce((sum, c) => sum + c.used, 0),
+    leastUseful: leastUsefulLearnings(usage, n),
+  };
+}
+
+export function renderLearningUsefulness(u: LearningUsefulness): string {
+  const share = u.offered > 0 ? `${Math.round((u.used / u.offered) * 100)}%` : "n/a";
+  const least = u.leastUseful.map((l) => `${l.id} (${l.used}/${l.offered})`).join(", ");
+  return `learnings used: ${u.used} of ${u.offered} offered (${share}) over ${u.reports} reports, ${u.silent} silent; least useful: ${least || "none yet"}`;
+}
+
 export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary {
   const since = collectSince(lines, sinceIso);
   const summary: DigestSummary = {
@@ -635,6 +665,7 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
     }
   }
   summary.cacheHit = aggregateCacheHitTotals(since);
+  summary.learningUsefulness = summarizeLearningUsefulness(since);
   return summary;
 }
 
@@ -698,6 +729,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     // (see the `cacheHit` field's doc on DigestSummary), two lines (per-run, per-class), never
     // a "(no data)" placeholder otherwise.
     ...(s.cacheHit ? [renderCacheHitLine("cache hit by run", s.cacheHit.byRun), renderCacheHitLine("cache hit by class", s.cacheHit.byClass)] : []),
+    ...(s.learningUsefulness ? [renderLearningUsefulness(s.learningUsefulness)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
     // W1-T2765: ALWAYS rendered, unlike the soft-composed lines above — "not observed" is the
