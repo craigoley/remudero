@@ -7082,17 +7082,17 @@
     rmd run-task/drain -> verdict=blocked_illformed, no worker spawned.
   acceptance:
     - claim: "a task spanning 3 independent concerns (distinct subsystems) at risk:medium is FLAGGED (sizing, Rule 19)"
-      proof: "unit test: test/task-linter.test.ts"
+      proof: "unit test: ACCEPTANCE 1: a task spanning 3 distinct subsystems"
     - claim: "a multi-criteria SINGLE-concern task (shape of W1-T4: three parser tests on ONE module) is NOT flagged — no false positive on raw criterion count"
-      proof: "unit test: test/task-linter.test.ts"
+      proof: "unit test: ACCEPTANCE 2: a multi-criteria SINGLE-concern task"
     - claim: "a criterion containing overnight/launchctl/killed on an auto-verify task is FLAGGED (headless-fitness, Rule 18)"
-      proof: "unit test: test/task-linter.test.ts"
+      proof: "unit test: ACCEPTANCE 3: a criterion containing 'overnight'"
     - claim: "a proof-less criterion is FLAGGED"
-      proof: "unit test: test/task-linter.test.ts"
+      proof: "unit test: ACCEPTANCE 4: a criterion whose proof is \"works\""
     - claim: "rmd run-task REFUSES a linter-failing task with verdict=blocked_illformed (no worker spawned); a clean task passes the guard"
-      proof: "unit test: test/task-linter-wiring.test.ts"
+      proof: "unit test: CRITERION 5 (behavioral): a linter-failing task"
     - claim: "the linter's CANONICAL regression fixture is W1-T12's ORIGINAL definition, and it is FLAGGED"
-      proof: "unit test: test/task-linter.test.ts"
+      proof: "unit test: ACCEPTANCE 6 (CANONICAL REGRESSION): W1-T12's original definition"
   risk: high
   origin: feedback#plan-health
   plan_refs: ["§5C"]
