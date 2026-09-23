@@ -2138,6 +2138,10 @@ function isOwnedSlugBranch(head: string, taskId: string): boolean {
 function branchClaimsOtherTask(head: string | undefined, taskId: string): boolean {
   if (!head) return false; // unresolved head ref carries no claim — cannot veto
   if (!head.startsWith("run-")) return false; // no task claim encoded at all
+  // `run-unfiled-<…>` is the head-identity gate's shape for a code PR that names NO task, so it claims
+  // none. Read as `run-<id>-<epoch>` it vetoed every trailer credit on such a PR: W1-T3991 (#6569)
+  // was re-dispatched four times as already_satisfied (measured 2026-09-22).
+  if (head.startsWith("run-unfiled-")) return false;
   return !ownsBranch(head, taskId) && !isBareRunBranch(head, taskId) && !isOwnedSlugBranch(head, taskId);
 }
 
@@ -2207,6 +2211,26 @@ export function preferImplementingPr(
  *  nothing is in plan scope" is the vacuous pass this repo keeps re-learning. DELETIONS COUNT (#1465). */
 export function isPlanOnlyChangeset(files: readonly string[]): boolean {
   return files.length > 0 && files.every((f) => isInPlanScope(f));
+}
+
+/**
+ * Persist a VERIFIED already_satisfied credit where deriveStatus reads first (the durable store's
+ * `trailer` entry), applying rung (c)'s plan-only refusal first. Without it the worker's verified
+ * verdict credited only its own run, the dispatcher's projection disagreed, and the task looped:
+ * W1-T3990 re-dispatched four times for $526 against #6492 (measured 2026-09-22). An unreadable file
+ * list records nothing, never a guess.
+ */
+export function persistVerifiedCredit(
+  ledgerPath: string,
+  taskId: string,
+  pr: { number: number; url: string },
+  files: readonly string[] | undefined,
+): "recorded" | "plan-only" | "unreadable" {
+  if (!files || files.length === 0) return "unreadable";
+  if (isPlanOnlyChangeset(files)) return "plan-only";
+  const path = defaultCreditStorePath(ledgerPath);
+  saveCreditStore(path, recordCredit(loadCreditStore(path), taskId, { source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
+  return "recorded";
 }
 
 /** Is `head` this task's OWN run branch, in any of the three accepted forms? A free, in-hand test that lets rung
