@@ -45,11 +45,11 @@
     `clean_single_strike` is caught automatically without a second edit to this check.
   acceptance:
     - claim: "the clean_single_strike step text, rendered verbatim from PROCEDURAL_STEP_TEXT, is refused as restating its own outcome with no new behavioral content — the live fixture from skill-draft:25c3724cf6958acf"
-      proof: "unit test: test/skill-workshop-actionable-step-text.test.ts"
+      proof: 'grep: test("W1-T4283: the clean_single_strike step is refused as restating its own outcome" in test/skill-workshop-actionable-step-text.test.ts'
     - claim: "the fully_executed_proof step text passes unchanged — the falsifier proving the check does not refuse every drafted step, only content-empty ones"
-      proof: "unit test: test/skill-workshop-actionable-step-text.test.ts"
+      proof: 'grep: test("W1-T4283: the fully_executed_proof step passes unchanged" in test/skill-workshop-actionable-step-text.test.ts'
     - claim: "a refused draft's reason names the offending step verbatim, matching scanSkillDraft's existing refusal shape (offendingLine + reason)"
-      proof: "unit test: test/skill-workshop-actionable-step-text.test.ts"
+      proof: 'grep: test("W1-T4283: a refused draft names the offending step verbatim with offendingLine and reason" in test/skill-workshop-actionable-step-text.test.ts'
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION IF `clean_single_strike` has already been rewritten to name a concrete,
     evidenced practice rather than the restated outcome, or removed from `PROCEDURAL_STEP_TEXT` — re-check

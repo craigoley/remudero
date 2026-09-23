@@ -49,11 +49,11 @@
     DO NOT touch `WORKER_SETTING_SOURCES` or `spawnWorker` — that stays W1-T3137's remit, untouched here.
   acceptance:
     - claim: "a draft carrying a valid applies-to: for an injectable task type is reported reachable, naming the W1-T3101 CONTEXT-splice route, even when settingSources excludes 'project'"
-      proof: "unit test: test/skill-workshop-reachability-route.test.ts"
+      proof: 'grep: test("W1-T4282: a draft with an injectable applies-to is reported reachable via the W1-T3101 CONTEXT-splice route" in test/skill-workshop-reachability-route.test.ts'
     - claim: "a draft with no applies-to: (or an unrecognised task type) still reports NOT reachable when settingSources also excludes 'project' — the falsifier proving the fix reports the real union rather than defaulting to reachable"
-      proof: "unit test: test/skill-workshop-reachability-route.test.ts"
+      proof: 'grep: test("W1-T4282: a draft with no applies-to or an unrecognised task type still reports NOT reachable" in test/skill-workshop-reachability-route.test.ts'
     - claim: "the live fixture — a draft matching skill-draft:25c3724cf6958acf's own frontmatter (applies-to: implement, 84 supporting runs) — is used as a regression case and reports reachable via the injection route"
-      proof: "unit test: test/skill-workshop-reachability-route.test.ts"
+      proof: 'grep: test("W1-T4282: the skill-draft:25c3724cf6958acf fixture reports reachable via the injection route" in test/skill-workshop-reachability-route.test.ts'
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION IF `stageSkillDraft`'s summary text no longer contains the unqualified phrase
     "NOT reachable by a worker today" for a draft carrying a matching `applies-to:` — re-check by staging a
