@@ -8,7 +8,7 @@ import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
-import { lintPlan, lintTask } from "./task-linter.js";
+import { lintPlan, lintTask, promoteIntroducedPlanOnlyDiagnostics, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import type { GhFailureReason } from "./status.js";
@@ -961,8 +961,57 @@ export function blockingLintMessages(
   const results = lint(merged, () => ({}), fragmentIds);
   const out: string[] = [];
   for (const task of fragmentPlan.tasks) {
-    const violations = results.get(task.id)?.violations ?? [];
-    for (const v of violations.filter((x) => x.severity === "block")) out.push(`${task.id}: [${v.check}] ${v.message}`);
+    const baseTask = basePlan.tasks.find((t) => t.id === task.id);
+    const violations = filingBlockers(
+      results.get(task.id)?.violations ?? [],
+      baseTask ? lintTask(baseTask).violations : undefined,
+      baseTask === undefined,
+    );
+    for (const v of violations) out.push(`${task.id}: [${v.check}] ${v.message}`);
+  }
+  return out;
+}
+
+/**
+ * The violations `rmd lint-plan --base` BLOCKS on a drafted task once it lands as a plan-only shard.
+ * W1-T3814 promotes shared-proof, call-site and proof-scope from warn to block on a new or newly
+ * warned shard, but this module's two readers (the draft rung's self-lint and the readiness check)
+ * kept only `severity === "block"` from a plain lint, so a draft CI was certain to refuse read as
+ * READY. MEASURED 2026-09-23: 10 of 15 ratify PRs opened in one batch were refused on exactly this.
+ */
+export function filingBlockers(
+  violations: readonly LintViolation[],
+  base: readonly LintViolation[] | undefined,
+  newlyAdded: boolean,
+): DraftLintViolation[] {
+  return promoteIntroducedPlanOnlyDiagnostics(violations, base, newlyAdded).filter((v) => v.severity === "block");
+}
+
+/**
+ * A ratification stamp names the proposal it ratifies and exactly the tasks it files. The stamp is
+ * written into MASTER-PLAN.md verbatim, so a model-invented label becomes a permanent record: one
+ * draft for proof-debt:W1-T4048 stamped "- P25 (MASTER-PLAN §7/P25) — RATIFIED" (#6791), and one
+ * for proof-debt:W1-T3570 merged as "- P44 (…)" (#6789). Checked, not rewritten, because the
+ * operator approves the stamp `rmd inbox` shows them.
+ */
+export function stampLineViolations(proposalId: string, stampLine: string, fragmentIds: readonly string[]): DraftLintViolation[] {
+  const out: DraftLintViolation[] = [];
+  if (!stampLine.startsWith(`- ${proposalId} (`)) {
+    out.push({
+      check: "draft-stamp",
+      severity: "block",
+      message: `the STAMP line must open with "- ${proposalId} (": it names the proposal being ratified, never another P-number. Got ${JSON.stringify(stampLine.slice(0, 80))}`,
+    });
+  }
+  const listed = /->\s*([A-Za-z0-9-]+(?:\s*\/\s*[A-Za-z0-9-]+)*)/.exec(stampLine)?.[1].split("/").map((id) => id.trim()) ?? [];
+  const named = [...new Set(listed)].sort();
+  const filed = [...new Set(fragmentIds)].sort();
+  if (named.join("/") !== filed.join("/")) {
+    out.push({
+      check: "draft-stamp",
+      severity: "block",
+      message: `the STAMP line's "-> <ids>" list must name exactly this fragment's tasks (${filed.join("/")}); it names ${named.join("/") || "none"}`,
+    });
   }
   return out;
 }
@@ -1107,7 +1156,10 @@ export function classifyProposal(
       });
     }
     verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan);
-    const blocking = verdict.blocking;
+    const blocking = [
+      ...verdict.blocking,
+      ...stampLineViolations(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id)).map((v) => `stamp: ${v.message}`),
+    ];
     if (blocking.length > 0) {
       reasons.push({ predicate: "lint_clean", detail: `draft-unclean: lint-plan violation(s) — ${blocking.join("; ")}` });
     }
@@ -1262,8 +1314,10 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     // W1-T509-adjacent, W1-T512: an absent or empty `files:` is fail-closed at dispatch — `overlappingPaths` reports
     // it as overlapping every candidate, so it can never batch.
     "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
-    "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`),",
-    "with the task-id list written as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
+    `exactly this shape: \`- ${proposal.id} (<one-line summary>) — RATIFIED <YYYY-MM-DD> -> <task ids>.\``,
+    `It opens with THIS proposal's id, ${proposal.id}, never another P-number, and its task-id list names`,
+    "every task in your fragment and nothing else, as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
+    "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
     'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
@@ -1408,7 +1462,7 @@ export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
-export function lintDraftedFragment(fragmentYaml: string, proposalId: string): DraftLintViolation[] {
+export function lintDraftedFragment(fragmentYaml: string, proposalId: string, stampLine?: string): DraftLintViolation[] {
   let tasks;
   try {
     tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
@@ -1416,9 +1470,8 @@ export function lintDraftedFragment(fragmentYaml: string, proposalId: string): D
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
-  for (const task of tasks) {
-    for (const v of lintTask(task).violations) if (v.severity === "block") violations.push(v);
-  }
+  for (const task of tasks) violations.push(...filingBlockers(lintTask(task).violations, undefined, true));
+  if (stampLine !== undefined) violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
   return violations;
 }
 
@@ -1460,7 +1513,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         });
         parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
         if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
-        violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id);
+        violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine);
         if (violations.length === 0) break; // lint-clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
