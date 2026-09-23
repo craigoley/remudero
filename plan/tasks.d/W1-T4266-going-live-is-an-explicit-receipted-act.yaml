@@ -1,0 +1,38 @@
+- id: W1-T4266
+  title: "NOTHING TURNS A SHADOW INSTANCE LIVE — serve the shadow evidence for an instance and a high-tier go-live that the operator confirms, which flips the instance to live in the registry through a reviewed pull request and returns a receipt"
+  repo: remudero
+  depends_on: [W1-T4265, W1-T4244]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator-request#onboard-wild-trails-2026-09-23"
+  plan_refs: ["W1-T4264", "W1-T4265", "W1-T4244"]
+  files:
+    - src/lib/onboarding-golive.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The intended onboarding ends with an explicit confirmation before going live (operator's stated flow:
+    authenticate → select repo → choose task types → proof policy → dry run and inspect → explicit
+    confirmation). W1-T4265 makes the dry run a shadow instance; this is the promote step.
+  design: |
+    GET /v1/i/<instance>/shadow-evidence (read): the shadow.verdict rows — PRs, verdicts, would_merge /
+    would_block counts, cost. POST /v1/i/<instance>/go-live (write, tier high, confirm nonce, operator
+    identity from W1-T4244): refuses when the instance is not shadow, or when it has fewer than a configured
+    number of shadow runs; otherwise it opens a pull request that changes the instance's `mode` to live in
+    .remudero/daemon-instances.yaml (the registry changes through review like any other file, never by a
+    write to disk), ledgers `onboarding.go_live_requested` with the actor, and returns that PR as the receipt.
+  acceptance:
+    - claim: "shadow evidence counts would-merge and would-block runs for an instance"
+      proof: "unit test: shadow evidence counts would-merge and would-block runs for an instance"
+    - claim: "go-live refuses an instance that is not in shadow mode"
+      proof: "unit test: go-live refuses an instance that is not in shadow mode"
+    - claim: "go-live opens a registry pull request and returns it as the receipt"
+      proof: "unit test: go-live opens a registry pull request and returns it as the receipt"
+    - claim: "serve answers go-live from the go-live module"
+      proof: "grep: requestGoLive( in src/lib/serve.ts"

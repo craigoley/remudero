@@ -1,0 +1,41 @@
+- id: W1-T4264
+  title: "A NEW REPO CANNOT BE JUDGED READY TO ONBOARD — serve a read-only readiness report for a candidate repository through the Fleet GitHub App: app access, branch protection and required checks, CI workflows, agent instructions, a detected test command and plan layout, each pass / warn / fail with its reason"
+  repo: remudero
+  depends_on: [W1-T4227]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator-request#onboard-wild-trails-2026-09-23"
+  plan_refs: ["W1-T4227", "W1-T4265", "W1-T4266"]
+  files:
+    - src/lib/onboarding-readiness.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The operator wants Wild Trails (craigoley/wild-trails) and later repos onboarded from the console
+    (design doc "Remudero Projects, Repos and Onboarding", 2026-09-23). The console's /onboard wizard is
+    stuck at step 1 because `githubAppVerified` is hard-coded false and no core endpoint exists; core
+    onboarding is CLI-only (`rmd onboard`). MEASURED 2026-09-23: the Fleet GitHub App installation already
+    lists craigoley/wild-trails among its 18 repos, so step 1 can be real.
+  design: |
+    GET /v1/onboarding/readiness?repo=<owner/name> (read scope). Every check is read-only through the
+    Fleet App and returns { id, status: pass|warn|fail|unknown, reason, evidence? }:
+    app-access (repo listed in the installation), default branch, branch protection + required checks,
+    CI workflows present, AGENTS.md or CLAUDE.md present, a detected test command (package.json scripts,
+    Makefile, pyproject), an existing plan/ layout, and whether the repo is already in the registry (then
+    `already-onboarded`, never a second instance). A GitHub read that fails is `unknown` with the reason,
+    never pass. Bounded reads, cached per repo for a short TTL.
+  acceptance:
+    - claim: "a repository the app cannot see fails app access with the reason"
+      proof: "unit test: a repository the app cannot see fails app access with the reason"
+    - claim: "a failed GitHub read reports unknown never pass"
+      proof: "unit test: a failed GitHub read reports unknown never pass"
+    - claim: "a repository already in the registry reads as already onboarded"
+      proof: "unit test: a repository already in the registry reads as already onboarded"
+    - claim: "serve answers the readiness route from the readiness module"
+      proof: "grep: onboardingReadiness( in src/lib/serve.ts"
