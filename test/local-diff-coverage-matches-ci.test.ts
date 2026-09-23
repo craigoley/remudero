@@ -21,11 +21,12 @@
  *    change -- the same shape as the measured false-BLOCKED defect, reproduced and proven fixed.
  */
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 // @ts-expect-error The exercised gate is a plain .mjs script without a declaration file.
-import { extractCoverageFlags, main, mergeBaseDiff } from "../scripts/diff-coverage-local.mjs";
+import { computeMergeBaseDiff, ensureRawCoverageDir, extractCoverageFlags, main, makeTempDiffDir, mergeBaseDiff, readCiYaml, removeTempDiffDir, runDiffCoverageGate, runInstrumentedTests, statLcov, writeDiffFile } from "../scripts/diff-coverage-local.mjs";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
@@ -235,4 +236,87 @@ test("W1-T4084 main: a BLOCKED gate propagates its exit code and names the remed
   assert.equal(status, 1);
   assert.ok(errors.some((e) => e.includes("add a test file")));
   assert.equal(calls.removeTempDiffDir?.length, 1, "the tmp dir must still be removed on a BLOCKED gate");
+});
+
+// ── extractCoverageFlags' fail-closed arms: ci.yml's shape changing must be a loud error, not a
+// silently empty flag set (which would run the instrumented suite with none of the source-map/
+// coverage flags this whole script exists to reproduce).
+
+test("W1-T4084: a coverage-ratchet job missing its Test with coverage step fails loudly", () => {
+  const yamlText = "jobs:\n  coverage-ratchet:\n    steps:\n      - name: some other step\n        run: echo hi\n";
+  assert.throws(() => extractCoverageFlags(yamlText), /has no "Test with coverage" step/);
+});
+
+test("W1-T4084: a Test with coverage step whose run: no longer invokes node --enable-source-maps fails loudly", () => {
+  const yamlText =
+    "jobs:\n  coverage-ratchet:\n    steps:\n      - name: Test with coverage (renamed)\n        run: echo hi\n";
+  assert.throws(() => extractCoverageFlags(yamlText), /could not find "node --enable-source-maps"/);
+});
+
+test("W1-T4084: a Test with coverage step missing the shard's test-file placeholder fails loudly", () => {
+  const yamlText =
+    "jobs:\n  coverage-ratchet:\n    steps:\n      - name: Test with coverage (renamed)\n        run: node --enable-source-maps --test\n";
+  assert.throws(() => extractCoverageFlags(yamlText), /could not find .*COVERAGE_TEST_FILES/);
+});
+
+// ── the real implementation behind each injectable seam, exercised directly and cheaply --
+// {@link defaultMainDeps} only NAMES these; this is what actually proves their bodies correct.
+
+test("W1-T4084: readCiYaml reads the real ci.yml off disk", () => {
+  const text = readCiYaml();
+  assert.match(text, /coverage-ratchet:/);
+});
+
+test("W1-T4084: ensureRawCoverageDir creates coverage/raw", () => {
+  ensureRawCoverageDir();
+  assert.ok(existsSync(join(REPO_ROOT, "coverage", "raw")));
+});
+
+test("W1-T4084: runInstrumentedTests really spawns node with the given argv and reports its exit code", () => {
+  const result = runInstrumentedTests(["-e", "process.exit(0)"]);
+  assert.equal(result.status, 0);
+});
+
+test("W1-T4084: statLcov reads a real file's size, relative to the repo root", () => {
+  ensureRawCoverageDir(); // guarantees coverage/ itself exists to hold this fixture
+  const relative = "coverage/w1-t4084-stat-fixture.tmp";
+  const absolute = join(REPO_ROOT, relative);
+  writeDiffFile(absolute, "some lcov text\n");
+  try {
+    const stat = statLcov(relative);
+    assert.ok(stat.size > 0);
+  } finally {
+    removeTempDiffDir(absolute);
+  }
+});
+
+test("W1-T4084: computeMergeBaseDiff against the repo's own HEAD is empty (same ref both sides)", () => {
+  assert.equal(computeMergeBaseDiff("HEAD", "HEAD"), "");
+});
+
+test("W1-T4084: runDiffCoverageGate really spawns scripts/diff-coverage.mjs and reports its exit code", () => {
+  const fixtures = join(REPO_ROOT, "test", "fixtures", "diff-coverage");
+  const result = runDiffCoverageGate(join(fixtures, "covered.lcov"), join(fixtures, "added-line.diff"));
+  assert.equal(result.status, 0);
+});
+
+test("W1-T4084: makeTempDiffDir/writeDiffFile/removeTempDiffDir round-trip a real temp file", () => {
+  const dir = makeTempDiffDir();
+  assert.ok(existsSync(dir));
+  const diffPath = join(dir, "pr.diff");
+  writeDiffFile(diffPath, "diff --git a/x b/x\n+added\n");
+  assert.equal(readFileSync(diffPath, "utf8"), "diff --git a/x b/x\n+added\n");
+  removeTempDiffDir(dir);
+  assert.ok(!existsSync(dir));
+});
+
+// ── the real CLI entrypoint (`if (isMainModule(...)) { process.exitCode = main(...); }`), which
+// only runs when this script is invoked directly -- not merely imported, as every test above does.
+
+test("W1-T4084 CLI: `node scripts/diff-coverage-local.mjs --help` runs via the real entrypoint and exits 0", () => {
+  const result = spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "diff-coverage-local.mjs"), "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /Usage: npm run diff-coverage:local/);
 });

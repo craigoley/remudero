@@ -158,10 +158,6 @@ export function mergeBaseDiff({ cwd = REPO_ROOT, base = "origin/main", head = "H
   return result.length > 0 ? `${result}\n` : result;
 }
 
-function readCiYaml() {
-  return readFileSync(join(REPO_ROOT, CI_YAML_RELATIVE_PATH), "utf8");
-}
-
 const HELP_TEXT = `Usage: npm run diff-coverage:local -- <test files...>
 
 Runs exactly the coverage flags ci.yml's "${COVERAGE_STEP_NAME_PREFIX}" step uses (read from
@@ -174,6 +170,60 @@ runs, on the same inputs CI would produce.
   --dry-run      print the node invocation and diff base this would use; run nothing
 `;
 
+// ── The real implementation behind each injectable seam, each its OWN named export so a test can
+// exercise it directly and cheaply (a trivial spawn, a real temp dir) rather than only through
+// main()'s wiring. {@link defaultMainDeps} just names them; nothing here is inlined.
+
+export function readCiYaml() {
+  return readFileSync(join(REPO_ROOT, CI_YAML_RELATIVE_PATH), "utf8");
+}
+
+export function ensureRawCoverageDir() {
+  mkdirSync(join(REPO_ROOT, "coverage", "raw"), { recursive: true });
+}
+
+/** @param {string[]} nodeArgs */
+export function runInstrumentedTests(nodeArgs) {
+  return spawnSync(process.execPath, nodeArgs, {
+    stdio: "inherit",
+    cwd: REPO_ROOT,
+    env: { ...process.env, NODE_V8_COVERAGE: "coverage/raw" },
+  });
+}
+
+/** @param {string} lcovPath repo-root-relative */
+export function statLcov(lcovPath) {
+  return statSync(join(REPO_ROOT, lcovPath));
+}
+
+/** @param {string} base @param {string} head */
+export function computeMergeBaseDiff(base, head) {
+  return mergeBaseDiff({ cwd: REPO_ROOT, base, head });
+}
+
+/** @param {string} lcovPath repo-root-relative @param {string} diffPath absolute */
+export function runDiffCoverageGate(lcovPath, diffPath) {
+  return spawnSync(
+    process.execPath,
+    [join(REPO_ROOT, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath, "--diff", diffPath],
+    { stdio: "inherit", cwd: REPO_ROOT },
+  );
+}
+
+export function makeTempDiffDir() {
+  return mkdtempSync(join(tmpdir(), "rmd-diff-coverage-local-"));
+}
+
+/** @param {string} path @param {string} text */
+export function writeDiffFile(path, text) {
+  writeFileSync(path, text);
+}
+
+/** @param {string} path */
+export function removeTempDiffDir(path) {
+  rmSync(path, { recursive: true, force: true });
+}
+
 /**
  * Every I/O `main` performs, as one injectable seam -- so a test can drive every branch (test
  * failure, missing/empty lcov, a blocking gate, an empty diff) without actually spawning an
@@ -182,24 +232,15 @@ runs, on the same inputs CI would produce.
  */
 export function defaultMainDeps() {
   return {
-    readCiYaml: () => readFileSync(join(REPO_ROOT, CI_YAML_RELATIVE_PATH), "utf8"),
-    ensureRawCoverageDir: () => mkdirSync(join(REPO_ROOT, "coverage", "raw"), { recursive: true }),
-    runInstrumentedTests: (nodeArgs) =>
-      spawnSync(process.execPath, nodeArgs, {
-        stdio: "inherit",
-        cwd: REPO_ROOT,
-        env: { ...process.env, NODE_V8_COVERAGE: "coverage/raw" },
-      }),
-    statLcov: (lcovPath) => statSync(join(REPO_ROOT, lcovPath)),
-    computeMergeBaseDiff: (base, head) => mergeBaseDiff({ cwd: REPO_ROOT, base, head }),
-    runDiffCoverageGate: (lcovPath, diffPath) =>
-      spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath, "--diff", diffPath], {
-        stdio: "inherit",
-        cwd: REPO_ROOT,
-      }),
-    makeTempDiffDir: () => mkdtempSync(join(tmpdir(), "rmd-diff-coverage-local-")),
-    writeDiffFile: (path, text) => writeFileSync(path, text),
-    removeTempDiffDir: (path) => rmSync(path, { recursive: true, force: true }),
+    readCiYaml,
+    ensureRawCoverageDir,
+    runInstrumentedTests,
+    statLcov,
+    computeMergeBaseDiff,
+    runDiffCoverageGate,
+    makeTempDiffDir,
+    writeDiffFile,
+    removeTempDiffDir,
     log: console.log,
     error: console.error,
   };
