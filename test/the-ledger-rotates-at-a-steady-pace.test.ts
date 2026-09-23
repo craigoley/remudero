@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,9 +8,18 @@ import {
   flagAnomalousLedgerWriters,
   rotateLedger,
   topLedgerWriters,
+  type LedgerArchiveStampFsDeps,
   type LedgerLine,
 } from "../src/lib/ledger.js";
 import { rotationStampIso } from "../src/lib/ledger-union.js";
+
+/** {@link LedgerArchiveStampFsDeps} backed by real `node:fs`, so a test only needs to override
+ *  the one method whose failure it is proving. */
+const realStampFsDeps: LedgerArchiveStampFsDeps = {
+  readdirSync: (dir) => readdirSync(dir),
+  statMtimeMs: (path) => statSync(path).mtimeMs,
+  renameSync: (from, to) => renameSync(from, to),
+};
 
 // ── W1-T4100 — READ 2026-09-23 on the host: 369 `ledger*.gz` archives (256 MB), 310 minted on
 // 2026-09-22 alone (about thirteen an hour), and one archive named
@@ -186,4 +195,131 @@ test("W1-T4100: the digest names the top ledger writers", () => {
   const pollingFlag = flagged.find((w) => w.step === "ci.polling");
   assert.equal(heavyFlag?.aboveHistoricalShare, true, "a step absent from the baseline that now dominates must be flagged");
   assert.equal(pollingFlag?.aboveHistoricalShare, false, "a step holding its OWN steady share across both windows must not be flagged");
+});
+
+// ── W1-T4100 — THE NAMING-SAFETY MACHINERY DEGRADES, IT NEVER THROWS. Every one of the four
+// filesystem races below (an unreadable state dir, a file gone between `readdir` and `stat`, a
+// rename the OS refuses, an unstattable file just written) is real on a live host — a concurrent
+// compactor deleting an archive, a permissions hiccup, disk pressure mid-rename — and each is
+// explicitly documented as best-effort in ledger.ts's own comments: "must never fail the rotation
+// that triggered it". These four tests inject a throwing LedgerArchiveStampFsDeps to prove that
+// promise deterministically, without needing a real race to land inside a single test process. ──
+
+test("W1-T4100: an unreadable state dir degrades reconciliation to 'nothing to heal', never a throw", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const ceiling = 2000;
+    writeFileSync(ledgerPath, "");
+    padPast(ledgerPath, ceiling, 0);
+
+    const unreadableDirDeps: LedgerArchiveStampFsDeps = {
+      ...realStampFsDeps,
+      readdirSync: () => {
+        throw new Error("EACCES: permission denied");
+      },
+    };
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, archiveStampFsDeps: unreadableDirDeps });
+    assert.equal(result.rotated, true, "an unreadable state dir must not block rotation — it degrades, never throws");
+    assert.equal(archivesIn(dir).length, 1, "the rotation still lands a real archive despite readdir failing throughout");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4100: an archive that vanishes between readdir and stat is skipped, not thrown, and left untouched", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const ceiling = 2000;
+    writeFileSync(ledgerPath, "");
+    padPast(ledgerPath, ceiling, 0);
+
+    const vanishingName = "ledger.2026-01-01T00-00-00-000Z.ndjson";
+    const vanishingPath = join(dir, vanishingName);
+    writeFileSync(vanishingPath, "old");
+
+    const vanishingDeps: LedgerArchiveStampFsDeps = {
+      ...realStampFsDeps,
+      statMtimeMs: (path) => {
+        if (path === vanishingPath) throw new Error("ENOENT: no such file or directory");
+        return realStampFsDeps.statMtimeMs(path);
+      },
+    };
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, archiveStampFsDeps: vanishingDeps });
+    assert.equal(result.rotated, true, "one unstattable archive must not block the rotation for every other file");
+    assert.equal(
+      readdirSync(dir).includes(vanishingName),
+      true,
+      "FALSIFIER: the skipped archive is left exactly as it was — never renamed, never deleted",
+    );
+    assert.equal(archivesIn(dir).length, 2, "the new archive still lands alongside the untouched one");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4100: a rename the filesystem refuses leaves the stale name in place, unhealed but never thrown", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const ceiling = 2000;
+    writeFileSync(ledgerPath, "");
+    padPast(ledgerPath, ceiling, 0);
+
+    // A name well ahead of its own real (backdated) mtime — reconcileArchiveStamps must attempt
+    // to heal this one, giving the injected rename failure something to refuse.
+    const staleFutureName = "ledger.2027-01-01T00-00-00-000Z.ndjson.gz";
+    const stalePath = join(dir, staleFutureName);
+    writeFileSync(stalePath, Buffer.from("stale"));
+    const realPastMs = Date.parse("2026-09-13T00:00:00.000Z");
+    utimesSync(stalePath, new Date(realPastMs), new Date(realPastMs));
+
+    const refusingRenameDeps: LedgerArchiveStampFsDeps = {
+      ...realStampFsDeps,
+      renameSync: () => {
+        throw new Error("EACCES: rename refused");
+      },
+    };
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, archiveStampFsDeps: refusingRenameDeps });
+    assert.equal(result.rotated, true, "a refused rename must not block the rotation itself");
+    assert.equal(
+      readdirSync(dir).includes(staleFutureName),
+      true,
+      "FALSIFIER: a rename the OS refuses leaves the old (unsafe) name on disk rather than throwing or deleting it",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4100: an unstattable just-written archive is left named exactly as written, not thrown", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const ceiling = 2000;
+    writeFileSync(ledgerPath, "");
+    padPast(ledgerPath, ceiling, 0);
+
+    // No pre-existing archive shaped name exists yet, so reconcileArchiveStamps' own scan never
+    // reaches statMtimeMs at all (only ledger.ndjson is on disk, and that name carries no
+    // rotation stamp) — this throw is reached exclusively via healIfAheadOfOwnMtime's post-write
+    // check on the archive this very rotation just wrote.
+    const unstattableJustWrittenDeps: LedgerArchiveStampFsDeps = {
+      ...realStampFsDeps,
+      statMtimeMs: () => {
+        throw new Error("ENOENT: cannot stat the archive just written");
+      },
+    };
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, archiveStampFsDeps: unstattableJustWrittenDeps });
+    assert.equal(result.rotated, true, "an unstattable just-written archive must not block the rotation that wrote it");
+    assert.ok(result.archivePath, "the rotation still names and returns the archive it wrote");
+    assert.equal(
+      readdirSync(dir).includes((result.archivePath as string).split("/").pop() as string),
+      true,
+      "FALSIFIER: the archive lands under exactly the name it was given — heal is skipped, not faked, when it cannot verify the file",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
