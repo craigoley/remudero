@@ -1,0 +1,42 @@
+- id: W1-T4356
+  title: "THE CORE FLEET STOPPED BUILDING FOR HOURS BECAUSE NOTHING UPDATES repos/remudero — its implement worktree takes node_modules from a managed checkout 305 commits behind main, so after any lockfile change every dispatch is refused as blocked_toolchain. Keep the managed checkout current before a worktree borrows its install"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "fleet stall 2026-09-23"
+  plan_refs: ["W1-T4193"]
+  files:
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on the fleet host: the core daemon claimed W1-T4267 and W1-T4100 at 18:08-18:09Z
+    and both runs ended at worktree.add -> worktree.node_modules_refused (node_modules_source
+    /home/node/Remudero/repos/remudero/node_modules) -> worktree.remove; dispatch.settled_set fulfilled 0,
+    rejected 2. `repos/remudero` sat at e97634ce1 (2026-09-21), 305 commits behind origin/main, and its
+    package-lock.json differed from main's since the dependabot minor bumps (#6760). W1-T4193 correctly refuses
+    a worktree whose lockfile differs from the install it would borrow, and defers as blocked_toolchain, but
+    nothing ever fast-forwards that checkout: run-task builds repoDir as join(config.root, "repos", task.repo)
+    unconditionally, while the entrypoint keeps only /home/node/Remudero/remudero fresh (the sweep already
+    special-cases repo === localRepoName). Meanwhile every priority-1 task sat unclaimed. Unblocked by hand:
+    ff-only to origin/main and npm ci inside the daemon container. The site and console daemons' managed
+    checkouts were current (0 behind), so this is core-specific.
+  design: |
+    Before worktreeAdd, when the managed checkout is behind origin/main and clean, fast-forward it (ff-only)
+    and let ensureInstallFresh reinstall on the lockfile change; a dirty or diverged checkout is not touched
+    and the refusal names that reason instead. Never mutate the checkout while a worker that borrowed its
+    node_modules is running (take the same lock the install path uses). Ledger each fast-forward with the
+    before/after sha.
+  acceptance:
+    - claim: "a clean managed checkout behind main is fast-forwarded before the worktree borrows its install"
+      proof: "unit test: a clean managed checkout behind main is fast-forwarded before the worktree borrows its install"
+    - claim: "a dirty managed checkout is never fast-forwarded and the refusal names why"
+      proof: "unit test: a dirty managed checkout is never fast-forwarded and the refusal names why"
+  falsifier: |
+    CLOSE IF a lockfile change on main no longer leaves core implement dispatches refused as blocked_toolchain.
