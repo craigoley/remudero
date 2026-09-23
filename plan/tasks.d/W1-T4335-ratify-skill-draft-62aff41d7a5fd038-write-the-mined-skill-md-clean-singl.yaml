@@ -98,10 +98,11 @@
     - claim: "the file exists and its frontmatter opts into injection for the implement task class"
       proof: "grep: applies-to: implement in .claude/skills/implement-clean-single-strike-fully-exec-62aff41d/SKILL.md"
     - claim: "the ratified skill is immediately selectable by the already-shipped W1-T3101 delivery path — loadInjectableSkills parses it into an InjectableSkill and selectSkillsForTask includes it for an implement-type task, correcting the staged proposal's 'NOT reachable by a worker today' note, which describes only the unrelated, still-closed native settingSources route"
-      proof: "unit test: test/a-ratified-skill-is-immediately-injectable.test.ts"
+      proof: "unit test: the ratified skill is immediately selectable by the already-shipped"
     - claim: "the injected body (what renderSkillsPart places in a worker's prompt) carries both mined Procedure steps and the Evidence provenance lines verbatim, so the worker sees exactly what the operator ratified"
-      proof: "unit test: test/a-ratified-skill-is-immediately-injectable.test.ts"
-  risk: low
+      proof: "unit test: the injected body what renderSkillsPart places in a worker"
+  risk: high
+  band_meaning: span
   origin: architect
   plan_refs: ["§8A", "§5B"]
   files: [.claude/skills/implement-clean-single-strike-fully-exec-62aff41d/SKILL.md, test/a-ratified-skill-is-immediately-injectable.test.ts]

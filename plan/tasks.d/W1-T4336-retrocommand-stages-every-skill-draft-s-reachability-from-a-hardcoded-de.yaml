@@ -57,9 +57,9 @@
     - claim: "the staged reachability check reads the same exported constant spawnWorker actually passes (WORKER_SETTING_SOURCES), never a hardcoded [] literal, at retroCommand's stageSkillDrafts call site"
       proof: "grep: WORKER_SETTING_SOURCES in src/run-task.ts"
     - claim: "a candidate whose task type resolves to a recognized injectable class (e.g. implement) is staged with a note naming the W1-T3101 injection route as its real future reachability, not only the closed native route"
-      proof: "unit test: test/skill-workshop.test.ts"
+      proof: "unit test: a candidate whose task type resolves to a recognized"
     - claim: "a candidate whose task type is NOT a recognized injectable class keeps the unqualified 'NOT reachable by a worker today' text — the falsifier proving the broadened message never overclaims reachability for a draft neither route can deliver"
-      proof: "unit test: test/skill-workshop.test.ts"
+      proof: "unit test: a candidate whose task type is NOT a recognized"
   risk: high
   origin: architect
   plan_refs: ["§8A", "§5B"]
