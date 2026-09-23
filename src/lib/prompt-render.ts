@@ -25,6 +25,13 @@ import {
 } from "./sweep.js";
 import { envelope } from "./untrusted-envelope.js";
 
+/** W1-T4106: four hand-backgrounded coverage suites swap-thrashed the fleet host; hooks/deny-floor.sh
+ *  refuses the shape, and this line tells the worker before it tries. */
+export const ONE_TEST_SUITE_AT_A_TIME_LINE =
+  "Run ONE full test suite at a time: never background or parallelize `node --test` runs (the deny " +
+  "floor refuses it); a single file or --test-name-pattern is fine, and `rmd preflight --coverage` " +
+  "runs the coverage shards one after another.";
+
 /**
  * SCOPE-GUARDED BRANCH REFRESH (W1-T142, the `reset --soft` phantom-revert
  * near-miss): collapsing a stale worker branch with `git reset --soft
@@ -503,6 +510,7 @@ export function renderFixPrompt(opts: {
     // W1-T2997: the fix rung needs this MORE than the implement contract does — it exists
     // because CI went red, and a ratchet an earlier round left unrecorded is the commonest reason.
     ...ratchetContractLines(),
+    ONE_TEST_SUITE_AT_A_TIME_LINE,
     // W1-T464: this rung used to spread ciParityContractLines() here — the same
     // `rmd preflight --ci-parity` obligation the implement contract carried (W1-T295) — but the
     // orchestrator never gated on a preflight failure (run-task.ts's own handling of it has no
@@ -1031,6 +1039,7 @@ export function renderImplementPromptWithParts(
     "# TASK",
     partValue("task_body"),
     "",
+    ONE_TEST_SUITE_AT_A_TIME_LINE,
     // Shared verbatim with the post-compaction ANCHOR (compaction.ts,
     // MASTER-PLAN §8B / W1-T36) — ONE source of literal text so the anchor
     // re-injected after a compaction is provably byte-identical to what the
