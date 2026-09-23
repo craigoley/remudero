@@ -883,6 +883,13 @@ import {
   type WipeTestCadenceRunResult,
 } from "./lib/measurement-cadence.js";
 import {
+  routedModelIdsFromCheckout,
+  watchSuccessorModels,
+  type SuccessorAlert,
+  type SuccessorWatchOptions,
+  type SuccessorWatchReading,
+} from "./lib/model-availability.js";
+import {
   judgeCiLessonEfficacy,
   readFiledCiLessons,
   summarizeCiLessonRecurrences,
@@ -25015,6 +25022,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   /** W1-T3970: keep the production credit read injectable so offline cadence fixtures do not
    * accidentally shell out to the live GitHub projection. */
   creditedMergedIds?: () => ReadonlySet<string>;
+  successorWatch?: (opts: SuccessorWatchOptions) => Promise<SuccessorWatchReading>;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -25054,6 +25062,40 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
       const verifyHuman = await defaultVerifyHumanCadenceResult(repoRoot, configFor(), verifyHumanRunId, cadenceClock);
+      const successorRunId = `MODEL-SUCCESSOR-CADENCE-${cadenceClock.now()}`;
+      const successorLedgerPath = ledgerPathFor(configFor());
+      const successorWatch = deps.successorWatch ?? ((opts: SuccessorWatchOptions) => watchSuccessorModels(opts));
+      const successorWatchReading = await successorWatch({
+        config: configFor(),
+        routedModels: routedModelIdsFromCheckout(repoRoot),
+        statePath: join(root, "state", "model-successor-watch.json"),
+        now: () => cadenceClock.date(),
+        ledger: (row) => appendLedger(successorLedgerPath, {
+          run_id: successorRunId,
+          task_id: "MODEL-CATALOG",
+          lane: "measurement-cadence",
+          ...row,
+        } as LedgerLine),
+        alert: policyFor().values.measurementCadence.escalate
+          ? (alert: SuccessorAlert) => {
+              const { owner, repo } = resolveOwnerRepo();
+              return tryEscalate(
+                {
+                  class: "MANUAL",
+                  taskId: "MODEL-CATALOG",
+                  summary: `Successor model ${alert.model} is ${alert.state}`,
+                  detail:
+                    `${alert.model} is a higher-generation ${alert.family} successor observed in ${alert.sources.join(" and ")}. ` +
+                    `The next step is: ${alert.nextStep}. ${alert.gated ? "This family is human-gated and is never proposed for automatic routing." : ""}`,
+                  options: [{ label: "Review successor model", detail: alert.nextStep }],
+                  recommendation: "Review successor model",
+                  consequence: "Without a decision, the current routing remains unchanged.",
+                },
+                { issues: ghIssueGateway(owner, repo), ledgerPath: successorLedgerPath, runId: successorRunId },
+              );
+            }
+          : undefined,
+      });
       // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
       // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
       // cadence fire, and land through the scratch-index bridge rather than dirtying this daemon
@@ -25070,7 +25112,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       const planReconcileOption =
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
-      return runMeasurementCadenceReport({
+      const report = runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,
@@ -25093,6 +25135,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         },
         verifyHuman,
       });
+      return { ...report, successorWatch: successorWatchReading };
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
 }

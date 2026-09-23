@@ -274,6 +274,7 @@
   "src/lib/measurement-cadence.ts": 750,
   "src/lib/memory-lint.ts": 250,
   "src/lib/merge-state.ts": 250,
+  "src/lib/model-availability.ts": 250,
   "src/lib/model-gate.ts": 16,
   "src/lib/mount-exploration.ts": 250,
   "src/lib/mount-recommender.ts": 195,
