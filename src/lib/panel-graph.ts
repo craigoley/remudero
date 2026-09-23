@@ -83,6 +83,7 @@ import {
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
 import { inboxOwner } from "./inbox-owner.js";
+import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   classifyProposal,
   declinedReasonInLedger,
@@ -1254,6 +1255,8 @@ export interface InboxDraftedTask {
 export interface InboxReadyItem {
   proposalId: string;
   summary: string;
+  /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
+  plain: PlainInboxMessage;
   stampLine?: string;
   draftedTasks: InboxDraftedTask[];
 }
@@ -1264,6 +1267,8 @@ export interface InboxReadyItem {
 export interface InboxDraftingItem {
   proposalId: string;
   summary: string;
+  /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
+  plain: PlainInboxMessage;
   spawnedAt: string;
 }
 
@@ -1278,6 +1283,8 @@ export interface InboxDraftingItem {
 export interface InboxDeclinedItem {
   proposalId: string;
   summary: string;
+  /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
+  plain: PlainInboxMessage;
   /** The reason the latest `panel.proposal_declined` row recorded, verbatim. */
   reason: string;
 }
@@ -1289,6 +1296,8 @@ export interface InboxDeclinedItem {
 export interface InboxNotReadyItem {
   proposalId: string;
   summary: string;
+  /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
+  plain: PlainInboxMessage;
   reasons: PredicateFailure[];
 }
 
@@ -1296,6 +1305,8 @@ export interface InboxNotReadyItem {
 export interface InboxFleetItem {
   proposalId: string;
   summary: string;
+  /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
+  plain: PlainInboxMessage;
   lane: "ready" | "drafting" | "notReady" | "declined";
 }
 
@@ -1388,6 +1399,8 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
     scope: "read",
     handler: (_req, res) => {
       const { registryPath, proposals, classifications } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
+      // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
+      const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
 
       const ready: InboxReadyItem[] = [];
       const drafting: InboxDraftingItem[] = [];
@@ -1400,21 +1413,23 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
           ready.push({
             proposalId: proposal.id,
             summary: proposal.summary,
+            plain: plainInboxMessage(proposal, plainStore),
             stampLine: classification.draft?.stampLine,
             draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
           });
         } else if (classification.state === "drafting") {
-          drafting.push({ proposalId: proposal.id, summary: proposal.summary, spawnedAt: classification.draftSpawnedAt ?? "" });
+          drafting.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
         } else if (classification.state === "declined") {
           declined.push({
             proposalId: proposal.id,
             summary: proposal.summary,
+            plain: plainInboxMessage(proposal, plainStore),
             reason: classification.declinedReason ?? "declined by an operator",
           });
         } else if (classification.state === "not_ready") {
           // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
           // never a bare "not_ready" — see InboxNotReadyItem's own doc.
-          notReady.push({ proposalId: proposal.id, summary: proposal.summary, reasons: classification.reasons });
+          notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
         }
       }
       // A "ratified" classification is detected off the ledger (W1-T190); detection alone leaves
@@ -1440,10 +1455,10 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         declined: declined.filter(isOperator),
       };
       const fleet: InboxFleetItem[] = [
-        ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "ready" as const })),
-        ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "drafting" as const })),
-        ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "notReady" as const })),
-        ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, lane: "declined" as const })),
+        ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
+        ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
+        ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
+        ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
       ].filter((i) => !isOperator(i));
       sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet });
     },

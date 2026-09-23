@@ -244,6 +244,7 @@
   "src/lib/idle-reasons-panel.ts": 87,
   "src/lib/image-drift.ts": 93,
   "src/lib/inbox-owner.ts": 250,
+  "src/lib/inbox-plain.ts": 250,
   "src/lib/inbox-thread.ts": 84,
   "src/lib/inbox.ts": 1000,
   "src/lib/inflight-lock.ts": 93,
@@ -386,6 +387,6 @@
   "src/lib/worker.ts": 1750,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16750,
+  "src/run-task.ts": 16787,
   "src/spike.ts": 18
 }

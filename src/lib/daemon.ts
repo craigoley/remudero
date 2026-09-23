@@ -15,6 +15,7 @@
  * Forensics for this file: docs/forensics/daemon.md. */
 
 import type { AutoTriageDecision } from "./auto-triage.js";
+import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
 import type {
   CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
@@ -945,6 +946,9 @@ export interface DaemonDeps {
   pendingPrActions?: () => Array<{ action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }>;
   /** Clear the request only after its established command reaches a named terminal outcome. */
   clearPrAction?: (action: "fix" | "review", prNumber: number) => void;
+  /** W1-T4087: writes plain-language messages for operator-owned inbox items that have none yet,
+   *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
+  plainBackfill?: PlainBackfillDeps;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
    * commands. It is injected so this scheduler module never grows a second repair implementation. */
   runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
@@ -2193,8 +2197,11 @@ export async function runDaemon(
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
   const prActionPumpRef: { stop: () => void } = { stop: () => {} };
+  // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
+  const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     prActionPumpRef.stop();
+    plainBackfill?.stop();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
