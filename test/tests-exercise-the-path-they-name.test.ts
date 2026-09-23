@@ -24,7 +24,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -33,9 +33,11 @@ import { stringify as stringifyYaml } from "yaml";
 
 import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HYGIENE_HREF = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
+const GH_FIRST_HREF = pathToFileURL(join(REPO_ROOT, "test", "helpers", "gh-first-on-path.ts")).href;
 
 /** The whole-plan lint-plan tests W1-T4226 moved onto the offline seam — each made refused `gh`
  *  reads (open/closed PR lists, issue search) before it did. */
@@ -97,29 +99,21 @@ test("a whole-plan lint-plan test builds no real GitHub gateway", async () => {
 
   // The seam alone proves nothing about the TESTS that were meant to use it: the lint-plan family
   // below shelled out to `gh` on every whole-plan run until W1-T4226 threaded the seam through
-  // them. Run them for real, with a recording `gh` preloaded AFTER tmp-hygiene so it sits ahead
-  // of the refusing stub on PATH, and require that none of them reached `gh` at all. A test's
-  // own shim, prepended later, still wins over the recorder, exactly as it wins over the stub.
-  const recorderDir = mkdtempSync(join(tmpdir(), "rmd-test-w1-t4226-gh-recorder-"));
+  // them. Run them for real under a recording shim that answers ahead of the refusing stub (it
+  // fails every call, as the stub does), and require that none of them reached `gh` at all. A
+  // test's own shim, prepended later, still wins over the recorder, exactly as it wins over the stub.
+  const recorder = ghShim([{ when: "", exit: 1 }], { kind: "w1-t4226-recorder" });
   try {
-    const log = join(recorderDir, "gh-calls.log");
-    writeFileSync(log, "", "utf8");
-    const recorder = join(recorderDir, "gh");
-    writeFileSync(recorder, ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`, "exit 1", ""].join("\n"), "utf8");
-    chmodSync(recorder, 0o755);
-    const preload = join(recorderDir, "record-gh.mjs");
-    writeFileSync(preload, `process.env.PATH = ${JSON.stringify(recorderDir)} + ":" + (process.env.PATH ?? "");\n`, "utf8");
     const result = spawnSync(
       process.execPath,
-      ["--test", "--import", "tsx", "--import", HYGIENE_HREF, "--import", pathToFileURL(preload).href, ...LINT_PLAN_FAMILY],
-      { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } },
+      ["--test", "--import", "tsx", "--import", HYGIENE_HREF, "--import", GH_FIRST_HREF, ...LINT_PLAN_FAMILY],
+      { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined, RMD_TEST_GH_FIRST_DIR: recorder.dir } },
     );
     const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
     assert.match(output, /^# pass [1-9]/m, `the lint-plan family must actually run — output:\n${output}`);
-    const calls = readFileSync(log, "utf8").split("\n").filter((line) => line.length > 0);
-    assert.deepEqual(calls, [], "a whole-plan lint-plan test must reach no real `gh` — each call above is one it made");
+    assert.deepEqual(recorder.calls(), [], "a whole-plan lint-plan test must reach no real `gh` — each call above is one it made");
   } finally {
-    rmSync(recorderDir, { recursive: true, force: true });
+    rmSync(recorder.dir, { recursive: true, force: true });
   }
 });
 

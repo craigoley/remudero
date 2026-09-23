@@ -785,8 +785,11 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // :6116/:6177. The EIGHTH re-derivation. Both witnesses are still the SAME two call sites,
   // the PR-602 and PR-701 fixtures, each still omitting `ledgerLines` while supplying `arm`;
   // only their coordinates moved, which is precisely what this note has claimed seven times.
-    "armIfVerdictPermits:test/run-task.test.ts:6116:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6177:ledgerLines",
+  // W1-T4226 then added THIRTY-FIVE lines ahead of both (a `fetchPrBody` fake on each fix-rung
+  // test that had been reading the PR body through the refused `gh`) and they moved by exactly
+  // thirty-five, to :6151/:6212. The NINTH re-derivation; still the same two call sites.
+    "armIfVerdictPermits:test/run-task.test.ts:6151:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6212:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

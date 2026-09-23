@@ -295,10 +295,9 @@ function daemonFixture(): { home: string; root: string; planPath: string } {
 }
 
 const stoppedDaemon = async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 });
+
 // W1-T4226: the daemon's merged-status projection reads GitHub through its `githubFactory` seam —
 // an offline fake gateway — never the shared stub refusing a real open/closed pulls listing.
-const offlineGithubFactory = () => fakeGitHub();
-
 test("real daemon boot writes not-probed only after lock acquisition; dry-run and refused second daemon do not replace it", async () => {
   const { home, root, planPath } = daemonFixture();
   const oldHome = process.env.HOME;
@@ -312,10 +311,10 @@ test("real daemon boot writes not-probed only after lock acquisition; dry-run an
     return writeProviderRoutingStatus(targetRoot, input);
   };
   try {
-    assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--dry-run"], { runDaemon: stoppedDaemon, writeProviderRoutingStatus: write, githubFactory: offlineGithubFactory }), 0);
+    assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--dry-run"], { runDaemon: stoppedDaemon, writeProviderRoutingStatus: write, githubFactory: () => fakeGitHub() }), 0);
     assert.equal(writes, 0);
 
-    assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: stoppedDaemon, writeProviderRoutingStatus: write, githubFactory: offlineGithubFactory }), 0);
+    assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: stoppedDaemon, writeProviderRoutingStatus: write, githubFactory: () => fakeGitHub() }), 0);
     assert.equal(writes, 1);
     const boot = readProviderRoutingStatus(root);
     assert.equal(boot.state, "not-probed");
@@ -324,7 +323,7 @@ test("real daemon boot writes not-probed only after lock acquisition; dry-run an
 
     const held = acquireDrainLock(join(root, "state", "drain.lock"));
     try {
-      assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: stoppedDaemon, writeProviderRoutingStatus: write, githubFactory: offlineGithubFactory }), 1);
+      assert.equal(await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: stoppedDaemon, writeProviderRoutingStatus: write, githubFactory: () => fakeGitHub() }), 1);
       assert.equal(writes, 1, "refused second daemon cannot overwrite the first daemon's snapshot");
     } finally {
       held.release();
