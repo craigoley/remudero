@@ -1,0 +1,36 @@
+- id: W1-T4406
+  title: "RUN THE FULL SUITE ONCE PER MERGE, NOT ON EVERY PUSH — with the selector proven in shadow (W1-T4404) and the fleet queue-aware (W1-T4405): pull requests run the selected suites, the merge queue runs the full instrumented suite, slow tier and security scans on the exact tree that lands, and the post-merge main run reuses that result"
+  repo: remudero
+  depends_on: [W1-T4404, W1-T4405]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: [W1-T4404, W1-T4405]
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/the-full-suite-runs-in-the-merge-queue.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    External: Uber's merge queue cut CI resources 53% and kept mainline green (arXiv 2501.03440; EuroSys 2019). OBSERVED here: main-push CI red 34% and ~117k job-min/month re-testing merged trees.
+  design: |
+    (i) ci.yml triggers on merge_group; the coverage shards, test-slow and the full lane run there. (ii) On
+    pull_request the test job runs the W1-T4404 selection (full when it says fullRun). (iii) The push-to-main run
+    reuses the merge-group result for an identical tree (W1-T4403) instead of re-testing. (iv) Switch only after the
+    shadow record shows no real failure missed over two weeks; the switch is one flag so it can be reverted in one PR.
+  acceptance:
+    - claim: "the merge group runs the full instrumented suite"
+      proof: 'grep: test("W1-T4406: the merge group runs the full instrumented suite" in test/the-full-suite-runs-in-the-merge-queue.test.ts'
+    - claim: "a pull request runs the selected suites"
+      proof: 'grep: test("W1-T4406: a pull request runs the selected suites" in test/the-full-suite-runs-in-the-merge-queue.test.ts'
+  falsifier: |
+    Leave coverage on pull_request and the first test finds no merge_group job running it.

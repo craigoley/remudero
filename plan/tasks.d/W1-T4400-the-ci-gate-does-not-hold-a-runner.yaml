@@ -1,0 +1,37 @@
+- id: W1-T4400
+  title: "CI-GATE HOLDS A RUNNER FOR THE WHOLE CI RUN JUST TO POLL — ci-gate.yml waits in a loop (up to 2,400 s) for 27 required checks, ~77k job-min/month; make it event-driven so it evaluates only when a check completes, and keep its verdict and its refusals identical"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: []
+  files: [.github/workflows/ci-gate.yml, test/the-ci-gate-does-not-hold-a-runner.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED: ci-gate ran 26 job-min on #6854 while CI ran; it is a waiter, not a worker.
+  design: |
+    (i) ci-gate triggers on check_suite/workflow_run completion (and on the PR events it has today), evaluates
+    the current state of the required checks once, and posts its status: pending while any is outstanding, final when
+    all are. No sleep loop. (ii) The aggregation logic, REQUIRED list, superseded-attempt and dedupe handling are
+    reused unchanged, so the existing ci-gate tests keep passing. (iii) A stale-pending guard re-evaluates on a
+    schedule so a lost event cannot strand a PR.
+  acceptance:
+    - claim: "ci-gate evaluates on completion events without a wait loop"
+      proof: 'grep: test("W1-T4400: ci-gate evaluates on completion events without a wait loop" in test/the-ci-gate-does-not-hold-a-runner.test.ts'
+    - claim: "a lost completion event is recovered by the scheduled re-evaluation"
+      proof: 'grep: test("W1-T4400: a lost completion event is recovered by the scheduled re-evaluation" in test/the-ci-gate-does-not-hold-a-runner.test.ts'
+  falsifier: |
+    Keep the sleep loop and the first test finds a job that waits on other checks.

@@ -1,0 +1,40 @@
+- id: W1-T4407
+  title: "LET AN LLM WIDEN WHAT CI RUNS, NEVER NARROW IT — beside the deterministic selector (W1-T4404), a judge reads the diff and the selection and may ADD suites or escalate to a full run (e.g. a change to text a scoring test greps); it can never remove a suite, and it runs in the daemon, not in the PR workflow, so it holds no CI secrets"
+  repo: remudero
+  depends_on: [W1-T4404]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: [W1-T4404]
+  files: [src/lib/ci-escalation-judge.ts, src/run-task.ts, test/an-llm-judge-can-only-add-suites.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    External: no production report of an LLM choosing tests to skip; Meta's diff-risk LLM sits inside deterministic gates (arXiv 2605.30208); prompt injection in CI agents is documented (GitInject arXiv 2606.09935, PromptPwnd). Here the diff author is itself an agent.
+  design: |
+    (i) The daemon runs the judge when a PR's head changes, with the diff treated as data, a JSON schema output
+    {add: suiteIds[], escalateFull: boolean, reason}, and ids checked against the real suite list; it posts the result
+    as a PR check the CI selector unions in. (ii) It can only add: the union with the floor is enforced in CI, so a
+    judge that returns nothing, garbage or an injected "skip everything" changes nothing. (iii) Scored like the
+    gardeners: an added suite that catches a failure credits it; escalations that find nothing debit its escalation
+    rate. (iv) Off switch state/CI_JUDGE_OFF.
+  acceptance:
+    - claim: "the daemon runs the judge"
+      proof: "grep: judgeCiEscalation( in src/run-task.ts"
+    - claim: "the judge can add suites but never remove one"
+      proof: 'grep: test("W1-T4407: the judge can add suites but never remove one" in test/an-llm-judge-can-only-add-suites.test.ts'
+    - claim: "an injected or malformed judge output changes nothing"
+      proof: 'grep: test("W1-T4407: an injected or malformed judge output changes nothing" in test/an-llm-judge-can-only-add-suites.test.ts'
+  falsifier: |
+    Let the judge's list replace the selection and the first test finds a floor suite dropped.

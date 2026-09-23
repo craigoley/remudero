@@ -1,0 +1,47 @@
+- id: W1-T4394
+  title: "WEBHOOK WAKE ROWS ARE 75% OF EVERYTHING THE CORE LEDGER WRITES — count routine wakes per minute and keep a full row only for a wake that armed a sweep"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "ledger step 2b follow-up 2026-09-23 (operator-approved plan item 3)"
+  plan_refs: ["W1-T4393"]
+  files:
+    - src/lib/github-event-wake.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 21:11:13-21:13:24Z on the fleet host: of 419 rows written between two rotations,
+    168 were github.wake.ignored and 148 github.wake.accepted, 316 in all (75%). The gateway writes one row
+    per webhook delivery (src/lib/github-event-wake.ts). Most accepted deliveries re-arm a sweep marker that is
+    already pending, so they change nothing the daemon will act on. Ignored deliveries change nothing at all.
+    The operator approved this over keeping every delivery row, provided a delivery that changed state
+    still gets its full row.
+  design: |
+    Keep the full `github.wake.accepted` row when the delivery armed a sweep marker that was not already
+    pending: the first wake of a burst, which is the one the daemon acts on. Coalesced accepted deliveries,
+    ignored deliveries and duplicates are counted in memory and flushed as one `github.wake.summary` row per
+    minute, and at shutdown: {window_start, window_end, accepted_coalesced, ignored, duplicate,
+    by_event:{<event>/<action>: n}}. The counters never drop a delivery; a flush failure keeps the counts for
+    the next minute. Refusals (github.wake.refused) stay one row each, because they are security-relevant.
+    The console's wake-volume time series in serve.ts counts BOTH full rows and summary counts, so its
+    totals are unchanged.
+    WIRING: github-event-wake.ts exports wakeSummaryRow(counters, window), and serve.ts calls it when
+    flushing on the minute tick and at shutdown.
+  acceptance:
+    - claim: "a delivery that arms a sweep keeps its full row and a coalesced one is only counted"
+      proof: "unit test: a delivery that arms a sweep keeps its full row and a coalesced one is only counted"
+    - claim: "ignored and duplicate deliveries flush as one summary row per minute with nothing dropped"
+      proof: "unit test: ignored and duplicate deliveries flush as one summary row per minute with nothing dropped"
+    - claim: "the console wake-volume series totals the same with summary rows as with one row per delivery"
+      proof: "unit test: the console wake-volume series totals the same with summary rows as with one row per delivery"
+    - claim: "the gateway flushes wake summaries"
+      proof: 'grep: wakeSummaryRow( in src/lib/serve.ts'
+  falsifier: |
+    CLOSE IF routine webhook deliveries already reach the ledger as periodic counts, not one row each.
