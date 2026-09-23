@@ -23,7 +23,7 @@ import {
   verifyOptionLink,
   type OptionLinkClaims,
 } from "./escalate.js";
-import type { Route } from "./service.js";
+import { verifiedActor, type Route } from "./service.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
 import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
@@ -73,6 +73,9 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
  *  viewer. `"unknown"` only if service.ts routed here with no Authorization header, which a
  *  write-scoped route's own scope check already rules out. Why: docs/forensics/panel-actions.md#bearertokenid */
 export function bearerTokenId(req: IncomingMessage): string {
+  // W1-T4244: a VERIFIED operator (service.ts's dispatch, never a header) is named as themselves.
+  const actor = verifiedActor(req);
+  if (actor) return actor;
   const header = req.headers.authorization;
   const token = header ? /^Bearer (.+)$/.exec(header)?.[1] : undefined;
   if (!token) return "unknown";
