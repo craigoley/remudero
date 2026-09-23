@@ -299,6 +299,9 @@ test("W1-T4095: the gardener's timer survives a failing pass and its state survi
         throw new Error("no worktree");
       },
       log: (s) => rows.push(s),
+      // Seeded: with a clock seed about 1 pass in 60 draws no acting class (0.125² that merge and refresh
+      // both draw under even odds), opens no workspace, and the assertion below reads a false failure.
+      seed: 1,
     },
     10,
   );
