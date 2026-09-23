@@ -15,7 +15,7 @@
     - src/lib/worker-provider.ts
     - .remudero/mounts.yaml
     - test/the-cash-ladder-takes-a-successor-once-it-is-ready.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR RULING 2026-09-22: stay on gpt-5.6 for the Azure cash ladder for now, and have the router
