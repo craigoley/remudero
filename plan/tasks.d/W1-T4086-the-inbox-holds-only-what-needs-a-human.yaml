@@ -11,7 +11,7 @@
   origin: "operator report 2026-09-22: the console inbox has over a hundred items, which was a surprise"
   plan_refs: [W1-T313, W1-T2494, W1-T2498]
   files: [src/lib/inbox-owner.ts, src/lib/panel-graph.ts, test/the-inbox-holds-only-what-needs-a-human.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22 ON THE LIVE HOST (/home/node/Remudero/state/inbox-proposals.json, 674 proposals), by id prefix:

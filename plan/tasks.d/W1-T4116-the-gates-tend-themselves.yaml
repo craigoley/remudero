@@ -11,6 +11,7 @@
   origin: "operator ask 2026-09-23; research over origin/main d7b569e0d"
   plan_refs: [W1-T4110, W1-T4115]
   files: [src/lib/gate-gardener.ts, src/run-task.ts, test/the-gates-tend-themselves.test.ts]
+  priority: 2
   status: queued
   attempts: 0
   rationale: |
