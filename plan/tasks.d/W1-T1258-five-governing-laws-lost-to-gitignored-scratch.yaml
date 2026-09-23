@@ -171,7 +171,9 @@
     - claim: "the prevention half is parked with its own owner rather than folded into this ruling"
       proof: "grep: THE PREVENTION IS NOT THIS SHARD'S CONCERN in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
   files: [plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T1258 — Every acceptance proof already holds on main.
   attempts: 0
   origin: "operator-brief#five-governing-laws-lost-to-gitignored-scratch-2026-08-23"
   plan_refs: ["W1-T398", "W1-T383", "W1-T438", "W1-T439", "W1-T418", "W1-T1248", "W1-T1249", "W1-T1259", "W1-T1120", "W1-T1263", "P48"]

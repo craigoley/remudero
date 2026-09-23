@@ -82,7 +82,9 @@
     - claim: "The shard parks the decision rather than picking a remedy, and names the family boundary against W1-T1014"
       proof: "grep: THIS SHARD PICKS NO REMEDY AND MUST NOT BE READ AS PROPOSING ONE in plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml"
   files: [plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T2982 — Every acceptance proof already holds on main.
   attempts: 0
   origin: "oper#id-collision-churn-2026-09-06"
   plan_refs: ["W1-T1014", "W1-T297", "W1-T2676", "W1-T2685", "W1-T2710"]
