@@ -85,9 +85,9 @@
     - claim: "W1-T3591's own criterion 0 — the grep-path-absent finding proof-debt:W1-T3591 names — resolves against the checkout: ci-learning:5318:coverage-shard (4/4) is reached by a matched learnings entry, not prose no dispatched worker reads"
       proof: "grep: ci-learning:5318:coverage-shard (4/4) in learnings/ci-gate-lessons.yaml"
     - claim: "learnings/ci-gate-lessons.yaml is a schema-valid shard the corpus loader merges cleanly alongside the five existing shards, with no duplicate id"
-      proof: "unit test: test/learnings.test.ts"
+      proof: "unit test: the shipped learnings/ corpus loads (across every shard)"
     - claim: "learnings/index.json stays fresh (matches a real regeneration) once the new shard lands, so the entry is reachable by the same lookup every injection match uses"
-      proof: "unit test: test/learnings-index.test.ts"
+      proof: "unit test: the REAL committed learnings/index.json is NOT stale"
     - claim: "the entry's files: list names the two paths this finding's own repairs touched more than once, src/run-task.ts and scripts/mutation-relevant-paths.json, so a task whose diff touches them is the one this lesson actually reaches"
       proof: "grep: src/run-task.ts in learnings/ci-gate-lessons.yaml"
   falsifier: |
