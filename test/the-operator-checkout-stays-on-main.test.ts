@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,7 +18,7 @@ function git(cwd: string, ...args: string[]): void {
 
 /** An operator-shaped checkout (a real `.git` directory, remudero origin) plus a worktree of it, and a
  *  checkout of an unrelated repo as the control. */
-function fixture(): { root: string; operator: string; worktree: string; other: string } {
+function fixture(): { root: string; operator: string; worktree: string; other: string; subdir: string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-opcheckout-")));
   const operator = join(root, "remudero");
   const other = join(root, "elsewhere");
@@ -31,15 +31,18 @@ function fixture(): { root: string; operator: string; worktree: string; other: s
     git(dir, "commit", "-q", "-m", "init");
     git(dir, "remote", "add", "origin", origin);
   }
+  const subdir = join(operator, "src");
+  mkdirSync(subdir);
   const worktree = join(root, "wt-feature");
   git(operator, "worktree", "add", "-q", "-b", "feature", worktree);
-  return { root, operator, worktree, other };
+  return { root, operator, worktree, other, subdir };
 }
 
 function run(command: string, cwd: string): { status: number | null; stderr: string } {
   const cache = mkdtempSync(join(tmpdir(), "rmd-opcheckout-cache-"));
   try {
     const r = spawnSync("bash", [HOOK], {
+      cwd,
       input: JSON.stringify({ cwd, tool_input: { command } }),
       encoding: "utf8",
       env: { ...process.env, XDG_CACHE_HOME: cache },
@@ -67,6 +70,37 @@ test("W1-T4082: a branch switch in the operator checkout is refused", () => {
       assert.equal(r.status, 2, command);
       assert.match(r.stderr, /operator checkout/);
       assert.match(r.stderr, /git worktree add/, "the refusal names the way forward");
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4082: checkout --detach is refused in the operator checkout", () => {
+  const f = fixture();
+  try {
+    const r = run("git checkout --detach", f.operator);
+    assert.equal(r.status, 2, "detaching leaves the operator checkout off main");
+    assert.match(r.stderr, /operator checkout/);
+    assert.match(r.stderr, /git worktree add/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4082: git from a repository subdirectory still resolves the operator checkout", () => {
+  const f = fixture();
+  try {
+    for (const [command, cwd] of [
+      [`git -C ${f.subdir} switch -c nested-cwd`, f.operator],
+      [`cd ${f.subdir} && git switch -c nested-cd`, f.operator],
+      [`cd ${f.operator} && git -C src switch -c nested-relative`, f.root],
+      [`cd ${f.operator} && git -C "${f.subdir}" switch -c nested-quoted`, f.root],
+    ]) {
+      const r = run(command, cwd);
+      assert.equal(r.status, 2, command);
+      assert.match(r.stderr, /operator checkout/);
+      assert.match(r.stderr, /git worktree add/);
     }
   } finally {
     rmSync(f.root, { recursive: true, force: true });

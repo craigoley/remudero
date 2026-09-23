@@ -179,8 +179,9 @@ fi
 #    run-W1-T4051-… and later run-W1-T4063-… while another session relied on it being main. Refused:
 #    `git checkout <ref>` / `-b` / `-B` / `--orphan` and `git switch` to anything but main/master, and
 #    `git branch -m|-M`. Allowed: returning to main, `git checkout -- <path>`, restoring an existing
-#    path, pulls — and everything in a worktree. The target directory is the segment's `git -C <dir>`,
-#    else the last `cd <dir>` before it, else the hook's own cwd.
+#    path, pulls — and everything in a worktree. Resolve the target from `git -C <dir>`, the last
+#    `cd <dir>` before it, or the hook's own cwd; then resolve the repository root so subdirectory
+#    commands still identify the operator checkout.
 case "$cmd" in *"git "*checkout*|*"git "*switch*|*"git "*branch*) op_scan=1 ;; *) op_scan=0 ;; esac
 if [ "$op_scan" -eq 1 ]; then
   op_last_cd="${hook_cwd:-$PWD}"
@@ -196,15 +197,24 @@ if [ "$op_scan" -eq 1 ]; then
     op_target="$op_last_cd"
     op_rest="${op_seg#git }"
     if [ "${op_rest#-C }" != "$op_rest" ]; then
-      op_rest="${op_rest#-C }"; op_target="${op_rest%% *}"; op_rest="${op_rest#* }"
-      case "$op_target" in "~"*) op_target="$HOME${op_target#\~}" ;; esac
+      op_rest="${op_rest#-C }"
+      case "$op_rest" in
+        \"*) op_quoted="${op_rest#\"}"; op_target="${op_quoted%%\"*}"; op_rest="${op_quoted#*\"}"; op_rest="${op_rest# }" ;;
+        \'*) op_quoted="${op_rest#\'}"; op_target="${op_quoted%%\'*}"; op_rest="${op_quoted#*\'}"; op_rest="${op_rest# }" ;;
+        *) op_target="${op_rest%% *}"; op_rest="${op_rest#"$op_target"}"; op_rest="${op_rest# }" ;;
+      esac
+      case "$op_target" in
+        "~"*) op_target="$HOME${op_target#\~}" ;;
+        /*) : ;;
+        *) op_target="$op_last_cd/$op_target" ;;
+      esac
     fi
     op_verb="${op_rest%% *}"; op_args=""; [ "$op_rest" != "$op_verb" ] && op_args="${op_rest#* }"
     op_switch=0
     case "$op_verb" in
       checkout)
         case " $op_args " in *" -- "*) op_switch=0 ;;
-          *" -b "*|*" -B "*|*" --orphan "*) op_switch=1 ;;
+          *" -b "*|*" -B "*|*" --orphan "*|*" --detach "*) op_switch=1 ;;
           *) op_ref=""; for op_a in $op_args; do case "$op_a" in -*) ;; *) op_ref="$op_a"; break ;; esac; done
              case "$op_ref" in ""|main|master|origin/main) op_switch=0 ;;
                *) if [ -e "$op_target/$op_ref" ]; then op_switch=0; else op_switch=1; fi ;; esac ;;
@@ -217,10 +227,14 @@ if [ "$op_scan" -eq 1 ]; then
       branch) case " $op_args " in *" -m "*|*" -M "*) op_switch=1 ;; esac ;;
     esac
     [ "$op_switch" -eq 1 ] || continue
-    [ -d "$op_target/.git" ] || continue
-    op_origin="$(git -C "$op_target" remote get-url origin 2>/dev/null || true)"
+    # Resolve from subdirectories too: git -C /repo/src and `cd /repo/src && git switch ...`
+    # still act on the operator checkout. A linked worktree's .git is a FILE, not a directory.
+    op_root="$(git -C "$op_target" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "$op_root" ] || continue
+    [ -d "$op_root/.git" ] || continue
+    op_origin="$(git -C "$op_root" remote get-url origin 2>/dev/null || true)"
     case "$op_origin" in *"/remudero"|*"/remudero.git"|*":remudero"|*":remudero.git") : ;; *) continue ;; esac
-    deny "a branch switch in the operator checkout ($op_target) — it stays on main (W1-T4082). Use a worktree: git worktree add ../wt-<name> -b <branch> origin/main"
+    deny "a branch switch in the operator checkout ($op_root) — it stays on main (W1-T4082). Use a worktree: git worktree add ../wt-<name> -b <branch> origin/main"
   done <<EOF_OP
 $op_segments
 EOF_OP
