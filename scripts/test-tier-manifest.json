@@ -289,6 +289,7 @@
     "test/a-worker-branch-must-be-shaped-for-dispatch.test.ts": 1853,
     "test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts": 1018,
     "test/a-worker-report-of-used-learnings-is-ledgered.test.ts": 0,
+    "test/a-worker-runs-one-test-suite-at-a-time.test.ts": 0,
     "test/a-worker-runs-the-cheap-gates-before-it-pushes.test.ts": 503,
     "test/a-worker-that-adds-a-test-file-is-born-red.test.ts": 0,
     "test/a-worker-worktree-carries-a-real-node-modules.test.ts": 0,
