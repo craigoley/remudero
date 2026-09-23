@@ -89,13 +89,13 @@
     skill-draft proposal's summary line, not just this one) and is filed on its own (W1-T4341).
   acceptance:
     - claim: "the file exists at .claude/skills/implement-clean-single-strike-de866b8a/SKILL.md carrying name, description and applies-to implement frontmatter plus the Procedure and Evidence sections verbatim from skill-draft:de866b8a3997b473, with the stale not-yet-ratified comment replaced by a ratified marker naming the proposal id"
-      proof: "unit test: test/implement-clean-single-strike-skill-reaches-the-prompt.test.ts"
+      proof: "unit test: the file exists at .claude skills implement-clean-single-strike-de866b8a SKILL.md carrying"
     - claim: "loadInjectableSkills, called against the REAL .claude/skills directory rather than a synthetic tmpdir, discovers this skill with appliesTo including implement -- the falsifier the proposal's own not-reachable line got backwards"
-      proof: "unit test: test/implement-clean-single-strike-skill-reaches-the-prompt.test.ts"
+      proof: "unit test: loadInjectableSkills called against the REAL .claude skills directory rather"
     - claim: "selectSkillsForTask selects this skill for task type implement under the existing DEFAULT_KNOWLEDGE_BUDGET_CHARS budget, and its body reaches renderImplementPrompt's CONTEXT block verbatim, before the TASK block rather than after it"
-      proof: "unit test: test/implement-clean-single-strike-skill-reaches-the-prompt.test.ts"
+      proof: "unit test: selectSkillsForTask selects this skill for task type implement under"
     - claim: "scanSkillDraft still reports ok true against the current settings/worker.json allowlist for the file's final written content"
-      proof: "unit test: test/implement-clean-single-strike-skill-reaches-the-prompt.test.ts"
+      proof: "unit test: scanSkillDraft still reports ok true against the current settings"
     - claim: "the written file no longer contains the phrase not yet ratified"
       proof: "grep: not yet ratified in .claude/skills/implement-clean-single-strike-de866b8a/SKILL.md"
   falsifier: |

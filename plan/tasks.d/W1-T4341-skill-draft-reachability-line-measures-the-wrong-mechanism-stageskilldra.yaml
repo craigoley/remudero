@@ -86,11 +86,11 @@
     alongside it.
   acceptance:
     - claim: "a drafted skill whose markdown carries a valid applies-to implement frontmatter line is reported reachable, naming the loadInjectableSkills and selectSkillsForTask route rather than settingSources"
-      proof: "unit test: test/skill-workshop.test.ts"
+      proof: "unit test: a drafted skill whose markdown carries a valid applies-to"
     - claim: "a drafted skill with no applies-to frontmatter line is reported not reachable, naming the absence of applies-to rather than settingSources"
-      proof: "unit test: test/skill-workshop.test.ts"
+      proof: "unit test: a drafted skill with no applies-to frontmatter line is"
     - claim: "describeWorkerSkillReachability's own existing contract, false for an empty settingSources array and true for project, is unchanged -- the W1-T3137 regression test still passes"
-      proof: "unit test: test/skill-workshop.test.ts"
+      proof: "unit test: describeWorkerSkillReachability s own existing contract false for an empty"
     - claim: "the one production call site in retroCommand no longer sources the staged reachability line from describeWorkerSkillReachability, and two drafts in the same batch with different applies-to content get DIFFERENT reachability lines"
       proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
   falsifier: |
