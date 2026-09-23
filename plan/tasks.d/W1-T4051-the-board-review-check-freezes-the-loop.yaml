@@ -10,7 +10,7 @@
   origin: "oper#board-review-check-freezes-the-loop-2026-09-22"
   plan_refs: [W1-T4041, W1-T4045, W1-T4046, W1-T2464, W1-T2304, W1-T3297]
   files: [src/run-task.ts, test/the-board-review-check-reuses-the-tick-projection.test.ts, test/board-review-wiring.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LOOP-LAG SAMPLER NAMED IT. MEASURED 2026-09-22 ON THE LIVE DAEMON (pid 645931, running #6598).

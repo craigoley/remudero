@@ -10,7 +10,7 @@
   origin: "operator ask 2026-09-22: a way to see headroom across linked subscriptions and what the cash lane has cost"
   plan_refs: [W1-T3726, W1-T4028]
   files: [src/lib/analytics-live-metrics.ts, src/lib/analytics-route.ts, test/the-headroom-card-sees-every-subscription.test.ts, test/an-analytics-request-returns-under-its-own-ceiling.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t4024-runway-panel

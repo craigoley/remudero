@@ -128,7 +128,7 @@
   origin: "oper#arm-report-describes-the-call-2026-08-18"
   plan_refs: ["W1-T449", "W1-T230"]
   files: [src/run-task.ts, src/lib/ledger.ts, test/arm-outcome-five-sites.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THREE BRIEFING CLAIMS DID NOT SURVIVE RE-DERIVATION AND ARE CORRECTED HERE RATHER THAN

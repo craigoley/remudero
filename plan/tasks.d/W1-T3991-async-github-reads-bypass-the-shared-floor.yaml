@@ -13,7 +13,7 @@
     - test/the-transport-paces-its-own-reads.test.ts
   origin: "recon#pr-6470-async-transport-floor-2026-09-21"
   plan_refs: [W1-T3297, W1-T3976, W1-T3791]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED on current origin/main a1741de0 and reproduced in PR #6470: the synchronous
