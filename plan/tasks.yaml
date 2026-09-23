@@ -9320,14 +9320,15 @@
     precedent. Both sites are ONE defect class — fix both, change nothing else in either function.
   acceptance:
     - claim: "no existsSync-gated write remains at either flagged site; creation is exclusive (wx) with EEXIST falling through to read"
-      proof: "grep: zero existsSync calls gating the create paths in loadConfig/writeTierIntoConfig; the wx flag present at both writes; unit test simulates EEXIST -> the existing file is read, not clobbered"
+      proof: "unit test: test/config.test.ts"
     - claim: "first-run behavior is byte-identical to today (contents, 0600 mode, createdFile semantics)"
-      proof: "existing config/init tests pass unchanged; a new unit test asserts mode 0o600 and createdFile=true on genuine first run, createdFile=false when the file exists"
+      proof: "unit test: test/init.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§5"]
-  files: [src/lib/config.ts, src/lib/init.ts]
+  files: [src/lib/config.ts, src/lib/init.ts, test/config.test.ts, test/init.test.ts]
   status: queued
+  pr: 324
   attempts: 0
   note: "Alert backlog triage 2026-07-16: code-scanning alerts #15/#16 (both HIGH). The race is live today only in narrow windows, but WS-2 concurrency widens every window — fix before N-concurrent, not after."
 
