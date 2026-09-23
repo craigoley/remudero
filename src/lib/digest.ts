@@ -4,6 +4,7 @@ import { readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync } from
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
+import type { KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningUsage, leastUsefulLearnings, learningValue } from "./knowledge-value.js";
 import { readLedgerLines } from "./status.js";
 import { ledgerRotationEntries, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-grep.js";
@@ -421,6 +422,8 @@ export interface DigestSummary {
   cacheHit?: CacheHitTotals;
   learningUsefulness?: LearningUsefulness;
   learningOutcomes?: LearningOutcomeSummary;
+  /** W1-T4243: the latest knowledge-measurement row in the window. */
+  knowledgeMeasured?: KnowledgeMeasuredSummary;
   gateFireRates?: GateFireRateSummary;
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
    *  `.fired` duplicates it and `.skipped` is the cadence working as intended. */
@@ -617,6 +620,55 @@ export function summarizeLearningOutcomes(lines: LedgerLine[]): LearningOutcomeS
   return { report, disagreements };
 }
 
+/** W1-T4243's multi-week reading, as the knowledge-measurement rung ledgered it. The digest reads the
+ *  rung's product; it never re-reads the union the rung read. */
+export interface KnowledgeMeasuredSummary {
+  ts: string;
+  status: string;
+  refusedReason?: string;
+  windowDays: number;
+  gaps?: KnowledgeGapReport;
+  outcomes?: LearningOutcomeReport;
+}
+
+export function summarizeKnowledgeMeasured(lines: readonly LedgerLine[]): KnowledgeMeasuredSummary | undefined {
+  let latest: LedgerLine | undefined;
+  for (const l of lines) {
+    if (l.step !== "knowledge.measured" || typeof l.ts !== "string") continue;
+    if (latest === undefined || l.ts > (latest.ts as string)) latest = l;
+  }
+  if (latest === undefined) return undefined;
+  const obj = (v: unknown) => (typeof v === "object" && v !== null ? v : undefined);
+  return {
+    ts: latest.ts as string,
+    status: typeof latest.status === "string" ? latest.status : "unknown",
+    ...(typeof latest.refused_reason === "string" ? { refusedReason: latest.refused_reason } : {}),
+    windowDays: typeof latest.window_days === "number" ? latest.window_days : 0,
+    ...(obj(latest.gaps) ? { gaps: latest.gaps as KnowledgeGapReport } : {}),
+    ...(obj(latest.outcomes) ? { outcomes: latest.outcomes as LearningOutcomeReport } : {}),
+  };
+}
+
+export function renderKnowledgeMeasured(s: KnowledgeMeasuredSummary): string {
+  const head = `knowledge (${s.windowDays}d`;
+  if (s.status !== "measured" || !s.gaps) return `${head}): refused: ${s.refusedReason ?? `status ${s.status}`}`;
+  const g = s.gaps;
+  const count = (v: string) => g.areas.filter((a) => a.verdict === v).length;
+  const blind = g.areas
+    .filter((a) => a.verdict === "blind")
+    .map((a) => `${a.area} (failed ${a.silentFailed}/${a.failed} silent vs clean ${a.silentClean}/${a.clean})`);
+  const o = s.outcomes;
+  const effects = (o?.learnings ?? [])
+    .filter((l) => l.verdict === "helps" || l.verdict === "hurts")
+    .map((l) => `${l.id} ${l.verdict} ${l.effect! >= 0 ? "+" : ""}${l.effect!.toFixed(2)}`);
+  return (
+    `${head}, ${g.runs} run(s)): blind: ${blind.join("; ") || "none"}; ` +
+    `areas: blind ${count("blind")}, covered ${count("covered")}, no-association ${count("no-association")}, unmeasurable ${count("unmeasurable")}; ` +
+    `excluded ${g.excludedNoVerdict} without a verdict, ${g.excludedMasked} masked, ${g.unmapped} unmapped; ` +
+    `outcomes: ${effects.join("; ") || "no measured effect"} (${o?.runs ?? 0} contested run(s))`
+  );
+}
+
 export function renderLearningOutcomes(s: LearningOutcomeSummary): string {
   const r = s.report;
   const window = r.window ? `${r.window.from} .. ${r.window.to}` : "no contributing run";
@@ -711,6 +763,8 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
   summary.learningUsefulness = summarizeLearningUsefulness(since);
   const learningOutcomes = summarizeLearningOutcomes(lines);
   if (learningOutcomes) summary.learningOutcomes = learningOutcomes;
+  const knowledgeMeasured = summarizeKnowledgeMeasured(since);
+  if (knowledgeMeasured) summary.knowledgeMeasured = knowledgeMeasured;
   summary.gateFireRates = summarizeGateFireRates(since);
   return summary;
 }
@@ -777,6 +831,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     ...(s.cacheHit ? [renderCacheHitLine("cache hit by run", s.cacheHit.byRun), renderCacheHitLine("cache hit by class", s.cacheHit.byClass)] : []),
     ...(s.learningUsefulness ? [renderLearningUsefulness(s.learningUsefulness)] : []),
     ...(s.learningOutcomes ? [renderLearningOutcomes(s.learningOutcomes)] : []),
+    ...(s.knowledgeMeasured ? [renderKnowledgeMeasured(s.knowledgeMeasured)] : []),
     ...(s.gateFireRates ? [renderGateFireRates(s.gateFireRates)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
