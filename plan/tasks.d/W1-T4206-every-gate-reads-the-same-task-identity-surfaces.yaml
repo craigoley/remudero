@@ -1,0 +1,39 @@
+- id: W1-T4206
+  title: "TWO GATES DISAGREE ABOUT WHICH SURFACE CARRIES A TASK IDENTITY — the reviewer recovers it from a run-shaped head ref, while acceptance-author-gate's no-header check and proof-discrimination-gate read the PR body alone, so a trailerless run-branch PR is judged one way and refused another, costing a CI round each time: make both gates read the reviewer's surfaces and name them in their refusals"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1790098399105-ecffa8"
+  plan_refs: ["W1-T4216"]
+  files: [scripts/acceptance-author-gate.mjs, scripts/proof-discrimination-gate.mjs, test/every-gate-reads-the-same-task-identity-surfaces.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: the reviewer synthesizes a trailer from the recovered run-branch task id when the body has none
+    (src/run-task.ts ~17451-17454).
+    OBSERVED: `evaluateGate` in scripts/acceptance-author-gate.mjs (~498-557) already derives `taskIdFromRunBranch`
+    for its credited-test-path check (~526) but calls `acceptanceAuthorTimeCheck(body)` on the body alone (~555), which
+    returns no-header without mentioning the head ref (src/lib/review.ts ~5350).
+    OBSERVED: scripts/proof-discrimination-gate.mjs has no head-ref or run-branch recovery at all.
+
+    ALSO REPORTED AS: fb-1790097003957-2a20bc.
+
+    risk: high is Rule 19's span, not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) Both gates resolve the task identity from the same ordered surfaces as the reviewer: the body trailer, then a
+        run-shaped head ref. (ii) Each refusal names which surface it read and, when none carried an identity, says the
+        trailer must be in the PR body.
+  acceptance:
+    - claim: "both gates accept a trailerless PR on a run-shaped head ref"
+      proof: 'grep: test("W1-T4206: both gates accept a trailerless PR on a run-shaped head ref" in test/every-gate-reads-the-same-task-identity-surfaces.test.ts'
+    - claim: "a refusal names the identity surfaces it read"
+      proof: 'grep: test("W1-T4206: a refusal names the identity surfaces it read" in test/every-gate-reads-the-same-task-identity-surfaces.test.ts'

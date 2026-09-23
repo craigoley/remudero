@@ -1,0 +1,32 @@
+- id: W1-T4212
+  title: "THE TASK-ID EXISTENCE GATE SCANS src/ AND deploy/ BUT NOT plan/, SO A PLAN RECORD MAY CITE AN ID THAT RESOLVES NOWHERE — the measured residue is 17 ids, mostly synthetic: widen the scan to plan/ and baseline the residue with written reasons"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1790084568759-eaa983"
+  plan_refs: []
+  files: [scripts/task-id-existence-check.mjs, scripts/task-id-existence-baseline.json, test/task-id-existence-check.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: scripts/task-id-existence-check.mjs scans only src and deploy (its header; ci.yml ~1716-1747).
+    OBSERVED: `node scripts/task-id-existence-check.mjs --dir plan` leaves 17 unresolved ids, not the 128 the report
+    estimated. Most are synthetic negative controls; about nine look real (W1-T966, W1-T1657, W1-T2200, W1-T2290,
+    W1-T3057, W1-T3340, W1-T3650 and two more the scan names).
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): low.
+  design: |
+    (i) The gate also scans plan/. (ii) Each current residue id gets a baseline entry with a written reason; a new
+        unresolved id fails. (iii) The real-looking ids are checked one by one and either corrected or baselined.
+  acceptance:
+    - claim: "an unresolved id in plan fails the gate"
+      proof: 'grep: test("W1-T4212: an unresolved id in plan fails the gate" in test/task-id-existence-check.test.ts'

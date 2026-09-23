@@ -1,0 +1,36 @@
+- id: W1-T4194
+  title: "A DAEMON BOOTED UNDER PAUSE SKIPS daemonBoot ENTIRELY, INCLUDING THE STALE-INFLIGHT-LOCK SWEEP, so locks left by the container it replaced keep a recycle's drain from ever converging: run the boot-identity lock sweep before honouring the hold"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789339523550-5ad56e"
+  plan_refs: []
+  files: [src/run-task.ts, test/daemon-pause-before-admission.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: in the daemon command (src/run-task.ts ~30332-30339) a boot hold logs `daemon.boot_held` and skips
+    `daemonBoot` altogether, and `sweepStaleInflightLocks` runs only inside `daemonBoot`.
+    OBSERVED: the paused poll loop continues before any inflight sweep (src/lib/daemon.ts ~2516-2521).
+    W1-T4023 (queued) covers reclaim rungs that never run while paused, but names disk and lane rungs, not inflight locks.
+    The report measured a 3000 s recycle refusal that needed a manual unpause.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): high.
+  design: |
+    (i) Under a boot hold, the stale-lock sweep that `daemonBoot` runs for dead pids from a previous container identity
+        still runs; everything else `daemonBoot` does stays held. (ii) The sweep releases only locks whose holder is
+        provably dead, exactly as on an unheld boot, so a hold never widens what it may delete.
+  acceptance:
+    - claim: "a daemon booted under pause still sweeps a dead holders inflight lock"
+      proof: 'grep: test("W1-T4194: a daemon booted under pause still sweeps a dead holders inflight lock" in test/daemon-pause-before-admission.test.ts'
+    - claim: "a daemon booted under pause admits no work"
+      proof: 'grep: test("W1-T4194: a daemon booted under pause admits no work" in test/daemon-pause-before-admission.test.ts'

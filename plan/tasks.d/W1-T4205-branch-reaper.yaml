@@ -1,0 +1,30 @@
+- id: W1-T4205
+  title: "planBranchReap's SOURCE-REFERENCE HOLD FAILS OPEN — a git-grep EXECUTION ERROR (exit 128 on a missing pathspec such as deploy/ in a satellite repo) is read as `not named`, so a branch the source still names loses its hold and can be reaped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1790036783486-fcf82d"
+  plan_refs: []
+  files: [src/run-task.ts, test/branch-reaper.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: the reaper's namedInSource scan (src/run-task.ts ~19595-19598) runs
+    `git grep ... -- src/ scripts/ deploy/ .github/` and its catch sets namedInSource = false on any failure, including
+    exit 128 for a missing path. git grep exits 1 for no match and 128 for an error; the two are conflated.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) Only exit status 1 (no match) reads as not named. (ii) Any other failure keeps the branch held and names the
+        failure on the reap plan. (iii) The pathspec list is restricted to paths that exist before the grep runs.
+  acceptance:
+    - claim: "a git-grep error keeps the branch held"
+      proof: 'grep: test("W1-T4205: a git-grep error keeps the branch held" in test/branch-reaper.test.ts'
+    - claim: "a repo without deploy/ still finds a name under src/"
+      proof: 'grep: test("W1-T4205: a repo without deploy/ still finds a name under src/" in test/branch-reaper.test.ts'

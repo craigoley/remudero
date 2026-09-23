@@ -1,0 +1,29 @@
+- id: W1-T4216
+  title: "A PLAN-ONLY FILING PUSHED ON A RUN-SHAPED BRANCH IS JUDGED AGAINST THE IMPLEMENTATION CRITERIA OF THE TASK THE BRANCH NAME NAMES, because a run-shaped head ref is itself a task-identity surface and the refusal text does not say so"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1790097003959-98dc15"
+  plan_refs: ["W1-T4206"]
+  files: [src/run-task.ts, test/a-plan-only-filing-on-a-run-branch.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: the reviewer writes a trailer from the recovered branch task id whenever the body has none
+    (src/run-task.ts ~17451-17454), with no check for a plan-only diff. The report proposes (a) naming the head ref in the
+    refusal, (b) a pre-push warning for a plan-only diff on a run-shaped branch, and (c) a behaviour change that needs a
+    ruling. This record covers (a); (b) and (c) are left for the operator to rule on.
+
+    VALUE (triage estimate): low.
+  design: |
+    (i) When the recovered identity came from the head ref and the diff is plan-only, the refusal says so and names
+        the head ref as the identity source.
+  acceptance:
+    - claim: "a plan-only diff on a run branch names the head ref as its identity source"
+      proof: 'grep: test("W1-T4216: a plan-only diff on a run branch names the head ref as its identity source" in test/a-plan-only-filing-on-a-run-branch.test.ts'

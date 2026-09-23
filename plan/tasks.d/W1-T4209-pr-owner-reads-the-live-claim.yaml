@@ -1,0 +1,30 @@
+- id: W1-T4209
+  title: "`rmd pr-owner` REPORTS A PR AS FREE WHILE A FIX WORKER HOLDS ITS BRANCH CLAIM, because it reads only fix.dispatch and sweep.disposed rows and fix.dispatch is written after the spawn returns: read the live branch claim too"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1789318921401-bd1bb4"
+  plan_refs: []
+  files: [src/run-task.ts, test/pr-owner-reads-the-live-claim.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: the concurrent-dispatch race itself is closed: an O_EXCL branch claim (`fixBranchClaimKey`,
+    src/lib/sweep.ts ~2477, W1-T2609) is taken before any spawn.
+    OBSERVED: `derivePrOwnerVerdict` (src/run-task.ts ~2974-3027) reads only ledger fix.dispatch and sweep.disposed rows,
+    and fix.dispatch is written after the spawn returns (~10108-10113), so pr-owner cannot see a live claim. This is a
+    diagnostic that misleads the operator, not a dispatch defect.
+
+    VALUE (triage estimate): low.
+  design: |
+    (i) pr-owner reports OWNED when a live fix branch claim exists for the PR, naming the claim's holder.
+        (ii) A claim whose holder pid is dead is reported as stale, not owned.
+  acceptance:
+    - claim: "pr-owner reports a live branch claim as owned"
+      proof: 'grep: test("W1-T4209: pr-owner reports a live branch claim as owned" in test/pr-owner-reads-the-live-claim.test.ts'

@@ -1,0 +1,35 @@
+- id: W1-T4197
+  title: "A GRACEFUL RECYCLE OVERWRITES ANY EXISTING PAUSE AND LATER DELETES IT WITHOUT CHECKING WHO WROTE IT, so an operator's own hold is silently lifted by a recycle: write an attributable pause and clear only that one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789304713245-340554"
+  plan_refs: ["W1-T4191", "W1-T4198", "W1-T4199"]
+  files: [deploy/recycle-container.sh, test/recycle-container.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: deploy/recycle-container.sh writes state/PAUSE unconditionally (~1032) and removes it with `rm -f`
+    (~1325, ~1352) without reading its contents. An operator PAUSE that existed before the recycle is overwritten and then
+    deleted. The other half of this report, the in-flight light sweep admitting workers under PAUSE, is W1-T4191.
+
+    W1-T4197, W1-T4198 and W1-T4199 all edit deploy/recycle-container.sh and its suite, so they are chained by depends_on to be built one after another rather than as conflicting PRs.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) If a PAUSE already exists when the recycle starts, the recycle records that and never deletes it.
+        (ii) The recycle's own PAUSE carries a marker naming the recycle, and only a PAUSE with that marker is removed.
+  acceptance:
+    - claim: "a recycle leaves an operators earlier pause in place"
+      proof: 'grep: test("W1-T4197: a recycle leaves an operators earlier pause in place" in test/recycle-container.test.ts'
+    - claim: "a recycle removes only the pause it wrote"
+      proof: 'grep: test("W1-T4197: a recycle removes only the pause it wrote" in test/recycle-container.test.ts'

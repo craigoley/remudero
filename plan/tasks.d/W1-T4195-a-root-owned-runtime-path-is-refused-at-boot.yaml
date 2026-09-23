@@ -1,0 +1,39 @@
+- id: W1-T4195
+  title: "A ROOT-OWNED MUTABLE RUNTIME PATH (the ledger, git refs and reflogs, worktree metadata) LEFT BY A HOST OR PRIVILEGED OPERATION STOPS TRIAGE, REVIEW AND FETCH WITH AN EACCES AT RUNTIME, AND NOTHING CHECKS BEFORE WORK IS ADMITTED: verify the runtime uid can write each mutable path at container start and refuse by name when it cannot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789959757208-462e0b"
+  plan_refs: []
+  files: [deploy/entrypoint.sh, deploy/recycle-container.sh, test/a-root-owned-runtime-path-is-refused-at-boot.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: neither deploy/entrypoint.sh nor deploy/recycle-container.sh contains any ownership or writability
+    check (no chown, `test -w` or equivalent).
+    The two reports describe the same class twice: state/ledger.ndjson left root-owned (fb-1789957498656-362d42), and git
+    administration paths under the checkout left root-owned (fb-1789959757208-462e0b). Either one turns every appendLedger
+    or git fetch into an EACCES after the container is already running.
+
+    ALSO REPORTED AS: fb-1789957498656-362d42.
+
+    risk: high is Rule 19's span, not blast radius.
+
+    VALUE (triage estimate): high.
+  design: |
+    (i) At container start, before the daemon is launched, check that the runtime user can write the ledger file, the
+        state directory, and the checkout's .git refs, logs and worktrees directories. (ii) A failure exits non-zero naming
+        the first unwritable path and its owner; it never chowns on its own, because a privileged repair is an operator
+        act. (iii) The check reads the filesystem only and is driven by a test against a fixture tree.
+  acceptance:
+    - claim: "a root-owned ledger is refused at boot by name"
+      proof: 'grep: test("W1-T4195: a root-owned ledger is refused at boot by name" in test/a-root-owned-runtime-path-is-refused-at-boot.test.ts'
+    - claim: "a root-owned git ref directory is refused at boot by name"
+      proof: 'grep: test("W1-T4195: a root-owned git ref directory is refused at boot by name" in test/a-root-owned-runtime-path-is-refused-at-boot.test.ts'
