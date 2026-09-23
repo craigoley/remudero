@@ -1366,7 +1366,7 @@ function ledgerRotationDue(sizeBytes: number, ceilingBytes: number, dir: string,
   // name is exactly what reconcileArchiveStamps exists because it cannot always be trusted.
   const mtimes = archiveMtimes(dir, fs).map((a) => a.mtimeMs);
   if (mtimes.length === 0) return true; // no prior rotation to smooth against
-  return Date.now() - mtimes.reduce((a, b) => Math.max(a, b)) >= LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
+  return systemClock.now() - mtimes.reduce((a, b) => Math.max(a, b)) >= LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
 }
 
 export function rotateLedger(
@@ -1414,7 +1414,7 @@ function rotateLedgerLocked(
   // the new archive's own name is never allowed to fall at or below.
   const dir = dirname(path);
   const lastArchiveMs = reconcileArchiveStamps(dir, archiveFsDeps);
-  let requestedMs = (now?.() ?? new Date()).getTime();
+  let requestedMs = now ? now().getTime() : systemClock.now();
   if (lastArchiveMs !== undefined && requestedMs <= lastArchiveMs) requestedMs = lastArchiveMs + 1;
   const plainArchivePath = datedArchivePath(path, new Date(requestedMs));
   let archivePath = writeArchive(plainArchivePath, snapshot, archiveFsDeps);
