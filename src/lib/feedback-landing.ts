@@ -1278,6 +1278,16 @@ function ciLearningFiledShardRead(
   }
 }
 
+/** Findings fetched origin/main carries (W1-T4190): the checkout lags main, so nothing else holds a merged one. */
+export function ciLearningMergedOrigins(checkoutRoot: string, git: GitExec = defaultGit(checkoutRoot)): string[] {
+  try {
+    return [...ciLearningMainOrigins(ciLearningShardRelDir(checkoutRoot), git)].sort();
+  } catch (e) {
+    console.error(`ci-learning: origin/main's filed origins are unreadable, so only the plan and queue hold findings: ${String((e as Error)?.message ?? e)}`);
+    return [];
+  }
+}
+
 /** Every CI-learning finding already staged outside the checkout and awaiting its landing PR. */
 export function ciLearningPendingOrigins(stateRoot: string, checkoutRoot: string): string[] {
   const origins = new Set<string>();
@@ -1384,6 +1394,7 @@ export function landCiLearningShards(
   } catch {
     // Fetch/ack failure must not discard staged bytes or prevent a new durable staging write.
   }
+  for (const origin of ciLearningMergedOrigins(checkoutRoot, git)) held.add(origin);
 
   for (const draft of drafts) {
     if (held.has(draft.findingId)) {
