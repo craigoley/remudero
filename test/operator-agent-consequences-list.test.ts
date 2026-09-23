@@ -35,7 +35,7 @@ const highOperator: IdentityProvider = {
   writeTier: "high",
 };
 
-async function withServer(fn: (ctx: { base: string; ledgerPath: string }) => Promise<void>): Promise<void> {
+async function withServer(fn: (ctx: { base: string; ledgerPath: string }) => Promise<void>, enforceWriteTiers = true): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "rmd-consequences-list-"));
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
@@ -44,7 +44,7 @@ async function withServer(fn: (ctx: { base: string; ledgerPath: string }) => Pro
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     providers: [highOperator],
     routes: [{ ...makeConfirmNonceRoute(nonces), tier: "low" }, ...buildOperatorAgentRoutes({ ledgerPath, now: () => NOW })],
-    enforceWriteTiers: true,
+    enforceWriteTiers,
     confirmNonces: nonces,
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -291,6 +291,9 @@ test("an approved consequence is ledgered and leaves the pending list", async ()
     assert.equal(decision.status, 200);
     assert.deepEqual(await decision.json().then((body) => (body as { decision: string }).decision), "approve");
     assert.equal((await readList(base)).body.consequences.some((item) => item.consequenceId === "cq-approved"), false);
+    const duplicate = await confirmedDecision(base, { consequenceId: "cq-approved", decision: "approve" });
+    assert.equal(duplicate.status, 409);
+    assert.equal(((await duplicate.json()) as { error: string }).error, "consequence_not_pending");
 
     const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
     const row = rows.find((candidate) => candidate.step === OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP && candidate.consequence_id === "cq-approved");
@@ -341,6 +344,19 @@ test("a consequence decision without a valid nonce is refused", async () => {
     const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean);
     assert.equal(lines.filter((line) => line.includes(OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP)).length, 0);
   });
+
+  // The normal serve dispatcher refuses before the handler for an invalid nonce. This second
+  // server keeps enforcement off to exercise the handler's own direct-invocation backstop too.
+  await withServer(async ({ base }) => {
+    assert.equal(await preflight(base, financialAction("cq-handler-no-nonce")), 409);
+    const response = await fetch(`${base}${DECISION}`, {
+      method: "POST",
+      headers: { ...HIGH_AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ consequenceId: "cq-handler-no-nonce", decision: "refuse" }),
+    });
+    assert.equal(response.status, 403);
+    assert.equal(((await response.json()) as { error: string }).error, "confirm_nonce_required");
+  }, false);
 });
 
 test("a decision on an expired or unknown consequence is refused by name", async () => {
