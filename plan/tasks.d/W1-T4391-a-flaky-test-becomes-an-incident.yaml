@@ -1,0 +1,47 @@
+- id: W1-T4391
+  title: "A FLAKY TEST COSTS A HUMAN A RE-RUN AND IS THEN FORGOTTEN — turn every failed CI check into an incident event fingerprinted by test, and mark it flaky when the same sha passes on a re-run, so the SRE gardener files the fix with the evidence"
+  repo: remudero
+  depends_on: [W1-T4383]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling 2026-09-23: CI flakes are incidents, phase 1"
+  plan_refs: ["W1-T4383", "W1-T4385", "W1-T4386"]
+  files:
+    - src/lib/ci-incidents.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    2026-09-23: #6870's coverage shard failed on a knowledge-gardener timer test unrelated to its diff (91 ms
+    under a loaded runner; 3 of 3 passes locally). A human diagnosed it, re-ran the job and moved on. The flake
+    stayed in the suite for the next PR to trip on. No record connected the failure, the re-run and the pass.
+    The gateway already receives check_run completed webhooks (src/lib/github-event-wake.ts) and the incident
+    ingest (W1-T4383) already fingerprints and samples, so a flake needs only a producer.
+  design: |
+    On a check_run completed with conclusion failure (the webhook path serve.ts already verifies), fetch that job's
+    log once (REST, within the gh read budget) and extract each `not ok N - <title>` with its test file.
+    Post one W1-T4383 event per failing test: {source:"ci", kind:"test_failure", name:<test file>,
+    message:<title>, frames:[{file:<test file>, fn:<title>}], sha:<head sha>}, so the same test fingerprints
+    alike across PRs. When the same check passes on a re-run at the SAME head sha, post
+    {kind:"flake"} for each test that had failed. The fingerprint then reads flaky, and the SRE lane
+    (W1-T4385) files it as `incident#<fp>` with every failing run, runner and duration it has seen. A failure
+    that also fails on main is NOT a flake and says so. W1-T4386's rerun-failed-ci-once runbook handles the
+    immediate re-run; this task is the memory.
+    WIRING: src/lib/ci-incidents.ts exports ciIncidentEventsFromLog(log, meta) and recordCheckRunOutcome(state,
+    check), and serve.ts calls recordCheckRunOutcome( from its check_run webhook handling.
+  acceptance:
+    - claim: "a failing check posts one incident event per failing test, fingerprinted by test"
+      proof: "unit test: a failing check posts one incident event per failing test, fingerprinted by test"
+    - claim: "a check that passes on a re-run at the same sha marks its failed tests as flaky"
+      proof: "unit test: a check that passes on a re-run at the same sha marks its failed tests as flaky"
+    - claim: "a test that also fails on main is never called a flake"
+      proof: "unit test: a test that also fails on main is never called a flake"
+    - claim: "the gateway records every completed check run's outcome"
+      proof: 'grep: recordCheckRunOutcome( in src/lib/serve.ts'
+  falsifier: |
+    CLOSE IF failed CI checks already reach the incident ingest and a same-sha re-run pass already marks a flake.

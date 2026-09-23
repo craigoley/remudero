@@ -20,7 +20,8 @@ For each one, propose the smallest fix, in this order of preference:
 1. GATE — a CI step, a census test or a lint that refuses the mistake by name. A rule
    stated only in prose can be broken silently, so prefer a refusal whenever the mistake
    is mechanical.
-2. DOCTRINE — a CLAUDE.md headline and body, only for a judgement call no check can make.
+2. DOCTRINE — a CLAUDE.md headline and body, only for a judgement call no check can make;
+   draft it with /agent-doc.
 3. LEARNING — a `learnings/*.yaml` entry scoped to the files where the fact applies.
 Check first whether a check or rule already exists but did not fire; if so, that is the
 finding, not a new one.

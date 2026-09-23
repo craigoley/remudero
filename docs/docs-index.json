@@ -620,6 +620,12 @@
       "grepHint": "`src/lib/worker.ts` — comment forensics"
     },
     {
+      "path": "docs/gate-garden-log.md",
+      "title": "Gate garden log",
+      "summary": "Each section is one pass of the gate gardener (W1-T4116).",
+      "grepHint": "Gate garden log"
+    },
+    {
       "path": "docs/model-routing.md",
       "title": "Model routing and cost evidence",
       "summary": "",

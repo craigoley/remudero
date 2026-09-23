@@ -3,7 +3,7 @@
  *
  * `compactRotations` owns row-set preservation. This module owns the filesystem boundary the
  * compactor deliberately leaves to its caller: select a small oldest-first window, read plain or
- * gzip rotations, stage the replacement atomically, and remove sources only after that write.
+ * gzip rotations, stage one replacement per UTC day atomically, and remove sources only after those writes.
  * It is the bounded archive executor shared by the CLI and the daemon compaction rung; it is
  * never a rotation-path dependency.
  */
@@ -151,6 +151,7 @@ function reportFor(mode: "dry-run" | "apply", olderThanDays: number, maxSources:
     mode, olderThanDays, maxSources, eligibleCount, unparseableAgeCount,
     sourceCount: result.sourceCount,
     rowsWritten: result.rowsWritten, duplicatesCollapsed: result.duplicatesCollapsed, archiveName: result.archiveName,
+    archiveNames: result.archiveNames,
   });
 }
 
@@ -213,7 +214,7 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
 
   const entryByPath = new Map<string, LedgerCorpusEntry>();
   for (const entry of selection.sources) entryByPath.set(entry.path, entry);
-  let staged: { name: string; body: string } | undefined;
+  const staged: { name: string; body: string }[] = [];
   const removals: string[] = [];
   let result: LedgerCompactionResult;
   try {
@@ -226,7 +227,7 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
         return body.toString("utf8").split("\n");
       },
       write: (name, body) => {
-        staged = { name, body };
+        staged.push({ name, body });
       },
       remove: (path) => removals.push(path),
       clock: fixedClock(now.getTime()),
@@ -250,17 +251,20 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
       `rmd ledger-compact: skipped ${selection.unparseableAge.length} rotation(s) whose filename age is unreadable`,
     );
   }
-  if (!staged) {
+  if (staged.length === 0) {
     out(report);
     return 0;
   }
 
-  const targetPath = join(stateDir, staged.name);
+  // Every day's output is checked before ANY is written, so a refusal leaves the corpus untouched.
   const selectedPaths = new Set(selection.sources.map((entry) => entry.path));
-  if (fs.existsSync(targetPath) && !selectedPaths.has(targetPath)) {
-    out(report);
-    log(`rmd ledger-compact: refusing to overwrite unselected archive ${targetPath}`);
-    return 1;
+  for (const { name } of staged) {
+    const targetPath = join(stateDir, name);
+    if (fs.existsSync(targetPath) && !selectedPaths.has(targetPath)) {
+      out(report);
+      log(`rmd ledger-compact: refusing to overwrite unselected archive ${targetPath}`);
+      return 1;
+    }
   }
   if (mode === "dry-run") {
     out(report);
@@ -268,9 +272,11 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   }
 
   try {
-    const compressed = fs.gzipSync(Buffer.from(staged.body, "utf8"));
-    if (!fs.writeAtomic(targetPath, compressed)) {
-      throw new Error(`atomic replacement withdrew before rename: ${targetPath}`);
+    for (const { name, body } of staged) {
+      const targetPath = join(stateDir, name);
+      if (!fs.writeAtomic(targetPath, fs.gzipSync(Buffer.from(body, "utf8")))) {
+        throw new Error(`atomic replacement withdrew before rename: ${targetPath}`);
+      }
     }
     coldStore(fs, stateDir, removals, now.getTime(), log);
   } catch (err) {

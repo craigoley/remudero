@@ -1,0 +1,43 @@
+- id: W1-T4385
+  title: "NOBODY TRIAGES WHAT THE FLEET BREAKS — run an SRE gardener in its own lightweight lane that reads every instance's incident events, dedupes against open work, gathers evidence (samples, first seen, deploy sha, suspect commits) and files incident feedback the existing pipeline builds"
+  repo: remudero
+  depends_on: [W1-T4383, W1-T4384]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-09-23: an SRE gardener fed by console and daemon errors"
+  plan_refs: ["W1-T4383", "W1-T4384", "W1-T4386", "W1-T4387"]
+  files:
+    - src/run-task.ts
+    - src/lib/sre-lane.ts
+    - src/lib/feedback.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Operator ruling 2026-09-23: the SRE runs in ITS OWN lane, not inside the core daemon. That day the core
+    daemon's single thread was starved by futile fix dispatches, and a watcher sharing that thread cannot see the
+    stall it is meant to catch. The pipeline downstream already exists: feedback (machine origins alert#, issue#,
+    repair#) → triage → plan task → fleet build; the gardener framework (src/lib/gardener.ts) already judges a
+    class by its own metric; fleet-lane.ts already paces machine filing.
+  design: |
+    A new feedback origin `incident#<fingerprint>`. The lane reads each registry instance's ledger read-only (the
+    W1-T4227 registry names every state root), keeps its own state file, and once per pass takes the
+    worst-burning fingerprint that has no open feedback or task and files ONE feedback entry with: title, sample
+    events (scrubbed), first and last seen, count and burn, the deploy sha(s) it appeared under, and SUSPECT
+    COMMITS — merged PRs since the last clean sha whose diff touches a file named in the incident's in-app
+    frames. Paced by fleet-lane (never more filings per day than the fleet merged). The lane is a registry
+    instance with its own small container budget; it never dispatches builds itself.
+    WIRING: src/lib/sre-lane.ts exports startSreLane(deps) returning a (pollIntervalMs) => {stop} starter; src/run-task.ts adds it to the daemon's `gardens` list (the same seam the knowledge gardener uses), only on the SRE registry instance.
+  acceptance:
+    - claim: "a fingerprint with open feedback or an open task is never filed twice"
+      proof: "unit test: a fingerprint with open feedback or an open task is never filed twice"
+    - claim: "an incident names the merged pull requests that touched its in-app frames"
+      proof: "unit test: an incident names the merged pull requests that touched its in-app frames"
+    - claim: "incident filing is paced by the fleet's own merge rate"
+      proof: "unit test: incident filing is paced by the fleet's own merge rate"
+    - claim: "the daemon starts the SRE lane among its gardens"
+      proof: 'grep: startSreLane( in src/run-task.ts'

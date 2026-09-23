@@ -1,0 +1,41 @@
+- id: W1-T4387
+  title: "NOBODY CHECKS A FIX ACTUALLY FIXED ANYTHING — track each incident from filed to verified: a fix PR names its incident, the lane watches the fingerprint after the fix deploys, marks it verified when it stops or regressed when it returns, credits its own record, and serves the lifecycle for the console"
+  repo: remudero
+  depends_on: [W1-T4385]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator request 2026-09-23: an SRE gardener fed by console and daemon errors"
+  plan_refs: ["W1-T4383", "W1-T4385"]
+  files:
+    - src/lib/incident-lifecycle.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The operator's goal: "the resolution might already be in progress automatically" — visible, not assumed.
+    Closing the loop is also how the gardener learns: src/lib/gardener.ts judges a class by its own metric, and
+    "the fingerprint stopped after the fix deployed" is exactly that metric for incident classes.
+  design: |
+    A fix PR carries a `Fixes-Incident: <fingerprint>` trailer (the filing lane writes it into the task). Status
+    per fingerprint: new → filed (feedback id) → building (PR n) → deployed (the fix sha is running) → verified
+    (no events for the fingerprint over a window after deploy) or regressed (events return; reopen and link the
+    PR). Verified and regressed credit and debit the lane's gardener record for that incident class.
+    GET /v1/incidents (scope read). EXACT RESPONSE: {incidents:[{fingerprint:string, title:string,
+    source:"console"|"gateway"|"daemon", kind:string, status:"new"|"filed"|"building"|"deployed"|"verified"|
+    "regressed", firstSeen:string, lastSeen:string, count24h:number, feedbackId:string|null, pr:number|null}],
+    generatedAt:string}. An unreadable source is reported, never an empty healthy list.
+    WIRING: src/lib/incident-lifecycle.ts exports buildIncidentsRoute(deps), and src/lib/serve.ts registers it beside the other build*Route calls.
+  acceptance:
+    - claim: "an incident moves to verified only when its fingerprint stays quiet after the fix deploys"
+      proof: "unit test: an incident moves to verified only when its fingerprint stays quiet after the fix deploys"
+    - claim: "an incident whose events return after its fix is marked regressed and linked to the pull request"
+      proof: "unit test: an incident whose events return after its fix is marked regressed and linked to the pull request"
+    - claim: "the incidents route reports an unreadable source instead of an empty list"
+      proof: "unit test: the incidents route reports an unreadable source instead of an empty list"
+    - claim: "the gateway registers the incidents read route"
+      proof: 'grep: buildIncidentsRoute( in src/lib/serve.ts'
