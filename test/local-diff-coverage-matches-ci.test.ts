@@ -24,10 +24,46 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { extractCoverageFlags, mergeBaseDiff } from "../scripts/diff-coverage-local.mjs";
+// @ts-expect-error The exercised gate is a plain .mjs script without a declaration file.
+import { extractCoverageFlags, main, mergeBaseDiff } from "../scripts/diff-coverage-local.mjs";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
+const REAL_CI_YAML_TEXT = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+
+/** A recording logger pair, plus the two lists it fills, for asserting on `main`'s own output. */
+function recorder() {
+  const logs: string[] = [];
+  const errors: string[] = [];
+  return { logs, errors, log: (m: string) => logs.push(m), error: (m: string) => errors.push(m) };
+}
+
+/** Every seam `main` needs, defaulted to a happy path that never touches disk/network/a real
+ *  instrumented run -- exactly the injection main() -> {@link defaultMainDeps} in scripts/
+ *  diff-coverage-local.mjs documents. A test overrides only the seam its branch cares about. */
+function fakeDeps(overrides: Record<string, unknown> = {}) {
+  const rec = recorder();
+  const calls: Record<string, unknown[]> = {};
+  const record = (name: string, fn: (...args: unknown[]) => unknown) => (...args: unknown[]) => {
+    (calls[name] ??= []).push(args);
+    return fn(...args);
+  };
+  const deps = {
+    readCiYaml: record("readCiYaml", () => REAL_CI_YAML_TEXT),
+    ensureRawCoverageDir: record("ensureRawCoverageDir", () => undefined),
+    runInstrumentedTests: record("runInstrumentedTests", () => ({ status: 0 })),
+    statLcov: record("statLcov", () => ({ size: 42 })),
+    computeMergeBaseDiff: record("computeMergeBaseDiff", () => "diff --git a/x.ts b/x.ts\n+added\n"),
+    runDiffCoverageGate: record("runDiffCoverageGate", () => ({ status: 0 })),
+    makeTempDiffDir: record("makeTempDiffDir", () => "/tmp/w1-t4084-fake"),
+    writeDiffFile: record("writeDiffFile", () => undefined),
+    removeTempDiffDir: record("removeTempDiffDir", () => undefined),
+    log: rec.log,
+    error: rec.error,
+    ...overrides,
+  };
+  return { deps, calls, ...rec };
+}
 
 test('W1-T4084: the local command reads its flags from the CI workflow', () => {
   const ciYamlText = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
@@ -99,4 +135,104 @@ test('W1-T4084: the diff is taken from the merge base', () => {
     /moved-base\.txt/,
     `origin/main's own later, unrelated commit must not appear in a merge-base diff; got:\n${diffText}`,
   );
+});
+
+// ── main()'s own orchestration, each branch driven through the injected seams above rather than
+// a real instrumented run or a real git spawn -- fast, and exercises the exact lines a real
+// invocation would (the coverage this repo's own diff-coverage.mjs gate checks against THIS file).
+
+test("W1-T4084 main: --help prints usage and exits 0 without touching any seam", () => {
+  const { deps, calls, logs } = fakeDeps();
+  const status = main(["--help"], deps);
+  assert.equal(status, 0);
+  assert.ok(logs.some((l) => l.includes("Usage: npm run diff-coverage:local")));
+  assert.equal(calls.readCiYaml, undefined, "must not read ci.yml just to print help");
+});
+
+test("W1-T4084 main: no test files given -> exits 1 and prints usage", () => {
+  const { deps, errors } = fakeDeps();
+  const status = main([], deps);
+  assert.equal(status, 1);
+  assert.ok(errors.some((e) => e.includes("no test files given")));
+});
+
+test("W1-T4084 main: an unparsable ci.yml fails loudly instead of silently running with no flags", () => {
+  const { deps, errors } = fakeDeps({ readCiYaml: () => "jobs: {}\n" });
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 1);
+  assert.ok(errors.some((e) => e.includes("coverage-ratchet")));
+});
+
+test("W1-T4084 main: --dry-run prints the real flags and the merge-base diff line, runs nothing", () => {
+  const { deps, calls, logs } = fakeDeps();
+  const status = main(["--dry-run", "test/example.test.ts"], deps);
+  assert.equal(status, 0);
+  assert.ok(logs.some((l) => l.includes("--enable-source-maps") && l.includes("test/example.test.ts")));
+  assert.ok(logs.some((l) => l.includes("origin/main...HEAD")));
+  assert.equal(calls.runInstrumentedTests, undefined, "dry-run must not actually spawn the suite");
+  assert.equal(calls.computeMergeBaseDiff, undefined, "dry-run must not actually compute the diff");
+});
+
+test("W1-T4084 main: no lcov produced -> exits 1, never reaches the diff step", () => {
+  const { deps, calls, errors } = fakeDeps({
+    statLcov: () => {
+      throw new Error("ENOENT");
+    },
+  });
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 1);
+  assert.ok(errors.some((e) => e.includes("no lcov produced")));
+  assert.equal(calls.computeMergeBaseDiff, undefined);
+});
+
+test("W1-T4084 main: an empty lcov -> exits 1, never reaches the diff step", () => {
+  const { deps, calls, errors } = fakeDeps({ statLcov: () => ({ size: 0 }) });
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 1);
+  assert.ok(errors.some((e) => e.includes("empty")));
+  assert.equal(calls.computeMergeBaseDiff, undefined);
+});
+
+test("W1-T4084 main: a failing instrumented suite still checks lcov, then reports the real exit code", () => {
+  const { deps, calls, errors } = fakeDeps({ runInstrumentedTests: () => ({ status: 7 }) });
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 7);
+  assert.ok(errors.some((e) => e.includes("exited 7")));
+  assert.equal(calls.computeMergeBaseDiff, undefined, "a real test failure must not go on to gate a diff");
+});
+
+test("W1-T4084 main: an empty merge-base diff -> OK, the gate is never spawned", () => {
+  const { deps, calls, logs } = fakeDeps({ computeMergeBaseDiff: () => "" });
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 0);
+  assert.ok(logs.some((l) => l.includes("is empty, nothing to check")));
+  assert.equal(calls.runDiffCoverageGate, undefined);
+});
+
+test("W1-T4084 main: computing the merge-base diff can itself fail loudly (e.g. an unfetched base)", () => {
+  const { deps, errors } = fakeDeps({
+    computeMergeBaseDiff: () => {
+      throw new Error("git diff origin/main...HEAD failed: unknown revision");
+    },
+  });
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 1);
+  assert.ok(errors.some((e) => e.includes("unknown revision")));
+});
+
+test("W1-T4084 main: the happy path writes the diff, runs the real gate CLI, and cleans up its tmp dir", () => {
+  const { deps, calls } = fakeDeps();
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 0);
+  assert.equal(calls.writeDiffFile?.length, 1);
+  assert.equal(calls.runDiffCoverageGate?.length, 1);
+  assert.equal(calls.removeTempDiffDir?.length, 1, "the tmp dir must be removed even on success");
+});
+
+test("W1-T4084 main: a BLOCKED gate propagates its exit code and names the remedy", () => {
+  const { deps, calls, errors } = fakeDeps({ runDiffCoverageGate: () => ({ status: 1 }) });
+  const status = main(["test/example.test.ts"], deps);
+  assert.equal(status, 1);
+  assert.ok(errors.some((e) => e.includes("add a test file")));
+  assert.equal(calls.removeTempDiffDir?.length, 1, "the tmp dir must still be removed on a BLOCKED gate");
 });

@@ -174,7 +174,52 @@ runs, on the same inputs CI would produce.
   --dry-run      print the node invocation and diff base this would use; run nothing
 `;
 
-export function main(argv) {
+/**
+ * Every I/O `main` performs, as one injectable seam -- so a test can drive every branch (test
+ * failure, missing/empty lcov, a blocking gate, an empty diff) without actually spawning an
+ * instrumented suite or a real git process. Defaults reproduce the real CLI byte for byte; only
+ * a test overrides them.
+ */
+export function defaultMainDeps() {
+  return {
+    readCiYaml: () => readFileSync(join(REPO_ROOT, CI_YAML_RELATIVE_PATH), "utf8"),
+    ensureRawCoverageDir: () => mkdirSync(join(REPO_ROOT, "coverage", "raw"), { recursive: true }),
+    runInstrumentedTests: (nodeArgs) =>
+      spawnSync(process.execPath, nodeArgs, {
+        stdio: "inherit",
+        cwd: REPO_ROOT,
+        env: { ...process.env, NODE_V8_COVERAGE: "coverage/raw" },
+      }),
+    statLcov: (lcovPath) => statSync(join(REPO_ROOT, lcovPath)),
+    computeMergeBaseDiff: (base, head) => mergeBaseDiff({ cwd: REPO_ROOT, base, head }),
+    runDiffCoverageGate: (lcovPath, diffPath) =>
+      spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath, "--diff", diffPath], {
+        stdio: "inherit",
+        cwd: REPO_ROOT,
+      }),
+    makeTempDiffDir: () => mkdtempSync(join(tmpdir(), "rmd-diff-coverage-local-")),
+    writeDiffFile: (path, text) => writeFileSync(path, text),
+    removeTempDiffDir: (path) => rmSync(path, { recursive: true, force: true }),
+    log: console.log,
+    error: console.error,
+  };
+}
+
+export function main(argv, deps = {}) {
+  const {
+    readCiYaml: readCi,
+    ensureRawCoverageDir,
+    runInstrumentedTests,
+    statLcov,
+    computeMergeBaseDiff,
+    runDiffCoverageGate,
+    makeTempDiffDir,
+    writeDiffFile,
+    removeTempDiffDir,
+    log,
+    error,
+  } = { ...defaultMainDeps(), ...deps };
+
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -187,59 +232,54 @@ export function main(argv) {
   });
 
   if (values.help) {
-    console.log(HELP_TEXT);
+    log(HELP_TEXT);
     return 0;
   }
 
   const testFiles = positionals;
   if (testFiles.length === 0) {
-    console.error("diff-coverage-local: no test files given.\n\n" + HELP_TEXT);
+    error("diff-coverage-local: no test files given.\n\n" + HELP_TEXT);
     return 1;
   }
 
   let flags;
   try {
-    flags = extractCoverageFlags(readCiYaml());
+    flags = extractCoverageFlags(readCi());
   } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err));
     return 1;
   }
   const nodeArgs = [...flags, ...testFiles];
 
   if (values["dry-run"]) {
-    console.log(`diff-coverage-local: would run: NODE_V8_COVERAGE=coverage/raw node ${nodeArgs.join(" ")}`);
-    console.log(`diff-coverage-local: would then check: git diff ${mergeBaseDiffArgs(values.base, "HEAD")[1]}`);
+    log(`diff-coverage-local: would run: NODE_V8_COVERAGE=coverage/raw node ${nodeArgs.join(" ")}`);
+    log(`diff-coverage-local: would then check: git diff ${mergeBaseDiffArgs(values.base, "HEAD")[1]}`);
     return 0;
   }
 
-  mkdirSync(join(REPO_ROOT, "coverage", "raw"), { recursive: true });
-  console.log(
+  ensureRawCoverageDir();
+  log(
     `diff-coverage-local: running the instrumented suite exactly as ci.yml's "${COVERAGE_STEP_NAME_PREFIX}" ` +
       `step does, over ${testFiles.length} file(s)...`,
   );
-  const testResult = spawnSync(process.execPath, nodeArgs, {
-    stdio: "inherit",
-    cwd: REPO_ROOT,
-    env: { ...process.env, NODE_V8_COVERAGE: "coverage/raw" },
-  });
+  const testResult = runInstrumentedTests(nodeArgs);
 
   // THE ONE THING CHECKED BEFORE THE TEST EXIT CODE, mirroring ci.yml's own step: no lcov means
   // the gate below has nothing to read, which is the vacuous pass this whole script exists to
   // prevent.
-  const lcovAbsolutePath = join(REPO_ROOT, values.lcov);
   let lcovStat;
   try {
-    lcovStat = statSync(lcovAbsolutePath);
+    lcovStat = statLcov(values.lcov);
   } catch {
-    console.error("diff-coverage-local: no lcov produced -- the coverage gate below would have nothing to read. FAILING.");
+    error("diff-coverage-local: no lcov produced -- the coverage gate below would have nothing to read. FAILING.");
     return 1;
   }
   if (lcovStat.size === 0) {
-    console.error("diff-coverage-local: lcov produced but empty -- FAILING.");
+    error("diff-coverage-local: lcov produced but empty -- FAILING.");
     return 1;
   }
   if (testResult.status !== 0) {
-    console.error(
+    error(
       `diff-coverage-local: the instrumented suite exited ${testResult.status} -- lcov was still checked ` +
         "above; this is a real test failure, not necessarily a coverage gap.",
     );
@@ -248,34 +288,30 @@ export function main(argv) {
 
   let diffText;
   try {
-    diffText = mergeBaseDiff({ cwd: REPO_ROOT, base: values.base, head: "HEAD" });
+    diffText = computeMergeBaseDiff(values.base, "HEAD");
   } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err));
     return 1;
   }
   if (diffText.trim() === "") {
-    console.log(`diff-coverage-local: OK -- ${values.base}...HEAD is empty, nothing to check.`);
+    log(`diff-coverage-local: OK -- ${values.base}...HEAD is empty, nothing to check.`);
     return 0;
   }
 
-  const tmpDir = mkdtempSync(join(tmpdir(), "rmd-diff-coverage-local-"));
+  const tmpDir = makeTempDiffDir();
   const diffPath = join(tmpDir, "pr.diff");
   try {
-    writeFileSync(diffPath, diffText);
-    const gateResult = spawnSync(
-      process.execPath,
-      [join(REPO_ROOT, "scripts", "diff-coverage.mjs"), "--lcov", values.lcov, "--diff", diffPath],
-      { stdio: "inherit", cwd: REPO_ROOT },
-    );
+    writeDiffFile(diffPath, diffText);
+    const gateResult = runDiffCoverageGate(values.lcov, diffPath);
     if (gateResult.status !== 0) {
-      console.error(
+      error(
         "diff-coverage-local: see the gate output above -- for a missing SF record, add a test file " +
           "that exercises the named source file(s) to your <test files...> argument and re-run.",
       );
     }
     return gateResult.status ?? 1;
   } finally {
-    rmSync(tmpDir, { recursive: true, force: true });
+    removeTempDiffDir(tmpDir);
   }
 }
 
