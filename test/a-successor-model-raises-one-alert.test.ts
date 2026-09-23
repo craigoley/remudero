@@ -190,7 +190,7 @@ test("W1-T4080: an unchanged state is never re-alerted, but every reading is sti
 
 // ── Acceptance (3): a gated family is reported but never proposed for routing ────
 
-test("W1-T4080: a gated family is reported but never proposed for routing", () => {
+test("W1-T4080: a gated family is reported but never proposed", () => {
   // Astra has no routed predecessor at all (mounts.yaml deliberately never routes it) — it is
   // still found, because design (iv) reports a gated family unconditionally.
   const successors = findSuccessors(["gpt-6-astra"], ROUTED);
