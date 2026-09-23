@@ -1,0 +1,124 @@
+- id: W1-T4281
+  title: "CREATE learnings/ci-gate-lessons.yaml — W1-T3591's own grep-path-absent criterion names a remedy file the ci-learning rung never writes, so its stated fix, reached by a matched learnings entry, has nowhere to land"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "proof-debt:W1-T3591"
+  plan_refs: ["W1-T33", "W1-T2477", "W1-T3591"]
+  files: [learnings/ci-gate-lessons.yaml]
+  status: queued
+  attempts: 0
+  rationale: |
+    GROUNDED FROM SOURCE, not assumed. `src/lib/measurement-cadence.ts:2717` defines
+    `CI_LEARNING_LESSONS_FILE = "learnings/ci-gate-lessons.yaml"` as a deliberate CONCRETE path
+    (not the `learnings/*.yaml` glob `CI_LEARNING_REMEDY_SURFACE` otherwise names) — the module's
+    own comment states why: a `grep:` proof is a BASIC REGEX, so a glob would match nothing and the
+    criterion would degrade silently. `learnings/` holds exactly five committed shards today
+    (architecture.yaml, testing.yaml, platform.yaml, failures.yaml, ci.yaml — `learnings/index.json`'s
+    own key list; a directory listing confirms `ci-gate-lessons.yaml` is absent). Every "carry the
+    lesson" shard the ci-learning rung has ever filed declares `files: [learnings/ci-gate-lessons.yaml]`
+    and a `grep:` proof against it, and the file has never once been created — confirmed by grep across
+    six live shards (W1-T3589 ci-gate, W1-T3590 coverage-ratchet, W1-T3591 coverage-shard (4/4), W1-T3592
+    ci-gate, W1-T3593 coverage-ratchet, W1-T3594 squash-trailer-gate). `rmd proof-queue-audit`'s
+    `grep-path-absent` cause therefore fires on W1-T3591's own criterion 0, and `mintProofDebtProposals`
+    (measurement-cadence.ts:1343) turned that into the proposal this task ratifies. This task closes
+    ONLY W1-T3591's finding (`ci-learning:5318:coverage-shard (4/4)`); the five siblings above share the
+    identical target-file gap and are separate proof-debt proposals for separate ratifications — folding
+    them in here would make this one PR five unrelated CI-gate investigations.
+
+    EVIDENCE FOR THE ENTRY'S CONTENT, all grep-verified rather than guessed. W1-T3591's own `note:`
+    field lists every file its 16 repairs touched, MOST-REPAIRED-FIRST (`repairFiles`,
+    measurement-cadence.ts:2492/2617); the two names first — `src/run-task.ts` then
+    `scripts/mutation-relevant-paths.json` — are exactly what `classifyCiLearningAction`
+    (measurement-cadence.ts:2473) would classify "build" rather than "gate", matching the shard's own
+    recorded "Recommended action: build". `.github/workflows/ci.yml:654-684` names
+    `coverage-shard (${{ matrix.shard }}/4)` as the `coverage-ratchet` job's 4-way matrix, HEAVY band,
+    running the WHOLE suite under `--experimental-test-coverage` with a 39-minute per-shard timeout.
+    Separately filed plan records — each independently grep-confirmed against `coverage-shard` in
+    `plan/tasks.d/` — show this job has a MEASURED history of reds that are timing/infrastructure
+    flakes rather than diff defects: W1-T3345 (hung/cancelled shards), W1-T3194 (an artifact-upload
+    403-while-finalizing race), W1-T3307 (a day-cost clock-crossing bug), W1-T3599 (a 2ms hedge/timeout
+    margin race). The fact this task files must say what is measured — the repeat-repair-file pattern
+    and the known-flake caution — never a causal story none of the 16 PRs' diffs actually demonstrated.
+  design: |
+    (i) Create `learnings/ci-gate-lessons.yaml`, headed with a comment stating its OWN purpose,
+    distinct from the five W1-T33 subsystem shards: the ci-learning rung's dedicated remedy surface
+    (`CI_LEARNING_LESSONS_FILE`/`CI_LEARNING_REMEDY_SURFACE`, `src/lib/measurement-cadence.ts`) — one
+    concrete file, never a glob, because a `grep:` proof is a basic regex. Same entry schema every
+    other shard uses (`LearningEntry`, `src/lib/learnings.ts:109`): id/subsystem/lifecycle/files/fact/src
+    [/cited].
+
+    (ii) Add exactly ONE entry, for finding `ci-learning:5318:coverage-shard (4/4)`. Suggested shape —
+    the worker owns the final wording and should VERIFY against the 16 PRs' actual diffs if still
+    reachable rather than trusting this note alone:
+      - id: a kebab-slug naming the finding (e.g. `coverage-shard-repairs-cluster-on-run-task-and-mutation-paths`)
+      - subsystem: ci
+      - lifecycle: active
+      - files: [src/run-task.ts, scripts/mutation-relevant-paths.json] — the two paths W1-T3591's OWN
+        measured `repairFiles` ranking touched in more than one of the 16 repairs; this is what makes the
+        entry actually MATCHED (injected) for the tasks that keep tripping this gate, not decorative.
+      - fact: state what is measured — `coverage-shard (N/4)` runs the whole suite with coverage
+        instrumentation (ci.yml's 4-way matrix, 39-minute timeout) and has a documented history of
+        non-diff timing/infra reds (cite the sibling findings in the rationale above); THIS finding's own
+        16 repairs most often touched `src/run-task.ts` and `scripts/mutation-relevant-paths.json`.
+        Actionable guidance: run the full coverage-instrumented suite locally before opening a PR
+        touching either path, and check whether a red shard matches a KNOWN flake class before
+        diagnosing the diff as the cause.
+      - src: the literal string `ci-learning:5318:coverage-shard (4/4)` — satisfies the grep proof
+        verbatim, and is W1-T3591's own `origin:`.
+      - cited: the date this entry is written.
+
+    (iii) Regenerate `learnings/index.json` (`npm run learnings-index`, i.e.
+    `scripts/generate-learnings-index.mjs`) — it is machine-generated, and `test/learnings-index.test.ts`
+    asserts the REAL committed index stays fresh on every PR; a hand-edited or stale index fails that
+    suite.
+
+    (iv) DO NOT touch `CI_LEARNING_LESSONS_FILE`, the ci-learning rung itself, or any of the five
+    sibling shards still targeting `learnings/ci-gate-lessons.yaml` (W1-T3589/T3590/T3592/T3593/T3594)
+    — each names a DIFFERENT finding id and is its own proof-debt proposal awaiting its own
+    ratification. This task adds exactly one entry.
+  acceptance:
+    - claim: "W1-T3591's own criterion 0 — the grep-path-absent finding proof-debt:W1-T3591 names — resolves against the checkout: ci-learning:5318:coverage-shard (4/4) is reached by a matched learnings entry, not prose no dispatched worker reads"
+      proof: "grep: ci-learning:5318:coverage-shard (4/4) in learnings/ci-gate-lessons.yaml"
+    - claim: "learnings/ci-gate-lessons.yaml is a schema-valid shard the corpus loader merges cleanly alongside the five existing shards, with no duplicate id"
+      proof: "unit test: test/learnings.test.ts"
+    - claim: "learnings/index.json stays fresh (matches a real regeneration) once the new shard lands, so the entry is reachable by the same lookup every injection match uses"
+      proof: "unit test: test/learnings-index.test.ts"
+    - claim: "the entry's files: list names the two paths this finding's own repairs touched more than once, src/run-task.ts and scripts/mutation-relevant-paths.json, so a task whose diff touches them is the one this lesson actually reaches"
+      proof: "grep: src/run-task.ts in learnings/ci-gate-lessons.yaml"
+  falsifier: |
+    RE-CHECK BEFORE BUILDING: `grep -rn "ci-learning:5318:coverage-shard (4/4)" learnings/` — if this
+    already resolves (the file now exists with this entry, landed a different way), this task is
+    CONSUMED and should close without a diff rather than duplicate the entry or mint a second one for
+    the same finding.
+
+    AND THE FACT MUST NOT INVENT A ROOT CAUSE THIS SESSION DID NOT MEASURE. The coverage-shard (N/4)
+    job has a documented history of reds that are infrastructure/timing flakes, not diff defects
+    (W1-T3345 cancelled/hung shards, W1-T3194 an artifact-upload 403-while-finalizing race, W1-T3307 a
+    day-cost clock-crossing bug, W1-T3599 a 2ms hedge/timeout margin race — all grep-confirmed against
+    `coverage-shard` in `plan/tasks.d/`). A fact claiming "this gate fails because <specific mechanism>"
+    where that mechanism is not evidenced by the 16 PRs this finding actually names must not ship;
+    state the measured repeat-repair-file pattern and the known-flake caution, not a fabricated
+    diagnosis.
+
+    AND THE INDEX MUST BE REGENERATED BY THE SCRIPT, NEVER HAND-EDITED. `learnings/index.json` is
+    machine-generated (`npm run learnings-index`); a hand-written index entry that happens to look
+    right will diverge from a real regeneration, and `test/learnings-index.test.ts`'s freshness check
+    (over the REAL committed corpus, the same one CI runs on every PR) will catch it.
+  note: |
+    Filed 2026-09-15 by Architect ratification of proof-debt:W1-T3591 (rmd proof-queue-audit's
+    grep-path-absent finding on W1-T3591's own criterion 0). Grounded from source before drafting:
+    `learnings/` holds exactly five committed shards today — architecture.yaml, testing.yaml,
+    platform.yaml, failures.yaml, ci.yaml (learnings/index.json's own key list; a directory listing
+    confirms `ci-gate-lessons.yaml` absent). `CI_LEARNING_LESSONS_FILE` (src/lib/measurement-cadence.ts:2717)
+    names it as a deliberate concrete path, never a glob. SIX shards currently target it with an
+    unresolved grep: W1-T3589 (ci-gate), W1-T3590 (coverage-ratchet), W1-T3591 (coverage-shard (4/4),
+    THIS task's referent), W1-T3592 (ci-gate), W1-T3593 (coverage-ratchet), W1-T3594
+    (squash-trailer-gate) — each is its own finding id and its own proof-debt proposal; this task
+    deliberately resolves ONLY W1-T3591's, per one-concern-per-PR. The other five remain open proof-debt
+    for separate ratification passes; the first of those to land will find the shared file this task
+    creates already in place and need only append its own entry.
