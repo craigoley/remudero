@@ -105,6 +105,9 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
+      // not fleet state, and not reachable from the console's remote HTTP client.
+      "memory-lint",
       "pr-owner",
       "hand-runs",
       "ci-failures",
