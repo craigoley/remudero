@@ -303,6 +303,7 @@
   "src/lib/operator-agent-outcomes.ts": 250,
   "src/lib/operator-agent-proof.ts": 250,
   "src/lib/operator-agent.ts": 250,
+  "src/lib/operator-identity-file.ts": 250,
   "src/lib/operator-merge-hold.ts": 14,
   "src/lib/operator-message.ts": 90,
   "src/lib/operator-notes.ts": 77,
