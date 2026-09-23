@@ -191,12 +191,10 @@ function makeWorld(): World {
     github: { prView: () => null },
     statusGithub,
     ratify: { approve: () => undefined, reframe: () => undefined },
-    inboxClassify: {
-      mainSha: () => sha.value,
-      grepAnchor: (_root, ref, anchor) => {
-        greps.push({ ref, anchor });
-        return grepAnswer(anchor);
-      },
+    inboxMainSha: () => sha.value,
+    inboxGrepAnchor: (_root, ref, anchor) => {
+      greps.push({ ref, anchor });
+      return grepAnswer(anchor);
     },
   };
   return { root, stateDir, planPath, ledgerPath, plan: loadPlan(planPath), merged, sha, greps, deps };
@@ -449,7 +447,7 @@ test("GET /v1/inbox classifies through the memo", async () => {
   const stamped: string[] = [];
   const deps: PanelGraphDeps = {
     ...w.deps,
-    inboxClassify: { ...w.deps.inboxClassify, statFile: (path) => (stamped.push(path), `${readFileSync(path, "utf8").length}`) },
+    inboxStatFile: (path) => (stamped.push(path), `${readFileSync(path, "utf8").length}`),
   };
   const route = buildPanelGraphRoutes(deps, () => w.plan).find((r) => r.method === "GET" && r.path === "/v1/inbox");
   assert.ok(route);
@@ -534,7 +532,7 @@ test("with no sha seam the memo keys on the ref files it reads", () => {
   const w = makeWorld();
   mkdirSync(join(w.root, ".git", "refs", "remotes", "origin"), { recursive: true });
   writeFileSync(join(w.root, ".git", "refs", "remotes", "origin", "main"), `${SHA_A}\n`);
-  const deps: PanelGraphDeps = { ...w.deps, inboxClassify: { grepAnchor: w.deps.inboxClassify?.grepAnchor } };
+  const deps: PanelGraphDeps = { ...w.deps, inboxMainSha: undefined, inboxStatFile: undefined, inboxListDir: undefined };
   const first = classifyAllProposalsMemo(deps, () => w.plan);
   assert.equal(classifyAllProposalsMemo(deps, () => w.plan).classifications, first.classifications);
   writeFileSync(join(w.root, ".git", "refs", "remotes", "origin", "main"), `${SHA_B}\n`);

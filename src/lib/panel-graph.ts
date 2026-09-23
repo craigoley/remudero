@@ -148,8 +148,15 @@ export interface PanelGraphDeps {
   /** Injectable `Policy` for the daily-cost-ceiling routes (W1-T364), defaulting to
    *  `loadDefaultPolicy()` — the same seam `account-usage.ts` and run-task.ts already offer. */
   policy?: Policy;
-  /** W1-T4261: the inbox classifier's I/O seams ({@link InboxClassifySeams}); omitted in production. */
-  inboxClassify?: InboxClassifySeams;
+  /** W1-T4261: the inbox classifier's I/O, injectable for a hermetic test; production passes none. A change
+   *  stamp for one input file (size, mtime, inode), undefined when absent. */
+  inboxStatFile?: (path: string) => string | undefined;
+  /** W1-T4261: a directory's entry names (the plan's shard directory), undefined when absent. */
+  inboxListDir?: (path: string) => string[] | undefined;
+  /** W1-T4261: `origin/main`'s sha, undefined when unresolvable (which disables every reuse). */
+  inboxMainSha?: (root: string) => string | undefined;
+  /** W1-T4261: one evidence-anchor grep at `ref`; defaults to {@link gitGrepAnchorTrue}. */
+  inboxGrepAnchor?: (root: string, ref: string, anchor: EvidenceAnchor) => boolean;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -1354,22 +1361,6 @@ export interface ClassifiedInbox {
   ledgerLines: LedgerLines;
 }
 
-/**
- * W1-T4261 — the inbox classifier's I/O, injectable so a test can drive the memo hermetically. Every seam is
- * optional and production passes none: real `statSync`/`readdirSync`, {@link readOriginMainSha} off the repo's ref
- * files, and {@link gitGrepAnchorTrue}.
- */
-export interface InboxClassifySeams {
-  /** A change stamp for one input file (size, mtime, inode), or undefined when it is absent. */
-  statFile?: (path: string) => string | undefined;
-  /** A directory's entry names, or undefined when it is absent — the plan's shard directory. */
-  listDir?: (path: string) => string[] | undefined;
-  /** `origin/main`'s commit sha, or undefined when it cannot be resolved (which disables every reuse). */
-  mainSha?: (root: string) => string | undefined;
-  /** One evidence-anchor grep at `ref`. */
-  grepAnchor?: (root: string, ref: string, anchor: EvidenceAnchor) => boolean;
-}
-
 function statStamp(path: string): string | undefined {
   try {
     const s = statSync(path, { throwIfNoEntry: false });
@@ -1425,7 +1416,7 @@ function inboxClassifyState(deps: PanelGraphDeps): InboxClassifyState {
 
 /** The anchor-grep predicate one pass hands every proposal: answered per main commit from the deps' cache. */
 function anchorGrepFor(deps: PanelGraphDeps, sha: string | undefined): (anchor: EvidenceAnchor) => boolean {
-  const grep = deps.inboxClassify?.grepAnchor ?? gitGrepAnchorTrue;
+  const grep = deps.inboxGrepAnchor ?? gitGrepAnchorTrue;
   const cache = inboxClassifyState(deps).grep;
   return (anchor) => cachedAnchorGrep(cache, sha, anchor, (ref, a) => grep(deps.root, ref, a));
 }
@@ -1504,7 +1495,7 @@ function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: strin
   const plan = loadPlanFn(deps.planPath);
   const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
   const ledgerLines = readLedgerLines(deps.ledgerPath);
-  const sha = (deps.inboxClassify?.mainSha ?? readOriginMainSha)(deps.root);
+  const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
   const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha));
   return { registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines };
 }
@@ -1546,11 +1537,10 @@ interface InboxFingerprint {
  * unrelated row.
  */
 function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan): InboxFingerprint {
-  const seams = deps.inboxClassify ?? {};
-  const stat = seams.statFile ?? statStamp;
+  const stat = deps.inboxStatFile ?? statStamp;
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
   const stamps = [registryPath, draftsPath, inflightPath, adoptionPath].map((p) => stat(p) ?? null);
-  const sha = (seams.mainSha ?? readOriginMainSha)(deps.root);
+  const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
 
   const ledgerStamp = stat(deps.ledgerPath) ?? null;
   if (state.ledger === undefined || state.ledger.stamp !== ledgerStamp) {
@@ -1565,7 +1555,7 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
   if (snapshot !== undefined) {
     plan = snapshot;
   } else {
-    planKey = planFilesStamp(deps.planPath, stat, seams.listDir ?? listDirOrUndefined);
+    planKey = planFilesStamp(deps.planPath, stat, deps.inboxListDir ?? listDirOrUndefined);
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : loadPlan(deps.planPath);
   }
