@@ -148,6 +148,8 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { startGarden, type GardenCheckout } from "./lib/gardener.js";
+import { planGardenSpec } from "./lib/plan-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
@@ -29977,6 +29979,39 @@ export function plainInboxWriter(
   }
 }
 
+/** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. A PR for
+ *  operator review opens as a DRAFT, which GitHub refuses to merge until a person marks it ready. */
+export function gardenCheckout(opts: {
+  name: string;
+  repoDir: string;
+  worktreesRoot: string;
+  owner: string;
+  repo: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  fetcher?: GhApiFetcher;
+  clock?: Clock;
+}): GardenCheckout {
+  const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
+  const root = join(opts.worktreesRoot, branch);
+  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return {
+    root,
+    land: ({ paths, title, body, review }) => {
+      git("add", "--", ...paths);
+      git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
+      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+      assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+      const fetcher = opts.fetcher ?? ghJson;
+      const pr = { title, body, head: branch, base: "main" };
+      return review === "operator"
+        ? createPlanPrRest((args) => fetcher([...args, "-F", "draft=true"]), opts.owner, opts.repo, pr).prUrl
+        : createPlanPrRest(fetcher, opts.owner, opts.repo, pr).prUrl;
+    },
+    dispose: () => worktreeRemove(opts.repoDir, root),
+  };
+}
+
 export function knowledgeGardenWorkspace(opts: {
   repoDir: string;
   worktreesRoot: string;
@@ -29986,27 +30021,16 @@ export function knowledgeGardenWorkspace(opts: {
   fetcher?: GhApiFetcher;
   clock?: Clock;
 }): GardenWorkspace {
-  const branch = `knowledge-garden-${(opts.clock ?? systemClock).now()}`;
-  const root = join(opts.worktreesRoot, branch);
-  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const checkout = gardenCheckout({ ...opts, name: "knowledge" });
   return {
-    root,
+    ...checkout,
     refreshAssertions: () => {
-      execFileSync(process.execPath, [join(root, "scripts", "learnings-assert-check.mjs"), "--dir", join(root, "learnings")], { cwd: root, stdio: "pipe" });
-      return git("status", "--porcelain", "--", "learnings")
+      execFileSync(process.execPath, [join(checkout.root, "scripts", "learnings-assert-check.mjs"), "--dir", join(checkout.root, "learnings")], { cwd: checkout.root, stdio: "pipe" });
+      return execFileSync("git", ["-C", checkout.root, "status", "--porcelain", "--", "learnings"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
         .split("\n")
         .filter(Boolean)
         .map((line) => line.slice(3));
     },
-    land: ({ paths, title, body }) => {
-      git("add", "--", ...paths);
-      git("commit", "-q", "-m", `${title}\n\nTended by the knowledge gardener (W1-T4095).`);
-      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
-      assertLiveWriteAllowed("gh-pr-create", `opening a knowledge garden PR against ${opts.owner}/${opts.repo}`);
-      return createPlanPrRest(opts.fetcher ?? ghJson, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
-    },
-    dispose: () => worktreeRemove(opts.repoDir, root),
   };
 }
 
@@ -30979,6 +31003,19 @@ export async function daemonCommand(
                 prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
                 log,
               },
+              // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
+              gardens: [
+                (intervalMs: number) => {
+                  const planGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "plan", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  return startGarden(planGardenSpec(planGarden), planGarden, intervalMs);
+                },
+              ],
             }
           : {}),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),

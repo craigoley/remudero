@@ -236,6 +236,49 @@ function matchCount(entry: LearningEntry, taskFiles: string[]): number {
   return taskFiles.filter((f) => globs.some((g) => g.test(f))).length;
 }
 
+/** One ACTIVE entry carrying at least one `files:` glob that matches no tracked path. */
+export interface UnreachableLearning {
+  id: string;
+  deadGlobs: string[];
+  /** Every glob is dead: no task file can ever select this entry by path. */
+  unreachable: boolean;
+}
+
+/**
+ * W1-T4240 — which active learnings name paths that do not exist. The matcher anchors each glob
+ * (`^…$`) with no directory-prefix rule, so a bare `test` matches only a file literally named
+ * `test`: on 2026-09-23, 17 of 160 globs were bare directories and four entries could never be
+ * injected, while keeping the Beta prior that hides them from the gardener's RETIRE class. Uses
+ * the SAME {@link globToRegExp} {@link selectLearnings} uses, so this census and selection cannot
+ * disagree about what a glob reaches. Superseded, quarantined and contested entries are skipped:
+ * they are never injected, so a dead glob on one costs nothing. An entry with NO globs is
+ * reachable only through `symbols` / `error_signatures`, so one carrying neither is unreachable.
+ *
+ * REPAIR A DEAD GLOB TO WHAT THE FACT IS ABOUT, NOT TO ITS WIDEST READING. Ranking counts file
+ * hits, so `test` -> `test/**` made four method lessons match ~80% of plan tasks and pushed 2,948
+ * selected entries out of 840 tasks (replayed over plan/ at 50de4b6a). Those four now carry
+ * `files: []` plus the symbols / error signatures their own text names (0.5-2% of tasks each).
+ */
+export function unreachableLearnings(entries: LearningEntry[], trackedPaths: readonly string[]): UnreachableLearning[] {
+  const out: UnreachableLearning[] = [];
+  for (const entry of entries) {
+    if (entry.lifecycle !== "active") continue;
+    if (entry.files.length === 0) {
+      // An absent list and an empty one both mean "no trigger": neither can select the entry.
+      const triggers = (entry.symbols ?? []).length + (entry.errorSignatures ?? []).length;
+      if (triggers === 0) out.push({ id: entry.id, deadGlobs: [], unreachable: true });
+      continue;
+    }
+    const deadGlobs = entry.files.filter((glob) => {
+      const re = globToRegExp(glob);
+      return !trackedPaths.some((path) => re.test(path));
+    });
+    if (deadGlobs.length === 0) continue;
+    out.push({ id: entry.id, deadGlobs, unreachable: deadGlobs.length === entry.files.length });
+  }
+  return out;
+}
+
 function stringList(e: Record<string, unknown>, key: string, id: string, sourceLabel: string): string[] | undefined {
   const value = e[key];
   if (value === undefined) return undefined;

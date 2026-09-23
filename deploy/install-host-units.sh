@@ -184,6 +184,8 @@ if [ -n "$INSTANCE_NAME" ]; then
       claude_dir) claude_dir="$value" ;;
       codex_dir) codex_dir="$value" ;;
       container_config_dir) container_config_dir="$value" ;;
+      # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
+      project|github_repo|retired) : ;;
       *) echo "install-host-units: FATAL -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
     esac
   done <<EOF

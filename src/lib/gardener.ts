@@ -18,7 +18,8 @@ import { sampleBeta, seededRandom } from "./knowledge-value.js";
  * A class is judged by ITS OWN metric ({@link GardenSpec.metric}), never one shared scalar: a closed PR
  * is a debit; after a merge, only a change in that metric beyond one standard error credits or debits
  * it. Each class has an off switch, `state/<NAME>_OFF-<class>`. A class that doctrine reserves to a
- * person declares `review` and its PR is landed for operator review, never for auto-merge.
+ * person declares `review` and its PR is landed for operator review, never for auto-merge; such a class
+ * is judged by the person's decision alone ({@link judgeGardenDecision}), not by a metric.
  */
 
 /** Successes out of trials: the evidence a class is judged on. */
@@ -86,8 +87,8 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   cheapFingerprint: () => string;
   inventory: () => I;
   fingerprint: (inventory: I) => string;
-  /** The evidence the given class is judged on, read from the current inventory. */
-  metric: (inventory: I, actionClass: C) => Outcome;
+  /** The evidence a class without `review` is judged on, read from the current inventory. */
+  metric?: (inventory: I, actionClass: C) => Outcome;
   /** Every action any class could take now. Called after the class draws, with the same rng. */
   candidates: (inventory: I, rng: () => number) => A[];
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
@@ -140,6 +141,23 @@ export function judgeGardenPending<C extends string>(state: GardenState<C>, now:
   if (after - before > se) return settle(true);
   if (before - after > se) return settle(false);
   return { state, verdict: "waiting" };
+}
+
+/** A class a person reviews is judged by that person: a merged PR credits it, a closed one debits it. */
+export function judgeGardenDecision<C extends string>(state: GardenState<C>, prState: PrState): { state: GardenState<C>; verdict: PendingVerdict } {
+  const pending = state.pending;
+  if (!pending) return { state, verdict: "none" };
+  if (prState !== "merged" && prState !== "closed") return { state, verdict: "waiting" };
+  const c = state.classes[pending.actionClass];
+  const credit = prState === "merged";
+  const classes = { ...state.classes, [pending.actionClass]: credit ? { ...c, alpha: c.alpha + 1 } : { ...c, beta: c.beta + 1 } };
+  return { state: { ...state, classes, pending: undefined }, verdict: credit ? "credit" : "debit" };
+}
+
+/** The evidence a metric-judged class is read on; a spec that leaves a class unreviewed must say how. */
+function metricOf<C extends string, I>(spec: { name: string; metric?: (inventory: I, actionClass: C) => Outcome }, inventory: I, actionClass: C): Outcome {
+  if (!spec.metric) throw new Error(`gardener ${spec.name}: class ${actionClass} has no review and the spec has no metric`);
+  return spec.metric(inventory, actionClass);
 }
 
 /**
@@ -195,7 +213,10 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
     return { ran: false };
   }
   if (state.pending) {
-    const judged = judgeGardenPending(state, spec.metric(inventory, state.pending.actionClass), deps.prState?.(state.pending.prUrl) ?? "unknown");
+    const prState = deps.prState?.(state.pending.prUrl) ?? "unknown";
+    const judged = spec.review?.[state.pending.actionClass]
+      ? judgeGardenDecision(state, prState)
+      : judgeGardenPending(state, metricOf(spec, inventory, state.pending.actionClass), prState);
     state = judged.state;
     if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
   }
@@ -229,7 +250,8 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   }
   deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null });
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
-  const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: spec.metric(inventory, acting) } : state.pending;
+  const baseline = (c: C): Outcome => (spec.review?.[c] ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
+  const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting) } : state.pending;
   writeAtomic(statePath, JSON.stringify({ ...state, pending, lastCheap: cheap, lastPass: { fingerprint } }, null, 2) + "\n");
   return { ran: true, plan, prUrl, scorecard };
 }
