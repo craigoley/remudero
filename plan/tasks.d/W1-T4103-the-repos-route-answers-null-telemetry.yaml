@@ -14,6 +14,9 @@
     - src/lib/repo-dashboard-route.ts
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: chore/amend-W1-T1081-fold-satisfied -> file/console-resilience-core
+    (the id was minted from the operator's other open worktree in the same session).
   rationale: |
     READ 2026-09-23 on origin/main 3d3c61590: src/lib/repo-dashboard-route.ts serves /v1/repos
     and returns null for errorrate, last_run, queuedtasks, tokens7d, cost_7d, connected_at,

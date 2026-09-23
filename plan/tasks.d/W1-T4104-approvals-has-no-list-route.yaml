@@ -14,6 +14,9 @@
     - src/lib/operator-agent.ts
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: chore/amend-W1-T1081-fold-satisfied -> file/console-resilience-core
+    (the id was minted from the operator's other open worktree in the same session).
   rationale: |
     READ 2026-09-23: the console's /approvals route reads GET /v1/operator-agent/consequences.
     On origin/main 3d3c61590 the only consequence route registered in src/ is

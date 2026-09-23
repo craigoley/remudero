@@ -1,5 +1,5 @@
 - id: W1-T4102
-  title: "THE CONSOLE GOES DARK WHENEVER THE FLEET HOST IS BUSY — remudero-serve has no memory, CPU or disk priority, so a test-heavy hour swaps it out and its event loop stalls past the console's 5 s budget; protect serve's resources, bound concurrent test suites on the host, and publish serve's event-loop lag so the stall is visible before the console goes blank"
+  title: "THE CONSOLE GOES DARK WHENEVER THE FLEET HOST IS BUSY — remudero-serve has no memory or CPU priority and the build daemons have no memory ceiling, so one worker's test fan-out swaps serve out and its event loop stalls past the console's 5 s budget; protect serve's memory and CPU, give every build daemon a memory ceiling that leaves serve's reserve free, and publish serve's event-loop lag and the host's pressure"
   repo: remudero
   depends_on: []
   priority: 1
@@ -10,71 +10,81 @@
   risk: high
   band_meaning: span
   origin: "operator-report#console-not-working-2026-09-23"
-  plan_refs: ["W1-T999", "W1-T4103"]
+  plan_refs: ["W1-T999", "W1-T4103", "W1-T4105", "W1-T4106"]
   files:
     - deploy/serve-container.sh
     - deploy/recycle-container.sh
-    - src/lib/serve.ts
+    - deploy/resource-policy.sh
     - src/lib/daemon-health.ts
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: chore/amend-W1-T1081-fold-satisfied -> file/console-resilience-core
+    (the id was minted from the operator's other open worktree in the same session).
   rationale: |
     OPERATOR REPORT 2026-09-23: "the console at app.remudero.com is not working well. Most of the
     tabs are unavailable." MEASURED that night on the fleet host, not inferred from the console:
 
     (1) THE CONSOLE'S FAILURES ARE ONE TIMEOUT. Fetching all 23 console routes from a signed-in
         session, 15 rendered an unavailable state, and their wall-clock clustered at 5.1-5.9 s and
-        10.2-10.8 s — one or two sequential reads each hitting the console's 5 s abort
-        (REQUEST_TIMEOUT_MS in the console's lib/rmd-control.ts). The Board read "This operation
-        was aborted".
+        10.2-10.8 s — one or two sequential reads each hitting the console's 5 s abort.
 
-    (2) THE DAEMON WAS NOT DOWN — ITS EVENT LOOP WAS STALLED. Sampled from inside remudero-serve
-        every 2 s for a minute, a bare GET /v1/status (answered 401, so no work beyond auth)
-        took 0.0008 s at best and 1.0, 1.5, 2.0, 2.8, 3.3, 3.5 and 8.0 s at worst. The round
-        before that took 20 s for every route. Serve itself sat at 49-148% CPU.
+    (2) THE DAEMON WAS NOT DOWN — SERVE'S EVENT LOOP WAS STALLED. Sampled from inside
+        remudero-serve every 2 s for a minute, a bare GET /v1/status (answered 401, no work beyond
+        auth) took 0.0008 s at best and 1.0-8.0 s at worst; the round before took 20 s.
 
-    (3) THE HOST WAS SWAP-THRASHING. 8 cores, 15 GiB RAM: load average 41.8, io PSI some=92% /
-        full=62% (avg10), 37-45 processes blocked on I/O, 73-80% iowait, 5.3 GiB swapped to
-        /mnt/scratch/swapfile with si up to 17 MB/s. The load was ~20 concurrent
-        `node --test` coverage processes (a PR sweep) beside a 7.2 GiB remudero-daemon.
+    (3) THE HOST WAS SWAP-THRASHING, AND ONE WORKER DID IT. 8 cores, 15.6 GiB: load 38-42, io PSI
+        some 62-92%, 37-45 processes blocked on I/O, 5.3-8 GiB swapped. The process tree traced
+        to ONE fix-rung worker (Sonnet, worktree sweep-W1-T4079-1790128037477) that hand-wrote
+        four coverage shards (`--test-reporter-destination=/tmp/cov/lcov_s1.info` .. `_s4`) and
+        ran them in parallel from its Bash tool: four `node --test` parents, each running the
+        default ~7 test files at once, 250 MB-1 GB apiece, for 45+ minutes — inside the same
+        container as a 760 MB daemon, beside serve.
 
-    (4) NO CONTAINER HAS ANY RESOURCE POLICY. `docker inspect` on remudero-serve,
-        remudero-daemon, remudero-console-daemon and remudero-site-daemon: Memory=0,
-        MemoryReservation=0, NanoCpus=0, CpuShares=0, BlkioWeight=0. The console's only backend
-        competes on equal terms with every test worker, so it is the first thing a burst pages
-        out.
+    (4) NOTHING CONTAINS IT. `docker inspect` on remudero-serve, remudero-daemon,
+        remudero-console-daemon and remudero-site-daemon: Memory=0, MemoryReservation=0,
+        CpuShares=0. Serve's cgroup memory.low reads 0. So a burst inside ANY build container is
+        paid for by whichever pages the kernel reclaims first — and serve, idle between console
+        reads, is the easiest to reclaim.
+
+    (5) TWO LEVERS MEASURED AS NO-OPS, SO THIS TASK DOES NOT USE THEM. Every host disk runs the
+        `none`/`mq-deadline` scheduler, where cgroup v2 io.weight (docker --blkio-weight) has no
+        effect. And Node 22 refuses `--test-concurrency` in NODE_OPTIONS ("is not allowed in
+        NODE_OPTIONS", exit 9), so an environment variable cannot bound what a worker types.
   design: |
-    Three parts, each independently useful:
+    The boundary that holds no matter what a worker runs is the container's cgroup:
 
-    (a) PRIORITY FOR SERVE. serve-container.sh launches serve with a memory reservation
-        (cgroup v2 memory.low — its working set is protected from reclaim), a higher
-        --cpu-shares and --blkio-weight than the daemons. recycle-container.sh gives the build
-        daemons a lower cpu/blkio weight. No hard memory LIMIT on serve: an OOM-kill of the
-        console backend is worse than a slow one. Values are named constants with the measured
-        serve RSS (~1.0-1.2 GiB) as the reservation's basis.
+    (a) deploy/resource-policy.sh (new, sourced by both launchers) derives the flags from the
+        host's MemTotal: SERVE_MEMORY_RESERVE (1536 MiB — serve's measured RSS is 1.0-1.2 GiB),
+        HOST_RESERVE (serve's reserve plus 2 GiB for the OS, cloudflared and the small daemons),
+        and a BUILD_MEMORY_CEILING = MemTotal - HOST_RESERVE. It prints the inputs it used.
+    (b) serve-container.sh launches serve with --memory-reservation=SERVE_MEMORY_RESERVE (cgroup
+        v2 memory.low: its working set is not reclaimed while anything else is reclaimable),
+        --cpu-shares 4096 and --oom-score-adj -500. No hard memory limit on serve: an OOM-killed
+        console backend is worse than a slow one.
+    (c) recycle-container.sh launches every build daemon instance with
+        --memory=BUILD_MEMORY_CEILING, a bounded --memory-swap, and --cpu-shares 512. A runaway
+        fan-out now pages its OWN container's memory and, at the ceiling, the kernel OOM-kills
+        inside that container — the largest test runner, not serve.
+    (d) /v1/daemon-health carries serve's event-loop lag (perf_hooks.monitorEventLoopDelay p50/p99
+        over the last minute) and the host's cpu/io/memory PSI, each "unknown" when unreadable.
 
-    (b) BOUND THE TEST FAN-OUT. Sweeps and worker preflights on the host pass a
-        --test-concurrency derived from host cores and free memory, so one PR sweep cannot
-        start 20 suites at once. The bound is logged with the inputs it was computed from.
-
-    (c) MAKE THE STALL VISIBLE. serve measures its own event-loop lag
-        (perf_hooks.monitorEventLoopDelay) and /v1/daemon-health carries p50/p99 over the last
-        minute plus the host's io/memory PSI. The console can then say "the host is under heavy
-        disk load" instead of "unavailable".
-
-    Apply (a) through the existing graceful recycle path (rmd deploy marker → deploy-run →
-    recycle-container.sh), never a hand `docker update`.
+    Applied through the established graceful path (rmd deploy marker → deploy-run →
+    recycle-container.sh / serve-container.sh), never a hand `docker update`. The per-worker
+    bound on parallel suites is W1-T4106; abandoning a fix whose PR head has moved is W1-T4105.
   acceptance:
-    - claim: "serve is launched with a memory reservation and higher cpu and blkio weight than the daemons, and no hard memory limit"
-      proof: "unit test: serve is launched with protected memory and a higher cpu and io weight than the daemons"
-    - claim: "a host test run is bounded by a concurrency derived from cores and free memory"
-      proof: "unit test: the host test fan-out is bounded by cores and free memory"
+    - claim: "serve is launched with protected memory and a higher cpu weight than the daemons, and no hard memory limit"
+      proof: "unit test: serve is launched with protected memory and a higher cpu weight than the daemons"
+    - claim: "every build daemon is launched with a memory ceiling that leaves the host reserve free"
+      proof: "unit test: every build daemon is launched with a memory ceiling that leaves the host reserve free"
+    - claim: "the policy derives its numbers from the host's own memory and prints the inputs"
+      proof: "unit test: the resource policy derives its ceiling from the host's memory and prints its inputs"
     - claim: "daemon health reports serve's event-loop lag and the host's pressure"
       proof: "unit test: daemon health carries serve event-loop lag and host pressure"
     - claim: "a pressure reading the host cannot provide is reported unknown, never zero"
       proof: "unit test: an unreadable pressure file reads unknown, not zero"
   falsifier: |
-    Re-run the one-minute sample from (2) during a PR sweep after this lands. If /v1/status p99 is
-    still above 2 s while serve's reported loop lag is low, the stall is not starvation and this
-    task fixed the wrong thing; the next suspect is serve's own board prewarm on the event loop
-    (its 49-148% CPU), which W1-T999 already paces.
+    Re-run the one-minute sample from (2) during a PR sweep after the recycle. If /v1/status p99
+    is still above 2 s while serve's cgroup shows memory.low set and its reported loop lag is
+    low, the stall is not starvation and the next suspect is serve's own board prewarm on the
+    event loop, which W1-T999 paces.
