@@ -5202,6 +5202,64 @@ export function selectBaseCausedRelease(
   return oldestActivityFirst(eligible, now);
 }
 
+/** W1-T4351 — main's LATEST observed run, read back from the main-health rung's own
+ *  `main.health.observed` row (it runs before every full pass), so no second GitHub read. */
+export interface MainLatestRun {
+  sha: string;
+  state: string;
+  failingChecks: readonly string[];
+}
+
+export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[]): MainLatestRun | undefined {
+  let latest: MainLatestRun | undefined;
+  for (const line of lines) {
+    if (line.step !== "main.health.observed" || typeof line.sha !== "string" || typeof line.state !== "string") continue;
+    const failing = Array.isArray(line.failing_checks) ? line.failing_checks.filter((n): n is string => typeof n === "string") : [];
+    latest = { sha: line.sha, state: line.state, failingChecks: failing };
+  }
+  return latest;
+}
+
+export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
+export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
+
+/** Per `pr@head`: the check a prior pass stood down as a base red, and whether its one refresh was
+ *  already spent. Together they bound the lane to one record and one refresh per head. */
+export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>[]): {
+  stoodDown: Map<string, string>;
+  refreshed: Set<string>;
+} {
+  const stoodDown = new Map<string, string>();
+  const refreshed = new Set<string>();
+  for (const line of lines) {
+    if (typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
+    const key = `${line.pr_number}@${line.head_sha}`;
+    if (line.step === BASE_RED_STOOD_DOWN_STEP && typeof line.check_name === "string") stoodDown.set(key, line.check_name);
+    if (line.step === BASE_RED_REFRESH_STEP) refreshed.add(key);
+  }
+  return { stoodDown, refreshed };
+}
+
+export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
+
+/** W1-T4351 — a failing check main's latest run ALSO fails is a base red that no fix worker can
+ *  commit away. Wait while main is red (or not yet green after a recorded base red), refresh the
+ *  branch once main is green, and only after that one refresh fall back to the PR's own lane. */
+export function decideBaseRed(
+  pr: OpenPrView,
+  main: MainLatestRun | undefined,
+  history: ReturnType<typeof baseRedHistoryFromLedger>,
+): BaseRedDecision {
+  if (!isBlockedCi(pr)) return { kind: "own" };
+  const names = (pr.ciFailures ?? []).map((failure) => failure.name);
+  const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
+  if (shared !== undefined) return { kind: "wait", check: shared };
+  const key = `${pr.prNumber}@${pr.headSha}`;
+  const recorded = history.stoodDown.get(key);
+  if (recorded === undefined || !names.includes(recorded) || history.refreshed.has(key)) return { kind: "own" };
+  return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+}
+
 export interface StaleBaseReleaseTarget {
   pr: OpenPrView;
   decision: RedBaseRefreshDecision;
@@ -8600,6 +8658,10 @@ export async function runSweep(
     mainTipSha === undefined
       ? undefined
       : selectBaseCausedRelease(openPrs, mainTipSha, lastBaseCausedTipFromLedger(ledgerLines), now);
+  // W1-T4351 — both folds read once per pass; `baseRedRefreshPr` holds this pass's ONE refresh.
+  const mainLatestRun = mainLatestRunFromLedger(ledgerLines);
+  const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
+  let baseRedRefreshPr: number | undefined;
   // W1-T2789 — unlike W1-T2620's cohort-wide release above, this is exact-path evidence for the
   // exhausted red population the disposition table would otherwise escalate before runFixRung
   // reaches its W1-T2671 pre-strike check. The write still rechecks live state and head below.
@@ -9000,6 +9062,16 @@ export async function runSweep(
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
     const pr = openPrs[prIndex];
     let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
+    // W1-T4351 — a positively classified plan filing has no implementation surface: every ci-log
+    // fix was refused "the task declares no files". Escalate naming the red instead (deduped per
+    // head like every escalation), never a worker strike that cannot produce a commit.
+    if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
+      disposition = "refused-escalate";
+      const red = (pr.ciFailures ?? []).map((failure) => failure.name).join(", ") || "a required check";
+      reason =
+        `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
+        `fix is dispatched; the plan violation needs a plan repair`;
+    }
     // W1-T3306: `deriveDisposition` has no ledger input, while capped proof grades live only on
     // `review.posted`. Route the exact capped-green arm refusal through the EXISTING fix rung;
     // its claim re-read and shared strike cap remain the sole spending boundary. An operator
@@ -9400,6 +9472,31 @@ export async function runSweep(
                     }
                   }
                 }
+                break;
+              }
+              // W1-T4351 — A RED MAIN ALSO CARRIES IS NOT THIS DIFF'S. Stand down while main is red,
+              // then spend this pass's ONE update-branch press once main is green; never a fix.
+              const baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              if (baseRed.kind !== "own") {
+                acted = false;
+                const mainSha = mainLatestRun?.sha ?? "unread";
+                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha };
+                if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined) {
+                  baseRedRefreshPr = pr.prNumber;
+                  let outcome: string;
+                  try {
+                    outcome = await deps.updateBranch(pr);
+                  } catch (e) {
+                    outcome = `error: ${String((e as Error)?.message ?? e)}`;
+                  }
+                  appendLine(deps.ledgerPath, { ...row, step: BASE_RED_REFRESH_STEP, outcome });
+                  standDownReason = `base red: ${baseRed.check} failed on main too; main is green at ${mainSha}, so the branch refresh was requested (${outcome}) — no fix dispatched`;
+                  break;
+                }
+                if (!baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) appendLine(deps.ledgerPath, { ...row, step: BASE_RED_STOOD_DOWN_STEP });
+                standDownReason = baseRed.kind === "refresh"
+                  ? `base red: ${baseRed.check} failed on main too; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
+                  : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
                 break;
               }
               // W1-T1275 — CI-GATE'S OWN CONCLUDED VERDICT CAN GO STALE: a required sibling's
@@ -10393,7 +10490,7 @@ export async function runSweep(
   // conflict is REPORTED and skipped rather than retried this pass.
   if (!deps.dryRun && deps.updateBranch) {
     const target = selectUpdateBranchTarget(
-      openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber),
+      openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr),
       now,
       deps.inFlightTaskIds ?? new Set(),
       deps.staleGateWorkflowsByPr ?? new Map(),

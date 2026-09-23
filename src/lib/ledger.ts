@@ -537,6 +537,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "verdict.merged",
   "correction.provenance",
   "sweep.disposed",
+  // W1-T4351: sweep.ts's `decideBaseRed` reads main's latest run and each head's base-red record;
+  // rotated away, a red main carries reads as the PR's own and a fix worker is spent on it again.
+  "main.health.observed",
+  "sweep.base_red.stood_down",
+  "sweep.base_red.refresh",
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
   // W1-T3167's re-judge rung, which must not re-ask a settled question. "escalation.demoted" was
