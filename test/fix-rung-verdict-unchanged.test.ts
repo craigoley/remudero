@@ -437,6 +437,8 @@ test("runFixRung (criterion 6b): the REVIEW FALSE-BLOCK escape still fires exact
     deps: {
       spawn: async () => result({ sessionId: "s-1" }),
       waitForCiGreen: async () => "green",
+      // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+      fetchPrBody: async () => "PR body",
       runReview: async () => reReview,
       push: () => {},
       issues,

@@ -746,7 +746,8 @@ export function proofResolvabilityViolations(
     const head = trimmed.slice(0, 80) + (trimmed.length > 80 ? "…" : "");
     const remedy =
       dialect === "unit test"
-        ? 'name a literal test/*.test.ts path or an explicit ::test-name anchor (e.g. "test/foo.test.ts::exact title")'
+        ? 'name the whole test file ("unit test: test/foo.test.ts") or one exact test title on its own ' +
+          '("unit test: exact test title") — never the two joined by ::, which proof-dialect refuses'
         : 'name a pattern with an `in <path>` clause (e.g. "grep: TODO in src/lib/foo.ts")';
     violations.push({
       check: "proof-resolvability",

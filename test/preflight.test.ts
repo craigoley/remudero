@@ -11,6 +11,7 @@ import {
   type PreflightSpawn,
 } from "../src/lib/commit-message.js";
 import { main, preflightCommand } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 /** Sentinel thrown by the mocked `process.exit` so main()'s flat if-ladder cannot run on
  *  past the verb under test — the same shape test/w1-t143-diff-coverage.test.ts uses,
@@ -325,4 +326,35 @@ test("emitter-checks: a git log that never ran FAILS instead of passing over zer
   assert.equal(r.ok, false, "an unrun check must never report PASS over an empty set");
   assert.match(r.detail, /SPAWN FAILURE/);
   assert.doesNotMatch(r.detail, /0 commit message\(s\)/);
+});
+
+// A branch refreshed with `git merge origin/main` carries a `Merge remote-tracking branch …`
+// commit. CI's commitlint ignores it by default (and PRs squash-merge), so the emitter checks must
+// too — real git, not a faked `git log`, since the skip is a property of the commit's PARENTS.
+function branchWithMergeRefresh(extraHeader?: string) {
+  const repo = gitRepo({ kind: "emitter-merge" });
+  repo.git("checkout", "-q", "-b", "run-x");
+  repo.git("commit", "-q", "--allow-empty", "-m", "fix(x): a compliant subject");
+  repo.git("checkout", "-q", "main");
+  repo.git("commit", "-q", "--allow-empty", "-m", "chore(main): moved on");
+  repo.git("checkout", "-q", "run-x");
+  repo.git("merge", "-q", "--no-ff", "--no-edit", "-m", "Merge remote-tracking branch 'origin/main' into run-x", "main");
+  if (extraHeader) repo.git("commit", "-q", "--allow-empty", "-m", extraHeader);
+  return repo;
+}
+
+test("emitter checks skip a merge commit the way commitlint does", () => {
+  const repo = branchWithMergeRefresh();
+  assert.match(repo.git("log", "-1", "--format=%P"), /^\S+ \S+$/, "fixture sanity: HEAD really has two parents");
+  const step = emitterChecksStep(repo.dir, { from: "main", to: "HEAD" });
+  assert.equal(step.ok, true, step.detail);
+  assert.match(step.detail, /PASS — 1 commit message\(s\)/, "only the ordinary commit is checked; the merge is skipped");
+});
+
+test("emitter checks still refuse an ordinary malformed header", () => {
+  const repo = branchWithMergeRefresh("Merged some stuff By Hand");
+  const step = emitterChecksStep(repo.dir, { from: "main", to: "HEAD" });
+  assert.equal(step.ok, false);
+  assert.match(step.detail, /emitter-checks: FAIL/);
+  assert.match(step.detail, /commit 1\/2/, "the single-parent malformed commit is checked beside the ordinary one");
 });

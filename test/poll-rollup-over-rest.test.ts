@@ -131,6 +131,10 @@ function restPoll(
   };
 }
 
+// W1-T4226: branch protection read through `PollDeps.requiredContexts`, not the refused `gh` —
+// a protected main requiring `ci`, the one context every rollup below reports.
+const REQUIRED_CI = (): string[] => ["ci"];
+
 // ── acceptance 5: every read is against the budget with headroom, never the point-priced one ─
 
 test("W1-T2268: every pollToGate iteration reads REST (`gh api`), never GraphQL (`gh pr view`)", async () => {
@@ -156,7 +160,7 @@ test("W1-T2268: every waitForCiGreen iteration reads REST (`gh api`), never Grap
     () => ({ state: "OPEN" }),
     () => [{ name: "ci", status: "completed", conclusion: "success" }],
   );
-  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson });
+  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, requiredContexts: REQUIRED_CI });
   assert.equal(ciGateState(outcome), "green");
   assert.ok(calls.length > 0, "the fixture was actually reached");
   assert.ok(
@@ -178,7 +182,7 @@ test("W1-T2268: a GhPaceFloorStandDownError thrown by the injected read propagat
   const readJson = async (): Promise<unknown> => {
     throw new GhPaceFloorStandDownError({ resource: "core", remaining: 0, limit: 5000 });
   };
-  await assert.rejects(() => waitForCiGreen(PR_URL, () => {}, 6, { readJson }), GhPaceFloorStandDownError);
+  await assert.rejects(() => waitForCiGreen(PR_URL, () => {}, 6, { readJson, requiredContexts: REQUIRED_CI }), GhPaceFloorStandDownError);
 });
 
 // ── acceptance 7: a transition to green is observed on the same iteration as before ─────────
@@ -191,7 +195,7 @@ test("W1-T2268: waitForCiGreen observes a transition to green on the FIRST itera
     (i) => (i < 1 ? [{ name: "ci", status: "in_progress" }] : [{ name: "ci", status: "completed", conclusion: "success" }]),
   );
   const slept: number[] = [];
-  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, sleep: async (ms) => void slept.push(ms) });
+  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, requiredContexts: REQUIRED_CI, sleep: async (ms) => void slept.push(ms) });
   assert.equal(ciGateState(outcome), "green");
   assert.equal(iterations(), 2, "green must be observed on the SECOND iteration (index 1), not later");
   assert.deepEqual(slept, [6000], "exactly one sleep between the pending iteration and the green one — no extra wait");
@@ -205,7 +209,7 @@ test("W1-T2268: the poll cadence is unchanged — one sleep per iteration, at ev
     (i) => (i < 4 ? [{ name: "ci", status: "in_progress" }] : [{ name: "ci", status: "completed", conclusion: "success" }]),
   );
   const slept: number[] = [];
-  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, sleep: async (ms) => void slept.push(ms) });
+  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, requiredContexts: REQUIRED_CI, sleep: async (ms) => void slept.push(ms) });
   assert.equal(ciGateState(outcome), "green");
   assert.equal(iterations(), 5, "four pending iterations then the green one — every observation still happened");
   assert.deepEqual(slept, [6000, 6000, 6000, 6000], "six seconds between every poll, unchanged by the transport swap");
@@ -249,7 +253,7 @@ test("W1-T2268: pollToGate and waitForCiGreen are drivable end to end without a 
       () => ({ state: "OPEN" }),
       () => [{ name: "ci", status: "completed", conclusion: "success" }],
     );
-    const ciOutcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson: ci.readJson, sleep: async () => {} });
+    const ciOutcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson: ci.readJson, requiredContexts: REQUIRED_CI, sleep: async () => {} });
     assert.equal(ciGateState(ciOutcome), "green");
   } finally {
     process.env.PATH = savedPath;

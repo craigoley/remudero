@@ -12,25 +12,23 @@ restate feature history.
 read it. The gates are elsewhere and refuse you by name — `coverage-ratchet` and `diff-coverage` on
 coverage, `proof-dialect` at dispatch and `lint-plan`'s changed-tasks pass on proofs, `judgeReview`'s
 rubric on the PR, `SymlinkInstallRefusal` on a worktree install. That split is the point: a rule
-stated ONLY here can be violated silently and repeatedly. When one turns out to matter, the fix is
-to make something refuse it — file the task; do not sharpen the wording and call it closed. Rules
-naming their own gate say so inline.
+stated ONLY here can be broken silently, repeatedly. When one matters, make something refuse
+it — file the task; never sharpen the wording and call it closed.
 
 **THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** Every rule is a bolded HEADLINE
 followed by `→ doctrine/<section>/<rule>.md`. **The headline is the whole rule — obey it without
 opening anything.** The file it names holds the EVIDENCE: the measurement, the PR, the session that
-earned it. `cat` that plain-markdown path when you are about to apply the rule precisely, when you
-doubt it, or when you are about to do the thing it forbids. A pointer that does not resolve is a
+earned it. `cat` it when you doubt the rule or are about to do what it forbids. A pointer that does not resolve is a
 BUG, not a rule you may skip; `test/the-doctrine-index-points-at-every-body.test.ts` fails on one.
 
 **Maintaining this file:** an INTERACTIVE session loads the index and pays that tax every session;
 a DISPATCHED WORKER never sees it — `spawnWorker` passes `settingSources: []`, the SDK isolation
-mode, which needs `'project'` (only Codex reads it). Keep it compressed for the lane that pays.
+mode, which needs `'project'`. Keep it compressed for the lane that pays.
 A NEW RULE IS THREE EDITS: the headline bullet with its pointer here, the body file it names, and
 `npm run agents-md`. Per §8A *compression is a deliverable* — but the 56 pre-migration headlines
 and bodies are FROZEN VERBATIM by `test/fixtures/doctrine-pre-migration-W1-T3323.json`, so a fold
 shortens THIS preamble or a post-migration headline, never one of them. Cite **symbol names, not
-line numbers** — every one here had gone stale. Each rule cites the PR that earned it.
+line numbers**. Each rule cites the PR that earned it.
 
 ## Before you push
 
@@ -107,6 +105,8 @@ line numbers** — every one here had gone stale. Each rule cites the PR that ea
   nothing.** → doctrine/ci-and-merging/a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a.md
 - **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
   half of your diff you are in before you call a merge "shipped."** → doctrine/ci-and-merging/a-merge-to-a-baked-path-ships-nothing-until-an-operator.md
+- **SUPERSEDES THE RULE ABOVE: a baked-path merge ships itself (auto ACR build + recycle); check
+  `docker inspect`.** → doctrine/ci-and-merging/supersedes-the-rule-above-a-baked-path-merge-now-ships-by.md
 
 ## Ledger and evidence discipline
 

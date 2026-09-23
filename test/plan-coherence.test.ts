@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
+import { withHealthyRetroProbeGh } from "./helpers/w4226-g1-retro-probe-gh.js";
 
 import { scanPlanCoherence, type PlanCoherenceShardEntry } from "../src/lib/plan-coherence.js";
 import { loadPlan } from "../src/lib/plan.js";
@@ -518,7 +519,8 @@ test("ACCEPTANCE #6: retroCommand's --dry-run report carries a MEASURED plan-coh
   writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
   const logSpy = t.mock.method(console, "log", () => {});
   try {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGithub() }));
+    // W1-T4226: the gather's throttle probe reads a scripted, healthy `gh`, never the refused real one.
+    const exitCode = await withHealthyRetroProbeGh(() => withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGithub() })));
     assert.equal(exitCode, 0);
     const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
     assert.match(printed, /## Plan-coherence rung/, "the section must be reached from the REAL command");

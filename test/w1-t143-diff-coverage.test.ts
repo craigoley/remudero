@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { daemonCommand, depReviewCommand, main } from "../src/run-task.js";
+import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 
 /** A throwaway HOME + `config.json` pointing `config.root` at a fresh temp dir — the
  *  SAME shape test/daemon-observability.test.ts and test/serve-command-boot.test.ts
@@ -44,6 +45,20 @@ function fakeBin(name: string, script: string): string {
   writeFileSync(path, script);
   chmodSync(path, 0o755);
   return dir;
+}
+
+/** W1-T4226: run `fn` with a scripted `gh` of this file's own first on PATH — `main()` has no deps
+ *  seam, so its GitHub reads are answered here instead of by the shared refusal stub. A final
+ *  catch-all route fails any read the caller did not script, so an unexpected call is loud. */
+async function withScriptedGh<T>(routes: GhShimRoute[], fn: (calls: () => string[]) => Promise<T>): Promise<T> {
+  const shim = ghShim([...routes, { when: "", stderr: "w1-t143 test: unexpected gh call", exit: 1 }], { kind: "t143-gh" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  try {
+    return await fn(() => shim.calls());
+  } finally {
+    process.env.PATH = oldPath;
+  }
 }
 
 // process.exit is mocked to THROW (never merely record-and-return) — same rationale
@@ -250,8 +265,37 @@ test("main(): `rmd ops --dry-run` polls alerts read-only and previews without es
     // --dry-run's own gate (src/lib/ops.ts's pollAlerts) skips escalate()/captureFeedback()
     // entirely -- ledgerPathFor(config) is still reached (this test's real target) to build
     // pollAlerts' deps, but nothing is WRITTEN under --dry-run, so no ledger file exists yet.
-    const code = await callMain(t, ["node", "run-task.js", "ops", "--dry-run"]);
+    // W1-T4226: the three alert reads answer from a scripted gh — one OPEN critical Dependabot
+    // alert (exactly what a live poll would escalate) and two empty scanners — so the dry-run
+    // really previews an escalatable alert instead of three refused reads degrading to [].
+    const criticalAlert = JSON.stringify([
+      {
+        number: 1,
+        state: "open",
+        created_at: "2026-09-01T00:00:00Z",
+        html_url: "https://github.com/craigoley/remudero/security/dependabot/1",
+        security_advisory: { severity: "critical", summary: "fixture advisory" },
+        dependency: { package: { name: "fixture-pkg" } },
+      },
+    ]);
+    const { code, calls } = await withScriptedGh(
+      [
+        { when: "code-scanning/alerts", stdout: "[]" },
+        { when: "dependabot/alerts", stdout: criticalAlert },
+        { when: "secret-scanning/alerts", stdout: "[]" },
+      ],
+      async (calls) => ({ code: await callMain(t, ["node", "run-task.js", "ops", "--dry-run"]), calls: calls() }),
+    );
     assert.equal(code, 0);
+    assert.deepEqual(
+      calls,
+      [
+        "api repos/craigoley/remudero/code-scanning/alerts --paginate",
+        "api repos/craigoley/remudero/dependabot/alerts --paginate",
+        "api repos/craigoley/remudero/secret-scanning/alerts --paginate",
+      ],
+      "read-only: the three alert polls and nothing else — no issue filed for the critical alert under --dry-run",
+    );
   } finally {
     process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
@@ -263,7 +307,11 @@ test("main(): `rmd issues --dry-run` against this checkout's empty managed-repos
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
-    const code = await callMain(t, ["node", "run-task.js", "issues", "--dry-run"]);
+    // W1-T4226: managed-repos.json now names three repos, so each one's open-issue read answers
+    // `[]` from a scripted gh — zero issues because none are open, not because the read failed.
+    const code = await withScriptedGh([{ when: "/issues?state=open", stdout: "[]" }], () =>
+      callMain(t, ["node", "run-task.js", "issues", "--dry-run"]),
+    );
     assert.equal(code, 0);
   } finally {
     process.env.HOME = oldHome;

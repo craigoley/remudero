@@ -269,6 +269,8 @@ test("an untrailered body is unchanged — still resolves from its own PR body A
             number: 1,
           }),
           loadConfig: () => ({ root }) as Config,
+          // W1-T4226: the start-of-review pending post reads the PR lifecycle — fake it, never the refused real gh.
+          postReviewPending: async () => ({ posted: false }),
           materialize: () =>
             ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip" } }) as unknown as ReturnType<
               typeof import("../src/run-task.js").materializeReviewWorktree
@@ -324,6 +326,8 @@ test("the swap costs no second network fetch and stays synchronous — one fetch
             return { headRefOid: headSha, headRefName: "b", body, url: "https://github.com/o/r/pull/1", number: 1 };
           },
           loadConfig: () => ({ root }) as Config,
+          // W1-T4226: the start-of-review pending post reads the PR lifecycle — fake it, never the refused real gh.
+          postReviewPending: async () => ({ posted: false }),
           materialize: () =>
             ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip" } }) as unknown as ReturnType<
               typeof import("../src/run-task.js").materializeReviewWorktree

@@ -17,7 +17,13 @@ import {
   type RollupCheckEntry,
   type SweepDeps,
 } from "../src/lib/sweep.js";
-import { buildOpenPrViews, buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "../src/run-task.js";
+import {
+  buildOpenPrViews,
+  buildSweepEffects,
+  cancelledRequiredChecks,
+  fetchCiFailures,
+  type CiFailureFetchOptions,
+} from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { REVIEW_CONTEXT } from "../src/lib/review.js";
 
@@ -96,6 +102,19 @@ const INCIDENT_2841 = {
       detailsUrl: `https://github.com/${OWNER}/${REPO}/actions/runs/17600500002/job/97865158300`,
     },
   ],
+};
+
+// W1-T4226: `fetchCiFailures` reads each failing job's annotations (and, on a bare exit code, its
+// log) through `CiFailureFetchOptions` — injected here so the miner reads the incidents' own
+// evidence instead of shelling out to the refused `gh`.
+const INCIDENT_ANNOTATIONS: Record<string, string[]> = {
+  "97655132319": ["The operation was canceled."], // coverage-ratchet — cancelled
+  "97655131652": ["Process completed with exit code 1"], // ci-gate — the aggregate's bare exit code
+};
+const OFFLINE_CI_READS: CiFailureFetchOptions = {
+  fetchAnnotations: (_owner, _repo, jobId) => INCIDENT_ANNOTATIONS[jobId] ?? [],
+  fetchJobLog: () =>
+    "Error: a required job (coverage-ratchet) was cancelled\nProcess completed with exit code 1\n",
 };
 
 function ledgerPath(): string {
@@ -196,7 +215,7 @@ test("acceptance 3 (end to end): a genuinely failing required check still dispat
   const deps = fakeDeps();
   const rollup: RollupCheckEntry[] = [{ name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-25T01:00:00Z" }];
   const subject = pr({
-    ciFailures: fetchCiFailures(OWNER, REPO, rollup),
+    ciFailures: fetchCiFailures(OWNER, REPO, rollup, 60, OFFLINE_CI_READS),
     cancelledRequiredChecks: cancelledRequiredChecks(rollup, REAL_REQUIRED),
   });
   await runSweep([subject], deps, DEFAULT_SWEEP_POLICY);
@@ -258,6 +277,8 @@ test("acceptance 5: ci-gate still IN PROGRESS (checksState 'pending', not yet 'r
   const views = buildOpenPrViews(OWNER, REPO, ledgerPath(), {
     fetch,
     requiredContexts: () => REAL_REQUIRED,
+    // W1-T4226: the failing-check miner reads through the same offline seam as every call above.
+    fetchCiFailureEvidence: (owner, repo, rollup) => fetchCiFailures(owner, repo, rollup, 60, OFFLINE_CI_READS),
   });
 
   assert.equal(views.length, 1);
@@ -283,7 +304,7 @@ test("acceptance 6: cancelledCheckRequeueDecision — no prior ledger record re-
 test("acceptance 6 (end to end): a SECOND pass over the SAME head sha, still cancelled, re-queues nothing and escalates instead", async () => {
   const first = fakeDeps();
   const subject = pr({
-    ciFailures: fetchCiFailures(OWNER, REPO, INCIDENT_2794.rollup),
+    ciFailures: fetchCiFailures(OWNER, REPO, INCIDENT_2794.rollup, 60, OFFLINE_CI_READS),
     cancelledRequiredChecks: cancelledRequiredChecks(INCIDENT_2794.rollup, REAL_REQUIRED),
   });
   await runSweep([subject], first, DEFAULT_SWEEP_POLICY);
@@ -376,7 +397,7 @@ test("acceptance 8b: REVIEW_CONTEXT stays excluded from the candidate set even w
 
 test("acceptance 9: #2794 end to end — the fix rung spends NO strike; the sweep re-queues coverage-ratchet instead", async () => {
   const deps = fakeDeps();
-  const ciFailures = fetchCiFailures(OWNER, REPO, INCIDENT_2794.rollup);
+  const ciFailures = fetchCiFailures(OWNER, REPO, INCIDENT_2794.rollup, 60, OFFLINE_CI_READS);
   // ci-gate is dropped as a downstream aggregator (W1-T2296); its CAUSE, coverage-ratchet, is
   // what the miner names.
   assert.deepEqual(ciFailures.map((f) => f.name), ["coverage-ratchet"]);

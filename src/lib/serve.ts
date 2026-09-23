@@ -148,6 +148,7 @@ import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
 import {
   DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
   InstanceRegistryError,
@@ -927,7 +928,7 @@ export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
 const CONSOLE_STALENESS_FIELD = "staleness";
-const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
+const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
   "writeFileSync",
@@ -3301,13 +3302,18 @@ function accessConfig(): { accessTeamDomain?: string; accessAudience?: string } 
 
 /** W1-T4244 — `serve.operatorIdentity` off `loadConfig()`, tolerantly, {@link accessConfig}'s
  *  precedent: an unreadable config composes no operator provider rather than failing the boot. */
-export function operatorIdentityConfig(read: () => Pick<Config, "serve"> = loadConfig): OperatorIdentityConfig | undefined {
+export function operatorIdentityConfig(
+  read: () => Pick<Config, "serve"> = loadConfig,
+  file: OperatorIdentityFileIo = {},
+): OperatorIdentityConfig | undefined {
+  let configured: OperatorIdentityConfig | undefined;
   try {
-    return read().serve?.operatorIdentity;
+    configured = read().serve?.operatorIdentity;
   } catch {
     // Deliberate: an unreadable config and an unconfigured one both mean "no operator provider".
-    return undefined;
+    configured = undefined;
   }
+  return configured ?? operatorIdentityFromFile(file);
 }
 
 /**
@@ -4333,7 +4339,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       log: deps.log,
     }),
     // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
-    operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(), { ...deps.operatorIdentityIo, log: deps.log }),
+    operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(loadConfig, { log: deps.log }), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
     // Absent build -> no mount -> `/console/*` is a plain 404 rather than a shell with no assets.
     staticMount:

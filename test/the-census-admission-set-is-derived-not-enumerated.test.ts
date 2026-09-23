@@ -332,7 +332,7 @@ test("runPreflightFast: mocked timings reproducing PR #5087's shape — a health
 
 test("runPreflightFast: mocked timings — an entry costing several times the run's median is still refused as RUNAWAY, so the fix does not merely delete the guard", () => {
   const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 }));
-  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 10_000];
+  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 10_000, 10_000]; // the last is the runaway's one re-measure
   const { spawn } = recordingSpawn();
   const result = runPreflightFast(REPO_ROOT, {
     spawn,

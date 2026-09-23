@@ -65,6 +65,7 @@ import { selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { planHealthSweepSectionFor, retroCommand } from "../src/run-task.js";
 
 // A recorded ledger fixture: two implement runs (one merged, one budget-blocked)
@@ -606,8 +607,26 @@ test("retroCommand: --dry-run's printed report carries the plan-health sweep sec
   // 439 task records with the per-task `ghGateway`, one `gh pr list --search` each: 453 SECONDS
   // for this file's 87 tests. Nothing below asserts merge state, so the network buys nothing.
   const github = offlineGithub();
+  // W1-T4226: the SHIPPED union's throttle probe (`retroShippedGithubGateway` -> `probeGithubThrottle`)
+  // has no injectable seam on `retroCommand`, so it gets a scripted `gh` of its own: GitHub reads as
+  // available, and any other `gh` call fails loudly instead of reaching the shared refusal stub.
+  const gh = ghShim(
+    [
+      { when: "api rate_limit", stdout: "5000" },
+      { when: "api user", stdout: "remudero-test" },
+      { when: "", stderr: "retro.test: unexpected gh call", exit: 1 },
+    ],
+    { kind: "retro-gh" },
+  );
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${savedPath}`;
   try {
     const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github }));
+    assert.deepEqual(
+      gh.calls(),
+      ["api rate_limit --jq .rate.remaining", "api user --jq .login"],
+      "the throttle probe reads GitHub as available through this file's own gh, and nothing else shells out",
+    );
     assert.equal(exitCode, 0, "--dry-run never fails a genuinely-first-ever retro");
     const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
     assert.match(
@@ -620,6 +639,7 @@ test("retroCommand: --dry-run's printed report carries the plan-health sweep sec
     // consulted. Without it, the two projectPlan passes would have opened real `ghGateway`s.
     assert.ok(github.calls.length > 0, `the injected gateway must be consulted, got ${github.calls.length} calls`);
   } finally {
+    process.env.PATH = savedPath;
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
   }

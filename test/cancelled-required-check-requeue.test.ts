@@ -17,9 +17,22 @@ import {
   type RollupCheckEntry,
   type SweepDeps,
 } from "../src/lib/sweep.js";
-import { buildOpenPrViews, buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "../src/run-task.js";
+import {
+  buildOpenPrViews,
+  buildSweepEffects,
+  cancelledRequiredChecks,
+  fetchCiFailures,
+  type CiFailureFetchOptions,
+} from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
+
+// W1-T4226: `fetchCiFailures`'s own annotation/job-log reads go through its CiFailureFetchOptions
+// seam, never the refused real gh — every failing check's evidence is READ, as in production.
+const fakeCiEvidence: CiFailureFetchOptions = {
+  fetchAnnotations: (_owner, _repo, checkRunId) => [`fixture annotation for check run ${checkRunId}`],
+  fetchJobLog: (_owner, _repo, jobId) => `fixture job log for ${jobId}`,
+};
 
 /**
  * W1-T1223 — a cancelled required check is indistinguishable from a genuine failure
@@ -120,7 +133,7 @@ test("run-task.ts's cancelledRequiredChecks and fetchCiFailures AGREE on which c
     { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-22T01:26:02Z", detailsUrl: "https://github.com/x/y/actions/runs/1/job/11" },
     { name: "coverage-ratchet", conclusion: "CANCELLED", startedAt: "2026-08-22T01:26:04Z", detailsUrl: "https://github.com/x/y/actions/runs/1/job/22" },
   ];
-  const failing = fetchCiFailures("craigoley", "remudero", rollup);
+  const failing = fetchCiFailures("craigoley", "remudero", rollup, 60, fakeCiEvidence);
   // W1-T2296 CHANGED THIS ASSERTION, AND THE OLD ONE DESCRIBED THE DEFECT. It used to read
   // `["ci-gate", "coverage-ratchet"]` with the note "names BOTH -- it does not distinguish cause".
   // `ci-gate` is a downstream aggregator: on THIS fixture it is FAILURE only because
@@ -391,6 +404,7 @@ test("GUARDED SITE gateway wiring: buildOpenPrViews populates OpenPrView.cancell
   const views = buildOpenPrViews("craigoley", "remudero", ledgerFile, {
     fetch,
     requiredContexts: () => ["ci-gate", "coverage-ratchet"],
+    fetchCiFailureEvidence: (owner, repo, rollup) => fetchCiFailures(owner, repo, rollup, 60, fakeCiEvidence),
   });
 
   assert.equal(views.length, 1);
@@ -442,7 +456,7 @@ test("W1-T2296: on that same #2444 fixture the cancelled-check stand-down has no
     { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-22T01:26:02Z", detailsUrl: "https://github.com/x/y/actions/runs/1/job/11" },
     { name: "coverage-ratchet", conclusion: "CANCELLED", startedAt: "2026-08-22T01:26:04Z", detailsUrl: "https://github.com/x/y/actions/runs/1/job/22" },
   ];
-  const ciFailures = fetchCiFailures("craigoley", "remudero", rollup);
+  const ciFailures = fetchCiFailures("craigoley", "remudero", rollup, 60, fakeCiEvidence);
   const cancelled = cancelledRequiredChecks(rollup, ["ci-gate", "coverage-ratchet"]);
   // The exact subtraction `runSweep` performs before deciding whether to spend a fix-rung strike.
   const genuineFailures = ciFailures.filter((f) => !cancelled.some((c) => c.name === f.name));

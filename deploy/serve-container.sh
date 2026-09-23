@@ -70,6 +70,7 @@
 #   RMD_STATE_DIR=/path ./deploy/serve-container.sh    # if the bind mount is not the daemon's
 #   RMD_CLAUDE_JSON_PATH=/path ./deploy/serve-container.sh   # if ~/.claude.json is not the host's
 #   RMD_GITHUB_WEBHOOK_SECRET_PATH=/path ./deploy/serve-container.sh   # arm POST /v1/hooks/github
+#   RMD_OPERATOR_IDENTITY_FILE=/path ./deploy/serve-container.sh       # if not ~/.config/remudero/operator-identity.json
 #   RMD_GH_APP_PRIVATE_KEY_HOST_PATH=/path ./deploy/serve-container.sh # the pem's HOST path, resolved
 #                                                                      # without inspecting remudero-daemon
 #
@@ -138,6 +139,8 @@ CLAUDE_JSON_MOUNT_DEST="/home/node/.claude.json"
 # test is below.
 GITHUB_WEBHOOK_SECRET_PATH="${RMD_GITHUB_WEBHOOK_SECRET_PATH:-}"
 GITHUB_WEBHOOK_SECRET_MOUNT_DEST="/home/node/.rmd-github-webhook-secret"
+OPERATOR_IDENTITY_FILE="${RMD_OPERATOR_IDENTITY_FILE:-${HOME:-/root}/.config/remudero/operator-identity.json}"
+OPERATOR_IDENTITY_MOUNT_DEST="/home/node/.rmd-operator-identity.json"
 # W1-T2778: one file, never the daemon's whole credential directory. The host-side source is
 # resolved after GH_APP_* capture because a captured value names the daemon container's namespace.
 APP_PRIVATE_KEY_MOUNT_DEST="/home/node/.rmd-github-app-private-key.pem"
@@ -527,6 +530,16 @@ else
   echo "  docs/operator-guide.md's webhook commissioning section." >&2
 fi
 
+# ── 4e. OPERATOR IDENTITY (serve.operatorIdentity) — as 4c: survives --replace, never printed ──
+OPERATOR_IDENTITY_ARGS=()
+if [ -f "${OPERATOR_IDENTITY_FILE}" ]; then
+  OPERATOR_IDENTITY_ARGS=(-v "${OPERATOR_IDENTITY_FILE}:${OPERATOR_IDENTITY_MOUNT_DEST}:ro" -e "RMD_OPERATOR_IDENTITY_PATH=${OPERATOR_IDENTITY_MOUNT_DEST}")
+  echo "serve-container: operator identity ${OPERATOR_IDENTITY_FILE} -> ${OPERATOR_IDENTITY_MOUNT_DEST} (read-only, content never printed)"
+else
+  echo "serve-container: NOTE — no operator identity file at ${OPERATOR_IDENTITY_FILE}; operator sessions ship dark unless config.json sets serve.operatorIdentity." >&2
+  echo "  Not a refusal. Set RMD_OPERATOR_IDENTITY_FILE if the file lives somewhere else on this host." >&2
+fi
+
 # ── 5. AN EXISTING CONTAINER IS NEVER SILENTLY REPLACED ─────────────────────────────────────────
 # Replacing the console is a deliberate act: it is frequently the only surface an operator has on a
 # fleet they are away from, and this script is also the natural thing to re-run "just to check".
@@ -613,6 +626,7 @@ RUN_ARGS=(
   # W1-T2568: same bash-3.2-safe empty-array form as ACCOUNT_FILE_ARGS immediately above — see
   # that splice's own comment for why the bare `"${ARR[@]}"` form is unsafe under `set -u`.
   "${GITHUB_WEBHOOK_SECRET_ARGS[@]+"${GITHUB_WEBHOOK_SECRET_ARGS[@]}"}"
+  "${OPERATOR_IDENTITY_ARGS[@]+"${OPERATOR_IDENTITY_ARGS[@]}"}"
   "${REF}"
   ./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}"
 )

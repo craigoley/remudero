@@ -13,6 +13,7 @@ import {
   homeRepoPath,
   loadHomeRepoPointer,
 } from "../src/lib/feedback.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 // W1-T397 — "`rmd feedback` always writes the LOCAL checkout's plan/feedback/, so an instance
 // working on another codebase files rmd's own bugs where no rmd maintainer will read them:
@@ -279,8 +280,19 @@ test("the DEFAULT gh seam really shells out: an uninjected gh is invoked and its
   seedHomePointer(r, "acme/remudero-nonexistent-fixture-repo-xyzzy");
   const { git } = fakeGit("https://github.com/someone-else/otherrepo.git");
 
-  // `gh` is NOT injected — this exercises defaultUpstreamGh.
-  const entry = captureFeedback(r, { raw: "default gh seam", upstream: { git } });
+  // `gh` is NOT injected — this exercises defaultUpstreamGh. W1-T4226: the binary it spawns is a
+  // scripted PATH `gh` answering what the real one answers for a repo that cannot exist (a 404),
+  // not the refused shared stub.
+  const shim = ghShim([{ when: "", stderr: "HTTP 404: Not Found (https://api.github.com/repos/acme/remudero-nonexistent-fixture-repo-xyzzy)", exit: 1 }]);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${savedPath ?? ""}`;
+  let entry: ReturnType<typeof captureFeedback>;
+  try {
+    entry = captureFeedback(r, { raw: "default gh seam", upstream: { git } });
+  } finally {
+    process.env.PATH = savedPath;
+  }
+  assert.ok(shim.calls().length > 0, "the default seam really spawned `gh`");
 
   // The capture survives regardless, and the failure is recorded rather than thrown — the
   // property the whole routing step promises.

@@ -166,13 +166,62 @@ syncBuiltinESMExports();
  * FIRST and this refusal second, exactly like today's "own stub wins" behaviour with no real
  * `gh` on PATH at all.
  */
+
+// The refusal stub's own log of every argv it refused, in call order — the "visible" half of
+// W1-T4226. Written by a SEPARATE process (the shelled-out `gh` shim script itself), so the
+// only channel back to THIS process is the file; read once, synchronously, at exit (below).
+let refusalsLogPath: string | undefined;
+
+// W1-T4226: set by `allowGhRefusals` (exported below) when a test file's own PURPOSE is to
+// exercise the shared refusal — e.g. test/no-test-reaches-the-real-github.test.ts. Checked at
+// exit, alongside `refusalsLogPath`'s contents, before deciding whether an unexplained refusal
+// turns the whole file red.
+let optedIn = false;
+
+/**
+ * OPT IN BY NAME (W1-T4226): call this from a test file whose own job is to exercise the shared
+ * `gh` refusal stub — the one already-legitimate reason a file should see a refusal recorded
+ * against it. `reason` is never read back by this module; it exists so the opt-in reads as a
+ * deliberate, reviewable choice at the call site, not a silent escape hatch.
+ *
+ * Every other caller of the refusing stub is UNEXPLAINED: the exit-time check below turns that
+ * file red instead of letting whatever caught the shelled-out failure swallow it and report
+ * green over the "GitHub unreachable" branch it never meant to exercise.
+ */
+export function allowGhRefusals(reason: string): void {
+  void reason;
+  optedIn = true;
+}
+
+/** The number of `gh` invocations the shared refusal stub has refused so far THIS process —
+ *  the other half of "make the stub's refusal count visible" (W1-T4226): a test can assert on
+ *  this directly, not just observe it as a file-level exit code. */
+export function ghRefusalCount(): number {
+  if (refusalsLogPath === undefined) return 0;
+  try {
+    return fs
+      .readFileSync(refusalsLogPath, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0).length;
+  } catch {
+    return 0;
+  }
+}
+
 function installGhRefusalStub(): void {
   const dir = fs.mkdtempSync(join(tmpdir(), "rmd-test-gh-refuse-"));
   const ghPath = join(dir, "gh");
+  const refusalsPath = join(dir, "refusals.log");
+  fs.writeFileSync(refusalsPath, "");
+  refusalsLogPath = refusalsPath;
   fs.writeFileSync(
     ghPath,
     [
       "#!/bin/sh",
+      // W1-T4226: record the refused argv BEFORE reporting it, so the exit-time check (below)
+      // can see it even though this line runs in a separate `gh` child process — the file is
+      // the only channel back to the parent test process.
+      `printf '%s\\n' "$*" >> ${JSON.stringify(refusalsPath)}`,
       'echo "test setup REFUSED: a test shelled out to the real gh CLI with no stub of its own." 1>&2',
       'echo "  argv: gh $*" 1>&2',
       'echo "  FIX: give the test its own gh stub, prepended onto PATH ahead of this one" 1>&2',
@@ -188,11 +237,42 @@ function installGhRefusalStub(): void {
 installGhRefusalStub();
 
 process.on("exit", () => {
+  // W1-T4226: read BEFORE the tmp-dir sweep below removes the stub's own dir (and the log
+  // inside it) — this is the only point this process ever reads it.
+  const refusals = ghRefusalCount();
+
   for (const dir of created) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
       // best-effort — a fixture may already have removed its own dir
     }
+  }
+
+  // W1-T4226: about 80 test files across the suite shell out to `gh`, get refused by the stub
+  // above, and let whatever catches that failure swallow it — a lint-plan test meant to exercise
+  // credit scoping actually exercises "GitHub unreachable", and still reports green. Make the
+  // refusal visible: an unexplained one now fails the WHOLE FILE, so the next silent caller is a
+  // red test instead of a passed one.
+  if (refusals > 0 && !optedIn) {
+    console.error(
+      [
+        "",
+        `test setup REFUSED: this test file triggered the shared gh refusal stub ${refusals} time(s) and did not opt in.`,
+        "",
+        "  WHAT HAPPENED: a shell-out to gh was refused (see the 'test setup REFUSED' line(s) above),",
+        "  and whatever caught that failure let the file finish and report green anyway — exercising",
+        "  the 'GitHub unreachable' branch instead of the one the test names.",
+        "",
+        "  FIX: give the call its own deps seam (e.g. offline: true plus a recording fake gateway —",
+        "  see test/policy.test.ts's offlineLintDeps), or its own gh stub ahead of this one",
+        "  (test/helpers/gh-shim.ts). If this file's own PURPOSE is to exercise the refusal itself,",
+        "  opt in explicitly and say why:",
+        '    import { allowGhRefusals } from "./setup/tmp-hygiene.js";',
+        '    allowGhRefusals("<why this file deliberately triggers the shared refusal>");',
+        "",
+      ].join("\n"),
+    );
+    process.exitCode = 1;
   }
 });

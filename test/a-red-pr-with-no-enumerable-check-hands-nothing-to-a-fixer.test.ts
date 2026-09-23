@@ -207,6 +207,8 @@ test("runFixRung: a red PR whose failing checks are enumerable dispatches normal
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
       account: (r) => r,
+      // W1-T4226: the live PR-body read goes through `deps.fetchPrBody`, not the refused gh read.
+      fetchPrBody: async () => "## Summary\n\nfix-rung fixture PR body.\n\nRemudero-Task: W1-T2674C\n",
     },
   });
 

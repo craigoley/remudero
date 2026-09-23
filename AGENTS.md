@@ -73,6 +73,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   nothing.**
 - **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
   half of your diff you are in before you call a merge "shipped."**
+- **SUPERSEDES THE RULE ABOVE: a baked-path merge ships itself (auto ACR build + recycle); check
+  `docker inspect`.**
 - **The rotations come in TWO FORMS and every glob that names only one answers SILENTLY WRONG. The
   union is three patterns, never two:**
 - **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT**

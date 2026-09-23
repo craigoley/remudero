@@ -346,6 +346,9 @@ function rollupReads(n: number, final: Array<Record<string, unknown>>): {
 }
 
 const GREEN = [{ name: "ci", conclusion: "SUCCESS" }];
+// W1-T4226: branch protection read through `PollDeps.requiredContexts`, not the refused `gh` —
+// a protected main requiring `ci`, the one context every rollup below reports.
+const REQUIRED_CI = (): string[] => ["ci"];
 
 test("W1-T463 FALSIFIER: a timer scheduled BEFORE the CI wait FIRES DURING it", async () => {
   const { read } = rollupReads(3, GREEN);
@@ -356,7 +359,7 @@ test("W1-T463 FALSIFIER: a timer scheduled BEFORE the CI wait FIRES DURING it", 
   const timer = setTimeout(() => {
     firedAt = Date.now();
   }, 30);
-  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.02, { readJson: read });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.02, { readJson: read, requiredContexts: REQUIRED_CI });
   clearTimeout(timer);
   assert.equal(ciGateState(outcome), "green");
   assert.notEqual(firedAt, undefined, "the timer never fired -- the event loop did not turn during the wait");
@@ -374,7 +377,7 @@ test("W1-T463 MUTANT: a BLOCKING sleep starves that same timer -- the falsifier 
     fired = true;
   }, 30);
   // Same function, same reads, same cadence -- only the sleep is the pre-W1-T463 shape.
-  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.05, { readJson: read, sleep: blockingSleep });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.05, { readJson: read, requiredContexts: REQUIRED_CI, sleep: blockingSleep });
   clearTimeout(timer);
   assert.equal(ciGateState(outcome), "green", "the mutant still RETURNS correctly, which is exactly why a return-value test proves nothing");
   assert.equal(fired, false, "a blocking sleep must starve the timer -- if this fires, the falsifier above is vacuous");
@@ -385,6 +388,7 @@ test("W1-T463: the poll CADENCE is unchanged -- one sleep per poll, at everySec 
   const slept: number[] = [];
   const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 6, {
     readJson: read,
+    requiredContexts: REQUIRED_CI,
     sleep: async (ms) => {
       slept.push(ms);
     },
@@ -397,7 +401,7 @@ test("W1-T463: the poll CADENCE is unchanged -- one sleep per poll, at everySec 
 test("W1-T463: the ci.polling LOG cadence is unchanged -- i === 0 || i % 5 === 0", async () => {
   const { read } = rollupReads(12, GREEN);
   const steps: string[] = [];
-  await waitForCiGreen("https://github.com/acme/remudero/pull/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
+  await waitForCiGreen("https://github.com/acme/remudero/pull/1", (s) => steps.push(s), 6, { readJson: read, requiredContexts: REQUIRED_CI, sleep: async () => {} });
   // 13 polls (0..12): logged at i = 0, 5, 10 -- three rows, exactly as before. 467 recorded rows
   // imply ~2,335 real polls precisely because of this 1-in-5 sampling.
   assert.equal(steps.filter((s) => s === "ci.polling").length, 3);
@@ -405,7 +409,7 @@ test("W1-T463: the ci.polling LOG cadence is unchanged -- i === 0 || i % 5 === 0
 
 test("W1-T463: the RED direction still returns red, and stops polling immediately", async () => {
   const { read, calls } = rollupReads(1, [{ name: "ci", conclusion: "FAILURE" }]);
-  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 6, { readJson: read, sleep: async () => {} });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 6, { readJson: read, requiredContexts: REQUIRED_CI, sleep: async () => {} });
   assert.equal(ciGateState(outcome), "red", "blocked_ci handling depends on this exact value");
   assert.equal(calls(), 2, "one pending read then the red one -- it must not keep polling past a red");
 });
@@ -423,7 +427,7 @@ test("W1-T463: the TIMEOUT direction still returns timeout on a stalled rollup",
     return { statuses: [] };
   };
   const steps: string[] = [];
-  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", (s) => steps.push(s), 6, { readJson: read, requiredContexts: REQUIRED_CI, sleep: async () => {} });
   assert.equal(ciGateState(outcome), "timeout");
   assert.ok(steps.includes("ci.stalled"), "and it must say which checks were still pending when it gave up");
 });

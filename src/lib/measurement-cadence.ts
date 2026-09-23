@@ -14,7 +14,7 @@ import {
 } from "./verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { resolveLedgerUnion, type LedgerUnionResult } from "./ledger-grep.js";
+import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import {
   buildBoardReview,
   type BoardItem,
@@ -37,7 +37,10 @@ import {
   type WipeTestRunResult,
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
-import { loadPlanFromYaml, type Task } from "./plan.js";
+import { loadPlan, loadPlanFromYaml, type Task } from "./plan.js";
+import { fixedClock } from "./clock.js";
+import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
+import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import type { CiLessonRecurrenceObservation } from "./ci-lesson-recurrence.js";
 export { judgeCiLessonEfficacy, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
 export type { CiLessonEfficacy } from "./ci-lesson-recurrence.js";
@@ -1689,6 +1692,9 @@ export interface MeasurementCadenceRunResult {
   handRunCensus?: HandRunCensusCadenceResult;
   /** The verify-human backlog's judged cadence, set when the daemon supplies its async result. */
   verifyHuman?: VerifyHumanCadenceResult;
+  /** W1-T4243's knowledge measurement, set when `opts.knowledge` is supplied — see
+   *  {@link runKnowledgeMeasurement}. Its own row family: `knowledge.measured`. */
+  knowledge?: KnowledgeMeasurementResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — same shallow-clone refusal as
@@ -1782,6 +1788,11 @@ export interface MeasurementCadenceReportOpts {
    *  supplied it, so it never ran before this task and stays a no-op for them now — the same
    *  "opt-in, caller supplies it" shape `coverageImprovement`'s `writeLedgerLine` already uses. */
   writeLedgerLine?: (line: Record<string, unknown>) => void;
+  /** W1-T4243: opt-in, like `coverageImprovement` — the rung runs only when the caller supplies the
+   *  writer for its one `knowledge.measured` row. */
+  knowledge?: Omit<KnowledgeMeasurementOpts, "stateDir" | "now" | "checkoutDir"> & {
+    writeLedgerLine: (line: Record<string, unknown>) => void;
+  };
 }
 
 function finiteMetric(value: unknown): number | null {
@@ -1965,11 +1976,100 @@ export function runWipeTestCadenceReport(opts: {
   };
 }
 
+// ── W1-T4243: the knowledge-measurement rung ─────────────────────────────────────────────────
+// The digest reads a capped union covering about a day, too short for a per-area silence rate or a
+// per-learning outcome effect (W1-T4241's fold reads mostly `unmeasurable` there). This rung reads the
+// three steps both folds need over a multi-week window instead. MEMORY: `resolveLedgerUnion` holds one
+// decompressed archive at a time plus the matched lines (W1-T3368), and `sinceTs` skips every archive
+// rotated before the window. It still opens every archive inside it — a per-archive step index
+// (research:turbopuffer-scan-2026-09-23) is the next cut, not this one.
+
+/** How far back the rung reads. Paced by the measurement cadence itself (at most `maxPerDay` fires). */
+export const KNOWLEDGE_MEASUREMENT_WINDOW_DAYS = 30;
+/** Raw-JSON step match, the convention every {@link resolveLedgerUnion} pre-filter here uses. */
+const KNOWLEDGE_MEASUREMENT_PATTERN = /"step":"(?:learnings\.injected|verdict|fix\.dispatch)"/;
+
+export interface KnowledgeMeasurementResult extends MeasurementCadenceVerbStatus {
+  /** The window requested, not the span of rows found — `gaps.window` carries that. */
+  window: { from: string; to: string };
+  archiveCount: number;
+  unread: number;
+  gaps?: KnowledgeGapReport;
+  outcomes?: LearningOutcomeReport;
+}
+
+export interface KnowledgeMeasurementOpts {
+  stateDir: string;
+  now: Date;
+  /** Task id -> declared `files:`. Defaults to the plan under `checkoutDir`. */
+  taskFiles?: () => ReadonlyMap<string, readonly string[]>;
+  checkoutDir?: string;
+  ledgerUnion?: (stateDir: string, pattern: RegExp, opts: LedgerUnionOptions) => LedgerUnionResult;
+}
+
+function planTaskFiles(checkoutDir: string | undefined): ReadonlyMap<string, readonly string[]> {
+  if (checkoutDir === undefined) throw new Error("no checkoutDir to load the plan from");
+  const plan = loadPlan(join(checkoutDir, "plan", "tasks.yaml"));
+  return new Map(plan.tasks.map((t) => [t.id, t.files ?? []]));
+}
+
+/** Read the window, then fold silence by area and outcome by learning over the SAME rows. Refuses — never
+ *  a quiet zero — when the union or the plan cannot be read. */
+export function runKnowledgeMeasurement(opts: KnowledgeMeasurementOpts): KnowledgeMeasurementResult {
+  const from = fixedClock(opts.now.getTime() - KNOWLEDGE_MEASUREMENT_WINDOW_DAYS * DAY_MS).iso();
+  const window = { from, to: opts.now.toISOString() };
+  const read = opts.ledgerUnion ?? ((stateDir, pattern, o) => resolveLedgerUnion(stateDir, pattern, undefined, o));
+  const union = read(opts.stateDir, KNOWLEDGE_MEASUREMENT_PATTERN, { sinceTs: from });
+  const base = { window, archiveCount: union.archiveCount, unread: union.unread.length };
+  if (!union.ok) {
+    const why = union.archiveCount === 0 ? "no rotation corpus" : `${union.unread.length} unreadable file(s)`;
+    return { status: "refused", refusedReason: `ledger union unreadable under ${union.stateDir}: ${why}`, ...base };
+  }
+  let taskFiles: ReadonlyMap<string, readonly string[]>;
+  try {
+    taskFiles = (opts.taskFiles ?? (() => planTaskFiles(opts.checkoutDir)))();
+  } catch (e) {
+    return { status: "refused", refusedReason: `plan unreadable: ${String((e as Error)?.message ?? e)}`, ...base };
+  }
+  const rows: Record<string, unknown>[] = [];
+  for (const line of union.matches) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // a torn line — the union's own convention; it never takes the read down
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const row = parsed as Record<string, unknown>;
+    // An archive rotated inside the window can still hold rows from before it.
+    if (typeof row.ts === "string" && row.ts >= from) rows.push(row);
+  }
+  return { status: "measured", ...base, gaps: foldKnowledgeGaps(rows, taskFiles), outcomes: foldLearningOutcomes(rows) };
+}
+
+/** The `knowledge.measured` row: the rung's whole product, read back by the digest. */
+export function buildKnowledgeMeasuredRow(result: KnowledgeMeasurementResult): Record<string, unknown> {
+  return {
+    step: KNOWLEDGE_MEASURED_STEP,
+    status: result.status,
+    ...(result.refusedReason !== undefined ? { refused_reason: result.refusedReason } : {}),
+    window_days: KNOWLEDGE_MEASUREMENT_WINDOW_DAYS,
+    window_from: result.window.from,
+    window_to: result.window.to,
+    archive_count: result.archiveCount,
+    unread: result.unread,
+    ...(result.gaps ? { gaps: result.gaps } : {}),
+    ...(result.outcomes ? { outcomes: result.outcomes } : {}),
+  };
+}
+
 /**
  * Runs every measurement verb once, returning a cadence-shaped summary — wrapped by
  * `buildMeasurementCadenceDaemonHooks` and logged by `lib/daemon.ts`'s poll loop.
  * INVARIANT: never files a task or mints an id — the only writes (`escalateRepeatingRules`,
- * `mintAdoptionProposals`) are gated on `opts.escalate` via `updateProposalRegistry`.
+ * `mintAdoptionProposals`) are gated on `opts.escalate` via `updateProposalRegistry`. The
+ * knowledge rung's one ledger row goes through the CALLER's `opts.knowledge.writeLedgerLine`, and
+ * without that option the rung does not run.
  */
 export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts): MeasurementCadenceRunResult {
   const registryPath = opts.registryPath ?? join(opts.stateDir, "inbox-proposals.json");
@@ -2226,6 +2326,12 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   // `land` seam — so this cannot turn a cadence tick into a failure however large the drift is.
   const planReconcile = opts.planReconcile ? planReconcileCadence(opts.planReconcile) : undefined;
 
+  // ── W1-T4243: the knowledge rung, opt-in; its product is its own `knowledge.measured` row ─────
+  const knowledge = opts.knowledge
+    ? runKnowledgeMeasurement({ ...opts.knowledge, stateDir: opts.stateDir, now: nowDate, checkoutDir: opts.checkoutDir })
+    : undefined;
+  if (knowledge && opts.knowledge) opts.knowledge.writeLedgerLine(buildKnowledgeMeasuredRow(knowledge));
+
   const currentMetrics = {
     repeatIncidentRate: ruleEfficacy.repeatIncidentRate,
     blockedCiShare: verdictCalibration.blocked_ci_share ?? null,
@@ -2260,6 +2366,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ...(handRunCensusResult ? { handRunCensus: handRunCensusResult } : {}),
     ...(planReconcile ? { planReconcile } : {}),
     ...(opts.verifyHuman ? { verifyHuman: opts.verifyHuman } : {}),
+    ...(knowledge ? { knowledge } : {}),
   };
 }
 
@@ -2267,7 +2374,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
  *  {@link buildMeasurementCadenceRow} builds — `boardReview` already has its own log family
  *  (`board_review.*` in `daemon.ts`), so naming it here would duplicate an existing row. A member
  *  that gains its own row family joins this set at the same time. */
-const CADENCE_ROW_OWN_FAMILY_KEYS: ReadonlySet<string> = new Set(["boardReview"]);
+const CADENCE_ROW_OWN_FAMILY_KEYS: ReadonlySet<string> = new Set(["boardReview", "knowledge"]);
 
 /** camelCase -> snake_case, ASCII-only — every key here is plain camelCase, so this never
  *  handles acronyms or unicode, needing no hand-maintained name map. */

@@ -615,6 +615,7 @@ async function driveDepReview(opts: {
   const tmp = opts.tmp ?? mkdtempSync(join(tmpdir(), "rmd-fr-"));
   const ledgerPath = join(tmp, "state", "ledger.ndjson");
   const armCalls: string[] = [];
+  const prMutationCalls: string[] = [];
   const printed: string[] = [];
   const realLog = console.log;
   console.log = (...a: unknown[]) => void printed.push(a.map(String).join(" "));
@@ -641,6 +642,12 @@ async function driveDepReview(opts: {
           return (opts.arm ?? (() => "ledger-refused"))();
         },
         issues: opts.issues,
+        // W1-T4226: the migrate branch's PR comment/close go through `DepReviewDeps.prMutations`,
+        // a recording fake — never the refused `gh pr comment`.
+        prMutations: {
+          comment: (prUrl: string, body: string) => void prMutationCalls.push(`comment ${prUrl} ${body}`),
+          close: (prUrl: string) => void prMutationCalls.push(`close ${prUrl}`),
+        },
       },
     );
   } finally {
@@ -649,7 +656,7 @@ async function driveDepReview(opts: {
   const steps = existsSync(ledgerPath)
     ? readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
     : [];
-  return { code, steps, printed, armCalls, tmp, ledgerPath };
+  return { code, steps, printed, armCalls, prMutationCalls, tmp, ledgerPath };
 }
 
 test("impl-FR: a minor/patch bump whose arm did NOT take is detected and escalated", async () => {
@@ -704,6 +711,10 @@ test("impl-FR SAFETY: a MAJOR bump migrates and still never arms or reaches the 
   );
   const decided = r.steps.filter((s) => s.step === "dep-review.decided");
   assert.equal(decided[0].decision, "migrate", "the lane's own policy still owns this outcome");
+  assert.ok(
+    r.steps.some((s) => s.step === "dep-review.migrate.ignore_commented"),
+    "the migration itself completes — the Dependabot ignore comment is posted, not refused",
+  );
   rmSync(r.tmp, { recursive: true, force: true });
 });
 

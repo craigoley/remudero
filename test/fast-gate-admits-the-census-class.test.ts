@@ -110,7 +110,7 @@ test("runPreflightFast: an entry whose OWN measured wall time runs away from its
   const { spawn } = recordingSpawn(); // every call returns {status: 0} — the underlying command WOULD pass
   // Three steps, six reads: two cheap siblings (0->1000ms, 1000->2000ms) then the runaway
   // 2000->32000ms (30s, well over 4x the 1000ms median of [1000, 1000, 30000]).
-  const clockTicks = [0, 1000, 1000, 2000, 2000, 32000];
+  const clockTicks = [0, 1000, 1000, 2000, 2000, 32000, 32000, 62000]; // then one re-measure, also 30s
   let tick = 0;
   const now = () => clockTicks[tick++];
   const syntheticSteps = [

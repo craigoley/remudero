@@ -31,6 +31,10 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
+// W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
+// injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
+const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
+
 function result(over: Partial<WorkerResult> = {}): WorkerResult {
   return {
     sessionId: "s",
@@ -304,6 +308,7 @@ test("runFixRung: a blocked_review exhaustion with REAL unmet criteria renders e
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => {
         reviewCalls++;
         return { ...stillFailing, headSha: `esc-sha-${reviewCalls}` };
@@ -341,6 +346,7 @@ test("runFixRung: a blocked_review exhaustion whose criteria were CHECKED AND AR
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => {
         reviewCalls++;
         return { ...allMetButFailing, headSha: `esc-sha-${reviewCalls}` };
@@ -375,6 +381,7 @@ test("runFixRung: a blocked_review exhaustion whose criteria list was NEVER COLL
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => {
         reviewCalls++;
         return { ...noCriteriaAtAll, headSha: `esc-sha-${reviewCalls}` };

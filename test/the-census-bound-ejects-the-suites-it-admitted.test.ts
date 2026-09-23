@@ -104,7 +104,7 @@ test("W1-T2545/W1-T3408 criterion 2: the bound is derived from the run's own mea
   const withFastPopulation = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([900, 1000, 4001]),
+    now: scriptedClock([900, 1000, 4001, 4001]), // W1-T3408 + the re-measure: crossed twice
     steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
   assert.equal(
@@ -165,7 +165,7 @@ test("W1-T2545 criterion 4: a genuinely runaway entry is still refused, so the b
   const r = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([1000, 1200, 60000]),
+    now: scriptedClock([1000, 1200, 60000, 60000]), // crossed on the run AND on the one re-measure
     steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
   const runaway = r.steps.find((s) => s.name === "c-census")!;
@@ -213,4 +213,57 @@ test("W1-T2545: a non-census entry is untouched — no timing, no cost report, n
   });
   assert.equal(r.ok, true);
   assert.doesNotMatch(r.steps[0].detail, /COST|RUNAWAY|soft bound/);
+});
+
+// ── The runaway bound is TIERED: a first crossing is re-measured once, alone; only a second refuses.
+// MEASURED on PR #6821: negative-reachability-census took 4091ms against a 4000ms bound on a loaded
+// CI runner — over by 2% — while its own command PASSed. One crossing is a load spike, not a runaway.
+
+test("a census that crosses the runaway bound once is re-measured before it refuses", () => {
+  const calls: string[] = [];
+  const r = runPreflightFast("/repo", {
+    packageJsonText: PKG,
+    spawn: (_file, args) => {
+      calls.push(args.join(" "));
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    now: scriptedClock([900, 1000, 4091, 1800]),
+    steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
+  });
+  const c = r.steps.find((s) => s.name === "c-census")!;
+  assert.equal(c.ok, true, c.detail);
+  assert.match(c.detail, /RE-MEASURED: 4091ms crossed the 4000ms runaway bound once; one re-run took 1800ms/);
+  assert.deepEqual(calls.filter((a) => a.endsWith("census:c")).length, 2, "the crossing entry alone ran a second time");
+  assert.deepEqual(calls.filter((a) => a.endsWith("census:a")).length, 1, "a sibling under the bound is never re-run");
+  assert.equal(r.ok, true);
+});
+
+test("a census that crosses the runaway bound twice still refuses", () => {
+  const r = runPreflightFast("/repo", {
+    packageJsonText: PKG,
+    spawn: okSpawn,
+    now: scriptedClock([900, 1000, 4091, 4200]),
+    steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
+  });
+  const c = r.steps.find((s) => s.name === "c-census")!;
+  assert.equal(c.ok, false);
+  assert.match(c.detail, /RUNAWAY — npm run --silent census:c took 4091ms then 4200ms on one re-measure, both over 4000ms/);
+  assert.equal(r.ok, false);
+});
+
+test("a census whose re-measure fails its own command reports that failure rather than a cost verdict", () => {
+  let censusCRuns = 0;
+  const r = runPreflightFast("/repo", {
+    packageJsonText: PKG,
+    spawn: (_file, args) => {
+      if (args.join(" ").endsWith("census:c") && ++censusCRuns === 2) return { status: 1, stdout: "", stderr: "flaked red" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    now: scriptedClock([900, 1000, 4091, 100]),
+    steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
+  });
+  const c = r.steps.find((s) => s.name === "c-census")!;
+  assert.equal(c.ok, false);
+  assert.match(c.detail, /on the re-measure after 4091ms crossed 4000ms/);
+  assert.doesNotMatch(c.detail, /RUNAWAY/);
 });

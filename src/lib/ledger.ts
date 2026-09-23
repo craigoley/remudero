@@ -1119,7 +1119,10 @@ export function compactRotations(
   rows.sort((a, b) => tsOf(a) - tsOf(b));
   const dated = rows.filter((r) => Number.isFinite(tsOf(r)));
   const clock = io.clock ?? systemClock;
-  const newestTs = dated.length > 0 ? fixedClock(tsOf(dated[dated.length - 1]!)).iso() : clock.iso();
+  // A row stamped in the future (one read 2027-10-14 on 2026-09-23) must not stamp the file past now:
+  // a future name is immune to every time window. The row itself is kept; only the name is capped.
+  const newestMs = dated.length > 0 ? Math.min(tsOf(dated[dated.length - 1]!), clock.now()) : clock.now();
+  const newestTs = fixedClock(newestMs).iso();
   const archiveName = compactedArchiveName(newestTs);
   io.write(archiveName, rows.join("\n") + "\n");
   // THE SOURCES GO ONLY AFTER THE REPLACEMENT IS WRITTEN. A crash between the two costs a duplicate

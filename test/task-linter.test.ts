@@ -769,7 +769,7 @@ test("ACCEPTANCE 1: the W1-T100 regression corpus — all three verbatim proofs 
   for (const v of resolvability) {
     assert.equal(v.severity, "block");
     assert.match(v.message, /resolvable/i);
-    assert.match(v.message, /name a literal test|name a pattern/i, "remedy names an artifact option");
+    assert.match(v.message, /name the whole test file|name a pattern/i, "remedy names an artifact option");
     assert.match(v.message, /drop the/i, "remedy names the drop-the-prefix option");
   }
   assert.match(resolvability[0]!.message, /criterion 1/);
@@ -1906,4 +1906,31 @@ test("W1-T180: whitespace normalisation still decides the match, and an empty `a
   assert.equal(followUpCarriesCriteria(added, [followUp]), true, "criterionKey collapses whitespace");
   assert.equal(followUpCarriesCriteria([], []), true, "nothing to carry");
   assert.equal(followUpCarriesCriteria(added, []), false, "no candidate tasks at all is never a home");
+});
+
+// The two lint rules must tell ONE story. proof-resolvability's remedy once recommended
+// "test/foo.test.ts::exact title", a form proof-dialect (and review's executor) refuse — so an
+// author who followed the advice traded one violation for the other. Every example the advice
+// names is run back through proof-dialect here.
+test("the proof-resolvability advice names only a form proof-dialect accepts", () => {
+  const narrative = task({
+    id: "FIX-ADVICE-AGREES",
+    acceptance: [{ claim: "a scenario", proof: "unit test: given one state, given another state, the thing happens" }],
+  });
+  const [violation] = proofResolvabilityViolations(narrative);
+  assert.ok(violation, "the narrative proof must draw a proof-resolvability violation for its advice to be read");
+  const advice = violation.message.split("names no resolvable artifact — ")[1] ?? "";
+  const examples = [...advice.matchAll(/"([^"]*)"/g)]
+    .map((m) => m[1]!)
+    .filter((e) => /^unit test:|\.test\.ts/.test(e))
+    .map((e) => (e.startsWith("unit test:") ? e : `unit test: ${e}`));
+  assert.ok(examples.length >= 2, `the advice must name both supported forms, got ${JSON.stringify(examples)}`);
+  for (const proof of examples) {
+    const followed = task({ id: "FIX-ADVICE-FOLLOWED", acceptance: [{ claim: "followed the advice", proof }] });
+    assert.deepEqual(
+      proofDialectViolations(followed).map((v) => v.message),
+      [],
+      `the advised form ${JSON.stringify(proof)} must be one proof-dialect accepts`,
+    );
+  }
 });

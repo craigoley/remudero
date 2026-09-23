@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
 import { DEFAULT_CRASHLOOP_WINDOW } from "../src/lib/daemon.js";
 import type { DaemonSummary } from "../src/lib/daemon.js";
+import { ghShim, type GhShim } from "./helpers/gh-shim.js";
 
 function fixtureHome(): { home: string; root: string; planPath: string } {
   const home = mkdtempSync(join(tmpdir(), "rmd-daemon-crashloop-wiring-"));
@@ -70,12 +71,34 @@ function ledgerLines(root: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
+/**
+ * W1-T4226: "no gh" is this fixture's OWN deliberate condition, not the shared refusal stub's
+ * accident — a test-owned `gh` answers every call with a failure, so tryEscalate's delivery fails
+ * (delivered:false) exactly as the header describes, and the attempt is recorded where a test can
+ * read it back. Prepended onto PATH ahead of the shared stub; restored by the returned function.
+ */
+function unreachableGh(): { shim: GhShim; restore: () => void } {
+  const shim = ghShim([{ when: "", stderr: "fixture: gh is not available in this daemon fixture", exit: 1 }], {
+    kind: "daemon-crashloop-no-gh",
+  });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  return {
+    shim,
+    restore: () => {
+      process.env.PATH = oldPath;
+      rmSync(shim.dir, { recursive: true, force: true });
+    },
+  };
+}
+
 const loopStub = async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 });
 
 test("W1-T215 wiring: a boot into a live storm (6 prior boots in <10m) escalates through the REAL daemonCommand — daemon.crashloop_check breached:true and one daemon.crashloop.escalated marker with the window evidence, delivered:false with no gh", async () => {
   const { home, root, planPath } = fixtureHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;
+  const gh = unreachableGh(); // W1-T4226: this fixture's own failing gh, not the shared refusal
   try {
     seedBoots(root, 6, 60_000); // one per minute — the observed storm cadence, > maxBoots (5)
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub });
@@ -89,11 +112,13 @@ test("W1-T215 wiring: a boot into a live storm (6 prior boots in <10m) escalates
     const escalated = lines.filter((l) => l.step === "daemon.crashloop.escalated");
     assert.equal(escalated.length, 1, "exactly one escalation marker for the storm");
     assert.equal(escalated[0].delivered, false, "no gh in the fixture PATH — marker still written (delivery-independent dedup key)");
+    assert.ok(gh.shim.calls().length > 0, "the failed delivery was this fixture's own gh answering, not the shared refusal");
     assert.ok(Number(escalated[0].window_boots) > DEFAULT_CRASHLOOP_WINDOW.maxBoots, "the marker carries the window's own evidence");
     assert.equal(typeof escalated[0].window_newest, "string");
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    gh.restore();
     rmSync(home, { recursive: true, force: true });
   }
 });
@@ -102,6 +127,7 @@ test("W1-T215 wiring: the NEXT boot of the SAME storm does not open a second iss
   const { home, root, planPath } = fixtureHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;
+  const gh = unreachableGh(); // W1-T4226: this fixture's own failing gh, not the shared refusal
   try {
     seedBoots(root, 6, 60_000);
     await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub });
@@ -114,6 +140,7 @@ test("W1-T215 wiring: the NEXT boot of the SAME storm does not open a second iss
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    gh.restore();
     rmSync(home, { recursive: true, force: true });
   }
 });

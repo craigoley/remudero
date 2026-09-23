@@ -22,6 +22,7 @@ import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
 import { isPaused } from "../src/lib/fleet-control.js";
 import { reachSection, shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -116,6 +117,8 @@ function fixtureDeps(root: string, tasks: Task[], github: GitHub = fakeGitHub(),
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T4226: /v1/daemon-health reads `gh api rate_limit` -- fake it, never shell the refused gh.
+    daemonHealth: { exec: fakeGhRateLimitExec() },
     // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
     // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
     // actually arrives with (Serve injects the capability header; grantor tier "high").

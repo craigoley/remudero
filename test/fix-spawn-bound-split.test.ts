@@ -282,6 +282,8 @@ test("W1-T1219 (acceptance 4): a completed (non-abandoned) spawn records its own
       log: (step, extra) => events.push({ step, extra }),
       say: () => {},
       account: (r) => r,
+      // W1-T4226: the live PR-body read goes through `deps.fetchPrBody`, not the refused gh read.
+      fetchPrBody: async () => "## Summary\n\nfix-rung fixture PR body.\n",
       spawnWallClockBoundMs: 5000, // comfortably above the 15ms the fake spawn actually takes
     },
   });
