@@ -15,7 +15,7 @@
     - hooks/deny-floor.sh
     - src/lib/github-transport.ts
     - test/interactive-reads-use-the-app-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The cadence floor (hooks/deny-floor.sh, W1-T3275) is correct to be shared: GitHub's secondary limit

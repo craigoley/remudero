@@ -14,7 +14,7 @@
   files:
     - deploy/install-host-units.sh
     - test/an-untracked-file-does-not-block-convergence.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     CORRECTED 2026-09-22 (this record was first filed with the wrong root cause — "the repo registry

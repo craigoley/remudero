@@ -15,7 +15,7 @@
     - .github/workflows/acr-build.yml
     - src/lib/deployer.ts
     - test/a-playwright-bump-rebuilds-the-image.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     deploy/Dockerfile resolves PW_VERSION from /app/package-lock.json and installs that Chromium
