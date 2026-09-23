@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "feedback#fb-1789959757208-462e0b"
   plan_refs: []
-  files: [deploy/entrypoint.sh, deploy/recycle-container.sh, test/a-root-owned-runtime-path-is-refused-at-boot.test.ts]
+  files: [deploy/entrypoint.sh, deploy/recycle-container.sh, test/a-root-owned-runtime-path-is-refused-at-boot.test.ts, test/host-capability-fixtures.test.ts]
   status: queued
   attempts: 0
   rationale: |

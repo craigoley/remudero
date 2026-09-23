@@ -1295,19 +1295,21 @@
   acceptance:
   - claim: 'at the limit: zero dispatches, a dispatch_deferred_wip ledger line carrying the observed count,
       and sweep/heal/arm/merge in the SAME pass unaffected — proving the throttle hits intake only'
-    proof: 'unit test: test/queue-governor.test.ts'
+    proof: 'grep: acceptance 1 — at the limit: checkQueueGovernor defers in test/queue-governor.test.ts'
   - claim: 'below the limit: dispatch proceeds normally — the falsifier proving the governor is not simply
       off or always-on'
-    proof: 'unit test: test/queue-governor.test.ts'
+    proof: 'grep: acceptance 2 — below the limit: dispatch proceeds normally in test/queue-governor.test.ts'
   - claim: changing the limit is a policy-data row edit with zero code change, the falsifier for whether
       this is really policy-data
-    proof: 'unit test: test/queue-governor.test.ts'
+    proof: 'grep: acceptance 3 — changing the limit is a policy-data row edit in test/queue-governor.test.ts'
   risk: high
   origin: architect
   plan_refs:
   - MASTER-PLAN#5C
   files:
   - src/lib/sweep.ts
+  - test/queue-governor.test.ts
+  pr: 385
   depends_on: []
 - id: W1-T122
   title: PLAN SHARDING (plan/tasks.d/) — concurrent filings become conflict-free BY CONSTRUCTION, not
@@ -1357,19 +1359,21 @@
   acceptance:
   - claim: two branches each adding a DIFFERENT shard merge with zero textual conflict — the whole point,
       proven by a real two-branch merge rather than asserted
-    proof: 'unit test: test/plan-sharding.test.ts'
+    proof: 'grep: two branches each adding a DIFFERENT shard merge with zero textual conflict in test/plan-sharding.test.ts'
   - claim: a duplicate id across two shards fails loadPlan, preserving the uniqueness guard the single-file
       format gave for free
-    proof: 'unit test: test/plan-sharding.test.ts'
+    proof: 'grep: a duplicate id across two shards fails loadPlan in test/plan-sharding.test.ts'
   - claim: the existing single-file plan/tasks.yaml still loads unchanged — the back-compat lock that
       lets migration be staged
-    proof: 'unit test: test/plan-sharding.test.ts'
+    proof: 'grep: the existing single-file plan/tasks in test/plan-sharding.test.ts'
   risk: high
   origin: architect
   plan_refs:
   - MASTER-PLAN#5C
   files:
   - src/lib/plan.ts
+  - test/plan-sharding.test.ts
+  pr: 386
   depends_on: []
 - id: W1-T155
   title: "live-state DATA — the board projection exposes the FULL status taxonomy (in-flight+phase, blocked, needs-human, armed-awaiting-merge) + startedAt/elapsed, joined from the ledger run state"
@@ -11000,16 +11004,17 @@
     temp dirs after a completed invocation.
   acceptance:
     - claim: "a completed rmd invocation leaves zero temp dirs"
-      proof: "unit test: run a status/derivation entrypoint against fixtures, assert the temp root is empty after exit, including a thrown-error path"
+      proof: "grep: withTempDir: removes the dir after fn returns normally in test/tmp.test.ts"
     - claim: "ledger reads no longer copy the file"
-      proof: "unit test: read path consumes the fixture ledger with no write syscalls to a temp copy (assert via injected fs) and returns identical parse results"
+      proof: "grep: readLedgerLines: consumes the fixture ledger through an injected fs with NO write/copy method available, identical parse results in test/tmp.test.ts"
     - claim: "boot sweep removes stale dirs and reports"
-      proof: "unit test: seeded stale + fresh dirs -> stale removed, fresh kept, count logged"
+      proof: "grep: sweepStaleTempDirs: removes rmd-owned dirs older than the ceiling, keeps fresh ones and non-rmd entries in test/tmp.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§9", "§4B"]
-  files: [src/lib/ledger.ts, src/lib/daemon.ts]
+  files: [src/lib/daemon.ts, src/lib/status.ts, src/lib/tmp.ts, src/run-task.ts, test/daemon.test.ts, test/tmp.test.ts]
   status: queued
+  pr: 279
   attempts: 0
 
 - id: W1-T116
