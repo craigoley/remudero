@@ -58,13 +58,13 @@
     never-granted file — the sibling task's concern).
   acceptance:
     - claim: "given an injected real-home fixture whose .claude holds a .credentials.json and no .claude-fleet sibling, the seed function creates .claude-fleet/.credentials.json at mode 600 and the directory at mode 700"
-      proof: "unit test: test/worker-home.test.ts"
+      proof: "unit test: given an injected real-home fixture whose .claude holds a"
     - claim: "given an injected real-home fixture whose .claude-fleet ALREADY exists (with different bytes than the real .claude/.credentials.json, simulating an already-refreshed worker token), the seed function makes NO write to it — an existing sibling is never overwritten"
-      proof: "unit test: test/worker-home.test.ts"
+      proof: "unit test: given an injected real-home fixture whose .claude-fleet ALREADY exists"
     - claim: "given an injected real-home fixture with no real .claude/.credentials.json at all, the seed function completes without error and creates nothing"
-      proof: "unit test: test/worker-home.test.ts"
+      proof: "unit test: given an injected real-home fixture with no real .claude"
     - claim: "the seed is invoked before materializeWorkerHome on the spawn path, so a worker spawned on a freshly-provisioned host (no prior .claude-fleet) resolves its .claude grant to the newly-seeded sibling rather than the wholesale .claude directory"
-      proof: "unit test: test/worker-home.test.ts"
+      proof: "unit test: the seed is invoked before materializeWorkerHome on the spawn"
   risk: high
   origin: "followup:DAEMON-1789306309171:2026-09-13T13:53:53.493Z:0"
   plan_refs: ["W1-T505", "W1-T971"]
