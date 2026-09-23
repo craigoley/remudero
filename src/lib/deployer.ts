@@ -95,6 +95,9 @@ export interface TriggerInputs {
   /** W1-T3245: read as the watchdog's RECYCLE question — image drift only, mount staleness ignored
    *  because the daemon's own freshness restart already owns it. Absent ⇒ today's full reading. */
   imageDriftOnly?: boolean;
+  /** W1-T4267: expected-versus-live Docker limits read by the watchdog tick. Undefined is
+   *  UNKNOWN (an unreadable inspect or policy), never drift. */
+  resourcePolicyDrift?: ResourcePolicyDrift[];
   /** Is the image built for the newest image-input commit published? `undefined` is UNKNOWN,
    *  which never recycles automatically — a recycle before the build lands would pull the old one. */
   imagePublished?: boolean;
@@ -106,6 +109,12 @@ export interface TriggerInputs {
   lastFailedAtMs?: number;
   /** The decision's clock, for the failure back-off above. */
   nowMs?: number;
+}
+
+export interface ResourcePolicyDrift {
+  field: "Memory" | "MemorySwap" | "CpuShares" | "MemoryReservation";
+  expected: number;
+  actual: number;
 }
 
 /** An automatic image recycle does not follow a recorded deploy failure sooner than this. */
@@ -448,6 +457,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   // (`undefined`) is deliberately NOT stale: an unreadable image sha means the container is down,
   // which is the crash-loop case, and restarting on it would be a storm.
   const imageStale = (i.imageBakedCommitsBehind ?? 0) > 0;
+  const resourcePolicyDrift = i.resourcePolicyDrift ?? [];
   // W1-T3245 — TWO DECISIONS, NOT ONE SCORE. `imageDriftOnly` is the WATCHDOG TICK's reading: it
   // asks whether a RECYCLE is due and is deliberately blind to mount-side staleness, because that
   // is a different event with a different cost and it is ALREADY HANDLED — the daemon's own
@@ -494,6 +504,20 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   const stopUnknownOrSet = i.stopPresent !== false;
   if (i.daemonAlive === false && !stopUnknownOrSet) {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
+  }
+  if (i.imageDriftOnly === true && resourcePolicyDrift.length > 0) {
+    const details = resourcePolicyDrift
+      .map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`)
+      .join(", ");
+    if (stopUnknownOrSet) {
+      return { deploy: false, reason: `resource policy drift (${details}), but STOP is set or unknown — no automatic recycle` };
+    }
+    const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
+      i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
+    if (recentFailure) {
+      return { deploy: false, reason: `resource policy drift (${details}); a deploy failed under an hour ago — the automatic recycle backs off` };
+    }
+    return { deploy: true, reason: `automatic resource-policy recycle: ${details}` };
   }
   if (!restartReasons && !imageStale) {
     // W1-T3694: the tick computed `runningStale` and is deliberately ignoring it (W1-T3245) —
@@ -893,6 +917,8 @@ export interface DeployDeps {
    *  was consulted, which is what every pre-existing test does. `undefined` from a supplied
    *  reader is UNKNOWN (the container is down — the crash-loop case), never "current". */
   imageBakedCommitsBehind?: () => number | undefined;
+  /** W1-T4267: compare policy arguments with Docker HostConfig. Undefined means UNKNOWN. */
+  resourcePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
   /** The newest origin/main commit touching {@link IMAGE_BAKED_PATHS}. */
   newestBakedSha?: () => string | undefined;
   /** Is an image tagged with that sha published? `undefined` = could not tell. Asked only on drift. */
@@ -1111,6 +1137,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     }
   }
   const imageBakedCommitsBehind = deps.imageBakedCommitsBehind?.();
+  const resourcePolicyDrift = opts.imageDriftOnly === true ? deps.resourcePolicyDrift?.() : undefined;
   const imageDrift = opts.imageDriftOnly === true && (imageBakedCommitsBehind ?? 0) > 0;
   const newestBakedSha = imageDrift ? deps.newestBakedSha?.() : undefined;
   const decision = decideDeployTrigger({
@@ -1128,6 +1155,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // #1066 shape this repo has paid for eleven times; `imageBuildSha` omitted yields `undefined`
     // here, which reads UNKNOWN and changes nothing.
     imageBakedCommitsBehind,
+    resourcePolicyDrift,
     imageDriftOnly: opts.imageDriftOnly,
     ...(newestBakedSha ? { newestBakedSha, imagePublished: deps.imagePublished?.(newestBakedSha) } : {}),
     imageRecycleManual: deps.imageRecycleManual?.(),
@@ -1696,6 +1724,53 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       const playwright = playwrightCoreVersionCommitsBehind(sha, (args) => git([...args]));
       if (baked === undefined && playwright === undefined) return undefined;
       return (baked ?? 0) + (playwright ?? 0);
+    },
+    resourcePolicyDrift: () => {
+      // The watchdog launcher passes the exact container and role it owns. Policy args are
+      // generated by the same sourced shell policy as container creation; Docker HostConfig is
+      // the actual persisted value. Any unreadable side stays UNKNOWN, never a recycle trigger.
+      const container = process.env.RMD_RESOURCE_POLICY_CONTAINER || IMAGE_SHA_CONTAINER;
+      const role = process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build";
+      let expectedArgsText: string;
+      let hostConfigText: string;
+      try {
+        expectedArgsText = exec("bash", [
+          "-c",
+          'source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; args=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); else resource_policy_build_args; args=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${args[@]}"',
+          "resource-policy",
+          join(o.installPath, "deploy", "resource-policy.sh"),
+          role,
+        ]);
+        hostConfigText = exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]);
+      } catch {
+        return undefined;
+      }
+      let hostConfig: Record<string, unknown>;
+      try {
+        hostConfig = JSON.parse(hostConfigText) as Record<string, unknown>;
+      } catch {
+        return undefined;
+      }
+      const expected = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0 };
+      for (const arg of expectedArgsText.split(/\r?\n/)) {
+        const match = /^--(memory|memory-swap|cpu-shares|memory-reservation)=(\d+)(m)?$/.exec(arg.trim());
+        if (!match) continue;
+        const [, option, raw, mib] = match;
+        const value = Number(raw) * (mib ? 1024 * 1024 : 1);
+        if (!Number.isSafeInteger(value)) return undefined;
+        if (option === "memory") expected.Memory = value;
+        else if (option === "memory-swap") expected.MemorySwap = value;
+        else if (option === "cpu-shares") expected.CpuShares = value;
+        else expected.MemoryReservation = value;
+      }
+      const fields: ResourcePolicyDrift["field"][] = ["Memory", "MemorySwap", "CpuShares", "MemoryReservation"];
+      const drift: ResourcePolicyDrift[] = [];
+      for (const field of fields) {
+        const actual = hostConfig[field];
+        if (typeof actual !== "number" || !Number.isFinite(actual) || actual < 0) return undefined;
+        if (expected[field] !== actual) drift.push({ field, expected: expected[field], actual });
+      }
+      return drift;
     },
     newestBakedSha: () => {
       let newestBaked: string | undefined;
