@@ -140,9 +140,32 @@ function stateWithArchives(): string {
     join(dir, "ledger.2026-09-14T00-00-00-000Z.ndjson"),
     line([...run("d10", "T1", { silent: false, verdict: "merged", ts: daysAgo(10) }), { ts: daysAgo(10), run_id: "x", step: "noise" }]),
   );
-  writeFileSync(join(dir, "ledger.ndjson"), line(run("live", "T1", { silent: true, verdict: "blocked_ci", ts: daysAgo(0, -5) })));
+  // A torn write matches the step filter but cannot parse; the read skips it, never fails on it.
+  writeFileSync(
+    join(dir, "ledger.ndjson"),
+    line(run("live", "T1", { silent: true, verdict: "blocked_ci", ts: daysAgo(0, -5) })) + '{"step":"verdict","run_id":"torn"\n',
+  );
   return dir;
 }
+
+test("W1-T4243: without an injected plan the rung loads the checkout's own plan, and refuses without one", () => {
+  const dir = stateWithArchives();
+  try {
+    // The real plan at this checkout: W1-T4243's own record declares files, so its runs map to areas.
+    const rows = (d: string) => run(`real-${d}`, "W1-T4243", { silent: true, verdict: "blocked_ci", ts: daysAgo(2) });
+    writeFileSync(join(dir, "ledger.ndjson"), rows("a").map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const m = runKnowledgeMeasurement({ stateDir: dir, now: NOW, checkoutDir: process.cwd() });
+    assert.equal(m.status, "measured", m.refusedReason);
+    assert.equal(m.gaps?.unmapped, 2, "T1 is not a real task id: d20 and d10 are counted as unmapped");
+    assert.equal(m.gaps?.runs, 1, "the W1-T4243 run resolves through the loaded plan");
+
+    const noCheckout = runKnowledgeMeasurement({ stateDir: dir, now: NOW });
+    assert.equal(noCheckout.status, "refused");
+    assert.match(noCheckout.refusedReason ?? "", /plan unreadable: no checkoutDir/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("W1-T4243: the rung reads the multi-week union, keeps its window, and refuses rather than reading zero", () => {
   const dir = stateWithArchives();
