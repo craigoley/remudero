@@ -34,7 +34,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
-  rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
+  rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
   rmd board [--repo <owner/repo> ...]   # Print what is open, and what is red, across every fleet repository.
@@ -306,10 +306,10 @@ the deduplicated union of every state/ledger.*.ndjson.gz archive and the live st
 Compact one bounded window of old ledger rotations without losing a distinct row.
 
 ```
-rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]
+rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]
 ```
 
-operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.
+operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.
 
 ### `rmd hand-runs`
 

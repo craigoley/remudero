@@ -1,0 +1,66 @@
+- id: W1-T4282
+  title: "skill-draft reachability note ignores the shipped W1-T3101 injection route — a draft carrying `applies-to:` is delivered to workers TODAY via the CONTEXT-splice path, yet describeWorkerSkillReachability (keyed only to WORKER_SETTING_SOURCES) tells every staged proposal it is 'NOT reachable by a worker today', misinforming whoever ratifies it about what approval actually does"
+  repo: remudero
+  depends_on: [W1-T2766, W1-T3101]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [src/lib/skill-workshop.ts, test/skill-workshop-reachability-route.test.ts]
+  origin: architect
+  plan_refs: ["W1-T2766", "W1-T3101", "W1-T3137", "skill-draft:25c3724cf6958acf"]
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED AT SOURCE while evaluating proposal skill-draft:25c3724cf6958acf. `describeWorkerSkillReachability`
+    (src/lib/skill-workshop.ts:252-266) reports reachable ONLY when `WORKER_SETTING_SOURCES` includes 'project' —
+    the native SDK filesystem-settings discovery path. `stageSkillDraft` embeds that verdict verbatim into every
+    staged proposal's summary ("NOT reachable by a worker today: settingSources excludes 'project' ...").
+
+    THAT IS NO LONGER THE ONLY DELIVERY PATH. W1-T3101 (merged) wired a SEPARATE, already-live route that
+    bypasses settingSources entirely: `loadInjectableSkills` reads the APPROVED `.claude/skills/` tree directly
+    off disk, `selectSkillsForTask` matches a skill's `applies-to:` frontmatter against the dispatched task's
+    type, and `renderSkillsPart` splices the matched skill's body into the implement prompt's CONTEXT block
+    (src/run-task.ts:12309-12326) — spending the same knowledge budget `matchedLearnings` already spends, and
+    ledgered as `skills.injected`. None of this consults `WORKER_SETTING_SOURCES`.
+
+    THE LIVE FIXTURE IS THIS VERY PROPOSAL. skill-draft:25c3724cf6958acf's frontmatter carries
+    `applies-to: implement` and cites 84 supporting merged runs — exactly the shape `INJECTABLE_SKILL_TASK_TYPES`
+    and `selectSkillsForTask` require. Approving it would make `loadInjectableSkills` find the written
+    `.claude/skills/implement-clean-single-strike-25c3724c/SKILL.md`, and its body would splice into every
+    subsequent implement-task prompt (budget permitting) — the OPPOSITE of what its own staged text claims.
+    An operator or an automated ratifier reading "NOT reachable" has no way to know approval does anything.
+  design: |
+    Extend the reachability computation the caller supplies to `stageSkillDraft` to report the UNION of both
+    routes, not only the settingSources-gated one:
+    (i) Parse the draft's OWN `applies-to:` frontmatter (reuse `SKILL_APPLIES_TO_RE`, already exported by
+        skill-workshop.ts for exactly this parse) and check the named class(es) against
+        `INJECTABLE_SKILL_TASK_TYPES` — the same set `injectableSkillTaskType` already validates against when
+        the draft is first rendered.
+    (ii) If any class matches, report `reachable: true` with a reason naming the W1-T3101 CONTEXT-splice route
+         explicitly (so the text is attributable to a real, cited mechanism, not a bare assertion) —
+         independent of, and never gated on, `WORKER_SETTING_SOURCES`.
+    (iii) Keep the existing settingSources-based check too — it remains a true statement about the NATIVE
+          discovery path, which W1-T3137 is separately deciding whether to pursue (Route A/B) — but the
+          STAGED SUMMARY must never assert unreachability when the injection route alone would deliver it.
+    (iv) A draft with no `applies-to:` (or one naming an unrecognised task type) AND excluded settingSources
+         still reports NOT reachable — the fix reports the real union, it does not default to reachable.
+    DO NOT touch `WORKER_SETTING_SOURCES` or `spawnWorker` — that stays W1-T3137's remit, untouched here.
+  acceptance:
+    - claim: "a draft carrying a valid applies-to: for an injectable task type is reported reachable, naming the W1-T3101 CONTEXT-splice route, even when settingSources excludes 'project'"
+      proof: 'grep: test("W1-T4282: a draft with an injectable applies-to is reported reachable via the W1-T3101 CONTEXT-splice route" in test/skill-workshop-reachability-route.test.ts'
+    - claim: "a draft with no applies-to: (or an unrecognised task type) still reports NOT reachable when settingSources also excludes 'project' — the falsifier proving the fix reports the real union rather than defaulting to reachable"
+      proof: 'grep: test("W1-T4282: a draft with no applies-to or an unrecognised task type still reports NOT reachable" in test/skill-workshop-reachability-route.test.ts'
+    - claim: "the live fixture — a draft matching skill-draft:25c3724cf6958acf's own frontmatter (applies-to: implement, 84 supporting runs) — is used as a regression case and reports reachable via the injection route"
+      proof: 'grep: test("W1-T4282: the skill-draft:25c3724cf6958acf fixture reports reachable via the injection route" in test/skill-workshop-reachability-route.test.ts'
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF `stageSkillDraft`'s summary text no longer contains the unqualified phrase
+    "NOT reachable by a worker today" for a draft carrying a matching `applies-to:` — re-check by staging a
+    fixture draft with `applies-to: implement` and reading the emitted summary before concluding this is stale.
+  note: |
+    Filed while evaluating proposal skill-draft:25c3724cf6958acf (skill-workshop.ts, W1-T2766/W1-T3101).
+    Distinct from W1-T3137: that task decides whether to widen settingSources or add a native-discovery
+    headline route; this task only corrects what the staged proposal SAYS about the route that already ships.
+    Sibling W1-T4283 also edits skill-workshop.ts — W1-T4283 depends on this task to avoid a same-file dispatch
+    overlap rather than a design coupling.

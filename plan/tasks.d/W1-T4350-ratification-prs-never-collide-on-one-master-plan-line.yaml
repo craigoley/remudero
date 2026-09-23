@@ -1,0 +1,34 @@
+- id: W1-T4350
+  title: "EVERY RATIFICATION PR CONFLICTS WITH EVERY OTHER — rmd approve appends its stamp at the END of MASTER-PLAN.md whenever the proposal has no bullet, so any two open APPROVE PRs collide on the same line and each merge dirties the rest. Stop appending; the ledger's ratify.approved row is the record"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "board jam 2026-09-23"
+  files:
+    - src/lib/inbox.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23: 15 of 32 open PRs were CONFLICTING, every one an APPROVE PR whose only
+    conflict was MASTER-PLAN.md, and the sweep cannot resolve them (not an rmd-owned run branch), so
+    green, reviewed, auto-merge-armed PRs sat unmergeable. applyStampToMasterPlan replaces an existing
+    `- <id> (…)` bullet in place (a unique line) but otherwise appends at end of file; codeql, skill-draft
+    and follow-up proposals never have a bullet, so they all append at the same place. Nothing reads the
+    appended stamp back: isRatifiedInLedger decides "already ratified" from ratify.approved, and each
+    PR's acceptance greps its filed shard. Cleared by hand by taking main's MASTER-PLAN.md in each PR.
+  design: |
+    applyStampToMasterPlan returns the file unchanged when the proposal has no bullet (the in-place
+    replace stays). The approve PR's diff is then its shards alone, so ratifications never conflict with
+    each other; the stamp line stays in the commit body, where it already is.
+  acceptance:
+    - claim: "a stamp for a proposal with no bullet leaves MASTER-PLAN.md unchanged"
+      proof: "unit test: a stamp for a proposal with no bullet leaves MASTER-PLAN.md unchanged"
+    - claim: "a stamp for a proposal with a bullet still replaces that bullet in place"
+      proof: "unit test: a stamp for a proposal with a bullet still replaces that bullet in place"
+    - claim: "two ratification PRs filed together share no file"
+      proof: "unit test: two ratification PRs filed together share no file"

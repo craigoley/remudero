@@ -27,7 +27,7 @@ import {
   type FleetLaneDeps,
 } from "../src/lib/fleet-lane.js";
 import { machineTokens } from "../src/lib/inbox-plain.js";
-import { buildPanelGraphRoutes } from "../src/lib/panel-graph.js";
+import { buildPanelGraphRoutes, fleetLaneStoreForDisplay } from "../src/lib/panel-graph.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -244,4 +244,38 @@ test("W1-T4089: the inbox writes the classification snapshot and shows each flee
     server.close();
   }
   assert.equal(fleetLaneDecisions([{ step: "fleet_lane.decided", task_id: P1, decision: "file" }]).get(P1)?.reason, "The fleet turned this finding into planned work.");
+});
+
+test("the inbox shows a fleet decision after the live ledger rotates", async () => {
+  const f = fx({ [A1]: "not_ready", [P1]: "ready" }, [P1]);
+  // The lane decided P1 and the live ledger then rotated away: only the lane's own store remembers it.
+  writeFileSync(fleetLaneStorePath(f.stateDir), JSON.stringify({ [P1]: { decision: "file", ts: "2026-09-23T00:00:00.000Z" } }));
+  const root = join(f.stateDir, "..");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  const server = createService({
+    tokens: { read: "r", write: "w" },
+    routes: buildPanelGraphRoutes({
+      root,
+      inboxRoot: root,
+      planPath: join(root, "plan", "tasks.yaml"),
+      ledgerPath: f.ledgerPath,
+      github: { prView: () => null },
+      statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+      ratify: { approve: () => {}, reframe: () => {} },
+    }),
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox`, { headers: { authorization: "Bearer r" } });
+    const body = (await res.json()) as { fleet: Array<{ proposalId: string; decision?: string; reason?: string }> };
+    const p1 = body.fleet.find((i) => i.proposalId === P1);
+    assert.equal(p1?.decision, "file");
+    assert.equal(p1?.reason, "The fleet turned this finding into planned work.");
+  } finally {
+    server.close();
+  }
+  // A store that cannot be read shows the ledger's rows alone; the inbox still answers.
+  writeFileSync(fleetLaneStorePath(f.stateDir), "{ torn");
+  assert.deepEqual(fleetLaneStoreForDisplay(f.stateDir), {});
 });

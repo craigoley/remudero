@@ -65,7 +65,8 @@ import {
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
-import type { GhFailureReason, GitHub } from "./status.js";
+import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
+import { buildInstanceGatewayRoutes, type InstanceGatewayOptions } from "./instance-gateway.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -406,7 +407,16 @@ export interface ServeDeps {
    */
   selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
   /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
-  registry?: Partial<RegistryRouteDeps>;
+  registry?: {
+    /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */
+    repoRegistryPath?: string;
+    /** The fleet host's copy; defaults to {@link DEFAULT_HOST_INSTANCE_REGISTRY_PATH}. */
+    hostRegistryPath?: string;
+    clock?: Clock;
+    /** Async on purpose: a console read route never blocks the event loop (W1-T3192's census). */
+    readText?: (path: string) => Promise<string>;
+  };
+  instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
    * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
@@ -3151,16 +3161,6 @@ export function buildVersionRoute(sha: string): Route {
   };
 }
 /** W1-T4227 — `GET /v1/registry`'s inputs. Both paths and the reader are injectable for tests. */
-export interface RegistryRouteDeps {
-  /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */
-  repoRegistryPath: string;
-  /** The fleet host's copy; defaults to {@link DEFAULT_HOST_INSTANCE_REGISTRY_PATH}. */
-  hostRegistryPath?: string;
-  clock?: Clock;
-  /** Async on purpose: a console read route never blocks the event loop (W1-T3192's census). */
-  readText?: (path: string) => Promise<string>;
-}
-
 /** How the host copy compared: `unreadable`/`malformed` are notes, never a failed response. */
 export type HostRegistryState = "in_sync" | "drifted" | "unreadable" | "malformed";
 
@@ -3176,7 +3176,9 @@ export type HostRegistryState = "in_sync" | "drifted" | "unreadable" | "malforme
  * container) or parsed is a `hostRegistry` NOTE and no `drift` field — never an error, because the
  * repo registry answered and the host copy is only the thing being checked against it.
  */
-export function buildRegistryRoute(deps: RegistryRouteDeps): Route {
+export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string };
+
+export function buildRegistryRoute(deps: RegistryRouteInput): Route {
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
   const clock = deps.clock ?? systemClock;
   const hostPath = deps.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH;
@@ -4177,6 +4179,17 @@ function assembleServeRoutes(
     }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps);
+  routes.push(
+    ...buildInstanceGatewayRoutes(routes, {
+      registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
+      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log }),
+      issues: deps.issues,
+      controlStatus: deps.controlStatus,
+      log: deps.log,
+      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board }),
+      ...deps.instances,
+    }),
+  );
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails
   // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.

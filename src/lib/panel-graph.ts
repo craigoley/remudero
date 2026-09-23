@@ -83,7 +83,7 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
-import { fleetLaneDecisions, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
+import { fleetLaneDecisions, readFleetLaneStore, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
@@ -1703,7 +1703,7 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
       // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
       // lanes stay unchanged for one release so the console can move over without a break.
       const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
-      const fleetDecisions = fleetLaneDecisions(ledgerLines as never);
+      const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(deps.inboxRoot, "state")));
       const needsYou = {
         ready: ready.filter(isOperator),
         drafting: drafting.filter(isOperator),
@@ -1885,6 +1885,17 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
 export interface RatifyCliGateway {
   approve(proposalId: string): void;
   reframe(proposalId: string, feedback: string): void;
+}
+
+/** The fleet lane's decision store for display. A store that cannot be read shows the ledger's rows
+ *  alone rather than failing the whole inbox; the lane itself refuses to act on such a store. */
+export function fleetLaneStoreForDisplay(stateDir: string): ReturnType<typeof readFleetLaneStore> {
+  try {
+    return readFleetLaneStore(stateDir);
+  } catch {
+    // deliberate: this is a read-only view; an unreadable store falls back to the live ledger's rows.
+    return {};
+  }
 }
 
 /** Real {@link RatifyCliGateway}: shells out to the repo's own `bin/rmd`, matching a terminal
