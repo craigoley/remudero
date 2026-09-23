@@ -489,3 +489,23 @@ test("W1-T4099: a real statement next to a type alias is still flagged", async (
   assert.deepEqual(computeTypeOnlyRanges('type Open =\n  | "a"\n'), [], "an alias with no terminating semicolon stays unexempted");
 });
 
+test("W1-T4099: a process-boundary directive over a flushThenExit exit is honoured", async () => {
+  // run-task.ts's own CLI guard, verbatim in shape, after W1-T4063 replaced process.exit with flushThenExit.
+  const { computeBoundaryRanges } = await import(pathToFileURL(SCRIPT).href);
+  const src = [
+    "// diff-cov: process-boundary - direct CLI guard; this wrapper only prints and exits the current process.",
+    "if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {",
+    "  main().catch((err) => {",
+    '    console.error("RUN-TASK ERROR " + String(err));',
+    "    void flushThenExit(exitCodeFor(err));",
+    "  });",
+    "}",
+    "",
+  ].join("\n");
+  const { ranges, errors } = computeBoundaryRanges(src);
+  assert.deepEqual(errors, [], "the directive is valid");
+  assert.equal(ranges.length, 1);
+  const control = computeBoundaryRanges(src.replace("void flushThenExit(exitCodeFor(err));", "logIt(err);"));
+  assert.equal(control.errors.length, 1, "control: without an exit call the directive is still refused");
+});
+

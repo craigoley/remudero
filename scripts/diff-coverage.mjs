@@ -606,8 +606,10 @@ export function computeTypeOnlyRanges(fileText) {
  * @returns {{ranges: Array<{start:number,end:number,reason:string,directiveLine:number}>, errors: Array<{directiveLine:number,message:string}>}}
  */
 export const MAX_BOUNDARY_EXEC_LINES = 15;
+// W1-T4099: `flushThenExit(` (src/lib/flush-exit.ts, W1-T4063) is an exit too — it drains stdout/stderr
+// and then calls process.exit, so run-task.ts's own CLI guard stayed exit glue when W1-T4063 moved to it.
 const BOUNDARY_CALL =
-  /\b(?:spawnSync|execFileSync)\(\s*process\.execPath\b|\bprocess\.exit(?:Code\s*=|\s*\()|\bspawnWorker\s*\(/;
+  /\b(?:spawnSync|execFileSync)\(\s*process\.execPath\b|\bprocess\.exit(?:Code\s*=|\s*\()|\bspawnWorker\s*\(|\bflushThenExit\s*\(/;
 
 /**
  * W1-T3304 — A REAL BROWSER IS A SECOND KIND OF IRREDUCIBLE I/O, AND IT GETS ITS OWN WORD.
