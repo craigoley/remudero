@@ -317,6 +317,38 @@ resolve_rmd_on_path() {
   fi
 }
 
+# ── W1-T4195: before the fetch and the daemon, refuse by name a mutable path this uid cannot write;
+# never chown (a privileged repair is an operator act). Falsifier: test/a-root-owned-runtime-path-is-refused-at-boot.test.ts.
+STATE_DIR="$CONFIG_ROOT/state"
+LEDGER_FILE="$STATE_DIR/ledger.ndjson"
+
+refuse_unwritable() {
+  die "REFUSING TO START: $1 is not writable by uid $(id -u) ($(id -un 2>/dev/null || echo unknown)) — owner $(ls -ld "$1" 2>/dev/null | awk '{print $3}'). A host or privileged operation left it this way; an operator must restore ownership (e.g. chown -R <runtime uid> on it) and restart. This script never chowns on its own."
+}
+
+check_runtime_paths_writable() {
+  local p first
+  for p in "$STATE_DIR" "$LEDGER_FILE"; do
+    if [ -e "$p" ] && [ ! -w "$p" ]; then refuse_unwritable "$p"; fi
+  done
+  [ -d "$TREE/.git" ] || return 0
+  for p in refs logs worktrees; do
+    [ -e "$TREE/.git/$p" ] || continue
+    first="$(find "$TREE/.git/$p" ! -type l 2>/dev/null | while IFS= read -r x; do
+      if [ ! -w "$x" ]; then printf '%s\n' "$x"; break; fi
+    done || :)"
+    [ -n "$first" ] || continue
+    if [ "$p" = worktrees ] && [ "$first" != "$TREE/.git/worktrees" ]; then
+      log "WARNING: $first is not writable by uid $(id -u) — owner $(ls -ld "$first" 2>/dev/null | awk '{print $3}'); only that worktree is affected, and git worktree prune cannot remove it"
+      continue
+    fi
+    refuse_unwritable "$first"
+  done
+  return 0
+}
+
+check_runtime_paths_writable
+
 # ── CLONE, OR SYNC WHAT IS ALREADY THERE ─────────────────────────────────────────────────────
 if [ ! -e "$TREE/.git" ]; then
   log "no work tree at $TREE — cloning $REPO_URL"
