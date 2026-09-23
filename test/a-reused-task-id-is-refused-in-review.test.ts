@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +11,7 @@ import {
   taskIdDeclarationsInDiff,
 } from "../src/lib/review.js";
 import { taskIdCollisions } from "../src/lib/task-id-reservation.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // W1-T4389 — MEASURED 2026-09-23: remudero-console #1695 added CONSOLE-T58 in a shard named unlike
 // the one #1699 had merged it in, so git reported MERGEABLE. The review must refuse that collision
@@ -21,29 +21,18 @@ import { taskIdCollisions } from "../src/lib/task-id-reservation.js";
 const CRITERIA: AcceptanceCriterion[] = [{ claim: "the widget renders", proof: "the widget renders" }];
 const REPORT = "REPORT\n- the widget renders.\nPR_URL: https://github.com/o/r/pull/7";
 
-/** A real git repo whose `refs/remotes/origin/main` holds `files` — the base branch's tip. The
- *  identity rides env vars so the commit works on a CI runner with no git config at all. */
-function baseRepo(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-reused-task-id-"));
-  const env = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "t",
-    GIT_AUTHOR_EMAIL: "t@t.invalid",
-    GIT_COMMITTER_NAME: "t",
-    GIT_COMMITTER_EMAIL: "t@t.invalid",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-  };
-  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { env, stdio: "pipe" });
-  git("init", "-q");
+/** A real git repo whose `refs/remotes/origin/main` holds `files` — the base branch's tip — built
+ *  on the shared fixture builder, which carries its own identity for a config-less CI runner. */
+function planAtOriginMain(files: Record<string, string>): string {
+  const fixture = gitRepo({ seedCommit: false, kind: "reused-task-id" });
   for (const [rel, text] of Object.entries(files)) {
-    mkdirSync(dirname(join(dir, rel)), { recursive: true });
-    writeFileSync(join(dir, rel), text);
+    mkdirSync(dirname(join(fixture.dir, rel)), { recursive: true });
+    writeFileSync(join(fixture.dir, rel), text);
   }
-  git("add", "-A");
-  git("commit", "-q", "-m", "base");
-  git("update-ref", "refs/remotes/origin/main", "HEAD");
-  return dir;
+  fixture.git("add", "-A");
+  fixture.git("commit", "-q", "-m", "base");
+  fixture.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  return fixture.dir;
 }
 
 const shardDiff = (file: string, lines: string[]) =>
@@ -56,7 +45,7 @@ const BASE = {
 };
 
 test("a pull request adding a shard under an id its base already declares is refused with both files named", () => {
-  const repo = baseRepo(BASE);
+  const repo = planAtOriginMain(BASE);
   const diff = shardDiff("plan/tasks.d/W1-T900-reissued.yaml", ["+- id: W1-T900", '+  title: "t"']);
   const v = judgeReview(CRITERIA, { diff, report: REPORT, headCheckoutDir: repo });
   assert.deepEqual(v.taskIdCollisions, [
@@ -70,7 +59,7 @@ test("a pull request adding a shard under an id its base already declares is ref
 });
 
 test("editing the base's own shard for an id is not a collision", () => {
-  const repo = baseRepo(BASE);
+  const repo = planAtOriginMain(BASE);
   const diff = shardDiff("plan/tasks.d/W1-T900-original.yaml", ["-- id: W1-T900", "+- id: W1-T900", '+  title: "t2"']);
   assert.equal(taskIdDeclarationsInDiff(diff).added.length, 1, "control: the id line IS an added declaration");
   const v = judgeReview(CRITERIA, { diff, report: REPORT, headCheckoutDir: repo });
@@ -80,7 +69,7 @@ test("editing the base's own shard for an id is not a collision", () => {
 
 test("W1-T4389: two colliding ids report the first and count the rest, and long shard names are clipped under the cap", () => {
   const long = "W1-T900-a-very-long-shard-name-that-names-a-whole-rationale-in-its-slug.yaml";
-  const repo = baseRepo({ ...BASE, [`plan/tasks.d/${long}`]: "- id: W1-T902\n" });
+  const repo = planAtOriginMain({ ...BASE, [`plan/tasks.d/${long}`]: "- id: W1-T902\n" });
   const diff = [
     shardDiff("plan/tasks.d/W1-T902-another-very-long-shard-name-that-cannot-fit-either.yaml", ["+- id: W1-T902"]),
     shardDiff("plan/tasks.yaml", ["+- id: W1-T901"]),
@@ -94,7 +83,7 @@ test("W1-T4389: two colliding ids report the first and count the rest, and long 
 });
 
 test("W1-T4389: a genuinely new id, or a review with no head checkout, is never a collision", () => {
-  const repo = baseRepo(BASE);
+  const repo = planAtOriginMain(BASE);
   const fresh = shardDiff("plan/tasks.d/W1-T903-new.yaml", ["+- id: W1-T903"]);
   assert.deepEqual(judgeReview(CRITERIA, { diff: fresh, report: REPORT, headCheckoutDir: repo }).taskIdCollisions, []);
   const reused = shardDiff("plan/tasks.d/W1-T900-reissued.yaml", ["+- id: W1-T900"]);
@@ -129,7 +118,7 @@ test("W1-T4389: TASK_ID_LINE_RE accepts a column-0 task header and refuses a nes
 });
 
 test("W1-T4389: taskIdDeclarationsAtRef reads every plan file at the ref, and an unreadable ref declares nothing", () => {
-  const repo = baseRepo(BASE);
+  const repo = planAtOriginMain(BASE);
   assert.deepEqual(taskIdDeclarationsAtRef(repo, "origin/main"), [
     { id: "W1-T900", file: "plan/tasks.d/W1-T900-original.yaml" },
     { id: "W1-T901", file: "plan/tasks.d/W1-T901-other.yaml" },
