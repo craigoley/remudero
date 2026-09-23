@@ -1,0 +1,89 @@
+- id: W1-T4268
+  title: "gh pr edit fails on the Projects-Classic GraphQL query even for a body-only edit — the shared PR-authoring worker contract (implement + fix) gains a named fallback to `gh api -X PATCH`, so a worker hitting it does not assume the edit silently failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/compaction.ts, src/lib/prompt-render.ts, test/gh-pr-edit-fallback-contract.test.ts]
+  origin: "retro#RETRO-1789367285330"
+  plan_refs: ["W1-T2948"]
+  status: queued
+  attempts: 0
+  rationale: |
+    HARVESTED VERBATIM from the fix worker dispatched at 2026-09-14T07:19:45.398Z (strike 2, round
+    "fresh", mode ci-log) against RETRO-1789367285330's own plan-only PR #5499 (run DAEMON-1789365794642;
+    ledger: fix.dispatch at that exact timestamp, then automerge.armed + fix.resolved "review passed" at
+    07:19:53-54). Its follow-up: `gh pr edit`'s underlying GraphQL mutation errors on this repo/token with
+    "Projects (classic) is being deprecated … (repository.pullRequest.projectCards)" even for a body-only
+    edit; `gh api -X PATCH` worked as a substitute.
+
+    W1-T2948 (merged; verified live in src/run-task.ts:3579-3637) already fixed the HALF of this that the
+    harness controls: every one of its OWN PR-body writers — the acceptance-gate repair, the trailer
+    stamp, the retro repair — was rerouted off `gh pr edit --body` onto `prBodyRestArgs`/`writePrBodyRest`,
+    a REST `PATCH repos/{owner}/{repo}/pulls/{number}` call, precisely because that GraphQL query selects
+    `repository.pullRequest.projectCards`. That fix is real and this task does not touch it, extend it, or
+    duplicate it.
+
+    WHAT IT DOES NOT COVER, AND WHAT THIS RUN JUST PROVED: a worker's OWN ad hoc `gh pr edit` invocation —
+    title, body, or label edits it issues directly in its own session, never routed through the harness's
+    internal writer — hits the identical failure with zero guidance. Verified by grep across
+    src/lib/compaction.ts, src/lib/prompt-render.ts, and every learnings/{platform,architecture,ci,
+    testing,failures}.yaml shard: none mentions `gh pr edit`, `projectCards`, "Projects Classic", or
+    `-X PATCH`. A worker hitting this today has no signal telling it the command's failure is a TRANSPORT
+    defect rather than evidence the edit was rejected — it would either silently give up, treat its own
+    edit as never having landed, or (as this run did) burn turns rediscovering the REST substitute from
+    scratch. compaction.ts's own `outputContractLines` ALREADY coaches workers through a `gh pr create
+    --title ...` invocation a few lines above its `WORKER_PR_AUTHORITY_LINES` splice (the "shared authority
+    boundary for both PR-authoring worker prompts") — the exact neighbourhood this fact belongs in.
+  design: |
+    ONE new shared constant, `GH_PR_EDIT_FALLBACK_LINES: readonly string[]`, defined in
+    src/lib/compaction.ts immediately beside `WORKER_PR_AUTHORITY_LINES` (same file, same "shared
+    authority boundary for both PR-authoring worker prompts" precedent that constant already documents).
+    Content: (a) names the specific failure signature a worker would see verbatim in its own terminal —
+    "Projects (classic)" / `repository.pullRequest.projectCards` — so it is recognized as THIS documented
+    case rather than treated as a novel failure worth escalating or silently accepting; (b) states plainly
+    that a `gh pr edit` failure carrying that signature is a TRANSPORT failure, never evidence the edit was
+    rejected or already applied; (c) gives the literal working substitute shape, reusing EXACTLY what
+    src/run-task.ts's own `prBodyRestArgs` (W1-T2948) already proved correct rather than inventing a
+    second, unverified transport: `gh api -X PATCH repos/{owner}/{repo}/pulls/{number} -f <field>=<value>`
+    (e.g. `-f body=…`, `-f title=…`); (d) carries forward the `-f`, never `-F` warning W1-T2948's own
+    comment already documents (`-F` reads a leading `@` value as a FILENAME and substitutes
+    `{owner}`/`{repo}`/`{branch}` placeholders), so a worker fixing this gotcha does not open a new one.
+
+    SPLICE POINTS, mirroring `WORKER_PR_AUTHORITY_LINES`'s own placement exactly so the two prompts cannot
+    drift: `...GH_PR_EDIT_FALLBACK_LINES` immediately beside the existing `...WORKER_PR_AUTHORITY_LINES`
+    line inside `outputContractLines()` (compaction.ts, the implement contract), AND immediately beside
+    `renderFixPrompt()`'s own `...WORKER_PR_AUTHORITY_LINES` line (prompt-render.ts:509, the fix contract) —
+    imported from compaction.ts exactly as `WORKER_PR_AUTHORITY_LINES` already is, never a second copy of
+    the wording.
+
+    SCOPE FENCE: zero new call sites in src/run-task.ts; zero changes to the harness's own internal
+    PR-body/trailer/retro writers, which are W1-T2948's and already shipped, already REST-only. This task
+    is exclusively the worker-facing PROMPT gap left open — a worker's own `gh pr edit` invocation, which
+    the harness cannot see or intercept in advance, only warn about.
+  acceptance:
+    - claim: "the shared PR-authoring contract names gh pr edit's specific failure signature (repository.pullRequest.projectCards / Projects Classic) and states plainly that a failure carrying it is a transport failure, never evidence the edit was rejected or already applied"
+      proof: "unit test: test/gh-pr-edit-fallback-contract.test.ts"
+    - claim: "the SAME fallback lines render byte-identical in both the implement contract and the fix contract — the falsifier proving the two prompts cannot drift apart on this fact"
+      proof: "unit test: test/gh-pr-edit-fallback-contract.test.ts"
+    - claim: "the fallback names the working substitute as a copy-executable command shape, not a vague pointer at 'use the API instead'"
+      proof: "grep: gh api -X PATCH repos/{owner}/{repo}/pulls in src/lib/compaction.ts"
+    - claim: "the fallback is defined once, in compaction.ts, and renderFixPrompt (prompt-render.ts) imports and splices that single constant rather than carrying its own copy of the wording"
+      proof: "grep: GH_PR_EDIT_FALLBACK_LINES in src/lib/prompt-render.ts"
+    - claim: "the task adds no new call site to src/run-task.ts and touches none of the harness's own internal PR-body/trailer/retro writers — this is prompt text only, never a second REST-write implementation competing with W1-T2948's"
+      proof: "unit test: test/gh-pr-edit-fallback-contract.test.ts"
+  note: |
+    RISK regraded medium->high for span alone (compaction.ts + prompt-render.ts are two distinct module
+    stems under the Rule-19 sizing count) — the blast radius is the opposite of the band: a two-line
+    addition to a static string array, spliced at an existing, already-proven splice point, changing no
+    control flow and no return type. Both files are touched BECAUSE both PR-authoring prompts need this
+    fact identically; touching only one would leave exactly the worker class that surfaced this finding
+    (a fix worker, ci-log mode) without the guidance.
+
+    SCOPE BOUNDARY, stated because a superficial reader could conflate this with W1-T2948: that task fixed
+    the harness's OWN write path (already merged, already REST-only, untouched here). This task is the
+    worker-facing prompt gap that fix left open — a worker's own ad hoc `gh pr edit`, invisible to and
+    unroutable by the harness.
