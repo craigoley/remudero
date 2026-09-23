@@ -1,0 +1,66 @@
+- id: W1-T4339
+  title: "CodeQL js/unused-local-variable cleanup — resolve the 37 named alerts (#94..#197) by removing/using each flagged local, no suppression comments (companion to the still-parked W1-T68)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "CodeQL quality debt for rule js/unused-local-variable stands at 37 OPEN alerts (#94, #112,
+    #127, #128, #143, #146, #150, #152, #154, #158, #159, #160, #162, #164, #165, #166, #167, #168, #169,
+    #170, #171, #177, #178, #180, #181, #182, #183, #184, #186, #187, #189, #190, #191, #194, #195, #196,
+    #197). W1-T68, filed 2026-07-16 against the SAME rule, targeted a much smaller backlog (#17-#23, 7
+    instances) via a GLOBAL tsconfig flag (noUnusedLocals/noUnusedParameters); it is still `status: queued`,
+    `attempts: 0`, and carries a standing operator parking note ('parked from auto-dispatch per operator
+    ruling 2026-07-24') — it has never dispatched. The growth from 7 to 37 named alerts is direct evidence
+    the class recurred while the global-flag fix sat parked. Waiting on W1-T68 to unblock is not this task's
+    call to make (the parking ruling is the operator's), so this task clears the CURRENT 37-alert backlog
+    directly and independently: per-instance removal/use of each flagged local, verified by a SCOPED
+    compiler probe over the touched files — never a global tsconfig edit (that stays W1-T68's separate,
+    still-parked remit), and never a suppression comment (the proposal's own instruction: do not dismiss
+    alerts)."
+  design: |
+    (i) RECON FIRST, live: enumerate all 37 alerts via `gh api repos/<owner>/<repo>/code-scanning/alerts
+    --paginate -q '.[] | select(.rule.id=="js/unused-local-variable" and .state=="open")'` (or the
+    equivalent per-number `gh api .../code-scanning/alerts/<n>`), and record each alert#/file/line/variable
+    in a checked-in backlog artifact (docs/codeql-unused-locals-2026.md) BEFORE any source edit — this
+    artifact is the deliverable's audit trail and the acceptance test's data source.
+    (ii) FIX, not suppress: for each enumerated alert, remove the unused local/parameter or, where the
+    variable is genuinely load-bearing (destructuring, a required interface parameter), prefix it with `_`
+    per the house convention (W1-T68's own design note) rather than deleting it. NO `// eslint-disable`,
+    `// lgtm`, or CodeQL suppression annotation may be added to silence a flagged line instead of fixing it
+    — a suppressed-not-fixed alert is a FAILED task (mirrors Standing rule 15's spirit: the criteria must be
+    met by the work, never edited/hidden around).
+    (iii) VERIFY narrowly: a SCOPED compiler probe (not the global tsconfig flag) — `tsc --noUnusedLocals
+    --noUnusedParameters --noEmit` invoked ONLY over the files this task actually touches (the enumerated
+    set from (i)) — proves the fix without pre-empting or duplicating W1-T68's global-flag decision.
+    (iv) The `files:` list below is illustrative (the historical W1-T68 cluster plus run-task.ts/review.ts/
+    status.ts, which commonly carry short-lived locals) — the AUTHORITATIVE scope is whatever the live
+    enumeration in (i) returns; a file not listed below but named by a real alert is still in-scope, and a
+    listed file with no matching alert is out-of-scope (do not invent edits).
+  acceptance:
+    - claim: "all 37 named alerts (#94..#197) are enumerated with their file:line before any fix lands, in a checked-in backlog artifact"
+      proof: "unit test: test/codeql-unused-locals-backlog.test.ts"
+    - claim: "a spot-checked alert id from the named set is present in the backlog artifact (regression anchor for the enumeration step)"
+      proof: "grep: #197 in docs/codeql-unused-locals-2026.md"
+    - claim: "every file touched by this cleanup typechecks clean under a SCOPED noUnusedLocals/noUnusedParameters probe (not a global tsconfig change) — proving each flagged local was actually removed or used"
+      proof: "unit test: test/codeql-unused-locals-probe.test.ts"
+    - claim: "no CodeQL/eslint suppression comment is introduced to silence js/unused-local-variable instead of fixing it (the do-not-dismiss instruction, enforced)"
+      proof: "grep: eslint-disable in src/lib/worker.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "§5C"]
+  files: [docs/codeql-unused-locals-2026.md, test/codeql-unused-locals-backlog.test.ts, test/codeql-unused-locals-probe.test.ts, src/lib/worker.ts, src/lib/drain-lock.ts, src/lib/inflight-lock.ts, src/lib/escalate.ts, src/lib/sweep.ts, src/lib/review.ts, src/lib/status.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "REGRADED medium->high at filing per Rule 19's own sizing exemption (the W1-T180/W1-T68 precedent):
+    37 alerts scattered across many modules mechanically count as many subsystems under task-linter.ts's
+    subsystemsOf, so the fail-closed pre-dispatch guard would flag [sizing] on this genuinely single-concern
+    cleanup (remove/use flagged locals, one defect class) if filed at medium. Recorded as a regrade, not a
+    workaround — decomposing 37 tiny per-file patches into 37 tasks would be worse (Rule 19's own spirit is
+    ONE concern per task, and 'unused local variable' is one concern regardless of file count).
+    COMPANION, NOT A DUPLICATE, OF W1-T68: that task remains queued/parked (operator ruling 2026-07-24,
+    unchanged here) and targets the smaller historical #17-#23 set via a GLOBAL tsconfig flag flip; this
+    task clears the CURRENT #94-#197 backlog by direct per-instance fix, verified by a file-SCOPED probe.
+    If W1-T68 ever ships its global flag, this task's fixes are a strict subset of what that flag would also
+    require — no conflict, no rework."
