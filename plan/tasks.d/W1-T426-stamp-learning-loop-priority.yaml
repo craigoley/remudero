@@ -36,7 +36,9 @@
   origin: oper#plan-review-triage-2026-08-11
   plan_refs: ["W1-T422", "W1-T418", "W1-T419", "W1-T420"]
   files: [plan/tasks.d/W1-T418-repeat-incident-rate-rule-efficacy.yaml, plan/tasks.d/W1-T419-learnings-citation-loop.yaml, plan/tasks.d/W1-T420-duplicate-closure-at-knowledge-intake.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T426 — Every acceptance proof already holds on main.
   attempts: 0
   note: "verify:auto — three greps and a selector assertion. risk:low — plan-only, three lines,
     carve-out intact by construction. budget_usd 25 — the smallest lawful unit of wiring.
