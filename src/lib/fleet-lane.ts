@@ -131,7 +131,7 @@ export function fleetLaneStorePath(stateDir: string): string {
   return `${stateDir}/fleet-lane-decisions.json`;
 }
 
-type DecisionStore = Record<string, { decision: FleetLaneDecision; ts: string }>;
+export type DecisionStore = Record<string, { decision: FleetLaneDecision; ts: string }>;
 
 /** Every decision the lane has made. An unreadable store THROWS: read as empty, every finding would
  *  be decided again — the defect this store replaces — so the pass fails loudly instead. */
@@ -214,9 +214,14 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
   return { filed, merged, room: room - filed.length };
 }
 
-/** The latest fleet-lane decision per finding, for `GET /v1/inbox`'s fleet list. */
-export function fleetLaneDecisions(ledger: Array<{ step?: unknown; task_id?: unknown; decision?: unknown; reason?: unknown }>): Map<string, { decision: FleetLaneDecision; reason: string }> {
+/** The latest fleet-lane decision per finding, for `GET /v1/inbox`'s fleet list: the lane's own store
+ *  first, so a decision outlives the live ledger's rotation, then any newer ledger row's reason. */
+export function fleetLaneDecisions(
+  ledger: Array<{ step?: unknown; task_id?: unknown; decision?: unknown; reason?: unknown }>,
+  store: DecisionStore = {},
+): Map<string, { decision: FleetLaneDecision; reason: string }> {
   const out = new Map<string, { decision: FleetLaneDecision; reason: string }>();
+  for (const [id, d] of Object.entries(store)) out.set(id, { decision: d.decision, reason: PLAIN_REASON[d.decision] });
   for (const l of ledger) {
     if (l.step !== "fleet_lane.decided" || typeof l.task_id !== "string") continue;
     if (l.decision !== "file" && l.decision !== "merge") continue;
