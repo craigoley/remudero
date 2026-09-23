@@ -123,6 +123,28 @@ macros:
       - "Investigation discipline"
       - "Plan and task hygiene"
     args: true
+  # Idea from Matt Pocock's `research` (mattpocock/skills, MIT); text written here (MASTER-PLAN §4F).
+  - name: research
+    summary: "Research a question against primary sources in a background agent and commit the findings as a dated report under docs/research/."
+    expansion: |
+      Research the question below. Run the investigation in a background agent so this session
+      keeps working, and do not answer from memory.
+
+      - Read primary sources: this repo's code and history, official docs at the version pinned
+        here, source code at a named commit, first-party APIs. Follow every claim back to the
+        source that owns it; a secondary write-up is a lead, never evidence.
+      - Label each claim OBSERVED (with file:line, command, or URL and read date) or INFERRED.
+        Before reporting a zero, run a positive control that proves the query could see its
+        corpus. If a source is unreachable, say so and leave the claim INFERRED.
+      - Write one report to docs/research/<slug>.md. Head it with the question, the date, and
+        every source's commit SHA or URL. Never write it under state/ — that directory is
+        ignored, and docs/research/README.md records the reports it has already lost.
+      - Return the report's path and a five-line summary: the answer, the strongest evidence,
+        and what is still unknown.
+    headlines:
+      - "Investigation discipline"
+      - "Ledger and evidence discipline"
+    args: true
   - name: diagnose
     summary: "Debug by evidence — build one command that goes red on the reported symptom before forming any theory, then fix and prove it with that same command."
     expansion: |
@@ -182,6 +204,31 @@ macros:
     headlines:
       - "Ledger and evidence discipline"
       - "Plan and task hygiene"
+    args: true
+  # Written for this repo. Matt Pocock's `resolving-merge-conflicts` (MIT) was read and not
+  # adopted: its "stage everything, never abort" breaks explicit-path staging, and sweep aborts a
+  # conflicted fleet rebase by design (rebaseDirtyFleetBranchViaGit, src/lib/sweep.ts).
+  - name: resolve-conflict
+    summary: "Resolve a merge or rebase conflict by keeping both sides' intent, staging only named paths, and proving the result with the local gate before pushing."
+    expansion: |
+      Resolve the conflict below. The goal is a result that keeps what BOTH sides meant, not one
+      that merely compiles.
+
+      1. For each conflicted hunk, read why each side changed it: `git log` on both branches for
+         that region, and the PR or task each commit names. Keep both intents; if they truly
+         contradict, stop and ask me which wins.
+      2. Stage explicit paths only — never `git add -A` or `git add .`. Before running any
+         census or test, check `git ls-files -u` is empty, so no file is still half-merged.
+      3. When both sides appended tests to the tail of one file, check the shared closing `});`
+         survived exactly once.
+      4. Regenerate generated files with the repo's own command, never by hand. Do not carry a
+         baseline or ledger change (for example scripts/comment-load-baseline.json) that you did
+         not make on purpose.
+      5. On someone else's branch, merge the base in; never rebase or force-push their history.
+      6. Run the local gate (`rmd preflight --ci-parity`) and push only when it passes. Report
+         which hunks you resolved and how, with the gate's summary line.
+    headlines:
+      - "CI and merging"
     args: true
   - name: wait-what
     summary: "Your last message did not land — re-explain it in plain language, with context, and say what you need from me."

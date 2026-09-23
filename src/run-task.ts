@@ -146,11 +146,13 @@ import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
+import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
+import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -22809,7 +22811,7 @@ export function creditedProofVisibility(
     })();
   const readCredited = deps.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds;
   const creditedIds = ledgerPath
-    ? readCredited(ledgerPath, { maxRotations: Number.MAX_SAFE_INTEGER }).credited
+    ? readCredited(ledgerPath).credited
     : new Set<string>();
 
   const creditedTasks = plan.tasks.filter((t) => creditedIds.has(t.id));
@@ -25036,10 +25038,10 @@ export async function defaultVerifyHumanCadenceResult(
       releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
-    // W1-T4083: measure the release judge over every retained rotation, remembering what older
+    // W1-T4083: measure the release judge over the board's week of rotations, remembering what older
     // rotations showed in a state file, so a judge that never escalates is caught.
     const auditStatePath = join(config.root, "state", "verify-human-release-audit.json");
-    const audit = runReleaseAudit(readLedgerUnionBounded(ledgerPath, { maxRotations: 400 }) as unknown as Record<string, unknown>[], {
+    const audit = runReleaseAudit(readLedgerUnionBounded(ledgerPath) as unknown as Record<string, unknown>[], {
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
       runId,
@@ -31084,6 +31086,31 @@ export async function daemonCommand(
                   };
                   return startGarden(planGardenSpec(planGarden), planGarden, intervalMs);
                 },
+                // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
+                // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
+                (intervalMs: number) => {
+                  const gateGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "gate", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  let garden: { stop: () => void } | undefined;
+                  let stopped = false;
+                  loadGateProbes(repoRoot).then(
+                    (probes) => {
+                      if (!stopped) garden = startGarden(gateGardenSpec(gateGarden, probes), gateGarden, intervalMs);
+                    },
+                    (e: unknown) => log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) }),
+                  );
+                  return {
+                    stop: () => {
+                      stopped = true;
+                      garden?.stop();
+                    },
+                  };
+                },
               ],
             }
           : {}),
@@ -32507,6 +32534,8 @@ export async function serveCommand(
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
     snapshotCache: serveBoardSnapshot,
+    // A merged PR's file list survives the restart on disk, and a miss never blocks the first snapshot.
+    changedFilesCache: createChangedFilesCache(config.root, self.owner, self.repo, { log }),
   });
   // W1-T2303: resolve the feedback-expansion rung ONCE at boot (never per request) — the SAME
   // shape `resolveDecisionSummaryMount`/`realDecisionSummarizer` already wire for the sibling

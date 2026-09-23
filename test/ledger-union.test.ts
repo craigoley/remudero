@@ -154,3 +154,32 @@ test("readLedgerUnionRecordsSync degrades to whatever rotations already supplied
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a rotation window reads by the newest rotation's stamp and never guesses an unstamped archive old", () => {
+  const dir = tmpStateDir();
+  try {
+    writeFileSync(join(dir, "ledger.2026-01-10T00-00-00-000Z.ndjson"), row("newest") + "\n");
+    writeFileSync(join(dir, "ledger.2026-01-08T00-00-00-000Z.ndjson"), row("inside") + "\n");
+    writeFileSync(join(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson"), row("outside") + "\n");
+    writeFileSync(join(dir, "ledger.unstamped.ndjson"), row("unstamped") + "\n");
+    const threeDays = 3 * 86_400_000;
+    const markers = (opts: { minRotations?: number }): string[] =>
+      readLedgerUnionRecordsSync(dir, { order: "newest-first", rotationWindowMs: threeDays, ...opts }).rows.map((r) => String(r.marker)).sort();
+    assert.deepEqual(markers({}), ["inside", "newest", "unstamped"], "the week-old rotation stays shut; its row is older than any in the window");
+    assert.deepEqual(markers({ minRotations: 4 }), ["inside", "newest", "outside", "unstamped"], "a floor only ever adds files");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a rotation window over archives with no parseable stamp reads them all", () => {
+  const dir = tmpStateDir();
+  try {
+    writeFileSync(join(dir, "ledger.a.ndjson"), row("a") + "\n");
+    writeFileSync(join(dir, "ledger.b.ndjson"), row("b") + "\n");
+    const rows = readLedgerUnionRecordsSync(dir, { rotationWindowMs: 1 }).rows;
+    assert.deepEqual(rows.map((r) => String(r.marker)).sort(), ["a", "b"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
