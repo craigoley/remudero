@@ -25,6 +25,8 @@
  */
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
@@ -138,6 +140,52 @@ fs.mkdtempSync = ((...args: Parameters<typeof fs.mkdtempSync>) => {
 // monkeypatch to its already-bound named ESM exports — the same trick fs-mocking
 // libraries (e.g. mock-fs) rely on.
 syncBuiltinESMExports();
+
+/**
+ * SHADOW `gh` ON PATH WITH A REFUSING STUB, FOR EVERY TEST PROCESS (W1-T4119).
+ *
+ * INCIDENT: `test/policy.test.ts` made a real `gh api repos/craigoley/remudero/pulls/6698/files`
+ * call — a live PR number — and hung until it was killed; `test/review-command-plan-filing-provenance.test.ts`
+ * (W1-T3115) is red on clean main for the same reason. Both reach a production module that shells
+ * out to the real `gh` CLI on a code path that test happened to leave un-faked. A test that reads
+ * live GitHub state spends the operator's API budget, depends on which PRs happen to be open that
+ * day, and reads as flaky when it is actually deterministic on a machine with no `gh` at all.
+ *
+ * Fix: this module is `--import`ed by every `node --test` invocation (see the module comment
+ * above), so it is the one place that can guarantee it for all of them. It prepends a per-process
+ * directory holding a `gh` stub onto PATH. The stub REFUSES — it exits 1 and prints the argv it
+ * was refused — so an accidental shell-out fails fast and names itself instead of hanging on the
+ * real network or reading whichever PRs happen to be open. Made via `fs.mkdtempSync` (the wrapped
+ * one, above) so this dir rides the same exit-time sweep as every fixture's own temp dir — no
+ * separate cleanup path to forget.
+ *
+ * A test that genuinely needs a fake `gh` (e.g. test/helpers/gh-shim.ts) is unaffected: this
+ * module runs at IMPORT time, before any test file's body executes, so a test that later does
+ * `process.env.PATH = \`${shim.dir}:${originalPath}\`` (the existing, already-used convention)
+ * prepends its own dir onto a PATH that already carries this one — putting the test's own stub
+ * FIRST and this refusal second, exactly like today's "own stub wins" behaviour with no real
+ * `gh` on PATH at all.
+ */
+function installGhRefusalStub(): void {
+  const dir = fs.mkdtempSync(join(tmpdir(), "rmd-test-gh-refuse-"));
+  const ghPath = join(dir, "gh");
+  fs.writeFileSync(
+    ghPath,
+    [
+      "#!/bin/sh",
+      'echo "test setup REFUSED: a test shelled out to the real gh CLI with no stub of its own." 1>&2',
+      'echo "  argv: gh $*" 1>&2',
+      'echo "  FIX: give the test its own gh stub, prepended onto PATH ahead of this one" 1>&2',
+      'echo "  (see test/helpers/gh-shim.ts) — no test should reach the real network." 1>&2',
+      "exit 1",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${dir}:${process.env.PATH ?? ""}`;
+}
+
+installGhRefusalStub();
 
 process.on("exit", () => {
   for (const dir of created) {
