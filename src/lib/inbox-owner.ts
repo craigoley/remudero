@@ -12,8 +12,6 @@
  * it, never silently moved out of sight.
  */
 
-export type InboxOwner = "operator" | "fleet";
-
 /** Kinds whose fix is fleet work — the proposal is a finding the fleet made about itself. */
 const FLEET_KINDS: ReadonlySet<string> = new Set([
   "adoption",
@@ -33,7 +31,7 @@ export function inboxKind(proposalId: string): string {
   return colon === -1 ? proposalId : proposalId.slice(0, colon);
 }
 
-export function inboxOwner(proposal: { id: string }): InboxOwner {
+export function inboxOwner(proposal: { id: string }): "operator" | "fleet" {
   const kind = inboxKind(proposal.id);
   return kind === "feedback-docket" || FLEET_KINDS.has(kind) ? "fleet" : "operator";
 }
