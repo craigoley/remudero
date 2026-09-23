@@ -58,13 +58,16 @@ test("W1-T3237: the distinct row set is identical before and after compaction", 
   const m = memoryIo(sources);
   const r = compactRotations(["a.gz", "b.gz", "c.gz"], m.io);
 
-  const after = new Set(m.written[r.archiveName]!.split("\n").filter(Boolean));
+  // Day-bounded since the delta change: the rows span three UTC days, so three outputs.
+  assert.equal(r.archiveNames.length, 3, "one output per day of the rows");
+  const bodies = Object.values(m.written).join("");
+  const after = new Set(bodies.split("\n").filter(Boolean));
   assert.deepEqual([...after].sort(), [...before].sort(), "the DISTINCT row set must be identical");
   assert.equal(r.rowsWritten, before.size);
   assert.equal(r.duplicatesCollapsed, a.length + b.length + c.length - before.size, "and every collapse is counted");
 
   // A size drop alone would pass on a truncation, so it is asserted only ALONGSIDE set equality.
-  assert.ok(m.written[r.archiveName]!.length < [...a, ...b, ...c].join("\n").length, "and it does reclaim");
+  assert.ok(bodies.length < [...a, ...b, ...c].join("\n").length, "and it does reclaim");
 
   // Sources are removed only AFTER the replacement is written — the other order costs history.
   assert.deepEqual(m.removed, ["a.gz", "b.gz", "c.gz"]);
@@ -147,18 +150,20 @@ test("W1-T3237: the compacted archive is never deleted by its own cleanup", () =
   const newest = row("2026-09-05T00:00:00.000Z", "verdict", "LATE");
   const older = row("2026-09-01T00:00:00.000Z", "run.start", "EARLY");
   const collidingName = "ledger.2026-09-05T00-00-00-000Z.ndjson.gz";
+  // Stamped six hours after its only row, so the 09-01 day output does NOT land on this name.
+  const olderSource = "ledger.2026-09-01T06-00-00-000Z.ndjson.gz";
   const m = memoryIo({
-    "ledger.2026-09-01T00-00-00-000Z.ndjson.gz": [older],
+    [olderSource]: [older],
     [collidingName]: [older, newest],
   });
 
-  const r = compactRotations(["ledger.2026-09-01T00-00-00-000Z.ndjson.gz", collidingName], m.io);
+  const r = compactRotations([olderSource, collidingName], m.io);
 
   assert.equal(r.archiveName, collidingName, "the fixture must actually collide, or this proves nothing");
   assert.ok(!m.removed.includes(collidingName), "the file just written must never be removed");
-  assert.deepEqual(m.removed, ["ledger.2026-09-01T00-00-00-000Z.ndjson.gz"], "every OTHER source still goes");
+  assert.deepEqual(m.removed, [olderSource], "every OTHER source still goes");
   assert.deepEqual(
-    new Set(m.written[r.archiveName]!.split("\n").filter(Boolean)),
+    new Set(Object.values(m.written).join("").split("\n").filter(Boolean)),
     new Set([older, newest]),
     "and both rows survive the collision",
   );

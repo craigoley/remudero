@@ -51,7 +51,7 @@ function readArchiveContent(path: string): string {
 }
 
 function archivesIn(dir: string): string[] {
-  return readdirSync(dir).filter((f) => f !== "ledger.ndjson");
+  return readdirSync(dir).filter((f) => f !== "ledger.ndjson" && !f.endsWith(".carried.json"));
 }
 
 test("CONVERGENCE — with the retained core bloated past the rotation ceiling, a single append triggers exactly one rotation and the live ledger ends strictly below the ceiling", () => {

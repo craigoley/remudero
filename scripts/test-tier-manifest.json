@@ -995,6 +995,7 @@
     "test/ledger-compact-is-preregistered-as-cli-only.test.ts": 0,
     "test/ledger-compaction-keeps-pace-with-rotation.test.ts": 0,
     "test/ledger-corpus-both-forms.test.ts": 1885,
+    "test/ledger-delta-archiving.test.ts": 0,
     "test/ledger-grep-unclassified.test.ts": 184,
     "test/ledger-grep.test.ts": 1047,
     "test/ledger-host-identity.test.ts": 273,
