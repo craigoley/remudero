@@ -1,0 +1,47 @@
+- id: W1-T4409
+  title: "ONE DUPLICATE TASK ID ON MAIN TAKES A WHOLE DAEMON DOWN, AND THE DOWN DAEMON CAN NEVER MERGE THE FIX — quarantine the duplicate, escalate it, and keep sweeping so the fold PR can land"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "console fleet outage 2026-09-23 from 21:14Z"
+  plan_refs: ["W1-T4389", "W1-T4388"]
+  files:
+    - src/lib/plan.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on the fleet host: two filing PRs (remudero-console #1700 and #1701) both merged a
+    CONSOLE-T60 shard within minutes. From then on, every remudero-console-daemon start died in
+    daemonCommand at loadPlan with `PlanError: duplicate task id 'CONSOLE-T60'` (src/lib/plan.ts). The
+    entrypoint's restart throttle then restarted it about every 2.5 min. Its last sweep.summary was at
+    21:14:42Z. The fold PR (#1706) went green and passed review within minutes, but the daemon that merges
+    reviewed PRs was the one crash-looping, so the console fleet stayed dark until the operator merged it
+    by hand. W1-T4389 refuses a duplicate in review, but a duplicate can still land (two PRs reviewed
+    against the same base, a hand merge, an offline filing). When one does, the fleet must degrade, not stop.
+  design: |
+    src/lib/plan.ts exports loadPlanQuarantiningDuplicates(path) -> {plan, quarantined:[{id, files}]}. It
+    applies every rule loadPlan applies, except a duplicate id: BOTH declarations are removed from the
+    returned plan (neither can be dispatched or credited while ambiguous) and reported, never thrown.
+    daemonCommand (src/run-task.ts) uses it instead of loadPlan. For each quarantined id it ledgers
+    `plan.duplicate_quarantined` {id, files} and opens ONE needs-human escalation, deduped per id. Then it
+    runs normally: the sweep, review and merge of every other PR go on, including the PR that removes the
+    duplicate. loadPlan itself, lint-plan and every CI check stay strict; only the long-running daemon
+    degrades.
+  acceptance:
+    - claim: "a plan with a duplicate id loads with both declarations quarantined and every other task intact"
+      proof: "unit test: a plan with a duplicate id loads with both declarations quarantined and every other task intact"
+    - claim: "the daemon keeps sweeping with a quarantined duplicate and escalates it once"
+      proof: "unit test: the daemon keeps sweeping with a quarantined duplicate and escalates it once"
+    - claim: "loadPlan itself still refuses a duplicate id"
+      proof: "unit test: loadPlan itself still refuses a duplicate id"
+    - claim: "the daemon loads its plan through the quarantining loader"
+      proof: 'grep: loadPlanQuarantiningDuplicates( in src/run-task.ts'
+  falsifier: |
+    CLOSE IF a daemon whose plan declares one id twice already keeps sweeping instead of exiting at loadPlan.

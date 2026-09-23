@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  priority: 2
   principles: {tdd: strict}
   budget_usd: 25.00
   risk: high
@@ -73,6 +74,17 @@
 
     (iv) INCREMENTAL IS ACCEPTABLE, UNBOUNDED GROWTH IS NOT. Reclaiming some objects safely beats
          reclaiming all of them never.
+
+    (v) AMENDED 2026-09-23: EVERY FLEET CHECKOUT, NOT ONLY repos/remudero. Measured on the Azure host:
+        across all 119 core ledger archives, the 85 `run.disk_reclaim` rows (09-19 to 09-23) ALL read
+        objects_pruned 0 and objects_would_prune 0, and no refusal row exists. Production wiring passes no
+        openFileCount, so `(deps.openFileCount ?? (() => 1))` always reports a held handle (answering (i)).
+        Loose objects: repos/remudero 60,326 (1,516 MB, stale gc.log); the daemon checkout ~/rmd-state2/remudero
+        89,170 (1,986 MB); the console daemon checkout 17,783 (667 MB, gc.log from 15:58Z). The console
+        checkout was repaired by hand while its daemon ran no lane (rm gc.log; git gc --prune=now): 667 MB
+        -> 50 MB, fsck clean. The reaper must cover the daemon's own checkout and every managed checkout,
+        each with its own window and receipt. Priority set to 2: with no priority this task sorted last and
+        sat unbuilt while the stores grew.
 
     DO NOT WEAKEN ANY OF THE THREE REFUSALS to make the gate passable. The race they prevent
     destroys a referenced object, which is worse than any amount of disk.
