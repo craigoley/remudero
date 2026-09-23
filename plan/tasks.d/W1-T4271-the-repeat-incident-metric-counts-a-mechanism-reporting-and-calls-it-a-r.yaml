@@ -72,13 +72,13 @@
     the metric. Different artifact, different reader, no overlap in files.
   acceptance:
     - claim: "a signature declared ACTIVITY-shaped never reaches REPEATING and drafts no proposal — it reports UNPROVEN carrying the match count and the reason that a fire is not a violation until the subject's health is observed"
-      proof: "unit test: test/rule-efficacy-signature-kind.test.ts"
+      proof: 'grep: test("W1-T4271: an ACTIVITY-shaped signature reports UNPROVEN with its match count and drafts no proposal" in test/rule-efficacy-signature-kind.test.ts'
     - claim: "a signature declared VIOLATION-shaped still reaches REPEATING and still drafts exactly one idempotent proposal at the threshold — the falsifier proving the kind field damped an unearned conclusion rather than disabling the escalation"
-      proof: "unit test: test/rule-efficacy-signature-kind.test.ts"
+      proof: 'grep: test("W1-T4271: a VIOLATION-shaped signature still reaches REPEATING and drafts exactly one idempotent proposal" in test/rule-efficacy-signature-kind.test.ts'
     - claim: "the shipped bound-fires-on-healthy entry is ACTIVITY-shaped, and re-running the escalation over a fixture carrying its 31 post-date rows drafts NO proposal"
-      proof: "unit test: test/rule-efficacy-signature-kind.test.ts"
+      proof: 'grep: test("W1-T4271: the shipped bound-fires-on-healthy entry is ACTIVITY-shaped and its 31 post-date rows draft no proposal" in test/rule-efficacy-signature-kind.test.ts'
     - claim: "a table entry that declares no kind is refused rather than defaulting to violation, so a future signature cannot inherit the harsher reading by omission"
-      proof: "unit test: test/rule-efficacy-signature-kind.test.ts"
+      proof: 'grep: test("W1-T4271: a table entry declaring no kind is refused rather than defaulting to violation" in test/rule-efficacy-signature-kind.test.ts'
     - claim: "the kind is read by the live report and escalation path, not merely declared in the type — the metric cannot merge as fully-tested dead data"
       proof: "grep: signatureKind in src/lib/rule-efficacy.ts"
   risk: high

@@ -69,15 +69,15 @@
     names — W1-T418 marked that follow-on and it stays follow-on.
   acceptance:
     - claim: "each bound-fire row resolves to its SUBJECT and that subject's later outcome, so a fire whose subject later reached a healthy terminal state is reported as a healthy-condition fire rather than an unclassified recurrence"
-      proof: "unit test: test/bound-fire-outcome.test.ts"
+      proof: 'grep: test("W1-T4272: a fire whose subject later reached a healthy terminal state is reported as a healthy-condition fire" in test/bound-fire-outcome.test.ts'
     - claim: "the census reports EPISODES alongside rows — repeated fires against one subject inside one wait window collapse to one episode, and both figures are rendered so the collapse is auditable"
-      proof: "unit test: test/bound-fire-outcome.test.ts"
+      proof: 'grep: test("W1-T4272: repeated fires against one subject within one wait window collapse to one episode, rows and episodes both rendered" in test/bound-fire-outcome.test.ts'
     - claim: "a subject whose outcome cannot be resolved is reported UNKNOWN with its reason, counted neither as healthy nor as stuck"
-      proof: "unit test: test/bound-fire-outcome.test.ts"
+      proof: 'grep: test("W1-T4272: an unresolvable subject is reported UNKNOWN with its reason, counted neither healthy nor stuck" in test/bound-fire-outcome.test.ts'
     - claim: "a census that resolves zero subjects while the union carries fire rows REFUSES to print a split rather than reporting an empty healthy population — the positive control that stops a broken join reading as a clean measurement"
-      proof: "unit test: test/bound-fire-outcome.test.ts"
+      proof: 'grep: test("W1-T4272: a census resolving zero subjects over non-empty fire rows refuses to print a split" in test/bound-fire-outcome.test.ts'
     - claim: "the census reads the ledger UNION rather than the live file alone, so the population it reports is history and not the most recent 0.28% of it"
-      proof: "unit test: test/bound-fire-outcome.test.ts"
+      proof: 'grep: test("W1-T4272: the census reads the ledger UNION rather than the live file alone" in test/bound-fire-outcome.test.ts'
     - claim: "the census is reachable from the report the operator already runs, so the measurement cannot merge as fully-tested dead code"
       proof: "grep: boundFireCensus in src/lib/rule-efficacy.ts"
   risk: high
