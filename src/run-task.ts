@@ -845,6 +845,7 @@ import {
   type CiFailureCorpusInput,
   type CorpusPr,
 } from "./lib/ci-failure-corpus.js";
+import { measureGateFireRates, recordGateFireRates, type GateFireRateReport, type GateWindowPr } from "./lib/gate-fire-rate.js";
 import {
   fetchMergedCoverageArtifact,
   injectCoverageImprovementTask,
@@ -19979,7 +19980,7 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
   const rows = (fetch([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
-  ]) ?? []) as Array<{ number?: number; updated_at?: string }>;
+  ]) ?? []) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
   const prs: CorpusPr[] = [];
   for (const row of rows) {
     if (row.number === undefined) continue;
@@ -19992,8 +19993,9 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
     } catch {
       continue; // a pull request whose commit list is unreadable contributes nothing, silently to nobody
     }
-    prs.push({
+    const windowPr: GateWindowPr = {
       number: row.number,
+      merged: Boolean(row.merged_at),
       commits: shas.map((sha) => {
         const rollup = rollupAtSha(self.owner, self.repo, sha, (args) => fetch(args));
         const commit: CorpusPr["commits"][number] = { sha };
@@ -20002,7 +20004,8 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
         if (files !== undefined) commit.changedFiles = files;
         return commit;
       }),
-    });
+    };
+    prs.push(windowPr);
   }
   return { prs };
 }
@@ -20023,7 +20026,7 @@ export async function loadCiFailureWindowAsync(
   const rows = (await reader.read([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
-  ])) as Array<{ number?: number; updated_at?: string }>;
+  ])) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
   const prs: CorpusPr[] = [];
   for (const row of rows ?? []) {
     if (row.number === undefined) continue;
@@ -20064,7 +20067,8 @@ export async function loadCiFailureWindowAsync(
       }
       commits.push(commit);
     }
-    prs.push({ number: row.number, commits });
+    const windowPr: GateWindowPr = { number: row.number, merged: Boolean(row.merged_at), commits };
+    prs.push(windowPr);
   }
   return { prs };
 }
@@ -29695,6 +29699,8 @@ export function buildCiLearningDaemonHooks(deps: {
  *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
  *  clean one (W1-T3324). */
 export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  /** W1-T4115: what the gate fire-rate measurement over the same window found. */
+  gateFireRates?: { status: GateFireRateReport["status"]; gates: number; neverFired: string[]; alwaysFired: string[] };
   filedCount: number;
   skippedCount: number;
   refusedCount: number;
@@ -29739,8 +29745,10 @@ export function buildCiLearningCadenceRunner(deps: {
     const at = (deps.clock ?? systemClock).date();
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     let corpus: ReturnType<typeof collectCiFailureCorpus>;
+    let window: CiFailureCorpusInput;
     try {
-      corpus = collectCiFailureCorpus(await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS));
+      window = await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS);
+      corpus = collectCiFailureCorpus(window);
     } catch (e) {
       // NO WORK WAS DONE, so the allowance is returned rather than spent. Rethrown, never swallowed:
       // the caller's `ci_learning_cadence.run_failed` row is how this becomes visible.
@@ -29786,7 +29794,17 @@ export function buildCiLearningCadenceRunner(deps: {
         // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
       }
     }
+    // W1-T4115: the same window, read once, also says how often each gate fires and what it costs.
+    const gateFireRates = measureGateFireRates(window);
+    const stateDir = join(deps.root, "state");
+    recordGateFireRates(
+      gateFireRates,
+      stateDir,
+      (step, extra) => appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: `GATE-FIRE-RATES-${at.getTime()}`, task_id: "DAEMON", step, ...extra }),
+      at.toISOString(),
+    );
     return {
+      gateFireRates: { status: gateFireRates.status, gates: gateFireRates.gates.length, neverFired: gateFireRates.neverFired, alwaysFired: gateFireRates.alwaysFired },
       status: result.status,
       draftCount: result.drafts.length,
       excludedCount: result.excludedFindings.length,
