@@ -1,0 +1,115 @@
+- id: W1-T4335
+  title: "ratify skill-draft:62aff41d7a5fd038 — write the mined SKILL.md (clean_single_strike + fully_executed_proof, 26-run evidence) to .claude/skills/implement-clean-single-strike-fully-exec-62aff41d/SKILL.md; the staged 'NOT reachable by a worker today' note is STALE for this draft — the already-shipped W1-T3101 approved-tree injection route (loadInjectableSkills -> selectSkillsForTask -> renderSkillsPart) delivers its FULL body into every matching implement prompt on the strength of this draft's own applies-to: implement frontmatter, with zero further engineering"
+  repo: remudero
+  depends_on: [W1-T2766, W1-T3101]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  rationale: |
+    RATIFIES skill-draft:62aff41d7a5fd038, a Rule-15 candidate `mineProceduralCandidates` (W1-T87/P13,
+    retro.ts) mined across 26 merged implement runs sharing two signals — clean_single_strike (no
+    fix.dispatch rung needed) and fully_executed_proof (every acceptance criterion ran as a real,
+    observed proof rather than resting on the keyword floor) — and `renderSkillDraft` (skill-workshop.ts,
+    W1-T2766) rendered into a SKILL.md, scanned clean against the worker allowlist (a refused draft is
+    never staged), and cached as this proposal.
+
+    THE STAGED "NOT REACHABLE BY A WORKER TODAY" NOTE IS ACCURATE ABOUT ONE ROUTE AND SILENT ABOUT THE
+    OTHER, VERIFIED FROM SOURCE. `stageSkillDraft`'s summary text (skill-workshop.ts:315-321) is built
+    from `describeWorkerSkillReachability`, which checks ONLY whether `settingSources` includes
+    'project' — the native SDK filesystem-settings route, closed by design (`spawnWorker` passes
+    `settingSources: []`; three sites in this tree — worker.ts, compaction.ts, the operator guide — call
+    that isolation load-bearing, and W1-T3101 explicitly refused to touch it: "widening settingSources IS
+    NOT THE FIX"). But W1-T3101 (merged) shipped a SEPARATE, already-wired delivery path for exactly this
+    shape of candidate: `loadInjectableSkills` reads every APPROVED `.claude/skills/<name>/SKILL.md`
+    carrying an `applies-to:` line (skill-workshop.ts:341, 367-394 — opt-in by construction, which is why
+    the generated `tddr`/`grfp` macro skills, which carry no `applies-to:`, stay excluded);
+    `selectSkillsForTask` matches it against `task.type` under the existing knowledge budget
+    (DEFAULT_KNOWLEDGE_BUDGET_CHARS, no second ceiling to re-measure); `renderSkillsPart` splices its FULL
+    body into the implement prompt's CONTEXT (run-task.ts:12096), ledgered like `learnings.injected`
+    (skillsInjectedEvent). This draft's own frontmatter already carries `applies-to: implement` — it is
+    IN the recognized set (`INJECTABLE_SKILL_TASK_TYPES`: recon/implement/diagnose/review/manual). So
+    ratifying it (writing the file) is sufficient BY ITSELF to make it reach every future implement
+    dispatch; nothing further needs building for THIS skill. (The companion fix to the reachability
+    ASSESSMENT itself — which also hardcodes `describeWorkerSkillReachability([])` instead of reading the
+    real `WORKER_SETTING_SOURCES` export, and stays silent about this route for every future candidate —
+    is filed separately as W1-T4336, since it is a fix to the MINING pipeline's self-description, not a
+    prerequisite for ratifying this one candidate.)
+
+    NOTHING WRITES UNDER .claude/skills/ OUTSIDE THIS TASK'S OWN IMPLEMENTATION PR — verified: a
+    repo-wide grep for a write to that path (writeFileSync, openPlanPr, any approve-time special case)
+    returns ZERO hits in src/. `rmd approve`'s generic machinery only files drafted TASKS and stamps
+    MASTER-PLAN; THIS task, once ratified and dispatched, is the mechanism that performs the promised
+    write — closing that gap for this candidate specifically.
+  design: |
+    Create the file at the path below with EXACTLY this content (byte-for-byte — do not edit, reword, or
+    "improve" the mined text; the provenance lines are the evidence this candidate was ratified on):
+
+    ---
+    name: implement-clean-single-strike-fully-exec-62aff41d
+    description: A procedure shape proven across 26 merged implement run(s): clean_single_strike + fully_executed_proof.
+    applies-to: implement
+    ---
+
+    <!-- DRAFTED by skill-workshop.ts (W1-T2766) from a mined procedural candidate — a Rule 15
+         plan write the Architect proposes and the operator ratifies, not yet ratified. -->
+
+    ## Procedure
+
+    - Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung.
+    - Execute every acceptance criterion as a real, observed proof — never let the keyword floor stand in for a run.
+
+    ## Evidence
+
+    - [src: run#W1-T2655-1788806940629]
+    - [src: run#W1-T2685-1788754398387]
+    - [src: run#W1-T2714-1788811315024]
+    - [src: run#W1-T2760-1788793868534]
+    - [src: run#W1-T2761-1788819334350]
+    - [src: run#W1-T2805-1788811391031]
+    - [src: run#W1-T2884-1788830806642]
+    - [src: run#W1-T2890-1789022939729]
+    - [src: run#W1-T2917-1788892517277]
+    - [src: run#W1-T2923-1789026144554]
+    - [src: run#W1-T2928-1789023074902]
+    - [src: run#W1-T2962-1789026240068]
+    - [src: run#W1-T2966-1789029907991]
+    - [src: run#W1-T2967-1789032843468]
+    - [src: run#W1-T2999-1789036344804]
+    - [src: run#W1-T3011-1789079859480]
+    - [src: run#W1-T3156-1788875979548]
+    - [src: run#W1-T3242-1788994100522]
+    - [src: run#W1-T3271-1789002812984]
+    - [src: run#W1-T3273-1788990556232]
+    - [src: run#W1-T3274-1789013455714]
+    - [src: run#W1-T3277-1788994211233]
+    - [src: run#W1-T3278-1789002715606]
+    - [src: run#W1-T3283-1789010600618]
+    - [src: run#W1-T3289-1789006207986]
+    - [src: run#W1-T3290-1789013551739]
+    - Filed under: W1-T2655, W1-T2685, W1-T2714, W1-T2760, W1-T2761, W1-T2805, W1-T2884, W1-T2890, W1-T2917, W1-T2923, W1-T2928, W1-T2962, W1-T2966, W1-T2967, W1-T2999, W1-T3011, W1-T3156, W1-T3242, W1-T3271, W1-T3273, W1-T3274, W1-T3277, W1-T3278, W1-T3283, W1-T3289, W1-T3290
+
+    Then prove it reaches a worker through the SHIPPED W1-T3101 path: call `loadInjectableSkills` against
+    `.claude/skills/` (a real read, not a fixture) and assert the returned entry's `name` and `appliesTo`;
+    call `selectSkillsForTask` with `taskType: "implement"` and assert this skill is included; call
+    `renderSkillsPart` and assert the rendered text contains both Procedure bullets and the
+    "Filed under:" evidence line verbatim.
+  acceptance:
+    - claim: "the file exists and its frontmatter opts into injection for the implement task class"
+      proof: "grep: applies-to: implement in .claude/skills/implement-clean-single-strike-fully-exec-62aff41d/SKILL.md"
+    - claim: "the ratified skill is immediately selectable by the already-shipped W1-T3101 delivery path — loadInjectableSkills parses it into an InjectableSkill and selectSkillsForTask includes it for an implement-type task, correcting the staged proposal's 'NOT reachable by a worker today' note, which describes only the unrelated, still-closed native settingSources route"
+      proof: "unit test: test/a-ratified-skill-is-immediately-injectable.test.ts"
+    - claim: "the injected body (what renderSkillsPart places in a worker's prompt) carries both mined Procedure steps and the Evidence provenance lines verbatim, so the worker sees exactly what the operator ratified"
+      proof: "unit test: test/a-ratified-skill-is-immediately-injectable.test.ts"
+  risk: low
+  origin: architect
+  plan_refs: ["§8A", "§5B"]
+  files: [.claude/skills/implement-clean-single-strike-fully-exec-62aff41d/SKILL.md, test/a-ratified-skill-is-immediately-injectable.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Ratification candidate for inbox proposal skill-draft:62aff41d7a5fd038 (drafted by skill-workshop.ts
+    under W1-T2766, from a mined procedural candidate). Companion task W1-T4336 fixes the reachability
+    ASSESSMENT the retro attaches to every future skill-draft proposal (a hardcoded settingSources
+    literal, and no mention of this very injection route) — filed separately since it is not a
+    prerequisite for ratifying THIS candidate.
