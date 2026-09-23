@@ -23,6 +23,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
@@ -53,11 +54,23 @@ export const realMountHeadroomFs = {
   gunzipSync: (buf) => gunzipSync(buf),
 };
 
+/** Visit each non-blank trimmed line, decoding each on its own — never a whole-file string. */
+function eachLine(buf, visit) {
+  let start = 0;
+  while (start < buf.length) {
+    let end = buf.indexOf(10, start);
+    if (end < 0) end = buf.length;
+    const line = buf.toString("utf8", start, end).trim();
+    if (line) visit(line);
+    start = end + 1;
+  }
+}
+
 /**
- * Read every ledger rotation under `stateDir` (both forms) plus the live file, IN READ ORDER, with
- * which forms were opened and which rotations could not be read. Never throws.
+ * Visit every line of every rotation (both forms) plus the live file, IN READ ORDER, retaining none:
+ * the corpus is gigabytes, and holding it exhausted the daemon's heap on 2026-09-23. Never throws.
  */
-export function readLedgerCorpus(stateDir, fsDeps = realMountHeadroomFs) {
+export function scanLedgerCorpus(stateDir, visit, fsDeps = realMountHeadroomFs) {
   let names = [];
   try {
     names = fsDeps.readdirSync(stateDir);
@@ -67,70 +80,75 @@ export function readLedgerCorpus(stateDir, fsDeps = realMountHeadroomFs) {
   const rotations = ledgerRotationEntries(names, stateDir);
   const formsOpened = new Set();
   const unread = [];
-  const rawLines = [];
 
   for (const entry of rotations) {
+    let buf;
     try {
-      const buf = fsDeps.readFileSync(entry.path);
-      const text = (entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8");
-      formsOpened.add(entry.form);
-      for (const raw of text.split("\n")) {
-        const line = raw.trim();
-        if (line) rawLines.push(line);
-      }
+      const raw = fsDeps.readFileSync(entry.path);
+      buf = entry.form === "gzip" ? fsDeps.gunzipSync(raw) : raw;
     } catch {
       // Found on disk, could not be opened — named in `unread`, never silently skipped.
       unread.push(entry.path);
+      continue;
     }
+    formsOpened.add(entry.form);
+    eachLine(buf, visit);
   }
 
   const livePath = join(stateDir, LIVE_LEDGER_FILENAME);
   const liveFileRead = fsDeps.existsSync(livePath);
   if (liveFileRead) {
+    let buf;
     try {
-      const text = fsDeps.readFileSync(livePath).toString("utf8");
-      formsOpened.add("live");
-      for (const raw of text.split("\n")) {
-        const line = raw.trim();
-        if (line) rawLines.push(line);
-      }
+      buf = fsDeps.readFileSync(livePath);
     } catch {
       // Best-effort on the live half — same discipline resolveLedgerUnion applies to it.
     }
+    if (buf) {
+      formsOpened.add("live");
+      eachLine(buf, visit);
+    }
   }
 
-  return {
-    stateDir,
-    archiveCount: rotations.length,
-    liveFileRead,
-    unread,
-    formsOpened: [...formsOpened].sort(),
-    rawLines,
-  };
+  return { stateDir, archiveCount: rotations.length, liveFileRead, unread, formsOpened: [...formsOpened].sort() };
+}
+
+export function readLedgerCorpus(stateDir, fsDeps = realMountHeadroomFs) {
+  const rawLines = [];
+  const corpus = scanLedgerCorpus(stateDir, (line) => rawLines.push(line), fsDeps);
+  return { ...corpus, rawLines };
 }
 
 /**
- * Parse every raw line as JSON, DEDUPED BY EXACT LINE TEXT before a record is retained — rotations
- * duplicate whole windows verbatim. A torn line is skipped, never thrown on. `rawRowsWithRunId`
- * counts every pre-dedup line carrying a string `run_id`, the numerator `rowToRunRatio` needs.
+ * Parse lines as JSON, DEDUPED BY LINE TEXT (remembered by SHA-1, not kept) — rotations duplicate whole
+ * windows. A torn line is skipped. `rawRowsWithRunId` counts pre-dedup run-tagged lines.
  */
-export function parseAndDedupeLedgerLines(rawLines) {
+export function ledgerRecordCollector() {
   const seen = new Set();
   const records = [];
   let rawRowsWithRunId = 0;
-  for (const line of rawLines) {
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (parsed && typeof parsed === "object" && typeof parsed.run_id === "string") rawRowsWithRunId++;
-    if (seen.has(line)) continue;
-    seen.add(line);
-    records.push(parsed);
-  }
-  return { records, rawRowsWithRunId };
+  return {
+    add(line) {
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (parsed && typeof parsed === "object" && typeof parsed.run_id === "string") rawRowsWithRunId++;
+      const key = createHash("sha1").update(line).digest("base64");
+      if (seen.has(key)) return;
+      seen.add(key);
+      records.push(parsed);
+    },
+    result: () => ({ records, rawRowsWithRunId }),
+  };
+}
+
+export function parseAndDedupeLedgerLines(rawLines) {
+  const collector = ledgerRecordCollector();
+  for (const line of rawLines) collector.add(line);
+  return collector.result();
 }
 
 function round2(n) {
@@ -690,8 +708,9 @@ export function computeAssignmentSweep(runs, assignmentFields, newestTs) {
  * per-class sweep. Throws on ZERO distinct runs; spawns and writes nothing.
  */
 export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) {
-  const corpus = readLedgerCorpus(stateDir, fsDeps);
-  const { records, rawRowsWithRunId } = parseAndDedupeLedgerLines(corpus.rawLines);
+  const collector = ledgerRecordCollector();
+  const corpus = scanLedgerCorpus(stateDir, (line) => collector.add(line), fsDeps);
+  const { records, rawRowsWithRunId } = collector.result();
   const runs = gatherRuns(records);
 
   if (runs.length === 0) {
