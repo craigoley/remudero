@@ -1,0 +1,47 @@
+- id: W1-T4191
+  title: "THE IN-FLIGHT LIGHT SWEEP ADMITS FIX AND REVIEW WORKERS WHILE AN OPERATOR PAUSE HOLDS — the ticker that runs during a dispatch or retro phase calls sweepLight with no hold check, while the full-sweep retrigger beside it and the interphase ticker both read one, so a recycle's PAUSE never reaches a quiet point (three feedback reports): withhold the light pass while PAUSE holds and name the hold on the ledger"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789339526952-673d48"
+  plan_refs: ["W1-T3491", "W1-T1065", "W1-T254"]
+  files: [src/lib/daemon.ts, test/daemon-pause-before-admission.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804.
+    - The in-flight ticker in `runDaemon` (src/lib/daemon.ts) ends each tick with `await deps.sweepLight!()` and reads
+      no hold first. The full-sweep retrigger a few lines above it reads `checkStop ?? checkPause` and logs
+      `daemon.sweep.retrigger_held`; the interphase ticker reads the same pair before its own `sweepLight` call.
+    - `buildSweepLightHook` (src/run-task.ts) runs `runSweepLightPass` with `actionable: lightPassActionable(d,
+      fixRungAllowed)`, so the light pass can call `dispatchFix` and admit post-review work. It never passes the
+      `workerAdmissionHold` W1-T3491 threads into the full sweep, so `workerAdmissionHoldReason` returns undefined there.
+    - Net effect: under PAUSE, while a batch drains, the fleet keeps admitting fix and review workers. Reported three
+      times: fb-1789339526952-673d48 ("PAUSE must close every worker admission path, including in-flight light sweeps"),
+      fb-1789932350150-bca0dc (0 to 6 lane-less workers while lane holders were active under a recycle's PAUSE) and
+      fb-1789304713245-340554 (PAUSE written, fix sweep still selected workers).
+    risk: high is Rule 19's span: the suite is the existing pause suite, not this task's own falsifier.
+    MEASURED RED before the fix: the new test saw 5 light-sweep passes run after the pause appeared, against 0 expected.
+  design: |
+    (i) The in-flight ticker reads `checkPause` before the light pass; while it holds, the pass is skipped and
+        `daemon.sweep_light.held` is logged with the phase and the hold's detail. Work already in flight is never
+        aborted: the batch drains, as W1-T3491 criterion 2 requires.
+    (ii) STOP is deliberately not read at this site. STOP ends the daemon on its own, and existing fixtures
+         (test/retro-sweep-ticker.test.ts) use `checkStop` as their loop bound; reading it here hung that suite in a
+         measured run. If STOP should also withhold the light pass during a long drain, that is a separate change.
+    (iii) OUT OF SCOPE, filed separately: a recycle that clears a PAUSE it did not write (W1-T4197).
+  acceptance:
+    - claim: "the in-flight light sweep admits no worker while a pause holds"
+      proof: 'grep: test("W1-T4191: the in-flight light sweep admits no worker while a pause holds" in test/daemon-pause-before-admission.test.ts'
+  falsifier: |
+    Remove the `checkPause` read before `deps.sweepLight!()` in the in-flight ticker and the test fails: light-sweep
+    passes run after the pause appears.
+  note: |
+    A WORKING IMPLEMENTATION IS DRAFTED at commit 94f39adf, the head PR #6711 carried before it was force-pushed to
+    plan-only (its timeline links it; the build commits are 787bf7a5, 8645388e and 5d25942a). It was split out by
+    Standing rule 15. Build from it, and re-verify it against your head rather than trusting it.

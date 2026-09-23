@@ -1,0 +1,58 @@
+- id: W1-T4190
+  title: "A CI LESSON THAT ALREADY MERGED IS FILED AGAIN THE NEXT DAY — the ci-learning rung's idempotency set is the checkout's plan plus the pending queue, and once a landing PR merges the queue is emptied while the checkout lags origin/main, so the same finding is held by nothing and is re-filed: add fetched origin/main's origins to the held set at mint and at the landing boundary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "session: 2026-09-23 backlog triage — duplicate machine-filed ci-learning shards"
+  plan_refs: ["W1-T2968", "W1-T3492", "W1-T3754", "W1-T3765"]
+  files: [src/lib/feedback-landing.ts, src/run-task.ts, test/ci-learning-safe-landing.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804. The 43 machine-filed "THE <gate> GATE REFUSED N PULL REQUESTS" shards
+    carry only 29 distinct `origin:` values. `ci-learning:5505:ci-gate` is filed FOUR times (W1-T3630, W1-T3717,
+    W1-T3753, W1-T3831); `5852:ci-gate`, `5861:coverage-ratchet` and `5861:coverage-shard (3/4)` three times each;
+    `5289:ci-gate`, `5318:coverage-ratchet`, `5318:coverage-shard (4/4)`, `5431:ci-gate`, `5431:coverage-ratchet`
+    and `5433:squash-trailer-gate` twice each. Each copy arrived in a separate daily "chore(ci-learning): land
+    pending lessons" PR (#5575, #5703, #5842, #5967, #6177), each AFTER the previous copy had merged. Every one is
+    `verify: human`, so the duplicates land in the operator's queue.
+
+    THE MECHANISM. `landCiLearningShards` (src/lib/feedback-landing.ts) holds `planOrigins ∪ pendingOrigins`. After
+    its fetch, `acknowledgeMergedCiLearningShards` deletes every pending copy whose origin origin/main carries. The
+    only other holder is `planOrigins`, read from the daemon's checkout (`ciLearningPlanOrigins`), which lags
+    origin/main between self-syncs. So a finding that merged yesterday is held by nothing today and is minted again.
+    `buildCiLearningCadenceRunner` has the same gap one step earlier, so a merged cluster also takes one of the
+    `CI_LEARNING_MINT_CEILING` draft slots and pushes a new cause out.
+    SHARED SURFACE WITH W1-T3765, NOT A DUPLICATE: W1-T3765 changes WHICH BRANCH the manual command reserves an id
+    from; this task changes WHICH ORIGINS count as already filed. Both touch run-task.ts and the landing suite.
+    risk: high is Rule 19's span (feedback-landing, run-task, the landing suite); the blast radius is one extra
+    read on an existing set.
+  design: |
+    (i) `ciLearningMergedOrigins(checkoutRoot, git?)` reads the origins under fetched origin/main's shard dir, using
+        the existing `ciLearningMainOrigins` git-grep, and returns `[]` when the ref cannot be read.
+    (ii) `landCiLearningShards` adds them to `held` AFTER its fetch and acknowledgement, the one point where main is
+         the only surface still holding those findings.
+    (iii) The scheduled runner and the manual `rmd ci-learning` command union them into the mint's origin set, so a
+          merged finding never takes a draft slot.
+    OUT OF SCOPE, reported separately: re-clustering. The mint's dedup key is the cluster's FIRST pull request, so a
+    cluster whose first PR is excluded can re-form under its second PR with most of the same pull requests
+    (measured: 5289->5431 ci-gate shares 6 of 26). Retiring the duplicates already filed is a plan-only change.
+  acceptance:
+    - claim: "a finding already on origin/main is not re-filed from a checkout that is behind it"
+      proof: 'grep: test("W1-T4190: a finding already on origin/main is not re-filed from a checkout that is behind it" in test/ci-learning-safe-landing.test.ts'
+    - claim: "a finding already on origin/main does not take a draft slot at mint time"
+      proof: 'grep: test("W1-T4190: a finding already on origin/main does not take a draft slot at mint time" in test/ci-learning-safe-landing.test.ts'
+    - claim: "the landing boundary adds main's origins to its held set"
+      proof: 'grep: for (const origin of ciLearningMergedOrigins(checkoutRoot, git)) held\.add(origin) in src/lib/feedback-landing.ts'
+  falsifier: |
+    Remove the `held.add` loop in landCiLearningShards and the first test fails (the merged finding mints an id).
+    Remove `mergedOrigins` from the runner's origin set and the second fails (draftCount 1).
+  note: |
+    A WORKING IMPLEMENTATION IS DRAFTED at commit 94f39adf, the head PR #6711 carried before it was force-pushed to
+    plan-only (its timeline links it; the build commits are 787bf7a5, 8645388e and 5d25942a). It was split out by
+    Standing rule 15. Build from it, and re-verify it against your head rather than trusting it.
