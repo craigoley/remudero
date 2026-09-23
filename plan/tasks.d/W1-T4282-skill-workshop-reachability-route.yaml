@@ -10,7 +10,9 @@
   files: [src/lib/skill-workshop.ts, test/skill-workshop-reachability-route.test.ts]
   origin: architect
   plan_refs: ["W1-T2766", "W1-T3101", "W1-T3137", "skill-draft:25c3724cf6958acf"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing from the skill-draft approvals (#6779-#6804): superseded by W1-T4341 (the same hard-coded describeWorkerSkillReachability([]) defect).
   attempts: 0
   rationale: |
     VERIFIED AT SOURCE while evaluating proposal skill-draft:25c3724cf6958acf. `describeWorkerSkillReachability`

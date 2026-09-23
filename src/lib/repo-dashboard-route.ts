@@ -200,6 +200,10 @@ function toDashboardEntry(repo: ManagedRepo, t: RepoTelemetry): RepoDashboardEnt
 /** How long one computed telemetry pass is served while its input stamps are unchanged; the seven-day window
  *  moves with the clock even when no input file does. */
 export const REPO_TELEMETRY_CACHE_TTL_MS = 60_000;
+/** PRIMARY CONTROL on recompute frequency: a pass younger than this is served even if an input stamp moved.
+ *  The live ledger's stamp changes every 5-10s on the fleet (measured 2026-09-23), so stamp-keying alone missed
+ *  on nearly every console poll; a telemetry figure 30s old is still an honest, age-marked answer. */
+export const REPO_TELEMETRY_MIN_AGE_MS = 30_000;
 
 const REPO_TELEMETRY_WORKER_KIND = "remudero-repo-telemetry" as const;
 
@@ -325,7 +329,8 @@ export function buildRepoDashboardRoute(deps: {
   const measure = async (repos: ManagedRepo[], ledgerPath: string): Promise<{ atMs: number; outcome: RepoTelemetryOutcome }> => {
     const stamps = await Promise.all([ledgerPath, planPath, join(dirname(planPath), "tasks.d")].map(statStamp));
     const key = [repos.map((r) => `${r.owner}/${r.repo}`).join(","), ...stamps].join("|");
-    if (cached && cached.key === key && clock.now() - cached.atMs < REPO_TELEMETRY_CACHE_TTL_MS) return cached;
+    const ageMs = cached ? clock.now() - cached.atMs : Number.POSITIVE_INFINITY;
+    if (cached && (ageMs < REPO_TELEMETRY_MIN_AGE_MS || (cached.key === key && ageMs < REPO_TELEMETRY_CACHE_TTL_MS))) return cached;
     if (inflight && inflight.key === key) return inflight.promise;
     const atMs = clock.now();
     const promise = compute({ kind: REPO_TELEMETRY_WORKER_KIND, repos, ledgerPath, planPath, nowMs: atMs }).then((outcome) => {
