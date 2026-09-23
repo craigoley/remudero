@@ -1,0 +1,53 @@
+- id: W1-T4261
+  title: "THE GATEWAY PINS ITS ONE THREAD RECLASSIFYING 693 PROPOSALS ON EVERY INBOX READ — each /v1/inbox pass re-projects the plan, re-reads the ledger, spawns a git grep per proposal and re-lints the plan per proposal, synchronously, so /v1/status times out at 15 s on an idle host; classify once per change of the inputs, answer anchor greps from a per-commit cache, and keep the refresh off the request path"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator-request#console-works-across-repos-2026-09-23"
+  plan_refs: ["W1-T4102", "W1-T999", "W1-T4228"]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/inbox.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 12:14Z on the fleet host. The host was idle (load 1.6, io PSI some 9.8% avg10)
+    yet remudero-serve sat at 96% CPU and a bare GET /v1/status timed out at 15 s on 7 of 7 tries; the
+    console's route sweep showed 5-20 s loads and "aborted" on most pages. A 10 s CPU profile of the
+    serve process (inspector enabled with SIGUSR1, no restart):
+      81.0% inclusive  classifyAllProposals path (panel-graph.ts) behind a request handler
+      67.4%            classifyAllProposals → classifyProposal ×693 (inbox.ts)
+      38.9% self       spawn — gitGrepAnchorTrue's execFileSync("git", ["grep", …]) per proposal
+      18.0% self       garbage collector
+      10.1%            blockingLintMessages → lintPlan, per proposal
+       7.9%            parseTasksFromYaml / projectPlan
+    state/inbox-proposals.json holds 693 proposals and inbox-drafts.json 729 drafts. /v1/inbox is in
+    CONSOLE_CACHED_READ_PATHS, but the refresh still runs this whole computation synchronously on the event
+    loop, so every refresh freezes every other route. classifyAllProposals also builds
+    `openProposalIds: new Set([...allIds].filter(...))` per proposal — quadratic in the registry size.
+  design: |
+    (1) Memoise classifyAllProposals on a fingerprint of its inputs: the registry, drafts, in-flight and
+    adoption files (size + mtime), the plan snapshot's identity, the ledger (size + mtime) and the
+    origin/main commit. An unchanged fingerprint returns the previous result with no recompute.
+    (2) gitGrepAnchorTrue answers from a cache keyed by (origin/main sha, anchor); a new sha invalidates it.
+    (3) Compute the open-id set and the plan lint once per pass, not once per proposal.
+    (4) The refresh for the cached inbox route runs in small slices (or a worker) so it never holds the
+    event loop for more than a bounded time; /v1/status keeps answering while it runs.
+    Classification results must be identical to today's for the same inputs.
+  acceptance:
+    - claim: "an unchanged input fingerprint reuses the previous classification without recomputing"
+      proof: "unit test: an unchanged input fingerprint reuses the previous classification without recomputing"
+    - claim: "any changed input invalidates the classification"
+      proof: "unit test: any changed input invalidates the classification"
+    - claim: "an anchor grep runs once per main commit"
+      proof: "unit test: an anchor grep runs once per main commit"
+    - claim: "classifications are identical to the uncached path for the same inputs"
+      proof: "unit test: classifications are identical to the uncached path for the same inputs"
+    - claim: "the panel graph classifies through the memoised path"
+      proof: "grep: classifyAllProposalsMemo( in src/lib/panel-graph.ts"
