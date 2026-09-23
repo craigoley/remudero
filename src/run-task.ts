@@ -19100,13 +19100,15 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
  * parsed" message. Line numbers are 1-based, matching what an author sees in an editor.
  */
 function zeroCriteriaOffendingLineMessage(body: string): string {
-  const region = acceptanceBlockRegion(body);
-  if (!region) {
-    // Cannot happen from the one call site above (`d.headerFound` was already checked true), but
-    // this function has no other invariant to lean on, so it names its own absence rather than
-    // indexing into a region that is not there.
-    return "an Acceptance header was found but ZERO bullets were resolved from it.";
-  }
+  // `acceptanceBlockRegion` is the EXACT function `acceptanceBlockDiagnostics` (lib/review.ts) calls
+  // to derive `headerFound` for this same `body` string — a pure function of `body` alone, with no
+  // other input. The one call site above only reaches this function once `d.headerFound` already
+  // read true for this identical `body`, so a second call here on the identical string cannot
+  // disagree and return `undefined`. Asserted rather than re-branched: a defensive `if (!region)`
+  // here would be a line no input can ever drive, which is what CI's coverage-ratchet flagged on an
+  // earlier round of this same fix (`src/run-task.ts:19108`, now removed) — an untestable branch is
+  // a worse signal than an assertion of an invariant the two functions already share by construction.
+  const region = acceptanceBlockRegion(body)!;
   const lines = body.split("\n");
   const headerLine = lines[region.headerLine]?.trim() ?? "";
   const offendingIndex = region.endLine;
