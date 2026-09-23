@@ -52,7 +52,11 @@ import {
   type Scope,
   cloudflareAccessIdentityProvider,
   createCloudflareAccessKeyCache,
+  createOperatorJwksCache,
+  operatorJwksUrl,
+  operatorSessionIdentityProvider,
   type IdentityProvider,
+  type OperatorIdentityConfig,
   type ServiceOptions,
   type ServiceTokens,
   type SseRoute,
@@ -141,7 +145,7 @@ import {
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
-import type { ModelApproval } from "./config-schema.js";
+import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
   buildProviderAuthRoutes,
@@ -218,6 +222,15 @@ export interface ServeDeps {
    */
   accessTeamDomain?: string;
   accessAudience?: string;
+  /**
+   * W1-T4244 — the console operator's Clerk session identity (`serve.operatorIdentity`). Defaulted
+   * from `loadConfig()` inside {@link buildServeServer} exactly like the Access values above;
+   * injectable so a test states it without a config file. Absent: no operator provider, and
+   * every request is authorised exactly as before this task.
+   */
+  operatorIdentity?: OperatorIdentityConfig;
+  /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
+  operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
   /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
    *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
   resolveCurrentSha?: () => string;
@@ -3203,6 +3216,41 @@ function accessConfig(): { accessTeamDomain?: string; accessAudience?: string } 
   }
 }
 
+/** W1-T4244 — `serve.operatorIdentity` off `loadConfig()`, tolerantly, {@link accessConfig}'s
+ *  precedent: an unreadable config composes no operator provider rather than failing the boot. */
+export function operatorIdentityConfig(read: () => Pick<Config, "serve"> = loadConfig): OperatorIdentityConfig | undefined {
+  try {
+    return read().serve?.operatorIdentity;
+  } catch {
+    // Deliberate: an unreadable config and an unconfigured one both mean "no operator provider".
+    return undefined;
+  }
+}
+
+/**
+ * W1-T4244 — COMPOSE THE OPERATOR-SESSION PROVIDER, OR NOTHING. Absent config, or one with no
+ * issuer / no allowed origin / no operator, composes NO provider: a verifier with an empty
+ * allowlist grants nobody, and saying so at boot beats an operator discovering it as a 403. The
+ * key set is fetched lazily, on the first request that carries a session, never at boot.
+ */
+export function operatorSessionProvider(
+  config: OperatorIdentityConfig | undefined,
+  io: { fetchImpl?: typeof fetch; clock?: Clock; log?: (step: string, extra?: Record<string, unknown>) => void } = {},
+): IdentityProvider | undefined {
+  if (!config) return undefined;
+  const issuer = config.issuer?.trim();
+  if (!issuer || !(config.allowedOrigins?.length > 0) || !(config.operatorUserIds?.length > 0)) {
+    io.log?.("serve.operator_identity_incomplete", {
+      issuer: Boolean(issuer),
+      allowed_origins: config.allowedOrigins?.length ?? 0,
+      operator_user_ids: config.operatorUserIds?.length ?? 0,
+    });
+    return undefined;
+  }
+  const keys = createOperatorJwksCache({ jwksUrl: operatorJwksUrl({ ...config, issuer }), fetchImpl: io.fetchImpl, clock: io.clock, log: io.log });
+  return operatorSessionIdentityProvider({ ...config, issuer, keys, clock: io.clock, log: io.log });
+}
+
 export function accessIdentityProviders(opts: {
   teamDomain?: string;
   audience?: string;
@@ -4185,6 +4233,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       audience: deps.accessAudience ?? accessConfig().accessAudience,
       log: deps.log,
     }),
+    // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
+    operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
     // Absent build -> no mount -> `/console/*` is a plain 404 rather than a shell with no assets.
     staticMount:
@@ -4207,6 +4257,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // refused without a nonce and satisfied with one; the bearer write token stays PINNED at "low"
     // (W1-T404's own ruling, not raised here) and so never reaches a MIDDLE or HIGH route at all,
     // nonce or not -- see ServiceOptions.enforceWriteTiers's own doc and bearerTokenProvider's.
+    // W1-T4244: the operator's own verified session (above) is how the console reaches MIDDLE,
+    // and HIGH after a recent step-up; the bearer token is still pinned at LOW.
     enforceWriteTiers: true,
   });
   drainTarget = server;
