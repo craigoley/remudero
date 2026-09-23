@@ -11,6 +11,7 @@ import {
   postRepoTelemetryWorkerResponse,
   projectRepoTelemetry,
   REPO_TELEMETRY_CACHE_TTL_MS,
+  REPO_TELEMETRY_MIN_AGE_MS,
   type RepoDashboardEntry,
   type RepoTelemetryRequest,
 } from "../src/lib/repo-dashboard-route.js";
@@ -229,8 +230,9 @@ test("a repos read recomputes once an input changes or the cache ages out", asyn
   const route = buildRepoDashboardRoute({ root, ledgerPath, clock, readLedger: () => (reads += 1, []), readPlan: () => plan(task("A-1", "alpha")) });
   await readDashboard(route);
   writeFileSync(ledgerPath, "{}\n");
+  nowMs += REPO_TELEMETRY_MIN_AGE_MS;
   await readDashboard(route);
-  assert.equal(reads, 2, "a changed ledger stamp recomputes");
+  assert.equal(reads, 2, "a changed ledger stamp recomputes once the minimum age has passed");
   nowMs += REPO_TELEMETRY_CACHE_TTL_MS;
   await readDashboard(route);
   assert.equal(reads, 3, "an aged entry recomputes");
@@ -322,4 +324,19 @@ test("an off-thread repo telemetry pass reports a dead worker as unavailable", a
   const unspawnable = await computeRepoTelemetryOffThread(req, new URL("http://127.0.0.1/not-a-worker.js"));
   assert.equal(unspawnable.ok, false);
   assert.match((unspawnable as { reason: string }).reason, /^repo telemetry worker could not start: /);
+});
+
+test("a repos read inside the minimum age reuses its result even when the ledger moved", async () => {
+  const root = fixtureRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  let reads = 0;
+  let nowMs = NOW_MS;
+  const clock = { now: () => nowMs, date: () => fixedClock(nowMs).date(), iso: () => fixedClock(nowMs).iso() };
+  const route = buildRepoDashboardRoute({ root, ledgerPath, clock, readLedger: () => (reads += 1, []), readPlan: () => plan(task("A-1", "alpha")) });
+  await readDashboard(route);
+  writeFileSync(ledgerPath, "{}\n");
+  nowMs += REPO_TELEMETRY_MIN_AGE_MS - 1;
+  await readDashboard(route);
+  assert.equal(reads, 1, "a pass younger than the minimum age is served although the ledger stamp changed");
 });
