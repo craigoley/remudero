@@ -1,0 +1,30 @@
+- id: W1-T4118
+  title: "482 OF 728 CACHED INBOX DRAFTS BELONG TO PROPOSALS THAT NO LONGER EXIST — state/inbox-drafts.json is 8.5 MB and nothing prunes it, so every inbox read parses drafts for proposals long gone: collect drafts whose proposal left the registry"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "research 2026-09-23, re-verified on the host the same day (728 drafts, 482 orphaned, 8,500,057 bytes)"
+  plan_refs: []
+  files: [src/lib/inbox.ts, test/an-orphaned-draft-is-collected.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 on the host: state/inbox-drafts.json holds 728 drafts; 482 are keyed by proposal ids absent from
+    state/inbox-proposals.json. The drafts cache has writers (the draft rung, reframe) and no collector.
+  design: |
+    (i) `pruneOrphanedDrafts(draftsPath, registryPath)` removes drafts whose proposal is not in the registry, under the
+        same lock and atomic write the registry uses, and the draft rung calls it once per pass.
+    (ii) Ledgers `inbox.drafts_pruned {count, bytes_before, bytes_after}`.
+  acceptance:
+    - claim: "a draft whose proposal left the registry is collected"
+      proof: 'grep: test("W1-T4118: a draft whose proposal left the registry is collected" in test/an-orphaned-draft-is-collected.test.ts'
+    - claim: "a draft for a live proposal is kept"
+      proof: 'grep: test("W1-T4118: a draft for a live proposal is kept" in test/an-orphaned-draft-is-collected.test.ts'
+    - claim: "the inbox module calls the collector"
+      proof: 'grep: pruneOrphanedDrafts( in src/lib/inbox.ts'
+  falsifier: |
+    Remove the call and the first test finds the orphan still cached.

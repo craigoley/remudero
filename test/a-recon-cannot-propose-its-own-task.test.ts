@@ -337,7 +337,7 @@ test("pruneSelfReferentialFollowups likewise takes no merge-state read — it pr
   const stillQueued = followupProposal({ ...SELF_REFERENTIAL_CANDIDATE, taskId: "W1-T9999-STILL-QUEUED", text: "Implement W1-T9999-STILL-QUEUED per its acceptance criteria" });
   const reg = fakeRegistry([stillQueued]);
 
-  // PruneFollowupsDeps carries only { registryPath, updateRegistry? } — no referent-read field.
+  // FollowupRegistryDeps (pruneFollowups) carries only { registryPath, updateRegistry? } — no referent-read field.
   const outcomes = pruneSelfReferentialFollowups({
     registryPath: "/state/inbox-proposals.json",
     updateRegistry: reg.updateRegistry,

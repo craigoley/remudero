@@ -125,7 +125,13 @@ test("W1-T3269: a healthy tick that finds drift converges it and leaves a record
 
 test("W1-T3269: convergence REFUSES on a dirty checkout and on one that is not at origin/main", () => {
   withWorld({ drift: true }, (w) => {
-    writeFileSync(join(w.checkout, "uncommitted.txt"), "work in progress\n");
+    // W1-T4076 — this used to write an UNTRACKED `uncommitted.txt`. An untracked file no longer
+    // refuses: one left on the fleet host blocked convergence silently from 2026-09-20 to
+    // 2026-09-22. The safety property this test exists for is about an UNREVIEWED TREE becoming
+    // root config, and only a TRACKED change can do that, so the fixture now makes one. The
+    // untracked half of the new contract is asserted in
+    // test/an-untracked-file-does-not-block-convergence.test.ts.
+    writeFileSync(join(w.checkout, "deploy", "install-host-units.sh"), "#!/usr/bin/env bash\necho tampered\n");
     const dirty = tick(w);
     assert.equal(installerCalls(w).length, 0, "a dirty tree must not even be checked, let alone installed");
     assert.match(dirty.stdout, /DIRTY/, "and the refusal must say so");
