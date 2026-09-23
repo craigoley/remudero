@@ -1,0 +1,131 @@
+- id: W1-T4346
+  title: "AN UNMEASURED HOST IS TOLD EVERY RED IS ITS OWN — `hostCausedSuiteRedsStep` prints \"any ci:test failure here is this diff's own\" whenever no cluster applies, and on a Linux container exactly one of the registry's sixteen predicates can even be true, so a host nobody ever measured is rendered as a host that is clean"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: "span"
+  budget_usd: 15.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/host-caused-suite-reds.test.ts
+  origin: "followup#DAEMON-1788783316728-w1-t3020-sandbox-suite-reds-2026-09-07"
+  plan_refs: ["W1-T2234", "W1-T2770", "W1-T2790", "W1-T130"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LINE, VERBATIM FROM SOURCE. When no registered cluster applies, the step returns:
+    "PASS — 0 of N known host-caused suite-red cluster(s) apply on this host (<facts>); any
+    ci:test failure here is this diff's own". The second clause is not a hedge — it is an
+    affirmative claim about the machine, and it is emitted from the ABSENCE of a matching entry.
+
+    ON A LINUX CONTAINER THAT ABSENCE IS STRUCTURAL, NOT EVIDENCE. Counted from the array at this
+    sha, the registry holds SIXTEEN entries, and their predicates key on exactly four axes:
+    `platform === "darwin"` (six entries), `bashMajorVersion < 4` (eight), `!hasProcMeminfo`
+    (one), and running-Node-differs-from-`.nvmrc` (one). In a bookworm container every darwin
+    clause is false, every bash clause is false (bash 5), and `/proc/meminfo` exists, so the node
+    drift entry is the ONLY one of sixteen that can be true. A host with a genuinely unmeasured
+    failure set therefore reaches the zero-applicable branch by construction and is told it is
+    clean — while W1-T3020's run reports ~19 reds there that Actions never sees.
+
+    THIS IS THE POLARITY THIS PLAN HAS FIXED FOUR TIMES ELSEWHERE. W1-T119 (a throttled read is
+    not an absent one), W1-T130 (cannot-observe means wait, never spend), W1-T181 (a failed
+    gateway fetch returned `[]` and the board read merged 0/212), W1-T179 (darkness is marked,
+    never a silent downgrade). Each is the same shape: a lookup that could not see is rendered as
+    a lookup that saw nothing. Here it is one clause of one informational line, and the cost is
+    an agent's belief about whose fault a red is.
+
+    THE COST IS MEASURED IN THIS REPO, TWICE. W1-T3018 records a session in this container
+    reading environmental reds as "origin/main is 189-red" and putting that claim into two merged
+    PR bodies. W1-T2790 records nine registry gaps found in ONE session on the mini — "None was
+    found by reading the registry. Each was found by running something." A registry that is
+    reliably incomplete must not speak as though completeness were the default, and the step's
+    own file header makes the stakes explicit by inviting the reader to "subtract them".
+
+    A SECOND, SMALLER GAP IN THE SAME LINE. The facts line prints `platform`, `bash-major` and
+    `/proc/meminfo` — the three axes that existed when it was written. W1-T2770 added
+    `nodeVersion` and `pinnedNodeVersion` to `HostFacts` and keyed a cluster on them, and the
+    line was never extended, so a reader cannot see from the output why the one cluster that CAN
+    apply in a container did or did not. A facts line that under-reports its own axes cannot be
+    audited by the person it is written for.
+
+    CORRECT UNDER EITHER ARM OF W1-T2790, AND THEREFORE NOT AN ANSWER TO IT. If the registry stays
+    hand-written, the distinction between "measured here and clean" and "never measured here" is
+    the honest reading of a hand-written list. If it becomes DERIVED from a real run, the
+    distinction becomes literally "has a run been observed on this pole" — the same question, and
+    the derived design needs it too. This task pre-empts nothing.
+  design: |
+    (i) THE REGISTRY DECLARES WHICH POLES IT HAS BEEN MEASURED AGAINST, as exported DATA — the
+    same treatment `HOST_CAUSED_SUITE_REDS` and `LOADED_RUN_THRESHOLD` already get, so widening
+    coverage is a data edit and its provenance is legible. Each measured pole carries when and at
+    what sha it was measured, because a coverage claim with no date is the claim this task is
+    fixing wearing a different hat.
+
+    (ii) THE POLE IS DERIVED, NEVER RE-TERNARIED. `resolveHostPole` already exists and takes
+    platform, env and the container marker as arguments; the pole joins `HostFacts` at the IMPURE
+    edge (`detectHostFacts`), leaving `computeHostFacts` pure on its existing precedent — a test
+    hands it strings and asserts the derived facts. A second `platform === "darwin"` ternary here
+    is the exact defect `resolveHostPole` was extracted to remove, and it must not be reintroduced.
+
+    (iii) THREE OUTCOMES WHERE THERE ARE TWO. Applicable clusters -> unchanged, verbatim. Zero
+    applicable ON A MEASURED POLE -> the existing "this diff's own" wording, unchanged, because on
+    a host whose set really was measured that claim is earned. Zero applicable on an UNMEASURED
+    pole -> a distinct line saying this host's failure set has never been measured against this
+    registry, so a red here is UNCLASSIFIED — never that it is the diff's own. The fix NARROWS the
+    claim; it never removes it, and it never invents a new verdict.
+
+    (iv) SEPARATION, NEVER SUPPRESSION, IS UNTOUCHED AND MUST BE RE-PROVEN. The step still always
+    returns `ok: true`, `ci:test`'s command, argv and `stream: true` are untouched, and `ci:test`
+    remains a distinct step in the CI job entry. The highest-value guard from W1-T2770 carries
+    over verbatim and must now hold across the NEW axis too: every combination of facts,
+    including every pole, still reports `ok: true`. The day this table gates a merge on a host
+    fact is the day it stops testing the diff.
+
+    (v) THE FACTS LINE NAMES EVERY AXIS ITS PREDICATES KEY ON — platform, bash major, procfs,
+    running Node and its pin, and the pole. An unreadable axis renders as unknown, on the
+    `bashMajorVersion: undefined` precedent, never as a guessed value.
+
+    (vi) OUT OF SCOPE: adding any cluster, changing any existing `appliesTo`, and populating the
+    measured-pole set with anything the repo cannot evidence today. Declaring a pole measured is
+    a deliberate act that belongs with the measurement (W1-T4345's territory for the container), not
+    with this fix — and a set that starts narrow errs toward saying "unknown", which is the safe
+    direction this task exists to install.
+  acceptance:
+    - claim: "on a host whose pole the registry has never been measured against, the zero-applicable line reports the failure set as unclassified here and never that a red is this diff's own"
+      proof: "unit test: an unmeasured pole is told its reds are unclassified, never that they are this diff's own"
+    - claim: "on a measured pole with no applicable cluster the existing this-diff's-own wording is unchanged — the claim is narrowed, never removed"
+      proof: "unit test: a measured pole with no applicable cluster still reads as this diff's own"
+    - claim: "the step still reports ok true on every combination of host facts including every pole, and ci:test remains a distinct step in the CI job entry — separation, never suppression"
+      proof: "unit test: the pole axis cannot alter ci:test's verdict — every fact combination still reports ok true"
+    - claim: "the facts line names every axis the registry's predicates key on, including the running Node version and its pin, so a reader can see why a cluster did or did not apply"
+      proof: "unit test: the facts line names the running Node version and its pin alongside platform, bash and procfs"
+    - claim: "the pole is derived through resolveHostPole rather than a second platform ternary, and the measured-pole set is exported data rather than a code branch"
+      proof: "unit test: the pole is resolved through resolveHostPole and the measured-pole set is data"
+  falsifier: |
+    Close without implementation if the zero-applicable branch already distinguishes an unmeasured
+    host from a clean one — read at this sha it does not; it emits one unconditional sentence.
+    A version that DROPS the "this diff's own" clause entirely fails this task: on a measured host
+    that clause is the useful half, and removing it would trade a false claim for no claim.
+    A version that reaches the new branch by testing `platform` directly fails: `resolveHostPole`
+    exists precisely because a runner and a container are not the same side of the diff, and a
+    second ternary would re-open the misattribution W1-T2735's filing measured.
+    A version that lets the pole axis change `ok` — in either direction — fails outright; that is
+    suppression wearing this task's name, and the guard in criterion three is what refuses it.
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the entry
+    (`src/lib/ci-parity.ts`) and the falsifier that pins it (`test/host-caused-suite-reds.test.ts`)
+    read as two concerns and are one act — the same pairing and the same recorded rationale as
+    W1-T2785 and W1-T2770 in this family.
+
+    DELIBERATELY NOT DEPENDED ON: W1-T4345 (the azure measurement) and W1-T2790 (the derive-or-keep-
+    writing question). This fix is right whether or not the container is ever measured and
+    whichever way the derivation question is ruled — and a hard edge to either would strand a
+    one-clause honesty fix behind a measurement task or an open operator decision. The coupling
+    that DOES exist is benign and one-directional: once a pole is genuinely measured, adding it to
+    the measured set flips this line to its stronger wording, by a deliberate declaration rather
+    than by silence.
+
+    THIS TASK ADDS NO CLUSTER. It is the difference between "I looked and found nothing" and "I
+    have never looked here", and nothing more.
