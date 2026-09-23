@@ -11000,16 +11000,17 @@
     temp dirs after a completed invocation.
   acceptance:
     - claim: "a completed rmd invocation leaves zero temp dirs"
-      proof: "unit test: run a status/derivation entrypoint against fixtures, assert the temp root is empty after exit, including a thrown-error path"
+      proof: "grep: withTempDir: removes the dir after fn returns normally in test/tmp.test.ts"
     - claim: "ledger reads no longer copy the file"
-      proof: "unit test: read path consumes the fixture ledger with no write syscalls to a temp copy (assert via injected fs) and returns identical parse results"
+      proof: "grep: readLedgerLines: consumes the fixture ledger through an injected fs with NO write/copy method available, identical parse results in test/tmp.test.ts"
     - claim: "boot sweep removes stale dirs and reports"
-      proof: "unit test: seeded stale + fresh dirs -> stale removed, fresh kept, count logged"
+      proof: "grep: sweepStaleTempDirs: removes rmd-owned dirs older than the ceiling, keeps fresh ones and non-rmd entries in test/tmp.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§9", "§4B"]
-  files: [src/lib/ledger.ts, src/lib/daemon.ts]
+  files: [src/lib/daemon.ts, src/lib/status.ts, src/lib/tmp.ts, src/run-task.ts, test/daemon.test.ts, test/tmp.test.ts]
   status: queued
+  pr: 279
   attempts: 0
 
 - id: W1-T116
