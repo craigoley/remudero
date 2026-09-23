@@ -2029,8 +2029,9 @@ export const FAST_GATE_CENSUS_BOUND_MS = 2000;
 /** The same-run reference is floored, so a run with only trivially-cheap entries cannot make the ratio harsh for all of them. */
 export const FAST_GATE_CENSUS_REFERENCE_FLOOR_MS = 1000;
 
-/** How many times the same run's median census cost an entry may cost before it is refused as
- *  RUNAWAY. Sized against the measured spread (2026-08-31: 960/1128/2344/2615ms), so a
+/** PRIMARY CONTROL — the only thing that refuses a runaway census entry: how many times the same
+ *  run's median census cost an entry may cost, TWICE (the run plus one re-measure), before it is
+ *  refused as RUNAWAY. Sized against the measured spread (2026-08-31: 960/1128/2344/2615ms), so a
  *  merely-grown suite passes and one doing several times its typical sibling's work does not. */
 export const FAST_GATE_CENSUS_RUNAWAY_MULTIPLE = 4;
 
@@ -3224,6 +3225,13 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  const timedCensus = (script: string) => {
+    const startedAt = now();
+    const result = withoutNodeTestContext(() =>
+      shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot }),
+    );
+    return { result, elapsedMs: now() - startedAt };
+  };
   // W1-T2545 — PASS ONE: run every step and keep each census entry's measured cost. Nothing is
   // refused on cost here: the threshold is derived from the population, which is not complete
   // until the last entry has run.
@@ -3236,13 +3244,10 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
-      const label = `npm run --silent ${script}`;
       if (boundMs === undefined) {
-        return shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot, retainSuccessOutput });
+        return shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot, retainSuccessOutput });
       }
-      const startedAt = now();
-      const result = withoutNodeTestContext(() => shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot }));
-      const elapsedMs = now() - startedAt;
+      const { result, elapsedMs } = timedCensus(script);
       censusCosts.set(i, elapsedMs);
       // The SOFT bound reports and never refuses: a census suite's growing cost is news about the tree.
       if (elapsedMs > boundMs && result.ok) {
@@ -3255,17 +3260,36 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
   // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
   // runner nor one accidentally-fast sibling can manufacture (W1-T3408). An entry whose own
-  // command FAILED is left alone.
+  // command FAILED is left alone. TIERED: a first crossing is re-measured once, alone; only a
+  // SECOND crossing refuses — a loaded runner crossed by 2% on PR #6821 with a PASSing command.
   const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
   if (threshold !== undefined) {
-    for (const [i, elapsedMs] of censusCosts) {
-      if (elapsedMs <= threshold || !steps[i].ok) continue;
+    for (const [i, firstMs] of censusCosts) {
+      if (firstMs <= threshold || !steps[i].ok) continue;
       const { job, script } = gateSteps[i];
+      let againMs = 0;
+      const again = runStep(job, () => {
+        const r = timedCensus(script);
+        againMs = r.elapsedMs;
+        return r.result;
+      });
+      if (!again.ok) {
+        steps[i] = { ...again, detail: `${again.detail} (on the re-measure after ${firstMs}ms crossed ${threshold}ms)` };
+        continue;
+      }
+      if (againMs <= threshold) {
+        steps[i] = {
+          ...steps[i],
+          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, under it (passed)`,
+        };
+        continue;
+      }
+      const measured = `${firstMs}ms then ${againMs}ms on one re-measure`;
       steps[i] = {
         ...steps[i],
         ok: false,
         detail:
-          `${job}: RUNAWAY — npm run --silent ${script} took ${elapsedMs}ms, over ${threshold}ms ` +
+          `${job}: RUNAWAY — npm run --silent ${script} took ${measured}, both over ${threshold}ms ` +
           `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's median census cost, floored at ` +
           `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
