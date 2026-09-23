@@ -14,6 +14,7 @@
   files:
     - src/lib/incident-events.ts
     - src/lib/serve.ts
+    - src/lib/service.ts
   status: queued
   attempts: 0
   rationale: |
@@ -22,7 +23,7 @@
     fingerprint is the error type plus the IN-APP stack frames, never library frames or line numbers — which is
     small enough to own instead of buying.
   design: |
-    POST /v1/incidents/events (scope write, tier low; the console's bearer suffices). EXACT BODY:
+    POST /v1/incidents/events (scope write, tier low). LEAST PRIVILEGE: besides the read/write bearers, ServiceTokens gains an optional `ingest` token (env RMD_SERVE_INGEST_TOKEN) that is accepted on THIS route and refused on every other one, so a public surface (the marketing site, an onboarded app) can report errors without holding a token that can pause or stop the fleet. EXACT BODY:
     {source:"console"|"gateway"|"daemon", kind:"exception"|"http_5xx"|"latency"|"invariant", name:string,
      message:string, frames?:[{file:string, fn:string}], route?:string, sha?:string, at:string (ISO)}.
     Scrub before anything is stored: strip query strings and fragments from routes and messages, drop anything
@@ -43,3 +44,5 @@
       proof: "unit test: a burst past the per-minute cap is recorded as one sampled count"
     - claim: "the gateway registers the incident ingest route"
       proof: 'grep: buildIncidentEventsRoute( in src/lib/serve.ts'
+    - claim: "the ingest-only token posts incident events and is refused on every other route"
+      proof: "unit test: the ingest-only token posts incident events and is refused on every other route"
