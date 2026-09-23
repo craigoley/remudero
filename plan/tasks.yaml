@@ -7376,12 +7376,13 @@
     lands in one pass."
   acceptance:
     - claim: "a mutation-testing baseline is established and ENFORCED by a script, with a recorded score"
-      proof: "unit test: the Stryker config + a recorded baseline file are present, and the baseline-check script REJECTS a fixture mutation score below the recorded baseline (accepts at/above); grep the CI workflow shows the mutation job wired"
+      proof: "unit test: mutation-ratchet CLI: BELOW-baseline fixture -> non-zero exit (the gate BLOCKS)"
   risk: high
   origin: architect
   plan_refs: ["§5"]
-  files: [stryker.conf.json, .github/workflows/ci.yml]
+  files: [.github/workflows/ci-gate.yml, .github/workflows/ci.yml, .gitignore, package-lock.json, package.json, scripts/mutation-baseline.json, scripts/mutation-ratchet.mjs, stryker.conf.json, test/fixtures/mutation-ratchet/above-baseline.json, test/fixtures/mutation-ratchet/at-baseline.json, test/fixtures/mutation-ratchet/baseline-no-metrics.json, test/fixtures/mutation-ratchet/baseline.json, test/fixtures/mutation-ratchet/below-baseline.json, test/fixtures/mutation-ratchet/file-missing-mutants.json, test/fixtures/mutation-ratchet/no-files-key.json, test/fixtures/mutation-ratchet/no-valid-mutants.json, test/mutation-ratchet.test.ts]
   status: queued
+  pr: 187
   attempts: 0
   note: "Decomposed 2026-07-17 from the four-gate W1-T25 (the #161/$13 blocked_ci lesson) — one gate per
     task; decomposition changes SIZE, never strength. LIVE CONFIRMATION (Rule 18, operator-observed, NOT
