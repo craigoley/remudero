@@ -372,6 +372,7 @@ test("external-scan macros: grill, diagnose, handoff and wait-what render operat
   // silent drift from what the PR that added it was reviewed as.
   const boundaries: Record<string, RegExp[]> = {
     grill: [/Do not start the work/, /YOUR RECOMMENDED ANSWER/, /Facts are yours to find; decisions are mine to make/, /Take no\s+action on the plan until I confirm/],
+    research: [/Run the investigation in a background agent/, /Never write it under state\//, /run a positive control that proves the query could see its\s+corpus/],
     diagnose: [/never a\s+patch/, /Until this command exists, do not read code to build a\s+theory/, /If two patches have not moved the symptom, stop/, /undo it, show red, restore it, show green/],
     handoff: [/never inside the\s+repository/, /Redact every secret/, /FLOOR, not a claim/, /RECON or\s+IMPLEMENT/],
     "wait-what": [/ISO 24495-1/, /Do not add new material/],
