@@ -5,7 +5,9 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T4123 into W1-T3829 — Its title and files repeat an older queued task.
   attempts: 0
   author_class: machine
   origin: "ci-learning:6569:coverage-shard (3/4)"

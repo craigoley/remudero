@@ -5,7 +5,9 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T3751 into W1-T3590 — Its title and files repeat an older queued task.
   attempts: 0
   author_class: machine
   origin: "ci-learning:5831:coverage-ratchet"
