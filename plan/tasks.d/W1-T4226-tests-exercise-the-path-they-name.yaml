@@ -1,0 +1,42 @@
+- id: W1-T4226
+  title: "ABOUT 80 TEST FILES STILL TRY TO REACH GITHUB AND PASS BY TESTING THE FAILURE PATH — W1-T4119's refusing stub turns each call into a swallowed error, so a lint-plan test meant to exercise credit scoping actually exercises 'GitHub unreachable'; give every whole-plan lint-plan test the offline deps seam, and make the stub's refusal count visible so a test that calls it at all fails"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: medium
+  band_meaning: span
+  origin: "follow-up from W1-T4119 and #6744, 2026-09-23"
+  plan_refs: ["W1-T4119"]
+  files:
+    - test/setup/tmp-hygiene.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on a full-suite run with W1-T4119's refusing stub in place (#6714): about 80 test
+    files still invoke the CLI. Each call is refused and the production code swallows the failure, so the
+    test passes while exercising the "GitHub failed" branch instead of the one it names. Largest by
+    refused-call count: task-linter-wiring (802), name-the-lint-residue (744), lint-plan-merge-evidence
+    (402), a-blocked-task-must-name-its-disposition (303), and ~100 each in lint-plan-open-only,
+    task-retirement-reason, repo-root-identity, base-lint-attributes-pre-existing-violations,
+    lint-plan-broken-base and monolith-id-gate; then run-task (39), several serve.* files and many
+    fix-rung-* files. Most are the whole-plan lint-plan path: lintPlanCommand called with no deps builds a
+    real gateway for creditedMergedIdsForWholePlan. #6744 fixed test/policy.test.ts the same way this task
+    will fix the rest (offline: true + a recording fake gateway; 864 calls to 0, 70/70).
+  design: |
+    (1) Fix the lint-plan family by passing the existing LintPlanStatusDeps seam (offline + a recording
+    fake gateway built from the shared fakeGitHub helper) and asserting no gateway was built. (2) Fix the
+    remaining files by injecting their GitHub reads through each module's existing deps seam. (3) Make the
+    shared stub record every refusal to a per-process file and have tmp-hygiene fail the test file at exit
+    when any refusal was recorded and the file did not opt in by name — so the next silent caller is a red
+    test, not a swallowed error. Land (3) last, when the count is zero.
+  acceptance:
+    - claim: "a whole-plan lint-plan test builds no real GitHub gateway"
+      proof: "unit test: a whole-plan lint-plan test builds no real GitHub gateway"
+    - claim: "a test file that calls the refusing stub without opting in fails at exit"
+      proof: "unit test: a test file that calls the refusing stub without opting in fails at exit"
+    - claim: "a test file that opts in by name may still call its own stub"
+      proof: "unit test: a test file that opts in by name may still call its own stub"
