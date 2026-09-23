@@ -74,6 +74,7 @@
     "test/a-durable-plan-filing-credit-is-revalidated.test.ts": 0,
     "test/a-failed-openweight-request-settles-its-reservation.test.ts": 0,
     "test/a-failed-probe-is-not-a-parse-failure.test.ts": 1020,
+    "test/a-failed-run-the-corpus-had-nothing-to-say-about-is-counted.test.ts": 0,
     "test/a-failing-retro-can-never-shrink-its-own-scope.test.ts": 1038,
     "test/a-fenced-structured-reply-is-unwrapped-not-rejected.test.ts": 0,
     "test/a-filing-body-never-credits-the-task-it-files.test.ts": 0,

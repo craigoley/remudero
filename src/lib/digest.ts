@@ -422,7 +422,6 @@ export interface DigestSummary {
   cacheHit?: CacheHitTotals;
   learningUsefulness?: LearningUsefulness;
   learningOutcomes?: LearningOutcomeSummary;
-  /** W1-T4243: the latest knowledge-measurement row in the window. */
   knowledgeMeasured?: KnowledgeMeasuredSummary;
   gateFireRates?: GateFireRateSummary;
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
@@ -620,8 +619,6 @@ export function summarizeLearningOutcomes(lines: LedgerLine[]): LearningOutcomeS
   return { report, disagreements };
 }
 
-/** W1-T4243's multi-week reading, as the knowledge-measurement rung ledgered it. The digest reads the
- *  rung's product; it never re-reads the union the rung read. */
 export interface KnowledgeMeasuredSummary {
   ts: string;
   status: string;

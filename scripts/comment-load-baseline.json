@@ -263,6 +263,7 @@
   "src/lib/isolation.ts": 227,
   "src/lib/issues-intake.ts": 67,
   "src/lib/knowledge-dedup.ts": 98,
+  "src/lib/knowledge-gaps.ts": 250,
   "src/lib/knowledge-gardener.ts": 250,
   "src/lib/knowledge-inventory.ts": 250,
   "src/lib/knowledge-outcome.ts": 250,
