@@ -1,0 +1,43 @@
+- id: W1-T4331
+  title: "A MACRO THAT CITES A MISSING `rmd` VERB IS NOT REFUSED — `validateMacro` refuses a macro whose NAME collides with a verb and a headline that does not exist, but not an expansion that tells the operator's session to run an `rmd <verb>` that is gone, so a renamed verb silently orphans a macro: refuse it the way a renamed headline is refused"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 6.00
+  files:
+    - scripts/generate-macro-skills.mjs
+    - test/operator-macros-are-generated.test.ts
+  origin: "operator-session#external-skill-scan-2026-09-23"
+  plan_refs: ["W1-T2763"]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 at origin/main a8cbc5fb. Names are symbols.
+
+    OBSERVED (scripts/generate-macro-skills.mjs `validateMacro`): three refusals — an empty
+    expansion or summary, a name equal to an `rmd` verb, and a `headlines` entry CLAUDE.md does not
+    carry. The headline check exists because "a renamed rule must be a red check, never a silently
+    orphaned macro". The same failure applies to verbs: the `grill` row (proposed with this filing; see W1-T4332) tells
+    the session to pass its summary to `rmd plan --mode=create`. If that verb is renamed, the macro
+    keeps instructing a command that no longer exists, and nothing fails.
+    OBSERVED: `rmdVerbNames` already parses the verb list from docs/cli-reference.md, which is itself
+    byte-checked against `COMMANDS`, so the check needs no second list.
+  design: |
+    (i) In `validateMacro`, collect every backticked `rmd <word>` in the expansion (the word matches
+        `[a-z][a-z-]*`). Refuse any whose word is not in `verbNames`, naming the macro and the
+        missing verb in the message, in the style of the headline refusal.
+    (ii) Only backticked spans count, so prose such as "rmd is behind" is never read as a verb.
+    (iii) The committed table must still pass `macro-skills:check`.
+  acceptance:
+    - claim: "an expansion citing a missing rmd verb is refused and the refusal names the verb"
+      proof: 'grep: test("W1-T4331: an expansion citing a missing rmd verb is refused and the refusal names the verb" in test/operator-macros-are-generated.test.ts'
+    - claim: "an expansion citing an existing rmd verb passes"
+      proof: 'grep: test("W1-T4331: an expansion citing an existing rmd verb passes" in test/operator-macros-are-generated.test.ts'
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if `validateMacro` already reads verbs out of the expansion. Re-run:
+    `grep -n 'expansion' scripts/generate-macro-skills.mjs`.
+  note: "high/span declares the generator change and its existing suite (the W1-T3442 shape). UNRESERVED FLOOR: same lane and same reason as W1-T4330. Reserve from the operator checkout before merge."
