@@ -1,0 +1,31 @@
+- id: W1-T4229
+  title: "THE GATEWAY'S OWN CLONE FALLS BEHIND MAIN AND NOTHING MOVES IT, SO /v1/repos ANSWERS [] AFTER managed-repos.json CHANGED — keep the serve checkout at origin/main the way the daemons keep theirs, reload what it read from it, and report how far behind it is on /v1/daemon-health"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  origin: "operator-request#projects-repos-onboarding-2026-09-23"
+  plan_refs: ["W1-T4227", "W1-T4228"]
+  files:
+    - src/lib/serve.ts
+    - src/lib/daemon-health.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 11:40Z: remudero-serve's checkout (~/rmd-serve-repo) was 6 commits behind
+    origin/main, last fetched 11:16:55, so GET /v1/repos returned {"source":"managed-repos","repos":[]}
+    although #6738 had put the three owned repos on main at 11:30. The daemons refresh through their own
+    freshness check and entrypoint; the gateway has no equivalent, so every repo card in the console read
+    unavailable. The core daemon also logged "cannot change to '/home/craigoleyagent/rmd-serve-repo'"
+    — it references the gateway's host path from inside its own container.
+  acceptance:
+    - claim: "a gateway checkout behind main is fast-forwarded when clean and reloaded"
+      proof: "unit test: a gateway checkout behind main is fast-forwarded when clean and reloaded"
+    - claim: "a dirty gateway checkout is reported, never overwritten"
+      proof: "unit test: a dirty gateway checkout is reported, never overwritten"
+    - claim: "daemon health reports how far behind the gateway checkout is"
+      proof: "unit test: daemon health reports how far behind the gateway checkout is"

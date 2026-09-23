@@ -1,0 +1,30 @@
+- id: W1-T4230
+  title: "THE GATEWAY PRINTS ITS READ TOKEN IN ITS STARTUP LINE, SO THE TOKEN LIVES IN docker logs — print the console URL without the token, keep the bind line serve-container.sh matches, and name how to fetch the token instead"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  origin: "operator-request#projects-repos-onboarding-2026-09-23"
+  plan_refs: ["W1-T4005"]
+  files:
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23: remudero-serve's startup banner prints the console URL with the read token in its
+    query string, and docker keeps it in `docker logs remudero-serve`. deploy/serve-container.sh already
+    treats that banner as secret-bearing ("THE BANNER IS MATCHED, NEVER ECHOED ... a token that reached a
+    terminal transcript is compromised and must be rotated"), but anyone who can read container logs can
+    read the token. Rotation is an operator step (it also updates the console's RMD_CONTROL_READ_TOKEN in
+    Vercel); this task stops the leak so a rotated token stays secret.
+  acceptance:
+    - claim: "the startup banner never contains the read token"
+      proof: "unit test: the gateway startup banner never contains the read token"
+    - claim: "the bind line serve-container.sh waits for is unchanged"
+      proof: "unit test: the gateway bind line serve-container.sh waits for is unchanged"
+    - claim: "the banner names where to read the token instead of printing it"
+      proof: "unit test: the gateway banner names where to read the token instead of printing it"
