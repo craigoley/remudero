@@ -855,3 +855,59 @@ export function reserveTaskIdBlockRemote(
     handles,
   };
 }
+
+// ── COLLISION DETECTION AT REVIEW TIME (W1-T4389) ─────────────────────────────────────────────
+// Everything above MINTS an id; nothing above catches a PR that never went through minting at all —
+// a hand filing, an offline mint, a worker that ignores the brief. MEASURED 2026-09-23
+// (craigoley/remudero-console #1695 vs #1699): PR #1695 added a shard under CONSOLE-T58 in a file
+// named differently from the shard #1699 had already merged under the SAME id, so git reported #1695
+// MERGEABLE — two different filenames hid the collision from every git-native check. Had #1695 been a
+// clean shard-only or impl-only PR, merging it would have credited the OTHER task (#1699's) as built,
+// which is exactly the danger on a `run-<ID>-<epoch>` branch: the branch name alone names which task
+// gets credit, regardless of which shard the diff actually adds a declaration for.
+
+/** One task id declared at a specific plan file path — either a diff's ADDED line ({@link
+ *  "./review.js".addedTaskIdDeclarationsInDiff}) or a base checkout's already-committed content
+ *  ({@link "./review.js".taskIdDeclarationsInDir}). The same shape either side of {@link
+ *  taskIdCollisions}, so neither producer needs to know which side it feeds. */
+export interface TaskIdDeclaration {
+  id: string;
+  file: string;
+}
+
+/** One collision {@link taskIdCollisions} reports: `id` is declared in `addedFile` by the diff's ADDED
+ *  lines, while the base ALREADY declares that SAME id in `baseFile` — a DIFFERENT file. */
+export interface TaskIdCollision {
+  id: string;
+  addedFile: string;
+  baseFile: string;
+}
+
+/**
+ * A PR ADDING a task-id declaration the base ALREADY declares, in a DIFFERENT file, is a collision:
+ * merging it would credit whichever task the merge/branch machinery resolves for that id — the OTHER
+ * task, if the base's own shard is the real one — as built, while a filename-only check (`git`'s own
+ * MERGEABLE) sees two distinct paths and reports nothing wrong. Editing the base's OWN shard for an id
+ * (the SAME file on both sides) is never a collision — that IS the ordinary edit path a shard's own
+ * author uses, and refusing it would refuse every legitimate task-record edit. Pure and diff-derived
+ * ONLY: this function trusts whatever its two arguments already extracted and reads no filesystem
+ * itself, so it works identically for `W1-T`, `CONSOLE-T`, `PORTAL-T` or any other id prefix.
+ */
+export function taskIdCollisions(
+  addedDecls: readonly TaskIdDeclaration[],
+  baseDecls: readonly TaskIdDeclaration[],
+): TaskIdCollision[] {
+  const baseFileById = new Map<string, string>();
+  for (const d of baseDecls) baseFileById.set(d.id, d.file);
+  const collisions: TaskIdCollision[] = [];
+  const seen = new Set<string>();
+  for (const d of addedDecls) {
+    const baseFile = baseFileById.get(d.id);
+    if (baseFile === undefined || baseFile === d.file) continue; // no base claim, or the id's own shard being edited
+    const key = `${d.id}\u0000${d.file}\u0000${baseFile}`;
+    if (seen.has(key)) continue; // the same (id, addedFile, baseFile) triple reported once, however many lines matched
+    seen.add(key);
+    collisions.push({ id: d.id, addedFile: d.file, baseFile });
+  }
+  return collisions;
+}

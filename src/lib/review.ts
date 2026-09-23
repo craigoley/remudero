@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
@@ -24,6 +24,7 @@ import {
   GENERATED_LEDGER_CLASSES,
   isCompanionPath,
 } from "./companion-paths.js";
+import { taskIdCollisions, type TaskIdCollision, type TaskIdDeclaration } from "./task-id-reservation.js";
 
 /** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
  * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
@@ -554,6 +555,12 @@ export interface ReviewVerdict {
    *  unmarked entries never fire. Non-empty FORCES `state` to `"failure"`, and UNLIKE {@link unwiredAdvisories} it
    *  BLOCKS from day one. TRAP: #1302 appended a bare `## … RULING:` header in neither genre (#1303). */
   unprovenancedDecisionsEntries?: string[];
+  /** Every task id THIS diff's ADDED lines declare in `plan/tasks.yaml`/`plan/tasks.d/*.yaml` that the
+   *  base ALREADY declares in a DIFFERENT file (W1-T4389) — see {@link
+   *  "./task-id-reservation.js".taskIdCollisions}. Editing the base's own shard for an id is never a
+   *  collision. Non-empty FORCES `state` to `"failure"`, named by {@link failSummary}: an unexplained
+   *  red gets overridden, and a filename-only check (git's own MERGEABLE) cannot see this at all. */
+  taskIdCollisions?: TaskIdCollision[];
   /** Visible-pass-rate minus holdout-pass-rate over this verdict's criteria (W1-T166). A worker that can see, and so
    *  optimise toward, only the visible criteria should pass them at a higher rate than the holdout ones it never saw,
    *  so a large positive gap is the signal SpecBench names. `null` when not MEASURABLE, never forces `state`, and
@@ -3717,6 +3724,16 @@ export function judgeReview(
   // exemption — a genuine Architect plan-only correction is never this function's business to fail.
   const criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff);
 
+  // W1-T4389, BESIDE the Standing rule 15 check above: a diff ADDING a task-id declaration the base
+  // ALREADY declares, in a DIFFERENT file, is a collision no filename-only check (git's own MERGEABLE)
+  // can see — see {@link ReviewVerdict.taskIdCollisions}'s doc and {@link
+  // "./task-id-reservation.js".taskIdCollisions}. `baseCheckoutDir` absent ⇒ no base to compare against
+  // ⇒ nothing is reported, mirroring every other checkout-gated check in this function.
+  const idCollisions = taskIdCollisions(
+    addedTaskIdDeclarationsInDiff(evidence.diff),
+    evidence.baseCheckoutDir ? taskIdDeclarationsInDir(evidence.baseCheckoutDir) : [],
+  );
+
   // A pure comparison of two values already computed above — no new fetch, no new gateway (W1-T274). W1-T1100 design
   // (ii): a detector comparing the BODY's claims against the diff must REFUSE on a substitute rather than judge one
   // (#2395). W1-T1264: one call produces both the contradictions and the recognition count, withheld together —
@@ -3768,6 +3785,7 @@ export function judgeReview(
     unmetForState.length > 0 ||
     testTheater ||
     criteriaTampered ||
+    idCollisions.length > 0 ||
     changesetContradictions.length > 0 ||
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
@@ -3791,6 +3809,7 @@ export function judgeReview(
     floorUnmet.length > 0 ||
     testTheater ||
     criteriaTampered ||
+    idCollisions.length > 0 ||
     changesetContradictions.length > 0 ||
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
@@ -3858,6 +3877,7 @@ export function judgeReview(
           instrumentEntangled ? instrumentEntanglement : undefined,
           unprovenancedDecisionsEntries,
           refusalContradictions,
+          idCollisions,
         );
 
   return {
@@ -3885,6 +3905,7 @@ export function judgeReview(
       ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
       : undefined,
     unprovenancedDecisionsEntries,
+    taskIdCollisions: idCollisions,
     unwiredAdvisories,
     reachabilityScanned,
     rewardHackingGap,
@@ -4824,6 +4845,10 @@ export function failSummary(
   instrumentEntanglement?: { instrumentPaths: string[]; srcPaths: string[] },
   unprovenancedDecisionsEntries: string[] = [],
   refusalContradictions: RefusalContradiction[] = [],
+  // W1-T4389: appended LAST so every existing positional caller (five other suites pin this
+  // signature) keeps working unchanged; the check itself sits BESIDE the Standing rule 15 branch
+  // right below, both being diff-derived structural refusals judged before anything else.
+  idCollisions: TaskIdCollision[] = [],
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
@@ -4832,6 +4857,16 @@ export function failSummary(
     // branch says the ONE actionable thing that fits, the PR SHAPE to change; the full two-part remedy rides
     // `checkSatisfiedByGuard`'s uncapped advisory `reason`. MEASURED: 133 characters. Five suites pin `Standing rule 15`.
     return `${FAIL_PREFIX}Standing rule 15: a criterion was added/edited beside non-plan files — file the shard in its own plan-only PR`;
+  }
+  if (idCollisions.length > 0) {
+    // BESIDE the Standing rule 15 branch above (W1-T4389): names BOTH files so an operator never has to
+    // re-derive which shard is the intruder, and the remedy fits in six words for the same 140-char reason.
+    const first = idCollisions[0];
+    const more = idCollisions.length > 1 ? ` (+${idCollisions.length - 1} more)` : "";
+    return (
+      `${FAIL_PREFIX}task id collision: ${first.id} declared in ${first.baseFile}, also added in ` +
+      `${first.addedFile} — renumber the later one${more}`
+    );
   }
   if (refusalContradictions.length > 0) {
     const first = refusalContradictions[0];
@@ -5759,6 +5794,66 @@ export function shardDeclaredFilesInDiff(diff: string): Set<string> {
     }
   }
   return declared;
+}
+
+// ── TASK ID COLLISION AT REVIEW TIME (W1-T4389) ─────────────────────────────
+// A plan-shard's own `id:` line, house convention: a list-item header, `- id: W1-T123`, always the
+// entry's own first line and always single-line — verified against every shard AND every `plan/tasks.yaml`
+// entry (both use the identical `- id: <id>` shape). Mirrors {@link SHARD_FILES_LINE_RE}'s own discipline.
+// EXPORTED so its own unhealthy arm (an ordinary non-`id:` plan line) has a fixture (W1-T4389; the
+// negative-reachability census, test/reused-task-id-is-refused-in-review.test.ts).
+export const TASK_ID_LINE_RE = /^\s*-?\s*id:\s*(\S+)\s*$/;
+
+/** Task id declarations THIS diff's ADDED lines introduce, in `plan/tasks.yaml` or a `plan/tasks.d/*.yaml`
+ * shard — the `addedDecls` half of {@link taskIdCollisions}. Read straight off ADDED lines of THIS diff,
+ * never off a resolved task id (mirrors {@link shardDeclaredFilesInDiff}'s own reasoning): a filing PR
+ * deliberately carries no `Remudero-Task:` trailer, so this is the only signal available for exactly the
+ * PRs the collision check exists to catch. */
+export function addedTaskIdDeclarationsInDiff(diff: string): TaskIdDeclaration[] {
+  const out: TaskIdDeclaration[] = [];
+  for (const line of walkDiff(diff)) {
+    if (line.kind !== "add" || !SHARD_PATH_RE.test(line.file)) continue;
+    const m = line.text.match(TASK_ID_LINE_RE);
+    if (!m) continue;
+    out.push({ id: m[1], file: line.file });
+  }
+  return out;
+}
+
+/** Every task id a plan checkout ALREADY declares at `dir`, per file — the `baseDecls` half of {@link
+ * taskIdCollisions}, read from `evidence.baseCheckoutDir` (the PR's merge-base). Reads `plan/tasks.yaml`
+ * and every `plan/tasks.d/*.yaml`/`.yml` shard present; a missing file or directory (no base checkout, or
+ * one built from the blob-only fallback — {@link ReviewEvidence.baseIsCheckout}) reads as declaring
+ * NOTHING rather than throwing, this module's usual fail-OPEN posture for a structurally-unavailable
+ * base: the trade is "collision undetected" on a partial tree, never "collision fabricated", since every
+ * id read here is real committed content. */
+export function taskIdDeclarationsInDir(dir: string): TaskIdDeclaration[] {
+  const out: TaskIdDeclaration[] = [];
+  const readIdsFrom = (relPath: string): void => {
+    let text: string;
+    try {
+      text = readFileSync(join(dir, relPath), "utf8");
+    } catch {
+      // absent at this checkout (a forward reference, or no base at all) ⇒ declares nothing here.
+      return;
+    }
+    for (const line of text.split("\n")) {
+      const m = line.match(TASK_ID_LINE_RE);
+      if (m) out.push({ id: m[1], file: relPath });
+    }
+  };
+  readIdsFrom("plan/tasks.yaml");
+  let shardNames: string[];
+  try {
+    shardNames = readdirSync(join(dir, "plan/tasks.d"));
+  } catch {
+    // no tasks.d/ at this checkout ⇒ no shards to scan, the same tolerance loadPlanAtRef applies.
+    shardNames = [];
+  }
+  for (const name of shardNames) {
+    if (/\.ya?ml$/.test(name)) readIdsFrom(join("plan/tasks.d", name));
+  }
+  return out;
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────
