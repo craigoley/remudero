@@ -121,7 +121,7 @@ test("W1-T2763 (acceptance 2): a hand-edited skill file fails --check and the fa
       0,
       clean.join("\n"),
     );
-    assert.match(clean.join("\n"), /OK — 2 generated skill\(s\) match/);
+    assert.match(clean.join("\n"), new RegExp(`OK — ${rendered.length} generated skill\\(s\\) match`));
 
     // NOW the hand edit.
     const edited = join(root, ".claude", "skills", "tddr", "SKILL.md");
@@ -148,7 +148,9 @@ test("W1-T2763: main() with no flag WRITES the skill files and logs what it wrot
     const errors: string[] = [];
     const code = main([], { repoRoot: root, skillsDir, log: (m: string) => logs.push(m), error: (m: string) => errors.push(m) });
     assert.equal(code, 0, errors.join("\n"));
-    assert.match(logs.join("\n"), /macro-skills: wrote 2 skill\(s\) — tddr, grfp\./);
+    // Derived from the table, never a literal list: a new row must not require editing this test.
+    const names = renderAllMacroSkills().map((r) => r.name);
+    assert.ok(logs.includes(`macro-skills: wrote ${names.length} skill(s) — ${names.join(", ")}.`), logs.join("\n"));
     assert.equal(errors.length, 0, "nothing orphaned in a freshly written tree");
 
     // The write actually landed on disk, at the path Claude Code reads.
@@ -179,7 +181,7 @@ test("W1-T2763: main() with no flag still WRITES the current rows but returns 1 
 test("W1-T2763 (acceptance 2b): the COMMITTED skills are current — the same gate, run through the real repo, read-only", () => {
   const r = spawnSync("node", ["--import", "tsx", SCRIPT, "--check"], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.match(r.stdout, /OK — 2 generated skill\(s\) match/);
+  assert.match(r.stdout, new RegExp(`OK — ${renderAllMacroSkills().length} generated skill\\(s\\) match`));
 });
 
 test("W1-T2763: a skill dir with no row is reported as ORPHANED — a deleted macro must not leave an invocable skill behind", () => {
@@ -351,7 +353,7 @@ test("W1-T2763: the generated skills are TRACKED — .claude/* is ignored, so an
   // A --check that compares a rendered file against an UNTRACKED path still passes locally and
   // then compares against a missing file in a fresh clone. The vacuous-pass family: OK over a set
   // where failure is unreachable. So assert git itself would track these paths.
-  for (const rel of [".claude/skills/tddr/SKILL.md", ".claude/skills/grfp/SKILL.md"]) {
+  for (const rel of renderAllMacroSkills().map((r) => r.relPath)) {
     const r = spawnSync("git", ["check-ignore", "-q", rel], { cwd: REPO_ROOT, encoding: "utf8" });
     assert.notEqual(r.status, 0, `${rel} is gitignored — the drift gate would compare against nothing in a fresh clone`);
   }
@@ -360,4 +362,24 @@ test("W1-T2763: the generated skills are TRACKED — .claude/* is ignored, so an
   // for a repo that commits session state.
   const local = spawnSync("git", ["check-ignore", "-q", ".claude/statsig/probe.json"], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(local.status, 0, "unrelated .claude/ state must stay ignored — the un-ignore is one generated tree, not the directory");
+});
+
+// ── external scan 2026-09-23: the four rows adapted from community skills keep their boundaries ──
+
+test("external-scan macros: grill, diagnose, handoff and wait-what render operator-only, and each carries the boundary that makes it safe here", () => {
+  const rendered = new Map(renderAllMacroSkills().map((r) => [r.name, r.text]));
+  // Each row's load-bearing sentence, asserted as text: rewording one away is a red test, not a
+  // silent drift from what the PR that added it was reviewed as.
+  const boundaries: Record<string, RegExp[]> = {
+    grill: [/Do not start the work/, /YOUR RECOMMENDED ANSWER/, /Facts are yours to find; decisions are mine to make/, /Take no\s+action on the plan until I confirm/],
+    diagnose: [/never a\s+patch/, /Until this command exists, do not read code to build a\s+theory/, /If two patches have not moved the symptom, stop/, /undo it, show red, restore it, show green/],
+    handoff: [/never inside the\s+repository/, /Redact every secret/, /FLOOR, not a claim/, /RECON or\s+IMPLEMENT/],
+    "wait-what": [/ISO 24495-1/, /Do not add new material/],
+  };
+  for (const [name, patterns] of Object.entries(boundaries)) {
+    const text = rendered.get(name);
+    assert.ok(text, `macro \`${name}\` renders from settings/macros.yaml`);
+    assert.match(text, /^disable-model-invocation: true$/m, `${name} is operator-invoked only`);
+    for (const re of patterns) assert.match(text, re, `${name} keeps its boundary ${re}`);
+  }
 });
