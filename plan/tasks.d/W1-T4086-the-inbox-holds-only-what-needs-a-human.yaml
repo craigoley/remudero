@@ -1,0 +1,46 @@
+- id: W1-T4086
+  title: "THE INBOX HOLDS 674 ITEMS AND ABOUT 54 OF THEM NEED A HUMAN — 620 are the fleet's own findings (adoption debt, proof debt, follow-up harvests, skill drafts, CodeQL debt, rule efficacy, feedback dockets, verify-human items a judge already cleared for automation) queued for the operator to approve one by one: route every item by who must act, so the inbox holds only what needs the operator and the fleet's findings go to a fleet lane"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator report 2026-09-22: the console inbox has over a hundred items, which was a surprise"
+  plan_refs: [W1-T313, W1-T2494, W1-T2498]
+  files: [src/lib/inbox-owner.ts, src/lib/panel-graph.ts, test/the-inbox-holds-only-what-needs-a-human.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 ON THE LIVE HOST (/home/node/Remudero/state/inbox-proposals.json, 674 proposals), by id prefix:
+      adoption 216, followup 167, proof-debt 164, verify-human 53, verify-human-automate 41, skill-draft 26,
+      codeql-quality 3, rule-efficacy 1, feedback-docket (FD-*) 2, ruling 1.
+    Only `verify-human` (a judge says the task still needs a person) and `ruling` (operator-owned) need the operator —
+    54 items. Every other kind is a finding the fleet produced about itself, and the fix it proposes is fleet work. The
+    `verify-human-automate` kind literally says a judge found it "safe to enter the self-improvement flow".
+    `GET /v1/inbox` (`buildInboxRoute`, src/lib/panel-graph.ts) returns every proposal in ready / drafting / notReady /
+    declined lanes, and the console renders them as the operator's inbox. So the operator is asked to approve 620
+    decisions the fleet can make, and the 54 that need a person are buried among them.
+  design: |
+    (i) One pure function, `inboxOwner(proposal)` in src/lib/inbox-owner.ts, answers "operator" or "fleet" from the
+        proposal's kind. The operator kinds are `verify-human` and `ruling`; an escalation is always the operator's.
+        An unknown kind is the operator's, so a new producer is seen before it is automated, never silently hidden.
+    (ii) `GET /v1/inbox` adds `needsYou` (operator-owned items, in the existing lane shape) and `fleet` (fleet-owned
+         items with their lane), and keeps its current keys for one release so the console can move over without a
+         break.
+    (iii) Nothing is deleted or declined by this task. Moving the fleet lane's items into the fleet's own flow is
+          W1-T4089; this task only stops showing them as the operator's.
+  acceptance:
+    - claim: "the inbox shows the operator only the items that need a person"
+      proof: 'grep: test("W1-T4086: the inbox shows the operator only the items that need a person" in test/the-inbox-holds-only-what-needs-a-human.test.ts'
+    - claim: "every fleet finding kind is routed to the fleet lane"
+      proof: 'grep: test("W1-T4086: every fleet finding kind is routed to the fleet lane" in test/the-inbox-holds-only-what-needs-a-human.test.ts'
+    - claim: "an unknown kind stays with the operator"
+      proof: 'grep: test("W1-T4086: an unknown kind stays with the operator" in test/the-inbox-holds-only-what-needs-a-human.test.ts'
+    - claim: "the inbox route calls the owner rule"
+      proof: 'grep: inboxOwner( in src/lib/panel-graph.ts'
+  falsifier: |
+    Return every proposal in `needsYou` and the first test goes red on its adoption and proof-debt fixtures. Default an
+    unknown kind to the fleet and the third goes red.

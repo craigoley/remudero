@@ -1,0 +1,71 @@
+- id: W1-T4088
+  title: "THE INBOX IS NOT A CONVERSATION — the thread store behind escalation replies (W1-T2494/W1-T2496) was never given a path in production, so `POST /v1/escalation/reply` refuses every real call and no thread file exists on the host; no proposal can be replied to at all; and nothing on the daemon side ever answers a reply: make every item the operator owns a thread the operator and the daemon both write to, and have the daemon answer each reply in plain language within a tick"
+  repo: remudero
+  depends_on: [W1-T4086, W1-T4087]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: span
+  origin: "operator report 2026-09-22: the inbox does not work like an email inbox with threads where I can reply and work back and forth with the daemon"
+  plan_refs: [W1-T2494, W1-T2496, W1-T2499, W1-T2500, W1-T404]
+  files: [src/lib/inbox-thread.ts, src/lib/inbox-responder.ts, src/lib/panel-actions.ts, src/lib/panel-graph.ts, src/lib/serve.ts, src/lib/daemon.ts, test/an-inbox-item-is-a-conversation.test.ts, test/route-wiring.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 ON origin/main AND THE LIVE HOST.
+    (1) THE THREAD PRIMITIVE IS BUILT AND SWITCHED OFF. src/lib/inbox-thread.ts stores messages per thread
+        (`deriveThreadId`, `readThread`, `appendThreadMessage`). src/lib/serve.ts mounts `buildEscalationReplyRoute`
+        with a note that `fleetControlDeps` carries no `threadStorePath`, "so this route currently refuses every real
+        call". `escalate.ts` no-ops its thread write for the same reason. No thread file exists under
+        /home/node/Remudero/state, and the ledger has no `panel.escalation_replied` row.
+    (2) A THREAD IS KEYED ONLY BY AN ESCALATION'S IDENTITY (taskId, class, cause, prRef), so an inbox proposal cannot
+        have one.
+    (3) NOBODY ANSWERS. The reply route runs `interpretReply` with no rules (production passes none), so every reply is
+        "understood" and nothing else happens: the text is filed as feedback. The operator writes into a void.
+    (4) The console writes the inbox through approve (high), decline, reframe and restore (low), and nothing else.
+  design: |
+    (i) Wire the thread store in production: `state/inbox-threads.jsonl`, passed to serve's routes, to `escalate`, and
+        to the daemon. Widen `ThreadIdentity` so a thread is keyed by an escalation's identity OR an inbox item's id;
+        existing escalation thread ids do not change.
+    (ii) Every operator-owned item (W1-T4086) opens a thread whose first message is its plain message (W1-T4087).
+    (iii) Routes: `GET /v1/inbox/threads` lists threads with headline, the last message's first line, who the thread
+          is waiting on (operator or daemon), last activity, message count and an unread flag from a per-operator
+          read mark; `GET /v1/inbox/threads/<id>` returns the messages; `POST /v1/inbox/threads/<id>/reply` (low) adds
+          an operator message; `POST /v1/inbox/threads/<id>/read` (low) sets the read mark.
+    (iv) THE DAEMON ANSWERS. src/lib/inbox-responder.ts runs on its own timer beside the heartbeat (the W1-T4077 pump
+         pattern, so a busy main loop never delays it). For each thread whose last message is the operator's, it asks
+         the existing writer to read the thread and choose ONE of the item's actions — approve, decline, edit and
+         redraft, snooze, answer a question — or to ask one clarifying question (bounded by `interpretReply`'s rounds).
+         It then writes a plain reply saying what it understood and what happens next, checked like W1-T4087's
+         messages.
+    (v) A REPLY IS STILL AN INPUT. The responder may itself run only low-tier, reversible actions (decline, edit and
+        redraft, snooze), and says in its reply what it did and how to undo it. It never approves from prose: an
+        approve is offered as a suggested action on the message, which the operator confirms with the existing
+        approve route and its tier. An ambiguous reply gets a question, not a guess.
+    (vi) Ledger: `inbox.thread_opened`, `inbox.thread_replied`, `inbox.thread_answered` (with the chosen action or
+         `question`), so response time and unanswered threads are measurable.
+  acceptance:
+    - claim: "an operator reply gets a plain daemon answer on the same thread"
+      proof: 'grep: test("W1-T4088: an operator reply gets a plain daemon answer on the same thread" in test/an-inbox-item-is-a-conversation.test.ts'
+    - claim: "a thread holds several rounds back and forth"
+      proof: 'grep: test("W1-T4088: a thread holds several rounds back and forth" in test/an-inbox-item-is-a-conversation.test.ts'
+    - claim: "an answer is written while the main loop is busy"
+      proof: 'grep: test("W1-T4088: an answer is written while the main loop is busy" in test/an-inbox-item-is-a-conversation.test.ts'
+    - claim: "a reply that says decline declines the item and says how to undo it"
+      proof: 'grep: test("W1-T4088: a reply that says decline declines the item and says how to undo it" in test/an-inbox-item-is-a-conversation.test.ts'
+    - claim: "a reply never approves; approve is offered as a suggested action"
+      proof: 'grep: test("W1-T4088: a reply never approves; approve is offered as a suggested action" in test/an-inbox-item-is-a-conversation.test.ts'
+    - claim: "an ambiguous reply gets one clarifying question"
+      proof: 'grep: test("W1-T4088: an ambiguous reply gets one clarifying question" in test/an-inbox-item-is-a-conversation.test.ts'
+    - claim: "the thread list shows who each thread is waiting on and what is unread"
+      proof: 'grep: test("W1-T4088: the thread list shows who each thread is waiting on and what is unread" in test/an-inbox-item-is-a-conversation.test.ts'
+    - claim: "serve passes the thread store to its routes"
+      proof: 'grep: threadStorePath: in src/lib/serve.ts'
+    - claim: "the daemon starts the responder"
+      proof: 'grep: startInboxResponder( in src/lib/daemon.ts'
+  falsifier: |
+    Leave `threadStorePath` unset in serve and the first test goes red with the route's "no thread store" refusal.
+    Await the responder inside the main loop and the third goes red with a busy-loop fixture. Let the responder run
+    approve from a reply that says "yes, file it" and the fifth goes red.

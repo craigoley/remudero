@@ -1,0 +1,48 @@
+- id: W1-T4089
+  title: "THE FLEET'S OWN FINDINGS WAIT FOR AN OPERATOR WHO WILL NEVER APPROVE 620 OF THEM — once W1-T4086 takes them out of the inbox nothing moves them at all: let the daemon triage its fleet lane itself, filing, merging or retiring each finding with a plain reason, at the pace the fleet actually merges work"
+  repo: remudero
+  depends_on: [W1-T4086, W1-T4087]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator report 2026-09-22 (inbox over a hundred items); operator direction: lean into automated flow and self-improvement"
+  plan_refs: [W1-T4086, W1-T311, W1-T3710]
+  files: [src/lib/fleet-lane.ts, src/lib/daemon.ts, src/lib/panel-graph.ts, test/the-fleet-triages-its-own-findings.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 ON THE LIVE HOST: 620 fleet-owned proposals (see W1-T4086), 726 drafts in
+    state/inbox-drafts.json, and the only way a draft becomes a filed task is an operator approve. Many are stale or
+    duplicates of each other (216 adoption findings, 164 proof-debt findings, 167 follow-up harvests).
+  design: |
+    (i) src/lib/fleet-lane.ts decides, per fleet-owned item, one of: FILE (through the same gate-compliant plan PR that
+        approve uses, so the plan PR's own review still gates it), MERGE into an open task or another item with the
+        same subject (same kind and same file or rule), or RETIRE (its evidence no longer holds when re-checked, or it
+        is older than the fleet's current turnover and was never picked). Each decision writes a plain one-line reason
+        (W1-T4087's checks) and a ledger row, `fleet_lane.decided`.
+    (ii) PACE, NOT A CAP. Each tick it files at most as many items as the fleet merged in the previous day, minus the
+         fleet-lane tasks still queued — so filing follows real throughput, rises when the fleet is fast, and stops
+         on its own when the fleet falls behind. Work comes from the oldest item of the most common kind first.
+    (iii) Each kind can be switched off with a state marker `state/FLEET_LANE_OFF-<kind>` (the PAUSE pattern). A
+          switched-off kind stays in the fleet lane untouched.
+    (iv) `GET /v1/inbox`'s `fleet` lane reports each item's latest decision and reason, so the console can show a
+         read-only "Fleet proposals" view.
+  acceptance:
+    - claim: "a fleet finding is filed, merged or retired with a plain reason"
+      proof: 'grep: test("W1-T4089: a fleet finding is filed, merged or retired with a plain reason" in test/the-fleet-triages-its-own-findings.test.ts'
+    - claim: "filing follows the fleet merge rate"
+      proof: 'grep: test("W1-T4089: filing follows the fleet merge rate" in test/the-fleet-triages-its-own-findings.test.ts'
+    - claim: "two findings with the same subject become one task"
+      proof: 'grep: test("W1-T4089: two findings with the same subject become one task" in test/the-fleet-triages-its-own-findings.test.ts'
+    - claim: "a finding whose evidence no longer holds is retired"
+      proof: 'grep: test("W1-T4089: a finding whose evidence no longer holds is retired" in test/the-fleet-triages-its-own-findings.test.ts'
+    - claim: "a switched-off kind is left alone"
+      proof: 'grep: test("W1-T4089: a switched-off kind is left alone" in test/the-fleet-triages-its-own-findings.test.ts'
+    - claim: "the daemon runs the fleet lane"
+      proof: 'grep: triageFleetLane( in src/lib/daemon.ts'
+  falsifier: |
+    File every item in one tick and the second test goes red. Skip the evidence re-check and the fourth goes red on a
+    finding whose file no longer exists.
