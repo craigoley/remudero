@@ -1003,7 +1003,7 @@ export function stampLineViolations(proposalId: string, stampLine: string, fragm
       message: `the STAMP line must open with "- ${proposalId} (": it names the proposal being ratified, never another P-number. Got ${JSON.stringify(stampLine.slice(0, 80))}`,
     });
   }
-  const listed = /->\s*([A-Za-z0-9-]+(?:\s*\/\s*[A-Za-z0-9-]+)*)/.exec(stampLine)?.[1].split("/").map((id) => id.trim()) ?? [];
+  const listed = /->\s*([A-Za-z0-9-]+(?:\s*[/,]\s*[A-Za-z0-9-]+)*)/.exec(stampLine)?.[1].split(/[/,]/).map((id) => id.trim()) ?? [];
   const named = [...new Set(listed)].sort();
   const filed = [...new Set(fragmentIds)].sort();
   if (named.join("/") !== filed.join("/")) {

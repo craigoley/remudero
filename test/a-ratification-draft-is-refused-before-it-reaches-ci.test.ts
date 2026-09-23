@@ -107,6 +107,8 @@ test("a stamp that names another proposal or other tasks is refused, and a stamp
   assert.match(wrongProposal[0].message, /must open with "- proof-debt:W1-T4048 \("/);
   assert.match(wrongProposal[1].message, /name exactly this fragment's tasks \(NEW-1\); it names NEW-1\/NEW-2/);
   assert.deepEqual(stampLineViolations(proposal.id, GOOD_STAMP, ["NEW-1"]), []);
+  // Comma-separated lists are in real stamps too; order is not the question, membership is.
+  assert.deepEqual(stampLineViolations(proposal.id, "- proof-debt:W1-T4048 (two) — RATIFIED 2026-09-23 -> NEW-2, NEW-1.", ["NEW-1", "NEW-2"]), []);
   assert.equal(stampLineViolations(proposal.id, "- proof-debt:W1-T4048 (no task list) — RATIFIED 2026-09-23.", ["NEW-1"]).length, 1);
 });
 
