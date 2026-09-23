@@ -21,13 +21,14 @@
     (i) Each group becomes one exported declaration named for what it is (for example `LedgerWriterDeps` for
         `{ledgerPath, writeLedger?}`), declared once and imported where the others were; the other names are removed, not
         aliased (an alias is still a declaration the census counts).
-    (ii) scripts/deps-interface-baseline.json's `depsInterfaceCount` is lowered by the number removed, so the room is
-         recorded rather than silently spent.
+    (ii) scripts/deps-interface-baseline.json's ceiling stays where it is: the census exists so the seam POPULATION
+         never grows, and folding eight declarations into three leaves room under it for the knowledge rungs' named
+         seams without the population ever exceeding today's. A test pins the fall itself.
     (iii) No behaviour changes: every caller keeps the same members.
   acceptance:
     - claim: "no two deps declarations share a member-set"
       proof: 'grep: test("W1-T4107: no two deps declarations share a member-set" in test/deps-interface-census.test.ts'
-    - claim: "the recorded count fell by the declarations removed"
-      proof: 'grep: test("W1-T4107: the recorded count fell by the declarations removed" in test/deps-interface-census.test.ts'
+    - claim: "the census population fell by the declarations removed"
+      proof: 'grep: test("W1-T4107: the census population fell by the declarations removed" in test/deps-interface-census.test.ts'
   falsifier: |
     Re-add one of the removed declarations and the first test names the duplicate pair.
