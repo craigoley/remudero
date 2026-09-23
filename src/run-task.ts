@@ -148,6 +148,8 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { startGarden, type GardenCheckout } from "./lib/gardener.js";
+import { planGardenSpec } from "./lib/plan-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
@@ -10229,6 +10231,12 @@ export async function runFixRung(opts: {
       ...predecessorTranscriptPromptLines(
         predecessorTranscriptPaths(opts.config.root, opts.taskId, { excludeRunId: opts.runId }),
       ),
+      // W1-T4207: the previous strike's refused commit, named from its own `fix.commit_refused` row.
+      ...lastCommitRefusalPromptLines(
+        (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
+        opts.taskId,
+        opts.task.files ?? [],
+      ),
     ].join("\n");
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
@@ -10341,6 +10349,7 @@ export async function runFixRung(opts: {
     // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
     // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
     let harnessCommitRefusalReason: string | undefined;
+    let harnessCommitUndeclared: readonly string[] = [];
     const harnessCommitCount = (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
       harnessOwnsGit: fixHarnessOwnsGit,
       commitCount: 0,
@@ -10349,8 +10358,9 @@ export async function runFixRung(opts: {
       declaredPaths: opts.task.files ?? [],
       log: deps.log,
       say: deps.say,
-      onRefusal: (reason) => {
+      onRefusal: (reason, undeclared = []) => {
         harnessCommitRefusalReason = reason;
+        harnessCommitUndeclared = undeclared;
       },
     });
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
@@ -10450,6 +10460,7 @@ export async function runFixRung(opts: {
         mode: fixMode,
         head_sha: priorHeadSha,
         reason: harnessCommitRefusalReason,
+        ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
       });
     }
     deps.log("fix.done", {
@@ -29968,6 +29979,39 @@ export function plainInboxWriter(
   }
 }
 
+/** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. A PR for
+ *  operator review opens as a DRAFT, which GitHub refuses to merge until a person marks it ready. */
+export function gardenCheckout(opts: {
+  name: string;
+  repoDir: string;
+  worktreesRoot: string;
+  owner: string;
+  repo: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  fetcher?: GhApiFetcher;
+  clock?: Clock;
+}): GardenCheckout {
+  const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
+  const root = join(opts.worktreesRoot, branch);
+  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return {
+    root,
+    land: ({ paths, title, body, review }) => {
+      git("add", "--", ...paths);
+      git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
+      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+      assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+      const fetcher = opts.fetcher ?? ghJson;
+      const pr = { title, body, head: branch, base: "main" };
+      return review === "operator"
+        ? createPlanPrRest((args) => fetcher([...args, "-F", "draft=true"]), opts.owner, opts.repo, pr).prUrl
+        : createPlanPrRest(fetcher, opts.owner, opts.repo, pr).prUrl;
+    },
+    dispose: () => worktreeRemove(opts.repoDir, root),
+  };
+}
+
 export function knowledgeGardenWorkspace(opts: {
   repoDir: string;
   worktreesRoot: string;
@@ -29977,27 +30021,16 @@ export function knowledgeGardenWorkspace(opts: {
   fetcher?: GhApiFetcher;
   clock?: Clock;
 }): GardenWorkspace {
-  const branch = `knowledge-garden-${(opts.clock ?? systemClock).now()}`;
-  const root = join(opts.worktreesRoot, branch);
-  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const checkout = gardenCheckout({ ...opts, name: "knowledge" });
   return {
-    root,
+    ...checkout,
     refreshAssertions: () => {
-      execFileSync(process.execPath, [join(root, "scripts", "learnings-assert-check.mjs"), "--dir", join(root, "learnings")], { cwd: root, stdio: "pipe" });
-      return git("status", "--porcelain", "--", "learnings")
+      execFileSync(process.execPath, [join(checkout.root, "scripts", "learnings-assert-check.mjs"), "--dir", join(checkout.root, "learnings")], { cwd: checkout.root, stdio: "pipe" });
+      return execFileSync("git", ["-C", checkout.root, "status", "--porcelain", "--", "learnings"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
         .split("\n")
         .filter(Boolean)
         .map((line) => line.slice(3));
     },
-    land: ({ paths, title, body }) => {
-      git("add", "--", ...paths);
-      git("commit", "-q", "-m", `${title}\n\nTended by the knowledge gardener (W1-T4095).`);
-      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
-      assertLiveWriteAllowed("gh-pr-create", `opening a knowledge garden PR against ${opts.owner}/${opts.repo}`);
-      return createPlanPrRest(opts.fetcher ?? ghJson, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
-    },
-    dispose: () => worktreeRemove(opts.repoDir, root),
   };
 }
 
@@ -30970,6 +31003,19 @@ export async function daemonCommand(
                 prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
                 log,
               },
+              // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
+              gardens: [
+                (intervalMs: number) => {
+                  const planGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "plan", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  return startGarden(planGardenSpec(planGarden), planGarden, intervalMs);
+                },
+              ],
             }
           : {}),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
@@ -35586,6 +35632,51 @@ export function forceCashContainedRunSpawn(args: SpawnWorkerArgs, config: Config
   };
 }
 
+/** W1-T4207: at most this many undeclared paths ride a `fix.commit_refused` row; the rest are counted. */
+const COMMIT_REFUSED_PATH_CAP = 20;
+
+/** W1-T4207: the capped `undeclared` list (plus `undeclared_omitted`) a refusal row carries. */
+function undeclaredPathsLedgerFields(undeclared: readonly string[]): Record<string, unknown> {
+  if (undeclared.length === 0) return {};
+  const omitted = undeclared.length - COMMIT_REFUSED_PATH_CAP;
+  return {
+    undeclared: undeclared.slice(0, COMMIT_REFUSED_PATH_CAP),
+    ...(omitted > 0 ? { undeclared_omitted: omitted } : {}),
+  };
+}
+
+/**
+ * W1-T4207: prompt lines naming what this task's latest fix strike could not commit. A refusal
+ * returns the rung, so the next strike is a later invocation and the ledger is the only carrier.
+ * A later round whose `fix.done` is not `commit_refused` supersedes it.
+ */
+function lastCommitRefusalPromptLines(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  declaredFiles: readonly string[],
+): string[] {
+  let pending: Record<string, unknown> | undefined;
+  let last: Record<string, unknown> | undefined;
+  for (const line of ledgerLines) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "fix.commit_refused") pending = line;
+    if (line.step === "fix.done") {
+      last = line.subtype === "commit_refused" ? pending : undefined;
+      pending = undefined;
+    }
+  }
+  const paths = Array.isArray(last?.undeclared) ? last.undeclared.map(String) : [];
+  if (paths.length === 0) return [];
+  const omitted = typeof last?.undeclared_omitted === "number" ? ` (and ${last.undeclared_omitted} more)` : "";
+  return [
+    "",
+    `LAST STRIKE'S COMMIT WAS REFUSED (W1-T4207): the harness could not commit it — ${String(last?.reason)}. ` +
+      `Paths it could not commit: ${paths.join(", ")}${omitted}. Declared files: ${declaredFiles.join(", ")}. ` +
+      `Keep this strike's change inside \`files:\`; if the fix genuinely needs a path outside it, change ` +
+      `nothing there and say in your REPORT that the task needs amending.`,
+  ];
+}
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -35597,8 +35688,9 @@ export function harnessCommitForShellLessWorker(
     declaredPaths: readonly string[];
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
-    /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row. */
-    onRefusal?: (reason: string) => void;
+    /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
+     *  with the undeclared paths it refused to stage (W1-T4207; empty when none were computed). */
+    onRefusal?: (reason: string, undeclared?: readonly string[]) => void;
   },
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
@@ -35609,7 +35701,7 @@ export function harnessCommitForShellLessWorker(
   if (asked === undefined) {
     const reason = "no anchored COMMIT_MESSAGE line in the report";
     input.log("implement.harness_commit_refused", { reason });
-    input.onRefusal?.(reason);
+    input.onRefusal?.(reason, []);
     return input.commitCount;
   }
   const committed = commit(input.worktreePath, input.declaredPaths, asked);
@@ -35620,7 +35712,7 @@ export function harnessCommitForShellLessWorker(
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
   });
   if (!committed.committed) {
-    input.onRefusal?.(refusalReason);
+    input.onRefusal?.(refusalReason, committed.undeclared);
     return input.commitCount;
   }
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);

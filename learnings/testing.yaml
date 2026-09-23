@@ -56,7 +56,7 @@
 - id: scan-both-quote-styles
   subsystem: evidence
   lifecycle: active
-  files: [scripts, src/lib/task-linter.ts]
+  files: ["scripts/**", src/lib/task-linter.ts]
   fact: >-
     Quote style silently splits a population. Across scripts/, `=== "number"` appears in three files
     and `=== 'number'` in two — a scan keyed on one form reported the other half as already repaired.
@@ -68,7 +68,7 @@
 - id: grep-anchor-must-fit-one-line
   subsystem: evidence
   lifecycle: active
-  files: [plan/tasks.d, plan/tasks.yaml, learnings, src/lib/review.ts]
+  files: ["plan/tasks.d/**", plan/tasks.yaml, "learnings/**", src/lib/review.ts]
   fact: >-
     A fixed-string anchor that spans a YAML line break matches NOTHING — four instances in one day,
     each a confident 0 for text visibly present in the file, because grep is line-oriented and folded
@@ -80,7 +80,7 @@
 - id: control-proves-reach-not-window
   subsystem: evidence
   lifecycle: active
-  files: [src/lib/ledger-union.ts, scripts, test]
+  files: [src/lib/ledger-union.ts]
   fact: >-
     A positive control proves the query can SEE its corpus; it does NOT prove the corpus COVERS the
     window asked about. Measured: resolveLedgerUnion returned archiveCount 0 / ok false against a
@@ -93,7 +93,9 @@
 - id: position-is-presentation-not-identity
   subsystem: evidence
   lifecycle: active
-  files: [scripts, hooks, test, plan/tasks.d]
+  files: []
+  symbols: [mkdtemp]
+  error_signatures: ["<file>:<line>", line number]
   fact: >-
     A source position is presentation, not durable identity: keying an exemption or assertion on
     `<file>:<line>` makes any unrelated insertion above it invalidate the side table. Derive keys

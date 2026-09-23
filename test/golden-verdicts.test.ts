@@ -28,7 +28,14 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { decideAutoMergeArm, judgeReview, type ReviewEvidence, type ReviewVerdict } from "../src/lib/review.js";
+import {
+  checkDrillCoverage,
+  checkTroubleshootingCoverage,
+  decideAutoMergeArm,
+  judgeReview,
+  type ReviewEvidence,
+  type ReviewVerdict,
+} from "../src/lib/review.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_ROOT = join(HERE, "fixtures", "golden-verdicts");
@@ -192,4 +199,14 @@ test("GOLDEN — HEALTHY CONTROL: a correct PR with no planted violation arms �
   const { verdict, golden } = judgeCase("healthy-control");
   assert.equal(golden.violation, "none");
   assertGolden(verdict, golden);
+});
+
+test("GOLDEN — KNOWLEDGE REPAIR: retargeting an existing operator-impact learning arms, and the coverage items do not mistake an edit for an addition", () => {
+  const { verdict, golden } = judgeCase("knowledge-repair");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+  const diff = readFileSync(join(FIXTURES_ROOT, "knowledge-repair", "diff.patch"), "utf8");
+  // W1-T4240: the rubric's failures-corpus items key on NEWLY ADDED operator_impact / drill entries.
+  assert.equal(checkTroubleshootingCoverage(diff).pass, true);
+  assert.equal(checkDrillCoverage(diff).pass, true);
 });
