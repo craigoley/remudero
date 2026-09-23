@@ -670,6 +670,7 @@ import {
   materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
+  pruneOrphanedDrafts,
   parseProposalRegistry,
   parseSupersedesExpr,
   approveRunBranch,
@@ -846,6 +847,7 @@ import {
   type CiFailureCorpusInput,
   type CorpusPr,
 } from "./lib/ci-failure-corpus.js";
+import { measureGateFireRates, recordGateFireRates, type GateFireRateReport, type GateWindowPr } from "./lib/gate-fire-rate.js";
 import {
   fetchMergedCoverageArtifact,
   injectCoverageImprovementTask,
@@ -2061,6 +2063,7 @@ import {
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
+  WorktreeNodeModulesRefusedError,
   detectWorktreeBaseUncheckableStreak,
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
@@ -14373,7 +14376,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // double should be able to silently swallow. `worktreeAdd` itself now emits the
     // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
     // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log });
+    // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
   } catch (e) {
     if (e instanceof WorktreeBaseStaleError) {
       log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref, behind: e.behind });
@@ -14386,6 +14390,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // to clear even though nothing is actually in flight.
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
+    }
+    if (e instanceof WorktreeNodeModulesRefusedError) {
+      // W1-T4193: a DEFERRAL, not a strike. Rethrown so daemon.ts's `isSpawnInfraBlocked` backs off on its
+      // `blocked_toolchain` tag; the claim is dropped first, or every later dispatch would meet it as taken.
+      log("worktree.node_modules_refused", {
+        package: e.packageName,
+        worktreePath: e.worktreePath,
+        node_modules_source: e.nodeModulesSource,
+      });
+      say(`REFUSED: ${e.message}`);
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "node_modules_refused" });
+      } catch (removeErr) {
+        log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
+      }
+      try {
+        releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      } catch (releaseErr) {
+        // Never replace the typed refusal: a generic throw here would read as a fatal crash, not a deferral.
+        log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
+      }
+      throw e;
     }
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
@@ -19987,7 +20014,7 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
   const rows = (fetch([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
-  ]) ?? []) as Array<{ number?: number; updated_at?: string }>;
+  ]) ?? []) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
   const prs: CorpusPr[] = [];
   for (const row of rows) {
     if (row.number === undefined) continue;
@@ -20000,8 +20027,9 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
     } catch {
       continue; // a pull request whose commit list is unreadable contributes nothing, silently to nobody
     }
-    prs.push({
+    const windowPr: GateWindowPr = {
       number: row.number,
+      merged: Boolean(row.merged_at),
       commits: shas.map((sha) => {
         const rollup = rollupAtSha(self.owner, self.repo, sha, (args) => fetch(args));
         const commit: CorpusPr["commits"][number] = { sha };
@@ -20010,7 +20038,8 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
         if (files !== undefined) commit.changedFiles = files;
         return commit;
       }),
-    });
+    };
+    prs.push(windowPr);
   }
   return { prs };
 }
@@ -20031,7 +20060,7 @@ export async function loadCiFailureWindowAsync(
   const rows = (await reader.read([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
-  ])) as Array<{ number?: number; updated_at?: string }>;
+  ])) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
   const prs: CorpusPr[] = [];
   for (const row of rows ?? []) {
     if (row.number === undefined) continue;
@@ -20072,7 +20101,8 @@ export async function loadCiFailureWindowAsync(
       }
       commits.push(commit);
     }
-    prs.push({ number: row.number, commits });
+    const windowPr: GateWindowPr = { number: row.number, merged: Boolean(row.merged_at), commits };
+    prs.push(windowPr);
   }
   return { prs };
 }
@@ -29703,6 +29733,8 @@ export function buildCiLearningDaemonHooks(deps: {
  *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
  *  clean one (W1-T3324). */
 export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  /** W1-T4115: what the gate fire-rate measurement over the same window found. */
+  gateFireRates?: { status: GateFireRateReport["status"]; gates: number; neverFired: string[]; alwaysFired: string[] };
   filedCount: number;
   skippedCount: number;
   refusedCount: number;
@@ -29747,8 +29779,10 @@ export function buildCiLearningCadenceRunner(deps: {
     const at = (deps.clock ?? systemClock).date();
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     let corpus: ReturnType<typeof collectCiFailureCorpus>;
+    let window: CiFailureCorpusInput;
     try {
-      corpus = collectCiFailureCorpus(await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS));
+      window = await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS);
+      corpus = collectCiFailureCorpus(window);
     } catch (e) {
       // NO WORK WAS DONE, so the allowance is returned rather than spent. Rethrown, never swallowed:
       // the caller's `ci_learning_cadence.run_failed` row is how this becomes visible.
@@ -29794,7 +29828,17 @@ export function buildCiLearningCadenceRunner(deps: {
         // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
       }
     }
+    // W1-T4115: the same window, read once, also says how often each gate fires and what it costs.
+    const gateFireRates = measureGateFireRates(window);
+    const stateDir = join(deps.root, "state");
+    recordGateFireRates(
+      gateFireRates,
+      stateDir,
+      (step, extra) => appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: `GATE-FIRE-RATES-${at.getTime()}`, task_id: "DAEMON", step, ...extra }),
+      at.toISOString(),
+    );
     return {
+      gateFireRates: { status: gateFireRates.status, gates: gateFireRates.gates.length, neverFired: gateFireRates.neverFired, alwaysFired: gateFireRates.alwaysFired },
       status: result.status,
       draftCount: result.drafts.length,
       excludedCount: result.excludedFindings.length,
@@ -39897,6 +39941,8 @@ export function buildInboxDraftHook(
       const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
+      const pruned = pruneOrphanedDrafts(draftsPath, registryPath);
+      if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));

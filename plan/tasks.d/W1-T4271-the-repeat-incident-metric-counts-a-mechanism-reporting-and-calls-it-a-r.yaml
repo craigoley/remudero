@@ -1,0 +1,109 @@
+- id: W1-T4271
+  title: "the repeat-incident metric counts a MECHANISM REPORTING and calls it a rule RECURRENCE — both step patterns for bound-fires-on-healthy are emitted by the POST-FIX call sites, so 31 activity rows escalated a promote-to-instrument proposal on zero observed violations; a signature must declare VIOLATION vs ACTIVITY and an ACTIVITY signature may never reach REPEATING or escalate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    FILED FROM THE ESCALATION IT INVALIDATES. `rmd rule-efficacy` drafted
+    `rule-efficacy:CLAUDE.md#investigation-discipline:bound-fires-on-healthy-condition`, reporting 31
+    recurrences since 2026-08-06 and concluding "Prose restated it; the rule did not prevent it". The
+    conclusion is not supported by the evidence, and the reason is visible in the metric's own source.
+
+    THE TWO STEP NAMES ARE THE REPAIRED MECHANISM'S OUTPUT, NOT THE DEFECT'S. `RULE_SIGNATURES`
+    (src/lib/rule-efficacy.ts:95) matches `^ci\.stalled$` and `^deploy\.idle_ceiling_forced$`. Its own
+    module doc (lines 72-76) states they are "literal ledger step names logged at the exact call sites
+    that FIXED them". Both sites confirm it. `waitForCiGreen`'s doc (src/run-task.ts:4603-4608) says the
+    fixed-iteration bound "NOW polls until the rollup itself shows no forward motion, logging which
+    check(s) were still pending when it gave up (`ci.stalled`)" — the row exists BECAUSE W1-T382 landed.
+    `deployer.ts:753-757` logs `deploy.idle_ceiling_forced` under "Not a quiet fleet — the ceiling fired.
+    Honest about what that costs". So each matched row is the post-fix instrument REPORTING that it
+    fired; whether the SUBJECT was healthy is nowhere in the row.
+
+    WHICH MEANS THE METRIC COMMITS THE DEFECT IT MEASURES. It set a bound (>= 2 recurrences ->
+    escalate, `RULE_EFFICACY_ESCALATION_THRESHOLD`) over a population it never observed: it counted
+    bound FIRINGS and never checked that the sub-population those firings are meant to separate —
+    fires on healthy subjects — had ever been seen. That is the rule's own sentence, applied to the
+    instrument built to police the rule.
+
+    W1-T418 PREDICTED THIS EXACT HAZARD AND ITS FALSIFIER CANNOT CATCH IT. That shard's note reads "a
+    wrong signature table manufactures evidence against innocent rules; the falsifier's
+    before/after-date arms are where that risk is managed". The before/after-date arms do not bite here:
+    these rows ARE strictly after 2026-08-06. The unhandled axis is not WHEN a row landed but WHAT a row
+    means — no field distinguishes a step whose presence IS a rule failure from a step that is a
+    mechanism narrating its own correct operation.
+
+    THE HARM IS NOT COSMETIC. The escalation writes to the ACTIVE-proposal registry and consumes an
+    operator ratification cycle — this one. Left as is, every honest instrument that logs when it fires
+    becomes evidence against the rule that motivated it, and the incentive inverts: the cheapest way to
+    improve the repeat-incident rate becomes deleting the row that reports the fire.
+  design: |
+    (i) A SIGNATURE DECLARES ITS KIND, and the kind is REQUIRED — never defaulted. Add the declaration
+    to `MeasurableRuleSignature`, the shape already reviewed like policy:
+      VIOLATION — a matching row IS a failure of this rule. Today's semantics, unchanged.
+      ACTIVITY  — a matching row records that the guarded mechanism ACTED. Whether the subject was
+                  healthy is not recorded by the row, so a match is EVIDENCE OF A FIRE and nothing more.
+    A table entry with no kind is REFUSED at load, in the same spirit as P48's no-naked-zero clause: a
+    signature that cannot say what a match means must not silently mean the harsher thing.
+
+    (ii) AN ACTIVITY SIGNATURE CANNOT REACH `REPEATING` AND CANNOT ESCALATE. Its verdict is a stated
+    UNPROVEN carrying the match count AND the reason — the fires are real, the health of their subjects
+    is unobserved — so the report stays honest in both directions rather than degrading to a
+    false-healthy PREVENTING. `escalateRepeatingRules` therefore drafts nothing for it, which is the
+    correct polarity: cannot-observe means WAIT, never conclude. The counts stay VISIBLE; only the
+    unearned conclusion is withdrawn.
+
+    (iii) DECLARE THE BOUND-FIRES-ON-HEALTHY ROW AS `ACTIVITY`, with its reason recorded in the table
+    beside it, citing both post-fix call sites. This is a semantics correction to shipped data, not a
+    softening: W1-T4272 supplies the outcome evidence that can promote this rule back to a genuine
+    violation reading, and until it lands the honest verdict is UNPROVEN.
+
+    (iv) THE FALSIFIER RUNS BOTH WAYS, and the second direction is the load-bearing one. A check that
+    simply stopped escalating would satisfy the first claim and destroy the instrument W1-T418 built.
+    A VIOLATION-declared rule at threshold must still reach REPEATING and still draft exactly one
+    idempotent proposal.
+
+    NOT IN SCOPE, each refused for a stated reason. NO change to any bound's VALUE — no number moves.
+    NO edit to the CLAUDE.md rule text. NO change to `resolveLedgerUnion`, the threshold constant, or
+    the two UNMEASURABLE entries. NOT W1-T1266's territory: that shard declares a bound's kind at its
+    DECLARATION SITE and explicitly changes no number; this declares what a MATCHED LEDGER ROW means to
+    the metric. Different artifact, different reader, no overlap in files.
+  acceptance:
+    - claim: "a signature declared ACTIVITY-shaped never reaches REPEATING and drafts no proposal — it reports UNPROVEN carrying the match count and the reason that a fire is not a violation until the subject's health is observed"
+      proof: 'grep: test("W1-T4271: an ACTIVITY-shaped signature reports UNPROVEN with its match count and drafts no proposal" in test/rule-efficacy-signature-kind.test.ts'
+    - claim: "a signature declared VIOLATION-shaped still reaches REPEATING and still drafts exactly one idempotent proposal at the threshold — the falsifier proving the kind field damped an unearned conclusion rather than disabling the escalation"
+      proof: 'grep: test("W1-T4271: a VIOLATION-shaped signature still reaches REPEATING and drafts exactly one idempotent proposal" in test/rule-efficacy-signature-kind.test.ts'
+    - claim: "the shipped bound-fires-on-healthy entry is ACTIVITY-shaped, and re-running the escalation over a fixture carrying its 31 post-date rows drafts NO proposal"
+      proof: 'grep: test("W1-T4271: the shipped bound-fires-on-healthy entry is ACTIVITY-shaped and its 31 post-date rows draft no proposal" in test/rule-efficacy-signature-kind.test.ts'
+    - claim: "a table entry that declares no kind is refused rather than defaulting to violation, so a future signature cannot inherit the harsher reading by omission"
+      proof: 'grep: test("W1-T4271: a table entry declaring no kind is refused rather than defaulting to violation" in test/rule-efficacy-signature-kind.test.ts'
+    - claim: "the kind is read by the live report and escalation path, not merely declared in the type — the metric cannot merge as fully-tested dead data"
+      proof: "grep: signatureKind in src/lib/rule-efficacy.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§8A", "P48", "W1-T418", "W1-T1266"]
+  files: [src/lib/rule-efficacy.ts, test/rule-efficacy-signature-kind.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    RATIFIED AT THE CLASS, NOT THE INSTANCE. The proposal's literal ask — promote the prose rule to an
+    instrument on the strength of 31 recurrences — is NOT filed as asked, because the count is an
+    activity count and the rule's failure is therefore unproven. What IS ratified is the mechanism that
+    made that unearned conclusion reachable. W1-T4272 carries the promote-to-instrument the proposal was
+    reaching for, done against observed evidence.
+    risk:high, BOTH READINGS RECORDED. Rule 19's SPAN is the band's proximate cause: `files:` crosses
+    two stems as `sizingViolation` counts them (`rule-efficacy`, `rule-efficacy-signature-kind`), and
+    decomposing is wrong — a semantics change cannot ship without the two-direction falsifier that
+    proves it damped one conclusion and preserved the other. BLAST RADIUS is genuinely non-trivial too:
+    this edits what the escalation writes into the proposal registry, and the failure direction is
+    asymmetric — too permissive re-mints unearned proposals, too strict silences a rule that really is
+    failing. Criterion 2 is what stops the fix overshooting into never-escalating.
+    verify:auto — every deliverable is a pure function over fixture signature tables and fixture ledger
+    rows plus a registry write, decidable in-process with no network and nothing spawned.
+    PROOF NOTES: the four `unit test:` proofs use the PURE-PATH form naming a file this shard's own
+    `files:` declares — the only form a forward reference resolves in, because `judgeCriterion` gates
+    its carve-out on `!whitelisted.nameFiltered` (W1-T1266's recorded finding). The grep forward-
+    references a new identifier into an EXISTING file, the no-third-option form: a grep at a
+    not-yet-existing path is exec_error, not a forward reference.

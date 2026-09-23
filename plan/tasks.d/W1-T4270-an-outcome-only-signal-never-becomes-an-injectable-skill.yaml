@@ -1,0 +1,75 @@
+- id: W1-T4270
+  title: "An outcome restated as a procedure must never become an injectable skill — `clean_single_strike`'s predicate (fixDispatchCount===0) names the merge outcome itself, not a technique, and would permanently tax the knowledge budget on every future implement prompt for zero actionable content once approved"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  rationale: |
+    OBSERVED reviewing skill-draft proposal skill-draft:d625783bf2e72aed. Its shapeKey is
+    `clean_single_strike`, defined in src/lib/retro.ts's `PROCEDURAL_SUCCESS_SIGNALS` with
+    `matches: (ctx) => ctx.fixDispatchCount === 0` — a run merged without needing a fix-rung. Its rendered
+    step text (src/lib/skill-workshop.ts's `PROCEDURAL_STEP_TEXT`) reads: "Resolve the task on the first
+    attempt — land a fix that needs no `fix.dispatch` rung." That sentence tells a future worker nothing
+    it does not already know from the task brief itself: no worker sets out NOT to resolve a task on the
+    first attempt. It is the trivial null hypothesis of "things that succeeded easily, succeeded easily",
+    not a technique — unlike its sibling signal `fully_executed_proof`, whose step ("execute every
+    acceptance criterion as a real, observed proof — never let the keyword floor stand in for a run")
+    names an actual behavior change.
+
+    BY CONSTRUCTION, `fixDispatchCount === 0` matches the OVERWHELMING MAJORITY of merged runs (81 of them
+    at the time this draft was staged), so it will ALWAYS clear W1-T87's two-run floor trivially, and
+    `renderSkillDraft` ALWAYS sets `applies-to: implement` for it. Once an operator approves this specific
+    draft, W1-T3101's prompt-injection route (`selectSkillsForTask`) will select it for EVERY future
+    implement-class task, spending knowledge-budget characters on a permanent, universal tax that carries
+    zero informational content — worse than an empty skill, because it occupies budget a genuinely useful
+    skill or learning could have spent instead.
+
+    IT ALSO COMPOUNDS OVER TIME. `stageSkillDraft`'s dedup key (`proceduralCandidateHash`) is derived from
+    `shapeKey` PLUS the sorted set of supporting run ids. As new merged runs keep matching this
+    trivially-satisfied predicate every cycle, each retro pass mints a NEW candidate hash for the same
+    zero-content shape, staging a fresh near-duplicate proposal for the operator to re-review — the exact
+    proposal-registry-bloat pattern this fleet has already measured elsewhere (one registry observed at
+    351 largely-duplicate entries). Left unfixed, this is a standing generator of that bloat.
+  design: |
+    (i) Add `SKILL_ELIGIBLE_SIGNALS: Readonly<Record<string, boolean>>` to src/lib/skill-workshop.ts, in
+    the SAME shape and safety direction as the existing `INJECTABLE_SKILL_TASK_TYPES` /
+    `injectableSkillTaskType` pair (lines 43-56): `clean_single_strike: false` (an outcome label, kept for
+    the fact-line/retro-report side, never promoted to a drafted skill), `fully_executed_proof: true` (a
+    real behavior). Add `skillEligibleSignal(key: string): boolean` reading it via `Object.hasOwn`,
+    defaulting an UNCATALOGUED key to `false` — the safe direction: an unrecognised signal is never
+    silently promoted to a permanent per-prompt tax, matching `injectableSkillTaskType`'s own
+    "unrecognised runtime value remains unselectable" precedent.
+    (ii) `renderSkillDraft` filters `candidate.signals` to `skillEligibleSignal`-true keys BEFORE building
+    `steps`; if the filtered set is empty, return `undefined` — the exact same early-return shape as the
+    existing `candidate.supportingRuns < 2` guard, extended with a second admissibility gate rather than a
+    parallel code path. `evidence` (run/task provenance) is unaffected either way.
+    (iii) A MIXED candidate (e.g. one run set matching BOTH `clean_single_strike` and
+    `fully_executed_proof`) drafts a skill containing ONLY the eligible signal's step — the ineligible one
+    is silently dropped from the DRAFT, never from the underlying candidate object.
+    (iv) NOT IN SCOPE, deliberately: `mineProceduralCandidates` and `PROCEDURAL_SUCCESS_SIGNALS`
+    (retro.ts) are UNCHANGED — `clean_single_strike` keeps surfacing in the retro's existing fact-line /
+    procedural-candidates report exactly as W1-T87 built it, since a fact line costs nothing until read
+    and carries no permanent per-prompt tax. This task narrows SKILL DRAFTING only.
+    (v) THE OPERATOR'S ACTION on the already-staged skill-draft:d625783bf2e72aed proposal: once this
+    lands, its sole signal (clean_single_strike) is ineligible, so no future candidate built from only
+    that signal will draft a new skill — the already-staged proposal should be declined directly rather
+    than approved, since approving it now would still write the zero-content SKILL.md this task exists to
+    prevent (this task changes future drafting; it does not retroactively edit or withdraw the one already
+    staged in the state-side registry).
+  acceptance:
+    - claim: "a candidate whose ONLY signal is clean_single_strike (the d625783b shape: fixDispatchCount===0) never renders a skill draft"
+      proof: 'grep: test("W1-T4270: a candidate whose only signal is clean_single_strike never renders a skill draft" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
+    - claim: "a candidate carrying fully_executed_proof still drafts a skill exactly as before this change — no regression on the eligible signal"
+      proof: 'grep: test("W1-T4270: a candidate carrying fully_executed_proof still drafts a skill exactly as before" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
+    - claim: "a mixed candidate matching both signals drafts a skill containing ONLY the eligible signal's step, never the outcome-only one"
+      proof: 'grep: test("W1-T4270: a mixed candidate drafts only the eligible signal step, never the outcome-only one" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
+    - claim: "mineProceduralCandidates still reports a clean_single_strike-only candidate in its raw output — this task narrows skill drafting, never the existing fact-line pipeline"
+      proof: 'grep: test("W1-T4270: mineProceduralCandidates still reports a clean_single_strike-only candidate" in test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts'
+  files: [src/lib/skill-workshop.ts, test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts]
+  origin: "skill-draft-review#d625783bf2e72aed"
+  plan_refs: ["W1-T87", "W1-T2766", "P13"]
+  status: queued
+  attempts: 0

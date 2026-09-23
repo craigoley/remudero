@@ -4,6 +4,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { parse as parseYaml } from "yaml";
+import { renderMacroSkill } from "./generate-macro-skills.mjs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
@@ -227,12 +229,38 @@ function touchedSymbolSurfaces(root, base, head, file) {
   return [...touched];
 }
 
-function touchedPathSurfaces(file) {
+export const MACRO_TABLE_PATH = "settings/macros.yaml";
+
+/**
+ * W1-T4332: whether every row of a macro table renders to a skill no model loads unasked — the
+ * frontmatter carries `disable-model-invocation: true` and no `applies-to:` (the key
+ * `loadInjectableSkills` selects on). Such a table reaches no worker prompt and no judge, so the
+ * golden verdict this gate demands for a prompt surface could only be theater. Rendered through
+ * the generator's own `renderMacroSkill`, never a second renderer, so a generator change that drops
+ * the flag makes the table a surface again. FAILS CLOSED: an unreadable, empty or unparseable table
+ * is NOT operator-only, so it stays gated.
+ */
+export function isOperatorOnlyMacroTable(text, render = renderMacroSkill) {
+  let rows;
+  try {
+    rows = parseYaml(text)?.macros;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.every((row) => {
+    const front = /^---\n([\s\S]*?)\n---/.exec(render(row))?.[1] ?? "";
+    return /^disable-model-invocation: true$/m.test(front) && !/^applies-to:/m.test(front);
+  });
+}
+
+function touchedPathSurfaces(root, head, file) {
   const path = file.newPath === "/dev/null" ? file.oldPath : file.newPath;
-  const isSurface = LEARNINGS_SHARD_RE.test(path) || path === "settings/macros.yaml";
+  const isSurface = LEARNINGS_SHARD_RE.test(path) || path === MACRO_TABLE_PATH;
   if (!isSurface) return [];
   // A schema-comment edit renders nothing different; see isCommentOnlyYamlChange for the measurement.
   if (isCommentOnlyYamlChange(file)) return [];
+  if (path === MACRO_TABLE_PATH && isOperatorOnlyMacroTable(readRevisionFile(root, head, path))) return [];
   return [path];
 }
 
@@ -304,7 +332,7 @@ export function refusalMessage(surfaces) {
 export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
   const files = parseUnifiedDiff(diffText);
   const surfaces = [
-    ...new Set(files.flatMap((file) => [...touchedPathSurfaces(file), ...touchedSymbolSurfaces(root, base, head, file)])),
+    ...new Set(files.flatMap((file) => [...touchedPathSurfaces(root, head, file), ...touchedSymbolSurfaces(root, base, head, file)])),
   ];
   if (surfaces.length === 0) {
     return { ok: true, message: "prompt-surface-gate: OK — no prompt surface touched", surfaces, evidence: [] };

@@ -779,6 +779,17 @@ export interface DrainSummary {
   resumeCommand: string;
 }
 
+/** worker.ts's `WorktreeNodeModulesRefusedError`, duck-typed on its name and `blocked_toolchain` tag so this module never
+ *  imports worker.ts as a value (W1-T4193). */
+export function isWorktreeNodeModulesRefusal(err: unknown): err is { reasonClass: "blocked_toolchain"; message: string } {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { name?: unknown }).name === "WorktreeNodeModulesRefusedError" &&
+    (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain"
+  );
+}
+
 /** Verdicts that are NOT `merged` and yet must NOT stop the drain. The header justifies
  *  stop-on-block as "a blocked task's DEPENDENTS would build on missing work", and each member is
  *  here because that justification does not apply to it:
@@ -1859,6 +1870,14 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       const outcome = settled[i];
       if (outcome.status === "rejected") {
         const message = String((outcome.reason as Error)?.message ?? outcome.reason);
+        if (isWorktreeNodeModulesRefusal(outcome.reason)) {
+          // W1-T4193: a DEFERRAL of this lane — the same continued/never-re-offered shape a non-halting verdict takes,
+          // riding the existing `drain.continued` row. Nothing was spent and nothing is credited.
+          continued.push({ taskId: t.id, verdict: outcome.reason.reasonClass });
+          continuedIds.add(t.id);
+          log("drain.continued", { task: t.id, verdict: outcome.reason.reasonClass, reason: message });
+          continue;
+        }
         log("drain.lane_error", { task: t.id, message });
         if (!failure) failure = { taskId: t.id, message }; // first-observed wins the summary detail
         continue;

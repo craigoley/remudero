@@ -282,3 +282,322 @@ test("W1-T2777 (f): the DEFAULT leaf runs end-to-end on real files — no inject
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── W1-T4193: an IMPLEMENT worktree defers on a same-package mismatch; nothing else changes ──
+//
+// W1-T2777 above shipped detection only; `worktreeAdd` discarded the outcome. W1-T4193 makes the
+// refusal OPT-IN: only runTaskBody's implement path sets `refuseSamePackageLockfileMismatch`, and
+// it refuses only when BOTH package.json files name the SAME package. A satellite linked to core's
+// install root is ledgered and keeps its link, and every caller without the option keeps the
+// warn-and-link baseline. The runTask tests drive the REAL runTaskBody catch arm; the drain test
+// drives the REAL runDrainLanes settle loop.
+
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { runTask, type RunResult } from "../src/run-task.js";
+import { worktreeAdd, WorktreeNodeModulesRefusedError, type WorkerResult } from "../src/lib/worker.js";
+import { runDrain } from "../src/lib/drain.js";
+import { loadPlan } from "../src/lib/plan.js";
+import type { Config } from "../src/lib/config.js";
+import type { DispatchClaimReserver } from "../src/lib/dispatch-claim.js";
+import type { ProbeExecResult } from "../src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+import type { GitHub } from "../src/lib/status.js";
+import type { spawnWorker } from "../src/lib/worker.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+
+const T4193_TASK = "T-W1-T4193-PROBE";
+const pkgJson = (name: string, deps: Record<string, string>) => JSON.stringify({ name, version: "0.0.0", dependencies: deps });
+
+function gitIn(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" });
+}
+
+/** A bare origin seeded with `seedFiles`, and a clone of it at `<root>/repos/remudero`. */
+function t4193Fixture(root: string, seedFiles: Record<string, string>): { repoDir: string } {
+  const origin = gitRepo({ bare: true, kind: "w1-t4193-origin" }).dir;
+  const seed = join(root, "seed");
+  execFileSync("git", ["clone", "-q", origin, seed], { stdio: "pipe" });
+  gitIn(seed, "config", "user.email", "t4193@example.invalid");
+  gitIn(seed, "config", "user.name", "t4193");
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  for (const [name, body] of Object.entries(seedFiles)) writeFileSync(join(seed, name), body);
+  gitIn(seed, "add", "-A");
+  gitIn(seed, "commit", "-q", "-m", "seed");
+  gitIn(seed, "push", "-q", "origin", "main");
+  const repoDir = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "-q", origin, repoDir], { stdio: "pipe" });
+  gitIn(repoDir, "config", "user.email", "t4193@example.invalid");
+  gitIn(repoDir, "config", "user.name", "t4193");
+  return { repoDir };
+}
+
+/** The same-package drift shape: origin/main adds a dependency; the canonical checkout's OWN
+ *  node_modules was installed from the older package.json of the SAME package. */
+function samePackageDrift(root: string): { repoDir: string } {
+  const { repoDir } = t4193Fixture(root, { "package.json": pkgJson("t4193-core", { a: "^1.0.0", added: "^2.0.0" }) });
+  writeFileSync(join(repoDir, "package.json"), pkgJson("t4193-core", { a: "^1.0.0" }));
+  mkdirSync(join(repoDir, "node_modules"));
+  return { repoDir };
+}
+
+function t4193Reserver(dropThrows = false): DispatchClaimReserver & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    mintAnchor: () => "t4193-anchor",
+    attempt: () => "created",
+    holder: () => undefined,
+    drop: (taskId, o) => {
+      calls.push(`drop:${taskId}:${o?.expect ?? "-"}`);
+      if (dropThrows) throw new Error("simulated: origin unreachable during the release");
+      return true;
+    },
+  };
+}
+
+const t4193Github = (): GitHub => ({
+  prByRef: () => null,
+  findMergedByTrailer: () => null,
+  headRefName: () => undefined,
+  prBody: () => undefined,
+});
+
+function workerErrorEnvelope(): WorkerResult {
+  return {
+    sessionId: "s", costUsd: 0, numTurns: 0, text: "", blocks: [], stderr: "", subtype: "error_max_turns", isError: true,
+    apiError: false, permissionDenials: [], childEnvKeys: [], model: "default", effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+  };
+}
+
+interface T4193Run {
+  err: unknown;
+  result: RunResult | undefined;
+  ledger: Array<Record<string, unknown>>;
+  reserver: ReturnType<typeof t4193Reserver>;
+  spawned: number;
+}
+
+/** Drive a REAL runTask() at the fixture under `root`. */
+async function runT4193(
+  root: string,
+  opts: { dropThrows?: boolean; spawnReturns?: boolean; readRemoteHead?: (repoDir: string, ref: string) => string } = {},
+): Promise<T4193Run> {
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(
+    planPath,
+    [`- id: ${T4193_TASK}`, "  title: node_modules refusal probe", "  repo: remudero", "  type: implement",
+      "  verify: auto", "  risk: medium", "  files: [src/lib/daemon.ts]", "  origin: architect", "  status: queued", ""].join("\n"),
+  );
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
+  const reserver = t4193Reserver(opts.dropThrows);
+  let spawned = 0;
+  const spawn: typeof spawnWorker = async () => {
+    spawned += 1;
+    if (opts.spawnReturns) return workerErrorEnvelope();
+    throw new Error("must never spawn — the node_modules refusal fires before any worker runs");
+  };
+  let err: unknown;
+  let result: RunResult | undefined;
+  try {
+    result = await withLiveWritesAllowed(() =>
+      runTask(T4193_TASK, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: t4193Github(),
+        spawn,
+        containmentExec: (token: string): Promise<ProbeExecResult> =>
+          Promise.resolve({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+        isolationExec: (): Promise<IsolationProbeExecResult> =>
+          Promise.resolve({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+        claimReserver: reserver,
+        ...(opts.readRemoteHead ? { worktreeBaseDeps: { readRemoteHead: opts.readRemoteHead } } : {}),
+      }),
+    );
+  } catch (e) {
+    err = e;
+  }
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  return { err, result, ledger, reserver, spawned };
+}
+
+function assertDeferredRefusal(r: T4193Run): Record<string, unknown> {
+  assert.ok(r.err instanceof WorktreeNodeModulesRefusedError, `runTask must rethrow the typed refusal; got: ${String(r.err)}`);
+  assert.equal((r.err as { reasonClass?: unknown }).reasonClass, "blocked_toolchain", "the tag daemon.ts defers without a strike");
+  assert.equal(r.err.packageName, "t4193-core");
+  assert.match(r.err.message, /Remedy: refresh the canonical checkout \(the install root is re-installed on the next freshness restart\)/);
+  assert.equal(r.spawned, 0, "no worker is spawned");
+  const refused = r.ledger.find((l) => l.step === "worktree.node_modules_refused");
+  assert.equal(refused?.package, "t4193-core", "runTaskBody ledgers the named refusal line");
+  assert.equal(r.ledger.find((l) => l.step === "worktree.add_failed"), undefined, "never the generic add-failure line");
+  assert.ok(r.reserver.calls.includes(`drop:${T4193_TASK}:t4193-anchor`), "the claim is released through the holder arm");
+  return refused!;
+}
+
+test("W1-T4193: a lockfile mismatch refuses the worktree instead of linking it", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-mismatch-`));
+  try {
+    const { repoDir } = samePackageDrift(root);
+    const r = await runT4193(root);
+    const refused = assertDeferredRefusal(r);
+    assert.equal(refused.node_modules_source, join(repoDir, "node_modules"), "names the node_modules source side");
+    const wt = String(refused.worktreePath);
+    assert.equal(existsSync(wt), false, `the refused worktree is removed, never left linked: ${wt}`);
+    assert.ok(r.ledger.some((l) => l.step === "worktree.remove" && l.on === "node_modules_refused"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4193: a satellite worktree linked to another packages tree is recorded and never refused", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-satellite-`));
+  try {
+    // A satellite: its own package, no node_modules in its canonical clone, so the only tree
+    // resolveNodeModulesSource finds is THIS install root's (package "remudero").
+    t4193Fixture(root, { "package.json": pkgJson("remudero-site", { next: "^15.0.0" }) });
+    const r = await runT4193(root, { spawnReturns: true });
+    assert.equal(r.err, undefined, `a satellite dispatch must never be refused: ${String(r.err)}`);
+    assert.ok(r.result, "the run reaches a terminal verdict of its own");
+    assert.ok(r.spawned > 0, "the worker is spawned exactly as today");
+    const cross = r.ledger.find((l) => l.step === "worktree.node_modules_cross_package");
+    assert.deepEqual(
+      { worktree_package: cross?.worktree_package, node_modules_package: cross?.node_modules_package, node_modules_source: cross?.node_modules_source },
+      { worktree_package: "remudero-site", node_modules_package: "remudero", node_modules_source: join(process.cwd(), "node_modules") },
+      "both package names and both paths are recorded",
+    );
+    assert.match(String(cross?.worktreePath), /worktrees/);
+    assert.equal(r.ledger.find((l) => l.step === "worktree.node_modules_refused"), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4193: a worktree created without the implement option keeps the warn-and-link baseline", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-baseline-`));
+  try {
+    const { repoDir } = samePackageDrift(root);
+    const errors: string[] = [];
+    t.mock.method(console, "error", (m: string) => errors.push(m));
+    const logs: string[] = [];
+    const wt = join(root, "wt");
+    worktreeAdd(repoDir, wt, "run-t4193-baseline", "origin/main", { log: (step) => logs.push(step) });
+    assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true, "the same-package mismatch is still linked");
+    assert.equal(readlinkSync(join(wt, "node_modules")), join(repoDir, "node_modules"));
+    assert.ok(errors.some((m) => m.startsWith("node_modules lockfile mismatch:")), "and still warned, exactly as W1-T2777 shipped");
+    assert.deepEqual(logs.filter((s) => s.startsWith("worktree.node_modules")), [], "no W1-T4193 line without the option");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4193: a refused implement lane in rmd drain defers instead of failing the drain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-drain-`));
+  try {
+    const f = join(dir, "tasks.yaml");
+    writeFileSync(f, ["A", "B"].map((id) =>
+      `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/${id}.ts]\n`).join(""));
+    const plan = loadPlan(f);
+    const merged = new Set<string>();
+    const calls: string[] = [];
+    const runOne = async (id: string): Promise<RunResult> => {
+      calls.push(id);
+      if (id === "A") throw new WorktreeNodeModulesRefusedError("t4193-core", "/wt/A", "/canonical/node_modules");
+      merged.add(id);
+      return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" };
+    };
+    const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+    const s = await runDrain(
+      plan,
+      { refreshMerged: () => (id) => merged.has(id), runOne, log: (step, extra) => logs.push([step, extra]) },
+      { laneCount: 2, max: 4 },
+    );
+    assert.notEqual(s.stopReason, "error", `a deferred lane must not end the drain in error: ${s.stopDetail}`);
+    assert.deepEqual(s.merged, ["B"], "the sibling lane still merges");
+    assert.deepEqual(s.continued, [{ taskId: "A", verdict: "blocked_toolchain" }], "A is continued, never credited");
+    assert.deepEqual(calls.filter((c) => c === "A"), ["A"], "and never re-offered in the same drain");
+    assert.equal(logs.find(([step]) => step === "drain.lane_error"), undefined);
+    const row = logs.find(([step, extra]) => step === "drain.continued" && extra?.task === "A");
+    assert.match(String(row?.[1]?.reason), /Remedy: refresh the canonical checkout/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4193: a claim release that throws never replaces the typed refusal", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-release-`));
+  try {
+    samePackageDrift(root);
+    const r = await runT4193(root, { dropThrows: true });
+    assertDeferredRefusal(r);
+    assert.ok(r.ledger.some((l) => l.step === "dispatch.claim_release_error"), "the failed release is ledgered, not swallowed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4193: a refused worktree that cannot be removed is ledgered and still rethrows the typed refusal", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-remove-`));
+  try {
+    const { repoDir } = samePackageDrift(root);
+    // The currency check runs AFTER `git worktree add`: answer it truthfully, and LOCK every linked
+    // worktree first, so the arm's `git worktree remove --force` genuinely fails.
+    const r = await runT4193(root, {
+      readRemoteHead: (dir, ref) => {
+        for (const line of gitIn(dir, "worktree", "list", "--porcelain").split("\n")) {
+          const path = line.startsWith("worktree ") ? line.slice("worktree ".length) : undefined;
+          if (path && path !== repoDir) gitIn(dir, "worktree", "lock", path);
+        }
+        return gitIn(dir, "ls-remote", "origin", `refs/heads/${ref}`).split("\t")[0]!;
+      },
+    });
+    assertDeferredRefusal(r);
+    const removeError = r.ledger.find((l) => l.step === "worktree.remove.error");
+    assert.equal(removeError?.on, "node_modules_refused");
+    assert.match(String(removeError?.error), /worktree remove --force/, "the real git failure is carried, not erased");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4193: an unreadable package.json is ledgered and keeps the link, never refused", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-unreadable-`));
+  try {
+    const { repoDir } = t4193Fixture(root, { "package.json": "{ not json" });
+    mkdirSync(join(repoDir, "node_modules"));
+    const logs: Array<[string, Record<string, unknown> | undefined]> = [];
+    const wt = join(root, "wt");
+    worktreeAdd(repoDir, wt, "run-t4193-unreadable", "origin/main", {
+      log: (step, extra) => logs.push([step, extra]),
+      warn: () => {},
+      refuseSamePackageLockfileMismatch: true,
+    });
+    const row = logs.find(([step]) => step === "worktree.node_modules_package_unreadable");
+    assert.match(String(row?.[1]?.worktree_error), /JSON/, "the parse failure is named, not read as a package-less repo");
+    assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true, "today's link is kept");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4193: a package-less worktree under the implement option keeps todays link and records nothing", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4193-nopkg-`));
+  try {
+    const { repoDir } = t4193Fixture(root, {});
+    mkdirSync(join(repoDir, "node_modules"));
+    const logs: string[] = [];
+    const wt = join(root, "wt");
+    worktreeAdd(repoDir, wt, "run-t4193-nopkg", "origin/main", { log: (step) => logs.push(step), warn: () => {}, refuseSamePackageLockfileMismatch: true });
+    assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true);
+    assert.deepEqual(logs.filter((s) => s.startsWith("worktree.node_modules")), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

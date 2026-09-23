@@ -12,6 +12,7 @@ import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
 import { renderInboxPollSummary, type InboxPollSummary } from "./inbox.js";
 import type { RundownLine } from "./drain.js";
+import { renderGateFireRates, summarizeGateFireRates, type GateFireRateSummary } from "./gate-fire-rate.js";
 import type { LastSeenStore } from "./last-seen.js";
 import {
   decideMeasurementCadence,
@@ -420,6 +421,7 @@ export interface DigestSummary {
   cacheHit?: CacheHitTotals;
   learningUsefulness?: LearningUsefulness;
   learningOutcomes?: LearningOutcomeSummary;
+  gateFireRates?: GateFireRateSummary;
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
    *  `.fired` duplicates it and `.skipped` is the cadence working as intended. */
   boardReview?: BoardReviewDigestSnapshot;
@@ -709,6 +711,7 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
   summary.learningUsefulness = summarizeLearningUsefulness(since);
   const learningOutcomes = summarizeLearningOutcomes(lines);
   if (learningOutcomes) summary.learningOutcomes = learningOutcomes;
+  summary.gateFireRates = summarizeGateFireRates(since);
   return summary;
 }
 
@@ -774,6 +777,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     ...(s.cacheHit ? [renderCacheHitLine("cache hit by run", s.cacheHit.byRun), renderCacheHitLine("cache hit by class", s.cacheHit.byClass)] : []),
     ...(s.learningUsefulness ? [renderLearningUsefulness(s.learningUsefulness)] : []),
     ...(s.learningOutcomes ? [renderLearningOutcomes(s.learningOutcomes)] : []),
+    ...(s.gateFireRates ? [renderGateFireRates(s.gateFireRates)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
     // W1-T2765: ALWAYS rendered, unlike the soft-composed lines above — "not observed" is the

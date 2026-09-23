@@ -1,0 +1,95 @@
+- id: W1-T4287
+  title: "Skill-draft reachability text ignores the merged harness-injection route (W1-T3101) — retroCommand stages EVERY draft with a stale, absolute 'NOT reachable by a worker today' claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files: ["src/lib/skill-workshop.ts", "src/run-task.ts", "test/skill-workshop.test.ts", "test/a-staged-skill-reaches-the-worker-prompt.test.ts"]
+  origin: architect
+  plan_refs: ["§7B", "P25", "W1-T2766", "W1-T3101"]
+  status: queued
+  attempts: 0
+  rationale: |
+    FOUND WHILE RATIFYING skill-draft:afa9c5aea4d3c168 (W1-T4286) — a defect in the GENERATOR, not
+    that one proposal. VERIFIED AT SOURCE: retroCommand (src/run-task.ts:22266-22272) calls
+    `stageSkillDrafts(followupRegistryPath, gather.skillDrafts, workerAllowlistFromSettings(undefined),
+    describeWorkerSkillReachability([]), log)` — reachability is computed ONCE, generically, for the
+    WHOLE batch, and describeWorkerSkillReachability (skill-workshop.ts:252-266) answers ONLY
+    whether native SDK settingSources permits Skill-tool loading (it does not — WORKER_SETTING_SOURCES
+    is []). stageSkillDraft (skill-workshop.ts:314-321) then bakes that ONE verdict into every staged
+    proposal's summary verbatim as an unqualified claim: "NOT reachable by a worker today: ...".
+
+    THAT CLAIM IS FALSE FOR ALMOST EVERY DRAFT THIS MODULE WILL EVER STAGE. renderSkillDraft
+    (skill-workshop.ts:85-115) automatically emits `applies-to: <taskType>` for any candidate whose
+    taskType is in INJECTABLE_SKILL_TASK_TYPES (recon/implement/diagnose/review/manual — i.e. every
+    task type PROCEDURAL_STEP_TEXT candidates come from). W1-T3101 (status: merged) built a second
+    reachability route keyed EXACTLY on that frontmatter field: loadInjectableSkills
+    (skill-workshop.ts:367-394) reads `.claude/skills/<name>/SKILL.md` off the real checkout,
+    SKILL_APPLIES_TO_RE (skill-workshop.ts:341, already exported) parses `applies-to:`, and
+    run-task.ts:12091-12098 wires selectSkillsForTask/renderSkillsPart into every real implement
+    prompt's CONTEXT block — proven live by test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts.
+    So a draft that WILL carry applies-to: (essentially all of them) is staged with a summary
+    claiming it is unreachable, when it will in fact be reachable the moment it is approved. This is
+    the same "the fleet already knows they are unreachable, in code" shape plan/tasks.d/W1-T3137's
+    own rationale names — inverted: here the code UNDER-reports reachability because it asks only
+    the native-settingSources question and never the harness-injection one.
+
+    RULE 19 #588 MERITS: this task asserts one cross-file invariant unsatisfiable piecewise — the
+    generator's per-draft reachability computation, retroCommand's production call site, and the
+    old shared-reachability tests must change together or the staged summary remains false.
+  design: |
+    (i) COMPUTE REACHABILITY PER-DRAFT, TWO-FACTOR, not once for the whole batch. Add and export
+        `describeSkillDraftReachability(draft: SkillDraft, settingSources: readonly string[])` from
+        skill-workshop.ts. It must report reachable if EITHER: settingSources includes 'project'
+        (native, via describeWorkerSkillReachability — UNCHANGED, keep it as the narrowly-scoped
+        native check it already is and already has passing tests for), OR the draft's own markdown
+        frontmatter matches SKILL_APPLIES_TO_RE (harness-injectable, W1-T3101). Reuse
+        SKILL_APPLIES_TO_RE — already exported from the SAME file — rather than deriving a second
+        frontmatter parser. NAME BOTH checked routes in the reason string on EITHER outcome, so a
+        summary never again makes an absolute claim ("not reachable... today") that is true of only
+        one of two routes.
+    (ii) stageSkillDraft's signature currently accepts a pre-computed `reachability: {reachable,
+         reason}` shared across a whole stageSkillDrafts batch (skill-workshop.ts:296,460-476).
+         Keep stageSkillDraft as the one-summary writer if that is still the cleanest seam, but
+         stageSkillDrafts must accept/compute a reachability value per draft, and retroCommand must
+         call `describeSkillDraftReachability(` in src/run-task.ts so the production caller, not
+         only tests, reaches the new exported helper. The invariant is that the harness-injection
+         check runs against EACH draft's OWN frontmatter, never a value shared across the batch.
+    (iii) UPDATE retroCommand's call site (run-task.ts:22266-22272) to pass WORKER_SETTING_SOURCES
+          and the new per-draft helper shape instead of `describeWorkerSkillReachability([])`.
+    (iv) settingSources / WORKER_SETTING_SOURCES IS NOT TOUCHED — this task changes only the
+         DESCRIPTION computed about reachability, never what a worker can actually load. Any change
+         to the isolation boundary itself is explicitly out of scope and belongs to a task like
+         plan/tasks.d/W1-T3137's own Route-A/B ruling, not this one.
+    (v) THE INVARIANT IS ATOMIC ACROSS THESE FILES, WHICH IS WHY THIS IS ONE risk:high TASK RATHER
+        THAN A SPLIT: the reachability computation (skill-workshop.ts), its production caller
+        (run-task.ts), and the tests asserting the OLD single-value contract
+        (test/skill-workshop.test.ts:210-222 and test/a-staged-skill-reaches-the-worker-prompt.test.ts,
+        which both construct `describeWorkerSkillReachability([])` and hand it straight to
+        stageSkillDraft/stageSkillDrafts under today's signature) all change together or the build
+        does not compile/pass. A change to only the function and not its caller+tests is not this
+        task done; band_meaning: span records that the risk is genuinely about coordinated span
+        across a small file set, not an unrelated blast radius.
+  acceptance:
+    - claim: "a draft carrying applies-to: (harness-injectable) is reported REACHABLE, naming the harness-injection route, even while native settingSources reachability is independently false"
+      proof: 'grep: test("W1-T4287: an applies-to draft is reported reachable via the harness-injection route while native settingSources is false" in test/skill-workshop.test.ts'
+    - claim: "a draft with NO applies-to (a non-injectable candidate.taskType) and settingSources excluding 'project' still reports NOT reachable, naming BOTH routes it checked — the falsifier proving this was not simply flipped to always-true"
+      proof: 'grep: test("W1-T4287: a draft without applies-to and without project settingSources is not reachable and names both routes" in test/skill-workshop.test.ts'
+    - claim: "the new exported per-draft reachability helper is called by retroCommand's production path in src/run-task.ts"
+      proof: "grep: describeSkillDraftReachability( in src/run-task.ts"
+    - claim: "retroCommand's real call site computes reachability from EACH draft's own markdown rather than one shared value for the whole batch — two drafts in the same retro cycle, one with applies-to and one without, are staged with DIFFERENT reachability verdicts"
+      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+    - claim: "spawnWorker's isolation is untouched — WORKER_SETTING_SOURCES still excludes 'project'; this task fixes only what the staged summary CLAIMS about reachability, never what a worker can load"
+      proof: 'grep: test("W1-T4287: WORKER_SETTING_SOURCES still excludes project so a worker loads nothing new" in test/a-staged-skill-reaches-the-worker-prompt.test.ts'
+  note: |
+    Filed as a SIBLING to W1-T4286 rather than folded into it (Rule 19): W1-T4286 lands one specific,
+    already-scanned skill; this fixes the GENERATOR so every skill-draft proposal staged AFTER this
+    merges carries an accurate reachability claim, including ones not yet mined. Grounded against a
+    live read of retroCommand's actual call (run-task.ts:22266-22272, confirming the shared,
+    per-batch `describeWorkerSkillReachability([])` value) and both existing test files' current
+    call shapes (test/skill-workshop.test.ts:166,210-222; test/a-staged-skill-reaches-the-worker-prompt.test.ts:166-241)
+    before drafting, per Standing distrust-the-prompt discipline.

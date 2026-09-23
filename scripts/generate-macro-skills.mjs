@@ -19,13 +19,13 @@
 //                                 # (driven by test/operator-macros-are-generated.test.ts, so it
 //                                 #  runs inside `npm test` and therefore inside CI's `ci` job)
 //
-// THREE REFUSALS, IN CODE RATHER THAN IN PROSE (design (iii)):
+// FOUR REFUSALS, IN CODE RATHER THAN IN PROSE (design (iii); the fourth is W1-T4331):
 //   - a row naming a CLAUDE.md headline that does not exist is refused, QUOTING the headline, so a
 //     renamed rule is a red check instead of a silently orphaned macro;
 //   - a row with no expansion is refused — an empty substitution is worse than the guess it
 //     replaces, because it looks deliberate;
-//   - a macro may not share a name with an `rmd` verb: `/deploy` meaning one thing in a session
-//     and another at the shell is exactly the ambiguity this table exists to remove.
+//   - a macro may not share a name with an `rmd` verb, nor cite a backticked `rmd <verb>` that does
+//     not exist: one name meaning two things, or an orphaned instruction, is the ambiguity removed.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -85,7 +85,7 @@ export function rmdVerbNames(usageText) {
 }
 
 /**
- * Validate one row against the three refusals, then return it. Every message NAMES the offending
+ * Validate one row against the four refusals, then return it. Every message NAMES the offending
  * value, because a refusal a reader cannot act on costs a whole re-derivation.
  */
 export function validateMacro(macro, headlines, verbNames) {
@@ -104,6 +104,14 @@ export function validateMacro(macro, headlines, verbNames) {
       `macro \`${macro.name}\` shares its name with the \`rmd ${macro.name}\` verb — one name meaning ` +
         "one thing in a session and another at the shell is the ambiguity this table exists to remove",
     );
+  }
+  for (const m of macro.expansion.matchAll(/`rmd ([a-z][a-z-]*)/g)) {
+    if (!verbNames.includes(m[1])) {
+      throw new MacroSkillError(
+        `macro \`${macro.name}\` tells the session to run \`rmd ${m[1]}\`, which is not an rmd verb. ` +
+          "A renamed verb must be a red check, never a silently orphaned instruction.",
+      );
+    }
   }
   for (const headline of macro.headlines ?? []) {
     if (!headlines.includes(headline)) {
