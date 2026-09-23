@@ -1100,6 +1100,7 @@
     "test/onboard-synthesize.test.ts": 907,
     "test/one-effect-surface-has-one-recorded-list.test.ts": 0,
     "test/one-fetch-and-one-plan-load-per-tick.test.ts": 1567,
+    "test/one-gateway-serves-every-instance.test.ts": 0,
     "test/one-invocation-is-one-burst.test.ts": 0,
     "test/one-manifest-predicate-reads-the-declared-workspaces.test.ts": 0,
     "test/one-procedure-is-one-skill-proposal.test.ts": 0,

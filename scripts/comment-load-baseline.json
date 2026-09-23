@@ -257,6 +257,7 @@
   "src/lib/init.ts": 98,
   "src/lib/install-hash.ts": 30,
   "src/lib/install-root.ts": 90,
+  "src/lib/instance-gateway.ts": 250,
   "src/lib/instance-registry.ts": 250,
   "src/lib/isolation.ts": 227,
   "src/lib/issues-intake.ts": 67,

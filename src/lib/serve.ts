@@ -65,7 +65,8 @@ import {
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
-import type { GhFailureReason, GitHub } from "./status.js";
+import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
+import { buildInstanceGatewayRoutes, type InstanceGatewayOptions } from "./instance-gateway.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -407,6 +408,7 @@ export interface ServeDeps {
   selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
   /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
   registry?: Partial<RegistryRouteDeps>;
+  instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
    * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
@@ -4177,6 +4179,17 @@ function assembleServeRoutes(
     }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps);
+  routes.push(
+    ...buildInstanceGatewayRoutes(routes, {
+      registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
+      github: (repo) => buildBatchedGithub(repo.split("/")[0], repo.split("/")[1], { ttlMs: DEFAULT_BOARD_POLL_TTL_MS, log: deps.log }),
+      issues: deps.issues,
+      controlStatus: deps.controlStatus,
+      log: deps.log,
+      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board }),
+      ...deps.instances,
+    }),
+  );
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails
   // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.
