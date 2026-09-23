@@ -2054,7 +2054,7 @@ import {
   REPORT_EXCERPT_CAP,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
-  foreignTreeStandDownReason, listRegisteredWorktrees,
+  foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock,
   workerLedgerFields,
   workerTranscript,
   uniqueRunBranch,
@@ -12948,6 +12948,77 @@ export function reportWorkerSourceSizeFollowup(
   }
 }
 
+/** A managed checkout cannot be refreshed while a registered worker may be using its node_modules. */
+class ManagedCheckoutRefreshRefusedError extends Error {
+  readonly reasonClass = "blocked_toolchain" as const;
+
+  constructor(readonly reason: string) {
+    super(`managed checkout refresh refused: ${reason}`);
+    this.name = "ManagedCheckoutRefreshRefusedError";
+  }
+}
+
+/** Fast-forward a clean managed checkout and refresh its install before a new worktree links it. */
+function refreshManagedCheckout(repoDir: string, log: (step: string, extra?: Record<string, unknown>) => void): void {
+  const git = (args: string[]) =>
+    execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  const beforeSha = git(["rev-parse", "HEAD"]);
+  const branch = git(["symbolic-ref", "--short", "-q", "HEAD"]);
+  if (branch !== "main") {
+    throw new ManagedCheckoutRefreshRefusedError(`checkout is on ${branch || "detached HEAD"}, not main`);
+  }
+  const dirty = git(["status", "--porcelain"]);
+  if (dirty) {
+    throw new ManagedCheckoutRefreshRefusedError(`checkout is dirty (${dirty.split("\n").length} changed path(s))`);
+  }
+
+  try {
+    git(["fetch", "--quiet", "origin"]);
+  } catch (error) {
+    throw new ManagedCheckoutRefreshRefusedError(`could not fetch origin (${String((error as Error)?.message ?? error)})`);
+  }
+  let behind = false;
+  try {
+    git(["merge-base", "--is-ancestor", "HEAD", "origin/main"]);
+    behind = git(["rev-parse", "HEAD"]) !== git(["rev-parse", "origin/main"]);
+  } catch {
+    throw new ManagedCheckoutRefreshRefusedError("checkout has diverged from origin/main");
+  }
+  if (!behind) return;
+
+  let registeredPaths: string[];
+  try {
+    registeredPaths = git(["worktree", "list", "--porcelain"])
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => line.slice("worktree ".length));
+  } catch (error) {
+    throw new ManagedCheckoutRefreshRefusedError(`could not enumerate worker worktrees (${String((error as Error)?.message ?? error)})`);
+  }
+  const activePath = registeredPaths.find((path) => path !== repoDir && readRunLock(path).kind !== "absent");
+  if (activePath) {
+    throw new ManagedCheckoutRefreshRefusedError(`worker worktree ${activePath} still has a run lock`);
+  }
+
+  const installLock = acquireDrainLock(managedInstallLockPath(repoDir));
+  try {
+    try {
+      git(["merge", "--ff-only", "--quiet", "origin/main"]);
+    } catch (error) {
+      throw new ManagedCheckoutRefreshRefusedError(`fast-forward failed (${String((error as Error)?.message ?? error)})`);
+    }
+    const afterSha = git(["rev-parse", "HEAD"]);
+    log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: afterSha });
+    try {
+      ensureInstallFreshUnlocked(repoDir);
+    } catch (error) {
+      throw new ManagedCheckoutRefreshRefusedError(`install refresh failed (${String((error as Error)?.message ?? error)})`);
+    }
+  } finally {
+    installLock.release();
+  }
+}
+
 /**
  * W1-T3801: route the already-shipped source-size maintainability signal through the bounded
  * gate-posture judge. This is deliberately an ADVISORY pilot, not a CI-red bypass: a material
@@ -14364,6 +14435,27 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
+  // Serialize the refresh/install and worktree link against peer dispatches. The lock remains
+  // held until this worktree's run.lock is visible, so another dispatcher cannot miss a borrower.
+  let managedCheckoutLock: DrainLockHandle;
+  try {
+    managedCheckoutLock = acquireDrainLock(join(config.root, "state", "managed-checkout-refresh.lock"));
+  } catch (error) {
+    releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+    throw new ManagedCheckoutRefreshRefusedError(`another dispatch owns the refresh lock (${String((error as Error)?.message ?? error)})`);
+  }
+  try {
+    refreshManagedCheckout(repoDir, log);
+  } catch (error) {
+    managedCheckoutLock.release();
+    const refusal = error instanceof ManagedCheckoutRefreshRefusedError
+      ? error
+      : new ManagedCheckoutRefreshRefusedError(String((error as Error)?.message ?? error));
+    log("managed_checkout.refresh_refused", { reason: refusal.reason });
+    say(`REFUSED: ${refusal.message}`);
+    releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+    throw refusal;
+  }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError
   // before this run touches recon/implement/commit -- catch it HERE, at dispatch, rather
   // than let a stale base surface only after a full run as the out-of-scope scope guard's
@@ -14382,6 +14474,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
     worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
   } catch (e) {
+    managedCheckoutLock.release();
     if (e instanceof WorktreeBaseStaleError) {
       log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref, behind: e.behind });
       say(
@@ -14445,6 +14538,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // written now and removed on terminal verdict (the finally below). If the process
   // crashes, the lock's pid goes dead and prune reclaims it. (docs/archive/DIAGNOSIS.md)
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+  managedCheckoutLock.release();
 
   try {
     // ── Recon (read-only).
@@ -44319,6 +44413,11 @@ export interface InstallFreshnessDeps {
   install?: () => void;
 }
 
+/** The lock shared by managed-checkout refreshes and every install freshness path. */
+function managedInstallLockPath(repoDir: string): string {
+  return join(dirname(repoDir), `.${basename(repoDir)}.rmd-install.lock`);
+}
+
 /**
  * The REFUSAL {@link ensureInstallFresh} throws instead of installing through a symlinked
  * `node_modules` — a NAMED type so {@link serviceFreshnessGate} can distinguish "the install
@@ -44366,7 +44465,7 @@ export const NPM_CI_TIMEOUT_MS = 600_000;
  * `rmd serve` entry, below) and `DaemonDeps.runInstall` (lib/daemon.ts) for W1-T126's
  * in-process self-restart, consulted from the SAME predicate rather than duplicating it.
  */
-export function ensureInstallFresh(repoDir: string, deps: InstallFreshnessDeps = {}): boolean {
+function ensureInstallFreshUnlocked(repoDir: string, deps: InstallFreshnessDeps = {}): boolean {
   const hash = deps.hash ?? ((dir: string) => hashInstallInputs(dir));
   const markerPath = installHashMarkerPath(repoDir);
   const readMarker =
@@ -44415,6 +44514,15 @@ export function ensureInstallFresh(repoDir: string, deps: InstallFreshnessDeps =
   install();
   writeMarker(markerPath, current);
   return true;
+}
+
+export function ensureInstallFresh(repoDir: string, deps: InstallFreshnessDeps = {}): boolean {
+  const lock = acquireDrainLock(managedInstallLockPath(repoDir));
+  try {
+    return ensureInstallFreshUnlocked(repoDir, deps);
+  } finally {
+    lock.release();
+  }
 }
 
 /**
