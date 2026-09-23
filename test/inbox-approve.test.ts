@@ -440,11 +440,14 @@ test("applyStampToMasterPlan replaces an existing proposal bullet in place", () 
   assert.match(out, /- P26 \(plan\) — CAPTURED 2026-07-02\./, "the unrelated P26 bullet is untouched");
 });
 
-test("applyStampToMasterPlan appends the stamp when no existing bullet matches the proposal id", () => {
+test("applyStampToMasterPlan leaves MASTER-PLAN.md unchanged when no existing bullet matches the proposal id (W1-T4350)", () => {
+  // Appending at EOF put every bulletless proposal's stamp on the SAME line, so any two open
+  // APPROVE PRs collided there on merge (measured 2026-09-23: 15/32). The ledger's
+  // ratify.approved row is the record now; this stops the write instead.
   const md = "# MASTER-PLAN\n\n- P26 (plan) — CAPTURED 2026-07-02.\n";
   const out = applyStampToMasterPlan(md, "P25", "- P25 (plan) — RATIFIED 2026-07-20 -> W1-T900.");
-  assert.match(out, /- P26 \(plan\) — CAPTURED 2026-07-02\./);
-  assert.match(out, /- P25 \(plan\) — RATIFIED 2026-07-20 -> W1-T900\.\s*$/);
+  assert.equal(out, md);
+  assert.doesNotMatch(out, /P25/);
 });
 
 // ── Integration proof (the "dry-run" acceptance criterion, W1-T136) ─────────────────────────

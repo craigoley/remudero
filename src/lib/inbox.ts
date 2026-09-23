@@ -2550,14 +2550,16 @@ export function applyFragmentToPlanYaml(tasksYaml: string, fragmentYaml: string)
 }
 
 /** Splice a ratification stamp into MASTER-PLAN.md's proposal list: replace an existing `- <id> (…)` bullet in place
- *  when there is one, otherwise append the stamp at the end of the file. */
+ *  when there is one, otherwise leave the file UNCHANGED (W1-T4350). Appending at EOF made every bulletless
+ *  proposal's stamp land on the SAME line, so any two open APPROVE PRs collided there and each merge dirtied the
+ *  rest — 15 of 32 open PRs, measured 2026-09-23. `isRatifiedInLedger` (the ratify.approved row) is the record of
+ *  "already ratified"; nothing reads the appended stamp back, and the stamp line still ships in the commit body. */
 export function applyStampToMasterPlan(masterPlanMd: string, proposalId: string, stampLine: string): string {
   const bulletRe = new RegExp(`^- ${proposalId} \\(.*$`, "m");
   if (bulletRe.test(masterPlanMd)) {
     return masterPlanMd.replace(bulletRe, stampLine);
   }
-  const base = masterPlanMd.replace(/\s*$/, "");
-  return `${base}\n${stampLine}\n`;
+  return masterPlanMd;
 }
 
 // ── W1-T2471: RATIFY A BATCH — one branch, one commit, one MASTER-PLAN block, one PR ───────
