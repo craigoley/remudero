@@ -1068,7 +1068,7 @@ function reconcileArchiveStamps(dir: string): number | undefined {
   try {
     names = readdirSync(dir);
   } catch {
-    return undefined;
+    return undefined; // state dir unreadable — nothing to reconcile, same as no archives on disk
   }
   let maxSafeMs: number | undefined;
   const usedMs = new Set<number>();
@@ -1113,7 +1113,7 @@ function renameArchiveTo(fullPath: string, currentName: string, stampMs: number)
     renameSync(fullPath, join(dirname(fullPath), safeName));
     return true;
   } catch {
-    return false;
+    return false; // best-effort — a failed rename must never fail the rotation that triggered it
   }
 }
 
@@ -1128,7 +1128,7 @@ function healIfAheadOfOwnMtime(archivePath: string, lastArchiveMs: number | unde
   try {
     mtimeMs = statSync(archivePath).mtimeMs;
   } catch {
-    return archivePath;
+    return archivePath; // can't stat the archive just written — leave its name exactly as it is
   }
   const name = basename(archivePath);
   const iso = rotationStampIso(name);
@@ -1359,7 +1359,7 @@ function newestArchiveMtimeMs(dir: string): number | undefined {
   try {
     names = readdirSync(dir);
   } catch {
-    return undefined;
+    return undefined; // state dir unreadable — no smoothing reference, so rotation proceeds
   }
   let max: number | undefined;
   for (const n of names) {
