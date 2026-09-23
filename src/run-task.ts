@@ -48,6 +48,7 @@ import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledge
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 import {
   decideLedgerCompaction,
+  ledgerCompactionProtectedHours,
   readLedgerCorpusPressure,
   type LedgerCompactionDecision,
   type LedgerCompactionOutcome,
@@ -24643,7 +24644,11 @@ export function autoTriageCheck(
  * pressure guard had no effect on the fleet. Keep this construction beside the other daemon-hook
  * producers and test it through `daemonCommand`, not by source grep alone.
  */
-export const DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS = 1;
+/** W1-T4262: the age a daemon pass compacts from — a day at the bound, less as pressure rises. */
+export function daemonLedgerCompactArgs(stateDir: string): string[] {
+  const pressure = readLedgerCorpusPressure(stateDir, { readdir: readdirSync, sizeOf: (path) => statSync(path).size });
+  return ["--older-than-hours", String(ledgerCompactionProtectedHours(pressure))];
+}
 
 export function buildLedgerCompactionDaemonHooks(deps: {
   config?: Config;
@@ -24676,7 +24681,7 @@ export function buildLedgerCompactionDaemonHooks(deps: {
     (async () => {
       let report: string | undefined;
       const errors: string[] = [];
-      const code = (deps.compact ?? ledgerCompactCommand)(["--older-than", String(DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS)], {
+      const code = (deps.compact ?? ledgerCompactCommand)(daemonLedgerCompactArgs(stateDirFor()), {
         stateDir: stateDirFor(),
         out: (line) => {
           report = line;
@@ -43767,9 +43772,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "ledger-compact",
-    syntax: "rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]",
+    syntax: "rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]",
     summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
-    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
+    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
   },
   {
     name: "hand-runs",
