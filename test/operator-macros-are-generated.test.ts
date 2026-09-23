@@ -377,6 +377,7 @@ test("external-scan macros: grill, diagnose, handoff and wait-what render operat
     handoff: [/never inside the\s+repository/, /Redact every secret/, /FLOOR, not a claim/, /RECON or\s+IMPLEMENT/],
     "resolve-conflict": [/Stage explicit paths only/, /never rebase or force-push their history/, /push only when it passes/],
     "wait-what": [/ISO 24495-1/, /Do not add new material/],
+    "agent-doc": [/FIRST, CAN A CHECK DO IT\?/, /THE HEADLINE IS THE WHOLE RULE/, /Never shorten the 56 frozen pre-migration headlines/],
     "session-retro": [/prefer a refusal whenever the mistake\s+is mechanical/, /that is the\s+finding, not a new one/, /Propose only\. Do not edit CLAUDE\.md/],
   };
   for (const [name, patterns] of Object.entries(boundaries)) {
