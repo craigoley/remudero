@@ -36,6 +36,14 @@ name: Build image (ACR)
 #
 # TRIGGER: dispatch or a main push changing any IMAGE_BAKED_PATHS entry (src/lib/deploy-judge.ts) — a
 # test holds this list equal to that one, so drift detection never waits on an image nobody builds.
+#
+# W1-T4061 — root `package-lock.json` is ALSO a trigger path, but deliberately NOT an
+# IMAGE_BAKED_PATHS entry: `deploy/Dockerfile` resolves the image's Chromium build from that
+# file's pinned `playwright-core` version (its REQ 15), yet the file itself changed 12 times in
+# the 30 days to 2026-09-22, almost all unrelated dependency bumps. Watching it the way
+# IMAGE_BAKED_PATHS is watched would rebuild about a dozen times a month for nothing, so the
+# "Decide whether this push needs a new image" step below runs FIRST and skips the actual build
+# (success, no-op) unless it can prove THIS push moved the playwright-core pin.
 
 on:
   push:
@@ -47,6 +55,7 @@ on:
       - deploy/package.json
       - deploy/package-lock.json
       - deploy/codex-requirements.toml
+      - package-lock.json
   workflow_dispatch:
     inputs:
       registry:
@@ -101,10 +110,65 @@ jobs:
       IMAGE: ${{ inputs.image || 'remudero' }}
       TAG_LATEST: ${{ github.event_name == 'push' || inputs.tag_latest }}
     steps:
+      # `fetch-depth: 0` (full history), not the action's shallow default: the guard step below
+      # needs `git show`/`git diff` against `github.event.before`, which a depth-1 checkout would
+      # not have fetched at all.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # W1-T4061 — decide BUILD vs SKIP before anything Azure-side runs, so an unrelated root
+      # `package-lock.json` bump costs one cheap local step instead of a full `az acr build`. Only
+      # runs for `push`: a `workflow_dispatch` has no `before` commit and always means "build".
+      #
+      # (1) any OTHER watched path changed -> build, unconditionally: those paths have no version
+      #     field to compare, touching them IS the image input.
+      # (2) only the root lockfile changed -> build IFF `packages['node_modules/playwright-core']
+      #     .version` differs between `before` and this push's head — the SAME field
+      #     `deploy/Dockerfile` resolves PW_VERSION from (REQ 15). Either side failing to parse
+      #     reads as "build": unknown must never silently skip a real drift.
+      - name: Decide whether this push needs a new image
+        id: image_guard
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BUILD=true
+          if [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            CHANGED="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
+            OTHER_BAKED=false
+            for p in deploy/Dockerfile deploy/entrypoint.sh .dockerignore deploy/package.json deploy/package-lock.json deploy/codex-requirements.toml; do
+              if printf '%s\n' "${CHANGED}" | grep -qxF "${p}"; then OTHER_BAKED=true; fi
+            done
+            if [ "${OTHER_BAKED}" = "false" ]; then
+              if printf '%s\n' "${CHANGED}" | grep -qxF "package-lock.json"; then
+                git show "${BEFORE_SHA}:package-lock.json" > /tmp/old-lock.json 2>/dev/null || echo '{}' > /tmp/old-lock.json
+                git show "${AFTER_SHA}:package-lock.json" > /tmp/new-lock.json 2>/dev/null || echo '{}' > /tmp/new-lock.json
+                BUILD="$(node -e '
+                  const fs = require("fs");
+                  const read = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; } };
+                  const version = (doc) => doc.packages && doc.packages["node_modules/playwright-core"]
+                    ? doc.packages["node_modules/playwright-core"].version
+                    : undefined;
+                  const oldVersion = version(read("/tmp/old-lock.json"));
+                  const newVersion = version(read("/tmp/new-lock.json"));
+                  console.log(oldVersion === undefined || newVersion === undefined || oldVersion !== newVersion ? "true" : "false");
+                ')"
+              else
+                # The push filter fired but this push touched none of the watched paths at all —
+                # should not happen given the `paths:` filter above, but skip rather than guess.
+                BUILD=false
+              fi
+            fi
+          fi
+          echo "This push needs a new image: ${BUILD}"
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
 
       - name: Azure login (OIDC)
+        if: github.event_name != 'push' || steps.image_guard.outputs.build == 'true'
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -121,6 +185,7 @@ jobs:
       # `state/` holds the ledger and the console's bearer tokens.
       - name: Build and push (ACR)
         id: build_push
+        if: github.event_name != 'push' || steps.image_guard.outputs.build == 'true'
         uses: azure/cli@9eb25b8360668fb0ecbafa808d40e2197b2f5f52 # v3.0.0
         with:
           azcliversion: latest
@@ -165,6 +230,7 @@ jobs:
       # Report what landed, including the size — a build that "succeeded" but produced something
       # implausibly small is worth seeing without opening the portal.
       - name: Show the published tag and size
+        if: github.event_name != 'push' || steps.image_guard.outputs.build == 'true'
         uses: azure/cli@9eb25b8360668fb0ecbafa808d40e2197b2f5f52 # v3.0.0
         with:
           azcliversion: latest
@@ -175,6 +241,7 @@ jobs:
             az acr manifest list-metadata -r "${REGISTRY}" -n "${IMAGE}" --orderby time_desc --top 1 -o table
 
       - name: Write build summary
+        if: github.event_name != 'push' || steps.image_guard.outputs.build == 'true'
         run: |
           {
             echo "### Image built"
@@ -183,4 +250,16 @@ jobs:
             echo "- **Image:** \`${IMAGE}:${GITHUB_SHA}\`"
             echo "- **Built by:** \`az acr build\` (ACR Task, on Azure's build fleet — no local daemon)"
             echo "- **Deployed:** nothing. This workflow builds only."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # W1-T4061 — the mirror summary: this push touched only the root lockfile and the pinned
+      # playwright-core version did not move, so the guard above skipped the build on purpose.
+      - name: Write skip summary
+        if: github.event_name == 'push' && steps.image_guard.outputs.build == 'false'
+        run: |
+          {
+            echo "### Image build skipped"
+            echo ""
+            echo "This push only changed \`package-lock.json\` and did not move the pinned"
+            echo "\`playwright-core\` version, so no image input changed (W1-T4061)."
           } >> "$GITHUB_STEP_SUMMARY"

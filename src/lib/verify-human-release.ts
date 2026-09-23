@@ -103,3 +103,149 @@ export async function releaseAutomatedShard(
   if (written.released === false) return { kind: "escalated", reason: written.message };
   return { kind: "released", reason: action.reason };
 }
+
+// ── W1-T4083: the release judge is measured (38 of 38 released, none escalated, 2026-09-22) ──────
+
+export const VERIFY_HUMAN_RELEASE_AUDIT_STEP = "verify_human.release_audit";
+export const RELEASE_AUDIT_MIN_RELEASES = 50;
+export const RELEASE_AUDIT_MIN_DECIDED = 10;
+
+const MERGED_VERDICTS = new Set(["merged", "already_satisfied"]);
+/** Task-attributable failures only; infrastructure blocks never count against the judge. */
+const FAILED_VERDICTS = new Set(["blocked_ci", "blocked_review", "no_pr", "blocked_budget", "error_max_budget_usd", "blocked_illformed"]);
+
+export interface ReleaseAuditAlert {
+  kind: "never-escalates" | "failing-above-base";
+  detail: string;
+}
+
+export interface ReleaseAudit {
+  releases: number;
+  escalations: number;
+  merged: number;
+  failed: number;
+  pending: number;
+  failureRate: number | null;
+  baseFailureRate: number | null;
+  alerts: ReleaseAuditAlert[];
+}
+
+function verdictClass(verdict: unknown): "merged" | "failed" | undefined {
+  if (typeof verdict !== "string") return undefined;
+  if (MERGED_VERDICTS.has(verdict)) return "merged";
+  return FAILED_VERDICTS.has(verdict) ? "failed" : undefined;
+}
+
+/** Remembered between runs: the fleet ledger keeps about a day of rotations. */
+export interface ReleaseAuditState {
+  released: Record<string, string>;
+  escalationKeys: string[];
+  outcomes: Record<string, { ts: string; cls: "merged" | "failed" }>;
+}
+
+export const EMPTY_RELEASE_AUDIT_STATE: ReleaseAuditState = { released: {}, escalationKeys: [], outcomes: {} };
+
+/** Join each machine release to its latest decisive verdict, against other tasks' failure rate. */
+export function auditMachineReleases(
+  rows: readonly Record<string, unknown>[],
+  prior: ReleaseAuditState = EMPTY_RELEASE_AUDIT_STATE,
+): { audit: ReleaseAudit; state: ReleaseAuditState } {
+  const released = new Map(Object.entries(prior.released));
+  const escalationKeys = new Set(prior.escalationKeys);
+  for (const row of rows) {
+    const ts = String(row.ts ?? "");
+    if (row.step === "verify_human.release_escalated") escalationKeys.add(`${String(row.task_id)}@${ts}`);
+    if (row.step === "ratify.approved" && row.author_class === "machine" && typeof row.task_id === "string") {
+      const seen = released.get(row.task_id);
+      if (seen === undefined || ts > seen) released.set(row.task_id, ts);
+    }
+  }
+  const outcomes = new Map(Object.entries(prior.outcomes));
+  let baseMerged = 0;
+  let baseFailed = 0;
+  for (const row of rows) {
+    if (row.step !== "verdict" || typeof row.task_id !== "string") continue;
+    const cls = verdictClass(row.verdict);
+    if (!cls) continue;
+    const ts = String(row.ts ?? "");
+    const releasedTs = released.get(row.task_id);
+    if (releasedTs === undefined) {
+      if (cls === "merged") baseMerged += 1;
+      else baseFailed += 1;
+      continue;
+    }
+    if (ts <= releasedTs) continue;
+    const seen = outcomes.get(row.task_id);
+    if (!seen || ts > seen.ts) outcomes.set(row.task_id, { ts, cls });
+  }
+  let merged = 0;
+  let failed = 0;
+  for (const [taskId, o] of outcomes) {
+    if (!released.has(taskId)) continue;
+    if (o.cls === "merged") merged += 1;
+    else failed += 1;
+  }
+  const decided = merged + failed;
+  const failureRate = decided > 0 ? failed / decided : null;
+  const baseDecided = baseMerged + baseFailed;
+  const baseFailureRate = baseDecided > 0 ? baseFailed / baseDecided : null;
+  const escalations = escalationKeys.size;
+  const alerts: ReleaseAuditAlert[] = [];
+  if (released.size >= RELEASE_AUDIT_MIN_RELEASES && escalations === 0) {
+    alerts.push({
+      kind: "never-escalates",
+      detail:
+        `The verify-human release judge has released ${released.size} tasks and escalated none. A gate ` +
+        `that never says no is not discriminating: sample a few released tasks and review the risk ` +
+        `threshold in plan/policy.yaml.`,
+    });
+  }
+  if (
+    failureRate !== null && baseFailureRate !== null && decided >= RELEASE_AUDIT_MIN_DECIDED &&
+    baseDecided >= RELEASE_AUDIT_MIN_DECIDED && failureRate > 2 * baseFailureRate
+  ) {
+    alerts.push({
+      kind: "failing-above-base",
+      detail:
+        `Tasks released by the verify-human judge fail ${(failureRate * 100).toFixed(0)}% of the time ` +
+        `(${failed} of ${decided}) against ${(baseFailureRate * 100).toFixed(0)}% for other tasks. The ` +
+        `release threshold is letting through work the fleet cannot finish.`,
+    });
+  }
+  return {
+    audit: { releases: released.size, escalations, merged, failed, pending: released.size - decided, failureRate, baseFailureRate, alerts },
+    state: { released: Object.fromEntries(released), escalationKeys: [...escalationKeys].sort(), outcomes: Object.fromEntries(outcomes) },
+  };
+}
+
+/** Stable proposal ids, so a once-only stager raises each condition exactly once. */
+export function runReleaseAudit(
+  rows: readonly Record<string, unknown>[],
+  hooks: {
+    appendRow: (row: Record<string, unknown>) => void;
+    stageProposal: (proposal: { id: string; summary: string; evidenceAnchors: never[] }) => void;
+    runId: string;
+    readState: () => ReleaseAuditState;
+    writeState: (state: ReleaseAuditState) => void;
+  },
+): ReleaseAudit {
+  const { audit, state } = auditMachineReleases(rows, hooks.readState());
+  hooks.writeState(state);
+  hooks.appendRow({
+    run_id: hooks.runId,
+    task_id: "DAEMON",
+    step: VERIFY_HUMAN_RELEASE_AUDIT_STEP,
+    releases: audit.releases,
+    escalations: audit.escalations,
+    merged: audit.merged,
+    failed: audit.failed,
+    pending: audit.pending,
+    failure_rate: audit.failureRate,
+    base_failure_rate: audit.baseFailureRate,
+    alerts: audit.alerts.map((a) => a.kind),
+  });
+  for (const alert of audit.alerts) {
+    hooks.stageProposal({ id: `verify-human-release-audit-${alert.kind}`, summary: alert.detail, evidenceAnchors: [] });
+  }
+  return audit;
+}

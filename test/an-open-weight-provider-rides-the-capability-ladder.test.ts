@@ -460,7 +460,7 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   // later edit that deletes the trailing entry fails here rather than silently killing the lane.
   assert.deepEqual(
     capabilities?.cash?.balanced.low,
-    ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
+    ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna"],
     "the declared cash row, not fallback data, is the capability source",
   );
   assert.equal(selected.capability, "balanced");

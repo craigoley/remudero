@@ -1,0 +1,42 @@
+- id: W1-T4098
+  title: "THE OPERATOR'S CLAUDE CODE MEMORY HAS NO HYGIENE — two stores split by working directory, one index at 20.7 KB near Claude Code's load limit, 39 of its 67 links pointing at files that no longer exist, and July-era project facts that repeat repo doctrine: add `rmd memory-lint` to check a memory directory and fix what is safe to fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "knowledge-system audit 2026-09-22"
+  plan_refs: [W1-T4095]
+  files: [src/lib/memory-lint.ts, src/run-task.ts, test/an-operator-memory-stays-loadable.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 on the operator's machine: ~/.claude/projects/-Users-craigoleyagent-Remudero/memory (9 files) and
+    ~/.claude/projects/-Users-craigoleyagent-Remudero-remudero/memory (28 files; MEMORY.md 20.7 KB, 39 of 67 links
+    dangling). Claude Code loads MEMORY.md into every session and documents a size limit on it, so a dead or
+    duplicated line costs every session and a near-limit index is silently truncated.
+  design: |
+    (i) `rmd memory-lint <dir>…` reports: dangling index links, memory files the index does not list, index size against
+        the documented load limit, missing frontmatter, and memories that near-duplicate a repo doctrine rule or learning
+        (shingle similarity against the repo's knowledge inventory).
+    (ii) `--fix` does only safe, reversible edits: drops dangling index lines and adds unlisted files to the index. It
+         never deletes a memory file; a duplicate is reported with the rule it repeats.
+    (iii) `--merge <from> <into>` moves one store's files into another and rewrites the index.
+    (iv) The gardener (W1-T4095) runs the lint read-only when memory directories are configured, and puts the result in
+         its scorecard.
+  acceptance:
+    - claim: "a dangling index link is reported and removed by fix"
+      proof: 'grep: test("W1-T4098: a dangling index link is reported and removed by fix" in test/an-operator-memory-stays-loadable.test.ts'
+    - claim: "an index near the load limit is reported"
+      proof: 'grep: test("W1-T4098: an index near the load limit is reported" in test/an-operator-memory-stays-loadable.test.ts'
+    - claim: "a memory that repeats a doctrine rule is reported with the rule"
+      proof: 'grep: test("W1-T4098: a memory that repeats a doctrine rule is reported with the rule" in test/an-operator-memory-stays-loadable.test.ts'
+    - claim: "fix never deletes a memory file"
+      proof: 'grep: test("W1-T4098: fix never deletes a memory file" in test/an-operator-memory-stays-loadable.test.ts'
+    - claim: "the CLI runs the lint"
+      proof: 'grep: lintMemoryDir( in src/run-task.ts'
+  falsifier: |
+    Let fix delete orphan files and the fourth test goes red.

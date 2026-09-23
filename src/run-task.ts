@@ -488,6 +488,7 @@ import {
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
+import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
   feedbackEntryPath,
@@ -808,7 +809,7 @@ import {
   type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./lib/verify-human-judge.js";
-import { releaseAutomatedShard } from "./lib/verify-human-release.js";
+import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
 import {
@@ -1122,6 +1123,7 @@ import {
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
   acceptanceAuthorTimeCheck,
+  acceptanceBlockRegion,
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
@@ -1247,6 +1249,7 @@ import {
   readMergeCreditedTaskIds,
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
+  persistVerifiedCredit,
   type RequiredContextsRead,} from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -1998,6 +2001,7 @@ import {
   type GhRateLimitRefusal,
   parseDecisionRequest,
   parseFollowups,
+  parseLearningsUsed,
   parseQuestion,
   parseReconReport,
   parseReport,
@@ -15064,6 +15068,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       });
     }
 
+    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds);
+
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
 
     // ── PR (worker REPORT or orchestrator fallback).
@@ -15146,6 +15152,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const resolved = resolution?.outcome === "verified" ? resolution : undefined;
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
+        // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
+        const credit = persistVerifiedCredit(ledgerPath, taskId, resolved, github.changedFiles?.(resolved.url));
+        log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
           worktreeRemove(repoDir, worktreePath);
           log("worktree.remove", { on: "already_satisfied" });
@@ -19037,9 +19046,29 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     return okOrStale(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
   }
 
-  // Untrailered (or trailer present but unresolved to any criteria): judged exactly as before —
-  // acceptance criterion 4, no change in verdict or exit code.
-  if (!d.defective) {
+  // Untrailered (or trailer present but unresolved to any criteria): W1-T1097 — the EXIT CODE is
+  // now SOURCED FROM `acceptanceAuthorTimeCheck`, the same predicate the CI gate
+  // (scripts/acceptance-author-gate.mjs) already calls on this body, rather than from `d.defective`
+  // (design item i). `d.defective` is `!headerFound || parsed.length !== bulletsWritten ||
+  // emptyProofs > 0`, and that reads FALSE when the block scan bails before the first bullet:
+  // headerFound is true, bulletsWritten and criteriaParsed both read 0, and 0 === 0, so a body that
+  // resolves NO criteria used to print "OK" and exit 0. `acceptanceAuthorTimeCheck` refuses that
+  // shape ITSELF, via its own `d.criteriaParsed === 0` arm, so this is an exit-code source, not a
+  // new rule (design item v). The printed diagnostic lines below stay exactly what they were
+  // (design item ii); only which predicate decides pass/fail moves.
+  //
+  // `trailerResolves` is passed rather than omitted: `taskId`/`trailerResolved` above already
+  // establish whether THIS body's trailer resolved any criteria via THIS command's own plan load,
+  // and reaching this line means it did not (`trailerResolved` is false whenever we get here).
+  // `acceptanceAuthorTimeCheck` OMITTED-`trailerResolves` accepts ANY anchored trailer at face
+  // value (its own doc: "TRAP: on #2908 a trailer resolved to ZERO ids..."), which would silently
+  // repass this exact unresolved-trailer shape and disagree with the block diagnostics computed
+  // two lines above — so the resolver here answers with the SAME verdict `trailerResolved` already
+  // reached, never a second lookup.
+  const authorCheck = acceptanceAuthorTimeCheck(body, {
+    trailerResolves: (id) => id === taskId && trailerResolved,
+  });
+  if (authorCheck.ok) {
     return okOrStale("OK — the parser resolves exactly what was written, and every proof is non-empty.");
   }
   if (!d.headerFound) {
@@ -19057,13 +19086,51 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
         `truncates everything after it. Keep each claim on ONE line.`,
     );
   }
-  if (d.emptyProofs > 0) {
+  if (d.headerFound && d.truncatedAtBullet === undefined && d.criteriaParsed === 0) {
+    // design item (iii): written FOR this case rather than inherited from
+    // `acceptanceAuthorTimeCheck`'s generic "0 criterion/criteria have no proof" message, which is
+    // confusing here — the real problem is that the scan never recognised a single bullet under the
+    // header. Name the header line and the first line that is not a bullet, so the author can see
+    // exactly where the block broke.
+    console.error(`DEFECTIVE: ${zeroCriteriaOffendingLineMessage(body)}`);
+  } else if (d.emptyProofs > 0) {
     console.error(
       `DEFECTIVE: ${d.emptyProofs} parsed criterion/criteria have an EMPTY proof — a claim with nothing ` +
         `to execute. The proof must be on the immediately-following indented line as \`proof: ...\`.`,
     );
   }
   return 1;
+}
+
+/**
+ * W1-T1097 design item (iii): the zero-criteria refusal names the ACCEPTANCE header's own line and
+ * the first line beneath it that is not a bullet — the exact line
+ * {@link "./lib/review.js".acceptanceBlockRegion} stopped at — rather than a generic "nothing
+ * parsed" message. Line numbers are 1-based, matching what an author sees in an editor.
+ */
+function zeroCriteriaOffendingLineMessage(body: string): string {
+  // `acceptanceBlockRegion` is the EXACT function `acceptanceBlockDiagnostics` (lib/review.ts) calls
+  // to derive `headerFound` for this same `body` string — a pure function of `body` alone, with no
+  // other input. The one call site above only reaches this function once `d.headerFound` already
+  // read true for this identical `body`, so a second call here on the identical string cannot
+  // disagree and return `undefined`. Asserted rather than re-branched: a defensive `if (!region)`
+  // here would be a line no input can ever drive, which is what CI's coverage-ratchet flagged on an
+  // earlier round of this same fix (`src/run-task.ts:19108`, now removed) — an untestable branch is
+  // a worse signal than an assertion of an invariant the two functions already share by construction.
+  const region = acceptanceBlockRegion(body)!;
+  const lines = body.split("\n");
+  const headerLine = lines[region.headerLine]?.trim() ?? "";
+  const offendingIndex = region.endLine;
+  const offendingLine = lines[offendingIndex];
+  const where =
+    offendingLine !== undefined
+      ? `line ${offendingIndex + 1}, "${offendingLine.trim()}", is not a bullet (a bullet starts with "-", "*", or "1.")`
+      : "the body ends immediately after the header, with no bullet ever written";
+  return (
+    `an Acceptance header was found (line ${region.headerLine + 1}, "${headerLine}") but ZERO bullets were ` +
+    `resolved from it — everything below the header is invisible to the parser. The very next thing the parser ` +
+    `saw was ${where}. Add at least one "- claim: ... / proof: ..." bullet directly under the header.`
+  );
 }
 
 // ReceiptCommandDeps/receiptCommand and ReplayCommandOpts/replayCommand moved to
@@ -19987,6 +20054,84 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
     const green = pair.greenSha ? ` green=${pair.greenSha.slice(0, 8)}` : "";
     const files = pair.repairFiles?.length ? `  repair=${pair.repairFiles.join(",")}` : "";
     console.log(`  ${pair.state === "repaired" ? "REPAIRED" : "OPEN    "} #${pair.pr} ${pair.gate}  red=${pair.redSha.slice(0, 8)}${green}${files}`);
+  }
+  return 0;
+}
+
+/** `rmd board`'s three-repository fallback (W1-T3685) — read ONLY when `config.fleetRepos` is
+ *  absent (an untouched, pre-upgrade config.json) AND no `--repo` flag was given. The genuinely
+ *  configured default lives in `config.fleetRepos` (src/lib/config-schema.ts); this is the last
+ *  resort, not the source of truth. */
+const DEFAULT_FLEET_REPOS: readonly string[] = ["craigoley/remudero", "craigoley/remudero-site", "craigoley/remudero-console"];
+
+/** Injectable seam for {@link boardCommand} — real callers pass none of it. */
+export interface BoardCommandOptions {
+  survey?: (repos: readonly string[]) => PullRequestBoard;
+  loadConfig?: () => Pick<Config, "fleetRepos">;
+}
+
+/** The repository set `rmd board` surveys when no `--repo` flag narrows it: `config.fleetRepos`
+ *  when the operator configured one (design (i) — "a fourth repo must need no code change"),
+ *  else {@link DEFAULT_FLEET_REPOS}. An unreadable config (the empty-checkout CI shape every
+ *  other diagnostic verb here already guards — see `handRunsCommand`'s own note) is not a fleet
+ *  with no repos; it falls back the same as an absent field, never crashing a report-only verb. */
+function defaultFleetRepos(deps: BoardCommandOptions): readonly string[] {
+  try {
+    const configured = (deps.loadConfig ?? loadConfig)().fleetRepos;
+    if (Array.isArray(configured) && configured.length > 0) return configured;
+  } catch {
+    // Unreadable config falls through to DEFAULT_FLEET_REPOS below, exactly like an absent field.
+  }
+  return DEFAULT_FLEET_REPOS;
+}
+
+/**
+ * `rmd board [--repo <owner/repo> ...]` — W1-T3685: the one question an operator asks first
+ * ("what is open across the fleet, and what is red") and no other verb answers. `rmd status`
+ * renders this daemon's own board from local state; `rmd ci-failures` answers a narrower
+ * question, one repo by day. This reads GitHub directly, cross-repo, via
+ * {@link surveyPullRequestBoard} (src/lib/pr-board.ts) — ONE `gh pr list` call per repository,
+ * never a per-PR follow-up (the secondary-rate-limit guard that module's own doc names).
+ *
+ * `--repo` may repeat; every occurrence is collected, and repos.length narrows the default set
+ * rather than adding to it. With none given, the survey covers {@link defaultFleetRepos}.
+ *
+ * EXIT CODE IS INFORMATIONAL ONLY: always 0, whatever the board contains, including every
+ * repository red or unavailable. This verb reports; it does not gate (design iv) — mirroring
+ * `ciFailuresCommand`'s own report-only contract just above.
+ */
+export function boardCommand(rest: string[], deps: BoardCommandOptions = {}): number {
+  const badArg = unknownArgError("board", rest, ["--repo"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const requested: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] !== "--repo") continue;
+    const value = rest[i + 1];
+    if (value) requested.push(value);
+    i++;
+  }
+  const repos = requested.length > 0 ? requested : defaultFleetRepos(deps);
+  const board = deps.survey ? deps.survey(repos) : surveyPullRequestBoard(repos);
+  console.log(`rmd board — ${repos.length} repositor${repos.length === 1 ? "y" : "ies"}`);
+  for (const r of board.repos) {
+    if (!r.available) {
+      console.log(`  ${r.repo}: UNAVAILABLE (${r.error})`);
+      continue;
+    }
+    if (r.pullRequests.length === 0) {
+      console.log(`  ${r.repo}: no open pull requests`);
+      continue;
+    }
+    console.log(`  ${r.repo}: ${r.pullRequests.length} open`);
+    for (const pr of r.pullRequests) {
+      const draft = pr.isDraft ? " [draft]" : "";
+      const failing = pr.failingChecks.length > 0 ? `  failing=${pr.failingChecks.join(",")}` : "";
+      const pending = pr.pendingChecks.length > 0 ? `  pending=${pr.pendingChecks.join(",")}` : "";
+      console.log(`    #${pr.number} ${pr.title}${draft} (${pr.headRefName})${failing}${pending}`);
+    }
   }
   return 0;
 }
@@ -24718,6 +24863,20 @@ export function stageInboxProposalOnce(registryPath: string, proposal: Proposal)
   );
 }
 
+/** The release audit's remembered state; a missing or corrupt file starts empty, never throws. */
+export function readReleaseAuditState(path: string): ReleaseAuditState {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ReleaseAuditState>;
+    return {
+      released: parsed.released ?? {},
+      escalationKeys: parsed.escalationKeys ?? [],
+      outcomes: parsed.outcomes ?? {},
+    };
+  } catch {
+    return EMPTY_RELEASE_AUDIT_STATE; // absent on the first run, or unreadable — the next write replaces it
+  }
+}
+
 export async function defaultVerifyHumanCadenceResult(
   /**
    * THE CHECKOUT, NOT `config.root` — different directories on every fleet host. `config.root` is
@@ -24737,7 +24896,7 @@ export async function defaultVerifyHumanCadenceResult(
     const ledgerPath = ledgerPathFor(config);
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
-    return await verifyHumanCadence({
+    const result = await verifyHumanCadence({
       shards: parkedVerifyHumanShards(plan, repoRoot, clock),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
@@ -24754,6 +24913,17 @@ export async function defaultVerifyHumanCadenceResult(
       releasedIds: releasedTaskIds(readLedgerRawLines(ledgerPath)),
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
     });
+    // W1-T4083: measure the release judge over every retained rotation, remembering what older
+    // rotations showed in a state file, so a judge that never escalates is caught.
+    const auditStatePath = join(config.root, "state", "verify-human-release-audit.json");
+    const audit = runReleaseAudit(readLedgerUnionBounded(ledgerPath, { maxRotations: 400 }) as unknown as Record<string, unknown>[], {
+      appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
+      stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
+      runId,
+      readState: () => readReleaseAuditState(auditStatePath),
+      writeState: (state) => writeAtomic(auditStatePath, JSON.stringify(state)),
+    });
+    return { ...result, releaseAudit: { releases: audit.releases, escalations: audit.escalations, merged: audit.merged, failed: audit.failed, alerts: audit.alerts.map((a) => a.kind) } };
   } catch (e) {
     return {
       parked: 0,
@@ -29571,6 +29741,19 @@ const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
 type DaemonSweepHookBuilder = typeof buildSweepHook;
 type DaemonSweepLightHookBuilder = typeof buildSweepLightHook;
 
+export function logLearningsUsed(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  text: string,
+  injectedIds: readonly string[],
+): void {
+  const parsed = parseLearningsUsed(text, injectedIds);
+  if (!parsed) {
+    log("learnings.used", { silent: true, injected_ids: [...injectedIds] });
+    return;
+  }
+  log("learnings.used", { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused });
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -30531,7 +30714,7 @@ export async function daemonCommand(
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];
           const exitCode = request.action === "fix"
-            ? await (deps.fixCommand ?? fixCommand)(args)
+            ? await (deps.fixCommand ?? fixCommand)([...args, "--requested"])
             : await (deps.reviewCommand ?? reviewCommand)(String(request.prNumber), ["--repo", target.repo]);
           return exitCode === 0
             ? { outcome: "completed", detail: `${request.action} command accepted PR #${request.prNumber}` }
@@ -32000,6 +32183,7 @@ export async function serveCommand(
   const server = await buildReadyServeServer({
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     board: boardDeps,
+    modelApprovals: config.modelApprovals,
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
@@ -37122,6 +37306,16 @@ export interface FixDeps {
  *   - anything else (no block evidence: mergeable,
  *     stale, contradictory-failure)                   -> refused, naming the reason.
  */
+/**
+ * W1-T4077 — THE CONSOLE'S "FIX NOW". The operator asking for a fix IS the decision to try again, so the strike
+ * count does not turn the request into an escalation: the PR routes as a fresh attempt. Nothing else is relaxed —
+ * {@link routeFix} still refuses a merged or closed PR and a PR with no failure evidence, and the dispatched round
+ * keeps the fix rung's own branch claim and cost ceiling. The strike ledger itself is not touched.
+ */
+export function requestedFixView(pr: OpenPrView): OpenPrView {
+  return { ...pr, priorStrikes: 0 };
+}
+
 export async function routeFix(
   prState: string | undefined,
   pr: OpenPrView,
@@ -37215,7 +37409,9 @@ export async function fixCommand(
   deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix } = {},
 ): Promise<number> {
   const prArg = rest[0];
-  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], []);
+  // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
+  // again, so the strike count does not turn it into an escalation; every other refusal still applies.
+  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], ["--requested"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -37232,6 +37428,7 @@ export async function fixCommand(
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
   const runId = `FIX-${Date.now()}`;
+  const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
 
@@ -37316,9 +37513,20 @@ export async function fixCommand(
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
   });
-  const { outcome, reason } = await (deps.route ?? routeFix)(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
+  const { outcome, reason } = await (deps.route ?? routeFix)(
+    raw.state,
+    operatorRequested ? requestedFixView(pr) : pr,
+    effects,
+    DEFAULT_SWEEP_POLICY,
+  );
 
-  log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, { pr_number: prNumber, task_id: taskId, outcome, reason });
+  log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, {
+    pr_number: prNumber,
+    task_id: taskId,
+    outcome,
+    reason,
+    ...(operatorRequested ? { operator_requested: true } : {}),
+  });
   if (outcome === "fixed") {
     console.log(`### rmd fix — PR #${prNumber} (${taskId}): ${reason} — dispatched the fix rung.`);
     return 0;
@@ -43198,6 +43406,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).",
   },
   {
+    name: "board",
+    syntax: "rmd board [--repo <owner/repo> ...]",
+    summary: "Print what is open, and what is red, across every fleet repository.",
+    detail: "W1-T3685: the one question an operator asks first and no other verb answered — `rmd status` renders this daemon's OWN board from local state, `rmd ci-failures` answers a narrower one (failures, one repo, by day). Surveys every repository named by `--repo` (repeatable), or `config.fleetRepos` when none is given, or a three-repository fallback when that is unset too — never a list written into `pr-board.ts` itself. ONE `gh pr list --json ...` call per repository (surveyPullRequestBoard, src/lib/pr-board.ts): a per-PR follow-up read is refused by design, the secondary-rate-limit hazard. A repository that cannot be read prints UNAVAILABLE with the read error, never rendered as zero open — an empty queue and an unreachable one are opposite facts. Each open pull request prints its number, title, draft state, head branch, and the NAMES of its failing and pending checks. REPORT-ONLY: exit code is always 0, whatever the board contains — this verb reports, it does not gate.",
+  },
+  {
     name: "census-membership",
     syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
@@ -44099,6 +44313,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
+  ["board", (rest) => boardCommand(rest)],
   ["census-membership", (rest) => censusMembershipCommand(rest)],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
   ["ci-learning", (rest) => ciLearningCommand(rest)],

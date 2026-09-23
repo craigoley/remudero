@@ -140,6 +140,7 @@ import {
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
+import type { ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
   buildProviderAuthRoutes,
@@ -220,6 +221,8 @@ export interface ServeDeps {
    *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
   resolveCurrentSha?: () => string;
   board: BoardDeps;
+  /** Read-only projection of the host's model approvals; no other config field crosses the status wire. */
+  modelApprovals?: readonly ModelApproval[];
   /**
    * `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts).
    * Deliberately `Omit<..., "inboxRoot">` — {@link buildServeRoutes} supplies `inboxRoot`
@@ -934,6 +937,27 @@ export interface ConsoleStatusTaskProjection {
   reason: string;
 }
 
+export interface ConsoleModelApproval {
+  model: string;
+  approvedBy: string;
+  approvedAt: string;
+  expiresAt?: string;
+  expired: boolean;
+}
+
+function projectModelApprovals(
+  approvals: readonly ModelApproval[] | undefined,
+  nowMs = systemClock.now(),
+): ConsoleModelApproval[] {
+  return (approvals ?? []).map((approval) => ({
+    model: approval.model,
+    approvedBy: approval.approvedBy,
+    approvedAt: approval.approvedAt,
+    ...(approval.expiresAt ? { expiresAt: approval.expiresAt } : {}),
+    expired: approval.expiresAt !== undefined && Date.parse(approval.expiresAt) <= nowMs,
+  }));
+}
+
 /** W1-T3394: `row.needsHuman` is one of the classifier's four source shapes — a needs-human
  *  escalation (escalate.ts, W1-T8/T77's BLOCKED-AMBIGUOUS disposition) — so routed through {@link
  *  classifyAskRecordItem} rather than read as a bare boolean here, even though today's only
@@ -947,7 +971,11 @@ function taskRendersOnInitialBoard(row: BoardRow): boolean {
   return row.phase !== undefined || escalationIsAsk || row.verifyHumanPending === true;
 }
 
-export function projectConsoleStatusResponse(body: unknown): unknown {
+export function projectConsoleStatusResponse(
+  body: unknown,
+  modelApprovals?: readonly ModelApproval[],
+  nowMs = systemClock.now(),
+): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const source = body as BoardSnapshot & Record<string, unknown>;
   if (!Array.isArray(source.tasks)) return body;
@@ -965,7 +993,7 @@ export function projectConsoleStatusResponse(body: unknown): unknown {
     limit: wholePlanFits ? CONSOLE_STATUS_FULL_TASK_THRESHOLD : CONSOLE_STATUS_RENDERED_TASK_LIMIT,
     reason: omitted === 0 ? "complete" : "bounded-to-initial-board-rows",
   };
-  return { ...source, tasks: rendered, taskProjection };
+  return { ...source, modelApprovals: projectModelApprovals(modelApprovals, nowMs), tasks: rendered, taskProjection };
 }
 
 function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: ConsoleResponseStaleness): BoardSnapshot & { staleness: ConsoleResponseStaleness } {
@@ -1010,9 +1038,10 @@ function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: Conso
 
 function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: ConsoleResponseStaleness): unknown {
   const nowMs = systemClock.now();
+  const modelApprovals = deps.modelApprovals ?? [];
   switch (path) {
     case "/v1/status":
-      return projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness));
+      return projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs);
     case "/v1/recent":
       return { entries: [], staleness };
     case "/v1/inbox":
@@ -1024,7 +1053,7 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
   }
 }
 
-export function projectConsoleStatusRoute(route: Route): Route {
+export function projectConsoleStatusRoute(route: Route, modelApprovals?: readonly ModelApproval[]): Route {
   if (route.method !== "GET" || route.path !== "/v1/status") return route;
   return {
     ...route,
@@ -1039,7 +1068,7 @@ export function projectConsoleStatusRoute(route: Route): Route {
         return;
       }
       res.writeHead(buffered.status, buffered.headers);
-      res.end(JSON.stringify(projectConsoleStatusResponse(JSON.parse(buffered.body))));
+      res.end(JSON.stringify(projectConsoleStatusResponse(JSON.parse(buffered.body), modelApprovals, buffered.generatedAtMs)));
     },
   };
 }
@@ -3543,6 +3572,7 @@ function assembleServeRoutes(
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
   operatorAgentMemory?: OperatorAgentMemorySource,
 ): ServeRoutesAssembly {
+  const modelApprovals = deps.modelApprovals ?? [];
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -3623,7 +3653,7 @@ function assembleServeRoutes(
   // export returns only a bounded, secret-scrubbed preview (see context-controls.ts's header).
   const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
   const rawRoutes = [
-    projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen)),
+    projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals),
     buildRepoDashboardRoute({ root: deps.questionsRoot }),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),

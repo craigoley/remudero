@@ -40,15 +40,38 @@ function executableText(value: unknown): string {
 test("a push to main that changes an authoritative baked or build-context path starts the ACR build workflow", () => {
   const push = workflow().on?.push;
   assert.deepEqual(push?.branches, ["main"]);
-  assert.deepEqual(push?.paths, ["deploy/Dockerfile", "deploy/entrypoint.sh", ".dockerignore", "deploy/package.json", "deploy/package-lock.json", "deploy/codex-requirements.toml"]);
+  // W1-T4061: root `package-lock.json` is a trigger PATH (so the job runs and can inspect the
+  // push), but not an IMAGE_BAKED_PATHS entry — the "Decide whether this push needs a new image"
+  // step still skips the actual `az acr build` unless the pinned playwright-core version moved.
+  assert.deepEqual(push?.paths, [
+    "deploy/Dockerfile",
+    "deploy/entrypoint.sh",
+    ".dockerignore",
+    "deploy/package.json",
+    "deploy/package-lock.json",
+    "deploy/codex-requirements.toml",
+    "package-lock.json",
+  ]);
 });
 
 test("a push to main that changes only mounted source paths does not start the ACR build workflow", () => {
   const paths = workflow().on?.push?.paths ?? [];
-  for (const mountedPath of ["src/**", "test/**", "plan/**", "scripts/**", "bin/**", "package.json", "package-lock.json"]) {
+  // package-lock.json is deliberately excluded here (W1-T4061 added it above): the workflow DOES
+  // start on a root lockfile edit, but its own first step decides build vs skip from content —
+  // this list is only the mounted paths that must never even trigger that decision.
+  for (const mountedPath of ["src/**", "test/**", "plan/**", "scripts/**", "bin/**", "package.json"]) {
     assert.equal(paths.includes(mountedPath), false, `${mountedPath} must not trigger an image build`);
   }
   assert.equal(paths.some((path) => path.includes("**") || path === "."), false, "the push filter must stay exact");
+});
+
+test("W1-T4061: a root package-lock.json push is gated behind a content-based guard, not built unconditionally", () => {
+  const build = workflow().jobs?.build;
+  const guard = build?.steps?.find((step) => step.name === "Decide whether this push needs a new image");
+  assert.ok(guard, "a guard step must exist to keep the root lockfile path from building on every edit");
+  assert.match(guard!.run ?? "", /playwright-core/);
+  const buildPush = build?.steps?.find((step) => step.name === "Build and push (ACR)");
+  assert.match((buildPush as { if?: string } | undefined)?.if ?? "", /steps\.image_guard\.outputs\.build/);
 });
 
 test("manual dispatch remains available with its current registry image and latest-tag controls", () => {

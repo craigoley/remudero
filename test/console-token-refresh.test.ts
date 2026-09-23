@@ -750,7 +750,7 @@ test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING ab
     "/v1/operator-agent/emergency/stop",
     "/v1/policy/provider-routing",
     "/v1/policy/provider-routing/clear",
-    "/v1/pr-actions",
+    // W1-T4077: /v1/pr-actions moved to LOW (operator ruling 2026-09-22) — review and fix only enter the ordinary pipelines.
     "/v1/skills/run",
   ].sort());
 });

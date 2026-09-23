@@ -1,0 +1,46 @@
+- id: W1-T4091
+  title: "A LEARNING IS RANKED BY HOW RECENTLY IT WAS INJECTED, NEVER BY WHETHER IT HELPED — give every learning a usefulness estimate from its own used/injected history and let selection explore: rank by a sample from each entry's Beta posterior, so a fact injected hundreds of times and never used sinks on its own, and a new fact still gets tried"
+  repo: remudero
+  depends_on: [W1-T4090]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "knowledge-system audit 2026-09-22"
+  plan_refs: [W1-T4090, W1-T33, W1-T2760]
+  files: [src/lib/knowledge-value.ts, src/lib/learnings.ts, src/lib/digest.ts, src/run-task.ts, test/a-learning-that-never-helps-sinks.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22.
+    (1) `selectLearnings` (learnings.ts) ranks matched entries by error, symbol and file match counts, then layer, then the
+        `cited` date. Over 1,056 `learnings.injected` rows, 32% dropped matched entries at the 8,148-character budget and the
+        most-injected fact (`askuserquestion-auto-resolves-empty-headless`) went in 325 times.
+    (2) After W1-T4090 each run ledgers which injected facts the worker says it used. That is a claim, not proof, but it is
+        the per-item signal every production memory system in the 2025-2026 literature keeps (ACE's helpful/harmful
+        counters, Mem0's usage-weighted retrieval); W1-T4092's A/B pairs are the causal check on top.
+  design: |
+    (i) src/lib/knowledge-value.ts folds the ledger's `learnings.injected` and `learnings.used` rows into, per learning,
+        `{injected, used, silent}` and a Beta(used + 1, injected - used + 1) posterior. Silent reports count as neither.
+    (ii) `selectLearnings` keeps its match-strength ordering, and within equal match strength ranks by a SAMPLE from each
+         entry's posterior (Thompson sampling), seeded per run so a run is reproducible. A fact with little history
+         keeps a wide posterior and still gets tried; one injected 300 times and used never has a narrow posterior near
+         zero and sinks. No count or ratio threshold decides anything.
+    (iii) The daily digest reports, per learning, injected, used, the posterior mean and its trend, and the ten most
+          injected-but-unused entries.
+    (iv) The folded counts are cached in a state file rebuilt from the ledger union, so rotation never erases history.
+  acceptance:
+    - claim: "a learning injected often and never used sinks below one that is used"
+      proof: 'grep: test("W1-T4091: a learning injected often and never used sinks below one that is used" in test/a-learning-that-never-helps-sinks.test.ts'
+    - claim: "a learning with no history still gets selected sometimes"
+      proof: 'grep: test("W1-T4091: a learning with no history still gets selected sometimes" in test/a-learning-that-never-helps-sinks.test.ts'
+    - claim: "a run's selection is reproducible from its seed"
+      proof: 'grep: test("W1-T4091: a run.s selection is reproducible from its seed" in test/a-learning-that-never-helps-sinks.test.ts'
+    - claim: "the digest names the most injected unused learnings"
+      proof: 'grep: test("W1-T4091: the digest names the most injected unused learnings" in test/a-learning-that-never-helps-sinks.test.ts'
+    - claim: "selection reads the value model"
+      proof: 'grep: learningValue( in src/lib/learnings.ts'
+  falsifier: |
+    Rank by `cited` alone and the first test goes red with a 300-injected, 0-used fixture beating a 10/8 one.

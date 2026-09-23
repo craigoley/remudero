@@ -17,7 +17,7 @@
     - src/lib/verify-human-release.ts
     - plan/policy.yaml
     - test/risk-levels-are-runtime-policy.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE OPERATOR'S WORDS: "I don't want strictness, I want risk levels and rules that can be

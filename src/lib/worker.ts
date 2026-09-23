@@ -124,6 +124,7 @@ import {
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
+  markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
   codexCapabilityForRequestedModel,
 } from "./worker-provider.js";
@@ -218,6 +219,8 @@ export interface WorkerResult {
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
+  openWeightDeploymentAbsent?: string;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
    * carries this only after its assignment event was emitted; the ID does NOT imply that a provider
    * reported serving the selected model. */
@@ -1750,6 +1753,15 @@ export async function runOpenWeightWalkingLadder(
     try {
       const result = await run({ ...selection, model });
       result.routedModel = model;
+      // W1-T4079: an absent deployment (404) cannot succeed on retry but the next rung can. Remember
+      // it so selection passes over it, and walk; with no rung left, return the result as before.
+      const next = rungs[index + 1];
+      if (result.openWeightDeploymentAbsent && next) {
+        markOpenWeightDeploymentAbsent(result.openWeightDeploymentAbsent);
+        console.error(JSON.stringify({ event: "worker.openweight.rung_absent", deployment: model, next, rung: index + 1, of: rungs.length }));
+        continue;
+      }
+      if (result.openWeightDeploymentAbsent) markOpenWeightDeploymentAbsent(result.openWeightDeploymentAbsent);
       return result;
     } catch (err) {
       if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;

@@ -15,4 +15,8 @@
   gate never renders, and it cost exactly one reverted reordering. WHAT STILL BITES: a real uncovered
   STATEMENT hides among these exempt records, so classify before concluding — slice the file's own
   `SF:`→`end_of_record` block, then separate comment and type-body lines from code.
-  *(#777, W1-T171; corrected 2026-09-11)*
+  THE CARVE-OUT HAD A HOLE until W1-T4099: it walked brace-delimited `interface`/object-`type` bodies
+  only, so a ONE-LINE alias such as `export type Owner = "a" | "b";` stayed `DA:<line>,0` and BLOCKED
+  #6677 on 2026-09-22. Type alias statements (one line or several, to the first `;`) and type-only
+  `import type`/`export type {…}` lines are now exempt too.
+  *(#777, W1-T171; corrected 2026-09-11; W1-T4099 2026-09-23)*

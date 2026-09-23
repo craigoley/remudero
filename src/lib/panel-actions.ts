@@ -26,7 +26,7 @@ import {
 import type { Route } from "./service.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
-import { isPaused, isPrActionName, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
+import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
@@ -760,6 +760,14 @@ export function buildDrainNowRoute(deps: Pick<PanelActionDeps, "root" | "ledgerP
 }
 
 // ── POST /v1/pr-actions ────────────────────────────────────────────────────
+/** W1-T4077: the display name the console reports in `x-remudero-operator` — bounded, printable, audit only. */
+function operatorDisplayName(req: IncomingMessage): string | undefined {
+  const raw = req.headers["x-remudero-operator"];
+  const value = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!value) return undefined;
+  const clean = value.replace(/[^\x20-\x7e]/g, "").slice(0, 80).trim();
+  return clean || undefined;
+}
 // A high-tier, selected-instance action request. This route never runs `rmd fix` or `rmd review`
 // inside the HTTP process; it only records durable intent for the daemon's ordinary poll boundary.
 
@@ -781,23 +789,45 @@ function validatePrAction(body: unknown): { error: string } | PrActionInput {
 }
 
 /**
- * POST /v1/pr-actions — record an operator's bounded repair or review request. The service's
- * HIGH tier consumes a nonce before this handler runs; no browser can turn a row into a daemon
- * command without explicit confirmation and the existing token/identity gates.
+ * POST /v1/pr-actions — record an operator's bounded repair or review request.
+ *
+ * NO NONCE, since W1-T4077 moved this route to the LOW tier. The sentence that used to stand here
+ * said "the service's HIGH tier consumes a nonce before this handler runs" — true while the tier
+ * was high, and a false claim about a gate the route no longer has once it was not. What still
+ * holds is stated at `tier` below: the request is RECORDED rather than executed,
+ * `validatePrAction` admits `fix` or `review` and nothing else, `isPrActionSwitchedOff` is
+ * consulted first, and the write token and identity gates are unchanged.
  */
 export function buildPrActionRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath">): Route {
   return {
     method: "POST",
     path: "/v1/pr-actions",
     scope: "write",
-    tier: "high",
+    // W1-T4077 — LOW, BY OPERATOR RULING (2026-09-22). This route executes nothing: it records one idempotent
+    // request that the daemon runs through the ordinary review or fix pipeline, which keeps its own rails (the
+    // daily cost ceiling, one fix worker per branch, the review and merge gates). The console's write token, pinned
+    // at "low" by W1-T404, must be able to ask for a review or a fix; nothing else moves tier.
+    tier: "low",
     handler: jsonAction(validatePrAction, (input, req, res) => {
       const origin = bearerTokenId(req);
-      const request = requestPrAction(deps.root, input.action, input.prNumber, origin);
+      if (isPrActionSwitchedOff(deps.root, input.action)) {
+        appendPanelLedger(deps.ledgerPath, "console.pr_action_switched_off", `PR-${input.prNumber}`, origin, {
+          action: input.action,
+          pr_number: input.prNumber,
+        });
+        sendJson(res, 409, {
+          error: "switched_off",
+          detail: `console ${input.action} requests are switched off on this daemon (state/CONSOLE_PR_ACTION_OFF-${input.action})`,
+        });
+        return;
+      }
+      const operator = operatorDisplayName(req);
+      const request = requestPrAction(deps.root, input.action, input.prNumber, origin, operator);
       appendPanelLedger(deps.ledgerPath, "console.pr_action_requested", `PR-${input.prNumber}`, origin, {
         action: input.action,
         pr_number: input.prNumber,
         requested_at: request.requestedAt,
+        ...(operator ? { operator } : {}),
       });
       sendJson(res, 200, { armed: true, action: request.action, prNumber: request.prNumber, requestedAt: request.requestedAt });
     }),

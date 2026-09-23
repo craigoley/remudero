@@ -11,7 +11,7 @@
   origin: "operator direction 2026-09-22 while triaging #6517: no hard ceilings or floors; prefer automated flow, self-improvement, and follow-up tasks"
   plan_refs: [W1-T75, W1-T148, W1-T172, W1-T271, W1-T316, W1-T3523, W1-T3758, W1-T3932]
   files: [src/lib/status.ts, src/lib/drain.ts, src/run-task.ts, src/lib/verify-human-judge.ts, src/lib/daemon.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> run-W1-T4025-1790077962

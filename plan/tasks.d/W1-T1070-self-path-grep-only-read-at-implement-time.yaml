@@ -198,7 +198,7 @@
   origin: "recon#self-path-grep-cannot-discriminate-2026-08-20"
   plan_refs: ["W1-T310", "W1-T456", "W1-T497", "W1-T1056"]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads two

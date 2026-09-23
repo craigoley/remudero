@@ -564,6 +564,33 @@ export function computeTypeOnlyRanges(fileText) {
       kind: 'type-only',
     });
   }
+  // W1-T4099: a type ALIAS statement (`export type X = "a" | "b";`, or one spanning several lines) and a
+  // type-only import/export erase to zero runtime code too. It runs to the first `;` at brace depth 0; an
+  // alias with no terminating `;` within reach is left unexempted, so the gate stays safe.
+  const ALIAS_OPEN = /^\s*(?:export\s+)?(?:declare\s+)?type\s+[A-Za-z_$][\w$]*(?:<[^=]*>)?\s*=/;
+  const TYPE_IMPORT = /^\s*(?:import|export)\s+type\s+(?:\{|\*|[A-Za-z_$])/;
+  for (let i = 0; i < lines.length; i++) {
+    if (TYPE_OPEN.test(lines[i]) || (!ALIAS_OPEN.test(lines[i]) && !TYPE_IMPORT.test(lines[i]))) continue;
+    let depth = 0;
+    let end = -1;
+    for (let k = i; k < lines.length && k < i + 200; k++) {
+      for (const ch of lines[k]) {
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+      }
+      if (depth <= 0 && /;\s*(?:\/\/.*)?$/.test(lines[k])) {
+        end = k;
+        break;
+      }
+    }
+    if (end === -1) continue;
+    ranges.push({
+      start: i + 1,
+      end: end + 1,
+      reason: 'type alias or type-only import/export -- erases to zero runtime code, can never carry a hit',
+      kind: 'type-only',
+    });
+  }
   return ranges;
 }
 
@@ -579,8 +606,10 @@ export function computeTypeOnlyRanges(fileText) {
  * @returns {{ranges: Array<{start:number,end:number,reason:string,directiveLine:number}>, errors: Array<{directiveLine:number,message:string}>}}
  */
 export const MAX_BOUNDARY_EXEC_LINES = 15;
+// W1-T4099: `flushThenExit(` (src/lib/flush-exit.ts, W1-T4063) is an exit too — it drains stdout/stderr
+// and then calls process.exit, so run-task.ts's own CLI guard stayed exit glue when W1-T4063 moved to it.
 const BOUNDARY_CALL =
-  /\b(?:spawnSync|execFileSync)\(\s*process\.execPath\b|\bprocess\.exit(?:Code\s*=|\s*\()|\bspawnWorker\s*\(/;
+  /\b(?:spawnSync|execFileSync)\(\s*process\.execPath\b|\bprocess\.exit(?:Code\s*=|\s*\()|\bspawnWorker\s*\(|\bflushThenExit\s*\(/;
 
 /**
  * W1-T3304 — A REAL BROWSER IS A SECOND KIND OF IRREDUCIBLE I/O, AND IT GETS ITS OWN WORD.

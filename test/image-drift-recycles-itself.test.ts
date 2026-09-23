@@ -7,6 +7,7 @@ import {
   decideDeployTrigger,
   IMAGE_BAKED_PATHS,
   IMAGE_RECYCLE_FAILURE_BACKOFF_MS,
+  ROOT_LOCKFILE_PATH,
   imageRefFor,
   runDeployCycle,
   type DeployDeps,
@@ -94,12 +95,16 @@ test("the judge scores an image input at the top rung — only a recycle deliver
   assert.equal(deterministicDeployWorth({ sha: "x", files: ["src/lib/worker.ts"] }).score, 1, "control: source keeps its floor");
 });
 
-test("drift detection and the image build trigger watch exactly the same paths", () => {
+test("drift detection and the image build trigger watch at least the same paths", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "acr-build.yml"), "utf8");
   const block = /\n {4}paths:\n((?: {6}- .+\n)+)/.exec(workflow);
   assert.ok(block, "acr-build.yml declares a push paths filter");
   const built = block[1].trim().split("\n").map((line) => line.replace(/^\s*-\s*/, "").trim());
-  assert.deepEqual([...built].sort(), [...IMAGE_BAKED_PATHS].sort());
+  // W1-T4061: the push filter also carries root `package-lock.json`, deliberately NOT an
+  // IMAGE_BAKED_PATHS entry (see ROOT_LOCKFILE_PATH's own doc comment) — the workflow's own
+  // content guard, not this pathspec, is what keeps an unrelated lockfile edit from building.
+  for (const p of IMAGE_BAKED_PATHS) assert.ok(built.includes(p), `${p} must still start the workflow`);
+  assert.deepEqual([...built].sort(), [...IMAGE_BAKED_PATHS, ROOT_LOCKFILE_PATH].sort());
   for (const cli of ["deploy/package.json", "deploy/package-lock.json"]) assert.ok(IMAGE_BAKED_PATHS.includes(cli), cli);
 });
 

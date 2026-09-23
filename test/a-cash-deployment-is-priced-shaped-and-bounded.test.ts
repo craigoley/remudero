@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   OPENWEIGHT_CONTEXT_WINDOWS,
+  OPENWEIGHT_AWAITING_READINESS,
   OPENWEIGHT_PRICES,
   OPENWEIGHT_TEMPERATURE,
 } from "../src/lib/worker-provider.js";
@@ -25,7 +26,15 @@ test("W1-T3689: every deployment named in the cash ladder is priced, shaped and 
   assert.ok(named.has("gpt-5.6-luna"), "luna leads the cash ladder");
   assert.ok(!named.has("gpt-5-mini"), "gpt-5-mini was removed, not demoted — a trailing row would imply a fallback worth reaching");
 
+  // W1-T4079: a successor may lead a row before its deployment and price exist; selection passes
+  // over it until it is ready. The exemption is explicit and closes itself: an exempt id that GAINS
+  // a price row fails here until it is removed from OPENWEIGHT_AWAITING_READINESS.
+  for (const id of OPENWEIGHT_AWAITING_READINESS) {
+    assert.ok(named.has(id), `${id} awaits readiness but no ladder row names it`);
+    assert.equal(OPENWEIGHT_PRICES[id], undefined, `${id} now has a price row: remove it from OPENWEIGHT_AWAITING_READINESS`);
+  }
   for (const id of named) {
+    if (OPENWEIGHT_AWAITING_READINESS.has(id)) continue;
     assert.ok(OPENWEIGHT_PRICES[id], `${id} is in the cash ladder with no PRICE row — dispatch would refuse it`);
     assert.ok(OPENWEIGHT_CONTEXT_WINDOWS[id], `${id} is in the cash ladder with no CONTEXT WINDOW row`);
     assert.ok(id in OPENWEIGHT_TEMPERATURE, `${id} is in the cash ladder with no TEMPERATURE row`);
@@ -55,8 +64,8 @@ test("cash economy and balanced rows retain Luna as the independent squeeze cand
   const cash = mounts.capabilities?.cash;
   assert.ok(cash, "the cash ladder must exist");
   for (const effort of ["low", "medium", "high"] as const) {
-    assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"]);
-    assert.deepEqual(cash.balanced[effort], ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"]);
+    assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna"]);
+    assert.deepEqual(cash.balanced[effort], ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna"]);
   }
 });
 
@@ -79,7 +88,8 @@ test("terra leads NOTHING — it is the escalation behind luna, never a lane's f
       assert.notEqual(row[0], "gpt-5.6-terra", `cash.${capability}.${effort} must not LEAD with terra — it is 10x luna`);
       if (capability === "frontier") {
         frontierRows++;
-        assert.equal(row[0], "gpt-5.6-luna", `frontier.${effort} leads with luna, which replaced gpt-5-mini`);
+        const firstReady = row.find((id) => !OPENWEIGHT_AWAITING_READINESS.has(id));
+        assert.equal(firstReady, "gpt-5.6-luna", `frontier.${effort} leads (among ready deployments) with luna, which replaced gpt-5-mini`);
         assert.ok(row.includes("gpt-5.6-terra"), `frontier.${effort} keeps terra reachable as the escalation`);
       }
     }

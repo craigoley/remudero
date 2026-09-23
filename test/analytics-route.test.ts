@@ -494,8 +494,10 @@ test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to th
   try {
     const invoked = '{"ts":"2026-08-14T00:00:00.000Z","task_id":"CLI","run_id":"CLI-1","step":"cli.invoked","verb":"status"}';
     const started = '{"ts":"2026-08-14T00:01:00.000Z","task_id":"W1-T1","run_id":"R1","step":"run.start"}';
+    const stepUp = '{"ts":"2026-08-14T00:01:30.000Z","task_id":"W1-T1","run_id":"R1","step":"implement.step_up","to":"opus"}';
+    const assignment = '{"ts":"2026-08-14T00:01:45.000Z","task_id":"W1-T1","run_id":"R1","step":"worker.assignment","worker_assignment":{"id":"assignment-checkpoint","selected":{"provider":"claude","model":"claude-sonnet-4"},"routing":{"capabilityPreference":{"capability":"frontier","provider":"claude"}}}}';
     const verdict = '{"ts":"2026-08-14T00:03:00.000Z","task_id":"W1-T1","run_id":"R1","step":"verdict","lane":"run-task","model":"sonnet","total_cost_usd":1.5,"worker_duration_ms":2000}';
-    writeGzArchive(dir, "ledger.2026-08-14T00-05-00-000Z.ndjson.gz", [invoked, started, verdict]);
+    writeGzArchive(dir, "ledger.2026-08-14T00-05-00-000Z.ndjson.gz", [invoked, started, stepUp, assignment, verdict]);
     writeLive(dir, [invoked, verdict]);
 
     const materialized = readLedgerUnionRecordsSync(dir, { dedupe: true }).rows;

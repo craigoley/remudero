@@ -75,7 +75,10 @@ test("the cash ladder skips a gated deployment unless it is approved", () => {
     cash: { ...table.cash!, economy: { low: ["gpt-6-astra", "gpt-5-nano"], medium: ["gpt-6-astra", "gpt-5-nano"], high: ["gpt-6-astra", "gpt-5-nano"] } },
   };
   assert.equal(selectOpenWeightModel(withAstra, "haiku", "low").model, "gpt-5-nano");
-  assert.equal(selectOpenWeightModel(withAstra, "haiku", "low", undefined, { modelApprovals: APPROVED }).model, "gpt-6-astra");
+  // Approved and treated as deployed and priced (W1-T4079's readiness seam), Astra is taken.
+  const ready = () => true;
+  assert.equal(selectOpenWeightModel(withAstra, "haiku", "low", undefined, { modelApprovals: APPROVED, ready }).model, "gpt-6-astra");
+  assert.equal(selectOpenWeightModel(withAstra, "haiku", "low", undefined, { ready }).model, "gpt-5-nano", "readiness never overrides the gate");
 });
 
 test("a Codex spawn with no model is refused instead of running the account default", async () => {
