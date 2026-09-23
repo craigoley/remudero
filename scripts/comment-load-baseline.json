@@ -31,6 +31,8 @@
   "deploy/host-update.sh": 750,
   "deploy/install-container-runtime-mount-order.sh": 57,
   "deploy/install-host-units.sh": 250,
+  "deploy/mac/install-tmp-reclaim.sh": 250,
+  "deploy/mac/tmp-reclaim.sh": 250,
   "deploy/package-lock.json": 250,
   "deploy/package.json": 250,
   "deploy/recycle-container.sh": 750,
