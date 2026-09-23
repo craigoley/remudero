@@ -104,7 +104,7 @@ function deliverOldVerdict(lp: string): void {
 
 // ── acceptance 1 — a repaired body is a NEW input, not a suppressed re-post ─────────────────────
 
-test("claim 1: the post-review dedup key includes a digest of the PR body, so a repaired body is a NEW input rather than a suppressed re-post", async () => {
+test("a repaired body is a new review input — claim 1: the post-review dedup key includes a digest of the PR body, so a repaired body is a NEW input rather than a suppressed re-post", async () => {
   assert.notEqual(OLD_DIGEST, NEW_DIGEST, "a body edit changes the digest at an unchanged sha");
 
   const lp = ledgerPath();
@@ -128,7 +128,7 @@ test("claim 1: the post-review dedup key includes a digest of the PR body, so a 
 
 // ── acceptance 2 — an unchanged body on the same head is still deduped forever ──────────────────
 
-test("claim 2: an UNCHANGED body on the same head is still deduped forever, so the stand-down that makes an unattended fleet tractable is preserved", async () => {
+test("an unchanged body is still suppressed forever — claim 2: an UNCHANGED body on the same head is still deduped forever, so the stand-down that makes an unattended fleet tractable is preserved", async () => {
   const lp = ledgerPath();
   deliverOldVerdict(lp);
 
@@ -159,7 +159,7 @@ test("claim 2: an UNCHANGED body on the same head is still deduped forever, so t
 
 // ── acceptance 3 — row 3.6 is reachable on its own stated case, with no hand-run verb ────────────
 
-test("claim 3: row 3.6 (VERDICT OVERTAKEN BY ACTIVITY) is reachable on its own stated case — a body repair on an unchanged sha now reaches the reviewer without a hand-run verb", async () => {
+test("a body repair on an unchanged sha reaches the reviewer — claim 3: row 3.6 (VERDICT OVERTAKEN BY ACTIVITY) is reachable on its own stated case — a body repair on an unchanged sha now reaches the reviewer without a hand-run verb", async () => {
   // The disposition layer: reviewVerdictOvertakenByActivity + zero exact-input attempts admits the
   // head to `post-review` — the SAME arm #3219 needed and never got dispatched by the sweep alone.
   assert.equal(reviewVerdictOvertakenByActivity(samePrAtSameSha(NEW_DIGEST, 0)), true, "the body PATCH is activity after the posted verdict");
@@ -207,7 +207,7 @@ test("claim 3: row 3.6 (VERDICT OVERTAKEN BY ACTIVITY) is reachable on its own s
 
 // ── acceptance 4 — re-keying adds no bypass; the same deterministic judge still runs ─────────────
 
-test("claim 4: the change re-keys the dedup and does not weaken, bypass or remove the escape hatch, which still invokes the same deterministic judge", async () => {
+test("re-keying does not add a bypass — claim 4: the change re-keys the dedup and does not weaken, bypass or remove the escape hatch, which still invokes the same deterministic judge", async () => {
   // (a) No unconditional bypass: a repaired-body digest at RED checks is not admitted to
   // post-review at all — re-keying only changes WHICH input the gate compares, not the surrounding
   // guards every other candidate must still clear.
