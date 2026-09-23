@@ -13,8 +13,9 @@
  *
  *  1. The offline deps seam (already generalized by #6744's `offlineLintDeps` pattern in
  *     test/policy.test.ts) really does keep a whole-plan `lintPlanCommand` call from building a
- *     real GitHub gateway — demonstrated here with a fresh, minimal fixture, independent of any
- *     of the ~80 already-affected files.
+ *     real GitHub gateway — demonstrated here with a fresh, minimal fixture — AND the whole-plan
+ *     lint-plan tests this task moved onto that seam now reach no `gh` at all, proved by running
+ *     them under a recording `gh` (their pre-fix versions each made refused reads).
  *  2. The shared stub's refusal count is now VISIBLE and ENFORCED: a test file that triggers it
  *     without opting in fails at exit (claim 2), and a file that opts in by name is exempt
  *     (claim 3) — proved by actually spawning a `node --test` child process on a throwaway
@@ -23,7 +24,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -35,6 +36,14 @@ import { fakeGitHub } from "./helpers/fake-github.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HYGIENE_HREF = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
+
+/** The whole-plan lint-plan tests W1-T4226 moved onto the offline seam — each made refused `gh`
+ *  reads (open/closed PR lists, issue search) before it did. */
+const LINT_PLAN_FAMILY = [
+  "test/lint-plan-broken-base.test.ts",
+  "test/a-blocked-task-must-name-its-disposition.test.ts",
+  "test/task-linter-wiring.test.ts",
+];
 
 // ── claim 1: a whole-plan lint-plan test builds no real GitHub gateway ─────────────────────────
 
@@ -85,6 +94,33 @@ test("a whole-plan lint-plan test builds no real GitHub gateway", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
   assert.deepEqual(gatewaysBuilt, [], "a whole-plan lint-plan run given the offline seam must build no GitHub gateway");
+
+  // The seam alone proves nothing about the TESTS that were meant to use it: the lint-plan family
+  // below shelled out to `gh` on every whole-plan run until W1-T4226 threaded the seam through
+  // them. Run them for real, with a recording `gh` preloaded AFTER tmp-hygiene so it sits ahead
+  // of the refusing stub on PATH, and require that none of them reached `gh` at all. A test's
+  // own shim, prepended later, still wins over the recorder, exactly as it wins over the stub.
+  const recorderDir = mkdtempSync(join(tmpdir(), "rmd-test-w1-t4226-gh-recorder-"));
+  try {
+    const log = join(recorderDir, "gh-calls.log");
+    writeFileSync(log, "", "utf8");
+    const recorder = join(recorderDir, "gh");
+    writeFileSync(recorder, ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`, "exit 1", ""].join("\n"), "utf8");
+    chmodSync(recorder, 0o755);
+    const preload = join(recorderDir, "record-gh.mjs");
+    writeFileSync(preload, `process.env.PATH = ${JSON.stringify(recorderDir)} + ":" + (process.env.PATH ?? "");\n`, "utf8");
+    const result = spawnSync(
+      process.execPath,
+      ["--test", "--import", "tsx", "--import", HYGIENE_HREF, "--import", pathToFileURL(preload).href, ...LINT_PLAN_FAMILY],
+      { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } },
+    );
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.match(output, /^# pass [1-9]/m, `the lint-plan family must actually run — output:\n${output}`);
+    const calls = readFileSync(log, "utf8").split("\n").filter((line) => line.length > 0);
+    assert.deepEqual(calls, [], "a whole-plan lint-plan test must reach no real `gh` — each call above is one it made");
+  } finally {
+    rmSync(recorderDir, { recursive: true, force: true });
+  }
 });
 
 // ── claims 2 & 3: the shared stub's refusal count, visible and enforced ────────────────────────
