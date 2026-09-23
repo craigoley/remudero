@@ -32,7 +32,7 @@ usage:
   rmd authority [--json]   # Every external write the fleet may make without the operator, its gate, and its last firing.
   rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
-  rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory: dead index links, unlisted files, load-limit pressure, repeats of repo knowledge.
+  rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
@@ -283,7 +283,7 @@ W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, pr
 
 ### `rmd memory-lint`
 
-Check a Claude Code memory directory: dead index links, unlisted files, load-limit pressure, repeats of repo knowledge.
+Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
 
 ```
 rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...

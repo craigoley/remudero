@@ -29755,8 +29755,8 @@ export function logLearningsUsed(
   log("learnings.used", { used_ids: parsed.usedIds, injected_ids: parsed.injectedIds, refused: parsed.refused });
 }
 
-export function memoryLintCommand(rest: string[], deps: { repoRoot?: string; out?: (s: string) => void } = {}): number {
-  const out = deps.out ?? ((line: string) => console.log(line));
+export function memoryLintCommand(rest: string[]): number {
+  const out = (line: string) => console.log(line);
   const fix = rest.includes("--fix");
   const mergeAt = rest.indexOf("--merge");
   const mergeFrom = mergeAt >= 0 ? rest[mergeAt + 1] : undefined;
@@ -29765,8 +29765,7 @@ export function memoryLintCommand(rest: string[], deps: { repoRoot?: string; out
     out("usage: rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...");
     return 2;
   }
-  const root = deps.repoRoot ?? repoRoot;
-  const corpus = memoryLintCorpus(root);
+  const corpus = memoryLintCorpus(repoRoot);
   if (mergeFrom) {
     const { moved } = mergeMemoryDirs(mergeFrom, dirs[0]!);
     out(`merged ${moved.length} memories from ${mergeFrom} into ${dirs[0]}`);
@@ -43431,7 +43430,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "memory-lint",
     syntax: "rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...",
-    summary: "Check a Claude Code memory directory: dead index links, unlisted files, load-limit pressure, repeats of repo knowledge.",
+    summary: "Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.",
     detail: "W1-T4098: reads each <memory-dir> (a Claude Code auto-memory directory holding MEMORY.md and one file per memory) and reports index lines whose link target is gone, memory files the index does not list, files without a name/description frontmatter block, the index's size against Claude Code's load limit (200 lines / about 25 KB), and memories whose phrasing repeats a doctrine rule or a learning in this repo. --fix makes only safe index edits (moves dangling lines to MEMORY.archive.md, lists unlisted files) and never deletes a memory file. --merge <from-dir> moves every memory from <from-dir> into the first <memory-dir> and rebuilds both indexes. Exits non-zero when anything is reported and --fix was not given.",
   },
   {

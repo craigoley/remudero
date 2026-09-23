@@ -98,19 +98,18 @@ test("W1-T4098: fix never deletes a memory file", () => {
   assert.deepEqual(lintMemoryDir(from).dangling, []);
 });
 
-test("W1-T4098: the command reports, fixes and merges", () => {
+test("W1-T4098: the command reports, fixes and merges", (t) => {
   const lines: string[] = [];
-  const out = (s: string) => lines.push(s);
+  t.mock.method(console, "log", (s: string) => lines.push(s));
   const dir = store({ "a.md": memory("a", "x") }, ["- [a](a.md)", "- [gone](gone.md)"]);
-  assert.equal(memoryLintCommand([], { out }), 2, "no directory is a usage error");
-  assert.equal(memoryLintCommand(["--merge"], { out }), 2);
-  assert.equal(memoryLintCommand([dir], { out, repoRoot: process.cwd() }), 1, "findings without --fix exit non-zero");
-  assert.equal(memoryLintCommand(["--fix", dir], { out, repoRoot: process.cwd() }), 0);
+  assert.equal(memoryLintCommand([]), 2, "no directory is a usage error");
+  assert.equal(memoryLintCommand(["--merge"]), 2);
+  assert.equal(memoryLintCommand([dir]), 1, "findings without --fix exit non-zero");
+  assert.equal(memoryLintCommand(["--fix", dir]), 0);
   assert.ok(lines.some((l) => /fixed .*removed 1 dangling/.test(l)));
   const from = store({ "m.md": memory("m", "moved") }, ["- [m](m.md)"]);
-  assert.equal(memoryLintCommand(["--merge", from, dir], { out, repoRoot: process.cwd() }), 0);
+  assert.equal(memoryLintCommand(["--merge", from, dir]), 0);
   assert.ok(lines.some((l) => /merged 1 memories/.test(l)));
   mkdirSync(join(dir, "sub"));
-  assert.equal(memoryLintCommand([dir], { out, repoRoot: process.cwd() }), 0, "a subdirectory is not a memory");
-  assert.equal(memoryLintCommand([store({}, [])], { out }), 0, "the default corpus is this repo");
+  assert.equal(memoryLintCommand([dir]), 0, "a subdirectory is not a memory");
 });
