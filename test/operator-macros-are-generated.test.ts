@@ -373,6 +373,7 @@ test("external-scan macros: grill, diagnose, handoff and wait-what render operat
   const boundaries: Record<string, RegExp[]> = {
     grill: [/Do not start the work/, /YOUR RECOMMENDED ANSWER/, /Facts are yours to find; decisions are mine to make/, /Take no\s+action on the plan until I confirm/],
     diagnose: [/never a\s+patch/, /Until this command exists, do not read code to build a\s+theory/, /If two patches have not moved the symptom, stop/, /undo it, show red, restore it, show green/],
+    "architecture-scan": [/Do not\s+change any code/, /never straight into code/, /Would deleting the module concentrate the complexity/],
     handoff: [/never inside the\s+repository/, /Redact every secret/, /FLOOR, not a claim/, /RECON or\s+IMPLEMENT/],
     "wait-what": [/ISO 24495-1/, /Do not add new material/],
     "session-retro": [/prefer a refusal whenever the mistake\s+is mechanical/, /that is the\s+finding, not a new one/, /Propose only\. Do not edit CLAUDE\.md/],
