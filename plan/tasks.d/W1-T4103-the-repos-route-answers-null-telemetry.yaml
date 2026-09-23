@@ -12,7 +12,7 @@
   plan_refs: ["W1-T4102", "W1-T4104"]
   files:
     - src/lib/repo-dashboard-route.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: chore/amend-W1-T1081-fold-satisfied -> file/console-resilience-core

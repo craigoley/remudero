@@ -11,7 +11,7 @@
   origin: "operator report 2026-09-22: the inbox does not work like an email inbox with threads where I can reply and work back and forth with the daemon"
   plan_refs: [W1-T2494, W1-T2496, W1-T2499, W1-T2500, W1-T404]
   files: [src/lib/inbox-thread.ts, src/lib/inbox-responder.ts, src/lib/panel-actions.ts, src/lib/panel-graph.ts, src/lib/serve.ts, src/lib/daemon.ts, test/an-inbox-item-is-a-conversation.test.ts, test/route-wiring.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22 ON origin/main AND THE LIVE HOST.

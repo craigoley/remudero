@@ -5685,7 +5685,7 @@ anchored matcher), and `selectLearnings`' seeded draw already randomizes the bud
 (the lint half of the LLM wiki, applied as Graphiti-style invalidation at the PR that removes the
 referent) · **W1-T4241** the Thompson draw read as a randomized trial: per-learning outcome effect by
 inverse propensity, surfaced beside the `LEARNINGS_USED` claim, never fed back until readings exist ·
-**W1-T4243** knowledge-gap census: zero-match rate on failed vs clean runs by code area, measurement only.
+**W1-T4243** one knowledge-measurement cadence rung over a multi-week step-filtered union: where the corpus is silent (zero-match rate on failed vs clean runs by code area) and W1-T4241's outcome fold cumulated, measurement only (amended before build: a digest consumer sees about a day).
 **REFUSED, WITH THE REASON:** embeddings or a vector store (matching is deterministic by rule,
 learnings.ts header, and paraphrase-miss is a stated tradeoff); a knowledge graph (83 records do not
 need traversal); an LLM that rewrites the corpus whole (ACE's "context collapse" is the measured cost;
@@ -7286,5 +7286,7 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
 - W1-T3076 (a retirement-carrying dependency is excluded from `unmetDependencies` so it can never permanently block a dependent, and `planHealthSweep` stops re-linting and re-proposing corrective work against retired shards — operationalizing the operator's 2026-09-09 chosen-bound ruling "(a) first, then (c); NOT (b)" before any closure-rate governor is built) — RATIFIED 2026-09-09 -> W1-T3397/W1-T3399.
 - verify-human:W1-T370 (plan) — RATIFIED 2026-09-10 -> W1-T3392/W1-T3393.
 - W1-T3075 (the dispatch frontier's id-order starves new value: after explicit priority, use measured expected value by deterministic task class; dependency fan-out breaks equal or unmeasured values) — RATIFIED 2026-09-11 -> W1-T3412/W1-T3416. The operator selected the prepared `(b) then (c)` recommendation. The value term is gated on a complete union, W1-T3074's population floor, and two-cycle stability; a failed gate retains priority/scope/id order rather than inventing a rate. W1-T3416 removes the stale `NOT YET RULED` record so this is the sole operative statement.
+- skill-draft:afa9c5aea4d3c168 (plan) — RATIFIED 2026-09-11 -> W1-T4286/W1-T4287.
 - P44 (proof-debt: W1-T3570 grep-path-absent criteria repair) — RATIFIED 2026-09-15 -> W1-T4290.
-- followup:DAEMON-1789365794642:2026-09-14T07:19:45.412Z:1 (gh pr edit's GraphQL mutation errors on Projects-Classic `repository.pullRequest.projectCards` even for a body-only edit; `gh api -X PATCH` works — the shared PR-authoring worker contract gains the fallback so future FIX/IMPLEMENT workers recognize it instead of assuming the edit silently failed) — RATIFIED 2026-09-14 -> W1-T4268.
+- P76 (the auto-authored Acceptance-block fallback greps a pre-existing symbol instead of this PR's own diff, guaranteed-stale under proof-discrimination's zero-allowance rule for untasked plan-only/retro PRs — RETRO-1789371541053's follow-up harvest) — RATIFIED 2026-09-14 -> W1-T4263.
+- followup:DAEMON-1788783316728:2026-09-07T13:01:21.750Z:0 (sandbox-vs-CI suite reds: the container pole's declared-empty baseline outlived the jq rationale that justified it, and the predictive registry tells an unmeasured host that every red is its own) — RATIFIED 2026-09-07 -> W1-T4345/W1-T4346.
