@@ -40,11 +40,11 @@
       ],
       "globs": [
         ".remudero/mounts.yaml",
-        "docs",
+        "docs/**",
         "docs/operator-message-standard.md",
-        "plan/feedback",
+        "plan/feedback/**",
         "plan/policy.yaml",
-        "plan/tasks.d",
+        "plan/tasks.d/**",
         "plan/tasks.yaml",
         "src/lib/auto-triage.ts",
         "src/lib/containment.ts",
@@ -116,7 +116,6 @@
       "globs": [
         "bin/rmd",
         "plan/tasks.yaml",
-        "src",
         "src/lib/dispatch-claim.ts",
         "src/lib/drain.ts",
         "src/lib/fleet-control.ts",
@@ -127,11 +126,20 @@
         "src/lib/service.ts",
         "src/lib/status.ts",
         "src/lib/sweep.ts",
-        "src/run-task.ts",
-        "test"
+        "src/run-task.ts"
       ],
-      "symbols": [],
-      "error_signatures": []
+      "symbols": [
+        "TAP"
+      ],
+      "error_signatures": [
+        "ERR_MODULE_NOT_FOUND",
+        "MEASUREMENT FAILED",
+        "error message",
+        "failure message",
+        "interleave",
+        "node --test",
+        "self-diagnosing"
+      ]
     },
     "platform.yaml": {
       "entries": [
@@ -188,21 +196,24 @@
       ],
       "globs": [
         "bin/rmd",
-        "hooks",
-        "learnings",
-        "plan/tasks.d",
+        "learnings/**",
+        "plan/tasks.d/**",
         "plan/tasks.yaml",
-        "scripts",
+        "scripts/**",
         "src/lib/config.ts",
         "src/lib/containment.ts",
         "src/lib/ledger-union.ts",
         "src/lib/review.ts",
         "src/lib/self-sync.ts",
-        "src/lib/task-linter.ts",
-        "test"
+        "src/lib/task-linter.ts"
       ],
-      "symbols": [],
-      "error_signatures": []
+      "symbols": [
+        "mkdtemp"
+      ],
+      "error_signatures": [
+        "<file>:<line>",
+        "line number"
+      ]
     }
   },
   "bySubsystem": {
