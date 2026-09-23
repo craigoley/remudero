@@ -2328,11 +2328,11 @@ export const OPENWEIGHT_ABSENT_TTL_MS = 30 * 60_000;
 const openWeightAbsentUntil = new Map<string, number>();
 
 /** Record a definitive 404. Only a 404 changes the reading; a timeout or any other failure leaves it. */
-export function markOpenWeightDeploymentAbsent(deployment: string, nowMs = Date.now()): void {
+export function markOpenWeightDeploymentAbsent(deployment: string, nowMs = systemClock.now()): void {
   openWeightAbsentUntil.set(deployment, nowMs + OPENWEIGHT_ABSENT_TTL_MS);
 }
 
-export function openWeightDeploymentKnownAbsent(deployment: string, nowMs = Date.now()): boolean {
+export function openWeightDeploymentKnownAbsent(deployment: string, nowMs = systemClock.now()): boolean {
   const until = openWeightAbsentUntil.get(deployment);
   return until !== undefined && nowMs < until;
 }
@@ -2343,7 +2343,7 @@ export function clearOpenWeightAbsence(): void {
 
 /** READY = priced, shaped and context-sized, and not known absent. A successor can lead a ladder row
  *  before any of that is true; until it is, selection passes over it as if it were not listed. */
-export function openWeightDeploymentReady(deployment: string, nowMs = Date.now()): boolean {
+export function openWeightDeploymentReady(deployment: string, nowMs = systemClock.now()): boolean {
   return (
     Object.prototype.hasOwnProperty.call(OPENWEIGHT_PRICES, deployment) &&
     Object.prototype.hasOwnProperty.call(OPENWEIGHT_TEMPERATURE, deployment) &&
