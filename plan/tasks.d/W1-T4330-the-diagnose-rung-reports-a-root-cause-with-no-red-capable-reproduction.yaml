@@ -1,0 +1,65 @@
+- id: W1-T4330
+  title: "THE DIAGNOSE RUNG REPORTS A ROOT CAUSE WITH NO REPRODUCTION — `renderDiagnosePrompt` asks for ROOT CAUSE, EVIDENCE and SUGGESTED APPROACH but never for one command that goes red on the failure, so the third patch can inherit a theory nobody reproduced: require a REPRODUCTION field (the command, its red output, or an explicit NONE with what was tried) and a FALSIFIER for the stated cause"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 10.00
+  files:
+    - src/lib/prompt-render.ts
+    - test/a-diagnose-report-names-a-red-capable-reproduction.test.ts
+    - scripts/test-tier-manifest.json
+  origin: "operator-session#external-skill-scan-2026-09-23"
+  plan_refs: ["W1-T3616", "W1-T3079"]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 at origin/main 4fd4f4de. Names are symbols; re-verify at your head.
+
+    OBSERVED (src/lib/prompt-render.ts `renderDiagnosePrompt`): the diagnose worker runs after two
+    failed attempts ("two strikes — evidence-only, before any third patch", src/run-task.ts
+    `dispatchDiagnose`). Its output contract is three fields: ROOT CAUSE, EVIDENCE, SUGGESTED
+    APPROACH. Nothing asks the worker to show that it reproduced the failure, so a report can name
+    a plausible cause read from code alone, and `runDiagnoseThenRetry` threads it VERBATIM into
+    the third attempt's findings (test/run-task.test.ts asserts the verbatim carry).
+    OBSERVED: no source parses the report's fields — the only consumers are verbatim carries and
+    tests that match its text — so adding fields breaks no reader.
+
+    INSPIRATION, NOT A COPY. Matt Pocock's `diagnosing-bugs` skill (MIT, mattpocock/skills) makes
+    "a tight loop that goes red on THIS bug" the completion criterion of its first phase, before any
+    hypothesis; obra/superpowers `systematic-debugging` (MIT) makes the same point. This repo's own
+    doctrine agrees ("Verify a new falsifier by DELETING the fix"). The external scan is recorded in
+    MASTER-PLAN §4F.
+
+    THE EFFECT IS NOT YET A CLAIM. Whether reproduction-first reports improve third-attempt pass
+    rates needs `diagnose.worker_done` outcomes before and after; this task only changes the
+    contract and must not assert an improvement.
+  design: |
+    (i) Extend the output contract, in this order: REPRODUCTION (one command, run once, with its
+        red output trimmed to the lines that carry the signal — or `NONE`, followed by what was
+        tried and why no command could be built), ROOT CAUSE, FALSIFIER (the one observation that
+        would prove the root cause wrong, and whether it was checked), EVIDENCE, SUGGESTED APPROACH.
+    (ii) Add one instruction before the contract: build the reproduction BEFORE reading code to form
+        a theory; a ROOT CAUSE given with REPRODUCTION: NONE must be labelled INFERRED.
+    (iii) Keep the read-only boundary sentence byte-identical ("Do NOT modify, commit, or push
+        ANYTHING"). Redact secrets from any output shown.
+    (iv) Do not parse or gate on the new fields, and do not change `runDiagnoseThenRetry`, the rung's
+        tool bound, its mount, or its budget.
+    (v) Seed only the new test's duration-zero row in scripts/test-tier-manifest.json.
+  acceptance:
+    - claim: "the diagnose prompt requires a reproduction command or an explicit NONE before the root cause"
+      proof: 'grep: test("W1-T4330: the diagnose prompt requires a reproduction command or an explicit NONE before the root cause" in test/a-diagnose-report-names-a-red-capable-reproduction.test.ts'
+    - claim: "the diagnose prompt requires a falsifier for the stated root cause"
+      proof: 'grep: test("W1-T4330: the diagnose prompt requires a falsifier for the stated root cause" in test/a-diagnose-report-names-a-red-capable-reproduction.test.ts'
+    - claim: "the read-only boundary is unchanged"
+      proof: 'grep: test("W1-T4330: the read-only boundary is unchanged" in test/a-diagnose-report-names-a-red-capable-reproduction.test.ts'
+    - claim: "the new test has a duration-zero manifest entry"
+      proof: "grep: a-diagnose-report-names-a-red-capable-reproduction\\.test\\.ts in scripts/test-tier-manifest.json"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if `renderDiagnosePrompt` already requires a reproduction command
+    or the diagnose rung has been removed. Re-run:
+    `grep -n 'REPRODUCTION\|ROOT CAUSE' src/lib/prompt-render.ts`.
+  note: "high/span declares the prompt change, its behavioural test and the mandatory test-tier row (the W1-T3442 shape). UNRESERVED FLOOR: minted with `rmd next-task-id --offline` from a Claude Code web lane whose proxy refused the refs/rmd-id/* push (and has no gh). Chosen above every reservation on origin (max W1-T4285 at renumbering, read by git ls-remote) and every open-PR claim. Reserve from the operator checkout before merge."
