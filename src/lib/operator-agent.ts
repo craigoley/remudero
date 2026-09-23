@@ -2044,7 +2044,7 @@ export function buildOperatorAgentConsequencePreflightRoute(deps: OperatorAgentR
 export const OPERATOR_AGENT_CONSEQUENCES_PATH = "/v1/operator-agent/consequences";
 /** The `source` every listed record carries — the exact string the console's fixtures pin. */
 export const OPERATOR_AGENT_CONSEQUENCES_SOURCE = "rmd:core:/v1/operator-agent/consequences";
-/** The most pending consequence approvals one read returns; `truncated` says when more exist. */
+/** BACKSTOP: the most pending consequence approvals one read returns; `truncated` says when more exist. */
 export const MAX_PENDING_CONSEQUENCES = 100;
 /** A preflight refused for one of these is WAITING on an operator (an approver, or the cooling-off
  *  window an approver is asked to sit out) — every other refusal code is a dead action, not a queue. */
