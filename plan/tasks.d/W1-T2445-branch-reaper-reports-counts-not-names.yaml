@@ -11,7 +11,7 @@
   files: [src/run-task.ts, test/branch-reap-names-what-it-holds.test.ts]
   origin: "operator-brief#reaper-closed-pr-blindness-2026-08-28"
   plan_refs: ["W1-T2246", "W1-T2247", "W1-T2397", "W1-T2429", "W1-T2387", "W1-T447"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE BRIEF'S STATED MECHANISM IS FALSIFIED BY THE CODE AND BY TODAY'S MEASUREMENT, AND THIS
