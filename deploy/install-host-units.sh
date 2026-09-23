@@ -354,7 +354,11 @@ converge_host_units() {
   refusal_since="\$STATE_DIR/state/units-converge-refused-since"
   refusal_alerted="\$STATE_DIR/state/units-converge-refusal-alerted"
   if [ -n "\$tracked_changes" ]; then
-    echo "rmd-relaunch: units -- checkout has tracked changes; not converging (an unreviewed tree must never become root config): \$tracked_changes"
+    echo "rmd-relaunch: units -- checkout is DIRTY (tracked changes); not converging (an unreviewed tree must never become root config): \$tracked_changes"
+    # W1-T4076 -- the stamp's directory is NOT guaranteed to exist. A redirection into a missing
+    # directory fails in the SHELL, before the command runs, so the trailing \`2>/dev/null || true\`
+    # never sees it and the error leaks to the launcher's own stderr on every tick.
+    mkdir -p "\$STATE_DIR/state" 2>/dev/null || true
     if [ ! -f "\$refusal_since" ]; then
       date -u +%s > "\$refusal_since" 2>/dev/null || true
       rm -f "\$refusal_alerted" 2>/dev/null || true

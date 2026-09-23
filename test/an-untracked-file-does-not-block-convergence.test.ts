@@ -96,3 +96,24 @@ test("W1-T4076: a long refusal raises one alert", () => {
     assert.doesNotMatch(repeated.stderr, /ALERT/, "the same continuous refusal raises only one alert");
   });
 });
+
+test("W1-T4076: a refusal with no state directory yet neither leaks nor loses the stamp", () => {
+  withWorld((w) => {
+    // The stamp's directory is NOT guaranteed to exist — `world()` above happens to pre-create it,
+    // which is exactly why this arm went unseen. A `>` redirection into a missing directory fails
+    // in the SHELL before the command runs, so the trailing `2>/dev/null || true` cannot suppress
+    // it: the launcher printed "No such file or directory" to its own stderr on EVERY refusing
+    // tick, and never recorded the stamp the 6-hour alert is measured from.
+    rmSync(join(w.root, "state"), { recursive: true, force: true });
+    writeFileSync(join(w.checkout, "tracked.txt"), "edited\n");
+
+    const first = tick(w, "1000000000");
+    assert.equal(first.status, 0, first.stderr);
+    assert.doesNotMatch(first.stderr, /No such file or directory/, "the refusal path must not leak a shell redirection error");
+    assert.ok(existsSync(join(w.root, "state", "units-converge-refused-since")), "and the stamp the alert is measured from must actually be written");
+
+    // The stamp being real is what makes the alert reachable at all from a bare state root.
+    const later = tick(w, "1000021600");
+    assert.match(later.stderr, /ALERT.*6 hours/, "so a long refusal still alerts when the directory had to be created");
+  });
+});
