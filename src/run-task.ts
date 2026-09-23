@@ -2059,6 +2059,7 @@ import {
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
+  WorktreeNodeModulesRefusedError,
   detectWorktreeBaseUncheckableStreak,
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
@@ -14371,7 +14372,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // double should be able to silently swallow. `worktreeAdd` itself now emits the
     // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
     // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log });
+    // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
   } catch (e) {
     if (e instanceof WorktreeBaseStaleError) {
       log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref, behind: e.behind });
@@ -14384,6 +14386,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // to clear even though nothing is actually in flight.
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
+    }
+    if (e instanceof WorktreeNodeModulesRefusedError) {
+      // W1-T4193: a DEFERRAL, not a strike. Rethrown so daemon.ts's `isSpawnInfraBlocked` backs off on its
+      // `blocked_toolchain` tag; the claim is dropped first, or every later dispatch would meet it as taken.
+      log("worktree.node_modules_refused", {
+        package: e.packageName,
+        worktreePath: e.worktreePath,
+        node_modules_source: e.nodeModulesSource,
+      });
+      say(`REFUSED: ${e.message}`);
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "node_modules_refused" });
+      } catch (removeErr) {
+        log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
+      }
+      try {
+        releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      } catch (releaseErr) {
+        // Never replace the typed refusal: a generic throw here would read as a fatal crash, not a deferral.
+        log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
+      }
+      throw e;
     }
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
