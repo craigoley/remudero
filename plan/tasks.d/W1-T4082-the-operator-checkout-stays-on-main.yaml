@@ -1,0 +1,39 @@
+- id: W1-T4082
+  title: "THE OPERATOR CHECKOUT LEAVES main SILENTLY — twice on 2026-09-22 an interactive session did branch work directly in ~/Remudero/remudero; make the interactive deny floor refuse a branch switch or branch creation in the operator checkout and point at a worktree instead"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "operator-session#flow-2026-09-22"
+  plan_refs: ["W1-T1066", "W1-T152"]
+  files:
+    - hooks/deny-floor.sh
+    - test/the-operator-checkout-stays-on-main.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    "The operator checkout stays on main" is written guidance only (operator memory and CLAUDE.md
+    doctrine), and CLAUDE.md says a rule that matters must be made to refuse. OBSERVED 2026-09-22: the
+    operator checkout was found on run-W1-T4051-1790104408479 and later on run-W1-T4063-1790113484225,
+    both created by another interactive session, while a third session relied on it being main.
+    `rmd serve` already refuses to bind off main (W1-T152), but nothing stops the switch itself.
+  design: |
+    (i) In hooks/deny-floor.sh (the interactive lane's PreToolUse floor, .claude/settings.json), refuse
+    `git checkout <branch>|-b`, `git switch`, and `git branch -m`/`-M` when the command's working tree
+    resolves to the operator checkout (a non-worktree checkout whose origin is the remudero repo), with
+    a message naming `git worktree add`. `git checkout -- <path>`, `git pull`, and anything in a
+    worktree stay allowed.
+    (ii) Workers are unaffected: they never run in the operator checkout.
+  acceptance:
+    - claim: "a branch switch in the operator checkout is refused with a worktree hint"
+      proof: 'grep: test("W1-T4082: a branch switch in the operator checkout is refused" in test/the-operator-checkout-stays-on-main.test.ts'
+    - claim: "the same command in a worktree is allowed"
+      proof: 'grep: test("W1-T4082: a worktree may switch branches" in test/the-operator-checkout-stays-on-main.test.ts'
+    - claim: "restoring a path and pulling main stay allowed in the operator checkout"
+      proof: 'grep: test("W1-T4082: path restores and pulls stay allowed" in test/the-operator-checkout-stays-on-main.test.ts'
+  falsifier: |
+    CLOSE IF hooks/deny-floor.sh already refuses branch switches in the operator checkout.
