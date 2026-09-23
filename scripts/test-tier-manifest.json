@@ -1554,6 +1554,7 @@
     "test/the-dashboard-has-its-own-toolchain.test.ts": 0,
     "test/the-day-cost-window-has-no-clock-seam.test.ts": 0,
     "test/the-deploy-tick-never-reports-health-it-did-not-measure.test.ts": 0,
+    "test/the-deploy-tick-retries-a-ref-lock-race.test.ts": 0,
     "test/the-deploy-trigger-sees-image-drift.test.ts": 0,
     "test/the-destructive-credit-consumers-are-wired.test.ts": 267,
     "test/the-dispatch-loop-is-never-told-the-window-closed.test.ts": 1155,
