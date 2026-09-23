@@ -93,7 +93,8 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
   // -- a single-candidate row is what this ladder is deliberately no longer allowed to have.
   for (const effort of ["low", "medium", "high"] as const) {
     const row = rows.frontier?.[effort];
-    assert.deepEqual(row, [LUNA, TERRA], `frontier.${effort} must lead with ${LUNA} and keep ${TERRA} as the escalation`);
+    // W1-T4079: gpt-6-luna is listed ahead of Luna and passed over until it is deployed and priced.
+    assert.deepEqual(row, ["gpt-6-luna", LUNA, TERRA], `frontier.${effort} must lead with ${LUNA} (behind its awaiting successor) and keep ${TERRA} as the escalation`);
   }
 
   // And the real resolver agrees with the file, so this is about what the fleet SELECTS rather than
@@ -101,7 +102,7 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
   const capabilities = { openweight: rows } as never;
   assert.equal(openWeightCandidatesForCapability(capabilities, "economy", "low")[0], OSS);
   assert.equal(openWeightCandidatesForCapability(capabilities, "balanced", "high")[0], NANO);
-  assert.deepEqual(openWeightCandidatesForCapability(capabilities, "frontier", "medium"), [LUNA, TERRA]);
+  assert.deepEqual(openWeightCandidatesForCapability(capabilities, "frontier", "medium"), ["gpt-6-luna", LUNA, TERRA]);
 });
 
 test("gpt-5-nano reserves and settles strictly less than gpt-oss-120b", () => {
@@ -206,5 +207,5 @@ test("the code fallback and the mounts ladder name one leading deployment", () =
   assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(NANO), "the fallback keeps gpt-5-nano reachable too");
   assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(LUNA), "the fallback keeps Luna reachable for a cash squeeze too");
   assert.equal(openWeightCandidatesForCapability(undefined, "balanced", "high")[0], NANO);
-  assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), [LUNA, TERRA]);
+  assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), ["gpt-6-luna", LUNA, TERRA]);
 });

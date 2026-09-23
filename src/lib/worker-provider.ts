@@ -647,7 +647,7 @@ export function codexCandidatesForCapability(
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
   balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
-  frontier: ["gpt-5.6-luna", "gpt-5.6-terra"],
+  frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -846,8 +846,11 @@ export function selectOpenWeightModel(
     ? [...luna, ...configured.filter((candidate) => !luna.includes(candidate))]
     : configured;
   const ready = options.ready ?? ((deployment: string) => openWeightDeploymentReady(deployment));
-  const safe = candidates.filter((candidate) =>
-    SAFE_OPENWEIGHT_MODEL_ID.test(candidate) && modelAllowed(candidate, { modelApprovals: options.modelApprovals }) && ready(candidate));
+  const allowed = candidates.filter((candidate) =>
+    SAFE_OPENWEIGHT_MODEL_ID.test(candidate) && modelAllowed(candidate, { modelApprovals: options.modelApprovals }));
+  // PREFER READY, ELSE BEHAVE AS BEFORE: with no ready candidate every existing refusal still fires.
+  const readyOnes = allowed.filter((candidate) => ready(candidate));
+  const safe = readyOnes.length > 0 ? readyOnes : allowed;
   if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
   if (promptBytes === undefined) {
     return { model: safe[0]!, effort: requestedEffort ?? "default", capability, alternatives: safe.slice(1) };
@@ -2349,6 +2352,11 @@ export function openWeightDeploymentReady(deployment: string, nowMs = Date.now()
   );
 }
 
+/** Successors listed in the cash ladder ahead of their deployment and price (W1-T4079). The one
+ *  exemption from "every listed deployment is priced, shaped and bounded"; selection passes over them
+ *  until {@link openWeightDeploymentReady}. Remove an id once its rows exist. */
+export const OPENWEIGHT_AWAITING_READINESS: ReadonlySet<string> = new Set(["gpt-6-luna"]);
+
 /** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
  *  caller seeing it knows no paid request was made against an unknown price. */
 export class OpenWeightUnpricedDeploymentError extends RmdError {
@@ -2736,6 +2744,8 @@ export interface OpenWeightWorkerResult {
   // spelling. No out-of-scope caller asserts this literal value (only import symbol names, which stay
   // unchanged; see this task's PR body for the deliberate scoping).
   provider: "cash";
+  /** W1-T4079: the deployment this attempt found absent (HTTP 404). */
+  openWeightDeploymentAbsent?: string;
   sessionId: string;
   costUsd: number;
   numTurns: number;
