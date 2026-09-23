@@ -1,0 +1,33 @@
+- id: W1-T4107
+  title: "EIGHT DEPS DECLARATIONS ARE THREE SHAPES — the deps census (test/deps-interface-census.test.ts) reports identical member-sets as the route to consolidation, and three groups exist (ContradictionResolutionDeps / FollowupHarvestDeps / MutationGateVerdictDeps / RecordReplayResultsDeps; DispatchClaimGitDeps / TriageClaimGitDeps; PruneFollowupsDeps / RetireFollowupsDeps): fold each group into one declaration and lower the recorded count, so new daemon rungs can declare a named seam without the census refusing growth"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-23: the knowledge-system rungs (W1-T4088, W1-T4089, W1-T4095) each need one named deps interface, and scripts/deps-interface-baseline.json refuses any growth"
+  plan_refs: [W1-T3744, W1-T4088, W1-T4089, W1-T4095]
+  files: [scripts/deps-interface-baseline.json, test/deps-interface-census.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 ON origin/main: `identicalMemberSetReport()` (test/deps-interface-census.test.ts) lists three groups
+    of *Deps declarations with byte-identical member-sets — 4 + 2 + 2 declarations that are 3 shapes. The census's own
+    comment names consolidation as the way its count falls. The recorded count is 160 and may only fall.
+  design: |
+    (i) Each group becomes one exported declaration named for what it is (for example `LedgerWriterDeps` for
+        `{ledgerPath, writeLedger?}`), declared once and imported where the others were; the other names are removed, not
+        aliased (an alias is still a declaration the census counts).
+    (ii) scripts/deps-interface-baseline.json's `depsInterfaceCount` is lowered by the number removed, so the room is
+         recorded rather than silently spent.
+    (iii) No behaviour changes: every caller keeps the same members.
+  acceptance:
+    - claim: "no two deps declarations share a member-set"
+      proof: 'grep: test("W1-T4107: no two deps declarations share a member-set" in test/deps-interface-census.test.ts'
+    - claim: "the recorded count fell by the declarations removed"
+      proof: 'grep: test("W1-T4107: the recorded count fell by the declarations removed" in test/deps-interface-census.test.ts'
+  falsifier: |
+    Re-add one of the removed declarations and the first test names the duplicate pair.

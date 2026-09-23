@@ -1,0 +1,40 @@
+- id: W1-T4108
+  title: "PREFLIGHT PASSES AND CI THEN FAILS ON CHECKS THAT COULD HAVE RUN LOCALLY — on 2026-09-23 alone, PRs #6677, #6687, #6690 and #6693 each went red in CI after a green `rmd preflight` on diff-coverage, the deps census, console-parity, the command-name inventory and the comment-load census, each a local, deterministic check: make preflight run every CI check that needs no GitHub, including diff-coverage over the branch's own diff with source maps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-23 session: five CI round-trips a preflight could have prevented"
+  plan_refs: []
+  files: [src/lib/preflight.ts, test/preflight-runs-what-ci-runs.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23. `rmd preflight --from origin/main` printed PASS on each of these, and CI then failed:
+    - #6677: diff-coverage flagged a one-line type alias (fixed by W1-T4099), and the comment-load census required a
+      ceiling for a new file.
+    - #6687: console-parity (a new verb with no CLI-only reason), the COMMANDS name inventory
+      (test/help-renders-a-summary-not-a-paragraph.test.ts), the deps census, and a summary over 100 characters.
+    - #6690 / #6693: diff-coverage refused run-task.ts's process-boundary directive after W1-T4063.
+    Measuring diff-coverage locally is also easy to get wrong: without `--enable-source-maps` the lcov's line numbers
+    point at transpiled JavaScript (ci.yml's own W1-T210 note), which produced false "uncovered" lines on 2026-09-23.
+  design: |
+    (i) Preflight runs the census and inventory suites CI runs (every test file that declares
+        `@source-text-subject` or is listed in ci.yml's census steps), console-parity, and cli-reference:check.
+    (ii) Preflight runs diff-coverage the way CI does: the test files that import any changed src module, under
+         `--enable-source-maps --experimental-test-coverage`, and scripts/diff-coverage.mjs over `git diff origin/main...HEAD`.
+         When the set is large it says so and how long it will take, and `--fast` skips it.
+    (iii) Each step's failure names the CI job it predicts, so the author knows which red it prevented.
+  acceptance:
+    - claim: "preflight fails where CI's diff-coverage would"
+      proof: 'grep: test("W1-T4108: preflight fails where CI.s diff-coverage would" in test/preflight-runs-what-ci-runs.test.ts'
+    - claim: "preflight runs the census suites and console-parity"
+      proof: 'grep: test("W1-T4108: preflight runs the census suites and console-parity" in test/preflight-runs-what-ci-runs.test.ts'
+    - claim: "local coverage is measured with source maps"
+      proof: 'grep: test("W1-T4108: local coverage is measured with source maps" in test/preflight-runs-what-ci-runs.test.ts'
+  falsifier: |
+    Drop the diff-coverage step and the first test passes a diff with an uncovered added line.
