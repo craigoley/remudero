@@ -469,3 +469,23 @@ test("computeRelocatedLines: a genuinely new added line with NO merge-base count
   const relocated = computeRelocatedLines(added, removed);
   assert.equal(relocated.get("src/z.ts"), undefined);
 });
+
+test("W1-T4099: a one-line union type alias is exempt", async () => {
+  // #6677 went red on exactly this line: src/lib/inbox-owner.ts:15, 2026-09-22.
+  const { computeTypeOnlyRanges } = await import(pathToFileURL(SCRIPT).href);
+  const src = 'export type InboxOwner = "operator" | "fleet";\n\nexport function f() {\n  return 1;\n}\n';
+  const ranges = computeTypeOnlyRanges(src);
+  assert.deepEqual(ranges.map((r: { start: number; end: number }) => [r.start, r.end]), [[1, 1]]);
+  // A multi-line union and type-only imports and exports erase too.
+  const multi = computeTypeOnlyRanges('type Kind =\n  | "a"\n  | "b";\nimport type { X } from "./x.js";\nexport type { Y } from "./y.js";\n');
+  assert.deepEqual(multi.map((r: { start: number; end: number }) => [r.start, r.end]), [[1, 3], [4, 4], [5, 5]]);
+});
+
+test("W1-T4099: a real statement next to a type alias is still flagged", async () => {
+  const { computeTypeOnlyRanges } = await import(pathToFileURL(SCRIPT).href);
+  const src = 'export type A = "x" | "y";\nexport const a: A = "x";\nlet type = 1;\ntype = 2;\n';
+  const ranges = computeTypeOnlyRanges(src);
+  assert.deepEqual(ranges.map((r: { start: number; end: number }) => [r.start, r.end]), [[1, 1]], "only the alias line is exempt");
+  assert.deepEqual(computeTypeOnlyRanges('type Open =\n  | "a"\n'), [], "an alias with no terminating semicolon stays unexempted");
+});
+

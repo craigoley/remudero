@@ -564,6 +564,33 @@ export function computeTypeOnlyRanges(fileText) {
       kind: 'type-only',
     });
   }
+  // W1-T4099: a type ALIAS statement (`export type X = "a" | "b";`, or one spanning several lines) and a
+  // type-only import/export erase to zero runtime code too. It runs to the first `;` at brace depth 0; an
+  // alias with no terminating `;` within reach is left unexempted, so the gate stays safe.
+  const ALIAS_OPEN = /^\s*(?:export\s+)?(?:declare\s+)?type\s+[A-Za-z_$][\w$]*(?:<[^=]*>)?\s*=/;
+  const TYPE_IMPORT = /^\s*(?:import|export)\s+type\s+(?:\{|\*|[A-Za-z_$])/;
+  for (let i = 0; i < lines.length; i++) {
+    if (TYPE_OPEN.test(lines[i]) || (!ALIAS_OPEN.test(lines[i]) && !TYPE_IMPORT.test(lines[i]))) continue;
+    let depth = 0;
+    let end = -1;
+    for (let k = i; k < lines.length && k < i + 200; k++) {
+      for (const ch of lines[k]) {
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+      }
+      if (depth <= 0 && /;\s*(?:\/\/.*)?$/.test(lines[k])) {
+        end = k;
+        break;
+      }
+    }
+    if (end === -1) continue;
+    ranges.push({
+      start: i + 1,
+      end: end + 1,
+      reason: 'type alias or type-only import/export -- erases to zero runtime code, can never carry a hit',
+      kind: 'type-only',
+    });
+  }
   return ranges;
 }
 
