@@ -493,6 +493,7 @@
     "test/census-discovery-is-blind-to-a-second-idiom.test.ts": 1180,
     "test/census-discovery-sees-the-file-you-are-adding.test.ts": 1259,
     "test/census-population-is-derived-not-counted.test.ts": 1168,
+    "test/changed-files-cache.test.ts": 0,
     "test/changed-tasks-raw-text.test.ts": 1872,
     "test/changelog-generation.test.ts": 992,
     "test/changeset-shorthand-anchor.test.ts": 1184,
