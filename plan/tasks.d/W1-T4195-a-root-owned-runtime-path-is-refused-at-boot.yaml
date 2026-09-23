@@ -32,7 +32,13 @@
         state directory, and the checkout's .git refs, logs and worktrees directories. (ii) A failure exits non-zero naming
         the first unwritable path and its owner; it never chowns on its own, because a privileged repair is an operator
         act. (iii) The check reads the filesystem only and is driven by a test against a fixture tree.
+    (iv) An unwritable entry BENEATH .git/worktrees warns by name and does not refuse: it blocks only that one linked
+        worktree, and deploy/entrypoint.sh already rules that housekeeping never blocks the boot. MEASURED 2026-09-23 on
+        the live host: the core container holds .git/worktrees/reviewer-6315-fresh-1789955000000 unwritable, the site
+        and console containers hold nothing, so refusing it would take core down on the next image rebuild.
   acceptance:
+    - claim: "an unwritable linked-worktree admin entry warns and still boots"
+      proof: 'grep: test("W1-T4195: an unwritable linked-worktree admin entry warns and still boots" in test/a-root-owned-runtime-path-is-refused-at-boot.test.ts'
     - claim: "a root-owned ledger is refused at boot by name"
       proof: 'grep: test("W1-T4195: a root-owned ledger is refused at boot by name" in test/a-root-owned-runtime-path-is-refused-at-boot.test.ts'
     - claim: "a root-owned git ref directory is refused at boot by name"

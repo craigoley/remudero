@@ -645,3 +645,38 @@ test("assignment evidence refuses a done row whose OWN reported routed_model con
   assert.equal(evidence.integrity.terminalRoutedModelMismatches, 1);
   assert.equal(evidence.integrity.terminalProviderMismatches, 0, "the mismatch is on model alone, not also counted as a provider mismatch");
 });
+
+test("buildMountHeadroomSweep: the ledger corpus is read a line at a time, never decoded as one whole-file string", () => {
+  // The corpus is the whole ledger history. On 2026-09-23 it was ~4.6 GB of text across 967
+  // rotations, and holding it as strings exhausted the daemon's 8 GB heap every ten minutes.
+  const dir = tmpDir();
+  try {
+    const a = runLines({ runId: "S1", taskId: "TS1", taskClass: "src", turns: 4, costUsd: 1, verdict: "merged", ts: "2026-08-01T00:00:00.000Z" });
+    const b = runLines({ runId: "S2", taskId: "TS2", taskClass: "src", turns: 9, costUsd: 2, verdict: "merged", ts: "2026-08-02T00:00:00.000Z" });
+    writeGzipArchive(dir, "2026-08-01T00-00-00-000Z", [a]);
+    writePlainArchive(dir, "2026-08-02T00-00-00-000Z", [a, b]);
+    writeLive(dir, [b]);
+    const wholeFileDecodes: string[] = [];
+    const guard = (buf: Buffer, path: string): Buffer => {
+      const decode = buf.toString.bind(buf) as (encoding?: BufferEncoding, start?: number, end?: number) => string;
+      buf.toString = ((encoding?: BufferEncoding, start?: number, end?: number) => {
+        if ((start ?? 0) === 0 && (end ?? buf.length) >= buf.length) wholeFileDecodes.push(path);
+        return decode(encoding, start, end);
+      }) as typeof buf.toString;
+      return buf;
+    };
+    const streamed = buildMountHeadroomSweep(dir, {
+      ...realMountHeadroomFs,
+      readFileSync: (path: string) => guard(realMountHeadroomFs.readFileSync(path), path),
+      gunzipSync: (raw: Buffer) => guard(realMountHeadroomFs.gunzipSync(raw), "gunzip"),
+    });
+    assert.deepEqual(wholeFileDecodes, [], "no file was decoded as one string");
+    // Same answer as an unguarded read: duplicated windows still collapse to one run each.
+    const plain = buildMountHeadroomSweep(dir);
+    assert.deepEqual(streamed, plain);
+    assert.equal(streamed.corpus.distinctRunCount, 2);
+    assert.equal(streamed.corpus.rawRowsWithRunId, 2 * a.split("\n").length + 2 * b.split("\n").length);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

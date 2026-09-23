@@ -1,0 +1,47 @@
+- id: W1-T4228
+  title: "THE CONSOLE CAN ONLY SEE THE CORE DAEMON, BECAUSE ONE rmd serve PROCESS IS BOUND TO ONE INSTANCE'S STATE — let the one existing gateway serve every instance in the registry under /v1/i/<instance>/..., reading each instance's own ledger, plan and controls, so site and console become visible and controllable without new containers, hostnames or tokens"
+  repo: remudero
+  depends_on: [W1-T4227]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator-request#projects-repos-onboarding-2026-09-23"
+  plan_refs: ["W1-T4227", "W1-T4102", "W1-T4244"]
+  files:
+    - src/lib/serve.ts
+    - deploy/serve-container.sh
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on the fleet host: one gateway (remudero-serve, 0.0.0.0:4317) serves the core
+    instance only; cloudflared routes console.remudero.com to it; the site and console daemons have no
+    gateway, so their status, queues, PRs and controls are unreachable from the console. serveCommand
+    loads ONE config (its root → ledger, service tokens) and ONE plan, which is why one process sees one
+    instance. #6546 answered with a container per instance (ports 4318/4319, never deployed).
+
+    OPERATOR RULING 2026-09-23: no additional gateways unless they are needed. They are not: a single
+    gateway that knows every instance gives the console one hostname, one Cloudflare route, one credential
+    and one memory reserve (serve is ~1.0-1.2 GiB resident; three copies would reserve 4.5 GiB of a
+    15.6 GiB host under W1-T4102), and it is the shape control planes take (one API server, resources
+    scoped by path). The daemons stay fully isolated; only the read/control surface is shared.
+  design: |
+    At startup serve reads the W1-T4227 registry and, for each instance, builds that instance's route set
+    from its own state root (mounted read-only except the control-marker directory the existing controls
+    already write) and its own plan. Routes mount under /v1/i/<instance>/…; the existing unprefixed routes
+    stay as aliases for the core instance so nothing breaks. An instance whose state cannot be read answers
+    its routes with an explicit unavailable state naming the reason, never another instance's data.
+    serve-container.sh mounts each registered instance's state root. One instance's slow read must not
+    block another's (reuse the existing per-route caches per instance).
+  acceptance:
+    - claim: "each registered instance is served under its own prefix from its own state"
+      proof: "unit test: each registered instance is served under its own prefix from its own state"
+    - claim: "an instance's routes never return another instance's tasks"
+      proof: "unit test: an instance's routes never return another instance's tasks"
+    - claim: "the unprefixed routes still answer for the core instance"
+      proof: "unit test: the unprefixed routes still answer for the core instance"
+    - claim: "an instance whose state is unreadable answers unavailable with the reason"
+      proof: "unit test: an instance whose state is unreadable answers unavailable with the reason"

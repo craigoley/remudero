@@ -1,0 +1,59 @@
+- id: W1-T4260
+  title: "A SATELLITE WORKTREE RUNS ITS PROOFS AGAINST CORE'S DEPENDENCY TREE — in the site and console containers every worktree links core's install root, which has no next, react or @clerk/nextjs and pins a different typescript, and the link also stops review's ensureDeps from installing the right tree: give a worktree whose package differs from the install root its own tree, keyed by repo and lockfile hash, installed once under a lock and linked"
+  repo: remudero
+  depends_on: [W1-T4193]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  origin: "feedback#fb-1790038102980-5f225f"
+  plan_refs: ["W1-T4193", "W1-T2716", "W1-T3041", "W1-T2312"]
+  files: [src/lib/worker.ts, test/a-satellite-worktree-gets-its-own-dependency-tree.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 at origin/main 925056e8, with read-only clones of remudero-console (d2b1c40) and remudero-site
+    (5d30478). Names are symbols; re-verify at your head.
+
+    OBSERVED (.remudero/daemon-instances.yaml): one image runs three daemons, `--repo remudero`, `--repo remudero-site`
+    and `--repo remudero-console`. In each container the rmd install is $HOME/Remudero/remudero (core) and the target
+    clone is $HOME/Remudero/repos/<repo>, which carries no node_modules (W1-T2716). `resolveNodeModulesSource` then falls
+    back to the install root, so every site and console worktree links CORE's tree.
+    OBSERVED: both satellites declare next, react, react-dom, @clerk/nextjs, vitest and typescript; core's package.json
+    has none of the first four and pins typescript ^7. fb-1790038102980-5f225f reports the mismatch warning on a console
+    review of remudero-console #1581 ("the second review happened to pass").
+    OBSERVED (src/lib/review.ts ensureDeps): review primes a fresh checkout with `npm ci` only when node_modules is ABSENT
+    and deliberately never over a symlink, so today's cross-link also stops review from installing the right tree.
+    OBSERVED: neither satellite has a hooks/ dir, so the commitlint reason for linking (W1-T137) does not apply there.
+    OBSERVED (W1-T3041): core worktrees already end up holding full 442 MiB copies, so a per-hash tree shared between
+    worktrees is not more disk than today.
+
+    ALSO REPORTED AS: fb-1789328946438-96e9b7 (asks for exactly this: a repo plus lockfile-hash keyed cache, installed
+    under a lock, never shared between repos with distinct lockfiles).
+
+    Depends on W1-T4193, which adds the cross-package detection (worktree.node_modules_cross_package) this task acts on.
+  design: |
+    (i) MEASURE FIRST, in the build's own test or a recorded probe: a satellite `npm ci` time and tree size from a warm
+        and a cold npm cache. If a cold install exceeds review's 120 s ensureDeps bound, say so; do not raise that bound
+        in this task.
+    (ii) Only a CROSS-PACKAGE worktree (its package.json name differs from the install root's) changes behaviour. Core
+        worktrees, and any worktree whose repo clone has its own node_modules, stay byte-identical.
+    (iii) The tree lives at <config.root>/deps/<package name>/<sha256 of package.json + package-lock.json>/node_modules.
+        It is installed with `npm ci` into that REAL directory, never through a symlink, under an exclusive lock file, and
+        written atomically (install to a temp dir beside it, then rename), so a concurrent worktree waits or reuses and
+        never sees half a tree. The worktree then links it.
+    (iv) If the install fails or times out, fall back to today's behaviour (link the install root, plus
+        worktree.node_modules_cross_package) and log deps.install_failed with the reason. A satellite dispatch must never
+        be refused by this task.
+    (v) Reuse happens only for the exact hash. Never link one repo's tree into another repo's worktree.
+    (vi) Pruning old hashes is out of scope; record the tree count and size on each install so a later task can bound it.
+  acceptance:
+    - claim: "a satellite worktree links a tree keyed by its own repo and lockfile hash"
+      proof: 'grep: test("W1-T4260: a satellite worktree links a tree keyed by its own repo and lockfile hash" in test/a-satellite-worktree-gets-its-own-dependency-tree.test.ts'
+    - claim: "two repos with distinct lockfiles never share a tree"
+      proof: 'grep: test("W1-T4260: two repos with distinct lockfiles never share a tree" in test/a-satellite-worktree-gets-its-own-dependency-tree.test.ts'
+    - claim: "a failed install falls back to the install root link and is never refused"
+      proof: 'grep: test("W1-T4260: a failed install falls back to the install root link and is never refused" in test/a-satellite-worktree-gets-its-own-dependency-tree.test.ts'
+    - claim: "a core worktree is unchanged"
+      proof: 'grep: test("W1-T4260: a core worktree is unchanged" in test/a-satellite-worktree-gets-its-own-dependency-tree.test.ts'
