@@ -38,6 +38,7 @@ import {
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlan, loadPlanFromYaml, type Task } from "./plan.js";
+import { fixedClock } from "./clock.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import type { CiLessonRecurrenceObservation } from "./ci-lesson-recurrence.js";
@@ -2015,7 +2016,7 @@ function planTaskFiles(checkoutDir: string | undefined): ReadonlyMap<string, rea
 /** Read the window, then fold silence by area and outcome by learning over the SAME rows. Refuses — never
  *  a quiet zero — when the union or the plan cannot be read. */
 export function runKnowledgeMeasurement(opts: KnowledgeMeasurementOpts): KnowledgeMeasurementResult {
-  const from = new Date(opts.now.getTime() - KNOWLEDGE_MEASUREMENT_WINDOW_DAYS * DAY_MS).toISOString();
+  const from = fixedClock(opts.now.getTime() - KNOWLEDGE_MEASUREMENT_WINDOW_DAYS * DAY_MS).iso();
   const window = { from, to: opts.now.toISOString() };
   const read = opts.ledgerUnion ?? ((stateDir, pattern, o) => resolveLedgerUnion(stateDir, pattern, undefined, o));
   const union = read(opts.stateDir, KNOWLEDGE_MEASUREMENT_PATTERN, { sinceTs: from });
