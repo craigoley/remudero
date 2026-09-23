@@ -1,0 +1,8 @@
+- id: a-killed-run-prints-no-summary
+  subsystem: testing
+  lifecycle: active
+  operator_impact: true
+  files: ["test/setup/**", scripts/test-with-retry.mjs]
+  fact: >-
+    A killed test run prints no `# tests` summary; a count read from it is not a result.
+  src: W1-T0
