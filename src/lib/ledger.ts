@@ -1428,8 +1428,7 @@ export function rotateLedger(
     fsDeps?: LedgerRotationFsDeps;
     now?: () => Date;
     archiveFsDeps?: LedgerArchiveFsDeps;
-    /** The cadence window (default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}); 0 rotates on every
-     *  ceiling crossing — for a caller exercising what one rotation writes, not how often. */
+    /** Cadence window, default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}; 0 rotates on every crossing. */
     smoothingWindowMs?: number;
   } = {},
 ): LedgerRotationResult {
@@ -1465,9 +1464,8 @@ function rotateLedgerLocked(
 ): LedgerRotationResult {
   const { size: size0, content: snapshot, bytes: snapshotBytes, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
 
-  // W1-T4100: heal any archive already on disk whose name ran ahead of its own real write time
-  // BEFORE this rotation adds a new one, and learn the newest SAFE stamp among them — the floor
-  // the new archive's own name is never allowed to fall at or below.
+  // W1-T4100: heal on-disk names that ran ahead of their write time; the newest safe stamp is the
+  // floor this rotation's own name must clear.
   const dir = dirname(path);
   const lastArchiveMs = reconcileArchiveStamps(dir, archiveFsDeps);
   let requestedMs = now ? now().getTime() : systemClock.now();
@@ -1477,9 +1475,7 @@ function rotateLedgerLocked(
   // share 99.3% of rows (fleet host, 2026-09-23). An empty delta writes no archive at all.
   const delta = snapshotBytes.subarray(archivedPrefixBytes(path, snapshotBytes));
   const plainArchivePath = datedArchivePath(path, new Date(requestedMs));
-  // The archive's own OS-assigned mtime, read back right after it lands, is the one clock that
-  // cannot share `now`'s own corruption — see healIfAheadOfOwnMtime's doc for the incident this
-  // guards against.
+  // The landed archive's own mtime is the clock `now` cannot corrupt (see healIfAheadOfOwnMtime).
   const archivePath =
     delta.length > 0
       ? healIfAheadOfOwnMtime(writeArchive(plainArchivePath, delta.toString("utf8"), archiveFsDeps), lastArchiveMs, archiveFsDeps)
