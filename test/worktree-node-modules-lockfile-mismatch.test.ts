@@ -37,10 +37,10 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { linkWorktreeNodeModules } from "../src/lib/worker.js";
-import { hashInstallInputs } from "../src/lib/install-hash.js";
+import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `rmd-w1-t2777-${prefix}`));
@@ -296,8 +296,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { runTask, type RunResult } from "../src/run-task.js";
-import { worktreeAdd, WorktreeNodeModulesRefusedError, type WorkerResult } from "../src/lib/worker.js";
+import { ManagedCheckoutRefreshRefusedError, refreshManagedCheckout, runTask, type RunResult } from "../src/run-task.js";
+import { worktreeAdd, WorktreeNodeModulesRefusedError, writeRunLock, type WorkerResult } from "../src/lib/worker.js";
 import { runDrain } from "../src/lib/drain.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { Config } from "../src/lib/config.js";
@@ -385,7 +385,12 @@ interface T4193Run {
 /** Drive a REAL runTask() at the fixture under `root`. */
 async function runT4193(
   root: string,
-  opts: { dropThrows?: boolean; spawnReturns?: boolean; readRemoteHead?: (repoDir: string, ref: string) => string } = {},
+  opts: {
+    dropThrows?: boolean;
+    spawnReturns?: boolean;
+    readRemoteHead?: (repoDir: string, ref: string) => string;
+    managedCheckoutInstall?: (repoDir: string) => void;
+  } = {},
 ): Promise<T4193Run> {
   const planPath = join(root, "tasks.yaml");
   writeFileSync(
@@ -417,6 +422,7 @@ async function runT4193(
           Promise.resolve({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
         claimReserver: reserver,
         ...(opts.readRemoteHead ? { worktreeBaseDeps: { readRemoteHead: opts.readRemoteHead } } : {}),
+        managedCheckoutInstall: opts.managedCheckoutInstall,
       }),
     );
   } catch (e) {
@@ -597,6 +603,179 @@ test("W1-T4193: a package-less worktree under the implement option keeps todays 
     worktreeAdd(repoDir, wt, "run-t4193-nopkg", "origin/main", { log: (step) => logs.push(step), warn: () => {}, refuseSamePackageLockfileMismatch: true });
     assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true);
     assert.deepEqual(logs.filter((s) => s.startsWith("worktree.node_modules")), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T4356: the managed checkout is fast-forwarded before a worktree borrows its install ──
+//
+// W1-T4193 refuses a worktree whose install inputs differ from the checkout it borrows node_modules from, but
+// nothing moved repos/<repo>, so a lockfile change on main refused every implement dispatch until an operator
+// fast-forwarded it by hand. The runTask tests below drive the REAL refresh inside runTaskBody (only `npm ci`
+// is injected); the direct tests pin each arm that leaves the checkout untouched.
+
+/** A borrowed checkout (its own node_modules) one commit behind an origin/main that adds a dependency. */
+function behindMain(root: string): { repoDir: string; before: string; after: string } {
+  const { repoDir } = t4193Fixture(root, { ".gitignore": "node_modules/\n", "package.json": pkgJson("t4193-core", { a: "^1.0.0" }) });
+  mkdirSync(join(repoDir, "node_modules"));
+  const seed = join(root, "seed");
+  writeFileSync(join(seed, "package.json"), pkgJson("t4193-core", { a: "^1.0.0", added: "^2.0.0" }));
+  gitIn(seed, "commit", "-q", "-am", "add a dependency");
+  gitIn(seed, "push", "-q", "origin", "main");
+  return { repoDir, before: gitIn(repoDir, "rev-parse", "HEAD").trim(), after: gitIn(seed, "rev-parse", "HEAD").trim() };
+}
+
+const refreshLog = () => {
+  const lines: Array<[string, Record<string, unknown> | undefined]> = [];
+  return { lines, log: (step: string, extra?: Record<string, unknown>) => void lines.push([step, extra]) };
+};
+
+test("W1-T4356: a clean managed checkout behind main is fast-forwarded before the worktree borrows its install", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-ff-`));
+  try {
+    const { repoDir, before, after } = behindMain(root);
+    const installs: string[] = [];
+    const r = await runT4193(root, { spawnReturns: true, managedCheckoutInstall: (dir) => void installs.push(dir) });
+    assert.equal(r.err, undefined, `the refreshed checkout must not be refused: ${String(r.err)}`);
+    assert.ok(r.spawned > 0, "the worker runs against the refreshed install");
+    assert.equal(gitIn(repoDir, "rev-parse", "HEAD").trim(), after, "the checkout now sits at origin/main");
+    assert.deepEqual(installs, [repoDir], "the install is refreshed for the lockfile change, once");
+    const steps = r.ledger.map((l) => l.step);
+    const ff = r.ledger.find((l) => l.step === "managed_checkout.fast_forward");
+    assert.deepEqual({ before: ff?.before_sha, after: ff?.after_sha }, { before, after }, "ledgered with both shas");
+    assert.ok(steps.indexOf("managed_checkout.fast_forward") < steps.indexOf("worktree.add"), "before the worktree is cut");
+    assert.equal(r.ledger.find((l) => l.step === "worktree.node_modules_refused"), undefined);
+    assert.equal(existsSync(join(root, "state", "managed-checkout-remudero.lock")), false, "the checkout lock is released");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4356: a dirty managed checkout is never fast-forwarded and the refusal names why", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-dirty-`));
+  try {
+    const { repoDir, before } = behindMain(root);
+    writeFileSync(join(repoDir, "operator-notes.txt"), "work in progress\n");
+    const installs: string[] = [];
+    const r = await runT4193(root, { managedCheckoutInstall: (dir) => void installs.push(dir) });
+    const refused = assertDeferredRefusal(r);
+    assert.match(String((r.err as Error).message), /the managed checkout was not fast-forwarded: checkout is dirty \(1 changed path\(s\)\)/);
+    assert.equal(refused.managed_checkout_not_refreshed, "checkout is dirty (1 changed path(s))", "the ledgered refusal names it too");
+    assert.equal(gitIn(repoDir, "rev-parse", "HEAD").trim(), before, "the dirty checkout is untouched");
+    assert.deepEqual(installs, [], "and never reinstalled");
+    assert.equal(r.ledger.find((l) => l.step === "managed_checkout.fast_forward"), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4356: an install that fails after the fast-forward is reverted and refused as a deferral before any worktree exists", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-install-`));
+  try {
+    const { repoDir, before } = behindMain(root);
+    const r = await runT4193(root, { managedCheckoutInstall: () => { throw new Error("simulated: npm ci exited 1"); } });
+    assert.ok(r.err instanceof ManagedCheckoutRefreshRefusedError, `got: ${String(r.err)}`);
+    assert.equal(r.err.reasonClass, "blocked_toolchain", "deferred by daemon.ts without a strike");
+    assert.match(String(r.ledger.find((l) => l.step === "managed_checkout.refresh_refused")?.reason), /reverted to [0-9a-f]{40}: simulated: npm ci exited 1/);
+    assert.equal(gitIn(repoDir, "rev-parse", "HEAD").trim(), before, "reverted, so the next dispatch retries the install");
+    assert.ok(r.reserver.calls.includes(`drop:${T4193_TASK}:t4193-anchor`), "the claim is released");
+    assert.equal(r.ledger.find((l) => l.step === "worktree.add"), undefined, "no worktree is cut");
+    assert.equal(existsSync(join(root, "state", "managed-checkout-remudero.lock")), false, "the checkout lock is released");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4356: a checkout without its own node_modules is not borrowed, so it is never touched or locked", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-unborrowed-`));
+  try {
+    const { repoDir, before } = behindMain(root);
+    rmSync(join(repoDir, "node_modules"), { recursive: true });
+    const lockPath = join(root, "state", "refresh.lock");
+    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, () => assert.fail("never installs"));
+    assert.equal(out.kind, "unborrowed");
+    assert.equal(existsSync(lockPath), false, "no lock is taken");
+    out.release();
+    assert.equal(gitIn(repoDir, "rev-parse", "HEAD").trim(), before);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4356: a current checkout is left alone and its lock is held until released", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-current-`));
+  try {
+    const { repoDir } = t4193Fixture(root, { "package.json": pkgJson("t4193-core", { a: "^1.0.0" }) });
+    mkdirSync(join(repoDir, "node_modules"));
+    const lockPath = join(root, "state", "refresh.lock");
+    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, () => assert.fail("never installs"));
+    assert.equal(out.kind, "current");
+    assert.throws(() => refreshManagedCheckout(repoDir, lockPath, refreshLog().log), (e: unknown) =>
+      e instanceof ManagedCheckoutRefreshRefusedError && /another dispatch holds/.test(e.message), "a peer is refused while it is held");
+    out.release();
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4356: an off-main, unfetchable, diverged or borrowed checkout is skipped with its reason and never moved", () => {
+  const cases: Array<[string, (repoDir: string, root: string) => void, RegExp]> = [
+    ["off-main", (dir) => void gitIn(dir, "checkout", "-q", "-b", "operator-branch"), /checkout is on operator-branch, not main/],
+    ["unfetchable", (dir, root) => void gitIn(dir, "remote", "set-url", "origin", join(root, "gone.git")), /could not fetch origin/],
+    ["diverged", (dir) => void gitIn(dir, "commit", "-q", "--allow-empty", "-m", "local only"), /checkout has diverged from origin\/main/],
+    ["borrowed", (dir, root) => {
+      const wt = join(root, "live-worker");
+      gitIn(dir, "worktree", "add", "-q", "--detach", wt);
+      writeRunLock(wt, { pid: process.pid, run_id: "live", startedAt: "2026-09-23T00:00:00.000Z" });
+    }, /a live worker still borrows its node_modules/],
+  ];
+  for (const [name, arrange, reason] of cases) {
+    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-${name}-`));
+    try {
+      const { repoDir } = behindMain(root);
+      arrange(repoDir, root);
+      const head = gitIn(repoDir, "rev-parse", "HEAD").trim();
+      const { lines, log } = refreshLog();
+      const out = refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), log, () => assert.fail("never installs"));
+      out.release();
+      assert.equal(out.kind, "skipped", name);
+      assert.match(out.kind === "skipped" ? out.reason : "", reason, name);
+      assert.match(String(lines.find(([s]) => s === "managed_checkout.refresh_skipped")?.[1]?.reason), reason, `${name} is ledgered`);
+      assert.equal(gitIn(repoDir, "rev-parse", "HEAD").trim(), head, `${name} is never moved`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("W1-T4356: the default install is ensureInstallFresh, which reinstalls only when the lockfile hash moved", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-default-`));
+  try {
+    const { repoDir, after } = behindMain(root);
+    // Prime the install marker with origin/main's inputs, so the REAL default no-ops instead of running npm ci.
+    const seedHash = hashInstallInputs(join(root, "seed"));
+    mkdirSync(dirname(installHashMarkerPath(repoDir)), { recursive: true });
+    writeFileSync(installHashMarkerPath(repoDir), seedHash);
+    const out = refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), refreshLog().log);
+    out.release();
+    assert.equal(out.kind, "fast_forwarded");
+    assert.equal(gitIn(repoDir, "rev-parse", "HEAD").trim(), after);
+    assert.equal(readFileSync(installHashMarkerPath(repoDir), "utf8"), seedHash, "the marker already matched: no npm ci ran");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4356: a checkout git cannot read is refused and its lock released", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-unreadable-`));
+  try {
+    const repoDir = join(root, "not-a-repo");
+    mkdirSync(join(repoDir, "node_modules"), { recursive: true });
+    const lockPath = join(root, "state", "refresh.lock");
+    assert.throws(() => refreshManagedCheckout(repoDir, lockPath, refreshLog().log), ManagedCheckoutRefreshRefusedError);
+    assert.equal(existsSync(lockPath), false, "a refusal never strands the lock");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
