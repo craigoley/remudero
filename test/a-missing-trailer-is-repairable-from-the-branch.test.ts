@@ -271,6 +271,7 @@ test("W1-T3283 UNREADABLE PLAN: an unreadable main plan disables trailer repair 
   let reached = false;
   const views = buildOpenPrViews("craigoley", "remudero", ledgerPath(), {
     fetch: () => [] as never,
+    requiredContexts: () => ["ci-gate", "remudero-review"], // W1-T4226: branch protection via its seam, not a refused gh read
     readMainPlan: () => {
       reached = true;
       throw new Error("plan/tasks.yaml is unreadable");

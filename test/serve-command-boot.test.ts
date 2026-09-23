@@ -23,6 +23,7 @@ import { serveCommand } from "../src/run-task.js";
 import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 
@@ -33,6 +34,11 @@ async function freePort(): Promise<number> {
   await new Promise<void>((resolve) => probe.close(() => resolve()));
   return port;
 }
+
+/** W1-T4226: the board's gateway, through `serveCommand`'s existing `buildBatchedGithub` seam (the
+ *  same fake test/serve-answers-before-it-accepts.test.ts wires) — so booting the console never
+ *  lists pulls through the refused `gh`. Nothing in this file asserts on board contents. */
+const boardGithub = () => fakeGitHub({ listMergedHeadBranches: () => [], listOpenHeadBranches: () => [] });
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -65,7 +71,7 @@ test("serve boots on main, secures its logs 0600, and answers on the config-reso
   // both resolved by the SAME two functions this exercises).
   // `branch` injected as main: CI checks out a detached merge SHA, so neither the quiet path
   // nor the warning path would ever be DETERMINISTIC here without it (see the sibling test).
-  const running = serveCommand([], { branch: () => "main" });
+  const running = serveCommand([], { branch: () => "main", buildBatchedGithub: boardGithub });
   t.after(() => {
     console.log = realLog;
     console.error = realErr;
@@ -119,7 +125,7 @@ test("a held port is WAITED OUT and, if it never frees, fails loudly instead of 
     squatter.close();
   });
 
-  const rc = await serveCommand([], { branch: () => "main", bindRetry: { attempts: 3, delayMs: 5 } });
+  const rc = await serveCommand([], { branch: () => "main", bindRetry: { attempts: 3, delayMs: 5 }, buildBatchedGithub: boardGithub });
 
   const said = stderr.join("\n");
   assert.match(said, /still held \(EADDRINUSE\), waiting for release \(attempt 1\)/, "it WAITS rather than dying on the first miss");
@@ -149,7 +155,7 @@ test("an OFF-MAIN checkout warns loudly and SERVES ANYWAY — a KeepAlive'd serv
   console.log = (...a: unknown[]) => void stdout.push(a.join(" "));
   console.error = (...a: unknown[]) => void stderr.push(a.join(" "));
 
-  const running = serveCommand([], { branch: () => "run-W1-T152" });
+  const running = serveCommand([], { branch: () => "run-W1-T152", buildBatchedGithub: boardGithub });
   t.after(() => {
     console.log = realLog;
     console.error = realErr;
@@ -240,7 +246,7 @@ test("serve resolves a real feedback-expansion rung at boot: a preview backed by
   const realLog = console.log;
   console.log = (...a: unknown[]) => void stdout.push(a.join(" "));
 
-  const running = serveCommand([], { branch: () => "main", spawn });
+  const running = serveCommand([], { branch: () => "main", spawn, buildBatchedGithub: boardGithub });
   t.after(() => {
     console.log = realLog;
     process.env.HOME = oldHome;
@@ -283,7 +289,7 @@ test("an install whose mounts table resolves no route boots UNCHANGED: preview s
   const realLog = console.log;
   console.log = (...a: unknown[]) => void stdout.push(a.join(" "));
 
-  const running = serveCommand([], { branch: () => "main", loadMounts: () => noRouteMounts() });
+  const running = serveCommand([], { branch: () => "main", loadMounts: () => noRouteMounts(), buildBatchedGithub: boardGithub });
   t.after(() => {
     console.log = realLog;
     process.env.HOME = oldHome;

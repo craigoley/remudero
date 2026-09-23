@@ -49,6 +49,14 @@ function fakeGit(dump: string, originUrl = "git@github.com:o/r.git"): (args: str
   };
 }
 
+/** W1-T4226: the gateway's `exec` seam, answering #3005's changed-file read (the self-credit
+ *  check `projectPlan` runs before crediting) so it never reaches the refused `gh`. #3005 touches
+ *  src/ only — it does not add W1-T2326's own plan record. Any other read is unexpected. */
+function fakeGhFiles(args: string[]): string {
+  if (args.join(" ") === "api --paginate repos/o/r/pulls/3005/files --jq .[].filename") return "src/lib/triage.ts\n";
+  throw new Error(`unexpected gh call: ${args.join(" ")}`);
+}
+
 function pr(over: Partial<BatchedPr> & Pick<BatchedPr, "number">): BatchedPr {
   return { url: `https://github.com/o/r/pull/${over.number}`, state: "MERGED", ...over };
 }
@@ -166,6 +174,7 @@ test("W1-T2447: a commit-only trailer adds credit through projectPlan that the b
   });
   const gh = buildBatchedGithub("o", "r", {
     fetchAll: () => [commitOnlyRow],
+    exec: fakeGhFiles, // W1-T4226: changed files via the seam, not the refused gh
     commitTrailerIndex: buildCommitTrailerIndex({
       slug: "o/r",
       exec: fakeGit(
@@ -182,6 +191,7 @@ test("W1-T2447: a commit-only trailer adds credit through projectPlan that the b
 
   const ghNoCommitEvidence = buildBatchedGithub("o", "r", {
     fetchAll: () => [commitOnlyRow],
+    exec: fakeGhFiles, // W1-T4226: changed files via the seam, not the refused gh
     commitTrailerIndex: () => new Map(),
   });
   const uncredited = projectPlan(onePlan("W1-T2326"), { ledgerPath: emptyLedger(), github: ghNoCommitEvidence }).get(
