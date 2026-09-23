@@ -1,0 +1,56 @@
+- id: W1-T4087
+  title: "NO INBOX ITEM IS WRITTEN FOR A PERSON — every proposal's summary is the producer's raw diagnostic (task ids, file paths, `context:` keys, 'promote-to-instrument', 'field-no-writer', command names), while the ISO 24495-1 operator message standard and the plain decision summary exist and reach only escalations: give every inbox message a plain-language layer written when the item is created, raw text behind Details"
+  repo: remudero
+  depends_on: [W1-T4086]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator report 2026-09-22: the inbox items use very complex language and read like commands; we settled on the ISO plain language standard for messaging"
+  plan_refs: [W1-T313, W1-T2279, W1-T2498]
+  files: [src/lib/inbox-plain.ts, src/lib/operator-message.ts, src/lib/panel-graph.ts, src/lib/daemon.ts, test/every-inbox-message-is-plain-language.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22.
+    (1) THE STANDARD EXISTS. docs/operator-message-standard.md (W1-T2279) applies ISO 24495-1:2023 and fixes four parts:
+        who is speaking, what happened, what is asked of the reader, and what follows from doing nothing.
+        `checkOperatorMessage` (src/lib/operator-message.ts, W1-T2498) checks those parts. The 2026-07-22 operator
+        directive (DECISIONS.md) says a decision card opens with a plain summary — headline of 15 words or fewer, what
+        happened, the decision, two or three labelled options — written at creation, raw payload behind Details.
+        W1-T313 built that as `summarizeEscalation` (src/lib/escalate.ts) over the `SummarizeDeps.summarize` writer.
+    (2) NONE OF IT REACHES THE INBOX. Live samples of `summary`, one per kind:
+        "adoption-debt: \"context:\" (field-no-writer) in src/lib/plan.ts has shipped since ... 0 raw `context:` key hits
+        across plan/ ..."; "promote-to-instrument: \"CLAUDE.md#investigation-discipline:...\" has recurred 31 time(s) ...";
+        "proof-debt: W1-T2 criterion 0 (name-filtered-zero-match) ... (rmd proof-queue-audit)". The console renders that
+        text as the item.
+  design: |
+    (i) src/lib/inbox-plain.ts writes, once per item when it is created or first read without one, a plain message with
+        the four parts of the standard and the decision-card shape: a headline (15 words or fewer), what happened, what
+        the daemon needs from the operator, and two or three labelled options with what each one does. It uses the
+        existing `SummarizeDeps.summarize` writer, the same one `summarizeEscalation` uses, and stores the result beside
+        the proposal so it is written once, not on every read.
+    (ii) A plain message is checked before it is stored: `checkOperatorMessage` for the four parts, plus mechanical
+         plain-language checks that need no judgement — no code spans, file paths, task or PR ids, rule anchors, or
+         command names in the plain text (those go to Details), and no sentence over 25 words. A message that fails is
+         rewritten once; if it still fails, a per-kind template written in plain English is used. The raw summary is
+         never shown as the plain text.
+    (iii) `GET /v1/inbox` returns `plain` on every item and keeps `summary` as the raw Details.
+    (iv) The daemon backfills `plain` for existing operator-owned items in the background, a few per tick, so the
+         change reaches the 54 items already waiting.
+  acceptance:
+    - claim: "every inbox item carries a plain message with the four parts"
+      proof: 'grep: test("W1-T4087: every inbox item carries a plain message with the four parts" in test/every-inbox-message-is-plain-language.test.ts'
+    - claim: "a plain message with code, paths or ids is refused and rewritten"
+      proof: 'grep: test("W1-T4087: a plain message with code, paths or ids is refused and rewritten" in test/every-inbox-message-is-plain-language.test.ts'
+    - claim: "a writer that keeps failing falls back to the plain template, never the raw summary"
+      proof: 'grep: test("W1-T4087: a writer that keeps failing falls back to the plain template, never the raw summary" in test/every-inbox-message-is-plain-language.test.ts'
+    - claim: "every live fleet kind has a plain template"
+      proof: 'grep: test("W1-T4087: every live fleet kind has a plain template" in test/every-inbox-message-is-plain-language.test.ts'
+    - claim: "the inbox route calls the plain writer"
+      proof: 'grep: plainInboxMessage( in src/lib/panel-graph.ts'
+  falsifier: |
+    Pass the raw summary through as `plain` and the second and third tests go red on the live adoption sample. Drop a
+    kind's template and the fourth goes red.
