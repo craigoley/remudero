@@ -1,0 +1,119 @@
+- id: W1-T4341
+  title: "Skill-draft reachability line measures the WRONG mechanism -- stageSkillDraft reports 'NOT reachable' off describeWorkerSkillReachability(settingSources), the SDK-native route W1-T3101's own design clause (v) refused to touch, instead of the actual W1-T3101 injection route (applies-to: implement + loadInjectableSkills/selectSkillsForTask) -- every staged skill-draft proposal, including the one this cycle ratifies, therefore carries a false claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 45.00
+  origin: "skill-draft:de866b8a3997b473"
+  plan_refs: ["W1-T3101", "W1-T3137"]
+  files: [src/lib/skill-workshop.ts, src/run-task.ts, test/skill-workshop.test.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    DISCOVERED while drafting the ratification for skill-draft:de866b8a3997b473 (W1-T4340,
+    this same fragment). stageSkillDraft (src/lib/skill-workshop.ts) embeds a reachability
+    line into every staged proposal's summary -- "Reachable: ..." or "NOT reachable by a
+    worker today: ..." -- sourced from a reachability parameter, and the ONE production
+    call site (retroCommand, src/run-task.ts,
+    stageSkillDrafts(..., describeWorkerSkillReachability([]), log)) passes
+    describeWorkerSkillReachability([]) -- the SAME value for EVERY draft in the batch,
+    computed from the SDK's settingSources gate (spawnWorker passes []), never from the
+    draft's OWN content.
+
+    THAT IS THE WRONG QUESTION, AS OF W1-T3101 (merged). describeWorkerSkillReachability
+    answers whether the Claude Code SDK's native project-scoped resource loading would
+    discover a repo-owned .claude/skills/<name>/SKILL.md -- gated on
+    settingSources.includes('project'). W1-T3101's own design clause (v) states plainly:
+    "settingSources is NOT touched. A builder who finds the prompt route insufficient files
+    a companion task arguing the isolation change on its own terms; it does not ride in
+    here." So describeWorkerSkillReachability([]) will ALWAYS answer "not reachable" for
+    every skill-draft this fleet ever stages, by construction, regardless of the skill's
+    content -- it is measuring a route this repo has explicitly and permanently decided not
+    to open.
+
+    MEANWHILE THE REAL ROUTE IS ALREADY LIVE AND IS PER-DRAFT. loadInjectableSkills +
+    selectSkillsForTask (both in skill-workshop.ts, wired into
+    implementPromptParts/renderImplementPrompt by W1-T3101) read .claude/skills/ off disk
+    directly -- no settingSources involved at all -- and select a skill for injection based
+    ENTIRELY on whether its OWN frontmatter carries a valid applies-to: naming an injectable
+    task type. renderSkillDraft already computes exactly that field
+    (injectableSkillTaskType(candidate.taskType)) when rendering a draft -- the information
+    needed to answer the RIGHT question already exists on every SkillDraft at draft time,
+    and nothing reads it for the reachability line.
+
+    THE CONSEQUENCE, MEASURED ON THIS CYCLE'S OWN PROPOSAL. skill-draft:de866b8a3997b473's
+    drafted markdown carries applies-to: implement (candidate.taskType was "implement", one
+    of the five INJECTABLE_SKILL_TASK_TYPES), so it WILL be selected into every implement
+    worker's prompt once approved (W1-T4340 proves this against the real tree) -- yet its
+    staged summary states, in the operator's own inbox, "NOT reachable by a worker today".
+    A false discouraging claim on a proposal that is, in fact, actionable is exactly the
+    class of claimed-vs-evidenced defect this fleet exists to catch elsewhere; it should
+    not survive in its own inbox.
+  design: |
+    (i) ADD a new predicate, e.g. describeSkillInjectionReachability(draft: SkillDraft):
+    { reachable: boolean; reason: string }, parsing draft.markdown's frontmatter with the
+    ALREADY-EXPORTED SKILL_APPLIES_TO_RE (never a second regex) and reporting
+    reachable: true naming the matched task type(s) and the W1-T3101 route
+    (loadInjectableSkills/selectSkillsForTask) when applies-to: is present and non-empty,
+    or reachable: false naming the ABSENCE of applies-to: -- never settingSources -- when
+    it is not.
+    (ii) DO NOT DELETE OR CHANGE describeWorkerSkillReachability. It is still a correct
+    answer to the question it asks (the SDK-native route), and W1-T3137's own regression
+    test (test/a-repo-skill-no-worker-can-reach.test.ts) depends on its exact current
+    contract (reachable:false for [], reachable:true for ['project']). This task adds a
+    function; it does not repurpose one.
+    (iii) REWIRE stageSkillDrafts's reachability PARAMETER so each draft's reachability
+    line is computed from ITS OWN content via (i), not from one shared value applied to
+    the whole batch -- a batch-shared value is ALSO wrong even setting the mechanism
+    question aside, since a future candidate with an unrecognized taskType renders no
+    applies-to: line at all (renderSkillDraft's own appliesTo ? [...] : [] branch) and
+    genuinely is not reachable, which a shared per-batch value cannot express. Preserve
+    stageSkillDrafts's existing signature shape where the existing test suite
+    (test/a-staged-skill-reaches-the-worker-prompt.test.ts) passes a single value directly
+    to stageSkillDraft -- VERIFY from source whether that is a second call path or the same
+    one before choosing whether the parameter becomes a function, a union type, or is
+    computed once per draft inside the existing loop in stageSkillDrafts itself (the least
+    invasive shape, since only ONE function currently loops over multiple drafts).
+    (iv) REWIRE THE ONE PRODUCTION CALL SITE (retroCommand, src/run-task.ts) to stop
+    passing describeWorkerSkillReachability([]) into the staging path.
+    (v) NOT IN SCOPE: writing or touching any .claude/skills/* file (that is W1-T4340, this
+    same fragment, and any FUTURE skill draft this fixes the summary line for). Nothing
+    here changes what gets staged, only the accuracy of the reachability line staged
+    alongside it.
+  acceptance:
+    - claim: "a drafted skill whose markdown carries a valid applies-to implement frontmatter line is reported reachable, naming the loadInjectableSkills and selectSkillsForTask route rather than settingSources"
+      proof: "unit test: test/skill-workshop.test.ts"
+    - claim: "a drafted skill with no applies-to frontmatter line is reported not reachable, naming the absence of applies-to rather than settingSources"
+      proof: "unit test: test/skill-workshop.test.ts"
+    - claim: "describeWorkerSkillReachability's own existing contract, false for an empty settingSources array and true for project, is unchanged -- the W1-T3137 regression test still passes"
+      proof: "unit test: test/skill-workshop.test.ts"
+    - claim: "the one production call site in retroCommand no longer sources the staged reachability line from describeWorkerSkillReachability, and two drafts in the same batch with different applies-to content get DIFFERENT reachability lines"
+      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+  falsifier: |
+    CLOSE WITHOUT BUILDING if test/a-repo-skill-no-worker-can-reach.test.ts (W1-T3137) has
+    since been amended to widen WORKER_SETTING_SOURCES to include 'project' -- re-check
+    grep -n 'settingSources: \[' src/lib/worker.ts first. If the SDK-native route is ever
+    opened, describeWorkerSkillReachability([]) stops always answering false and this
+    task's whole premise (a route that can NEVER succeed being used as the signal) no
+    longer holds -- though the per-draft-vs-per-batch defect in design clause (iii) would
+    still be worth fixing on its own terms, restated as its own task.
+  note: |
+    risk:high + band_meaning: span, same Rule 19 SPAN regrade as W1-T4340: files: spans
+    skill-workshop.ts (lib) and run-task.ts (the retro command's call site) plus two test
+    files, which subsystemsOf is likely to read as >=2 distinct subsystems even though the
+    underlying change is ONE concern (correct the reachability signal at its one
+    production call site). Independent of W1-T4340: disjoint files:, and W1-T4340's own
+    reachability proof for this cycle's specific skill is self-contained and does not read
+    this function -- so neither task blocks the other, by design (W1-T171's file-overlap
+    doctrine has nothing to serialize here).
+    Fixes the SIGNAL for every FUTURE staged skill-draft proposal (e.g. a future
+    fully_executed_proof draft, PROCEDURAL_SUCCESS_SIGNALS's second member,
+    src/lib/retro.ts:2414). It does NOT and cannot retroactively correct
+    skill-draft:de866b8a3997b473's own already-cached registry summary text -- that entry
+    is consumed and removed by this cycle's ratification (W1-T4340) regardless of its stale
+    wording, which is why W1-T4340 proves reachability independently rather than trusting the
+    registry's own claim.
