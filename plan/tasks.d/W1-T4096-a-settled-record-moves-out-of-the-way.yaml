@@ -1,0 +1,46 @@
+- id: W1-T4096
+  title: "THE NARRATIVE STORES ONLY GROW AND NOTHING SAYS WHICH DECISION STILL STANDS — MASTER-PLAN.md is 705 KB after 84 commits in 30 days, decisions live in three places (DECISIONS.md 293 KB, docs/adr/ 5, plan/decisions.d/ 22) with no status, and `// Why:` pointers land in forensics pages too big to read: give decisions an ADR status, fold settled plan sections into dated archives, and split forensics pages by anchor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "knowledge-system audit 2026-09-22"
+  plan_refs: [W1-T4095]
+  files: [src/lib/narrative-fold.ts, src/run-task.ts, scripts/decisions-status.mjs, scripts/forensics-split.mjs, test/a-settled-record-moves-out-of-the-way.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 ON origin/main.
+    (1) MASTER-PLAN.md: 7,207 lines, 705 KB, up from 376 KB 30 days ago; its SHIPPED log appends forever, and 19 src
+        modules read it.
+    (2) DECISIONS.md holds 88 entries with about 12 mentions of supersession, and no field says which decisions still
+        stand; docs/adr/ and plan/decisions.d/ are two more stores.
+    (3) docs/forensics/review.md is 598 KB and sweep.md 586 KB. A `// Why:` pointer into them cannot be read whole.
+    (4) ADR practice (Nygard; adr.github.io) gives every decision a status — proposed, accepted, superseded by — and
+        Context Rot / lost-in-the-middle findings show long context degrades use.
+  design: |
+    (i) DECISIONS: every entry gets a `Status:` line (accepted / superseded by <id> / withdrawn); a script derives the
+        initial status from existing supersession mentions and reports entries it cannot classify. plan/decisions.d/
+        and docs/adr/ become the one store's per-file form, indexed from DECISIONS.md.
+    (ii) MASTER-PLAN: src/lib/narrative-fold.ts moves sections marked shipped, and SHIPPED-log entries older than the
+         current wave, into `docs/archive/master-plan-<yyyy-mm>.md`, leaving a one-line pointer. Readers that grep
+         MASTER-PLAN keep working through the pointer (a test pins each of the 19 readers).
+    (iii) FORENSICS: a page over its reading size is split into one file per anchor, and every `// Why:` pointer is
+          rewritten to the new file, verified by the existing doctrine-pointer test style.
+    (iv) `rmd knowledge fold` runs these operations from the CLI. The gardener (W1-T4095) runs the fold when a store grows past its reading size, so the fold repeats
+         automatically; this task builds the operations and runs them once.
+  acceptance:
+    - claim: "every decision carries a status and a superseded one names its successor"
+      proof: 'grep: test("W1-T4096: every decision carries a status and a superseded one names its successor" in test/a-settled-record-moves-out-of-the-way.test.ts'
+    - claim: "a shipped plan section folds to a dated archive and leaves a pointer"
+      proof: 'grep: test("W1-T4096: a shipped plan section folds to a dated archive and leaves a pointer" in test/a-settled-record-moves-out-of-the-way.test.ts'
+    - claim: "every Why pointer resolves after a forensics split"
+      proof: 'grep: test("W1-T4096: every Why pointer resolves after a forensics split" in test/a-settled-record-moves-out-of-the-way.test.ts'
+    - claim: "the CLI runs the fold"
+      proof: 'grep: foldNarrativeStore( in src/run-task.ts'
+  falsifier: |
+    Fold without the pointer and the second test finds a reader's anchor gone.

@@ -1,0 +1,45 @@
+- id: W1-T4093
+  title: "LEARNINGS ARE RETRIEVED BY FILE GLOB ALONE — 0 of 83 entries declare `symbols:` or `error_signatures:` though the ranker sorts on them first, 28 glob the 44,636-line src/run-task.ts, 31% of runs match nothing and 32% drop matches at a fixed 8,148-character budget: derive each fact's symbols from the code it names, and fill the budget by match strength instead of size"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "knowledge-system audit 2026-09-22"
+  plan_refs: [W1-T19, W1-T33]
+  files: [src/lib/learnings.ts, src/lib/knowledge-symbols.ts, scripts/learnings-derive-symbols.mjs, test/a-learning-is-retrieved-by-what-it-is-about.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 (learnings/*.yaml at origin/main, 1,056 live `learnings.injected` rows).
+    (1) `selectLearnings` orders by error-signature, then symbol, then file matches. No entry declares symbols or error
+        signatures, so only file globs ever match.
+    (2) 28 entries glob src/run-task.ts, so any task touching it matches about a third of the corpus; `matched_learnings`
+        p90 is 8,100 bytes, pinned at the 8,148 cap, and 32% of runs drop matched entries.
+    (3) Industry practice has moved to description- and symbol-triggered retrieval (Cursor "apply intelligently" rules,
+        Agent Skills descriptions) and to just-in-time loading.
+  design: |
+    (i) src/lib/knowledge-symbols.ts derives, for each fact, the code identifiers it names that really exist in src/
+        (checked against the tree, like `assertion:` is), and a script writes them as `symbols:` in the entry. The
+        derivation re-runs whenever the gardener (W1-T4095) runs, so symbols follow renames.
+    (ii) Symbol matches are taken from the task's own text and the changed files' identifiers, so a task that touches
+         run-task.ts matches only facts about the functions it touches.
+    (iii) FILL BY STRENGTH: selection adds entries while each one's match score is at least a fraction of the best
+          match's, so a weak glob-only match no longer crowds out a strong one. The existing character budget stays as a
+          backstop.
+  acceptance:
+    - claim: "a fact's symbols are derived from the code it names"
+      proof: 'grep: test("W1-T4093: a fact.s symbols are derived from the code it names" in test/a-learning-is-retrieved-by-what-it-is-about.test.ts'
+    - claim: "a task touching one function of a large file matches only facts about that function"
+      proof: 'grep: test("W1-T4093: a task touching one function of a large file matches only facts about that function" in test/a-learning-is-retrieved-by-what-it-is-about.test.ts'
+    - claim: "weak matches stop filling the budget"
+      proof: 'grep: test("W1-T4093: weak matches stop filling the budget" in test/a-learning-is-retrieved-by-what-it-is-about.test.ts'
+    - claim: "a symbol that no longer exists is dropped"
+      proof: 'grep: test("W1-T4093: a symbol that no longer exists is dropped" in test/a-learning-is-retrieved-by-what-it-is-about.test.ts'
+    - claim: "selection derives symbols from the fact text"
+      proof: 'grep: deriveFactSymbols( in src/lib/learnings.ts'
+  falsifier: |
+    Match on file globs only and the second test selects every run-task.ts fact.

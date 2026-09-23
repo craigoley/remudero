@@ -1,0 +1,36 @@
+- id: W1-T4094
+  title: "DISPATCHED CLAUDE WORKERS SEE TWO DOCTRINE LINES AND NO WAY TO ASK FOR MORE — `workerRuleHeadlines` is off (absent from plan/policy.yaml; the `rule_headlines` part is absent in all 531 manifests since Sep 1) while Codex workers load every headline through AGENTS.md: give Claude workers a read tool that fetches a rule's body on demand, and let the ablation harness decide whether headlines are injected"
+  repo: remudero
+  depends_on: [W1-T4092]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "knowledge-system audit 2026-09-22"
+  plan_refs: [W1-T4092]
+  files: [src/lib/learnings.ts, src/lib/worker.ts, src/run-task.ts, test/a-worker-can-ask-for-a-rule.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22.
+    (1) `spawnWorker` passes `settingSources: []`, so a dispatched Claude worker never loads CLAUDE.md. Its prompt carries
+        the two-line doctrine preamble (433 bytes). `retrieveRuleBody`/`retrieveRuleBodyOnDemand` exist in learnings.ts
+        but no worker can call them.
+    (2) Anthropic's context-engineering guidance and Agent Skills both favour a lightweight index plus on-demand bodies
+        ("progressive disclosure", just-in-time retrieval) over pre-loading.
+  design: |
+    (i) Expose a read-only `rule` tool to implement workers: given a rule id or a phrase, it returns that doctrine body
+        (and, for a learning id, its evidence). The prompt gets a one-line pointer telling the worker the tool exists.
+    (ii) Every call ledgers `knowledge.pulled {id}`, feeding the value model (W1-T4091) as a strong "used" signal.
+    (iii) Whether headlines are also injected is a `rules` factor in W1-T4092's ablation, not a guess.
+  acceptance:
+    - claim: "a worker can fetch a rule body by id or phrase"
+      proof: 'grep: test("W1-T4094: a worker can fetch a rule body by id or phrase" in test/a-worker-can-ask-for-a-rule.test.ts'
+    - claim: "every fetch is ledgered"
+      proof: 'grep: test("W1-T4094: every fetch is ledgered" in test/a-worker-can-ask-for-a-rule.test.ts'
+    - claim: "the tool is read-only"
+      proof: 'grep: test("W1-T4094: the tool is read-only" in test/a-worker-can-ask-for-a-rule.test.ts'
+  falsifier: |
+    Leave the tool out of the implement worker's tool list and the first test finds no way to call it.

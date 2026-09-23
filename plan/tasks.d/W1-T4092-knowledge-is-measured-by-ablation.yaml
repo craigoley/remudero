@@ -1,0 +1,40 @@
+- id: W1-T4092
+  title: "THE A/B HARNESS THAT CAN TELL WHETHER KNOWLEDGE HELPS HAS RUN ONCE — `wipeTestCadence.enabled: false`, one `wipetest.pair` row ever: run it continuously at a low, adaptive rate, rotating the learnings, rules and recon factors, and run a factor more often when its measured effect and its claimed use disagree"
+  repo: remudero
+  depends_on: [W1-T4090]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "knowledge-system audit 2026-09-22"
+  plan_refs: [W1-T4090]
+  files: [src/lib/measurement-cadence.ts, src/lib/policy.ts, plan/policy.yaml, src/lib/digest.ts, test/knowledge-is-measured-by-ablation.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22.
+    (1) The wipe-test harness pairs an ordinary run with one where a factor (`learnings`, `rules`, `recon`) is removed.
+        `wipeTestCadenceCheck` (measurement-cadence.ts) gates it; plan/policy.yaml has it off. The ledger union holds one
+        `wipetest.pair` row.
+    (2) Without ablation, every usefulness signal is a worker's own claim (W1-T4090). The ETH study of repository
+        context files (arXiv 2602.11988) found they add cost with uncertain benefit unless measured.
+  design: |
+    (i) Turn the cadence on with a small base share of eligible runs, and rotate the factor pair by pair.
+    (ii) ADAPTIVE: per factor, keep a running estimate of the effect (merged, turns, cost) with its confidence interval.
+         A factor whose interval is wide, or whose effect disagrees with W1-T4090's used share, is sampled more; a factor
+         whose interval is narrow is sampled less. The share per factor moves with that, not with a fixed daily count.
+    (iii) Only low-risk tasks are eligible, so an ablated run never touches risky work.
+    (iv) The digest reports each factor's effect, interval and pair count.
+  acceptance:
+    - claim: "the cadence schedules ablation pairs by default"
+      proof: 'grep: test("W1-T4092: the cadence schedules ablation pairs by default" in test/knowledge-is-measured-by-ablation.test.ts'
+    - claim: "an uncertain factor is sampled more than a settled one"
+      proof: 'grep: test("W1-T4092: an uncertain factor is sampled more than a settled one" in test/knowledge-is-measured-by-ablation.test.ts'
+    - claim: "a risky task is never ablated"
+      proof: 'grep: test("W1-T4092: a risky task is never ablated" in test/knowledge-is-measured-by-ablation.test.ts'
+    - claim: "the digest reports each factor's effect with its interval"
+      proof: 'grep: test("W1-T4092: the digest reports each factor.s effect with its interval" in test/knowledge-is-measured-by-ablation.test.ts'
+  falsifier: |
+    Leave the policy off and the first test schedules nothing.

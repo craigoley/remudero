@@ -1,0 +1,66 @@
+- id: W1-T4095
+  title: "NOTHING PRUNES, MERGES OR RETIRES KNOWLEDGE UNLESS A PERSON DOES IT — MASTER-PLAN.md grew 87% in 30 days (705 KB), two forensics pages are ~600 KB, 11 doctrine headlines restate one idea, 39 of 67 links in the operator's memory index are dead, and no process measures whether the knowledge base is getting better: add a KNOWLEDGE GARDENER, a self-paced background pass that scores every knowledge item, takes tiered reversible actions through ordinary PRs, and judges its own past actions"
+  repo: remudero
+  depends_on: [W1-T4091]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-22: a process that prunes and self-improves the memory system; industry-leading, automated"
+  plan_refs: [W1-T4090, W1-T4091, W1-T4093, W1-T4096, W1-T4097, W1-T4098]
+  files: [src/lib/knowledge-gardener.ts, src/lib/knowledge-inventory.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/digest.ts, test/the-knowledge-base-tends-itself.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22 (knowledge-system audit).
+    (1) Knowledge is written by retros, the ci-learning rung, workers and people, and retired only when a person notices.
+        Growth over 30 days: MASTER-PLAN.md 376 → 705 KB; DECISIONS.md 199 → 293 KB; docs/forensics 3.6 MB with pages
+        of 598 and 586 KB behind 275 `// Why:` pointers.
+    (2) Redundancy: doctrine investigation rules (a)–(k) restate "a zero needs a positive control", which also appears in
+        the global CLAUDE.md and two learnings.
+    (3) Freshness: 19 of 83 learnings carry an executable `assertion:`; no doctrine rule does. The operator's memory
+        index links 39 files that do not exist.
+    (4) Letta's sleep-time agents and "memory defragmentation", ACE's grow-and-refine curation, and Zep's
+        invalidate-don't-delete model all converge on a background consolidation pass, rather than cleanup by hand.
+  design: |
+    (i) INVENTORY (src/lib/knowledge-inventory.ts): one list of every knowledge item — learnings, doctrine rules, decision
+        records, forensics sections, MASTER-PLAN sections, skills, and (when configured) the operator's memory files —
+        each with size, readers, last change, and pointers in and out.
+    (ii) SCORE each item on four axes: VALUE (W1-T4091's posterior, W1-T4094's pulls, the citation count), FRESHNESS
+         (assertion result, dangling pointers, symbols that vanished), REDUNDANCY (shingle similarity to other items, so
+         no model is needed), and WEIGHT (bytes a reader must load to use it).
+    (iii) ACT, tiered and reversible — never a delete:
+          - REFRESH: re-run assertions and re-derive symbols (W1-T4093).
+          - MERGE: a near-duplicate cluster becomes one entry, and the others become `superseded_by` it.
+          - DEMOTE: a low-value entry stays but stops being injected.
+          - RETIRE: `lifecycle: superseded`, with a plain reason.
+          - FOLD: a narrative store over its reading size gets its shipped or settled sections archived (W1-T4096).
+          - PROMOTE: a rule that keeps recurring becomes an instrument task (W1-T4097).
+          Changes to repo knowledge land as ONE ordinary PR per pass, through the normal review gate. The operator's
+          memory is changed only with `--fix` for the safe operations W1-T4098 defines.
+    (iv) SELF-JUDGING: each pass writes a `knowledge.scorecard` row: used share, zero-match share, dropped-match share,
+         dangling pointers, duplicate clusters, prompt bytes per used fact, and narrative-store growth. The next pass
+         compares the items an action touched against untouched ones. An action class whose changes lowered the score is
+         taken less often; one that raised it is taken more (a bandit over action classes). The gardener improves its
+         own policy from its own outcomes.
+    (v) SELF-PACED: it runs on its own timer beside the main loop, sized by how much changed since the last pass and how
+        busy review is. There is no fixed schedule or cap; each action class has an off switch, `state/KNOWLEDGE_OFF-<class>`.
+  acceptance:
+    - claim: "the inventory lists every knowledge surface with its size and readers"
+      proof: 'grep: test("W1-T4095: the inventory lists every knowledge surface with its size and readers" in test/the-knowledge-base-tends-itself.test.ts'
+    - claim: "a near-duplicate cluster is merged into one entry, never deleted"
+      proof: 'grep: test("W1-T4095: a near-duplicate cluster is merged into one entry, never deleted" in test/the-knowledge-base-tends-itself.test.ts'
+    - claim: "a low-value entry is demoted and a failing assertion retires its fact"
+      proof: 'grep: test("W1-T4095: a low-value entry is demoted and a failing assertion retires its fact" in test/the-knowledge-base-tends-itself.test.ts'
+    - claim: "each pass writes a scorecard and an action class that hurt is taken less"
+      proof: 'grep: test("W1-T4095: each pass writes a scorecard and an action class that hurt is taken less" in test/the-knowledge-base-tends-itself.test.ts'
+    - claim: "a pass lands its changes as one reviewed PR"
+      proof: 'grep: test("W1-T4095: a pass lands its changes as one reviewed PR" in test/the-knowledge-base-tends-itself.test.ts'
+    - claim: "the daemon runs the gardener"
+      proof: 'grep: startKnowledgeGardener( in src/lib/daemon.ts'
+    - claim: "the gardener builds its inventory"
+      proof: 'grep: buildKnowledgeInventory( in src/lib/knowledge-gardener.ts'
+  falsifier: |
+    Delete instead of supersede and the second test goes red. Freeze the action weights and the fourth goes red.

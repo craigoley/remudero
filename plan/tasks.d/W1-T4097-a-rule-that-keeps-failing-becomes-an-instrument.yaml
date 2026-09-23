@@ -1,0 +1,42 @@
+- id: W1-T4097
+  title: "DOCTRINE CANNOT CHANGE AND A RULE THAT KEEPS FAILING STAYS PROSE — test/fixtures/doctrine-pre-migration-W1-T3323.json freezes 56 rule bodies verbatim, investigation rules (a)–(k) restate one idea, no rule body carries an assertion, and `rule-efficacy:…bound-fires-on-healthy-condition` has recurred 31 times since 2026-08-06 unenforced: freeze each rule's id and meaning instead of its wording, and turn a recurring rule into an instrument task automatically"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "knowledge-system audit 2026-09-22"
+  plan_refs: [W1-T3323, W1-T4095]
+  files: [test/fixtures/doctrine-pre-migration-W1-T3323.json, src/lib/rule-efficacy.ts, src/lib/doctrine-lifecycle.ts, test/the-doctrine-index-points-at-every-body.test.ts, test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-22.
+    (1) CLAUDE.md's own preamble says the 56 pre-migration headlines and bodies are FROZEN VERBATIM by the fixture, so a
+        fold may only shorten the preamble — rules cannot be merged, corrected or consolidated.
+    (2) Doctrine rule "A new .ts file's DA:<line>,0 on a doc comment or interface body is EXEMPT" is partly stale: on
+        2026-09-22 diff-coverage blocked #6677 on a one-line `export type X = "a" | "b"` alias, which `computeTypeOnlyRanges`
+        does not exempt (W1-T4099 fixes the gate). A frozen body cannot say so.
+    (3) `rule-efficacy.ts` drafts promote-to-instrument proposals; they queue for a person. The live one has 31 recurrences.
+  design: |
+    (i) The fixture freezes each rule's ID and a normalized meaning hash that a reviewed edit may change, and every body
+        edit must name its reason in the body's own evidence trail. Wording can then be corrected and rules merged.
+    (ii) Rule bodies gain optional `assertion:` (a check that the rule still holds, like learnings) and `instrument:` (the
+         gate that enforces it). A rule with an instrument is marked enforced in the index.
+    (iii) src/lib/doctrine-lifecycle.ts files a plan task when a rule's recurrence count keeps rising across two
+          rule-efficacy passes, instead of queuing a proposal for a person — starting with the 31-recurrence rule.
+    (iv) Merge (a)–(k) into one rule with sub-cases, keeping every id as an alias so pointers resolve.
+  acceptance:
+    - claim: "a doctrine body may be reworded when its meaning hash is updated with a reason"
+      proof: 'grep: test("W1-T4097: a doctrine body may be reworded when its meaning hash is updated with a reason" in test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts'
+    - claim: "a rule whose recurrences keep rising becomes a plan task"
+      proof: 'grep: test("W1-T4097: a rule whose recurrences keep rising becomes a plan task" in test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts'
+    - claim: "a merged rule keeps every old id resolving"
+      proof: 'grep: test("W1-T4097: a merged rule keeps every old id resolving" in test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts'
+    - claim: "rule-efficacy promotes recurring rules"
+      proof: 'grep: promoteRecurringRules( in src/lib/rule-efficacy.ts'
+  falsifier: |
+    Keep the verbatim freeze and the first test cannot land a reworded body.

@@ -1,0 +1,36 @@
+- id: W1-T4100
+  title: "THE LEDGER ROTATES ABOUT THIRTEEN TIMES AN HOUR — 369 archives (256 MB) on the host, 310 created on 2026-09-22 alone and 52 more by 01:40Z the next day, and one archive named ledger.2027-10-14T21-24-52-494Z.ndjson.gz with a file date of 2026-09-13, so a reader choosing the newest by name picks a stale file: find what writes so much, rotate on a steadier basis, and name archives from a clock that cannot run ahead"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "knowledge-system audit 2026-09-22 (side finding)"
+  plan_refs: []
+  files: [src/lib/ledger.ts, src/lib/ledger-compaction-rung.ts, test/the-ledger-rotates-at-a-steady-pace.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 01:40Z on the host (/home/node/Remudero/state): 369 `ledger*.gz` archives, 256 MB total; by name
+    date, 6 on 2026-09-21, 310 on 2026-09-22, 52 on 2026-09-23 so far, and one on 2027-10-14 whose mtime is 2026-09-13.
+    The live ledger is 4.2 MB. The ledger is the fleet's episodic memory: rotation this fast multiplies the union a
+    reader must scan, and a future-dated name breaks every newest-by-name reader.
+  design: |
+    (i) Measure which steps write the most bytes per hour, from the archives themselves, and report the top writers in
+        the digest; a step writing far above its historical share is flagged.
+    (ii) Rotation keys on bytes per unit time with a smoothing window, not a single size ceiling, so a burst does not
+         produce dozens of archives.
+    (iii) Archive names come from a monotonic source (the last archive's name plus one, never earlier than now, never
+          later than the file's own mtime), and an existing future-dated name is renamed on the next rotation.
+  acceptance:
+    - claim: "a burst of writes produces few archives"
+      proof: 'grep: test("W1-T4100: a burst of writes produces few archives" in test/the-ledger-rotates-at-a-steady-pace.test.ts'
+    - claim: "an archive name never runs ahead of its file"
+      proof: 'grep: test("W1-T4100: an archive name never runs ahead of its file" in test/the-ledger-rotates-at-a-steady-pace.test.ts'
+    - claim: "the digest names the top ledger writers"
+      proof: 'grep: test("W1-T4100: the digest names the top ledger writers" in test/the-ledger-rotates-at-a-steady-pace.test.ts'
+  falsifier: |
+    Name archives from the wall clock alone and the second test goes red with a clock set ahead.
