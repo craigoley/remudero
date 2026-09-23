@@ -1359,19 +1359,21 @@
   acceptance:
   - claim: two branches each adding a DIFFERENT shard merge with zero textual conflict — the whole point,
       proven by a real two-branch merge rather than asserted
-    proof: 'unit test: test/plan-sharding.test.ts'
+    proof: 'grep: two branches each adding a DIFFERENT shard merge with zero textual conflict in test/plan-sharding.test.ts'
   - claim: a duplicate id across two shards fails loadPlan, preserving the uniqueness guard the single-file
       format gave for free
-    proof: 'unit test: test/plan-sharding.test.ts'
+    proof: 'grep: a duplicate id across two shards fails loadPlan in test/plan-sharding.test.ts'
   - claim: the existing single-file plan/tasks.yaml still loads unchanged — the back-compat lock that
       lets migration be staged
-    proof: 'unit test: test/plan-sharding.test.ts'
+    proof: 'grep: the existing single-file plan/tasks in test/plan-sharding.test.ts'
   risk: high
   origin: architect
   plan_refs:
   - MASTER-PLAN#5C
   files:
   - src/lib/plan.ts
+  - test/plan-sharding.test.ts
+  pr: 386
   depends_on: []
 - id: W1-T155
   title: "live-state DATA — the board projection exposes the FULL status taxonomy (in-flight+phase, blocked, needs-human, armed-awaiting-merge) + startedAt/elapsed, joined from the ledger run state"
