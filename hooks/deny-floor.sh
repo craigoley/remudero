@@ -240,6 +240,98 @@ $op_segments
 EOF_OP
 fi
 
+# 12) ONE FULL TEST SUITE AT A TIME PER WORKTREE (W1-T4106). MEASURED 2026-09-23: a fix-rung worker
+#    backgrounded four `node --experimental-test-coverage ... --test` parents at once — ~28 test
+#    processes on a 15.6 GiB host — and the swap storm took the console down. Node refuses
+#    --test-concurrency in NODE_OPTIONS, so only this floor sees it. A FULL run is a `node ... --test`
+#    with no --test-name-pattern and not exactly one test file; those two shapes stay allowed.
+#    Refused: two full runs overlapping in one command (`&` without a `wait`), a loop that
+#    backgrounds a run, `xargs -P`/`parallel` driving one, and a full run while another is live with
+#    its /proc/<pid>/cwd under this hook's cwd. No /proc (macOS) means no live check — never a refusal.
+tr_kind="" tr_par=0
+tr_classify() {  # one simple command -> tr_kind=none|scoped|full, tr_par=1 under xargs -P / parallel
+  local node=0 test=0 skip=0 scoped=0 npos=0 last="" xargs=0 want_p=0 tok
+  tr_kind=none tr_par=0
+  set -f
+  for tok in $1; do
+    if [ "$want_p" -eq 1 ]; then want_p=0; [ "$tok" = 1 ] || tr_par=1; continue; fi
+    if [ "$node" -eq 0 ]; then
+      case "$tok" in
+        node|*/node) node=1 ;;
+        xargs|*/xargs) xargs=1 ;;
+        parallel|*/parallel) tr_par=1 ;;
+        -P) [ "$xargs" -eq 1 ] && want_p=1 ;;
+        -P*|--max-procs=*) [ "$xargs" -eq 1 ] && case "$tok" in -P1|--max-procs=1) ;; *) tr_par=1 ;; esac ;;
+      esac
+      continue
+    fi
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    case "$tok" in
+      --test) test=1 ;;
+      --test-name-pattern) scoped=1; skip=1 ;;
+      --test-name-pattern=*) scoped=1 ;;
+      --import|--require|-r|--loader|--experimental-loader|--test-reporter|--test-reporter-destination|\
+      --test-skip-pattern|--test-concurrency|--test-shard|--test-coverage-include|--test-coverage-exclude|\
+      --test-timeout|--env-file|--conditions|-C) skip=1 ;;
+      -*) ;;
+      *\>|*\<) skip=1 ;;
+      *\>*|*\<*) ;;
+      *) npos=$((npos + 1)); last="$tok" ;;
+    esac
+  done
+  set +f
+  [ "$test" -eq 1 ] || return 0
+  tr_kind=full
+  [ "$scoped" -eq 1 ] && tr_kind=scoped
+  if [ "$npos" -eq 1 ]; then
+    case "$last" in *\**) ;; *.ts|*.js|*.mjs|*.cjs|*.mts|*.cts) tr_kind=scoped ;; esac
+  fi
+  return 0
+}
+case "$cmd" in *node*--test*) tr_scan=1 ;; *) tr_scan=0 ;; esac
+if [ "$tr_scan" -eq 1 ]; then
+  tr_route="run suites one after another, or scope this run to one file or --test-name-pattern; for CI-shaped coverage use \`rmd preflight --coverage\`, which runs the shards sequentially"
+  tr_loop=0
+  printf '%s' "$cmd" | grep -Eq '(^|[^A-Za-z0-9_])(for|while|until)[[:space:]]' && tr_loop=1
+  # Quotes dropped so `eval '...'`/`bash -c "..."` bodies are seen; `2>&1`/`&>` are not a background `&`.
+  tr_segments="$(printf '%s\n' "$cmd" | tr -d "'\"()" | sed -e 's/>&/>/g' -e 's/&>/>/g' \
+    | awk '{ gsub(/&&|\|\||;|\|/, "\n"); gsub(/&/, "&\n"); print }')"
+  tr_full=0 tr_bg_full=0
+  while IFS= read -r tr_seg; do
+    tr_bg=0
+    case "$tr_seg" in *\&) tr_bg=1; tr_seg="${tr_seg%&}" ;; esac
+    case " $tr_seg " in *" wait "*) tr_bg_full=0 ;; esac
+    tr_classify "$tr_seg"
+    [ "$tr_kind" = none ] && continue
+    if [ "$tr_par" -eq 1 ] || { [ "$tr_bg" -eq 1 ] && [ "$tr_loop" -eq 1 ]; } || \
+       { [ "$tr_kind" = full ] && [ "$tr_bg_full" -eq 1 ]; }; then
+      deny "one command starting more than one \`node --test\` run at once (W1-T4106) — parallel suites swap-thrashed the fleet host; $tr_route"
+    fi
+    if [ "$tr_kind" = full ]; then
+      tr_full=$((tr_full + 1))
+      [ "$tr_bg" -eq 1 ] && tr_bg_full=1
+    fi
+  done <<EOF_TR
+$tr_segments
+EOF_TR
+  tr_proc="${RMD_DENY_FLOOR_PROC_ROOT:-/proc}"
+  tr_cwd="${hook_cwd%/}"
+  if [ "$tr_full" -gt 0 ] && [ -n "$tr_cwd" ] && [ -d "$tr_proc" ]; then
+    for tr_f in $(grep -alF -e '--test' "$tr_proc"/[0-9]*/cmdline 2>/dev/null || true); do
+      tr_pid_dir="${tr_f%/cmdline}"
+      # Only a process whose executable IS node: a shell whose command text merely names
+      # `node --test` (measured on the fleet: an ssh `bash -c` wrapper) is not a live run.
+      tr_argv0=""; IFS= read -r -d '' tr_argv0 < "$tr_f" 2>/dev/null || true
+      case "${tr_argv0##*/}" in node|nodejs) : ;; *) continue ;; esac
+      tr_pcwd="$(readlink "$tr_pid_dir/cwd" 2>/dev/null || true)"
+      case "$tr_pcwd/" in "$tr_cwd"/*) : ;; *) continue ;; esac
+      tr_classify "$(tr '\0' ' ' < "$tr_f" 2>/dev/null || true)"
+      [ "$tr_kind" = full ] || continue
+      deny "a full \`node --test\` run is already live in this worktree (pid ${tr_pid_dir##*/}, W1-T4106) — a second one beside it swap-thrashes the host; wait for it to finish, or $tr_route"
+    done
+  fi
+fi
+
 # 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
 #    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
 #    gets burned. MEASURED 2026-09-09: a session tripped the secondary limit TWICE with no loop

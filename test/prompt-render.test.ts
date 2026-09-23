@@ -81,7 +81,7 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
     "- Rule headline [src: plan#W1-T2508]",
   );
 
-  assert.equal(sha256(fix), "03e8002e6a838f5ec6adc3269815a208262f74d0493dd9acc54fcf0492552dda");
+  assert.equal(sha256(fix), "b08659f95da978d4dec4e2e9d290d6a786216b7617b952febd7648e88cc233b9");
   assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted
@@ -89,9 +89,10 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // Claude. The observations it asks for are unchanged; only the instruction to use a shell is gone.
   // Re-baselined rather than reverted. The other four hashes are untouched, so this test still
   // guards W1-T2886's move for every template that did NOT intentionally change.
+  // W1-T4106 re-baselined fix and implement: both now carry ONE_TEST_SUITE_AT_A_TIME_LINE.
   assert.equal(sha256(recon), "45ccd6b3f8cf9ffbf89a5d7bbe0c5c946cfa9bb27a0faea04d1f920ccdde66ad");
   assert.equal(sha256(diagnose), "cc1209eecea9ef35572af1a184d1a90850f2ee6eed0139082b9f54ec2edb41bc");
-  assert.equal(sha256(implement), "95e6d80b5168ff4c5efe4f538c54ef77800d919aa8bc94e20510960a4ac8590e");
+  assert.equal(sha256(implement), "777f6108eb521809d0678927104f78dcd1c367a2bab56d3ffb7f8435fa173229");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {
