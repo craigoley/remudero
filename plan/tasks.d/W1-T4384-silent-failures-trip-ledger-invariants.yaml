@@ -30,6 +30,7 @@
     window), repeated-refusal (the same refusal step and reason 3+ times in the window), loop-lag (p99 over its
     bound in both windows), no-merges-with-green-queue. A firing rule posts a kind "invariant" event whose name
     is the rule id and whose message carries the measured values.
+    WIRING: src/lib/incident-invariants.ts exports evaluateIncidentInvariants(rows, nowMs), which src/lib/serve.ts calls from its once-a-minute timer.
   acceptance:
     - claim: "an invariant fires only when both its long and short windows burn"
       proof: "unit test: an invariant fires only when both its long and short windows burn"
@@ -37,3 +38,5 @@
       proof: "unit test: zero fulfilled dispatches with queued priority-one work fires the dispatch-stall rule"
     - claim: "event-loop lag is recorded as a ledger row"
       proof: "unit test: event-loop lag is recorded as a ledger row"
+    - claim: "the gateway runs the invariant evaluator on its minute timer"
+      proof: 'grep: evaluateIncidentInvariants( in src/lib/serve.ts'

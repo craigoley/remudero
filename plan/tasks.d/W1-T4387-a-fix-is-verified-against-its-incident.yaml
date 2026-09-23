@@ -29,6 +29,7 @@
     source:"console"|"gateway"|"daemon", kind:string, status:"new"|"filed"|"building"|"deployed"|"verified"|
     "regressed", firstSeen:string, lastSeen:string, count24h:number, feedbackId:string|null, pr:number|null}],
     generatedAt:string}. An unreadable source is reported, never an empty healthy list.
+    WIRING: src/lib/incident-lifecycle.ts exports buildIncidentsRoute(deps), and src/lib/serve.ts registers it beside the other build*Route calls.
   acceptance:
     - claim: "an incident moves to verified only when its fingerprint stays quiet after the fix deploys"
       proof: "unit test: an incident moves to verified only when its fingerprint stays quiet after the fix deploys"
@@ -36,3 +37,5 @@
       proof: "unit test: an incident whose events return after its fix is marked regressed and linked to the pull request"
     - claim: "the incidents route reports an unreadable source instead of an empty list"
       proof: "unit test: the incidents route reports an unreadable source instead of an empty list"
+    - claim: "the gateway registers the incidents read route"
+      proof: 'grep: buildIncidentsRoute( in src/lib/serve.ts'

@@ -12,6 +12,7 @@
   origin: "operator request 2026-09-23: an SRE gardener fed by console and daemon errors"
   plan_refs: ["W1-T4383", "W1-T4384", "W1-T4386", "W1-T4387"]
   files:
+    - src/run-task.ts
     - src/lib/sre-lane.ts
     - src/lib/feedback.ts
   status: queued
@@ -30,6 +31,7 @@
     COMMITS — merged PRs since the last clean sha whose diff touches a file named in the incident's in-app
     frames. Paced by fleet-lane (never more filings per day than the fleet merged). The lane is a registry
     instance with its own small container budget; it never dispatches builds itself.
+    WIRING: src/lib/sre-lane.ts exports startSreLane(deps) returning a (pollIntervalMs) => {stop} starter; src/run-task.ts adds it to the daemon's `gardens` list (the same seam the knowledge gardener uses), only on the SRE registry instance.
   acceptance:
     - claim: "a fingerprint with open feedback or an open task is never filed twice"
       proof: "unit test: a fingerprint with open feedback or an open task is never filed twice"
@@ -37,3 +39,5 @@
       proof: "unit test: an incident names the merged pull requests that touched its in-app frames"
     - claim: "incident filing is paced by the fleet's own merge rate"
       proof: "unit test: incident filing is paced by the fleet's own merge rate"
+    - claim: "the daemon starts the SRE lane among its gardens"
+      proof: 'grep: startSreLane( in src/run-task.ts'

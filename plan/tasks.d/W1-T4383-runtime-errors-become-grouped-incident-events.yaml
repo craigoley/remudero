@@ -31,6 +31,7 @@
     node_modules), each as file:fn with no line numbers. Ledger one `incident.event` row {fingerprint, source,
     kind, name, route, sha}; past 20 events per fingerprint per minute, record a single `incident.sampled` count
     row instead. RESPONSE: {fingerprint:string, accepted:true, sampled:boolean}. A malformed body is 400 with the reason.
+    WIRING: src/lib/incident-events.ts exports buildIncidentEventsRoute(deps), and src/lib/serve.ts registers it beside the other build*Route calls.
   acceptance:
     - claim: "two errors differing only in line numbers and ids share one fingerprint"
       proof: "unit test: two errors differing only in line numbers and ids share one fingerprint"
@@ -40,3 +41,5 @@
       proof: "unit test: an event carrying a token or a query string is stored scrubbed"
     - claim: "a burst past the per-minute cap is recorded as one sampled count"
       proof: "unit test: a burst past the per-minute cap is recorded as one sampled count"
+    - claim: "the gateway registers the incident ingest route"
+      proof: 'grep: buildIncidentEventsRoute( in src/lib/serve.ts'
