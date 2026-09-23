@@ -103,13 +103,14 @@ export function createChangedFilesCache(
   const load = (): void => {
     let raw: string;
     try {
-      if (fs.statSync(path).size > maxBytes) {
-        log("changed_files_cache.load_refused", { repository, reason: "oversized" });
-        return;
-      }
       raw = fs.readFileSync(path, "utf8");
     } catch {
       return; // No cache yet (first boot) — every PR is a miss, fetched off the event loop.
+    }
+    // Size is judged on the bytes actually read, never a separate stat, so nothing can change between them.
+    if (Buffer.byteLength(raw, "utf8") > maxBytes) {
+      log("changed_files_cache.load_refused", { repository, reason: "oversized" });
+      return;
     }
     let doc: { schema?: unknown; repository?: unknown; entries?: unknown };
     try {
