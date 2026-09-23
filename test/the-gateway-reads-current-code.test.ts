@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { createServer, request, type Server, type ServerResponse } from "node:http";
+import { Agent, createServer, request, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -436,6 +436,40 @@ test("W1-T4229: a connection that never ends is closed at the drain bound", asyn
   await drain;
   const res = await stream;
   assert.ok(res.error !== undefined || res.body.includes("open"), "the stream was ended by the bound");
+});
+
+test("W1-T4229: a keep-alive connection that goes idle after the drain began is closed promptly", async () => {
+  let respond: () => void = () => {};
+  let noteArrival: () => void = () => {};
+  const arrived = new Promise<void>((resolve) => {
+    noteArrival = resolve;
+  });
+  const server = createServer((_req, res) => {
+    respond = () => res.end("done");
+    noteArrival();
+  });
+  server.keepAliveTimeout = 60_000;
+  const port = await listening(server);
+  const agent = new Agent({ keepAlive: true, timeout: 60_000 });
+  const pending = new Promise<void>((resolve, reject) => {
+    request({ port, host: "127.0.0.1", path: "/", agent }, (res) => {
+      res.resume();
+      res.on("end", () => resolve());
+    }).on("error", reject).end();
+  });
+  await arrived;
+  let drained = false;
+  const drain = drainServer(server, 60_000).then(() => {
+    drained = true;
+  });
+  respond();
+  await pending;
+  for (let i = 0; i < 100 && !drained; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  agent.destroy();
+  assert.equal(drained, true, "the drain resolved within a second, not at the client keep-alive timeout");
+  await drain;
 });
 
 // ── the real server wiring ────────────────────────────────────────────────────────────────────

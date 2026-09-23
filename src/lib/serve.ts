@@ -303,7 +303,6 @@ export interface ServeDeps {
   daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
   /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
   gatewayCheckout?: () => Promise<GatewayCheckoutAssessment>;
-  /** Test seams; production gets the real interval and `process.exit`. */
   staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit">;
   /**
    * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
@@ -2758,13 +2757,8 @@ function porcelainPaths(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
-/**
- * W1-T4229 — the daemon's own freshness read ({@link checkServiceFreshness}, whose `-uno` dirty rule
- * matches deploy/entrypoint.sh), with the fetch moved async so it never stalls serve's requests.
- * NOT the daemon's material-path filter: this restart is the only thing that moves the clone, and
- * `.remudero/managed-repos.json` — the file behind the measured `[]` — is "immaterial" to it.
- * An unreadable piece is "unknown", never a 0/false that would impersonate a healthy reading.
- */
+/** W1-T4229 — {@link checkServiceFreshness}'s read with an async fetch and NO material-path filter
+ *  (managed-repos.json, behind the measured `[]`, is "immaterial"); unreadable is "unknown", never 0. */
 export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<GatewayCheckoutAssessment> {
   const env = deps.env ?? process.env;
   const git = deps.git ?? ((args: string[]) => execFileSync("git", ["-C", deps.repoDir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
@@ -2773,7 +2767,6 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     try {
       return read();
     } catch {
-      // Unreadable is reported as "unknown", never as a healthy default — the caller shows it.
       return "unknown";
     }
   };
@@ -2795,7 +2788,6 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   try {
     await (deps.fetch ?? defaultGatewayFetch(deps.repoDir))();
   } catch (err) {
-    // Carried into the read below, which reports `degraded` rather than trusting a stale ref.
     fetchError = err instanceof Error ? err.message : String(err);
   }
   const seen = new Map<string, string>();
@@ -2838,8 +2830,10 @@ export const SERVE_RESTART_DRAIN_BOUND_MS = 10_000;
 
 export type DrainableServer = Pick<Server, "close" | "closeIdleConnections" | "closeAllConnections">;
 
-/** Stop accepting, let in-flight requests finish; resolve when all connections close or the
- *  bound passes. Never rejects, so the restart it prepares always follows. */
+/** Node never closes a socket that goes idle AFTER close(); unswept, a restart waited ~4 s. */
+const DRAIN_IDLE_SWEEP_MS = 50;
+
+/** Let in-flight requests finish; resolves at the last close or the bound, and never rejects. */
 export function drainServer(
   server: DrainableServer,
   boundMs: number = SERVE_RESTART_DRAIN_BOUND_MS,
@@ -2855,12 +2849,15 @@ export function drainServer(
       if (done) return;
       done = true;
       cancel();
+      clearInterval(sweep);
       resolve();
     };
     const cancel = schedule(() => {
       server.closeAllConnections();
       finish();
     }, boundMs);
+    const sweep = setInterval(() => server.closeIdleConnections(), DRAIN_IDLE_SWEEP_MS);
+    sweep.unref?.();
     server.close(() => finish());
     server.closeIdleConnections();
   });
@@ -2984,8 +2981,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
 
   const maybeExit = (): void => {
     if (exiting) return;
-    // NEVER NEGOTIABLE, AND NOT SUBJECT TO PRESSURE: an exit mid-write drops the request and
-    // orphans whatever it handed off, and a drain's bound could cut one short.
+    // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
     const codeStale = isConsoleCodeStale(deps.bootSha, currentSha);
@@ -3020,8 +3016,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     });
     exiting = true;
     stopRecheck();
-    // exit(0): unless-stopped restarts ANY exit, and deploy/entrypoint.sh's boot sync_tree then
-    // fast-forwards the clean clone before serve loads again, as for the daemon's freshness exit.
+    // exit(0): unless-stopped restarts it and entrypoint.sh's sync_tree fast-forwards the clone.
     const finish = (): void => {
       deps.beforeExit?.();
       exit(0);
@@ -3047,13 +3042,11 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   const recheck = (): Promise<void> => {
     if (deps.assessCheckout && !assessing && !exiting) {
       assessing = deps.assessCheckout().then(noteCheckout, (err: unknown) => {
-        // The reading stays whatever it last was; the reason is kept, never erased.
         log("serve.gateway_checkout_unreadable", { reason: err instanceof Error ? err.message : String(err) });
       }).finally(() => {
         assessing = undefined;
       });
     }
-    // Synchronously first, as always, then again when the checkout reading lands.
     maybeExit();
     return assessing ? assessing.then(maybeExit) : Promise.resolve();
   };
