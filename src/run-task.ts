@@ -965,6 +965,7 @@ import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, 
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { readModelAvailabilitySnapshot, watchSuccessorModels } from "./lib/model-availability.js";
 import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
@@ -25025,6 +25026,25 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       const planReconcileOption =
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
+      // W1-T4080: ON THE MEASUREMENT CADENCE, NOT PER TICK (design (i)) — read the cash
+      // data-plane catalog and raise one operator alert per successor model per state (design
+      // (iii)). Best-effort, like every other read this cadence folds in above: a catalog read
+      // or escalation failure here must never cost the rest of the cadence its report.
+      try {
+        const config = configFor();
+        const mounts = loadMounts(mountsPath(repoRoot));
+        const { owner, repo } = resolveOwnerRepo();
+        const ledgerPath = ledgerPathFor(config);
+        const { catalog, routed } = await readModelAvailabilitySnapshot(config, mounts);
+        await watchSuccessorModels(catalog, routed, {
+          escalate: (e) => escalate(e, { issues: ghIssueGateway(owner, repo), ledgerPath, runId: coverageRunId }),
+          ledgerPath,
+          runId: coverageRunId,
+        });
+      } catch {
+        // best-effort — see this block's own comment above; the successor watch never blocks
+        // the measurement cadence report below.
+      }
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,

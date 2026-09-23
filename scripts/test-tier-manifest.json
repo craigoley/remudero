@@ -261,6 +261,7 @@
     "test/a-step-wired-census-gate-is-not-entanglement.test.ts": 0,
     "test/a-structured-output-request-is-per-deployment.test.ts": 0,
     "test/a-successful-leaf-check-is-not-a-full-sweep.test.ts": 0,
+    "test/a-successor-model-raises-one-alert.test.ts": 0,
     "test/a-suite-is-not-a-second-concern.test.ts": 1008,
     "test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts": 0,
     "test/a-superseded-check-attempt-is-not-a-live-failure.test.ts": 0,
