@@ -3,7 +3,8 @@ import { basename, dirname, join } from "node:path";
 import { readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 
-import { foldLearningUsage, leastUsefulLearnings } from "./knowledge-value.js";
+import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
+import { foldLearningUsage, leastUsefulLearnings, learningValue } from "./knowledge-value.js";
 import { readLedgerLines } from "./status.js";
 import { ledgerRotationEntries, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-grep.js";
 import { notify, type NotifyChannel, type NotifyDeps } from "./notify.js";
@@ -419,6 +420,7 @@ export interface DigestSummary {
   /** Cache-hit ratio totals for this window. See {@link aggregateCacheHitTotals}. */
   cacheHit?: CacheHitTotals;
   learningUsefulness?: LearningUsefulness;
+  learningOutcomes?: LearningOutcomeSummary;
   gateFireRates?: GateFireRateSummary;
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
    *  `.fired` duplicates it and `.skipped` is the cadence working as intended. */
@@ -592,6 +594,45 @@ export function renderLearningUsefulness(u: LearningUsefulness): string {
   return `learnings used: ${u.used} of ${u.offered} offered (${share}) over ${u.reports} reports, ${u.silent} silent; least useful: ${least || "none yet"}`;
 }
 
+/** W1-T4241 — the outcome fold plus learnings whose effect and `LEARNINGS_USED` posterior disagree in sign. */
+export interface LearningOutcomeSummary {
+  report: LearningOutcomeReport;
+  disagreements: Array<{ id: string; verdict: "helps" | "hurts"; usedMean: number }>;
+}
+
+/** Folds every line read, but `buildDigest` reads about a day, so most learnings read `unmeasurable`;
+ *  W1-T4243's cadence rung cumulates over weeks. `undefined` when no run carried a propensity. */
+export function summarizeLearningOutcomes(lines: LedgerLine[]): LearningOutcomeSummary | undefined {
+  const report = foldLearningOutcomes(lines);
+  if (report.runs === 0 && report.excludedNoVerdict === 0) return undefined;
+  const usage = foldLearningUsage(lines.filter((l) => l.step === "learnings.used") as Array<Record<string, unknown>>);
+  const disagreements: LearningOutcomeSummary["disagreements"] = [];
+  for (const l of report.learnings) {
+    if (l.verdict !== "helps" && l.verdict !== "hurts") continue;
+    const usedMean = learningValue(l.id, usage).mean;
+    if ((l.verdict === "hurts" && usedMean > 0.5) || (l.verdict === "helps" && usedMean < 0.5)) {
+      disagreements.push({ id: l.id, verdict: l.verdict, usedMean });
+    }
+  }
+  return { report, disagreements };
+}
+
+export function renderLearningOutcomes(s: LearningOutcomeSummary): string {
+  const r = s.report;
+  const window = r.window ? `${r.window.from} .. ${r.window.to}` : "no contributing run";
+  const measured = r.learnings.filter((l) => l.verdict !== "unmeasurable");
+  const fmt = (l: LearningOutcomeReport["learnings"][number]) =>
+    `${l.id} ${l.effect! >= 0 ? "+" : ""}${l.effect!.toFixed(2)} ±${l.se!.toFixed(2)} (n ${l.injected}/${l.dropped})`;
+  const effects = measured.filter((l) => l.verdict !== "no-detectable-effect");
+  const disagree = s.disagreements.map((d) => `${d.id} ${d.verdict} but used-mean ${d.usedMean.toFixed(2)}`).join(", ");
+  return (
+    `learning outcomes (${r.runs} contested run(s), ${window}; excluded ${r.excludedNoVerdict} without a verdict, ` +
+    `${r.excludedTrimmed} trimmed): ${effects.map(fmt).join("; ") || "no detectable effect"}; ` +
+    `${measured.length} measured, ${r.learnings.length - measured.length} unmeasurable` +
+    (disagree ? `; disagrees with LEARNINGS_USED: ${disagree}` : "")
+  );
+}
+
 export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary {
   const since = collectSince(lines, sinceIso);
   const summary: DigestSummary = {
@@ -668,6 +709,8 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
   }
   summary.cacheHit = aggregateCacheHitTotals(since);
   summary.learningUsefulness = summarizeLearningUsefulness(since);
+  const learningOutcomes = summarizeLearningOutcomes(lines);
+  if (learningOutcomes) summary.learningOutcomes = learningOutcomes;
   summary.gateFireRates = summarizeGateFireRates(since);
   return summary;
 }
@@ -733,6 +776,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     // a "(no data)" placeholder otherwise.
     ...(s.cacheHit ? [renderCacheHitLine("cache hit by run", s.cacheHit.byRun), renderCacheHitLine("cache hit by class", s.cacheHit.byClass)] : []),
     ...(s.learningUsefulness ? [renderLearningUsefulness(s.learningUsefulness)] : []),
+    ...(s.learningOutcomes ? [renderLearningOutcomes(s.learningOutcomes)] : []),
     ...(s.gateFireRates ? [renderGateFireRates(s.gateFireRates)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
