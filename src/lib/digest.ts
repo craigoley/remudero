@@ -951,13 +951,14 @@ export function readDigestWindow(
   const opened = ordered.slice(0, cap);
   const seen = new Set<string>();
   const lines: LedgerLine[] = [];
-  // Filtering before retaining is a memory bound, not an optimisation — an earlier draft parsed
-  // and deduped every line first and died with a heap OOM. This predicate is `collectSince`'s
-  // own, applied one step earlier, so `summarize`'s later call is a no-op over this input.
-  // Why: the OOM measurement — docs/forensics/digest.md
+  // Filtering before retaining is the memory bound (an unfiltered draft died with a heap OOM); the
+  // predicate is `collectSince`'s own, so its later call is a no-op. The live file is read first and
+  // each file newest line first, so a cap that bites keeps the NEWEST rows; `lines` is reversed back
+  // into time order at the end. Why: the OOM measurement — docs/forensics/digest.md
   const addText = (text: string): void => {
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
+    const raws = text.split("\n");
+    for (let i = raws.length - 1; i >= 0; i--) {
+      const line = raws[i]!.trim();
       if (!line) continue;
       let parsed: LedgerLine;
       try {
@@ -974,6 +975,11 @@ export function readDigestWindow(
   };
   let rowsTruncated = 0;
   const unread: string[] = [];
+  try {
+    addText(fs.readFileSync(ledgerPath).toString("utf8"));
+  } catch {
+    // The live file may genuinely not exist yet — `readLedgerLines` returns [] for that too.
+  }
   for (const entry of opened) {
     try {
       const buf = fs.readFileSync(entry.path);
@@ -984,11 +990,7 @@ export function readDigestWindow(
       unread.push(entry.path);
     }
   }
-  try {
-    addText(fs.readFileSync(ledgerPath).toString("utf8"));
-  } catch {
-    // The live file may genuinely not exist yet — `readLedgerLines` returns [] for that too.
-  }
+  lines.reverse();
   return {
     lines,
     archivesConsidered: rotations.length,
