@@ -103,6 +103,11 @@ export const OPERATOR_AGENT_PROMOTION_DECISION_STEP = "panel.operator_agent_prom
 export const OPERATOR_AGENT_PROMOTION_ADVANCE_STEP = "panel.operator_agent_promotion_advance";
 export const OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP = "panel.operator_agent_promotion_rollback";
 export const OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP = "panel.operator_agent_consequence_preflight";
+/** W1-T4120: the approve/refuse decision on a pending consequence approval — a SEPARATE row from
+ *  the preflight step above, so a decision never overwrites the preflight verdict it responds to
+ *  and {@link readPendingConsequences} can compare "latest preflight" against "latest decision"
+ *  to know whether a still-open preflight has since been decided. */
+export const OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP = "panel.operator_agent_consequence_decision";
 export const CONTEXT_ITEM_VERSION = "context-item-v1" as const;
 export const CONTEXT_ITEM_STEP = "panel.context_item";
 export const CONTEXT_REVOKED_STEP = "panel.context_revoked";
@@ -2056,6 +2061,11 @@ const MAX_CONSEQUENCE_RECOVERY = 1_000;
 const FINANCIAL_ONLY_RECOVERY =
   "financial action: consequence-policy-v1 records no recovery path for a transfer; treat it as unrecoverable once executed";
 const CONSEQUENCE_WRITE_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
+/** W1-T4120: the console's Approve/Refuse buttons on the pending-consequence list. */
+export const OPERATOR_AGENT_CONSEQUENCES_DECISION_PATH = "/v1/operator-agent/consequences/decision";
+export const CONSEQUENCE_DECISIONS = ["approve", "refuse"] as const;
+export type ConsequenceDecisionAction = (typeof CONSEQUENCE_DECISIONS)[number];
+const MAX_CONSEQUENCE_DECISION_REASON = 1_000;
 
 /** What an operator must see to approve, persisted on the preflight ledger row. */
 export interface ConsequenceApprovalProjection {
@@ -2146,8 +2156,22 @@ export interface PendingConsequenceRead {
   unprojected: number;
 }
 
+/** The latest approve/refuse decision row per consequence id (W1-T4120) — only its `at` timestamp
+ *  matters to {@link readPendingConsequences}: a decision at or after the latest preflight row
+ *  means that preflight has already been acted on and must not re-appear as pending. */
+function latestConsequenceDecisions(ledgerPath: string): Map<string, { at: string }> {
+  const latest = new Map<string, { at: string }>();
+  for (const row of readLedgerUnionRecordsSync(dirname(ledgerPath), { step: OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP }).rows) {
+    if (typeof row.consequence_id === "string" && row.consequence_id && typeof row.at === "string") {
+      latest.set(row.consequence_id, { at: row.at });
+    }
+  }
+  return latest;
+}
+
 /** The pending consequence approvals: every action whose LATEST preflight row was refused for a
- *  {@link PENDING_CONSEQUENCE_CODES} reason, is financial/irreversible, and has not expired. */
+ *  {@link PENDING_CONSEQUENCE_CODES} reason, is financial/irreversible, has not expired, and has
+ *  no approve/refuse decision (W1-T4120) at or after that preflight row. */
 export function readPendingConsequences(deps: OperatorAgentRouteDependencies): PendingConsequenceRead {
   const clock = clockFromMillisFn(deps.now);
   const nowMs = clock.now();
@@ -2155,6 +2179,7 @@ export function readPendingConsequences(deps: OperatorAgentRouteDependencies): P
   for (const row of readLedgerUnionRecordsSync(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP }).rows) {
     if (typeof row.action_id === "string" && row.action_id) latest.set(row.action_id, row);
   }
+  const decisions = latestConsequenceDecisions(deps.ledgerPath);
   const pending: PendingConsequenceRecord[] = [];
   let unprojected = 0;
   for (const [consequenceId, row] of latest) {
@@ -2165,6 +2190,8 @@ export function readPendingConsequences(deps: OperatorAgentRouteDependencies): P
       unprojected += 1;
       continue;
     }
+    const decision = decisions.get(consequenceId);
+    if (decision && Date.parse(decision.at) >= Date.parse(row.at)) continue;
     if (Date.parse(projection.expiresAt) <= nowMs) continue;
     const stale = projection.evidenceFreshUntil !== undefined && Date.parse(projection.evidenceFreshUntil) <= nowMs;
     pending.push({
@@ -2226,6 +2253,80 @@ export function buildOperatorAgentConsequencesWriteRefusalRoutes(): Route[] {
       });
     },
   }));
+}
+
+// ── W1-T4120: POST /v1/operator-agent/consequences/decision — approve/refuse a pending item ──
+
+/** The durable receipt a decision leaves behind — both the ledger row and the route's own
+ *  response body carry this exact shape, so a caller never has to re-derive one from the other. */
+export interface ConsequenceDecisionReceipt {
+  consequenceId: string;
+  decision: ConsequenceDecisionAction;
+  reason: string;
+  decidedBy: string;
+  decidedAt: string;
+}
+
+function isConsequenceDecisionAction(value: unknown): value is ConsequenceDecisionAction {
+  return CONSEQUENCE_DECISIONS.includes(value as ConsequenceDecisionAction);
+}
+
+interface ConsequenceDecisionInput {
+  consequenceId: string;
+  decision: ConsequenceDecisionAction;
+  reason: string;
+}
+
+function validateConsequenceDecisionInput(body: unknown): { error: string } | ConsequenceDecisionInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!boundedString(body.consequenceId, MAX_ID)) return { error: "consequenceId is required" };
+  if (!isConsequenceDecisionAction(body.decision)) return { error: "decision must be approve or refuse" };
+  if (!boundedString(body.reason, MAX_CONSEQUENCE_DECISION_REASON)) return { error: "reason is required" };
+  return { consequenceId: body.consequenceId.trim(), decision: body.decision, reason: body.reason.trim() };
+}
+
+/**
+ * POST /v1/operator-agent/consequences/decision — the console's Approve/Refuse buttons on a
+ * pending consequence approval (W1-T4120). HIGH tier: `createService`'s `enforceWriteTiers`
+ * dispatch refuses this call outright with no valid `X-Confirm-Nonce` (403 `confirm_nonce_required`)
+ * before this handler ever runs — the SAME server-side second factor every other HIGH-tier
+ * operator-agent route already relies on (write-tier-second-factor.test.ts), not a bespoke one.
+ * A decision on a consequence id that is unknown, already decided, or has since expired is refused
+ * BY NAME (404) rather than silently accepted: {@link readPendingConsequences} is the single source
+ * of what is still awaiting approval, so this route decides against exactly that list, never a
+ * separate, driftable lookup.
+ */
+export function buildOperatorAgentConsequenceDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  return {
+    method: "POST",
+    path: OPERATOR_AGENT_CONSEQUENCES_DECISION_PATH,
+    scope: "write",
+    tier: "high",
+    handler: jsonAction(validateConsequenceDecisionInput, (input, req, res) => {
+      const pending = readPendingConsequences(deps).consequences.find((c) => c.consequenceId === input.consequenceId);
+      if (!pending) {
+        sendJson(res, 404, { error: "not_found", detail: `no pending consequence approval "${input.consequenceId}"` });
+        return;
+      }
+      const decidedAt = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const decidedBy = bearerTokenId(req);
+      const receipt: ConsequenceDecisionReceipt = {
+        consequenceId: input.consequenceId,
+        decision: input.decision,
+        reason: input.reason,
+        decidedBy,
+        decidedAt,
+      };
+      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP, input.consequenceId, decidedBy, {
+        consequence_id: input.consequenceId,
+        decision: input.decision,
+        reason: input.reason,
+        at: decidedAt,
+        receipt,
+      });
+      sendJson(res, 200, { ok: true, consequenceId: input.consequenceId, decision: input.decision, receipt });
+    }),
+  };
 }
 
 function followUpHistory(deps: OperatorAgentRouteDependencies): FollowUpHistory[] {
@@ -2679,6 +2780,7 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     buildOperatorAgentConsequencePreflightRoute(deps),
     buildOperatorAgentConsequencesReadRoute(deps),
     ...buildOperatorAgentConsequencesWriteRefusalRoutes(),
+    buildOperatorAgentConsequenceDecisionRoute(deps),
     buildOperatorAgentFollowUpReadRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
