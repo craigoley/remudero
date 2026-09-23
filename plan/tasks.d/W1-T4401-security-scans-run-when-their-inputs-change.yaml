@@ -1,0 +1,38 @@
+- id: W1-T4401
+  title: "SECURITY SCANS RUN IN FULL ON EVERY PULL REQUEST WHATEVER CHANGED — CodeQL twice (codeql.yml and CodeQL - Code Quality), Semgrep, OSV-Scanner (PR), Dependency Review and License Review cost ~121k job-min/month on PRs, and OSV and Scorecard run on every main push; run each only when its inputs change, diff-aware where the tool supports it, with full scans on a schedule"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: []
+  files: [.github/workflows/codeql.yml, .github/workflows/semgrep.yml, .github/workflows/osv-scanner-pr.yml, .github/workflows/osv-scanner.yml, .github/workflows/dependency-review.yml, .github/workflows/scorecard.yml, test/security-scans-run-when-their-inputs-change.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED: dependency review and OSV-PR only matter when package.json or the lockfile change; Scorecard runs 3,165 times a month.
+  design: |
+    (i) Job-level if: from the diff class (never a workflow paths: filter — ci.yml INVARIANT 2 and ci-gate's
+    wait both forbid it; a skipped job reports success): Dependency Review, License Review and OSV-PR only on
+    manifest/lockfile changes; CodeQL and Semgrep skip PLAN/DOCS diffs; Semgrep in diff-aware mode; CodeQL keeps its
+    PR incremental analysis. (ii) One CodeQL analysis, not two: decide between codeql.yml and the Code Quality
+    default setup and retire the other through gate-monotonic with a GATE_RATIONALE. (iii) Full OSV and Semgrep
+    scans nightly and Scorecard weekly, instead of on every main push.
+  acceptance:
+    - claim: "dependency scans run only when dependencies change"
+      proof: 'grep: test("W1-T4401: dependency scans run only when dependencies change" in test/security-scans-run-when-their-inputs-change.test.ts'
+    - claim: "full scans still run on a schedule"
+      proof: 'grep: test("W1-T4401: full scans still run on a schedule" in test/security-scans-run-when-their-inputs-change.test.ts'
+  falsifier: |
+    Remove the job-level condition and the first test finds dependency review running on a docs-only diff.

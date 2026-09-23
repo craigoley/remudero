@@ -1,0 +1,36 @@
+- id: W1-T4398
+  title: "ONE FLAKY TEST ON A SOURCE PULL REQUEST COSTS A WHOLE NEW ~100-MINUTE RUN — test-with-retry.mjs wraps the push and plan lanes but not the PR coverage lane, so a single flake fails coverage-shard and the fleet re-pushes; retry failed files once there too, and report every retry as a flake"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: [W1-T3207]
+  files: [.github/workflows/ci.yml, scripts/test-with-retry.mjs, test/the-coverage-lane-retries-a-flake.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    OBSERVED: the PR coverage run calls node --test directly; flake-retry-aggregate only sees the other lanes.
+  design: |
+    (i) The coverage shard runs its files through the retry wrapper in coverage mode: a file that fails is re-run
+    once, uninstrumented, and a pass on retry is recorded as a flake, not a pass. (ii) Coverage figures come from the
+    first run only, so a retry can never raise the coverage number. (iii) flake-retry-aggregate reads the coverage
+    lane's flake report too.
+  acceptance:
+    - claim: "a coverage-lane flake is retried once and reported"
+      proof: 'grep: test("W1-T4398: a coverage-lane flake is retried once and reported" in test/the-coverage-lane-retries-a-flake.test.ts'
+    - claim: "a retry never changes the coverage figures"
+      proof: 'grep: test("W1-T4398: a retry never changes the coverage figures" in test/the-coverage-lane-retries-a-flake.test.ts'
+  falsifier: |
+    Call node --test directly in the coverage shard and the first test sees no retry.

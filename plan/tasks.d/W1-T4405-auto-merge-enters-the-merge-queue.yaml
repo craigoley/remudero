@@ -1,0 +1,36 @@
+- id: W1-T4405
+  title: "THE FLEET'S AUTO-MERGE AND REMUDERO-REVIEW MUST WORK WITH A MERGE QUEUE BEFORE ONE IS TURNED ON — arm-auto-merge.ts merges or arms per PR and remudero-review is a status posted on the PR head, which a merge_group commit never receives; make both queue-aware so enabling the queue cannot strand every fleet PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
+  plan_refs: []
+  files: [src/lib/arm-auto-merge.ts, test/auto-merge-enters-the-merge-queue.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other
+    workflows, ~1.1M job-minutes/month. ~3.0 PR CI runs per merged PR (47% success, 26% fail, 27% cancelled);
+    main-push CI red 34%. Ranked sinks: coverage suite on every SOURCE PR run ~302k min; ~25 one-runner gate jobs
+    ~228k; PR security scans ~121k; main-push lane ~117k; late-cancelled runs ~114k; ci-gate poller ~77k;
+    plan-reading lane ~71k; edited-triggered small workflows ~52k. Repo is public, so the cost is latency and
+    fleet throughput today (~$5-6.5K/month if ever private).
+    INFERRED: required checks in a merge queue are evaluated on the merge_group commit; a PR-head status like remudero-review would never appear there.
+  design: |
+    (i) arm-auto-merge detects a merge-queue ruleset and enqueues (auto-merge on a queued branch adds the PR to
+    the queue) instead of a direct REST merge, and treats "queued" as armed, not stuck. (ii) remudero-review stays a
+    PR-time requirement (branch protection), NOT a merge_group required check; the queue requires only CI checks.
+    (iii) A dry-run mode proves the call sequence against a recorded ruleset response before any repo setting changes.
+  acceptance:
+    - claim: "auto-merge enqueues when a merge queue is configured"
+      proof: 'grep: test("W1-T4405: auto-merge enqueues when a merge queue is configured" in test/auto-merge-enters-the-merge-queue.test.ts'
+    - claim: "a queued pull request reads as armed, not stuck"
+      proof: 'grep: test("W1-T4405: a queued pull request reads as armed, not stuck" in test/auto-merge-enters-the-merge-queue.test.ts'
+  falsifier: |
+    Keep the direct REST merge and the first test sees a merge call bypassing the queue.
