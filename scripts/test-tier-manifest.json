@@ -332,6 +332,7 @@
     "test/an-adoption-proposal-retires-when-its-finding-goes.test.ts": 0,
     "test/an-advisory-id-from-a-stale-checkout-says-so.test.ts": 257,
     "test/an-agent-records-a-ruling-behind-a-judge.test.ts": 1190,
+    "test/an-already-satisfied-credit-sticks.test.ts": 0,
     "test/an-analytics-request-returns-under-its-own-ceiling.test.ts": 0,
     "test/an-automate-verdict-releases-when-the-risk-judge-proceeds.test.ts": 0,
     "test/an-availability-probe-reads-the-limit-that-stops-it.test.ts": 0,

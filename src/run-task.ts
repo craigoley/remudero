@@ -1249,6 +1249,7 @@ import {
   readMergeCreditedTaskIds,
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
+  persistVerifiedCredit,
   type RequiredContextsRead,} from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -15148,6 +15149,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const resolved = resolution?.outcome === "verified" ? resolution : undefined;
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
+        // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
+        const credit = persistVerifiedCredit(ledgerPath, taskId, resolved, github.changedFiles?.(resolved.url));
+        log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
           worktreeRemove(repoDir, worktreePath);
           log("worktree.remove", { on: "already_satisfied" });
