@@ -77,7 +77,7 @@ ENV HOME=/home/node
 # lockfile-installed bins are on PATH, in-layer. deploy/verify-image.sh and `checkBinaryPin` read
 # the Claude ARG below.
 ARG CLAUDE_CODE_VERSION=2.1.280
-ARG CODEX_VERSION=0.155.0
+ARG CODEX_VERSION=0.155.1
 ENV DISABLE_AUTOUPDATER=1
 COPY --chown=root:root deploy/package.json deploy/package-lock.json /opt/remudero-image-clis/
 # The throwaway `npm_config_cache` below is REQ 14; REQ 11's chown no longer has to repair it.
