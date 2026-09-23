@@ -25,6 +25,7 @@ import {
   lintPlanCommand,
   sweepArmTaskId,
   type ArmDeps,
+  type LintPlanStatusDeps,
 } from "../src/run-task.js";
 // The SOURCE constants plan/policy.yaml claims to lift — imported so the drift lock below
 // compares against the real thing, never a second copy of the literal.
@@ -44,6 +45,7 @@ import { HEADROOM_LIMIT_PCT } from "../src/lib/headroom.js";
 import { DEFAULT_RETRO_MERGES_THRESHOLD, DEFAULT_RETRO_DAYS_THRESHOLD } from "../src/lib/retro.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED = policyPath(REPO_ROOT);
@@ -68,16 +70,35 @@ function lintFixture(policyRaw: Record<string, unknown>): { tasksPath: string; d
   return { tasksPath, dir };
 }
 
+/**
+ * W1-T4119: these tests pin plan/policy.yaml validation, which is checkout-local. With no seam
+ * injected, lint-plan's whole-plan credit scoping shelled out to the real `gh` hundreds of times
+ * per run (and once hung on a live PR). Run the offline subset, and hand it the shared recording
+ * fake so any gateway it still builds is an assertion failure, not a silent network read.
+ */
+function offlineLintDeps(gatewaysBuilt: string[]): LintPlanStatusDeps {
+  const github = fakeGitHub();
+  return {
+    offline: true,
+    ghGateway: (owner, repo) => {
+      gatewaysBuilt.push(`${owner}/${repo}`);
+      return github;
+    },
+  };
+}
+
 async function runLintPlanCapturingStderr(tasksPath: string): Promise<{ exitCode: number; stderr: string }> {
   const origError = console.error;
   const origLog = console.log;
   const origWarn = console.warn;
   const errors: string[] = [];
+  const gatewaysBuilt: string[] = [];
   console.error = (m: string) => errors.push(m);
   console.log = () => {};
   console.warn = () => {};
   try {
-    const exitCode = await lintPlanCommand(["--plan", tasksPath]);
+    const exitCode = await lintPlanCommand(["--plan", tasksPath], offlineLintDeps(gatewaysBuilt));
+    assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from a policy test");
     return { exitCode, stderr: errors.join("\n") };
   } finally {
     console.error = origError;
