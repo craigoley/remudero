@@ -173,6 +173,59 @@ if printf '%s' "$cmd" | grep -Eq '\b(npm|pnpm)[[:space:]]+(ci|install|i|add)\b|\
   fi
 fi
 
+# 11) A BRANCH SWITCH IN THE OPERATOR CHECKOUT (W1-T4082). The operator checkout (a repo whose `.git`
+#    is a DIRECTORY, i.e. not a worktree, with the remudero origin) stays on `main`: `rmd`, `serve` and
+#    other sessions read it as main. OBSERVED 2026-09-22: an interactive session left it on
+#    run-W1-T4051-… and later run-W1-T4063-… while another session relied on it being main. Refused:
+#    `git checkout <ref>` / `-b` / `-B` / `--orphan` and `git switch` to anything but main/master, and
+#    `git branch -m|-M`. Allowed: returning to main, `git checkout -- <path>`, restoring an existing
+#    path, pulls — and everything in a worktree. The target directory is the segment's `git -C <dir>`,
+#    else the last `cd <dir>` before it, else the hook's own cwd.
+case "$cmd" in *"git "*checkout*|*"git "*switch*|*"git "*branch*) op_scan=1 ;; *) op_scan=0 ;; esac
+if [ "$op_scan" -eq 1 ]; then
+  op_last_cd="${hook_cwd:-$PWD}"
+  op_segments="$(printf '%s\n' "$cmd" | awk '{ gsub(/&&|\|\||;/, "\n"); print }')"
+  while IFS= read -r op_seg; do
+    op_seg="$(printf '%s' "$op_seg" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$op_seg" in
+      cd\ *) op_dir="${op_seg#cd }"; op_dir="${op_dir%% *}"; op_dir="${op_dir%\"}"; op_dir="${op_dir#\"}"
+             case "$op_dir" in "~"*) op_dir="$HOME${op_dir#\~}" ;; /*) : ;; *) op_dir="$op_last_cd/$op_dir" ;; esac
+             op_last_cd="$op_dir"; continue ;;
+    esac
+    case "$op_seg" in git\ *) : ;; *) continue ;; esac
+    op_target="$op_last_cd"
+    op_rest="${op_seg#git }"
+    if [ "${op_rest#-C }" != "$op_rest" ]; then
+      op_rest="${op_rest#-C }"; op_target="${op_rest%% *}"; op_rest="${op_rest#* }"
+      case "$op_target" in "~"*) op_target="$HOME${op_target#\~}" ;; esac
+    fi
+    op_verb="${op_rest%% *}"; op_args=""; [ "$op_rest" != "$op_verb" ] && op_args="${op_rest#* }"
+    op_switch=0
+    case "$op_verb" in
+      checkout)
+        case " $op_args " in *" -- "*) op_switch=0 ;;
+          *" -b "*|*" -B "*|*" --orphan "*) op_switch=1 ;;
+          *) op_ref=""; for op_a in $op_args; do case "$op_a" in -*) ;; *) op_ref="$op_a"; break ;; esac; done
+             case "$op_ref" in ""|main|master|origin/main) op_switch=0 ;;
+               *) if [ -e "$op_target/$op_ref" ]; then op_switch=0; else op_switch=1; fi ;; esac ;;
+        esac ;;
+      switch)
+        case " $op_args " in *" -c "*|*" -C "*|*" --detach "*|*" --orphan "*) op_switch=1 ;;
+          *) op_ref=""; for op_a in $op_args; do case "$op_a" in -*) ;; *) op_ref="$op_a"; break ;; esac; done
+             case "$op_ref" in main|master) op_switch=0 ;; *) op_switch=1 ;; esac ;;
+        esac ;;
+      branch) case " $op_args " in *" -m "*|*" -M "*) op_switch=1 ;; esac ;;
+    esac
+    [ "$op_switch" -eq 1 ] || continue
+    [ -d "$op_target/.git" ] || continue
+    op_origin="$(git -C "$op_target" remote get-url origin 2>/dev/null || true)"
+    case "$op_origin" in *"/remudero"|*"/remudero.git"|*":remudero"|*":remudero.git") : ;; *) continue ;; esac
+    deny "a branch switch in the operator checkout ($op_target) — it stays on main (W1-T4082). Use a worktree: git worktree add ../wt-<name> -b <branch> origin/main"
+  done <<EOF_OP
+$op_segments
+EOF_OP
+fi
+
 # 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
 #    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
 #    gets burned. MEASURED 2026-09-09: a session tripped the secondary limit TWICE with no loop
