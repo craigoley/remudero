@@ -14,6 +14,7 @@ import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js"
 import { renderInboxPollSummary, type InboxPollSummary } from "./inbox.js";
 import type { RundownLine } from "./drain.js";
 import { renderGateFireRates, summarizeGateFireRates, type GateFireRateSummary } from "./gate-fire-rate.js";
+import { flagAnomalousLedgerWriters, topLedgerWriters, type LedgerWriterFlag } from "./ledger.js";
 import type { LastSeenStore } from "./last-seen.js";
 import {
   decideMeasurementCadence,
@@ -424,6 +425,8 @@ export interface DigestSummary {
   learningOutcomes?: LearningOutcomeSummary;
   knowledgeMeasured?: KnowledgeMeasuredSummary;
   gateFireRates?: GateFireRateSummary;
+  /** W1-T4100: the heaviest `step`s by bytes in the window. Soft-composed. See {@link summarizeLedgerWriters}. */
+  ledgerWriters?: LedgerWriterFlag[];
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
    *  `.fired` duplicates it and `.skipped` is the cadence working as intended. */
   boardReview?: BoardReviewDigestSnapshot;
@@ -766,6 +769,22 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
   return summary;
 }
 
+/** W1-T4100 (i): what writes so much — `window`'s top five steps by bytes, flagged against their
+ *  share of `baseline`. An empty baseline flags nothing: every step "new" would be noise, not a
+ *  finding. Bytes are re-serialised rows — the parsed form is all a digest holds. */
+export function summarizeLedgerWriters(window: LedgerLine[], baseline: LedgerLine[] = []): LedgerWriterFlag[] | undefined {
+  if (window.length === 0) return undefined;
+  const current = window.map((l) => JSON.stringify(l));
+  if (baseline.length > 0) return flagAnomalousLedgerWriters(current, baseline.map((l) => JSON.stringify(l)), { limit: 5 });
+  return topLedgerWriters(current, 5).map((w) => ({ ...w, aboveHistoricalShare: false }));
+}
+
+export function renderLedgerWriters(writers: readonly LedgerWriterFlag[]): string {
+  const one = (w: LedgerWriterFlag): string =>
+    `${w.step} ${Math.round(w.shareOfBytes * 100)}% (${w.lineCount} rows, ${w.bytes} B)${w.aboveHistoricalShare ? " ABOVE ITS HISTORICAL SHARE" : ""}`;
+  return `top ledger writers: ${writers.map(one).join(", ")}`;
+}
+
 /**
  * Deep-link a task id to its console card (W1-T144). A hash route (`#task=<id>`) so the link
  * never leaves the client and layers on top of whatever base URL the operator has bookmarked.
@@ -830,6 +849,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     ...(s.learningOutcomes ? [renderLearningOutcomes(s.learningOutcomes)] : []),
     ...(s.knowledgeMeasured ? [renderKnowledgeMeasured(s.knowledgeMeasured)] : []),
     ...(s.gateFireRates ? [renderGateFireRates(s.gateFireRates)] : []),
+    ...(s.ledgerWriters?.length ? [renderLedgerWriters(s.ledgerWriters)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
     // W1-T2765: ALWAYS rendered, unlike the soft-composed lines above — "not observed" is the
@@ -1011,7 +1031,10 @@ export function readDigestWindow(
 export function buildDigest(ledgerPath: string, sinceIso: string, consoleBaseUrl?: string): string {
   const read = readDigestWindow(ledgerPath, sinceIso);
   const summary = summarize(read.lines, sinceIso);
-  return renderDigest({ ...summary, read }, consoleBaseUrl);
+  // W1-T4100: named only when a rotation landed in the window — churn is what they explain, and a
+  // window the live file alone answers renders byte-identical to a caller-built summary.
+  const ledgerWriters = read.archivesRead > 0 ? summarizeLedgerWriters(read.lines) : undefined;
+  return renderDigest({ ...summary, read, ...(ledgerWriters ? { ledgerWriters } : {}) }, consoleBaseUrl);
 }
 
 /** Build the digest from `ledgerPath` and deliver it over the SAME notify channel as real-time pings. */

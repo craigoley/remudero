@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,9 @@ import {
   type LedgerLine,
 } from "../src/lib/ledger.js";
 import { rotationStampIso } from "../src/lib/ledger-union.js";
+import { buildDigest, renderDigest, summarize, summarizeLedgerWriters } from "../src/lib/digest.js";
+
+const ts0 = "2026-09-23T00:00:00.000Z";
 
 // ── W1-T4100 — READ 2026-09-23 on the host: 369 `ledger*.gz` archives (256 MB), 310 minted on
 // 2026-09-22 alone (about thirteen an hour), and one archive named
@@ -186,4 +189,56 @@ test("W1-T4100: the digest names the top ledger writers", () => {
   const pollingFlag = flagged.find((w) => w.step === "ci.polling");
   assert.equal(heavyFlag?.aboveHistoricalShare, true, "a step absent from the baseline that now dominates must be flagged");
   assert.equal(pollingFlag?.aboveHistoricalShare, false, "a step holding its OWN steady share across both windows must not be flagged");
+
+  // THE DIGEST ITSELF, end to end: the daily digest built from a real ledger file names them.
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const ts = new Date().toISOString();
+    const rows = lines.map((l) => JSON.stringify({ ...(JSON.parse(l) as object), ts }));
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    writeFileSync(ledgerPath, rows.slice(0, 20).join("\n") + "\n");
+    // No rotation in the window: no churn to explain, so no line.
+    assert.doesNotMatch(buildDigest(ledgerPath, since), /top ledger writers/);
+    // A rotation landed in the window: the digest reads the archive and the live file together.
+    writeFileSync(join(dir, `ledger.${ts.replace(/[:.]/g, "-")}.ndjson`), rows.slice(20).join("\n") + "\n");
+    const text = buildDigest(ledgerPath, since);
+    assert.match(text, /^top ledger writers: sweep\.escalation_reconcile\.summary \d+% \(5 rows, \d+ B\), ci\.polling \d+% \(50 rows, /m);
+    assert.doesNotMatch(text, /ABOVE ITS HISTORICAL SHARE/, "no baseline was read, so nothing is flagged");
+    assert.equal(summarizeLedgerWriters([]), undefined, "an empty window names no writer");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const parse = (l: string) => JSON.parse(l) as Record<string, unknown>;
+  const withBaseline = summarizeLedgerWriters(lines.map(parse), baseline.map(parse));
+  const rendered = renderDigest({ ...summarize([], ts0), ledgerWriters: withBaseline });
+  // The heavy step, absent from the baseline, is flagged; the steady step is named but not flagged.
+  assert.match(rendered, /^top ledger writers: sweep\.escalation_reconcile\.summary \d+% \(5 rows, \d+ B\) ABOVE ITS HISTORICAL SHARE, ci\.polling \d+% \(50 rows, \d+ B\)$/m);
+});
+
+test("W1-T4100: healing a future-dated name never overwrites another archive", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    writeFileSync(ledgerPath, "");
+    padPast(ledgerPath, 2000, 0);
+    // Two future-named archives whose real mtimes share one millisecond, plus a third archive
+    // already holding the name that millisecond encodes: a heal by `renameSync` alone would
+    // silently replace one file with another.
+    const realMs = Date.parse("2026-09-13T00:00:00.000Z");
+    const names = ["ledger.2027-01-01T00-00-00-000Z.ndjson.gz", "ledger.2027-01-02T00-00-00-000Z.ndjson.gz", "ledger.2026-09-13T00-00-00-000Z.ndjson.gz"];
+    names.forEach((n, i) => {
+      writeFileSync(join(dir, n), `archive-${i}`);
+      utimesSync(join(dir, n), new Date(realMs), new Date(realMs));
+    });
+    assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 2000 }).rotated, true);
+    const contents = archivesIn(dir)
+      .filter((f) => f.startsWith("ledger.2026-09-13"))
+      .map((f) => readFileSync(join(dir, f), "utf8"))
+      .sort();
+    assert.deepEqual(contents, ["archive-0", "archive-1", "archive-2"], "FALSIFIER: every archive survives its heal");
+    assert.equal(archivesIn(dir).filter((f) => f.startsWith("ledger.2027")).length, 0, "no future-dated name survives");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

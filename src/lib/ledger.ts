@@ -1072,7 +1072,6 @@ function reconcileArchiveStamps(dir: string): number | undefined {
     return undefined; // state dir unreadable — nothing to reconcile, same as no archives on disk
   }
   let maxSafeMs: number | undefined;
-  const usedMs = new Set<number>();
   for (const n of names) {
     const iso = rotationStampIso(n);
     if (iso === undefined) continue;
@@ -1090,31 +1089,33 @@ function reconcileArchiveStamps(dir: string): number | undefined {
       // FLOOR, never round: mtimeMs carries sub-millisecond precision and an ISO stamp does not,
       // so rounding UP could itself mint a name a fraction of a millisecond ahead of the file —
       // the exact class of defect this function exists to remove.
-      safeMs = Math.floor(mtimeMs);
-      while (usedMs.has(safeMs)) safeMs++; // collision-only nudge, never a reorder
-      const renamed = renameArchiveTo(full, n, safeMs);
-      if (!renamed) safeMs = nameMs; // rename failed — the old (unsafe) name is still on disk
+      const renamed = renameArchiveTo(full, n, mtimeMs);
+      const healedIso = renamed === undefined ? undefined : rotationStampIso(basename(renamed));
+      // A failed rename leaves the old (unsafe) name on disk; a nudged one lands a little later.
+      safeMs = healedIso === undefined ? nameMs : Date.parse(healedIso);
     }
-    usedMs.add(safeMs);
     if (maxSafeMs === undefined || safeMs > maxSafeMs) maxSafeMs = safeMs;
   }
   return maxSafeMs;
 }
 
 /** Rename the archive at `fullPath` (current basename `currentName`) to the name `stampMs`
- *  encodes, preserving its gzip/plain form. Best-effort: a failed rename must never fail the
- *  rotation that triggered the heal — the file is simply left as it was, still relocated, never
- *  deleted or truncated. */
-function renameArchiveTo(fullPath: string, currentName: string, stampMs: number): boolean {
+ *  encodes, preserving its gzip/plain form, and return its new path. A name another archive already
+ *  holds is nudged forward a millisecond at a time — `renameSync` would silently replace that file.
+ *  Best-effort: a failed rename returns `undefined` and must never fail the rotation that triggered
+ *  the heal — the file is simply left as it was, never deleted or truncated. */
+function renameArchiveTo(fullPath: string, currentName: string, stampMs: number): string | undefined {
   const ext = currentName.endsWith(".gz") ? ".ndjson.gz" : ".ndjson";
-  const stamp = fixedClock(Math.floor(stampMs)).iso().replace(/[:.]/g, "-");
-  const safeName = `ledger.${stamp}${ext}`;
-  if (safeName === currentName) return true; // already safe under its own name
+  const nameAt = (ms: number): string => `ledger.${fixedClock(ms).iso().replace(/[:.]/g, "-")}${ext}`;
+  let ms = Math.floor(stampMs);
+  if (nameAt(ms) === currentName) return fullPath; // already safe under its own name
+  while (existsSync(join(dirname(fullPath), nameAt(ms)))) ms++;
+  const target = join(dirname(fullPath), nameAt(ms));
   try {
-    renameSync(fullPath, join(dirname(fullPath), safeName));
-    return true;
+    renameSync(fullPath, target);
+    return target;
   } catch {
-    return false; // best-effort — a failed rename must never fail the rotation that triggered it
+    return undefined; // best-effort — a failed rename must never fail the rotation that triggered it
   }
 }
 
@@ -1139,10 +1140,7 @@ function healIfAheadOfOwnMtime(archivePath: string, lastArchiveMs: number | unde
   // fraction of a millisecond ahead of the real mtime it was meant to cap at.
   let safeMs = Math.floor(mtimeMs);
   if (lastArchiveMs !== undefined && safeMs <= lastArchiveMs) safeMs = lastArchiveMs + 1;
-  if (!renameArchiveTo(archivePath, name, safeMs)) return archivePath;
-  const ext = name.endsWith(".gz") ? ".ndjson.gz" : ".ndjson";
-  const stamp = fixedClock(Math.floor(safeMs)).iso().replace(/[:.]/g, "-");
-  return join(dirname(archivePath), `ledger.${stamp}${ext}`);
+  return renameArchiveTo(archivePath, name, safeMs) ?? archivePath;
 }
 
 /** Minimal fs surface {@link writeArchive} needs for compression, injectable so a test can force
