@@ -11,7 +11,7 @@
   origin: "operator report 2026-09-22 (inbox over a hundred items); operator direction: lean into automated flow and self-improvement"
   plan_refs: [W1-T4086, W1-T311, W1-T3710]
   files: [src/lib/fleet-lane.ts, src/lib/daemon.ts, src/lib/panel-graph.ts, test/the-fleet-triages-its-own-findings.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22 ON THE LIVE HOST: 620 fleet-owned proposals (see W1-T4086), 726 drafts in

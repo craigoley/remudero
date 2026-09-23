@@ -11,7 +11,7 @@
   origin: "operator report 2026-09-22: the inbox items use very complex language and read like commands; we settled on the ISO plain language standard for messaging"
   plan_refs: [W1-T313, W1-T2279, W1-T2498]
   files: [src/lib/inbox-plain.ts, src/lib/operator-message.ts, src/lib/panel-graph.ts, src/lib/daemon.ts, test/every-inbox-message-is-plain-language.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22.
