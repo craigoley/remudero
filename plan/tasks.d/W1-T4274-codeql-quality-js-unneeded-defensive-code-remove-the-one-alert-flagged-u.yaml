@@ -1,0 +1,55 @@
+- id: W1-T4274
+  title: "codeql-quality:js/unneeded-defensive-code — remove the ONE alert-flagged unneeded-defensive branch (#144), located from the alert's own captured instance data (W1-T4273), behavior pinned by a regression test; no sweep, no guess, no auto-dismiss"
+  repo: remudero
+  depends_on: [W1-T4273]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: medium
+  rationale: |
+    Ratifies codeql-quality:js/unneeded-defensive-code's own instruction — "Propose one bounded
+    cleanup task for this rule; do not auto-fix or dismiss alerts" — for alert #144 (rule
+    js/unneeded-defensive-code, tags quality + maintainability, CodeQL's own class for a condition
+    the surrounding code already guarantees true or false, so the check is confusing dead weight
+    rather than a real guard; GitHub's canonical example: a check re-testing something an earlier
+    branch in the same reachable scope already established).
+    DEPENDS ON W1-T4273 for a real reason, not convenience: an implement worker cannot fetch the alert
+    (no gh, no WebFetch — see W1-T4273's rationale) and no repo-tracked artifact carries #144's location
+    today. Once W1-T4273 merges, the NEXT alert-intake poll (pollAlerts, ops.ts:566-576) captures alert
+    #144 FRESH — confirmed no entry exists yet, so this is a first capture, not a stale one the
+    enrichment would miss — writing plan/feedback/fb-alert-craigoley-remudero-code-scanning-144.yaml
+    with its `raw` field now carrying path/line/message via W1-T4273's enriched renderAlertRaw. That
+    file is a plain repo-relative YAML any worker's Read tool can open.
+  design: |
+    (i) READ plan/feedback/fb-alert-craigoley-remudero-code-scanning-144.yaml FIRST. If its `raw`
+    field carries a location line (path + line range, per W1-T4273), that names the flagged site — read
+    the function and confirm from the code alone, never guessed, that the condition CodeQL flagged
+    is genuinely implied by an earlier guard in the same reachable scope.
+    (ii) IF THE ENTRY IS ABSENT, OR PRESENT BUT STILL LACKING LOCATION (e.g. captured by a poll that
+    ran before W1-T4273 shipped — pollAlerts never re-captures an existing entry, existsSync skip at
+    ops.ts:568), DO NOT GUESS A LOCATION. Add a `## Follow-ups` `research:` entry (the W1-T105
+    harvest contract) asking for the alert to be re-verified, and submit NO code diff — a legitimate
+    no_pr outcome, never a blind codebase-wide sweep for "anything that looks defensive."
+    (iii) THE FIX SIMPLIFIES EXACTLY THE FLAGGED CONDITION — delete the redundant branch/check or
+    collapse the guard into what it was defending — with NO change to any externally-observable
+    behavior for any currently-reachable input. Never remove a check whose necessity cannot be proven
+    from the code alone; a genuinely uncertain case takes the escalate/no-fix path in (ii), never a
+    guess in either direction.
+    (iv) A new regression test (test/codeql-unneeded-defensive-code-144.test.ts) exercises the
+    function at the flagged site, including specifically the input class the removed check used to
+    (uselessly) guard against, proving the simplified code's behavior is unchanged.
+    (v) SCOPE IS EXACTLY THIS ONE ALERT/RULE INSTANCE — never a sweep across other CodeQL findings.
+    Nothing in this diff calls the GitHub API to dismiss or otherwise mutate alert state (workers
+    have no gh access to do so regardless) — the alert closes itself on GitHub's next scan once the
+    fix lands, per the proposal's own "do not auto-fix or dismiss alerts" instruction.
+  acceptance:
+    - claim: "the flagged branch, located from the alert's own captured instance data (never guessed, never fetched live), is confirmed redundant from the code's own reachable-state logic and is removed/simplified, with a regression test pinning behavior for the specific input class the removed check used to guard"
+      proof: 'grep: test("W1-T4274: the input class the removed defensive check guarded keeps its behavior" in test/codeql-unneeded-defensive-code-144.test.ts'
+    - claim: "the diff is confined to the one flagged site plus its regression test — no sweep across other CodeQL findings, and nothing in the diff calls the GitHub API to dismiss or mutate the alert's state directly"
+      proof: 'grep: test("W1-T4274: the fix is confined to the flagged site and never calls the GitHub API to dismiss the alert" in test/codeql-unneeded-defensive-code-144.test.ts'
+  origin: architect
+  plan_refs: ["§5D"]
+  files: [test/codeql-unneeded-defensive-code-144.test.ts]
+  status: queued
+  attempts: 0

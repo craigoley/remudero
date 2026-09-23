@@ -26,6 +26,7 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   ) => GateResult;
   readGitDiff: (root: string, base: string, head?: string) => string;
   functionRanges: (path: string, text: string) => Array<{ symbol: string; start: number; end: number }>;
+  isOperatorOnlyMacroTable: (text: string, render?: (row: unknown) => string) => boolean;
   main: (
     argv: string[],
     io: { log: (msg: string) => void; error: (msg: string) => void },
@@ -273,5 +274,65 @@ test("W1-T3077 main(): exits 0 and logs on a clean diff, 1 and errors the refusa
       if (previousBaseRef === undefined) delete process.env.GITHUB_BASE_REF;
       else process.env.GITHUB_BASE_REF = previousBaseRef;
     }
+  });
+});
+
+// ── W1-T4332: an operator-only macro row reaches no worker and no judge ──────────────────────────
+
+const MACRO_ROW = (expansion: string) =>
+  `macros:\n  - name: probe\n    summary: "a probe"\n    expansion: |\n      ${expansion}\n    args: true\n`;
+
+test("W1-T4332: a data edit to an operator-only macro row passes the gate with no golden fixture", () => {
+  withFixture((root) => {
+    write(root, "settings/macros.yaml", MACRO_ROW("old body"));
+    commit(root, "base");
+    write(root, "settings/macros.yaml", MACRO_ROW("new body"));
+    commit(root, "head");
+
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, true, result.message);
+    assert.deepEqual(result.surfaces, [], "an operator-only table is not a prompt surface");
+  });
+});
+
+test("W1-T4332: a macro table that would render a model-invocable or injectable skill is still a prompt surface", () => {
+  const table = MACRO_ROW("body");
+  // CONTROL: the real generator renders this row operator-only, so the refusals below are about the
+  // rendered frontmatter and not about the table.
+  assert.equal(mod.isOperatorOnlyMacroTable(table), true);
+  const invocable = () => "---\nname: probe\ndescription: d\n---\nbody\n";
+  const injectable = () => "---\nname: probe\ndisable-model-invocation: true\napplies-to: implement\n---\nbody\n";
+  assert.equal(mod.isOperatorOnlyMacroTable(table, invocable), false, "no disable-model-invocation flag");
+  assert.equal(mod.isOperatorOnlyMacroTable(table, injectable), false, "an applies-to: key opts into worker injection");
+  // FAILS CLOSED: a table that does not parse, has no rows, or is gone stays a surface.
+  assert.equal(mod.isOperatorOnlyMacroTable("macros: [unclosed"), false, "unparseable");
+  assert.equal(mod.isOperatorOnlyMacroTable("macros: []\n"), false, "empty");
+  assert.equal(mod.isOperatorOnlyMacroTable(""), false, "absent");
+
+  // END TO END: an unparseable table at head is refused without golden evidence.
+  withFixture((root) => {
+    write(root, "settings/macros.yaml", MACRO_ROW("old body"));
+    commit(root, "base");
+    write(root, "settings/macros.yaml", "macros: [unclosed\n");
+    commit(root, "head");
+
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.surfaces, ["settings/macros.yaml"]);
+  });
+});
+
+test("W1-T4332: a learnings shard data edit is still refused without a golden fixture", () => {
+  withFixture((root) => {
+    write(root, "learnings/testing.yaml", "- id: before\n  fact: old\n");
+    write(root, "settings/macros.yaml", MACRO_ROW("old body"));
+    commit(root, "base");
+    write(root, "learnings/testing.yaml", "- id: before\n  fact: new\n");
+    write(root, "settings/macros.yaml", MACRO_ROW("new body"));
+    commit(root, "head");
+
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, false, "the macro exemption must not carry a learnings edit through with it");
+    assert.deepEqual(result.surfaces, ["learnings/testing.yaml"]);
   });
 });
