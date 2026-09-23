@@ -19,7 +19,7 @@
     - test/action-results-redaction.test.ts
     - test/action-results-bounds.test.ts
     - test/the-console-draws-the-graph-it-computes.test.ts
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED 2026-09-22: remudero-console issue #1611 remains open because API-T44 has no

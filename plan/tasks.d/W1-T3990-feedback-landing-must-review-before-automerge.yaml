@@ -14,7 +14,7 @@
     - test/feedback-landing.test.ts
   origin: "issue#5317-feedback-landing-review-2026-09-21"
   plan_refs: [W1-T530, W1-T913, W1-T1000002, W1-T3754, W1-T3910]
-  status: queued
+  status: merged
   priority: 1
   rationale: |
     OBSERVED on current origin/main a9eef4714572d91628c1e27d1a0553afe3510393 and in issue #5317.

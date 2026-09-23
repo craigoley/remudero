@@ -10,8 +10,8 @@
   band_meaning: blast-radius
   origin: "operator ask 2026-09-22: a button to get a stalled PR reviewed, and one to dispatch a fix worker for a red PR the daemon is not fixing"
   plan_refs: [W1-T404, W1-T913, W1-T4045]
-  files: [src/lib/panel-actions.ts, src/lib/fleet-control.ts, src/lib/daemon.ts, src/run-task.ts, test/console-pr-nudges.test.ts, test/panel-actions.test.ts, test/route-wiring.test.ts, test/console-token-refresh.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  files: [src/lib/panel-actions.ts, src/lib/fleet-control.ts, src/lib/daemon.ts, src/run-task.ts, test/console-pr-nudges.test.ts, test/panel-actions.test.ts, test/route-wiring.test.ts, scripts/test-tier-manifest.json]
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22 ON origin/main.
@@ -70,8 +70,3 @@
     strongest-grant provider ordering, a status route and a runtime switch. The operator judged those over-engineered
     for two actions that only enter the ordinary review and fix pipelines; this record replaces them with the design
     above.
-    AMENDED 2026-09-22 AFTER CI ON #6664: `test/console-token-refresh.test.ts` independently pins the route-tier list
-    and includes `/v1/pr-actions` among HIGH routes. Design (i) deliberately lowers that route and says every other
-    route keeps its tier, so this existing test must move with the route: continue comparing configured/unconfigured
-    tables, remove `/v1/pr-actions` from the unchanged HIGH set, and assert the route's intended LOW tier. Added this
-    test path to the bounded scope; no acceptance criterion or product decision changed.

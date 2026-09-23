@@ -15,7 +15,7 @@
     - src/lib/verify-human-release.ts
     - src/lib/measurement-cadence.ts
     - test/the-release-judge-is-measured.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 on the fleet: the first real `rmd verify-human-sweep` after #6619 released 38

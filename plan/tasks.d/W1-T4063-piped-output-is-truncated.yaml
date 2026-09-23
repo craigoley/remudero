@@ -11,7 +11,7 @@
   origin: "oper#piped-output-truncation-2026-09-22"
   plan_refs: [W1-T2893, W1-T2901]
   files: [src/lib/flush-exit.ts, src/run-task.ts, test/a-piped-command-output-is-never-truncated.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 IN THE DAEMON CONTAINER, same command, same corpus:

@@ -13,7 +13,7 @@
   files:
     - hooks/deny-floor.sh
     - test/the-operator-checkout-stays-on-main.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     "The operator checkout stays on main" is written guidance only (operator memory and CLAUDE.md
