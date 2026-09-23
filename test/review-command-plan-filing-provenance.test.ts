@@ -81,6 +81,9 @@ test("W1-T3115: buildSweepEffects's own PRODUCTION reviewRunner default is actua
       runId: "SWEEP-W1-T3115-default",
       plan: plan(),
       log: (step, extra) => logs.push({ step, extra }),
+      // W1-T4225: pin freshness. The real check reads this checkout's git state, and a stale one
+      // routes the call to the fresh-tree runner instead of the default this test is about.
+      reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "abc", originMainSha: "abc", advance: "none" }),
     });
     // postReview logs THEN rethrows the review failure (so runSweep's own containment records
     // it) — the assertion is on the log line, not on postReview resolving.
