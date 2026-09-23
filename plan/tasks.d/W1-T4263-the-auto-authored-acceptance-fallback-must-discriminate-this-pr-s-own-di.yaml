@@ -95,9 +95,9 @@
     regresses, only its trigger condition narrows to genuine no-anchor cases.
   acceptance:
     - claim: "a real unified-diff fixture carrying a genuine added line yields an Acceptance criterion whose grep proof names that exact added line and its exact file path, not the fixed acceptanceAuthorTimeCheck self-reference"
-      proof: "unit test: test/acceptance-fallback-diff-anchor.test.ts"
+      proof: 'grep: test("W1-T4263: a unified-diff fixture yields a grep proof naming the exact added line and its file path" in test/acceptance-fallback-diff-anchor.test.ts'
     - claim: "the generated proof genuinely discriminates under the real reviewer machinery: run through parseWhitelistedProof/execWhitelistedProof against a merge-base checkout lacking the added line and a head checkout carrying it, it reports no-match at the merge base and pass at head — never the shape proof-discrimination-gate.mjs flags as passing at both"
-      proof: "unit test: test/acceptance-fallback-diff-anchor.test.ts"
+      proof: 'grep: test("W1-T4263: the diff-anchored proof misses at the merge base and passes at head under the real reviewer machinery" in test/acceptance-fallback-diff-anchor.test.ts'
     - claim: "ghPrCreateFillCommand derives PR_OPEN_TIME_ACCEPTANCE_FALLBACK's criterion from the worktree's own origin/main..HEAD diff, and the previously-locked assertion that both fallbacks retain the fixed acceptanceAuthorTimeCheck grep is updated to assert the new diff-anchored shape on a fixture with a real addition, plus a separate case confirming the static fallback still applies when no diff-anchor is derivable"
       proof: "unit test: test/a-pr-opens-with-a-judgeable-body.test.ts"
     - claim: "acceptanceGateBodyRepair's fix-rung fallback is likewise diff-anchored from its own checkout's diff, so a body repaired after acceptance-author-gate's refusal carries a proof discriminating this PR's own diff rather than the always-stale symbol"
@@ -105,7 +105,7 @@
     - claim: "repairRetroAcceptanceBlock's own inline fallback criterion (currently bare prose with no grep:/unit test: dialect) is replaced by the same diff-anchored derivation, fed by a gh pr diff read mirroring repairRetroChangesetClaim's existing changedFiles dep, so a retro/plan-sync PR reaching this rung gets a proof that is both dialect-valid and diff-discriminating"
       proof: "unit test: test/retro-acceptance-repair.test.ts"
     - claim: "when no diff text is available or no candidate line clears the safety bar, every one of the three sites falls back to the current static self-referential proof and ledgers a named acceptance.fallback.diff_anchor_unavailable diagnostic naming the reason, so the rare unfixable case stays observable instead of silently reproducing today's untraceable failure"
-      proof: "unit test: test/acceptance-fallback-diff-anchor.test.ts"
+      proof: 'grep: test("W1-T4263: with no usable diff anchor every site keeps the static fallback and ledgers diff_anchor_unavailable" in test/acceptance-fallback-diff-anchor.test.ts'
   falsifier: |
     Revert the three call sites to construct their fallback from the fixed
     `PR_OPEN_TIME_ACCEPTANCE_FALLBACK`/`ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK`/inline-prose constants
