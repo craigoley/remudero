@@ -345,7 +345,8 @@ export interface LedgerWriterShare {
 }
 
 /** Rank every distinct `step` in `lines` by bytes written, heaviest first. A line with no
- *  parseable JSON or no string `step` is measured (it still occupies real disk) under `"(unparseable)"`/`"(unknown)"` respectively, so noise is visible rather than silently dropped
+ *  parseable JSON or no string `step` is measured (it still occupies real disk) under
+ *  `"(unparseable)"`/`"(unknown)"` respectively, so noise is visible rather than silently dropped
  *  from the total. `bytes` counts each line's own length plus the newline it owns on disk, the
  *  same unit {@link readLedgerCorpusPressure} (ledger-compaction-rung.ts) already measures. */
 export function topLedgerWriters(lines: readonly string[], limit = 10): LedgerWriterShare[] {
