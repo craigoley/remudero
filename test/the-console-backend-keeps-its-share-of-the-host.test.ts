@@ -117,7 +117,7 @@ function serveDryRun(): { status: number | null; out: string } {
         RMD_STATE_DIR: join(root, "state"),
         RMD_SERVE_REPO_DIR: join(root, "code"),
         RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
-        RMD_DOCKERENV_PATH: join(root, "no-dockerenv"),
+        RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"),
       },
     });
     return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
