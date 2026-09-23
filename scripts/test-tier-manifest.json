@@ -366,6 +366,7 @@
     "test/an-operator-note-reaches-the-docket-from-the-cli.test.ts": 0,
     "test/an-operator-stop-is-undone-by-the-restart-policy.test.ts": 23135,
     "test/an-operator-verdict-releases-a-parked-task.test.ts": 0,
+    "test/an-orphaned-draft-is-collected.test.ts": 0,
     "test/an-orphaned-run-is-not-a-failed-dispatch.test.ts": 0,
     "test/an-orphaned-worker-process-is-reaped.test.ts": 0,
     "test/an-outcome-metric-reports-per-repo.test.ts": 1275,

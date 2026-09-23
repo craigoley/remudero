@@ -20,7 +20,7 @@ export type DraftLintViolation = RelintViolation;
 import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
@@ -2006,6 +2006,33 @@ export function writeDraftAttemptPair(draftsPath: string, attemptsPath: string, 
   fs.writeFileSync(attemptsTmpPath, JSON.stringify(nextAttempts, null, 2), "utf8");
   fs.renameSync(draftsTmpPath, draftsPath);
   fs.renameSync(attemptsTmpPath, attemptsPath);
+}
+
+/**
+ * W1-T4118 — drop cached drafts whose proposal has left the registry. The cache had writers and no collector:
+ * on 2026-09-23 482 of 728 drafts (8.5 MB) were orphans every inbox read still parsed. Runs under the registry's
+ * own lock, against the blob-plus-shard population that lock guards, and lands by temp file plus rename.
+ * `undefined` when it did not look: an unreadable registry would make every draft read as an orphan.
+ */
+export function pruneOrphanedDrafts(draftsPath: string, registryPath: string): { count: number; bytesBefore: number; bytesAfter: number } | undefined {
+  const blob = parseProposalRegistryResult(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
+  if (blob.kind !== "ok" || !fs.existsSync(draftsPath)) return undefined;
+  let result: { count: number; bytesBefore: number; bytesAfter: number } | undefined;
+  updateProposalRegistry(registryPath, (current) => {
+    const raw = fs.readFileSync(draftsPath, "utf8");
+    const drafts = parseDraftCache(raw);
+    const live = new Set(current.map((p) => p.id));
+    const kept = Object.fromEntries(Object.entries(drafts).filter(([id]) => live.has(id)));
+    const count = Object.keys(drafts).length - Object.keys(kept).length;
+    result = { count, bytesBefore: Buffer.byteLength(raw), bytesAfter: Buffer.byteLength(raw) };
+    if (count > 0) {
+      const text = JSON.stringify(kept, null, 2);
+      writeAtomic(draftsPath, text);
+      result.bytesAfter = Buffer.byteLength(text);
+    }
+    return null; // the registry itself is never rewritten here
+  });
+  return result;
 }
 
 /** `state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host has re-opened. ⚠ KEYED ON
