@@ -233,7 +233,7 @@ export function runReleaseAudit(
   hooks.writeState(state);
   hooks.appendRow({
     run_id: hooks.runId,
-    task_id: "VERIFY-HUMAN",
+    task_id: "DAEMON",
     step: VERIFY_HUMAN_RELEASE_AUDIT_STEP,
     releases: audit.releases,
     escalations: audit.escalations,
