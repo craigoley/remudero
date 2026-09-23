@@ -789,9 +789,14 @@ function validatePrAction(body: unknown): { error: string } | PrActionInput {
 }
 
 /**
- * POST /v1/pr-actions — record an operator's bounded repair or review request. The service's
- * HIGH tier consumes a nonce before this handler runs; no browser can turn a row into a daemon
- * command without explicit confirmation and the existing token/identity gates.
+ * POST /v1/pr-actions — record an operator's bounded repair or review request.
+ *
+ * NO NONCE, since W1-T4077 moved this route to the LOW tier. The sentence that used to stand here
+ * said "the service's HIGH tier consumes a nonce before this handler runs" — true while the tier
+ * was high, and a false claim about a gate the route no longer has once it was not. What still
+ * holds is stated at `tier` below: the request is RECORDED rather than executed,
+ * `validatePrAction` admits `fix` or `review` and nothing else, `isPrActionSwitchedOff` is
+ * consulted first, and the write token and identity gates are unchanged.
  */
 export function buildPrActionRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath">): Route {
   return {
