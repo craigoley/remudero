@@ -6153,6 +6153,13 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "not the rule logic itself, same shape as openapi/daemon.yaml above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/diff-coverage-local.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T4084) — a local convenience exposed only as the " +
+    "`diff-coverage:local` package.json script; no workflow `run:` step invokes it. It RESTATES NO " +
+    "RULE: it reads the coverage invocation out of ci.yml's own `coverage-ratchet` step and spawns " +
+    "scripts/diff-coverage.mjs, which IS on INSTRUMENT_SURFACE, as the gate, reimplementing neither " +
+    "lcov parsing nor line matching. A diff touching it cannot change what any gate MEASURES — the " +
+    "same claim, for the same reason, as scripts/rule25-precheck.mjs.",
   "scripts/lint-plan-offline.mjs":
     "VERIFIED NON-INSTRUMENT — a latency-path convenience for git hooks, exposed only as " +
     "the `lint-plan:offline` package.json script; no workflow `run:` step invokes it (only its own " +

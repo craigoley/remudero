@@ -75,6 +75,7 @@
   "scripts/cycle-ratchet.mjs": 44,
   "scripts/deps-interface-baseline.json": 250,
   "scripts/diff-class.mjs": 250,
+  "scripts/diff-coverage-local.mjs": 75,
   "scripts/diff-coverage.mjs": 250,
   "scripts/error-subclass-baseline.json": 250,
   "scripts/expiring-fixture-census.mjs": 250,
