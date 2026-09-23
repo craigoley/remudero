@@ -12,6 +12,7 @@ import {
   statSync,
   symlinkSync,
   unlinkSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 // The default `fs` export serves ONLY the run.lock path (writeRunLock/readRunLock/removeRunLock). Invariant: call those
@@ -69,6 +70,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
+import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
 // W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
@@ -3490,6 +3492,203 @@ export function linkWorktreeNodeModules(
   return "linked";
 }
 
+/** W1-T4260: the untrappable bound on a satellite tree's `npm ci`, SIGKILL on expiry like review.ts `ensureDeps`. A BACKSTOP:
+ * a healthy install ends on its own (a next/react/@clerk proxy measured ~10 s cold, 559 MiB), so this fires only on a wedged
+ * one. The SAME 120 s as `ensureDeps`: runTask runs in the daemon's process, so this install blocks every lane while it runs. */
+export const DEPS_INSTALL_TIMEOUT_MS = 120_000;
+/** A lock older than this has no live holder: a holder's `npm ci` is SIGKILLed at {@link DEPS_INSTALL_TIMEOUT_MS}, and the
+ * copy and rename around it take seconds. Reclaiming sooner would delete a live holder's lock. */
+export const DEPS_LOCK_STALE_MS = DEPS_INSTALL_TIMEOUT_MS + 60_000;
+/** How long a caller waits on another holder's lock before falling back — a BACKSTOP: long enough for a live holder's
+ * bounded install to finish, and SHORTER than {@link DEPS_LOCK_STALE_MS}, so a waiter never reclaims a lock that was fresh when it arrived. */
+export const DEPS_LOCK_WAIT_MS = DEPS_INSTALL_TIMEOUT_MS + 30_000;
+const DEPS_LOCK_POLL_MS = 1_000;
+
+/** Total bytes of the regular files under `dir`, walking without following links; an absent tree reads as 0. Recorded on each
+ * install so a later pruning task can bound the store (W1-T4260 design vi). */
+export function dependencyTreeBytes(dir: string): number {
+  if (!existsSync(dir)) return 0;
+  let total = 0;
+  const stack = [dir];
+  while (stack.length > 0) {
+    const d = stack.pop()!;
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) stack.push(p);
+      else if (e.isFile()) total += lstatSync(p).size;
+    }
+  }
+  return total;
+}
+
+type WorktreeAddDepsArg = NonNullable<Parameters<typeof worktreeAdd>[4]>;
+
+/** Throw a NAMED provisioning failure: `depsStage` is the ledger's `stage`. Every stage falls back to today's install-root
+ * link; none refuses. A throw without it is ledgered as stage "unexpected". */
+function failDeps(stage: string, reason: string): never {
+  throw Object.assign(new Error(reason), { depsStage: stage });
+}
+
+/** The package-name path segment: a scope's `/` flattens to `_`, and a name that is only dots never becomes a path. */
+function depsPackageSegment(name: string): string {
+  const seg = name.replace(/[^A-Za-z0-9._-]/g, "_");
+  if (/^\.*$/.test(seg)) failDeps("unsafe_package_name", `package name ${JSON.stringify(name)} is not a safe path segment`);
+  return seg;
+}
+
+/** `<config.root>/deps`: every caller cuts worktrees from `<config.root>/repos/<repo>`, so the root is two levels up. A clone
+ * anywhere else names no deps root, and an explicit one wins. */
+function depsRootFor(repoDir: string, explicit: string | undefined): string {
+  if (explicit !== undefined) return explicit;
+  const reposDir = dirname(repoDir);
+  if (reposDir.split(sep).pop() !== "repos") failDeps("no_deps_root", `${repoDir} is not under <config.root>/repos`);
+  return join(dirname(reposDir), "deps");
+}
+
+/** Take the exclusive lock at `lockPath`, or return "reuse" once `treeNm` exists. Waits at most {@link DEPS_LOCK_WAIT_MS}, and
+ * reclaims a lock older than {@link DEPS_LOCK_STALE_MS} (its holder was SIGKILLed or died). */
+function acquireDepsLock(
+  lockPath: string,
+  treeNm: string,
+  opts: WorktreeAddDepsArg,
+  clock: Clock,
+  sleep: (ms: number) => void,
+): "locked" | "reuse" {
+  const now = () => clock.now();
+  const start = now();
+  for (;;) {
+    try {
+      mkdirSync(dirname(lockPath), { recursive: true });
+      writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
+      return "locked";
+    } catch (e) {
+      // EEXIST on a lock that is really there is contention, handled below; anything else is a named "lock" failure.
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || !existsSync(lockPath)) {
+        failDeps("lock", String((e as Error).message));
+      }
+    }
+    if (existsSync(treeNm)) return "reuse";
+    // Absent here means the holder released between our open and this stat: retry the open at once.
+    const mtimeMs = statSync(lockPath, { throwIfNoEntry: false })?.mtimeMs;
+    if (mtimeMs === undefined) continue;
+    if (now() - mtimeMs > DEPS_LOCK_STALE_MS) {
+      rmSync(lockPath, { force: true });
+      opts.log?.("deps.lock_reclaimed", { lock: lockPath, hash: dirname(treeNm).split(sep).pop(), age_ms: now() - mtimeMs });
+      continue;
+    }
+    if (now() - start >= DEPS_LOCK_WAIT_MS) failDeps("lock_timeout", `${lockPath} held for over ${DEPS_LOCK_WAIT_MS} ms`);
+    sleep(DEPS_LOCK_POLL_MS);
+  }
+}
+
+/** W1-T4260: the only variables a satellite install sees. Dependency lifecycle scripts run with this env, so the daemon's
+ * tokens (GH_TOKEN, provider keys) never reach them; what is kept is what npm needs to reach the registry. */
+const DEPS_INSTALL_ENV_KEYS = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TZ", "TMPDIR", "TMP", "TEMP",
+  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+]);
+
+export function dependencyInstallEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([k]) => DEPS_INSTALL_ENV_KEYS.has(k) || /^npm_config_/i.test(k)));
+}
+
+function defaultInstallDependencies(dir: string, timeoutMs: number): void {
+  execFileSync("npm", ["ci", "--no-audit", "--no-fund"], {
+    cwd: dir,
+    stdio: "pipe",
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+    env: dependencyInstallEnv(process.env),
+  });
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Install (or reuse) `<depsRoot>/<package>/<hash>/node_modules` for `worktreePath` and return it. Installed into a temp dir
+ * BESIDE the target under an exclusive lock, then renamed, so a reader never sees half a tree; the tree dir carries copies of
+ * the worktree's `package.json`/`package-lock.json`, so `linkWorktreeNodeModules`' hash compare reads a match. Throws
+ * {@link DepsProvisionFailure} on every failure. */
+function provisionDependencyTree(repoDir: string, worktreePath: string, packageName: string, opts: WorktreeAddDepsArg): string {
+  const clock = opts.clock ?? systemClock;
+  const now = () => clock.now();
+  const segment = depsPackageSegment(packageName);
+  const pkgDir = join(depsRootFor(repoDir, opts.depsRoot), segment);
+  const hash = hashInstallInputs(worktreePath);
+  const tree = join(pkgDir, hash);
+  const treeNm = join(tree, "node_modules");
+  const reused = (): string => {
+    opts.log?.("deps.reused", { package: packageName, hash, node_modules: treeNm });
+    return treeNm;
+  };
+  if (existsSync(treeNm)) return reused();
+  if (!existsSync(join(worktreePath, "package-lock.json"))) failDeps("no_lockfile", `${worktreePath} has no package-lock.json`);
+  const lockPath = join(pkgDir, `${hash}.lock`);
+  if (acquireDepsLock(lockPath, treeNm, opts, clock, opts.sleepMs ?? sleepSync) === "reuse") return reused();
+  const tmp = join(pkgDir, `.tmp-${hash}-${process.pid}-${randomUUID()}`);
+  let stage = "install";
+  try {
+    if (existsSync(treeNm)) return reused();
+    const started = now();
+    mkdirSync(tmp);
+    for (const f of ["package.json", "package-lock.json", ".npmrc"]) {
+      if (existsSync(join(worktreePath, f))) writeFileSync(join(tmp, f), readFileSync(join(worktreePath, f)));
+    }
+    (opts.installDependencies ?? defaultInstallDependencies)(tmp, DEPS_INSTALL_TIMEOUT_MS);
+    // An empty dependency set is a real, empty tree: `npm ci` then creates no node_modules at all (measured, npm 10.9).
+    mkdirSync(join(tmp, "node_modules"), { recursive: true });
+    stage = "rename";
+    (opts.renameDir ?? renameSync)(tmp, tree);
+    opts.log?.("deps.installed", {
+      package: packageName,
+      hash,
+      node_modules: treeNm,
+      duration_ms: now() - started,
+      timeout_ms: DEPS_INSTALL_TIMEOUT_MS,
+      tree_count: readdirSync(pkgDir).filter((n) => !n.startsWith(".") && !n.endsWith(".lock")).length,
+      size_bytes: dependencyTreeBytes(treeNm),
+    });
+    return treeNm;
+  } catch (e) {
+    // A rename that lost to a finished tree of the SAME hash is a reuse, not a failure: the tree is exactly the one we built.
+    if (stage === "rename" && existsSync(treeNm)) return reused();
+    failDeps(stage, String((e as Error)?.message ?? e));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(lockPath, { force: true });
+  }
+}
+
+/** W1-T4260: the `node_modules` a CROSS-PACKAGE worktree links instead of the install root's, or `undefined` to keep today's
+ * link. Only a worktree whose clone has no tree of its own AND whose package name differs from the fallback source's changes
+ * behaviour; a core worktree reads two names and returns. Never throws: any failure ledgers `deps.install_failed` and keeps
+ * today's link, plus W1-T4193's `worktree.node_modules_cross_package` when the implement lane has not already written it. */
+function satelliteNodeModulesSource(repoDir: string, worktreePath: string, opts: WorktreeAddDepsArg): string | undefined {
+  const source = resolveNodeModulesSource(repoDir);
+  if (!source || source === join(repoDir, "node_modules")) return undefined;
+  const worktreeName = readPackageName(worktreePath);
+  const sourceName = readPackageName(dirname(source));
+  if (worktreeName.kind !== "named" || sourceName.kind !== "named" || worktreeName.name === sourceName.name) return undefined;
+  try {
+    return provisionDependencyTree(repoDir, worktreePath, worktreeName.name, opts);
+  } catch (e) {
+    const stage = (e as { depsStage?: string } | null)?.depsStage ?? "unexpected";
+    const reason = String((e as Error)?.message ?? e);
+    opts.log?.("deps.install_failed", { package: worktreeName.name, worktreePath, stage, reason, fallback: source });
+    if (!opts.refuseSamePackageLockfileMismatch) {
+      opts.log?.("worktree.node_modules_cross_package", {
+        worktree_package: worktreeName.name,
+        worktreePath,
+        node_modules_package: sourceName.name,
+        node_modules_source: source,
+      });
+    }
+    return undefined;
+  }
+}
+
 /** Is `glob` a workspace pattern this repo's workspace-linking is willing to read? Only a normalized relative path
  * (`apps/dashboard`) or that SAME shape with exactly one trailing wildcard segment (`apps/*`) qualifies — never an absolute
  * path, a `..` segment anywhere, a bare/embedded `*` mid-segment, or a recursive glob (`apps/**`). This is the boundary the
@@ -4022,6 +4221,14 @@ export function worktreeAdd(
     /** W1-T4193: set ONLY by runTaskBody's implement path. Refuses a same-package lockfile mismatch before linking;
      * absent, every caller keeps the warn-and-link baseline byte-identically. */
     refuseSamePackageLockfileMismatch?: boolean;
+    /** W1-T4260 seams for a CROSS-PACKAGE worktree's own dependency tree, each defaulting to the real thing: the deps root
+     * (default `<config.root>/deps`, derived from `repoDir`), the installer (default `npm ci` under
+     * {@link DEPS_INSTALL_TIMEOUT_MS}), the atomic rename, and the clock and sleep the lock wait reads. */
+    depsRoot?: string;
+    installDependencies?: (dir: string, timeoutMs: number) => void;
+    renameDir?: (from: string, to: string) => void;
+    clock?: Clock;
+    sleepMs?: (ms: number) => void;
   } = {},
 ): void {
   ensureWorktreeConfigEnabled(repoDir);
@@ -4071,7 +4278,11 @@ export function worktreeAdd(
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
   excludeNodeModulesFromGit(worktreePath);
   if (deps.refuseSamePackageLockfileMismatch) assertSamePackageInstallInputs(repoDir, worktreePath, deps.log);
-  linkWorktreeNodeModules(repoDir, worktreePath);
+  // A satellite on core's install root gets its OWN lockfile-keyed tree instead; every other worktree links exactly as
+  // before, through the unchanged call below (W1-T4260).
+  const satelliteSource = satelliteNodeModulesSource(repoDir, worktreePath, deps);
+  if (satelliteSource) linkWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => satelliteSource });
+  else linkWorktreeNodeModules(repoDir, worktreePath);
   // The link above is ROOT-only and cannot reach a dependency npm installed beneath a declared workspace (e.g.
   // apps/dashboard/node_modules) -- link those too, through the SAME observability channel `worktree.add` already uses, so a
   // missing local tool is attributable to provisioning rather than misdiagnosed as the worker's own diff (W1-T4003).
