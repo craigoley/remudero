@@ -12,9 +12,9 @@ raw: "Automation defect: feedback landing commits are authored as
   construction, and no direct push to main."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6302
 summary: null
 expansion: null
 submission_key: null

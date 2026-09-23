@@ -1,0 +1,34 @@
+- id: W1-T4204
+  title: "`rmd review --repo` STILL DIES OUTSIDE A GIT CHECKOUT (the console image's /app), BECAUSE resolveOwnerRepo() RUNS `git config remote.origin.url` BEFORE --repo IS HONOURED"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1790036267432-9a0ffc"
+  plan_refs: []
+  files: [src/run-task.ts, test/review-command-target-repository.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: `resolveRepoRoot` falls back to the install root when cwd is not a git tree (src/lib/repo-location.ts
+    ~59-80); `resolveOwnerRepo` then runs `git config remote.origin.url` there (~86-93), which throws in /app because it
+    has no .git. `reviewCommand` evaluates `resolveReviewTarget(resolveOwnerRepo(), rest)` (src/run-task.ts ~17335), so
+    the throw happens even when --repo is passed.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) When --repo names the target, the default owner/repo is not resolved at all. (ii) Without --repo, outside a
+        checkout, the command refuses with a message naming --repo instead of a raw git error.
+  acceptance:
+    - claim: "review with --repo runs outside a git checkout"
+      proof: 'grep: test("W1-T4204: review with --repo runs outside a git checkout" in test/review-command-target-repository.test.ts'
+    - claim: "review without --repo outside a checkout names --repo in its refusal"
+      proof: 'grep: test("W1-T4204: review without --repo outside a checkout names --repo in its refusal" in test/review-command-target-repository.test.ts'

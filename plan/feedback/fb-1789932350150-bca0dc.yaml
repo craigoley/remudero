@@ -15,9 +15,9 @@ raw: "Observed during the official deploy/recycle-container.sh --instance core
   pause semantics."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

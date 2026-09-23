@@ -14,9 +14,9 @@ raw: "OPEN PR CONVERGENCE: Core PR 5399 is GitHub mergeState CLEAN but cannot be
   converges without operator intervention."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5433
 summary: null
 expansion: null
 submission_key: null

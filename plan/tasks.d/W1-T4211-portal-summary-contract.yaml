@@ -1,0 +1,30 @@
+- id: W1-T4211
+  title: "THE PORTAL HAS NO VERSIONED, READ-ONLY SUMMARY CONTRACT ON `rmd serve` — core serves /v1/status, /v1/recent, /v1/inbox and /v1/daemon-health but no summary route with a fixed payload, a freshness field and an unavailable state, so the site's adapter (remudero-site PR #14) is built against nothing stable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1789327800532-71d91d"
+  plan_refs: []
+  files: [src/lib/serve.ts, test/portal-summary-contract.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: src/lib/serve.ts (~1043-1049) registers /v1/status, /v1/recent, /v1/inbox and /v1/daemon-health; there
+    is no summary route and no versioned portal contract. The adapter half of this report belongs to remudero-site.
+    Whether the portal is a priority now is the operator's call; this record exists so the core half is not lost.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) One GET route returns a versioned payload: the counts the portal shows, an as-of timestamp, and an explicit
+        `unavailable` state per field. (ii) An exact-payload fixture pins the shape, so a breaking change fails a test.
+  acceptance:
+    - claim: "the summary route returns the versioned payload"
+      proof: 'grep: test("W1-T4211: the summary route returns the versioned payload" in test/portal-summary-contract.test.ts'
+    - claim: "an unreadable source is reported as unavailable in the summary"
+      proof: 'grep: test("W1-T4211: an unreadable source is reported as unavailable in the summary" in test/portal-summary-contract.test.ts'

@@ -47,9 +47,9 @@ raw: "THE DOCUMENTED MANUAL REPAIR FOR A STALLED PR CANNOT RUN AT ITS OWN
   re-derive by running the verb cold and reading which call raises."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6595
 summary: null
 expansion: null
 submission_key: null

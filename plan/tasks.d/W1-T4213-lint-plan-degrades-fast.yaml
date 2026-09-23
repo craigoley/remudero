@@ -1,0 +1,29 @@
+- id: W1-T4213
+  title: "`rmd lint-plan` DEGRADES TO MINUTES UNDER GITHUB SECONDARY-LIMIT THROTTLING INSTEAD OF DEGRADING FAST, AND IT IS THE GATE EVERY PLAN PR RUNS: attribute the wall-clock first, then bound it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1790084580606-1f4a3f"
+  plan_refs: []
+  files: [src/run-task.ts, test/lint-plan-degrades-fast.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: `creditedMergedIdsForWholePlan` (src/run-task.ts ~18117) calls projectPlan through the GitHub gateway
+    and returns undefined on any throw, after which the check falls back to the larger status: corpus (~23313-23330).
+    NOT ATTRIBUTED: where the wall-clock actually goes under 403s; no local retry loop was found. DIAGNOSE FIRST: this
+    record's first deliverable is a measurement, and the bound follows from it.
+
+    VALUE (triage estimate): low.
+  design: |
+    (i) Measure lint-plan's time per phase under an injected secondary-limit response. (ii) Bound the GitHub-read phase
+        with an overall budget, after which it proceeds with the offline subset and says so, as `--offline` already does.
+  acceptance:
+    - claim: "lint-plan under a throttled gateway finishes within its budget"
+      proof: 'grep: test("W1-T4213: lint-plan under a throttled gateway finishes within its budget" in test/lint-plan-degrades-fast.test.ts'

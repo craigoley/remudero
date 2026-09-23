@@ -14,9 +14,9 @@ raw: "Observed live on core: both W1-T3746/#6239 and W1-T3814/#6238 emitted
   extra strikes."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6269
 summary: null
 expansion: null
 submission_key: null

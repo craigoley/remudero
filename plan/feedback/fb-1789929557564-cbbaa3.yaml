@@ -13,9 +13,9 @@ raw: "Observed live on core at 2026-09-20T18:33Z: red PR #6239 entered the
   explicitly and no fallback silently mutates a PR body."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6282
 summary: null
 expansion: null
 submission_key: null

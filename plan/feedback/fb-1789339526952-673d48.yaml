@@ -20,9 +20,9 @@ raw: "PAUSE MUST CLOSE EVERY WORKER ADMISSION PATH, INCLUDING IN-FLIGHT LIGHT
   be newer than the pause requestedAt."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

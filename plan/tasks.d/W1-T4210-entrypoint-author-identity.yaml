@@ -1,0 +1,28 @@
+- id: W1-T4210
+  title: "A PRIVATE TARGET REPO RECEIVES COMMITS UNDER THE GLOBAL remudero-worker FALLBACK IDENTITY, WHICH VERCEL CANNOT MAP TO A TEAM MEMBER, AND ITS DEPLOYMENT STALLS: refuse to start a private-repo instance without an explicit author identity"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1789282072891-8e9428"
+  plan_refs: []
+  files: [deploy/entrypoint.sh, test/entrypoint-author-identity.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: deploy/entrypoint.sh (~36-37) sets one global git identity and silently falls back to remudero-worker.
+    W1-T3454 (#5301) carries RMD_GIT_AUTHOR_* through a recycle, so an operator can set it per container, but nothing
+    refuses a missing one, so a new private instance can stall the same way again.
+
+    VALUE (triage estimate): low.
+  design: |
+    (i) An instance declared private in .remudero/daemon-instances.yaml refuses to start without an explicit author
+        identity, naming the variable to set. (ii) Public repos keep the fallback.
+  acceptance:
+    - claim: "a private instance with no author identity refuses to start"
+      proof: 'grep: test("W1-T4210: a private instance with no author identity refuses to start" in test/entrypoint-author-identity.test.ts'

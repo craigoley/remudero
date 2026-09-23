@@ -1,0 +1,36 @@
+- id: W1-T4203
+  title: "triageCommitMessage CAN EMIT A BODY LINE OVER COMMITLINT'S 100-CHARACTER LIMIT, BECAUSE wrapBodyLine NEVER SPLITS A SINGLE LONG TOKEN, AND A REFUSED TRIAGE COMMIT RECORDS NO TERMINAL OUTCOME, so an already-decided feedback entry is re-triaged on every pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1790009538530-c1be01"
+  plan_refs: []
+  files: [src/lib/triage.ts, test/triage.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: `wrapBodyLine` (src/lib/triage.ts ~546) breaks only at spaces, so one token longer than 100 characters
+    (a path or URL) passes through unchanged; a probe produced a 120-character body line from a no_task detail.
+    OBSERVED: fb-1789961451233-8554de is still `status: new` at head although it was decided.
+    OBSERVED: W1-T3483 fixed the same class for planCommitMessage only. `gitAddAndCommitWithRollback` already restores the
+    index on a refused commit (W1-T3243), so no staging leftovers remain; the gap is line length and the missing outcome.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) Every body line triageCommitMessage emits is at most 100 characters, a long token being hard-split.
+        (ii) A refused triage commit writes a terminal, non-retryable ledger outcome naming the refusal, and auto-triage
+        does not pick that entry again until the outcome is cleared.
+  acceptance:
+    - claim: "no triage commit body line exceeds 100 characters"
+      proof: 'grep: test("W1-T4203: no triage commit body line exceeds 100 characters" in test/triage.test.ts'
+    - claim: "a refused triage commit is not re-triaged"
+      proof: 'grep: test("W1-T4203: a refused triage commit is not re-triaged" in test/triage.test.ts'

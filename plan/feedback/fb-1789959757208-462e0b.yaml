@@ -11,9 +11,9 @@ raw: "Regression: privileged host/container operations can leave mutable Git
   writable by the runtime uid."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

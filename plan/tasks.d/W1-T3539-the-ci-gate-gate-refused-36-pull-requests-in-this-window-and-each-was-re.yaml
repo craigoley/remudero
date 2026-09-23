@@ -5,9 +5,10 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # WITHDRAWN 2026-09-23 as a duplicate filing: W1-T3589 carries the same origin and landed first (W1-T4190).
   attempts: 0
-  author_class: machine
   origin: "ci-learning:5289:ci-gate"
   ci_learning_prs: [5289, 5318, 5321, 5323, 5336, 5342, 5342, 5343, 5344, 5347, 5353, 5354, 5361, 5365, 5367, 5370, 5371, 5372, 5376, 5378, 5387, 5392, 5401, 5405, 5410, 5413, 5416, 5417, 5424, 5431, 5432, 5433, 5437, 5441, 5445, 5446]
   files:

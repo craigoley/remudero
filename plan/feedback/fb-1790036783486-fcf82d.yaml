@@ -10,9 +10,9 @@ raw: "Console daemon branch-reap safety scan is fail-open for repos without
   add a multi-repo regression test."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

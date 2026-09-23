@@ -1,0 +1,35 @@
+- id: W1-T4199
+  title: "THE RECYCLE DRAIN COUNTS EVERY WORKER PROCESS AS BUSY ON TOP OF THE INFLIGHT LOCK COUNT, SO A LOCK-HOLDING WORKER IS COUNTED TWICE AND THE DRAIN WAITS LONGER THAN THE WORK: match each worker process to the lock it holds"
+  repo: remudero
+  depends_on: [W1-T4198]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#fb-1789320746761-9e7cc9"
+  plan_refs: ["W1-T4197", "W1-T4198"]
+  files: [deploy/recycle-container.sh, test/recycle-container.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: `worker_lines()` (deploy/recycle-container.sh ~1053-1060) matches every `claude --output-format` or
+    `codex exec` process, and the drain loop (~1258-1273) counts each non-sweep-fix process as busy and lane-less in
+    addition to the inflight lock count. No process is matched to a lock, so a lane holder is counted twice.
+
+    W1-T4197, W1-T4198 and W1-T4199 all edit deploy/recycle-container.sh and its suite, so they are chained by depends_on to be built one after another rather than as conflicting PRs.
+
+    risk: high is Rule 19's span (an existing suite, not this task's own falsifier), not blast radius.
+
+    VALUE (triage estimate): medium.
+  design: |
+    (i) A worker process is classified by the inflight lock whose pid it is (or descends from); only processes with no
+        lock count as lane-less. (ii) The drain's reported counts name each class, so an operator can see why it waits.
+  acceptance:
+    - claim: "a worker holding a lock is counted once"
+      proof: 'grep: test("W1-T4199: a worker holding a lock is counted once" in test/recycle-container.test.ts'
+    - claim: "a worker with no lock is counted as lane-less"
+      proof: 'grep: test("W1-T4199: a worker with no lock is counted as lane-less" in test/recycle-container.test.ts'

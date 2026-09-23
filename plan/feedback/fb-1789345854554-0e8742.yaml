@@ -14,9 +14,9 @@ raw: "OBSERVED on 2026-09-14 while triaging fb-1789331541509-6463e8:
   open until a parseable verdict and clean lint."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6575
 summary: null
 expansion: null
 submission_key: null

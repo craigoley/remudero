@@ -1,0 +1,29 @@
+- id: W1-T4214
+  title: "A PUSH CAN TAKE AN ALREADY-ADMITTED HEAD TO A REFUSED IDENTITY STATE, AND pre-push ONLY WARNS, so the only repair is a new pull request: refuse a push that turns an admitted head refused, naming the identity form it lost"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  origin: "feedback#fb-1790092094822-1eac59"
+  plan_refs: []
+  files: [hooks/pre-push, test/pre-push-identity-transition.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
+
+    OBSERVED: hooks/pre-push (~146-185, W1-T3388) runs head-identity-gate on the pushed ref, but only as an advisory
+    warning; it does not compare the basis before and after the push. INFERRED: the fleet push that broke #6562 printed
+    that warning and nobody saw it. NOT VERIFIED: whether the fleet's push path runs hooks/pre-push at all.
+
+    VALUE (triage estimate): low.
+  design: |
+    (i) pre-push refuses only the admitted-to-refused transition (so a first push of an ad-hoc branch is unaffected),
+        naming the identity form that was lost. (ii) First confirm the fleet push path runs this hook; if it does not,
+        record that and put the same check where the fleet pushes.
+  acceptance:
+    - claim: "a push that turns an admitted head refused is refused"
+      proof: 'grep: test("W1-T4214: a push that turns an admitted head refused is refused" in test/pre-push-identity-transition.test.ts'

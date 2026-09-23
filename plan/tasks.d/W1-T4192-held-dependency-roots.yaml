@@ -1,0 +1,59 @@
+- id: W1-T4192
+  title: "A CHAIN OF TASKS STALLED BEHIND A ROOT ONLY A PERSON CAN MOVE IS INVISIBLE WHILE ANY OTHER WORK IS DISPATCHABLE — the starvation census fires only at zero dispatchable and names the stalled task, never the root it waits on, and its own text says an unmet-deps task clears itself: name each held dependency root, and what it holds, under the board's NEEDS ME"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "session: 2026-09-23 backlog triage — find ways to automatically unblock blocked items"
+  plan_refs: ["W1-T2474", "W1-T391", "W1-T931", "W1-T280"]
+  files: [src/lib/held-dependency-roots.ts, src/lib/status-board.ts, test/held-dependency-roots.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 AT origin/main b5c2804.
+    - The starvation census in `runDaemon` (src/lib/daemon.ts) escalates only when a tick has zero dispatchable tasks,
+      and its `unmetDeps` bucket names the stalled task, not the dependency it is waiting on. With about a hundred
+      runnable tasks in the queue it never fires. `escalateStarvation` (src/lib/escalation-catalogue.ts) tells the
+      operator "an unmet-deps task clears itself once its dependency merges", which is false when the dependency is a
+      `verify:` gate nobody has released, or a `blocked` record with no retirement ruling.
+    - MEASURED on the live plan with this task's own function: two such roots hold work today. W1-T3570
+      (`verify: human`) holds W1-T3547 and W1-T3558; W3-T3 (`blocked`, retired in prose but carrying no
+      `retirement:` field) holds W3-T4. Every other unmet-deps chain ends at runnable work, which is ordinary queue order.
+    - A CORRECTION RECORDED SO NOBODY REPEATS IT: an ad-hoc walk first reported W1-T3762 as holding five tasks.
+      W1-T3762 carries `retirement: closed`, and `unmetDependencies` never treats a retired dependency as unmet, so it
+      holds nothing. This task calls `unmetDependencies` rather than re-deriving it for exactly that reason.
+    risk: high is Rule 19's span (a new module and its reader on the board), not blast radius: the board only reads.
+  design: |
+    (i) `heldDependencyRoots(plan, isMerged, releasedIds?)` walks each unmerged, unblocked, unretired task's unmet
+        dependencies with the repo's own `unmetDependencies`, stopping at the first dependency that is `blocked` with
+        no retirement or not `verify: auto` and not released. It returns each root, why it is held, and the tasks it
+        holds, most-held first.
+    (ii) The board's NEEDS ME section carries `heldRoots`, read off the SAME projections the rest of the board uses. It
+         is EMPTY when there are none and ABSENT when merge state could not be read, because unknown is not quiet.
+         Each root renders as one line naming the root, its hold, and the tasks it releases.
+    (iii) NOT A NEW ESCALATION AND NOT A GATE. It changes nothing any dispatcher decides. The board is where the
+          operator already reads what needs a person; a new issue class would be a second channel for the same fact.
+  acceptance:
+    - claim: "a dependent stalled behind a human-gated root names that root"
+      proof: 'grep: test("W1-T4192: a dependent stalled behind a human-gated root names that root" in test/held-dependency-roots.test.ts'
+    - claim: "a blocked root is named and a retired one is not"
+      proof: 'grep: test("W1-T4192: a blocked root is named and a retired one is not" in test/held-dependency-roots.test.ts'
+    - claim: "a released or merged root holds nothing"
+      proof: 'grep: test("W1-T4192: a released or merged root holds nothing" in test/held-dependency-roots.test.ts'
+    - claim: "the board names a held root under NEEDS ME with what it holds"
+      proof: 'grep: test("W1-T4192: the board names a held root under NEEDS ME with what it holds" in test/held-dependency-roots.test.ts'
+    - claim: "with merge state unknown the board claims no held roots"
+      proof: 'grep: test("W1-T4192: with merge state unknown the board claims no held roots" in test/held-dependency-roots.test.ts'
+    - claim: "the board derives held roots from its own projections"
+      proof: 'grep: heldDependencyRoots(plan, (id) => projections\.get(id)[?]\.merged === true) in src/lib/status-board.ts'
+  falsifier: |
+    Drop the `heldRoots` field from deriveNeedsMe and the board test fails: NEEDS ME renders "nothing needs you" while
+    H holds A and B.
+  note: |
+    A WORKING IMPLEMENTATION IS DRAFTED at commit 94f39adf, the head PR #6711 carried before it was force-pushed to
+    plan-only (its timeline links it; the build commits are 787bf7a5, 8645388e and 5d25942a). It was split out by
+    Standing rule 15. Build from it, and re-verify it against your head rather than trusting it.

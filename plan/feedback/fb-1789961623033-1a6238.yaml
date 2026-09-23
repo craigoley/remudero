@@ -11,9 +11,9 @@ raw: "Observed Azure console control-plane source split: remudero-serve resolves
   grill reply succeeds and lands without copying target settings/hooks."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null

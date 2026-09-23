@@ -69,3 +69,8 @@
     Leave `threadStorePath` unset in serve and the first test goes red with the route's "no thread store" refusal.
     Await the responder inside the main loop and the third goes red with a busy-loop fixture. Let the responder run
     approve from a reply that says "yes, file it" and the fifth goes red.
+  note: |
+    TRIAGE 2026-09-23: feedback#fb-1790009598281-aa40d8 (operator decision, Compose) asks for an operator-started
+    thread with no inbox item behind it. The design above keys a thread by an escalation identity or an inbox item id
+    only, so the implementer should give a Compose thread its own id rather than invent an item for it.
+    feedback#fb-1790008295185-f86051 is the report this task already answers.

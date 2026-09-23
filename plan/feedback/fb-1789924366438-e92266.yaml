@@ -18,9 +18,9 @@ raw: "Observed live across the three daemon instances: a non-self sweep calls
   dropping the CAS/PR gates."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6059
 summary: null
 expansion: null
 submission_key: null

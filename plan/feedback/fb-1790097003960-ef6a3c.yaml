@@ -3,9 +3,9 @@ ts: 2026-09-22T17:10:03.960Z
 raw: "THE MOST COMMON FIX-RUNG REFUSAL NAMES NO PATHS, SO NEITHER THE NEXT STRIKE NOR AN OPERATOR CAN ACT ON IT — \"every change the worker made is outside its declared files\" appears 46 times in the live ledger (state/ledger.ndjson, counted 2026-09-22), and the row carries the sentence and nothing else: no `paths`, no `scope_overrun_paths`, no file list in `reason`. Measured context: over a 12-hour window the fix rung made 91 dispatches and 76 were refused with no commit produced (84%), and this reason was the single largest bucket at 37. A worker is therefore told its whole commit was rejected without being told which files caused it, and the next strike re-derives from the same evidence. CONCRETE CASE: W1-T3901 (PR 6513) declares only `src/lib/sweep.ts` and `src/run-task.ts` — no test path — so a fix worker that writes a test to reproduce a failing check has its entire commit refused, silently, with nothing in the row naming the test file as the cause. CANDIDATE REMEDIES, CHEAP FIRST. (a) PUT THE PATHS ON THE ROW: the refusal already knows them (it computed the set difference to decide), so carrying them costs one field and makes the next strike and the operator both able to act. (b) SAY IT IN THE `say` LINE TOO, so it reaches the transcript a worker reads. (c) SEPARATELY, and needing a ruling rather than a patch: decide whether a task under `principles.tdd: strict` should be allowed to stage a test file it did not declare, since requiring a test and forbidding the file is a contradiction a worker cannot resolve. FALSIFYING CHECK: if any `fix.commit_refused` row in the ledger union carries a populated path list for this reason, the field already exists somewhere and only the common path omits it."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/6711
 summary: null
 expansion: null
 submission_key: null
