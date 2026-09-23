@@ -1,0 +1,44 @@
+- id: W1-T4393
+  title: "THE CORE LEDGER ROTATES EVERY ~4 MINUTES BECAUSE ROTATION KEEPS IT AT 90% OF ITS CEILING — size the retained core from the measured append rate so rotation leaves about an hour of headroom, now that delta archives keep every row"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "ledger step 2b follow-up 2026-09-23 (operator-approved plan item 3)"
+  plan_refs: ["W1-T244", "W1-T4394", "W1-T4355"]
+  files:
+    - src/lib/ledger.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on the fleet host (~/rmd-state2/state) after delta archiving (#6876) went live at 21:55Z:
+    rotations at 21:54:59, 21:59:18 and 22:03:33 (about 14 per hour); each new archive is a pure delta
+    (325 and 266 rows, 11.9 KB and 11.2 KB gzipped, 0 rows shared; control: the last two full snapshots shared
+    5,962 of 6,254 rows). But the live file sits at 4.10-4.18 MB right after rotating. rotateLedger's per-step
+    caps (MAX_RETAINED_LINES_PER_STEP) and dedupe leave a retained core above the 4 MiB ceiling, so every
+    rotation ends in the W1-T244 convergence shed to `Math.floor(ceilingBytes * 0.9)`. The next ~420 KB of
+    appends trips it again. Each rotation re-reads and rewrites the whole ~4 MB live file synchronously on
+    the daemon's loop, about 1.4 GB of rewrite a day for about 2 MB of new rows an hour. The retained core
+    existed so live-only readers kept history. Since #6868 and #6876, union readers read the archives and
+    the archives hold every row once, so a smaller live core loses nothing.
+  design: |
+    Replace the fixed 0.9 shed target with headroom derived from the measured append rate: bytes appended
+    since the previous rotation divided by the time since it (the previous rotation's time is the newest
+    archive's name), smoothed across rotations. Shed target = ceiling minus one hour of that rate. State the
+    hour beside the constant with its derivation. Retained lines are still shed OLDEST first by ts, and the
+    W1-T244 convergence invariant holds unchanged. With no prior rotation to measure, keep today's 0.9
+    target. Ledger each rotation's measured rate and chosen target on the existing rotation row.
+    W1-T4394 cuts the write rate; together they make rotation roughly hourly.
+  acceptance:
+    - claim: "rotation sheds the retained core to leave an hour of the measured append rate as headroom"
+      proof: "unit test: rotation sheds the retained core to leave an hour of the measured append rate as headroom"
+    - claim: "a first rotation with no measured rate keeps the ninety percent target"
+      proof: "unit test: a first rotation with no measured rate keeps the ninety percent target"
+    - claim: "a rotated ledger is still strictly below its ceiling under the new target"
+      proof: "unit test: a rotated ledger is still strictly below its ceiling under the new target"
+  falsifier: |
+    CLOSE IF the core ledger already rotates about hourly at the fleet's measured write rate.
