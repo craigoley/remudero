@@ -231,6 +231,16 @@ export const RUN_BRANCH_UNFILED_FORM = "run-unfiled-<epochMs>";
  *  placeholder) — the one `scripts/head-identity-gate.mjs` tests a real head ref against. */
 export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
 
+/** A GARDENER'S OWN HEAD: `gardenCheckout` names every garden PR's branch `<gardener>-garden-<epochMs>`,
+ *  and `scripts/head-identity-gate.mjs` admits exactly this shape. A garden PR tends the repo on a
+ *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
+ *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
+ *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
+export const GARDEN_NAMES = ["knowledge", "plan", "gate"] as const;
+export type GardenName = (typeof GARDEN_NAMES)[number];
+export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
+export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
+
 /**
  * THE BRANCH-NAME CONTRACT, CARRIED INTO THE PROMPT ITSELF (W1-T3388). CLAUDE.md's own
  * maintenance note says a DISPATCHED WORKER never loads CLAUDE.md at all — `spawnWorker` passes
@@ -30053,7 +30063,7 @@ export function plainInboxWriter(
 /** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. A PR for
  *  operator review opens as a DRAFT, which GitHub refuses to merge until a person marks it ready. */
 export function gardenCheckout(opts: {
-  name: string;
+  name: GardenName;
   repoDir: string;
   worktreesRoot: string;
   owner: string;
@@ -30070,6 +30080,12 @@ export function gardenCheckout(opts: {
     root,
     land: ({ paths, title, body, review }) => {
       git("add", "--", ...paths);
+      // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
+      // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
+      if (paths.some((p) => p.startsWith("docs/") && p.endsWith(".md"))) {
+        execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" });
+        git("add", "--", "docs/docs-index.json");
+      }
       git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
       git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
