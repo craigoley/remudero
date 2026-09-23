@@ -1,0 +1,80 @@
+- id: W1-T4102
+  title: "THE CONSOLE GOES DARK WHENEVER THE FLEET HOST IS BUSY — remudero-serve has no memory, CPU or disk priority, so a test-heavy hour swaps it out and its event loop stalls past the console's 5 s budget; protect serve's resources, bound concurrent test suites on the host, and publish serve's event-loop lag so the stall is visible before the console goes blank"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator-report#console-not-working-2026-09-23"
+  plan_refs: ["W1-T999", "W1-T4103"]
+  files:
+    - deploy/serve-container.sh
+    - deploy/recycle-container.sh
+    - src/lib/serve.ts
+    - src/lib/daemon-health.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR REPORT 2026-09-23: "the console at app.remudero.com is not working well. Most of the
+    tabs are unavailable." MEASURED that night on the fleet host, not inferred from the console:
+
+    (1) THE CONSOLE'S FAILURES ARE ONE TIMEOUT. Fetching all 23 console routes from a signed-in
+        session, 15 rendered an unavailable state, and their wall-clock clustered at 5.1-5.9 s and
+        10.2-10.8 s — one or two sequential reads each hitting the console's 5 s abort
+        (REQUEST_TIMEOUT_MS in the console's lib/rmd-control.ts). The Board read "This operation
+        was aborted".
+
+    (2) THE DAEMON WAS NOT DOWN — ITS EVENT LOOP WAS STALLED. Sampled from inside remudero-serve
+        every 2 s for a minute, a bare GET /v1/status (answered 401, so no work beyond auth)
+        took 0.0008 s at best and 1.0, 1.5, 2.0, 2.8, 3.3, 3.5 and 8.0 s at worst. The round
+        before that took 20 s for every route. Serve itself sat at 49-148% CPU.
+
+    (3) THE HOST WAS SWAP-THRASHING. 8 cores, 15 GiB RAM: load average 41.8, io PSI some=92% /
+        full=62% (avg10), 37-45 processes blocked on I/O, 73-80% iowait, 5.3 GiB swapped to
+        /mnt/scratch/swapfile with si up to 17 MB/s. The load was ~20 concurrent
+        `node --test` coverage processes (a PR sweep) beside a 7.2 GiB remudero-daemon.
+
+    (4) NO CONTAINER HAS ANY RESOURCE POLICY. `docker inspect` on remudero-serve,
+        remudero-daemon, remudero-console-daemon and remudero-site-daemon: Memory=0,
+        MemoryReservation=0, NanoCpus=0, CpuShares=0, BlkioWeight=0. The console's only backend
+        competes on equal terms with every test worker, so it is the first thing a burst pages
+        out.
+  design: |
+    Three parts, each independently useful:
+
+    (a) PRIORITY FOR SERVE. serve-container.sh launches serve with a memory reservation
+        (cgroup v2 memory.low — its working set is protected from reclaim), a higher
+        --cpu-shares and --blkio-weight than the daemons. recycle-container.sh gives the build
+        daemons a lower cpu/blkio weight. No hard memory LIMIT on serve: an OOM-kill of the
+        console backend is worse than a slow one. Values are named constants with the measured
+        serve RSS (~1.0-1.2 GiB) as the reservation's basis.
+
+    (b) BOUND THE TEST FAN-OUT. Sweeps and worker preflights on the host pass a
+        --test-concurrency derived from host cores and free memory, so one PR sweep cannot
+        start 20 suites at once. The bound is logged with the inputs it was computed from.
+
+    (c) MAKE THE STALL VISIBLE. serve measures its own event-loop lag
+        (perf_hooks.monitorEventLoopDelay) and /v1/daemon-health carries p50/p99 over the last
+        minute plus the host's io/memory PSI. The console can then say "the host is under heavy
+        disk load" instead of "unavailable".
+
+    Apply (a) through the existing graceful recycle path (rmd deploy marker → deploy-run →
+    recycle-container.sh), never a hand `docker update`.
+  acceptance:
+    - claim: "serve is launched with a memory reservation and higher cpu and blkio weight than the daemons, and no hard memory limit"
+      proof: "unit test: serve is launched with protected memory and a higher cpu and io weight than the daemons"
+    - claim: "a host test run is bounded by a concurrency derived from cores and free memory"
+      proof: "unit test: the host test fan-out is bounded by cores and free memory"
+    - claim: "daemon health reports serve's event-loop lag and the host's pressure"
+      proof: "unit test: daemon health carries serve event-loop lag and host pressure"
+    - claim: "a pressure reading the host cannot provide is reported unknown, never zero"
+      proof: "unit test: an unreadable pressure file reads unknown, not zero"
+  falsifier: |
+    Re-run the one-minute sample from (2) during a PR sweep after this lands. If /v1/status p99 is
+    still above 2 s while serve's reported loop lag is low, the stall is not starvation and this
+    task fixed the wrong thing; the next suspect is serve's own board prewarm on the event loop
+    (its 49-148% CPU), which W1-T999 already paces.
