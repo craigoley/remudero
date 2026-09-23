@@ -647,7 +647,7 @@ export function codexCandidatesForCapability(
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
   balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
-  frontier: ["gpt-5.6-luna", "gpt-5.6-terra"],
+  frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -805,6 +805,8 @@ export interface OpenWeightSelectionOptions {
   cashSqueezed?: boolean;
   /** The operator's approvals; a human-gated deployment (Astra, Fable) is skipped without one. */
   modelApprovals?: ModelApproval[];
+  /** W1-T4079 readiness seam; defaults to {@link openWeightDeploymentReady}. */
+  ready?: (deployment: string) => boolean;
 }
 
 /**
@@ -838,11 +840,17 @@ export function selectOpenWeightModel(
   // Cash and subscription are separate billing lanes. A normal cash request keeps the measured
   // OSS/nano order, but a cash request reached only after a blocked subscription auction may use
   // Luna first. The context gate still wins: a squeeze never routes an oversized prompt to Luna.
-  const candidates = options.cashSqueezed && configured.includes("gpt-5.6-luna")
-    ? ["gpt-5.6-luna", ...configured.filter((candidate) => candidate !== "gpt-5.6-luna")]
+  // Every Luna generation is promoted, in row order, so a ready gpt-6-luna leads the squeeze (W1-T4079).
+  const luna = configured.filter((candidate) => /^gpt-[0-9.]+-luna$/.test(candidate));
+  const candidates = options.cashSqueezed && luna.length > 0
+    ? [...luna, ...configured.filter((candidate) => !luna.includes(candidate))]
     : configured;
-  const safe = candidates.filter((candidate) =>
+  const ready = options.ready ?? ((deployment: string) => openWeightDeploymentReady(deployment));
+  const allowed = candidates.filter((candidate) =>
     SAFE_OPENWEIGHT_MODEL_ID.test(candidate) && modelAllowed(candidate, { modelApprovals: options.modelApprovals }));
+  // PREFER READY, ELSE BEHAVE AS BEFORE: with no ready candidate every existing refusal still fires.
+  const readyOnes = allowed.filter((candidate) => ready(candidate));
+  const safe = readyOnes.length > 0 ? readyOnes : allowed;
   if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
   if (promptBytes === undefined) {
     return { model: safe[0]!, effort: requestedEffort ?? "default", capability, alternatives: safe.slice(1) };
@@ -2304,6 +2312,51 @@ export function openWeightTemperatureField(deployment: string): { temperature?: 
   return value === null ? {} : { temperature: value };
 }
 
+/** The endpoint answered 404: no deployment by this name exists (yet). Distinct from every other
+ *  failure because the NEXT rung can succeed and a retry of this one cannot (W1-T4079). */
+export class OpenWeightDeploymentNotFoundError extends RmdError {
+  readonly deployment: string;
+  constructor(deployment: string) {
+    super("usage", 1, `openweight deployment ${JSON.stringify(deployment)} does not exist on the endpoint (HTTP 404)`, { deployment });
+    this.name = "OpenWeightDeploymentNotFoundError";
+    this.deployment = deployment;
+  }
+}
+
+/** How long a 404 keeps a deployment out of selection before one request asks again. */
+export const OPENWEIGHT_ABSENT_TTL_MS = 30 * 60_000;
+const openWeightAbsentUntil = new Map<string, number>();
+
+/** Record a definitive 404. Only a 404 changes the reading; a timeout or any other failure leaves it. */
+export function markOpenWeightDeploymentAbsent(deployment: string, nowMs = systemClock.now()): void {
+  openWeightAbsentUntil.set(deployment, nowMs + OPENWEIGHT_ABSENT_TTL_MS);
+}
+
+export function openWeightDeploymentKnownAbsent(deployment: string, nowMs = systemClock.now()): boolean {
+  const until = openWeightAbsentUntil.get(deployment);
+  return until !== undefined && nowMs < until;
+}
+
+export function clearOpenWeightAbsence(): void {
+  openWeightAbsentUntil.clear();
+}
+
+/** READY = priced, shaped and context-sized, and not known absent. A successor can lead a ladder row
+ *  before any of that is true; until it is, selection passes over it as if it were not listed. */
+export function openWeightDeploymentReady(deployment: string, nowMs = systemClock.now()): boolean {
+  return (
+    Object.prototype.hasOwnProperty.call(OPENWEIGHT_PRICES, deployment) &&
+    Object.prototype.hasOwnProperty.call(OPENWEIGHT_TEMPERATURE, deployment) &&
+    Object.prototype.hasOwnProperty.call(OPENWEIGHT_CONTEXT_WINDOWS, deployment) &&
+    !openWeightDeploymentKnownAbsent(deployment, nowMs)
+  );
+}
+
+/** Successors listed in the cash ladder ahead of their deployment and price (W1-T4079). The one
+ *  exemption from "every listed deployment is priced, shaped and bounded"; selection passes over them
+ *  until {@link openWeightDeploymentReady}. Remove an id once its rows exist. */
+export const OPENWEIGHT_AWAITING_READINESS: ReadonlySet<string> = new Set(["gpt-6-luna"]);
+
 /** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
  *  caller seeing it knows no paid request was made against an unknown price. */
 export class OpenWeightUnpricedDeploymentError extends RmdError {
@@ -2691,6 +2744,8 @@ export interface OpenWeightWorkerResult {
   // spelling. No out-of-scope caller asserts this literal value (only import symbol names, which stay
   // unchanged; see this task's PR body for the deliberate scoping).
   provider: "cash";
+  /** W1-T4079: the deployment this attempt found absent (HTTP 404). */
+  openWeightDeploymentAbsent?: string;
   sessionId: string;
   costUsd: number;
   numTurns: number;
@@ -3174,6 +3229,8 @@ function openWeightResult(input: {
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  /** W1-T4079: the deployment this attempt found absent (HTTP 404). */
+  deploymentAbsent?: string;
   webSearchAttempted?: number;
   webSearchAccepted?: number;
   webSearchRefused?: number;
@@ -3220,6 +3277,7 @@ function openWeightResult(input: {
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
+    ...(input.deploymentAbsent ? { openWeightDeploymentAbsent: input.deploymentAbsent } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
     webSearchRefused: input.webSearchRefused ?? 0,
@@ -3359,6 +3417,7 @@ export async function spawnOpenWeightWorker(
       } finally {
         clearTimeout(deadline);
       }
+      if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
       if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
         id?: unknown;
@@ -3466,7 +3525,10 @@ export async function spawnOpenWeightWorker(
     // `OPENWEIGHT_MAX_COMPLETION_TOKENS` ceiling the reservation assumed it might. `reason` is the
     // failure's own message, so the ledger row itself says which failure settled it.
     if (pendingReservation !== undefined) {
-      const inputOnlyUsd = openWeightUsageUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes, 0);
+      // A 404 reached no model, so nothing was billed: settle it to zero, not to the input.
+      const inputOnlyUsd = error instanceof OpenWeightDeploymentNotFoundError
+        ? 0
+        : openWeightUsageUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes, 0);
       settleOpenWeightBudget(config, {
         requestId: pendingReservation.requestId,
         actualUsd: inputOnlyUsd,
@@ -3494,6 +3556,7 @@ export async function spawnOpenWeightWorker(
         // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
         // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
         budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
+        ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
         webSearchAttempted,
         webSearchAccepted,
         webSearchRefused,

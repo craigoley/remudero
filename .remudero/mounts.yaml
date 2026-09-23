@@ -217,6 +217,10 @@ capabilities:
   # open-weight, and belongs on this ladder anyway because it is cash-billed the same as every other
   # row. `src/lib/mounts.ts`'s `parseCapabilities` still accepts the deprecated `openweight:` key as
   # an alias for an already-deployed host's table; remove that alias once none remain.
+  # W1-T4079 (operator ruling 2026-09-22): gpt-6-luna leads every row gpt-5.6-luna appears in, with
+  # 5.6 directly behind it. selectOpenWeightModel passes over a deployment until it is READY (price,
+  # temperature and context rows exist, and it has not answered 404 within OPENWEIGHT_ABSENT_TTL_MS),
+  # so every lane resolves exactly as before until gpt-6-luna is deployed on Azure and priced.
   cash:
     # W1-T3614 — THE TWO ROWS LEAD WITH DIFFERENT DEPLOYMENTS, AND THAT IS THE POINT. Neither model
     # wins outright; the winner is decided by the INPUT:OUTPUT ratio of the lane, measured against
@@ -237,18 +241,18 @@ capabilities:
     # So `balanced` leading with nano is not a preference, it is the only thing that can run; the
     # trailing gpt-oss there is unreachable for that lane and is kept only for a smaller caller.
     economy:
-      low:    [gpt-oss-120b, gpt-5-nano, gpt-5.6-luna]
-      medium: [gpt-oss-120b, gpt-5-nano, gpt-5.6-luna]
-      high:   [gpt-oss-120b, gpt-5-nano, gpt-5.6-luna]
+      low:    [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
+      medium: [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
+      high:   [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
     # NORMAL CASH ORDER STAYS MEASURED: economy/balanced continue to lead with the per-task winners
     # from W1-T3614. Luna is nevertheless a real cash deployment, independently of subscription
     # Codex. It trails both normal candidates so cheap routine work does not move lanes, and
     # selectOpenWeightModel(..., { cashSqueezed: true }) promotes it only when the subscription
     # auction has already blocked and this cash request is the squeeze fallback.
     balanced:
-      low:    [gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
-      medium: [gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
-      high:   [gpt-5-nano, gpt-oss-120b, gpt-5.6-luna]
+      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
+      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
+      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
     # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
     # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
     # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.
@@ -256,9 +260,9 @@ capabilities:
     # when luna is unavailable or below reserve -- "only when absolutely necessary", per operator
     # direction. Sol ($5.00/$30.00) is deliberately absent: 2.5x terra for the same band.
     frontier:
-      low:    [gpt-5.6-luna, gpt-5.6-terra]
-      medium: [gpt-5.6-luna, gpt-5.6-terra]
-      high:   [gpt-5.6-luna, gpt-5.6-terra]
+      low:    [gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra]
+      medium: [gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra]
+      high:   [gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra]
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
 # claude-opus-5-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY
