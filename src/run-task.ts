@@ -967,7 +967,7 @@ import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, 
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { readModelAvailabilitySnapshot, watchSuccessorModelsBestEffort } from "./lib/model-availability.js";
+import { readModelAvailabilitySnapshot, watchSuccessorModels, watchSuccessorModelsBestEffort } from "./lib/model-availability.js";
 import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
@@ -25039,7 +25039,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         const { catalog, routed } = await readModelAvailabilitySnapshot(config, loadMounts(mountsPath(repoRoot)));
         const escalateSuccessor = (e: Escalation) =>
           escalate(e, { issues: ghIssueGateway(owner, repo), ledgerPath, runId: coverageRunId });
-        return { catalog, routed, deps: { escalate: escalateSuccessor, ledgerPath, runId: coverageRunId } };
+        return watchSuccessorModels(catalog, routed, { escalate: escalateSuccessor, ledgerPath, runId: coverageRunId });
       });
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),

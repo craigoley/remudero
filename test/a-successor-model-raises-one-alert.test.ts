@@ -235,18 +235,16 @@ test("W1-T4080: watchSuccessorModels still escalates a gated successor, naming i
 test("W1-T4080: the cadence's best-effort watch runs the watch and reports it as watched", async () => {
   const ledger = ledgerPath();
   const escalated: Escalation[] = [];
-  const outcome = await watchSuccessorModelsBestEffort(async () => ({
-    catalog: catalog({ listed: ["gpt-6-luna"] }),
-    routed: ROUTED,
-    deps: {
+  const outcome = await watchSuccessorModelsBestEffort(() =>
+    watchSuccessorModels(catalog({ listed: ["gpt-6-luna"] }), ROUTED, {
       escalate: (e) => {
         escalated.push(e);
         return "https://example.invalid/issues/1";
       },
       ledgerPath: ledger,
       runId: "TEST-RUN-BEST-EFFORT",
-    },
-  }));
+    }),
+  );
   assert.equal(outcome.status, "watched");
   assert.equal(outcome.status === "watched" ? outcome.result.alerted.length : -1, 1);
   assert.equal(escalated.length, 1);

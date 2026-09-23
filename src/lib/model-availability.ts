@@ -240,17 +240,16 @@ export type SuccessorWatchOutcome =
 
 /**
  * The successor watch as the measurement cadence runs it (W1-T4080 design (i): on the cadence, not
- * per tick). BEST-EFFORT BY DESIGN, like every other read the cadence folds in: `prepare` builds
- * the snapshot and escalation deps, and a throw from it or from the watch is returned as
+ * per tick). BEST-EFFORT BY DESIGN, like every other read the cadence folds in: `watch` reads the
+ * snapshot and runs {@link watchSuccessorModels}, and a throw from either is returned as
  * `{ status: "failed" }` rather than rethrown, so a catalog read or escalation failure never costs
  * the cadence the rest of its report.
  */
 export async function watchSuccessorModelsBestEffort(
-  prepare: () => Promise<{ catalog: CatalogSnapshot; routed: readonly RoutedLadderRow[]; deps: ModelAvailabilityDeps }>,
+  watch: () => Promise<ModelAvailabilityResult>,
 ): Promise<SuccessorWatchOutcome> {
   try {
-    const { catalog, routed, deps } = await prepare();
-    return { status: "watched", result: await watchSuccessorModels(catalog, routed, deps) };
+    return { status: "watched", result: await watch() };
   } catch (error) {
     return { status: "failed", error };
   }
