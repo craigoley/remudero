@@ -209,7 +209,7 @@ jobs:
             if [ "$CLASS" = "TEST_ONLY" ]; then
               SUITES="$(tail -n +2 test-only-run.txt)"
             else
-              SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
+              SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt)" || SUITES=""
             fi
             if [ -z "$SUITES" ]; then
               if [ "${{ matrix.shard }}" = "1" ]; then
@@ -606,7 +606,7 @@ jobs:
               exit 0
               ;;
           esac
-          if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites > plan-reading-suites.txt; then
+          if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt > plan-reading-suites.txt; then
             echo "established=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi

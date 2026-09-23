@@ -742,6 +742,7 @@
     "test/docs-index.test.ts": 586,
     "test/doctor-node-pin.test.ts": 3564,
     "test/doctor.test.ts": 1416,
+    "test/doctrine-and-root-markdown-are-docs.test.ts": 0,
     "test/doctrine-resolves-for-its-reader.test.ts": 0,
     "test/downgrade-names-the-remedy.test.ts": 1235,
     "test/downstream-gate-failure-filter.test.ts": 670,
