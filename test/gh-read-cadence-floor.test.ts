@@ -171,3 +171,43 @@ test("W1-T3275: a poll that assembles the tool name indirectly is NOT caught —
     assert.equal(fire(indirect, c).status, 0, "an indirectly-named invocation escapes this floor, by construction");
   });
 });
+
+// ── W1-T4085 — AN APP-TOKEN-ROUTED READ GETS ITS OWN STAMP ─────────────────────────────────────
+//
+// src/lib/github-transport.ts's `routeInteractiveGhRead` mints an installation token and hands its
+// caller an inline `GH_TOKEN=<token> gh …` to run. This hook cannot mint (no network, by its own
+// header), so it must instead RECOGNISE that shape and account it separately, or the whole point
+// of minting — a budget independent of the shared, per-operator window — is lost the moment the
+// call reaches this tripwire.
+
+test("W1-T4085: a GH_TOKEN-prefixed read paces against its own stamp, untouched by the shared window", () => {
+  withCache((c) => {
+    // The shared window is fully spent...
+    assert.equal(fire("gh pr checks 4849", c).status, 0);
+    assert.equal(fire("gh pr view 4850 --json state", c).status, 2, "control: an ordinary read is refused here");
+
+    // ...but an app-token-routed read is paced on a SEPARATE stamp, so it is unaffected.
+    assert.equal(
+      fire("GH_TOKEN=ghs_minted_app_token gh pr view 4851 --json state", c).status,
+      0,
+      "the app-routed read must not be refused by the shared window",
+    );
+    // And it is now itself paced: a SECOND app-routed read, seconds later, IS refused — against its
+    // own budget, not the shared one.
+    assert.equal(
+      fire("GH_TOKEN=ghs_minted_app_token gh pr view 4852 --json state", c).status,
+      2,
+      "the app bucket has its own cadence too, once spent",
+    );
+    // And the shared window is completely unaffected by any of the above.
+    assert.equal(fire("gh pr view 4853 --json state", c).status, 2, "the shared window is unchanged either way");
+  });
+});
+
+test("W1-T4085: a plain read with no inline GH_TOKEN= is unaffected — today's floor, unchanged", () => {
+  withCache((c) => {
+    backdate(c, 200);
+    assert.equal(fire("gh pr checks 4849", c).status, 0);
+    assert.equal(fire("gh pr checks 4850", c).status, 2, "an ordinary read is paced exactly as before this task");
+  });
+});
