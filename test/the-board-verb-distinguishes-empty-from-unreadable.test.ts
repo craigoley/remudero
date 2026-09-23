@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { surveyPullRequestBoard, type PullRequestBoard } from "../src/lib/pr-board.js";
-import { boardCommand, type BoardCommandDeps } from "../src/run-task.js";
+import { boardCommand, type BoardCommandOptions } from "../src/run-task.js";
 
 /** A raw `gh pr list --json ...` row, minimal — only the fields the module reads. */
 function row(
@@ -175,7 +175,7 @@ test("boardCommand's default repos, with no --repo given, come from config.fleet
 
 test("boardCommand falls back to its default fleet, never crashing, when config is unreadable", () => {
   let surveyed: readonly string[] = [];
-  const deps: BoardCommandDeps = {
+  const deps: BoardCommandOptions = {
     survey: (repos) => {
       surveyed = repos;
       return { repos: [] };
