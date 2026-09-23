@@ -1534,6 +1534,8 @@ export interface VerifyHumanCadenceResult {
   /** Released to the fleet this cycle: the judge said automate AND the risk judge said proceed.
    *  Optional so every existing result literal stays valid; absent reads as none. */
   released?: string[];
+  /** W1-T4083: the release judge's running audit; absent when the audit did not run. */
+  releaseAudit?: { releases: number; escalations: number; merged: number; failed: number; alerts: string[] };
   status: "clear" | "judged" | "refused";
   refusedReason?: string;
 }
