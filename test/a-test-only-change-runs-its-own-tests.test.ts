@@ -93,6 +93,10 @@ test("W1-T4395: a helper or fixture change is not treated as test-only", () => {
   assert.equal(testOnlyRun([]), null);
   assert.equal(testOnlyRun("test/x.test.ts"), null);
   assert.equal(cli(["src/lib/plan-scope.ts"]), "");
+  // An unreadable list prints nothing and fails, so CI keeps the ordinary classification.
+  const unreadable = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--test-only-run", "--changed-files", join(tmpdir(), "rmd-w1t4395-missing.txt")], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(unreadable.status, 1);
+  assert.equal(unreadable.stdout, "");
   // "full" runs the sharded full suite rather than taking the W1-T3207 skip ...
   const full = runTestStep("full\n");
   assert.equal(full.status, 0, full.out);
