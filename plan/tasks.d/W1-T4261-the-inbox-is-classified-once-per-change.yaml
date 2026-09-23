@@ -14,7 +14,7 @@
   files:
     - src/lib/panel-graph.ts
     - src/lib/inbox.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 12:14Z on the fleet host. The host was idle (load 1.6, io PSI some 9.8% avg10)
