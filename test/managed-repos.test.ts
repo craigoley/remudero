@@ -17,8 +17,14 @@ function seed(r: string, content: string): void {
   writeFileSync(managedReposPath(r), content);
 }
 
-test("the SHIPPED .remudero/managed-repos.json loads — empty by default (safe no-op, G-6)", () => {
-  assert.deepEqual(loadManagedRepos(REPO_ROOT), []);
+// G-6 DEVIATION, recorded on purpose (#6738, operator choice 2026-09-23): the shipped list names the three
+// owned repositories the fleet already ran with, so remudero's own issues reach issues intake before WS-4.
+test("the SHIPPED .remudero/managed-repos.json loads the three owned repositories (G-6 deviation, #6738)", () => {
+  assert.deepEqual(loadManagedRepos(REPO_ROOT), [
+    { owner: "craigoley", repo: "remudero" },
+    { owner: "craigoley", repo: "remudero-site" },
+    { owner: "craigoley", repo: "remudero-console" },
+  ]);
 });
 
 test("loadManagedRepos on a missing file returns [] — not an error", () => {
