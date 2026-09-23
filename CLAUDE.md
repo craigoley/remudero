@@ -151,10 +151,8 @@ line numbers** — every one here had gone stale. Each rule cites the PR that ea
 - **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.** → doctrine/investigation-discipline/k-a-rule-21-protocol-run-passing-alone-reports-three.md
 - **A `catch` that returns a success-shaped literal is making a CLAIM: name the outcomes it collapses, and
   where two remedies differ, the answer is a third value the caller can see — never a comment asserting the
-  collapse is fine. Reasoning vocabulary (fail-soft, degrade, treat as, unknown) does NOT track correctness;
-  `loadLearningsCorpus` returns `[]` with comment `// no corpus directory yet`, reasoning-vocabulary-perfect
-  and defective alike. diff-coverage is the gate for NEW conflations, forcing tests per arm and thus naming
-  outcomes; it catches none of the 145 already on main, which is filed as W1-T1074.** → doctrine/investigation-discipline/a-catch-that-returns-a-success-shaped-literal-is-making.md
+  collapse is fine. Reasoning vocabulary (fail-soft, degrade, treat as, unknown) does NOT track correctness.
+  diff-coverage is the gate for NEW conflations, forcing tests per arm and thus naming outcomes.** → doctrine/investigation-discipline/a-catch-that-returns-a-success-shaped-literal-is-making.md
 
 ## Code traps
 
