@@ -1699,6 +1699,7 @@
     "test/the-supervisor-reads-its-own-daemons-image.test.ts": 0,
     "test/the-sweep-entrypoint-supplies-the-pr-body-writer.test.ts": 0,
     "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 1247,
+    "test/the-sweep-never-sends-a-fix-worker-at-a-red-it-cannot-fix.test.ts": 0,
     "test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts": 328,
     "test/the-top-of-tick-freshness-exit-precedes-every-dispatch.test.ts": 771,
     "test/the-top-tier-is-not-claude-only.test.ts": 0,
