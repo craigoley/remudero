@@ -22,6 +22,7 @@ import {
   planInventory,
   planShards,
   PLAN_GARDEN_CLASSES,
+  retirementCandidates,
 } from "../src/lib/plan-gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand, gardenCheckout, type RunResult } from "../src/run-task.js";
@@ -264,4 +265,15 @@ test("W1-T4111: a self-hosting daemon wires the plan gardener", async () => {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
   }
+});
+
+test("a task whose proofs only grep its own shard is never proposed as already done", () => {
+  // 2026-09-23: W1-T1258 and W1-T2982 were proposed for retirement because every proof held — each grepped
+  // text in the task's own shard, which holds from the moment it is filed.
+  const root = planRepo([
+    { id: "W1-T1", title: "self-proving", proof: "grep: self-proving in plan/tasks.d/W1-T1-x.yaml" },
+    { id: "W1-T2", title: "really shipped", proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" },
+  ]);
+  const actions = retirementCandidates(planInventory(root, join(root, "state")), root);
+  assert.deepEqual(actions.map((a) => a.target), ["W1-T2"]);
 });

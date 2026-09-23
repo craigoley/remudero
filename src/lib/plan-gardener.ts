@@ -120,7 +120,10 @@ export function retirementCandidates(inv: PlanInventory, repoRoot: string): Plan
       out.push({ class: "retire", target: t.id, retirement: "retired", reason: `It depends on ${gone.join(", ")}, which will never be built.` });
       continue;
     }
-    const proofs = (t.acceptance ?? []).map((c) => c.proof);
+    // A proof that greps the task's OWN shard holds from the moment it is filed, so it is no evidence the
+    // work happened; only proofs about other files count, and there must be at least one.
+    const own = inv.shards.get(t.id);
+    const proofs = (t.acceptance ?? []).map((c) => c.proof).filter((p) => !own || !p.trim().endsWith(` in ${own}`));
     if (proofs.length > 0 && proofs.every((p) => grepProofHolds(repoRoot, p))) {
       out.push({ class: "retire", target: t.id, retirement: "closed", reason: "Every acceptance proof already holds on main." });
     }
