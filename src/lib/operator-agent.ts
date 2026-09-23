@@ -2308,7 +2308,7 @@ export function buildOperatorAgentConsequenceDecisionRoute(deps: OperatorAgentRo
         sendJson(res, 404, { error: "not_found", detail: `no pending consequence approval "${input.consequenceId}"` });
         return;
       }
-      const decidedAt = new Date(deps.now?.() ?? Date.now()).toISOString();
+      const decidedAt = clockFromMillisFn(deps.now).iso();
       const decidedBy = bearerTokenId(req);
       const receipt: ConsequenceDecisionReceipt = {
         consequenceId: input.consequenceId,
