@@ -286,7 +286,7 @@ test("W1-T4095: the daemon starts the gardener beside a busy main loop", async (
   assert.equal(passedWhileBusy, true);
 });
 
-test("W1-T4095: the gardener's timer survives a failing pass and its state survives a bad file", async () => {
+test("W1-T4095: the gardener's seeded timer survives a failing pass and its state survives a bad file", async () => {
   const root = corpus();
   const rows: string[] = [];
   let calls = 0;
