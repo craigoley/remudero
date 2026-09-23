@@ -1,0 +1,53 @@
+- id: W1-T4244
+  title: "THE CONSOLE'S PAUSE, STOP, APPROVE, RUN-NOW AND MERGE-HOLD BUTTONS ARE REFUSED — the console reaches core with the static bearer write token, which W1-T404 pins at tier low; carry the signed-in operator's own identity instead: core verifies the console user's Clerk session token, grants middle for the allowlisted operator and high only after a recent step-up, and ledgers who acted"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator-request#projects-repos-onboarding-2026-09-23"
+  plan_refs: ["W1-T404", "W1-T500", "W1-T4228"]
+  files:
+    - src/lib/serve.ts
+    - src/lib/service.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on the gateway, with deliberately malformed bodies so no action could run: the
+    gateway's only write token gets `403 {"required_tier":"middle"}` on POST /v1/quiet-hours and
+    `403 {"required_tier":"high"}` on POST /v1/merge-hold. serve.ts records why: "the bearer write token
+    stays PINNED at low (W1-T404's own ruling) and so never reaches a MIDDLE or HIGH route at all, nonce or
+    not"; only a tailnet identity reaches high. So every console control above low is refused: pause /
+    resume / stop and quiet hours (middle); approving a MANUAL item, Run now, merge hold, provider-routing
+    policy and emergency stop (high).
+
+    W1-T404 is right that a static key held by a hosted web app must not spend money or move code. The
+    fix is not a stronger key; it is the operator's identity. The console already authenticates the
+    operator with Clerk, and every Clerk session token is a short-lived signed JWT carrying `sub` (the
+    user) and `fva` (minutes since each factor was last verified), which Clerk's reverification (step-up)
+    refreshes — https://clerk.com/docs/guides/secure/reverification ,
+    https://clerk.com/docs/guides/sessions/session-tokens . This is the same pattern as GitHub's sudo mode.
+  design: |
+    A new identity provider beside the bearer and tailnet ones: the console forwards the signed-in user's
+    Clerk session token on each write. Core verifies it against Clerk's JWKS (issuer, expiry, azp = the
+    console origin) and an allowlist of operator user ids from config. Granted tier: middle for an
+    allowlisted operator; high only when `fva` shows a factor verified within a configured window
+    (default 10 minutes) — the console runs Clerk's reverification prompt before a high action. The existing
+    confirm-nonce step stays for high actions. Every write ledgers the Clerk user id as the actor. The
+    bearer token keeps working for reads and low writes, unchanged. No Clerk secret lives in core — only
+    the public JWKS URL and the operator allowlist.
+  acceptance:
+    - claim: "an allowlisted operator's verified session reaches middle-tier routes"
+      proof: "unit test: an allowlisted operator's verified session reaches middle-tier routes"
+    - claim: "a high-tier route needs a factor verified within the step-up window"
+      proof: "unit test: a high-tier route needs a factor verified within the step-up window"
+    - claim: "an unknown user, a bad signature or an expired session gets no write tier"
+      proof: "unit test: an unknown user, a bad signature or an expired session gets no write tier"
+    - claim: "every write ledgers the operator who made it"
+      proof: "unit test: every write ledgers the operator who made it"
+    - claim: "the bearer write token stays pinned at low"
+      proof: "unit test: the bearer write token stays pinned at low"

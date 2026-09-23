@@ -1,5 +1,5 @@
 - id: W1-T4227
-  title: "THE FLEET'S REPOS AND INSTANCES ARE DEFINED IN FOUR PLACES THAT DISAGREE — the console's hard-coded OWNED_REPOSITORY_REGISTRY, core's managed-repos.json, the host's /etc/remudero/daemon-instances.yaml (which omits core) and the console's RMD_CONTROL_REPO_INSTANCES env; make .remudero/daemon-instances.yaml the one registry, give each instance its project, repo and gateway port/hostname, serve it read-only as /v1/registry, and flag the host copy when it drifts"
+  title: "THE FLEET'S REPOS AND INSTANCES ARE DEFINED IN FOUR PLACES THAT DISAGREE — the console's hard-coded OWNED_REPOSITORY_REGISTRY, core's managed-repos.json, the host's /etc/remudero/daemon-instances.yaml (which omits core) and the console's RMD_CONTROL_REPO_INSTANCES env; make .remudero/daemon-instances.yaml the one registry, give each instance its project and repo, serve it read-only as /v1/registry, and flag the host copy when it drifts"
   repo: remudero
   depends_on: []
   priority: 1
@@ -10,7 +10,7 @@
   risk: high
   band_meaning: span
   origin: "operator-request#projects-repos-onboarding-2026-09-23"
-  plan_refs: ["W1-T3596", "W1-T4228", "W1-T4229", "W1-T433"]
+  plan_refs: ["W1-T3596", "W1-T4228", "W1-T4229", "W1-T4244", "W1-T433"]
   files:
     - .remudero/daemon-instances.yaml
     - src/lib/instance-registry.ts
@@ -26,16 +26,17 @@
     five hand edits in three systems. The operator's design (doc "Remudero Projects, Repos and Onboarding")
     adds a light Project layer — Remudero = core + site + console — which needs one place to live.
   design: |
-    Extend each instance in .remudero/daemon-instances.yaml with `project` (default "default"), `repo`
-    (owner/name), and `gateway: {port, hostname?}`; add core's gateway (4317), site 4318, console 4319.
-    A pure parser in src/lib/instance-registry.ts validates it (unique names, ports, one repo per live
-    instance). serve exposes GET /v1/registry (read scope): projects → repos → instances with gateway
-    port/hostname and nothing else — never credential paths, state dirs or tokens. It also reports drift
+    Extend each instance in .remudero/daemon-instances.yaml with `project` (default "default") and `repo`
+    (owner/name); the Remudero project = core + site + console (operator ruling 2026-09-23: adopt the
+    project layer). A pure parser in src/lib/instance-registry.ts validates it (unique names, one repo per
+    live instance). serve exposes GET /v1/registry (read scope): projects → repos → instances, each with
+    the /v1/i/<instance> prefix W1-T4228 serves it under, and nothing else — never credential paths,
+    state dirs or tokens. It also reports drift
     when the host registry path (injectable; default /etc/remudero/daemon-instances.yaml) is readable and
     names a different instance set. managed-repos.json keeps working as today.
   acceptance:
-    - claim: "the registry parser refuses duplicate instance names, ports and live repos"
-      proof: "unit test: the registry parser refuses duplicate instance names, ports and live repos"
+    - claim: "the registry parser refuses duplicate instance names and live repos"
+      proof: "unit test: the registry parser refuses duplicate instance names and live repos"
     - claim: "the registry route lists projects, repos and instances without any path or secret"
       proof: "unit test: the registry route lists projects, repos and instances without any path or secret"
     - claim: "an instance with no project belongs to the default project"
