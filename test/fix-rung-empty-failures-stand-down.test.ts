@@ -34,6 +34,10 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
+// W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
+// injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
+const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
+
 function result(over: Partial<WorkerResult> = {}): WorkerResult {
   return {
     sessionId: "s",
@@ -141,6 +145,7 @@ test("runFixRung (criteria 1/2/4/5): a ci-log round with ZERO enumerable failure
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => {
         throw new Error("must never be reached — no strike should ever be dispatched");
       },
@@ -184,6 +189,7 @@ test("runFixRung (criterion 2): the stand-down escalates NOTHING and rewrites NO
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => {
         throw new Error("must never be reached");
       },
@@ -223,6 +229,7 @@ test("runFixRung (criterion 3): a ci-log round with a NON-EMPTY ciFailures set d
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => ({
         ...ciLogInitialReview("sha-1"),
         state: "success",
@@ -270,6 +277,7 @@ test("runFixRung: an UNKNOWN failing-check detail (no fetchCiFailures dep — cu
         return result({ sessionId: "fix-session-1" });
       },
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => ({
         state: "success",
         criteria: [criterion({ claim: "some criterion", met: true })],

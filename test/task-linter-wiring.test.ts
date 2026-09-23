@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask, lintPlanCommand, HANDLERS } from "../src/run-task.js";
+import { runTask, lintPlanCommand, HANDLERS, type LintPlanStatusDeps } from "../src/run-task.js";
 import { assertLintClean } from "../src/lib/task-linter.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -406,6 +407,20 @@ function probeShardYaml(): string {
   ].join("\n");
 }
 
+/** W1-T4226: lint-plan reads GitHub through its `LintPlanStatusDeps` seam, not the refused `gh` —
+ *  offline, with a recording fake gateway so the caller can assert none was ever built (mirrors
+ *  test/policy.test.ts's `offlineLintDeps`). Every check this file wires is checkout-local. */
+function offlineLintDeps(gatewaysBuilt: string[]): LintPlanStatusDeps {
+  const github = fakeGitHub();
+  return {
+    offline: true,
+    ghGateway: (owner, repo) => {
+      gatewaysBuilt.push(`${owner}/${repo}`);
+      return github;
+    },
+  };
+}
+
 /** Captures console.log/error/warn during a `lintPlanCommand` call into ONE combined stream —
  *  the warning this task cares about is printed via console.warn (the soft-violation branch),
  *  distinct from test/lint-plan-open-only.test.ts's own helper, which discards warn entirely. */
@@ -418,7 +433,9 @@ async function runLintPlanCapturingEverything(args: string[]): Promise<{ exitCod
   console.error = (m?: unknown) => void lines.push(String(m));
   console.warn = (m?: unknown) => void lines.push(String(m));
   try {
-    const exitCode = await lintPlanCommand(args);
+    const gatewaysBuilt: string[] = [];
+    const exitCode = await lintPlanCommand(args, offlineLintDeps(gatewaysBuilt));
+    assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this test");
     return { exitCode, combined: lines.join("\n") };
   } finally {
     console.log = origLog;

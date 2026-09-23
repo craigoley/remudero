@@ -6,13 +6,15 @@ import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
+  LEDGER_COLD_STORE_DIRNAME,
+  LEDGER_COLD_STORE_RETENTION_MS,
   LEDGER_COMPACT_MAX_SOURCES,
   ledgerCompactCommand,
   selectLedgerCompactionSources,
   type LedgerCompactCommandDeps,
   type LedgerCompactFs,
 } from "../src/lib/ledger-compact.js";
-import { compactedArchiveName } from "../src/lib/ledger.js";
+import { compactRotations, compactedArchiveName } from "../src/lib/ledger.js";
 import { fixedClock } from "../src/lib/clock.js";
 
 const STATE_DIR = "/state";
@@ -379,4 +381,80 @@ test("ledger-compact reports a state dir it cannot list, and exits 1 rather than
   const said = [...out, ...errors].join("\n");
   assert.match(said, /cannot list/, "the operator must be told the listing failed");
   assert.match(said, /EACCES: permission denied, scandir/, "the underlying reason must survive verbatim");
+});
+
+/** {@link memoryFs} plus the cold-storage seam: a rename moves the entry, a touch stamps its mtime. */
+function coldMemoryFs(initial: Record<string, Buffer>, mtimes: Record<string, number> = {}) {
+  const memory = memoryFs(initial);
+  const mtime = new Map(Object.entries(mtimes));
+  memory.fs.mkdirSync = () => {};
+  memory.fs.renameSync = (from, to) => {
+    const body = memory.files.get(from);
+    if (!body) throw new Error(`missing ${from}`);
+    memory.files.delete(from);
+    memory.files.set(to, body);
+  };
+  memory.fs.touch = (path, atMs) => {
+    mtime.set(path, atMs);
+  };
+  memory.fs.mtimeMs = (path) => mtime.get(path) ?? 0;
+  return memory;
+}
+
+const COLD = join(STATE_DIR, LEDGER_COLD_STORE_DIRNAME);
+const topLevelRows = (files: Map<string, Buffer>) =>
+  corpusRows(new Map([...files].filter(([path]) => !path.startsWith(`${COLD}/`))));
+
+test("ledger-compact moves a merged source into cold storage instead of deleting it", () => {
+  const a = row("2026-08-01T00:00:00.000Z", "R1");
+  const b = row("2026-08-02T00:00:00.000Z", "R2");
+  const older = join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.000Z"));
+  const memory = coldMemoryFs({
+    [older]: gzipRows([a]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-02T00:00:00.000Z"))]: gzipRows([a, b]),
+  });
+  const before = corpusRows(memory.files);
+
+  assert.equal(command([], memory).code, 0);
+  assert.deepEqual(memory.removals, [], "nothing is deleted");
+  assert.ok(memory.files.has(join(COLD, compactedArchiveName("2026-08-01T00:00:00.000Z"))), "the merged source is in cold storage");
+  assert.ok(!memory.files.has(older), "and gone from the scanned directory");
+  assert.deepEqual(topLevelRows(memory.files), before, "the scanned corpus keeps every distinct row");
+});
+
+test("ledger-compact deletes a cold-stored source only after its retention lapses", () => {
+  const stale = join(COLD, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz");
+  const young = join(COLD, "ledger.2026-09-05T00-00-00-000Z.ndjson.gz");
+  const memory = coldMemoryFs(
+    {
+      [join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.000Z"))]: gzipRows([row("2026-08-01T00:00:00.000Z", "R1")]),
+      [join(STATE_DIR, compactedArchiveName("2026-08-02T00:00:00.000Z"))]: gzipRows([row("2026-08-02T00:00:00.000Z", "R2")]),
+      [stale]: gzipRows([row("2026-07-01T00:00:00.000Z", "OLD")]),
+      [young]: gzipRows([row("2026-09-05T00:00:00.000Z", "YOUNG")]),
+    },
+    {
+      [stale]: NOW.getTime() - LEDGER_COLD_STORE_RETENTION_MS - 1,
+      [young]: NOW.getTime() - 24 * 60 * 60 * 1000,
+    },
+  );
+
+  assert.equal(command([], memory).code, 0);
+  assert.deepEqual(memory.removals, [stale], "only the file past retention is deleted");
+  assert.ok(memory.files.has(young), "a file inside retention stays recoverable");
+});
+
+test("a compacted archive is never named after a row stamped in the future", () => {
+  const future = row("2027-10-14T21:24:52.494Z", "FUTURE");
+  const past = row("2026-09-01T00:00:00.000Z", "PAST");
+  let written = "";
+  const result = compactRotations(["/state/ledger.a.ndjson"], {
+    readRows: () => [past, future],
+    write: (name) => {
+      written = name;
+    },
+    remove: () => {},
+    clock: fixedClock(NOW.getTime()),
+  });
+  assert.equal(written, compactedArchiveName(NOW.toISOString()));
+  assert.equal(result.rowsWritten, 2, "the future row itself is kept");
 });

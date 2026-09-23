@@ -269,6 +269,8 @@ test("W1-T127: the #212 replay — strike 1 is real and judged, strike 2 is a sp
             throw toolchainBlockedError();
           },
           waitForCiGreen: async () => "green",
+          // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+          fetchPrBody: async () => "PR body",
           // Strike 1's judgment: still failing — the rung would normally loop
           // to strike 2 (strikeCap 2), which is exactly where #212's crash hit.
           runReview: async () => failingAfterStrike1,

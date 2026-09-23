@@ -49,6 +49,7 @@ import {
   SymlinkInstallRefusal,
 } from "../src/run-task.js";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -230,6 +231,10 @@ async function runServeChild(guarded: boolean): Promise<{ log: string; target: s
   const out = openSync(logPath, "a", 0o600);
   const env = childEnv(home);
   if (guarded) env.RMD_SELF_SYNC_DONE = "1";
+  // W1-T4226: the serve child's boot-time board read shells out to `gh` — answered by this
+  // test's own scripted stub (the fixture origin has no PRs), never the shared refusal stub.
+  const gh = ghShim([{ when: "/pulls?", stdout: "[]" }], { kind: "install-refusal-serve-gh" });
+  env.PATH = `${gh.dir}:${env.PATH ?? ""}`;
   const port = await freePort();
   const child = spawn(join(REPO_ROOT, "bin", "rmd"), ["serve", "--port", String(port), "--host", "127.0.0.1"], {
     cwd: repo, // resolveRepoRoot reads cwd -> git show-toplevel -> the FIXTURE, never this checkout
@@ -254,6 +259,7 @@ async function runServeChild(guarded: boolean): Promise<{ log: string; target: s
     };
   } finally {
     killProcessGroup(child.pid!);
+    rmSync(gh.dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
     rmSync(target, { recursive: true, force: true });

@@ -984,7 +984,8 @@ test("buildBatchedGithub.findMergedByTrailer returns the NEWEST (highest-number)
 
 test("buildBatchedGithub.warm(): forces the fetch immediately, with NO query method called first", () => {
   let fetchCalls = 0;
-  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return []; } });
+  // W1-T4226: warm() also fetches the escalation-issue batch; answer it through its own seam.
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return []; }, fetchAllIssues: () => [] });
   assert.equal(fetchCalls, 0, "sanity: the fetch is still lazy until warm()/a query forces it");
   gh.warm?.();
   assert.equal(fetchCalls, 1, "warm() must force the fetch NOW — the whole point of a boot-time pre-warm");
@@ -997,6 +998,8 @@ test("buildBatchedGithub.warm(): a SECOND warm() within the TTL does not refetch
     ttlMs: 100,
     now: () => clock,
     fetchAll: () => { fetchCalls++; return []; },
+    // W1-T4226: warm() also fetches the escalation-issue batch; answer it through its own seam.
+    fetchAllIssues: () => [],
   });
   gh.warm?.();
   assert.equal(fetchCalls, 1);
@@ -1010,7 +1013,8 @@ test("buildBatchedGithub.warm(): a SECOND warm() within the TTL does not refetch
 test("buildBatchedGithub.warm(): after warming, the FIRST query method resolves with ZERO additional fetches (the request path is never cold)", () => {
   let fetchCalls = 0;
   const prs: BatchedPr[] = [{ number: 1, url: "u1", state: "MERGED", body: "Remudero-Task: W1-T9\n" }];
-  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return prs; } });
+  // W1-T4226: warm() also fetches the escalation-issue batch; answer it through its own seam.
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return prs; }, fetchAllIssues: () => [] });
   gh.warm?.();
   assert.equal(fetchCalls, 1);
   // The first real "request" (a query method) after warm() -- must serve from the already-warm

@@ -1,0 +1,46 @@
+- id: W1-T4380
+  title: "A SATELLITE'S FIRST DEPENDENCY INSTALL FREEZES ITS WHOLE DAEMON — W1-T4260 runs npm ci synchronously inside worktreeAdd, and runTask runs in the daemon's own process, so every lane in that container stalls for up to 120 s the first time a lockfile hash is seen: move the install off the event loop and defer the dispatch that needs it"
+  repo: remudero
+  depends_on: [W1-T4260]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  origin: "session: 2026-09-23 W1-T4260 build review"
+  plan_refs: ["W1-T4260", "W1-T4193", "W1-T3266"]
+  files: [src/lib/worker.ts, test/a-satellite-install-never-blocks-the-daemon.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 on the W1-T4260 build (PR #6840). Names are symbols; re-verify at your head.
+
+    OBSERVED: W1-T4260's default installer is `execFileSync("npm", ["ci", ...])` with a SIGKILL timeout of
+    DEPS_INSTALL_TIMEOUT_MS (120 000), called from inside `worktreeAdd`, which is synchronous.
+    OBSERVED: the daemon dispatches a task in-process (`runOne: (taskId) => runTaskFn(...)` in src/run-task.ts),
+    and runTask calls worktreeAdd. So the first satellite worktree for a new lockfile hash blocks the event loop of
+    that whole container (every lane, the sweep, the PR pump) until the install finishes or is killed.
+    MEASURED on a next/react/@clerk proxy: about 10 s cold, 559 MiB. The stall is short on a healthy registry and up
+    to 120 s on a wedged one. review.ts `ensureDeps` (W1-T3266) blocks the same way at the same bound.
+
+    Who pays: the site and console daemons, once per lockfile change of their repo. Core never installs (its
+    worktrees are same-package and link the install root).
+
+    VALUE (triage estimate): medium. The bound caps the damage; this removes it.
+  design: |
+    (i) The install runs in a child process that does not block the event loop (an async spawn, or a detached
+        install whose completion the next dispatch observes). The lock, temp dir, atomic rename, env allowlist and
+        exact-hash reuse from W1-T4260 are unchanged.
+    (ii) While a tree for a hash is being installed, a dispatch that needs it is deferred without a strike, the
+        same shape W1-T4193 uses (reasonClass blocked_toolchain), never refused and never linked to the wrong tree.
+        A non-implement caller (review, fix) keeps W1-T4260's fallback: link the install root and log it.
+    (iii) A failed or timed-out background install logs deps.install_failed exactly as today, and the next
+        dispatch retries once the failure backoff allows; it never loops.
+    (iv) Core worktrees stay byte-identical.
+  acceptance:
+    - claim: "a satellite install does not block the event loop"
+      proof: 'grep: test("W1-T4380: a satellite install does not block the event loop" in test/a-satellite-install-never-blocks-the-daemon.test.ts'
+    - claim: "an implement dispatch waiting on its tree is deferred without a strike"
+      proof: 'grep: test("W1-T4380: an implement dispatch waiting on its tree is deferred without a strike" in test/a-satellite-install-never-blocks-the-daemon.test.ts'
+    - claim: "a core worktree is unchanged"
+      proof: 'grep: test("W1-T4380: a core worktree is unchanged" in test/a-satellite-install-never-blocks-the-daemon.test.ts'

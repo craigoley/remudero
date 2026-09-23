@@ -532,14 +532,14 @@ export function splitRangeCommitMessages(stdout: string): string[] {
     .map((s) => s.trim());
 }
 
-/** `git log` the range's raw commit messages, NUL-separated so blank lines in a body can't be
- *  mistaken for a message boundary. */
+/** `git log` the range's raw commit messages, NUL-separated so a body's blank lines are no boundary;
+ *  `--no-merges` skips a multi-parent commit, as commitlint's default ignores do (squashed at merge). */
 export function readRangeCommitMessages(
   repoRoot: string,
   range: PreflightRange = DEFAULT_PREFLIGHT_RANGE,
   spawn: PreflightSpawn = defaultPreflightSpawn,
 ): string[] {
-  const res = spawn("git", ["log", "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
+  const res = spawn("git", ["log", "--no-merges", "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
   // A `git log` that never ran also returns empty stdout, the same shape as a genuinely empty
   // range — spawnFailureDetail (which reads status, not stdout) is what tells them apart;
   // skipping it would let a never-run spawn read as zero messages, a vacuous pass.

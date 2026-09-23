@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { lintPlanCommand, resolveRepoRoot, stripRepoRootFlag } from "../src/run-task.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import { formatReadIdentity, isPathOutsideRoot } from "../src/lib/task-linter.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -214,15 +215,25 @@ test("rmd lint-plan --plan <inside root>: the summary line carries the absolute 
   writeFileSync(fixturePlan, raw, "utf8");
   try {
     assert.equal(isPathOutsideRoot(repoRoot, fixturePlan), false, "sanity: the fixture must be IN-root for this test to exercise the identity line rather than the refusal");
+    // W1-T4226: whole-plan credit scoping reads GitHub; the offline seam plus a recording fake keeps
+    // this run off the refused `gh`, and the assertion proves no gateway was ever built.
+    const gatewaysBuilt: string[] = [];
     const origLog = console.log;
     const logs: string[] = [];
     console.log = (m: string) => logs.push(m);
     let exitCode: number;
     try {
-      exitCode = await lintPlanCommand(["--plan", fixturePlan]);
+      exitCode = await lintPlanCommand(["--plan", fixturePlan], {
+        offline: true,
+        ghGateway: (owner, repo) => {
+          gatewaysBuilt.push(`${owner}/${repo}`);
+          return fakeGitHub();
+        },
+      });
     } finally {
       console.log = origLog;
     }
+    assert.deepEqual(gatewaysBuilt, [], "an offline lint-plan run builds no GitHub gateway");
     assert.equal(exitCode, 0);
     const joined = logs.join("\n");
     assert.equal(exitCode, 0, "a single valid task with no plan-level defects must lint clean");

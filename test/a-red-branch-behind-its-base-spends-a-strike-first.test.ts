@@ -103,6 +103,8 @@ function deps(events: string[], waits: Array<"green" | "red" | "timeout">) {
       events.push("wait");
       return waits.shift() ?? "green";
     },
+    // W1-T4226: the green-CI round reads the live PR body — fake it, never the refused real gh.
+    fetchPrBody: async () => "PR body",
     runReview: async () => review("success", "fixed-head"),
     push: () => events.push("push"),
     issues: {} as IssueGateway,

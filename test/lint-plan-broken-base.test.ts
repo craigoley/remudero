@@ -26,7 +26,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { lintPlanCommand } from "../src/run-task.js";
+import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -116,6 +117,21 @@ function baseCommitWithDuplicate(id: string): string {
   }
 }
 
+/** W1-T4226: every `lintPlanCommand` below runs through the existing `LintPlanStatusDeps` seam —
+ *  offline, with a recording fake gateway — so the base-plan path each title names is what runs,
+ *  never the shared gh refusal stub's "GitHub unreachable" branch. Each caller asserts
+ *  `gatewaysBuilt` stayed empty: nothing on this path reaches for GitHub at all. */
+function offlineLintDeps(gatewaysBuilt: string[]): LintPlanStatusDeps {
+  const github = fakeGitHub();
+  return {
+    offline: true,
+    ghGateway: (owner, repo) => {
+      gatewaysBuilt.push(`${owner}/${repo}`);
+      return github;
+    },
+  };
+}
+
 function captureStderr(): { lines: string[]; restore: () => void } {
   const lines: string[] = [];
   const original = console.error;
@@ -142,12 +158,14 @@ test("a base plan that does not load degrades with a warning instead of failing 
   assert.ok(refusal, "the planted shard must really be in the base tree");
 
   const cap = captureStderr();
+  const gatewaysBuilt: string[] = [];
   let code: number;
   try {
-    code = await lintPlanCommand(["--base", base]);
+    code = await lintPlanCommand(["--base", base], offlineLintDeps(gatewaysBuilt));
   } finally {
     cap.restore();
   }
+  assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this fixture");
 
   assert.notEqual(code, 2, "an unparseable BASE must not be reported as this branch's failure");
   const warned = cap.lines.find((l) => l.includes("does not itself load"));
@@ -159,11 +177,13 @@ test("a base plan that does not load degrades with a warning instead of failing 
 test("FALSIFIER: a base that loads fine is not degraded — the fallback fires only on a real refusal", async () => {
   // Without this, deleting the parsed comparison outright would pass the test above.
   const cap = captureStderr();
+  const gatewaysBuilt: string[] = [];
   try {
-    await lintPlanCommand(["--base", "HEAD"]);
+    await lintPlanCommand(["--base", "HEAD"], offlineLintDeps(gatewaysBuilt));
   } finally {
     cap.restore();
   }
+  assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this fixture");
 
   assert.equal(
     cap.lines.filter((l) => l.includes("does not itself load")).length,
@@ -179,12 +199,14 @@ test("a HEAD plan that does not load still fails — fail-closed moved, not remo
   // the assertion is that the head-side loader is what would throw, which the source ordering
   // guarantees and this pins by exit code on a base that cannot be resolved AT ALL.
   const cap = captureStderr();
+  const gatewaysBuilt: string[] = [];
   let code: number;
   try {
-    code = await lintPlanCommand(["--base", "0000000000000000000000000000000000000000"]);
+    code = await lintPlanCommand(["--base", "0000000000000000000000000000000000000000"], offlineLintDeps(gatewaysBuilt));
   } finally {
     cap.restore();
   }
+  assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this fixture");
 
   assert.equal(code, 2, "a base ref that cannot be resolved at all is still exit 2");
   assert.ok(

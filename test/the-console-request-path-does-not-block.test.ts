@@ -74,6 +74,13 @@ function fakeRatifyGateway(): RatifyCliGateway {
   return { approve() {}, reframe() {} };
 }
 
+/** W1-T4226: `/v1/daemon-health`'s `gh api rate_limit` read, answered through `DaemonHealthDeps.exec`
+ *  instead of shelling out to the refused `gh`. Any other argv is unexpected. */
+function fakeGhRateLimit(args: string[]): string {
+  if (args.join(" ") !== "api rate_limit") throw new Error(`unexpected gh call: ${args.join(" ")}`);
+  return JSON.stringify({ resources: { core: { remaining: 4999, reset: 1_790_000_000 } } });
+}
+
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-console-nonblocking-"));
 }
@@ -110,6 +117,7 @@ function depsFor(root: string, plan: Plan = planOf([task()])): ServeDeps {
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     pollMs: 50,
     githubAppRefresh: { start: () => ({ armed: false }) },
+    daemonHealth: { exec: fakeGhRateLimit }, // W1-T4226: rate-limit read via its seam, not a refused gh
   };
 }
 

@@ -221,7 +221,9 @@ test("W1-T2804: one sha per decision — the gate reports the head it judged, so
     throw new Error(`unrouted read (a SECOND head resolution would land here): ${JSON.stringify(args)}`);
   };
 
-  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, sleep: async () => {} });
+  // W1-T4226: branch protection read through `PollDeps.requiredContexts`, not the refused `gh` —
+  // a protected main requiring `ci`, the one context this rollup reports.
+  const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, requiredContexts: () => ["ci"], sleep: async () => {} });
   assert.equal(ciGateState(outcome), "green");
   assert.equal(ciGateSha(outcome), "sha-one", "the verdict names the commit it was actually read for, not whatever the head became afterwards");
   assert.equal(rowReads, 1, "the sha is the ALREADY-RESOLVED head — a second read would be a second chance to skew");

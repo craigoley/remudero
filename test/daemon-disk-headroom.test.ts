@@ -29,6 +29,8 @@ import { judgeDiskHeadroom, DISK_WARN_BYTES, DISK_FAIL_BYTES } from "../src/lib/
 import { DECISION_RELEVANT_LEDGER_STEPS, ledgerExceedsRotationCeiling, rotateLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 // A single dispatchable task — enough to keep `runOne` in flight so the dispatch-phase
 // `startInFlightTicker` (the row this whole task rides on) actually starts ticking.
@@ -325,13 +327,34 @@ test("W1-T1082 wiring: daemonCommand builds readDiskHeadroom off a real statfs +
     );
 
     assert.ok(captured?.onDiskHeadroomBreach, "the real command wires the escalation hook too");
-    captured!.onDiskHeadroomBreach!({ freeBytes: DISK_WARN_BYTES - 1, verdict: "WARN", ts: new Date().toISOString() });
+    // W1-T4226: the real hook's issue gateway shells out to `gh` — answered by this test's own
+    // scripted stub (no open needs-human issue; the create returns a URL), never the shared
+    // refusal stub, so the escalation DELIVERS instead of degrading through "GitHub unreachable".
+    const shim = ghShim(
+      [
+        { when: "labels=needs-human", stdout: "[]" },
+        { when: "issue create", stdout: "https://github.com/o/r/issues/1082" },
+      ],
+      { kind: "daemon-disk-headroom-gh" },
+    );
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${shim.dir}:${originalPath}`;
+    try {
+      withLiveWritesAllowed(() =>
+        captured!.onDiskHeadroomBreach!({ freeBytes: DISK_WARN_BYTES - 1, verdict: "WARN", ts: new Date().toISOString() }),
+      );
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(shim.dir, { recursive: true, force: true });
+    }
     const lines = readLedgerLines(ledgerPathFor({ root } as never));
+    const markers = lines.filter((l) => l.step === "daemon.disk_headroom.escalated");
     assert.equal(
-      lines.filter((l) => l.step === "daemon.disk_headroom.escalated").length,
+      markers.length,
       1,
       "the real hook writes the real dedup marker to the real ledger at config.root",
     );
+    assert.equal(markers[0].delivered, true, "the real gateway reached the scripted gh and delivered the issue");
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;

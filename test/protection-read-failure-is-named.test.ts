@@ -60,6 +60,17 @@ function greenReviewNone(over: Partial<OpenPrView> = {}): OpenPrView {
   } as OpenPrView;
 }
 
+/** W1-T4226: a `gh` first on PATH that FAILS the way a real protection read does (exit 1, an HTTP
+ *  error on stderr) — the exec-failure arm each "read failed" test below names, reached through
+ *  the file's own stub rather than the shared refusal stub's "GitHub unreachable" stand-in. */
+function failingGh(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-failing-gh-protection-"));
+  const p = join(dir, "gh");
+  writeFileSync(p, `#!/bin/sh\necho "gh: Branch not protected (HTTP 404)" 1>&2\nexit 1\n`);
+  chmodSync(p, 0o755);
+  return dir;
+}
+
 const READ_FAILED = {
   requiredContextsUnreadable: true,
   requiredContextsReadFailure: { branch: "main", reason: "HTTP 403: Resource not accessible by integration" },
@@ -101,9 +112,10 @@ test("acceptance 2 (degraded): with the flag but no captured cause, it still nam
 // ── acceptance 3: the producer no longer collapses the three readings ────────────────────────
 
 test("acceptance 3: a FAILED read is distinguishable from protection that declares no required contexts", () => {
-  const failed = readRequiredStatusCheckContexts("o", "r", "main");
-  // No `gh` reachable in this harness, so the real call classifies as a read FAILURE — which is
-  // itself the point: the old function answered `undefined` here, identical to a readable "none".
+  // W1-T4226: a failing `gh` of this file's own (see `failingGh`), so the real call classifies as a
+  // read FAILURE — which is itself the point: the old function answered `undefined` here,
+  // identical to a readable "none".
+  const failed = withPath(failingGh(), () => readRequiredStatusCheckContexts("o", "r", "main"));
   assert.equal(failed.kind, "unreadable");
   if (failed.kind === "unreadable") {
     assert.equal(failed.branch, "main", "the branch it tried is carried");
@@ -163,8 +175,10 @@ test("the W1-T176 ABSENT shape is NOT stolen by the new state — a readable gat
 // ── acceptance 7: the read still fails soft ──────────────────────────────────────────────────
 
 test("acceptance 7: the read never throws — an absent or throwing gh returns a classified failure instead", () => {
-  assert.doesNotThrow(() => readRequiredStatusCheckContexts("nope", "nope", "no-such-branch"));
-  const r = readRequiredStatusCheckContexts("nope", "nope", "no-such-branch");
+  // W1-T4226: a throwing gh of this file's own, not the shared refusal stub.
+  const gh = failingGh();
+  assert.doesNotThrow(() => withPath(gh, () => readRequiredStatusCheckContexts("nope", "nope", "no-such-branch")));
+  const r = withPath(gh, () => readRequiredStatusCheckContexts("nope", "nope", "no-such-branch"));
   assert.equal(r.kind, "unreadable", "classified, not thrown and not silently 'none'");
 });
 
@@ -238,5 +252,9 @@ test("W1-T2399: the thin wrapper keeps the pre-existing string[] | undefined con
   // a readable NONE and an UNREADABLE read both answer undefined — the documented collapse the
   // classified form exists to let a caller avoid, asserted here so the wrapper's contract is pinned.
   assert.equal(withPath(fakeGhPrinting('{"contexts":[]}'), () => ghRequiredStatusCheckContexts("o", "r", "main")), undefined);
-  assert.equal(ghRequiredStatusCheckContexts("nope", "nope", "no-such-branch"), undefined, "no gh reachable -> undefined");
+  assert.equal(
+    withPath(failingGh(), () => ghRequiredStatusCheckContexts("nope", "nope", "no-such-branch")), // W1-T4226: own failing gh
+    undefined,
+    "no gh reachable -> undefined",
+  );
 });

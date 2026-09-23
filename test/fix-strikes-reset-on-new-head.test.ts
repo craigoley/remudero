@@ -6,6 +6,10 @@ import type { Config } from "../src/lib/config.js";
 import type { ReviewVerdict } from "../src/lib/review.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
+// W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
+// injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
+const FAKE_PR_BODY = "Implements the task.\n\nRemudero-Task: fixture";
+
 const TASK = "W1-T2788-FIXTURE";
 const HEAD_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HEAD_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -77,6 +81,7 @@ test("W1-T2788: both worker dispatch and its review retain the pre-push input he
     deps: {
       spawn: async () => workerResult(),
       waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
       runReview: async () => review("success", HEAD_B),
       push: () => {},
       issues: { create: () => "https://github.com/acme/remudero/issues/2788" },

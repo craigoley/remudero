@@ -147,6 +147,10 @@ function fakeIssueStore(): IssueGateway & { calls: Array<{ title: string; body: 
   };
 }
 
+// W1-T4226: every dispatched strike reads the live PR body back; hand it one through the
+// `fetchPrBody` seam instead of letting the shared stub refuse a real PR-body read.
+const fetchPrBody = async (prUrl: string): Promise<string> => `## Summary\nfix the CI baseline (${prUrl})\n`;
+
 /** A `deps.fetchPrDiffFiles` fake that replays a fixed SEQUENCE of diff-file snapshots, one per
  *  call — the LAST entry repeats once the sequence is exhausted, mirroring "nothing else changed
  *  since." Call 0 is always the pre-loop baseline snapshot. */
@@ -276,6 +280,7 @@ test("runFixRung (criterion 2): a fix worker's round-1 commit that adds a path o
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       // Baseline (call 0) carries only the declared file; round 1's own pre-strike check (call 1)
       // sees the same, unchanged, state — round 1 dispatches normally. Round 2's pre-strike check
       // (call 2) observes round 1's OWN commit having added an out-of-scope instrument path.
@@ -324,6 +329,7 @@ test("runFixRung (criterion 3): on a plan-only task, a fix worker's non-plan add
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       fetchPrDiffFiles: diffFileSequence([
         ["plan/tasks.d/PR-2527X.yaml"],
         ["plan/tasks.d/PR-2527X.yaml"],
@@ -369,6 +375,7 @@ test("runFixRung (criterion 4): a repair confined to the declared file(s) dispat
       log: () => {},
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       // Every observation is the SAME declared file, in scope throughout both rounds.
       fetchPrDiffFiles: async () => ["src/foo.ts"],
     },
@@ -400,6 +407,7 @@ test("runFixRung: an out-of-scope path from BEFORE this invocation ever ran (tol
       log: () => {},
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       // The implement diff ALREADY carried an out-of-scope file before this rung ever ran
       // (scopeGuardOutOfScopeFiles's own push-and-flag disposition, rationale 6) — every
       // observation this invocation makes reports the identical, unchanged set.
@@ -433,6 +441,7 @@ test("runFixRung (criterion 5): the scope stand-down never calls updatePrBody �
       log: () => {},
       say: () => {},
       account: (r) => r,
+      fetchPrBody,
       updatePrBody: async () => {
         updatePrBodyCalls++;
       },
