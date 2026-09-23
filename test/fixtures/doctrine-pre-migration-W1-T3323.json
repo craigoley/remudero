@@ -46,10 +46,10 @@
     },
     {
       "headline": "A new `.ts` file's `DA:<line>,0` on a doc comment or `interface` body is EXEMPT \u2014 never reorder\n  a file to dodge it.",
-      "bodyBytes": 1618,
-      "bodySha256": "fb67c32205c11aedb147603065f28f60615ccc65b2f3e75efa4f44ec5efacbb7",
-      "refrozenAt": "2026-09-11",
-      "refrozenReason": "RENAMED AND REWRITTEN because the gate it described stopped behaving that way. The old form told authors to sandwich type-only declarations between covered functions, citing #777. W1-T171 later added computeTypeOnlyRanges to diff-coverage, which exempts every interface member line by brace context, and isNonExecutableLine already exempted leading doc comments. MEASURED 2026-09-11 on src/lib/ledger-compaction-rung.ts: all five head-placed interface member lines read DA:...,0 in the lcov AND return typeOnly=true from the live function. Obeying the stale form cost a reordering that was reverted in the same branch. This is the one legitimate reason to touch a frozen row: the rule changed, not the migration."
+      "bodyBytes": 2004,
+      "bodySha256": "95a5c5fa92de171907e199f3ccd69b33b15eda948bd0d59eb042901edfa6b53a",
+      "refrozenAt": "2026-09-23",
+      "refrozenReason": "W1-T4099: the carve-out missed one-line type aliases (#6677 blocked on `export type Owner = \"a\" | \"b\";`); the body now names the hole and its fix. Earlier refreeze (2026-09-11): RENAMED AND REWRITTEN because the gate it described stopped behaving that way. The old form told authors to sandwich type-only declarations between covered functions, citing #777. W1-T171 later added computeTypeOnlyRanges to diff-coverage, which exempts every interface member line by brace context, and isNonExecutableLine already exempted leading doc comments. MEASURED 2026-09-11 on src/lib/ledger-compaction-rung.ts: all five head-placed interface member lines read DA:...,0 in the lcov AND return typeOnly=true from the live function. Obeying the stale form cost a reordering that was reverted in the same branch. This is the one legitimate reason to touch a frozen row: the rule changed, not the migration."
     },
     {
       "headline": "When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are\n  unreachable \u2014 write one test that really shells out, and one per catch arm.",
