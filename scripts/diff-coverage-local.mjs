@@ -1,36 +1,26 @@
 #!/usr/bin/env node
 // scripts/diff-coverage-local.mjs
 //
-// LOCAL DIFF-COVERAGE, MEASURED TO MATCH CI (W1-T4084). Before this script existed, running
-// diff-coverage.mjs locally meant hand-rolling the instrumented `node --experimental-test-coverage`
-// invocation and the diff it checks -- and both hand-rolled pieces were measured wrong in the same
-// session on 2026-09-22: (a) omitting `--enable-source-maps` reports `diff-coverage: OK` for a PR
-// CI then BLOCKED on a genuinely uncovered line, because without source maps `DA:` positions land
-// on tsx-transpiled JS lines while `SF:` still names the `.ts` file (ci.yml's own comment on its
-// "Test with coverage" step explains the same defect); and (b) diffing `A..B` (two dots) instead of
-// `A...B` (three) against a moved `origin/main` added a false BLOCKED by including origin/main's
-// own unrelated commits in the diff.
+// LOCAL DIFF-COVERAGE, MEASURED TO MATCH CI (W1-T4084, rationale there for the two hand-rolled
+// invocations this replaces: a coverage run missing `--enable-source-maps` mis-locates `DA:` lines
+// against tsx-transpiled JS instead of the `.ts` `SF:` name; a two-dot `A..B` diff against a moved
+// `origin/main` pulls in commits the branch never touched).
 //
-// THIS SCRIPT FIXES BOTH BY NEVER RE-DECIDING THEM: {@link extractCoverageFlags} READS the node
-// invocation straight out of `.github/workflows/ci.yml`'s `coverage-ratchet` job's "Test with
-// coverage" step -- not a copy of its flags, so a future edit to that step changes what this
-// script runs with it, and the two cannot drift silently apart again. {@link mergeBaseDiff} always
-// diffs `<base>...HEAD` (triple-dot, merge-base-relative), the same semantics CI's own
-// `git diff HEAD^1...HEAD` has against the PR's base parent. The actual per-diff gate is then
-// scripts/diff-coverage.mjs ITSELF, invoked as a subprocess exactly as ci.yml invokes it -- this
-// script never reimplements lcov parsing or line matching, only reproduces the two inputs CI feeds
-// it (the instrumented lcov and the merge-base diff).
+// NEITHER INPUT IS RE-DECIDED HERE: {@link extractCoverageFlags} READS the node invocation out of
+// `.github/workflows/ci.yml`'s `coverage-ratchet` job's "Test with coverage" step, so an edit to
+// that step's flags changes this script's own invocation with it. {@link mergeBaseDiff} always
+// diffs `<base>...HEAD` (triple-dot, merge-base-relative), matching CI's own `HEAD^1...HEAD`. The
+// per-diff gate itself is scripts/diff-coverage.mjs, spawned exactly as ci.yml spawns it -- this
+// script reimplements neither lcov parsing nor line matching, only reproduces its two inputs.
 //
 // Usage: npm run diff-coverage:local -- <test files...>
 //   --base <ref>   merge-base this against instead of origin/main (default origin/main)
 //   --lcov <path>  where to write/read the lcov report (default coverage/lcov.info)
 //   --dry-run      print the node invocation and diff base this WOULD use, run nothing
 //
-// The caller supplies the test files to run under coverage -- exactly the files whose lcov `SF:`
-// records diff-coverage.mjs needs, so a run that never exercised a changed source file fails loudly
-// with that file named (diff-coverage.mjs's own missing-SF-record check, `findMissingSourceCoverage`)
-// rather than passing vacuously. This script's own message on that failure adds the one thing that
-// check cannot know locally: which argument to fix.
+// The caller supplies the test files to run under coverage, so a run that never exercised a
+// changed source file fails loudly (diff-coverage.mjs's own missing-SF-record check) naming which
+// file needs a test, rather than passing vacuously.
 //
 // Falsifier: test/local-diff-coverage-matches-ci.test.ts.
 
