@@ -7082,22 +7082,23 @@
     rmd run-task/drain -> verdict=blocked_illformed, no worker spawned.
   acceptance:
     - claim: "a task spanning 3 independent concerns (distinct subsystems) at risk:medium is FLAGGED (sizing, Rule 19)"
-      proof: "unit test: the linter returns a sizing violation for a risk:medium task whose files:/criteria span 3 distinct subsystems"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "a multi-criteria SINGLE-concern task (shape of W1-T4: three parser tests on ONE module) is NOT flagged — no false positive on raw criterion count"
-      proof: "unit test over a 3-criteria / one-subsystem fixture (W1-T4 shape) -> the linter returns NO sizing violation"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "a criterion containing overnight/launchctl/killed on an auto-verify task is FLAGGED (headless-fitness, Rule 18)"
-      proof: "unit test over the forbidden-lexicon fixture -> a headless-fitness violation is returned"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "a proof-less criterion is FLAGGED"
-      proof: "unit test: a criterion whose proof is 'works'/'correct' -> a proof-shape violation is returned"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "rmd run-task REFUSES a linter-failing task with verdict=blocked_illformed (no worker spawned); a clean task passes the guard"
-      proof: "injected-exec test: a malformed task -> blocked_illformed with no spawn; a clean task -> guard passes"
+      proof: "unit test: test/task-linter-wiring.test.ts"
     - claim: "the linter's CANONICAL regression fixture is W1-T12's ORIGINAL definition, and it is FLAGGED"
-      proof: "a stored fixture of W1-T12's original 3-concern / 3-live-criterion definition -> the linter flags BOTH sizing AND headless-fitness (if it can't catch the task that cost $10, it isn't done)"
+      proof: "unit test: test/task-linter.test.ts"
   risk: high
   origin: feedback#plan-health
   plan_refs: ["§5C"]
-  files: [src/lib/task-linter.ts, src/run-task.ts]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts, test/task-linter-wiring.test.ts]
   status: queued
+  pr: 134                     # merged implementation PR; #133 was superseded by the behavioral-test correction
   attempts: 0
   note: "The CI-check side integrates with the W1-T29 plan-claims / W1-T30 docs-rubric CI family — a
     tasks.yaml PR runs the linter in CI alongside the plan-claims check."
