@@ -283,6 +283,26 @@ test("W1-T2763: an empty expansion and an rmd-verb collision are both refused, e
   assert.doesNotThrow(() => validateMacro({ name: "notaverb", summary: "s", expansion: "b" }, HEADLINES, VERBS));
 });
 
+test("W1-T4331: an expansion citing a missing rmd verb is refused and the refusal names the verb", () => {
+  assert.throws(
+    () => validateMacro({ name: "x", summary: "s", expansion: "then run `rmd no-such-verb --now`" }, HEADLINES, VERBS),
+    (e: unknown) => {
+      assert.ok(e instanceof MacroSkillError, "a refusal, not a crash");
+      assert.match((e as Error).message, /`rmd no-such-verb`, which is not an rmd verb/);
+      assert.match((e as Error).message, /macro `x`/, "and the macro it came from");
+      return true;
+    },
+  );
+});
+
+test("W1-T4331: an expansion citing an existing rmd verb passes", () => {
+  assert.doesNotThrow(() =>
+    validateMacro({ name: "x", summary: "s", expansion: "pass it to `rmd review --pr 1` when done" }, HEADLINES, VERBS),
+  );
+  // Only a BACKTICKED span is an instruction: prose naming rmd is never read as a verb.
+  assert.doesNotThrow(() => validateMacro({ name: "x", summary: "s", expansion: "rmd is behind origin" }, HEADLINES, VERBS));
+});
+
 test("W1-T2763: the verb list is read from the CLI's own reference, never a second hand-kept copy", () => {
   const verbs = rmdVerbNames(readFileSync(join(REPO_ROOT, "docs", "cli-reference.md"), "utf8"));
   assert.ok(verbs.length > 20, `expected the real verb list, got ${verbs.length}`);

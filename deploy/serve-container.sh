@@ -545,6 +545,36 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ] && [ "${REPLACE}" -ne 1 ] && [ "${DRY_RUN}" -
   exit 1
 fi
 
+INSTANCE_STATE_BASE="/home/node/rmd-instances"
+INSTANCE_STATE_ARGS=()
+list_registry_state_dirs() {
+  awk '
+    { sub(/[[:space:]]+#.*/, "") }
+    /^[[:space:]]*$/ { next }
+    /^[^ ]/ { if (name != "") print name, dir, retired; name = ""; inside = ($0 ~ /^instances:[[:space:]]*$/); next }
+    inside && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      if (name != "") print name, dir, retired
+      name = $1; sub(/:$/, "", name); dir = "-"; retired = "false"; next
+    }
+    inside && name != "" && $0 ~ /^    state_dir:/ { dir = $2 }
+    inside && name != "" && $0 ~ /^    retired:/ { retired = $2 }
+    END { if (name != "") print name, dir, retired }
+  ' "$1"
+}
+if [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ]; then
+  while read -r other_name other_dir other_retired; do
+    if [ "${other_name}" = "core" ] || [ "${other_retired}" = "true" ] || [ "${other_dir}" = "${STATE_DIR}" ]; then
+      continue
+    fi
+    if [ "${other_dir}" = "-" ] || [ ! -d "${other_dir}/state" ]; then
+      echo "serve-container: NOTE — instance ${other_name}'s state (${other_dir}/state) is absent here; the gateway will answer /v1/i/${other_name}/ as unavailable." >&2
+      continue
+    fi
+    INSTANCE_STATE_ARGS+=(-v "${other_dir}:${INSTANCE_STATE_BASE}/${other_name}:ro" -v "${other_dir}/state:${INSTANCE_STATE_BASE}/${other_name}/state")
+    echo "serve-container: instance ${other_name} state ${other_dir} mounted at ${INSTANCE_STATE_BASE}/${other_name} (read-only except state/)"
+  done < <(list_registry_state_dirs "${INSTANCE_REGISTRY}")
+fi
+
 RESOURCE_POLICY_SERVE_ARGS=() # W1-T4102: serve's host share; see deploy/resource-policy.sh
 if [ -f "${SCRIPT_ROOT}/deploy/resource-policy.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/resource-policy.sh"
@@ -568,6 +598,7 @@ RUN_ARGS=(
   -e "RMD_CONSOLE_BUILD_ROOT=${CONSOLE_BUILD_ROOT}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${SERVE_REPO_DIR}:${DAEMON_REPO_DIR}"
+  "${INSTANCE_STATE_ARGS[@]+"${INSTANCE_STATE_ARGS[@]}"}"
   # W1-T2778: same bash-3.2-safe optional-array form as the two optional mounts below. This is
   # exactly one regular, non-empty, host-readable key file and is always read-only.
   "${APP_PRIVATE_KEY_ARGS[@]+"${APP_PRIVATE_KEY_ARGS[@]}"}"

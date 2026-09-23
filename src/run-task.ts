@@ -48,6 +48,7 @@ import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledge
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 import {
   decideLedgerCompaction,
+  ledgerCompactionProtectedHours,
   readLedgerCorpusPressure,
   type LedgerCompactionDecision,
   type LedgerCompactionOutcome,
@@ -148,6 +149,8 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { startGarden, type GardenCheckout } from "./lib/gardener.js";
+import { planGardenSpec } from "./lib/plan-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
@@ -667,6 +670,7 @@ import {
   materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
+  pruneOrphanedDrafts,
   parseProposalRegistry,
   parseSupersedesExpr,
   approveRunBranch,
@@ -843,6 +847,7 @@ import {
   type CiFailureCorpusInput,
   type CorpusPr,
 } from "./lib/ci-failure-corpus.js";
+import { measureGateFireRates, recordGateFireRates, type GateFireRateReport, type GateWindowPr } from "./lib/gate-fire-rate.js";
 import {
   fetchMergedCoverageArtifact,
   injectCoverageImprovementTask,
@@ -2057,6 +2062,7 @@ import {
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
+  WorktreeNodeModulesRefusedError,
   detectWorktreeBaseUncheckableStreak,
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
@@ -14369,7 +14375,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // double should be able to silently swallow. `worktreeAdd` itself now emits the
     // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
     // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log });
+    // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
   } catch (e) {
     if (e instanceof WorktreeBaseStaleError) {
       log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref, behind: e.behind });
@@ -14382,6 +14389,29 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // to clear even though nothing is actually in flight.
       releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
+    }
+    if (e instanceof WorktreeNodeModulesRefusedError) {
+      // W1-T4193: a DEFERRAL, not a strike. Rethrown so daemon.ts's `isSpawnInfraBlocked` backs off on its
+      // `blocked_toolchain` tag; the claim is dropped first, or every later dispatch would meet it as taken.
+      log("worktree.node_modules_refused", {
+        package: e.packageName,
+        worktreePath: e.worktreePath,
+        node_modules_source: e.nodeModulesSource,
+      });
+      say(`REFUSED: ${e.message}`);
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "node_modules_refused" });
+      } catch (removeErr) {
+        log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
+      }
+      try {
+        releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      } catch (releaseErr) {
+        // Never replace the typed refusal: a generic throw here would read as a fatal crash, not a deferral.
+        log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
+      }
+      throw e;
     }
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
@@ -19977,7 +20007,7 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
   const rows = (fetch([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
-  ]) ?? []) as Array<{ number?: number; updated_at?: string }>;
+  ]) ?? []) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
   const prs: CorpusPr[] = [];
   for (const row of rows) {
     if (row.number === undefined) continue;
@@ -19990,8 +20020,9 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
     } catch {
       continue; // a pull request whose commit list is unreadable contributes nothing, silently to nobody
     }
-    prs.push({
+    const windowPr: GateWindowPr = {
       number: row.number,
+      merged: Boolean(row.merged_at),
       commits: shas.map((sha) => {
         const rollup = rollupAtSha(self.owner, self.repo, sha, (args) => fetch(args));
         const commit: CorpusPr["commits"][number] = { sha };
@@ -20000,7 +20031,8 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
         if (files !== undefined) commit.changedFiles = files;
         return commit;
       }),
-    });
+    };
+    prs.push(windowPr);
   }
   return { prs };
 }
@@ -20021,7 +20053,7 @@ export async function loadCiFailureWindowAsync(
   const rows = (await reader.read([
     "api",
     `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
-  ])) as Array<{ number?: number; updated_at?: string }>;
+  ])) as Array<{ number?: number; updated_at?: string; merged_at?: string | null }>;
   const prs: CorpusPr[] = [];
   for (const row of rows ?? []) {
     if (row.number === undefined) continue;
@@ -20062,7 +20094,8 @@ export async function loadCiFailureWindowAsync(
       }
       commits.push(commit);
     }
-    prs.push({ number: row.number, commits });
+    const windowPr: GateWindowPr = { number: row.number, merged: Boolean(row.merged_at), commits };
+    prs.push(windowPr);
   }
   return { prs };
 }
@@ -24641,7 +24674,11 @@ export function autoTriageCheck(
  * pressure guard had no effect on the fleet. Keep this construction beside the other daemon-hook
  * producers and test it through `daemonCommand`, not by source grep alone.
  */
-export const DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS = 1;
+/** W1-T4262: the age a daemon pass compacts from — a day at the bound, less as pressure rises. */
+export function daemonLedgerCompactArgs(stateDir: string): string[] {
+  const pressure = readLedgerCorpusPressure(stateDir, { readdir: readdirSync, sizeOf: (path) => statSync(path).size });
+  return ["--older-than-hours", String(ledgerCompactionProtectedHours(pressure))];
+}
 
 export function buildLedgerCompactionDaemonHooks(deps: {
   config?: Config;
@@ -24674,7 +24711,7 @@ export function buildLedgerCompactionDaemonHooks(deps: {
     (async () => {
       let report: string | undefined;
       const errors: string[] = [];
-      const code = (deps.compact ?? ledgerCompactCommand)(["--older-than", String(DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS)], {
+      const code = (deps.compact ?? ledgerCompactCommand)(daemonLedgerCompactArgs(stateDirFor()), {
         stateDir: stateDirFor(),
         out: (line) => {
           report = line;
@@ -29693,6 +29730,8 @@ export function buildCiLearningDaemonHooks(deps: {
  *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
  *  clean one (W1-T3324). */
 export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  /** W1-T4115: what the gate fire-rate measurement over the same window found. */
+  gateFireRates?: { status: GateFireRateReport["status"]; gates: number; neverFired: string[]; alwaysFired: string[] };
   filedCount: number;
   skippedCount: number;
   refusedCount: number;
@@ -29737,8 +29776,10 @@ export function buildCiLearningCadenceRunner(deps: {
     const at = (deps.clock ?? systemClock).date();
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     let corpus: ReturnType<typeof collectCiFailureCorpus>;
+    let window: CiFailureCorpusInput;
     try {
-      corpus = collectCiFailureCorpus(await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS));
+      window = await deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS);
+      corpus = collectCiFailureCorpus(window);
     } catch (e) {
       // NO WORK WAS DONE, so the allowance is returned rather than spent. Rethrown, never swallowed:
       // the caller's `ci_learning_cadence.run_failed` row is how this becomes visible.
@@ -29784,7 +29825,17 @@ export function buildCiLearningCadenceRunner(deps: {
         // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
       }
     }
+    // W1-T4115: the same window, read once, also says how often each gate fires and what it costs.
+    const gateFireRates = measureGateFireRates(window);
+    const stateDir = join(deps.root, "state");
+    recordGateFireRates(
+      gateFireRates,
+      stateDir,
+      (step, extra) => appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: `GATE-FIRE-RATES-${at.getTime()}`, task_id: "DAEMON", step, ...extra }),
+      at.toISOString(),
+    );
     return {
+      gateFireRates: { status: gateFireRates.status, gates: gateFireRates.gates.length, neverFired: gateFireRates.neverFired, alwaysFired: gateFireRates.alwaysFired },
       status: result.status,
       draftCount: result.drafts.length,
       excludedCount: result.excludedFindings.length,
@@ -29977,6 +30028,39 @@ export function plainInboxWriter(
   }
 }
 
+/** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. A PR for
+ *  operator review opens as a DRAFT, which GitHub refuses to merge until a person marks it ready. */
+export function gardenCheckout(opts: {
+  name: string;
+  repoDir: string;
+  worktreesRoot: string;
+  owner: string;
+  repo: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  fetcher?: GhApiFetcher;
+  clock?: Clock;
+}): GardenCheckout {
+  const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
+  const root = join(opts.worktreesRoot, branch);
+  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return {
+    root,
+    land: ({ paths, title, body, review }) => {
+      git("add", "--", ...paths);
+      git("commit", "-q", "-m", `${title}\n\nTended by the ${opts.name} gardener.`);
+      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+      assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+      const fetcher = opts.fetcher ?? ghJson;
+      const pr = { title, body, head: branch, base: "main" };
+      return review === "operator"
+        ? createPlanPrRest((args) => fetcher([...args, "-F", "draft=true"]), opts.owner, opts.repo, pr).prUrl
+        : createPlanPrRest(fetcher, opts.owner, opts.repo, pr).prUrl;
+    },
+    dispose: () => worktreeRemove(opts.repoDir, root),
+  };
+}
+
 export function knowledgeGardenWorkspace(opts: {
   repoDir: string;
   worktreesRoot: string;
@@ -29986,27 +30070,16 @@ export function knowledgeGardenWorkspace(opts: {
   fetcher?: GhApiFetcher;
   clock?: Clock;
 }): GardenWorkspace {
-  const branch = `knowledge-garden-${(opts.clock ?? systemClock).now()}`;
-  const root = join(opts.worktreesRoot, branch);
-  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const checkout = gardenCheckout({ ...opts, name: "knowledge" });
   return {
-    root,
+    ...checkout,
     refreshAssertions: () => {
-      execFileSync(process.execPath, [join(root, "scripts", "learnings-assert-check.mjs"), "--dir", join(root, "learnings")], { cwd: root, stdio: "pipe" });
-      return git("status", "--porcelain", "--", "learnings")
+      execFileSync(process.execPath, [join(checkout.root, "scripts", "learnings-assert-check.mjs"), "--dir", join(checkout.root, "learnings")], { cwd: checkout.root, stdio: "pipe" });
+      return execFileSync("git", ["-C", checkout.root, "status", "--porcelain", "--", "learnings"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
         .split("\n")
         .filter(Boolean)
         .map((line) => line.slice(3));
     },
-    land: ({ paths, title, body }) => {
-      git("add", "--", ...paths);
-      git("commit", "-q", "-m", `${title}\n\nTended by the knowledge gardener (W1-T4095).`);
-      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
-      assertLiveWriteAllowed("gh-pr-create", `opening a knowledge garden PR against ${opts.owner}/${opts.repo}`);
-      return createPlanPrRest(opts.fetcher ?? ghJson, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
-    },
-    dispose: () => worktreeRemove(opts.repoDir, root),
   };
 }
 
@@ -30979,6 +31052,19 @@ export async function daemonCommand(
                 prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
                 log,
               },
+              // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
+              gardens: [
+                (intervalMs: number) => {
+                  const planGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "plan", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  return startGarden(planGardenSpec(planGarden), planGarden, intervalMs);
+                },
+              ],
             }
           : {}),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
@@ -39852,6 +39938,8 @@ export function buildInboxDraftHook(
       const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
+      const pruned = pruneOrphanedDrafts(draftsPath, registryPath);
+      if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
@@ -43730,9 +43818,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "ledger-compact",
-    syntax: "rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]",
+    syntax: "rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]",
     summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
-    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
+    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days) or --older-than-hours, taking ordinary rotations before any archive a previous pass wrote (W1-T4262), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, is never a rotateLedger dependency (so a compaction fault can never block a write), and refuses to overwrite an unselected archive if a row timestamp would collide with its name. W1-T3368 RETIRED THE 'no daemon cadence' HALF of this contract: operator-only was right for a new primitive and wrong as a steady state for a corpus growing ~240 archives a day, which cost an eight-hour fleet outage whose cure had already merged. The daemon now fires ONE bounded pass when archive PRESSURE crosses a threshold (src/lib/ledger-compaction-rung.ts); this verb remains the operator's hand-run path.",
   },
   {
     name: "hand-runs",

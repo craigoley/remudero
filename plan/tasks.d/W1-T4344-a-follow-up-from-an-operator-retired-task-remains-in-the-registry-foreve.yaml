@@ -1,0 +1,36 @@
+- id: W1-T4344
+  title: "A follow-up from an operator-retired task remains in the registry forever — retire it when the same plan-health projection reads explicit retirement metadata, never from generic blocked state or a PR title"
+  repo: remudero
+  depends_on: [W1-T2601]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  rationale: |
+    W1-T2729 is explicitly `retirement: withdrawn`; its implementation PR #3728 was closed as
+    defective. Its harvested `DO NOT MERGE` title observation therefore has no future merge to
+    confirm, but remains an open follow-up because retireSettledFollowups only receives a merged-id
+    set. A PR title remains author-facing, not a CI gate or durable merge control; this task extends
+    the existing retirement reader rather than turning title wording into a second merge mechanism.
+  design: |
+    Extend FollowupReferentRead's successful result with the explicit retirement reason for each
+    task from the already-loaded plan-health view. retireSettledFollowups retires a routed follow-up
+    when its referent is merged OR carries `retirement: retired|closed|withdrawn`, naming the exact
+    settling reason in its outcome. A plain `status: blocked`, a closed-unmerged PR, an unparseable
+    referent, or an unreadable projection leaves the proposal untouched. Reuse the existing single
+    projectPlan pass; do not add a per-proposal GitHub read.
+  acceptance:
+    - claim: "the exact follow-up shape sourced from W1-T2729 is removed when its task record carries retirement: withdrawn, and its outcome names withdrawal rather than claiming a merge"
+      proof: "unit test: the exact follow-up shape sourced from W1-T2729 is removed"
+    - claim: "a blocked task with no retirement metadata remains in the registry, so neither generic blocked state nor a closed-unmerged PR authorizes retirement"
+      proof: "unit test: a blocked task with no retirement metadata remains in"
+    - claim: "an unreadable plan-health projection retires nothing and does not write the registry"
+      proof: "unit test: an unreadable plan-health projection retires nothing and does not"
+    - claim: "the production caller derives merged and explicit-retirement referents from its one completed plan-health projection, never a per-follow-up GitHub read"
+      proof: "unit test: test/the-followup-retirement-arm-has-a-call-site.test.ts"
+  origin: architect
+  plan_refs: ["§7", "P25"]
+  files: [src/lib/retro.ts, src/run-task.ts, test/routed-followups-retire.test.ts, test/the-followup-retirement-arm-has-a-call-site.test.ts]
+  status: queued
+  attempts: 0

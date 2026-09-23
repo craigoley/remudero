@@ -17,7 +17,7 @@
  */
 
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -43,6 +43,7 @@ import {
   readLedgerUnionBounded,
   type GhFailureReason,
   type GitHub,
+  type LedgerLines,
   type StatusProjection,
 } from "./status.js";
 import { buildDrainPreview, dispatchOrder, runnableCandidates, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
@@ -82,7 +83,7 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
-import { fleetLaneDecisions, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
+import { fleetLaneDecisions, readFleetLaneStore, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
@@ -95,17 +96,24 @@ import {
 } from "./inbox-responder.js";
 import { appendThreadMessage, inboxThreadIdentity, proposalIdOfThread, readAllThreads } from "./inbox-thread.js";
 import {
+  beginFragmentPass,
+  cachedAnchorGrep,
   classifyProposal,
-  declinedReasonInLedger,
+  createAnchorGrepCache,
+  createFragmentMemo,
   gitGrepAnchorTrue,
-  isRatifiedInLedger,
+  ledgerProposalVerdicts,
+  readOriginMainSha,
   parseDraftCache,
   parseDraftInFlightCache,
   parseProposalRegistry,
   pruneRatifiedProposals,
   refusalReason,
   updateProposalRegistry,
+  type AnchorGrepCache,
   type DraftCache,
+  type EvidenceAnchor,
+  type FragmentMemo,
   type InboxClassification,
   type PredicateFailure,
   type Proposal,
@@ -140,6 +148,15 @@ export interface PanelGraphDeps {
   /** Injectable `Policy` for the daily-cost-ceiling routes (W1-T364), defaulting to
    *  `loadDefaultPolicy()` — the same seam `account-usage.ts` and run-task.ts already offer. */
   policy?: Policy;
+  /** W1-T4261: the inbox classifier's I/O, injectable for a hermetic test; production passes none. A change
+   *  stamp for one input file (size, mtime, inode), undefined when absent. */
+  inboxStatFile?: (path: string) => string | undefined;
+  /** W1-T4261: a directory's entry names (the plan's shard directory), undefined when absent. */
+  inboxListDir?: (path: string) => string[] | undefined;
+  /** W1-T4261: `origin/main`'s sha, undefined when unresolvable (which disables every reuse). */
+  inboxMainSha?: (root: string) => string | undefined;
+  /** W1-T4261: one evidence-anchor grep at `ref`; defaults to {@link gitGrepAnchorTrue}. */
+  inboxGrepAnchor?: (root: string, ref: string, anchor: EvidenceAnchor) => boolean;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -1335,30 +1352,99 @@ export function draftedTaskSummaries(fragmentYaml: string, proposalId: string): 
   }
 }
 
-/**
- * Shared read + classify step every /v1/inbox* route needs, assembled once so the write routes
- * can never drift from what GET /v1/inbox just rendered. `loadPlanFn` defaults to {@link
- * loadPlan}'s torn-read-guarded read (W1-T2220 remedy (a)); `POST /v1/inbox/approve` passes
- * {@link loadPlanAtRef} instead (remedy (c)) since only it gates an irreversible action here.
- */
-function classifyAllProposals(
-  deps: PanelGraphDeps,
-  loadPlanFn: (planPath: string) => Plan = loadPlan,
-): {
+/** What every /v1/inbox* route reads off one classification pass. Shared, never copied, by the memo below:
+ *  callers treat every array and object in it as READ-ONLY. */
+export interface ClassifiedInbox {
   registryPath: string;
   proposals: Proposal[];
   classifications: InboxClassification[];
-  ledgerLines: ReturnType<typeof readLedgerLines>;
-} {
-  const registryPath = join(deps.inboxRoot, "state", "inbox-proposals.json");
-  const draftsPath = join(deps.inboxRoot, "state", "inbox-drafts.json");
-  const inflightPath = join(deps.inboxRoot, "state", "inbox-draft-inflight.json");
+  ledgerLines: LedgerLines;
+}
+
+function statStamp(path: string): string | undefined {
+  try {
+    const s = statSync(path, { throwIfNoEntry: false });
+    return s === undefined ? undefined : `${s.size}:${s.mtimeMs}:${s.ino}`;
+  } catch (e) {
+    // An unstattable input is read by readFileIfExists as absent too, so a stable stamp naming the failure is exact:
+    // two passes that both fail to read it both classify it as absent.
+    return `unreadable:${(e as NodeJS.ErrnoException).code ?? "unknown"}`;
+  }
+}
+
+function listDirOrUndefined(path: string): string[] | undefined {
+  try {
+    return readdirSync(path).sort();
+  } catch (_err) {
+    // No shard directory is a plan made of tasks.yaml alone; loadPlan tolerates it the same way.
+    return undefined;
+  }
+}
+
+/** Where the four inbox state files live, derived once so the reader and the memo's stamps never disagree. */
+function inboxInputPaths(deps: PanelGraphDeps): { registryPath: string; draftsPath: string; inflightPath: string; adoptionPath: string } {
+  const stateDir = join(deps.inboxRoot, "state");
+  return {
+    registryPath: join(stateDir, "inbox-proposals.json"),
+    draftsPath: join(stateDir, "inbox-drafts.json"),
+    inflightPath: join(stateDir, "inbox-draft-inflight.json"),
+    adoptionPath: adoptionLatestPath(stateDir),
+  };
+}
+
+/** Per-deps classifier state. A WeakMap keyed by the deps object holds ONE memo entry per deps (the gateway builds
+ *  one), so it cannot grow with requests and goes when its routes go. */
+interface InboxClassifyState {
+  grep: AnchorGrepCache;
+  fragments: FragmentMemo;
+  /** The last ledger read, reused while the ledger's stamp is unchanged. */
+  ledger?: { stamp: string | null; lines: LedgerLines; verdictDigest: string };
+  last?: { key: string; plan: Plan; planKey?: string; result: ClassifiedInbox };
+  /** A sliced refresh in progress, so a second caller with the same inputs awaits it instead of starting another. */
+  pending?: { key: string; plan: Plan; promise: Promise<ClassifiedInbox> };
+}
+const inboxClassifyStates = new WeakMap<PanelGraphDeps, InboxClassifyState>();
+
+function inboxClassifyState(deps: PanelGraphDeps): InboxClassifyState {
+  let state = inboxClassifyStates.get(deps);
+  if (state === undefined) {
+    state = { grep: createAnchorGrepCache(), fragments: createFragmentMemo() };
+    inboxClassifyStates.set(deps, state);
+  }
+  return state;
+}
+
+/** The anchor-grep predicate one pass hands every proposal: answered per main commit from the deps' cache. */
+function anchorGrepFor(deps: PanelGraphDeps, sha: string | undefined): (anchor: EvidenceAnchor) => boolean {
+  const grep = deps.inboxGrepAnchor ?? gitGrepAnchorTrue;
+  const cache = inboxClassifyState(deps).grep;
+  return (anchor) => cachedAnchorGrep(cache, sha, anchor, (ref, a) => grep(deps.root, ref, a));
+}
+
+/** One pass's inputs, read, with the per-proposal step still to run — so the same pass can run whole or in slices. */
+interface InboxPass {
+  registryPath: string;
+  proposals: Proposal[];
+  ledgerLines: LedgerLines;
+  classifyOne: (proposal: Proposal) => InboxClassification;
+}
+
+/**
+ * Read one pass's inputs over an already-loaded plan, projection and ledger. The registry-wide open-id set and the
+ * ledger's ratify/decline verdicts are built ONCE per pass here (W1-T4261) — both were rebuilt per proposal, the
+ * first by copying the whole id set for each one.
+ */
+function prepareInboxPass(
+  deps: PanelGraphDeps,
+  plan: Plan,
+  projection: Map<string, StatusProjection>,
+  ledgerLines: LedgerLines,
+  grepAnchorTrue: (anchor: EvidenceAnchor) => boolean,
+): InboxPass {
+  const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
   const proposals = parseProposalRegistry(readFileIfExists(registryPath));
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
   const inflight = parseDraftInFlightCache(readFileIfExists(inflightPath));
-
-  const plan = loadPlanFn(deps.planPath);
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
   // `?? false` is dead code on a present entry, not an absent-as-unmerged conflation (W1-T510):
   // `projection` derives one entry per `plan.tasks`, the same `plan` this projection comes from.
   const isMerged: MergedResolver = (t) => projection.get(t.id)?.merged ?? false;
@@ -1369,30 +1455,180 @@ function classifyAllProposals(
   const allIds = new Set(proposals.map((p) => p.id));
   // W1-T190: the console must never offer the ratify affordance on a proposal the
   // ledger already carries `ratify.approved` for, even when the registry entry itself
-  // still looks READY (a drifted write) — re-derived from the ledger on every request,
+  // still looks READY (a drifted write) — re-derived from the ledger on every pass,
   // never trusted from the registry's own state.
-  const ledgerLines = readLedgerLines(deps.ledgerPath);
-  // W1-T3518: the last adoption scan's own output. Same posture as the ledger read above — read
-  // ONCE per request here, re-derived every pass, never cached across requests.
-  const adoptionLatest = readAdoptionLatest(adoptionLatestPath(join(deps.inboxRoot, "state")));
+  const verdicts = ledgerProposalVerdicts(ledgerLines);
+  // W1-T3518: the last adoption scan's own output. Same posture as the ledger read — read
+  // ONCE per pass here, re-derived every pass that recomputes.
+  const adoptionLatest = readAdoptionLatest(adoptionPath);
+  const fragmentMemo = inboxClassifyState(deps).fragments;
+  beginFragmentPass(fragmentMemo);
 
-  const classifications = proposals.map((proposal) =>
+  const classifyOne = (proposal: Proposal): InboxClassification =>
     classifyProposal(proposal, drafts[proposal.id], {
       plan,
       isMerged,
       depsUnobservable,
-      grepAnchorTrue: (anchor) => gitGrepAnchorTrue(deps.root, "origin/main", anchor),
-      openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
-      isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-      isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
-      // W1-T3518: the record is read ONCE per request above and this predicate closes over it.
+      grepAnchorTrue,
+      // Every OTHER registry id: one shared set behind a view that excludes this proposal.
+      openProposalIds: { has: (id) => id !== proposal.id && allIds.has(id) },
+      isRatified: verdicts.isRatified,
+      isDeclined: verdicts.isDeclined,
+      // W1-T3518: the record is read ONCE per pass above and this predicate closes over it.
       // An absent or unparseable record reads as undefined, so NO proposal retires — the
       // direction a missing measurement must always fail.
       adoptionFindingGone: (id) => adoptionFindingGone(id, adoptionLatest),
       draftSpawnedAt: (id) => inflight[id],
-    }),
-  );
-  return { registryPath, proposals, classifications, ledgerLines };
+      fragmentMemo,
+    });
+  return { registryPath, proposals, ledgerLines, classifyOne };
+}
+
+/**
+ * Shared read + classify step every /v1/inbox* WRITE route needs, recomputed on every call. `loadPlanFn` defaults to
+ * {@link loadPlan}'s torn-read-guarded read (W1-T2220 remedy (a)); `POST /v1/inbox/approve` passes {@link
+ * loadPlanAtRef} instead (remedy (c)) since only it gates an irreversible action here. The read routes go through
+ * {@link classifyAllProposalsMemo}; this path shares only the per-commit anchor grep and the per-plan-object fragment
+ * verdicts, both of which answer exactly what a recompute would.
+ */
+function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = loadPlan): ClassifiedInbox {
+  const plan = loadPlanFn(deps.planPath);
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+  const ledgerLines = readLedgerLines(deps.ledgerPath);
+  const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
+  const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha));
+  return { registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines };
+}
+
+/** The plan's change stamp when it is read off disk: tasks.yaml plus every entry of its shard directory. */
+function planFilesStamp(planPath: string, stat: (path: string) => string | undefined, listDir: (path: string) => string[] | undefined): string {
+  const shardDir = join(dirname(planPath), "tasks.d");
+  const shards = listDir(shardDir) ?? [];
+  return JSON.stringify([stat(planPath), shards.map((name) => [name, stat(join(shardDir, name))])]);
+}
+
+/** Only what classifyProposal reads off a projection: merged, and an indeterminate read's reason. */
+function projectionDigest(projection: Map<string, StatusProjection>): string {
+  const parts: string[] = [];
+  for (const [id, p] of projection) parts.push(`${id}:${p.merged ? 1 : 0}:${p.indeterminate ? (p.unavailableReason ?? "unknown") : ""}`);
+  return parts.join("|");
+}
+
+/** Only what classifyProposal reads off the ledger: which ids are ratified, and which declined with what reason. */
+function ledgerVerdictDigest(lines: LedgerLines): string {
+  const { ratified, declined } = ledgerProposalVerdicts(lines);
+  return JSON.stringify([[...ratified].sort(), [...declined].sort((x, y) => (x[0] < y[0] ? -1 : 1))]);
+}
+
+/** One pass's fingerprint and the inputs it was taken over. */
+interface InboxFingerprint {
+  key: string;
+  sha?: string;
+  plan: Plan;
+  planKey?: string;
+  projection: Map<string, StatusProjection>;
+  ledgerLines: LedgerLines;
+}
+
+/**
+ * Stamp everything a classification reads — BEFORE reading it, so a write racing the pass invalidates the next one.
+ * The ledger enters through what classification reads off it (its ratify/decline verdicts, and the projection's
+ * merged facts), never its raw stamp: the daemon appends to it continuously, and a stamp would recompute on every
+ * unrelated row.
+ */
+function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan): InboxFingerprint {
+  const stat = deps.inboxStatFile ?? statStamp;
+  const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
+  const stamps = [registryPath, draftsPath, inflightPath, adoptionPath].map((p) => stat(p) ?? null);
+  const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
+
+  const ledgerStamp = stat(deps.ledgerPath) ?? null;
+  if (state.ledger === undefined || state.ledger.stamp !== ledgerStamp) {
+    const lines = readLedgerLines(deps.ledgerPath);
+    state.ledger = { stamp: ledgerStamp, lines, verdictDigest: ledgerVerdictDigest(lines) };
+  }
+  const { lines: ledgerLines, verdictDigest } = state.ledger;
+
+  const snapshot = readPlanSnapshot?.();
+  let plan: Plan;
+  let planKey: string | undefined;
+  if (snapshot !== undefined) {
+    plan = snapshot;
+  } else {
+    planKey = planFilesStamp(deps.planPath, stat, deps.inboxListDir ?? listDirOrUndefined);
+    const last = state.last;
+    plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : loadPlan(deps.planPath);
+  }
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines });
+  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection)]);
+  return { key, sha, plan, planKey, projection, ledgerLines };
+}
+
+/** The previous result, when `fp` names exactly its inputs and the commit is known. Its ledger rows are this pass's. */
+function reusableResult(state: InboxClassifyState, fp: InboxFingerprint): ClassifiedInbox | undefined {
+  const last = state.last;
+  if (fp.sha === undefined || last === undefined || last.plan !== fp.plan || last.key !== fp.key) return undefined;
+  return last.result.ledgerLines === fp.ledgerLines ? last.result : { ...last.result, ledgerLines: fp.ledgerLines };
+}
+
+/**
+ * W1-T4261 — THE READ ROUTES' CLASSIFIER. MEASURED 2026-09-23 on the fleet gateway: every GET /v1/inbox pass
+ * reclassified 693 proposals synchronously (81% of the serve process's CPU; /v1/status timed out at 15 s on an idle
+ * host). This returns the previous pass's result whenever nothing it reads has changed: the four inbox state files
+ * (size, mtime, inode), the plan (the process snapshot's identity, or tasks.yaml and its shards' stamps), the
+ * ledger's ratify/decline verdicts, the GitHub-derived projection's merged facts, and origin/main's sha. An
+ * unresolvable sha never reuses. {@link classifyAllProposalsSliced} is the same memo with a recompute that yields.
+ */
+export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ClassifiedInbox {
+  const state = inboxClassifyState(deps);
+  const fp = inboxFingerprint(deps, state, readPlanSnapshot);
+  const reused = reusableResult(state, fp);
+  if (reused !== undefined) return reused;
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha));
+  const result = { registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines };
+  state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result };
+  return result;
+}
+
+/** PRIMARY CONTROL on how long one inbox recompute holds the event loop: proposals classified between yields. Each can
+ *  cost a `git grep` spawn (~8 ms) per uncached anchor, so ten is well under 200 ms even on a cold commit. */
+export const INBOX_CLASSIFY_SLICE = 10;
+
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * {@link classifyAllProposalsMemo} for the CACHED GET /v1/inbox refresh: a recompute classifies
+ * {@link INBOX_CLASSIFY_SLICE} proposals at a time and yields between slices, so every other route keeps answering
+ * while it runs and the console's cached-read wrapper serves the previous body. MEASURED on a 700-proposal fixture
+ * with every anchor distinct: a cold commit was a single ~5 s block. A second caller over the same inputs awaits the
+ * running refresh rather than starting its own.
+ */
+export async function classifyAllProposalsSliced(
+  deps: PanelGraphDeps,
+  readPlanSnapshot?: () => Plan,
+  yieldNow: () => Promise<void> = yieldToEventLoop,
+): Promise<ClassifiedInbox> {
+  const state = inboxClassifyState(deps);
+  const fp = inboxFingerprint(deps, state, readPlanSnapshot);
+  const reused = reusableResult(state, fp);
+  if (reused !== undefined) return reused;
+  if (state.pending !== undefined && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha));
+  const run = async (): Promise<ClassifiedInbox> => {
+    const classifications: InboxClassification[] = [];
+    for (let i = 0; i < pass.proposals.length; i += INBOX_CLASSIFY_SLICE) {
+      if (i > 0) await yieldNow();
+      for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
+    }
+    const result = { registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines };
+    state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result };
+    return result;
+  };
+  const promise = run().finally(() => {
+    if (state.pending?.promise === promise) state.pending = undefined;
+  });
+  state.pending = { key: fp.key, plan: fp.plan, promise };
+  return promise;
 }
 
 /**
@@ -1411,8 +1647,10 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
     method: "GET",
     path: "/v1/inbox",
     scope: "read",
-    handler: (_req, res) => {
-      const { registryPath, proposals, classifications, ledgerLines } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
+    // W1-T4261: async so a recompute yields between slices; the console's cached-read wrapper serves the previous
+    // body meanwhile. An unchanged input set answers from the memo with no recompute at all.
+    handler: async (_req, res) => {
+      const { registryPath, proposals, classifications, ledgerLines } = await classifyAllProposalsSliced(deps, readPlanSnapshot);
       // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
       const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
 
@@ -1465,7 +1703,7 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
       // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
       // lanes stay unchanged for one release so the console can move over without a break.
       const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
-      const fleetDecisions = fleetLaneDecisions(ledgerLines as never);
+      const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(deps.inboxRoot, "state")));
       const needsYou = {
         ready: ready.filter(isOperator),
         drafting: drafting.filter(isOperator),
@@ -1498,7 +1736,7 @@ const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["st
 /** Every operator-owned item with its plain message and state, off the SAME classification
  *  `GET /v1/inbox` renders. */
 function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): InboxThreadItem[] {
-  const { proposals, classifications } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
+  const { proposals, classifications } = classifyAllProposalsMemo(deps, readPlanSnapshot);
   const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
   const items: InboxThreadItem[] = [];
   for (const c of classifications) {
@@ -1649,6 +1887,17 @@ export interface RatifyCliGateway {
   reframe(proposalId: string, feedback: string): void;
 }
 
+/** The fleet lane's decision store for display. A store that cannot be read shows the ledger's rows
+ *  alone rather than failing the whole inbox; the lane itself refuses to act on such a store. */
+export function fleetLaneStoreForDisplay(stateDir: string): ReturnType<typeof readFleetLaneStore> {
+  try {
+    return readFleetLaneStore(stateDir);
+  } catch {
+    // deliberate: this is a read-only view; an unreadable store falls back to the live ledger's rows.
+    return {};
+  }
+}
+
 /** Real {@link RatifyCliGateway}: shells out to the repo's own `bin/rmd`, matching a terminal
  *  invocation exactly. stdout/stderr are appended to a per-call log under `<logDir>`, since no
  *  operator terminal is watching this run — a failing spawn still leaves a trace. */
@@ -1656,7 +1905,8 @@ export function ratifyCliGateway(repoRoot: string, logDir: string): RatifyCliGat
   const rmdBin = join(repoRoot, "bin", "rmd");
   const spawnDetached = (args: string[], label: string) => {
     mkdirSync(logDir, { recursive: true });
-    const logFd = openSync(join(logDir, `${label}-${Date.now()}.log`), "a");
+    // A proposal id can hold a path (`symbol-no-caller:src/lib/retro.ts:x`); the log name must stay one file.
+    const logFd = openSync(join(logDir, `${label.replace(/[^\w.-]+/g, "_")}-${Date.now()}.log`), "a");
     try {
       const child = spawn(rmdBin, args, { cwd: repoRoot, detached: true, stdio: ["ignore", logFd, logFd] });
       child.unref();

@@ -1,0 +1,86 @@
+- id: W1-T4348
+  title: "the W1-T505 .claude-fleet narrowing has never activated — nothing ever creates the sibling, so every fleet host still grants a worker the operator's WHOLE ~/.claude (transcripts, settings, skills, the real credentials file); seed .claude-fleet with only .credentials.json, once, idempotently, outside the sandbox, so the already-merged narrowing takes effect with no operator action"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    Filed from the follow-up harvest that flagged test/credential-reach-probe.test.ts failing in a
+    worker's sandboxed checkout (followup:DAEMON-1789306309171:2026-09-13T13:53:53.493Z:0, run
+    DAEMON-1789306309171, PR #5389). VERIFIED LIVE on THIS run's own host (azure-container class,
+    /etc/rmd-build-sha present): /home/node/.claude.json and /home/node/.claude/.credentials.json
+    both EXIST, and /home/node/.claude-fleet does NOT — reproducing exactly the condition W1-T971
+    already recorded in prose ("~/.claude-fleet IS ABSENT ON BOTH HOSTS, so the grant falls back to
+    the whole ~/.claude") and the one scripts/credential-reach-baseline.json's own `_finding`
+    documents for the unknown-linux class. That baseline's azure-container entry reads
+    `reachable: []`, so this host's actual reach is a genuine, currently-reproducible WIDENING
+    against its own recorded baseline — not a local-only artifact, and not something the ratchet
+    is designed to tolerate ("Re-capturing it upward is not a remedy").
+
+    W1-T505 (merged) already BUILT and PROVED the narrowing mechanism: workerHomePlan prefers
+    `<realHome>/.claude-fleet` over the wholesale `.claude` when it exists, and its own acceptance
+    criteria confirm a credential-only sibling keeps token refresh and the headroom governor
+    working. What W1-T505 never did — scoped OUT deliberately in its own design note (v) — is
+    CREATE that sibling on a real host. Nobody has. deploy/host-update.sh's CRED_DIR defaults to
+    the WHOLE `${HOME}/.claude`, RMD_CLAUDE_DIR is an unset override, and no code path anywhere
+    writes `.claude-fleet`. So the narrowing this repo already paid to build has been fully inert
+    on both fleet hosts since it merged — every worker on every spawn since then has been granted
+    the operator's complete `.claude` (transcripts, settings.json, skills, plugins, history.jsonl)
+    exactly as before, which is the precondition W1-T971's own documented finding (workers
+    spontaneously loading bundled Claude Code skills via the leaked transcript-writing symlink)
+    depends on.
+  design: |
+    Add a pure, injectable function (mirroring workerHomePlan's own `exists`-injection style) that,
+    given `realHome` and injected fs primitives, materializes
+    `<realHome>/.claude-fleet/.credentials.json` from `<realHome>/.claude/.credentials.json` — mode
+    0600 on the file, 0700 on the directory — IF AND ONLY IF `.claude-fleet` does not already
+    exist. NEVER overwrite an existing `.claude-fleet`: a worker's own in-place token refresh (the
+    mechanism W1-T505's rationale documents — "the token self-refreshes on an 8-hour cycle and is
+    rewritten in place") writes INTO `.claude-fleet` once it is the grant target, and a bootstrap
+    that re-copies from the real `.claude` on every call would clobber a fresher refreshed token
+    with a stale one. Seed once; never touch again.
+    ABSENCE IS A LEGITIMATE STATE, not a failure: if the real `.claude/.credentials.json` does not
+    exist (a dev/test host with no real login), skip silently — mirroring WorkerHomeGrantOutcome's
+    own `absent` semantics.
+    CONCURRENCY: multiple workers spawn concurrently (worker.ts calls materializeWorkerHome per
+    spawn), so the seed-once check is a TOCTOU race across concurrent spawns. Write atomically
+    (temp file + rename, or an exclusive-create primitive) and treat "already exists" as success,
+    never an error — the repo's own O_EXCL/withTempDir discipline elsewhere is the precedent to
+    follow.
+    WIRE IT before materializeWorkerHome is called on the spawn path (src/lib/worker.ts), so every
+    spawn on a freshly-provisioned host self-heals into the narrowed grant with no operator action
+    and no deploy-script change.
+    NOT IN SCOPE: closing the credential-reach ratchet itself (a sibling task); changing
+    deploy/host-update.sh's default CRED_DIR (this task activates the existing container-side
+    narrowing regardless of what the host mounts); anything about `.claude.json` (a separate,
+    never-granted file — the sibling task's concern).
+  acceptance:
+    - claim: "given an injected real-home fixture whose .claude holds a .credentials.json and no .claude-fleet sibling, the seed function creates .claude-fleet/.credentials.json at mode 600 and the directory at mode 700"
+      proof: "unit test: given an injected real-home fixture whose .claude holds a"
+    - claim: "given an injected real-home fixture whose .claude-fleet ALREADY exists (with different bytes than the real .claude/.credentials.json, simulating an already-refreshed worker token), the seed function makes NO write to it — an existing sibling is never overwritten"
+      proof: "unit test: given an injected real-home fixture whose .claude-fleet ALREADY exists"
+    - claim: "given an injected real-home fixture with no real .claude/.credentials.json at all, the seed function completes without error and creates nothing"
+      proof: "unit test: given an injected real-home fixture with no real .claude"
+    - claim: "the seed is invoked before materializeWorkerHome on the spawn path, so a worker spawned on a freshly-provisioned host (no prior .claude-fleet) resolves its .claude grant to the newly-seeded sibling rather than the wholesale .claude directory"
+      proof: "unit test: the seed is invoked before materializeWorkerHome on the spawn"
+  risk: high
+  origin: "followup:DAEMON-1789306309171:2026-09-13T13:53:53.493Z:0"
+  plan_refs: ["W1-T505", "W1-T971"]
+  files: [src/lib/worker-home.ts, src/lib/worker.ts, test/worker-home.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high is set deliberately, matching W1-T505's and W1-T971's own precedent for this exact
+    credential path: a defect here either breaks token refresh/headroom (W1-T505's own stated
+    regression bar) or fails silently open onto the wholesale grant, which is the very exposure
+    this task exists to close. files: spans worker-home.ts and worker.ts (the seed + its wiring),
+    which sizingViolation would flag below high — the same regrade this repo's own precedent uses
+    for credential/containment-path tasks rather than an artificial split of one seed-and-wire
+    concern.
+
+    DOES NOT RETROACTIVELY ALTER W1-T971's RECORD. W1-T971's DECISIONS.md entry is a durable
+    statement about what ALREADY HAPPENED (six measured skill invocations against transcripts on a
+    ~30-day deletion clock); this task changes FUTURE behavior only and must not be read as
+    correcting or invalidating that record.

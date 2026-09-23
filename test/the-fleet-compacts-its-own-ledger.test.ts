@@ -8,6 +8,7 @@ import type { DaemonDeps } from "../src/lib/daemon.js";
 import {
   DEFAULT_LEDGER_COMPACTION_TRIGGER,
   decideLedgerCompaction,
+  ledgerCompactionIntervalMs,
   readLedgerCorpusPressure,
   type LedgerCompactionTrigger,
 } from "../src/lib/ledger-compaction-rung.js";
@@ -80,9 +81,11 @@ test("W1-T3368: a fire inside the interval is THROTTLED, and says so rather than
 });
 
 test("W1-T3368: once the interval has passed, the same over-bound corpus fires again", () => {
-  const justInside = decideLedgerCompaction(FATAL, NOW - (DEFAULT_LEDGER_COMPACTION_TRIGGER.minIntervalMs - 1), NOW);
+  // W1-T4262: the interval is the pressure-scaled one, shorter the further over the bound.
+  const interval = ledgerCompactionIntervalMs(FATAL);
+  const justInside = decideLedgerCompaction(FATAL, NOW - (interval - 1), NOW);
   assert.equal(justInside.fire, false, "one millisecond inside the interval must still throttle");
-  const justOutside = decideLedgerCompaction(FATAL, NOW - DEFAULT_LEDGER_COMPACTION_TRIGGER.minIntervalMs, NOW);
+  const justOutside = decideLedgerCompaction(FATAL, NOW - interval, NOW);
   assert.equal(justOutside.fire, true, "at the interval it must fire — the bound is 'at or beyond'");
 });
 

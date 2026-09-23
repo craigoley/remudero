@@ -136,6 +136,7 @@ import {
 } from "./provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -3345,6 +3346,82 @@ export type NodeModulesLinkOutcome =
   // Telling the caller stops a worker reading the resulting "module not found" as a defect in its own diff (W1-T2777).
   | "linked-lockfile-mismatch";
 
+/** Thrown by `worktreeAdd`, only when its caller opts in, instead of linking a SAME-package tree whose install inputs differ
+ * from the worktree's (W1-T4193). `reasonClass` is the `blocked_toolchain` tag daemon.ts's `isSpawnInfraBlocked` defers
+ * WITHOUT a strike: every daemon installs its install root before a freshness restart, so the mismatch clears. */
+export class WorktreeNodeModulesRefusedError extends RmdError {
+  readonly reasonClass = "blocked_toolchain" as const;
+  constructor(
+    readonly packageName: string,
+    readonly worktreePath: string,
+    readonly nodeModulesSource: string,
+  ) {
+    const sourceDir = dirname(nodeModulesSource);
+    // GENERIC_EXIT_CODE: what a plain `extends Error` already resolved to through exitCodeFor.
+    super(
+      "git",
+      GENERIC_EXIT_CODE,
+      `worktree ${worktreePath} refused before any worker runs: its package.json/package-lock.json hash differs from ` +
+        `${sourceDir}'s, the same package (${packageName}) whose node_modules it would link. Remedy: refresh the canonical ` +
+        "checkout (the install root is re-installed on the next freshness restart); never install inside the worktree",
+      { packageName, worktreePath, nodeModulesSource },
+    );
+    this.name = "WorktreeNodeModulesRefusedError";
+  }
+}
+
+/** A directory's `package.json` name: absent file or name is "unnamed"; a file that does not parse is "unreadable". */
+type PackageNameRead = { kind: "named"; name: string } | { kind: "unnamed" } | { kind: "unreadable"; error: string };
+
+function readPackageName(dir: string): PackageNameRead {
+  const file = join(dir, "package.json");
+  if (!existsSync(file)) return { kind: "unnamed" };
+  try {
+    const name = (JSON.parse(readFileSync(file, "utf8")) as { name?: unknown } | null)?.name;
+    return typeof name === "string" ? { kind: "named", name } : { kind: "unnamed" };
+  } catch (e) {
+    // Distinct from "unnamed": the caller ledgers it rather than reading a broken file as a package-less repo.
+    return { kind: "unreadable", error: String((e as Error)?.message ?? e) };
+  }
+}
+
+/** The implement lane's pre-link check (W1-T4193). Throws {@link WorktreeNodeModulesRefusedError} only when BOTH
+ * package.json files name the SAME package and the install-input hashes differ. A cross-package link (a satellite on core's
+ * install root) and an unreadable name are ledgered and left to today's link; a package-less side changes nothing. */
+function assertSamePackageInstallInputs(
+  repoDir: string,
+  worktreePath: string,
+  log: ((step: string, extra?: Record<string, unknown>) => void) | undefined,
+): void {
+  const source = resolveNodeModulesSource(repoDir);
+  if (!source) return;
+  const sourceDir = dirname(source);
+  const worktreeName = readPackageName(worktreePath);
+  const sourceName = readPackageName(sourceDir);
+  if (worktreeName.kind === "unreadable" || sourceName.kind === "unreadable") {
+    log?.("worktree.node_modules_package_unreadable", {
+      worktreePath,
+      node_modules_source: source,
+      worktree_error: worktreeName.kind === "unreadable" ? worktreeName.error : undefined,
+      node_modules_error: sourceName.kind === "unreadable" ? sourceName.error : undefined,
+    });
+    return;
+  }
+  if (worktreeName.kind !== "named" || sourceName.kind !== "named") return;
+  if (worktreeName.name !== sourceName.name) {
+    log?.("worktree.node_modules_cross_package", {
+      worktree_package: worktreeName.name,
+      worktreePath,
+      node_modules_package: sourceName.name,
+      node_modules_source: source,
+    });
+    return;
+  }
+  if (hashInstallInputs(worktreePath) !== hashInstallInputs(sourceDir)) {
+    throw new WorktreeNodeModulesRefusedError(worktreeName.name, worktreePath, source);
+  }
+}
+
 /** Give a fresh worktree a `node_modules`, by SYMLINK — never by installing. INVARIANT: a symlink, never `npm ci`. An install
  * here is what emptied the shared `node_modules` under the live daemon on 2026-07-29, so the commit-msg hook's own "run `npm
  * ci` first" advice must not be taken. Best-effort by contract: every outcome is a RETURN VALUE, never a throw, because
@@ -3942,6 +4019,9 @@ export function worktreeAdd(
      * carrying the three-way base reading plus `ref` and `behind`, and on the fail-open branch `worktree.base_uncheckable`. A
      * refusal stays the caller's to ledger, since only the caller decides what it means for dispatch (W1-T2621). */
     log?: (step: string, extra?: Record<string, unknown>) => void;
+    /** W1-T4193: set ONLY by runTaskBody's implement path. Refuses a same-package lockfile mismatch before linking;
+     * absent, every caller keeps the warn-and-link baseline byte-identically. */
+    refuseSamePackageLockfileMismatch?: boolean;
   } = {},
 ): void {
   ensureWorktreeConfigEnabled(repoDir);
@@ -3990,6 +4070,7 @@ export function worktreeAdd(
   // …and give that hook the `commitlint` it resolves, or it rejects every commit made here. Must run AFTER the hooksPath line
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
   excludeNodeModulesFromGit(worktreePath);
+  if (deps.refuseSamePackageLockfileMismatch) assertSamePackageInstallInputs(repoDir, worktreePath, deps.log);
   linkWorktreeNodeModules(repoDir, worktreePath);
   // The link above is ROOT-only and cannot reach a dependency npm installed beneath a declared workspace (e.g.
   // apps/dashboard/node_modules) -- link those too, through the SAME observability channel `worktree.add` already uses, so a

@@ -7,7 +7,7 @@
  * It is the bounded archive executor shared by the CLI and the daemon compaction rung; it is
  * never a rotation-path dependency.
  */
-import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
@@ -24,7 +24,10 @@ export const LEDGER_COMPACT_DEFAULT_OLDER_THAN_DAYS = 7;
 // PRIMARY CONTROL: bounds the exact-row Set and gzip inputs held by one operator invocation.
 export const LEDGER_COMPACT_MAX_SOURCES = 50;
 const LEDGER_COMPACT_MAX_OLDER_THAN_DAYS = 36_500;
-const LEDGER_COMPACT_VALUE_FLAGS = ["--older-than", "--max-sources"];
+const LEDGER_COMPACT_VALUE_FLAGS = ["--older-than", "--older-than-hours", "--max-sources"];
+/** An archive this many times the typical rotation's size is a previous pass's output (one pass
+ *  merges up to {@link LEDGER_COMPACT_MAX_SOURCES} rotations; rotations are cut at one size). */
+export const MERGED_ARCHIVE_SIZE_FACTOR = 4;
 const LEDGER_COMPACT_BOOL_FLAGS = ["--dry-run"];
 
 function parseBoundedInteger(raw: string | undefined, min: number, max: number): number | undefined {
@@ -41,6 +44,8 @@ export interface LedgerCompactFs {
   rmSync: (path: string) => void;
   gzipSync: (content: Buffer) => Buffer;
   gunzipSync: (content: Buffer) => Buffer;
+  /** Bytes on disk. Absent, every archive is treated alike, as before W1-T4262. */
+  sizeOf?: (path: string) => number;
 }
 
 export interface LedgerCompactCommandDeps {
@@ -67,12 +72,14 @@ const realFs: LedgerCompactFs = {
   rmSync: (path) => rmSync(path),
   gzipSync: (content) => gzipSync(content),
   gunzipSync: (content) => gunzipSync(content),
+  sizeOf: (path) => statSync(path).size,
 };
 
 /** Select the oldest parseable rotations strictly older than the requested age. The hard source
  * ceiling bounds `compactRotations`' exact-row Set even when an operator supplies a larger flag. */
 export function selectLedgerCompactionSources(
-  names: string[], stateDir: string, olderThanDays: number, maxSources: number, now: Date): LedgerCompactSelection {
+  names: string[], stateDir: string, olderThanDays: number, maxSources: number, now: Date,
+  sizeOf?: (path: string) => number): LedgerCompactSelection {
   // This signature stays on two lines so type erasure cannot mark a parameter-only line uncovered.
   // Selection uses filename time only to avoid opening an unbounded candidate set before the cap.
   // A name with no trustworthy time is reported separately rather than guessed old or recent.
@@ -94,7 +101,30 @@ export function selectLedgerCompactionSources(
       eligible.push(entry);
     }
   }
-  return { sources: eligible.slice(0, Math.min(maxSources, LEDGER_COMPACT_MAX_SOURCES)), eligibleCount: eligible.length, unparseableAge };
+  const cap = Math.min(maxSources, LEDGER_COMPACT_MAX_SOURCES);
+  // W1-T4262: a previous pass's output is re-read whole by every pass that picks it, so ordinary
+  // rotations go first; outputs merge with each other, two at a time, only once none are left.
+  const merged = mergedArchives(ledgerRotationEntries(names, stateDir), sizeOf);
+  const rotations = eligible.filter((e) => !merged.has(e.path));
+  const sources = rotations.length > 0 ? rotations.slice(0, cap) : eligible.slice(0, Math.min(cap, 2));
+  return { sources, eligibleCount: eligible.length, unparseableAge };
+}
+
+/** Archives far larger than the median rotation: earlier passes' outputs. */
+function mergedArchives(entries: LedgerCorpusEntry[], sizeOf: ((path: string) => number) | undefined): Set<string> {
+  if (!sizeOf || entries.length === 0) return new Set();
+  const sizes = entries.map((e) => {
+    try {
+      return { path: e.path, size: sizeOf(e.path) };
+    } catch {
+      // deliberate: an archive gone between listing and sizing is ordinary rotation churn; it counts
+      // as an ordinary rotation, and the read that follows reports it in the command's own error.
+      return { path: e.path, size: 0 };
+    }
+  });
+  const sorted = sizes.map((x) => x.size).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)]!;
+  return new Set(sizes.filter((x) => x.size > MERGED_ARCHIVE_SIZE_FACTOR * median).map((x) => x.path));
 }
 function reportFor(mode: "dry-run" | "apply", olderThanDays: number, maxSources: number, eligibleCount: number, unparseableAgeCount: number, result: LedgerCompactionResult): string {
   // These fields are the preview/apply audit contract.
@@ -118,16 +148,22 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   // All remaining paths have a valid and fully parsed invocation.
   // Filesystem failures below therefore use exit 1 instead.
   const olderThanPresent = rest.includes("--older-than");
+  const olderThanHoursPresent = rest.includes("--older-than-hours");
   const maxSourcesPresent = rest.includes("--max-sources");
-  const olderThanDays = olderThanPresent
-    ? parseBoundedInteger(flagValue(rest, "--older-than"), 0, LEDGER_COMPACT_MAX_OLDER_THAN_DAYS)
-    : LEDGER_COMPACT_DEFAULT_OLDER_THAN_DAYS;
+  const hours = olderThanHoursPresent ? parseBoundedInteger(flagValue(rest, "--older-than-hours"), 0, LEDGER_COMPACT_MAX_OLDER_THAN_DAYS * 24) : undefined;
+  const olderThanDays = olderThanPresent && olderThanHoursPresent
+    ? undefined
+    : olderThanHoursPresent
+      ? (hours === undefined ? undefined : hours / 24)
+      : olderThanPresent
+        ? parseBoundedInteger(flagValue(rest, "--older-than"), 0, LEDGER_COMPACT_MAX_OLDER_THAN_DAYS)
+        : LEDGER_COMPACT_DEFAULT_OLDER_THAN_DAYS;
   const maxSources = maxSourcesPresent
     ? parseBoundedInteger(flagValue(rest, "--max-sources"), 1, LEDGER_COMPACT_MAX_SOURCES)
     : LEDGER_COMPACT_MAX_SOURCES;
   if (olderThanDays === undefined || maxSources === undefined) {
     log(
-      `rmd ledger-compact: --older-than must be an integer from 0 to ${LEDGER_COMPACT_MAX_OLDER_THAN_DAYS}; ` +
+      `rmd ledger-compact: --older-than must be an integer from 0 to ${LEDGER_COMPACT_MAX_OLDER_THAN_DAYS} (or --older-than-hours, not both); ` +
         `--max-sources must be an integer from 1 to ${LEDGER_COMPACT_MAX_SOURCES}`,
     );
     return 2;
@@ -151,6 +187,7 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
       olderThanDays,
       maxSources,
       now,
+      fs.sizeOf,
     );
   } catch (err) {
     log(`rmd ledger-compact: cannot list ${stateDir} — ${(err as Error)?.message ?? String(err)}`);

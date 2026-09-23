@@ -410,7 +410,25 @@ export interface DaemonHealthDeps {
   defaultPollIntervalMs?: number;
   eventLoopLag?: () => EventLoopLag | undefined;
   hostPressure?: () => HostPressure;
+  gatewayCheckout?: () => GatewayCheckoutState | undefined;
 }
+
+export interface GatewayCheckoutState {
+  head: string | "unknown";
+  behindBy: number | "unknown";
+  dirty: boolean | "unknown";
+  dirtyPaths?: string[];
+  checkedAt: string | "unknown";
+  detail?: string;
+}
+
+export const GATEWAY_CHECKOUT_UNCHECKED: GatewayCheckoutState = {
+  head: "unknown",
+  behindBy: "unknown",
+  dirty: "unknown",
+  checkedAt: "unknown",
+  detail: "not checked yet",
+};
 
 /** `GET /v1/daemon-health`'s body — every field individually optional/absent (never a
  *  placeholder) when its own source could not be read. */
@@ -426,6 +444,7 @@ export interface DaemonHealthSnapshot {
   rateLimitRemaining?: number;
   eventLoopLag?: EventLoopLag;
   hostPressure: HostPressure;
+  gatewayCheckout: GatewayCheckoutState;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -454,6 +473,7 @@ export function buildDaemonHealthRoute(deps: DaemonHealthDeps): Route {
         rateLimitRemaining: readGhRateLimitRemaining(deps.exec),
         eventLoopLag: (deps.eventLoopLag ?? defaultEventLoopLag)(),
         hostPressure: (deps.hostPressure ?? readHostPressure)(),
+        gatewayCheckout: deps.gatewayCheckout?.() ?? GATEWAY_CHECKOUT_UNCHECKED,
       };
       sendJson(res, 200, body);
     },
