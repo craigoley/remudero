@@ -1,0 +1,14 @@
+- id: W1-T4279
+  title: Draft ratification criteria update
+  repo: master-plan
+  depends_on:
+    - W1-T4278
+  type: implement
+  verify: "grep: symbol in MASTER-PLAN.md"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "MASTER-PLAN §7/P25 RATIFICATION CANDIDATE"
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md

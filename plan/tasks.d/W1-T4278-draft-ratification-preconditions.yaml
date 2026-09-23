@@ -1,0 +1,13 @@
+- id: W1-T4278
+  title: Draft ratification preconditions
+  repo: master-plan
+  depends_on: []
+  type: implement
+  verify: "review: ensure alignment with MASTER-PLAN §7/P25"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "MASTER-PLAN §7/P25 RATIFICATION CANDIDATE"
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md

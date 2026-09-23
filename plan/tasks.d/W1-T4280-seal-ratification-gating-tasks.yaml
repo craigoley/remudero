@@ -1,0 +1,14 @@
+- id: W1-T4280
+  title: Seal ratification gating tasks
+  repo: master-plan
+  depends_on:
+    - W1-T4279
+  type: implement
+  verify: "check: gating criteria applied"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "MASTER-PLAN §7/P25 RATIFICATION CANDIDATE"
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md
