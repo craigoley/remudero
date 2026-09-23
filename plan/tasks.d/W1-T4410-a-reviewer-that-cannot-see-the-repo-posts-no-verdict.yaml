@@ -1,0 +1,36 @@
+- id: W1-T4410
+  title: "A REVIEWER THAT CANNOT SEE THE REPO POSTS A PUBLIC FAIL — `rmd review --repo <name>` without that repo's managed checkout marks the PR red as if the change were judged; an environment refusal must post nothing"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  origin: "remudero-console #1706, 2026-09-23"
+  plan_refs: []
+  files:
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-23: an operator session ran `rmd review 1706 --repo remudero-console` on a Mac with no
+    ~/Remudero/repos/remudero-console. resolveReviewSubjectCheckout returned review-subject-missing, and the
+    refusal branch in src/run-task.ts called postStatusDep with state "failure" and "remudero-review:
+    FAIL — review-subject-missing" on the PR head. The PR had passed nothing and failed nothing, but it now
+    carried a required-context FAILURE that no fleet reviewer would overwrite on that sha. The only way out
+    was a new empty commit. The refusal is about the reviewer's machine, not the change.
+  design: |
+    In the review-subject refusal branch, post no commit status. Ledger `review.subject_refused` as today,
+    print the refusal with the remedy (clone the repo into the managed checkout path, or run the review
+    where it exists), and exit non-zero. If a pending status was already posted on this head by the same run,
+    withdraw it to the status that preceded it rather than leaving it pending. Any refusal about the
+    reviewer's environment takes the same path. A refusal about the PR itself still posts FAIL as today.
+  acceptance:
+    - claim: "a review whose target repo has no managed checkout posts no commit status and exits non-zero"
+      proof: "unit test: a review whose target repo has no managed checkout posts no commit status and exits non-zero"
+    - claim: "a refusal about the pull request itself still posts a failure"
+      proof: "unit test: a refusal about the pull request itself still posts a failure"
+  falsifier: |
+    CLOSE IF a review refused for a missing managed checkout already leaves the PR's commit statuses untouched.
