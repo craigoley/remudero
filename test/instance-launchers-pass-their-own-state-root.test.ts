@@ -56,6 +56,8 @@ test("core, site and console launchers pass their own state root to deploy-run",
         `${name} must pass its registry state root to deploy-run`,
       );
       assert.ok(launcher.includes(`STATE_DIR=/srv/remudero-${name}`));
+      // W1-T4267: the drift reader inspects THIS instance's container, named at install time.
+      assert.ok(launcher.includes(`RMD_RESOURCE_POLICY_CONTAINER='remudero-${name}'`), `${name} must name its own container`);
       assert.ok(launcher.includes(`CHECKOUT=/srv/remudero-${name}/daemon-install`));
     }
     const roots = instances.map((name) => `/srv/remudero-${name}/daemon-install`);
