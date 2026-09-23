@@ -17,11 +17,10 @@ function seed(r: string, content: string): void {
   writeFileSync(managedReposPath(r), content);
 }
 
-// G-6 DEVIATION, recorded on purpose (#6738, operator choice 2026-09-23): the shipped list names the three
-// owned repositories the fleet already ran with, so remudero's own issues reach issues intake before WS-4.
-test("the SHIPPED .remudero/managed-repos.json loads the three owned repositories (G-6 deviation, #6738)", () => {
+test("the SHIPPED .remudero/managed-repos.json keeps remudero's own public issues off intake (G-6)", () => {
+  // MASTER-PLAN G-6: remudero's public tracker stays off issues intake until WS-4 — anyone can open an
+  // issue there, and its text would reach the fleet's triage. #6738 deviated; the operator restored it.
   assert.deepEqual(loadManagedRepos(REPO_ROOT), [
-    { owner: "craigoley", repo: "remudero" },
     { owner: "craigoley", repo: "remudero-site" },
     { owner: "craigoley", repo: "remudero-console" },
   ]);
