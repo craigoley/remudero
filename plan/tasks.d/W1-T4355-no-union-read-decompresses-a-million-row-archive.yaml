@@ -1,0 +1,58 @@
+- id: W1-T4355
+  title: "ONE UNION READ PEAKS AT ~870 MB BECAUSE COMPACTION MERGES ITS OWN OUTPUTS WITHOUT A CEILING — cap a merged archive's decompressed size, and re-split any archive already over it, so no ledger reader ever holds a million-row file in memory"
+  repo: remudero
+  depends_on: [W1-T4262]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  origin: "research:turbopuffer-scan-2026-09-23"
+  plan_refs: [W1-T4262, W1-T3368, W1-T4243, W1-T4100]
+  files:
+    - src/lib/ledger-compact.ts
+    - test/no-union-read-decompresses-a-million-row-archive.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    RESCOPED BEFORE FILING. The id was reserved for a per-archive step index (a sidecar naming which steps
+    each archive holds). A host recon on 2026-09-23 at 20:27Z (remudero-daemon container, checkout 37085a789,
+    state dir /home/node/Remudero/state) showed that index would skip nothing, and found the real cost:
+    (1) THE INDEX IS DEAD. OBSERVED: 34 files (33 gzip rotations plus the live file); `verdict` and
+        `fix.dispatch` each appear in 34 of 34, so a step index skips 0 files for W1-T4243's knowledge read.
+    (2) THE COST IS ONE ARCHIVE. OBSERVED: that read (resolveLedgerUnion, 3 steps, sinceTs 30 days back) ran
+        3 times in fresh processes: about 1.62 s and 869-880 MB peak RSS each, against a 43 MB node baseline.
+        Two merged archives (34.6 MB and 22.9 MB compressed; 1,016,356 and 933,073 rows) hold 86% of the rows.
+    (3) THE MECHANISM, MEASURED. The synchronous union reader decompresses each archive whole
+        (readLedgerUnionRawLinesSync: gunzipSync then one buffer; W1-T3368 made it hold one file at a time).
+        So peak memory follows the LARGEST archive, not the corpus. OBSERVED on synthetic data at origin/main,
+        through the repo's own resolveLedgerUnion: the same 1,000,000 rows and the same 5,952 matches peak at
+        752 MB as 1 archive, 205-231 MB as 10, and 173-178 MB as 50 (wall time 1.9 s, 0.9 s, 0.84 s).
+    (4) THE CAUSE. OBSERVED at src/lib/ledger-compact.ts: once no ordinary rotation is eligible, selection
+        merges previous outputs "two at a time" (`eligible.slice(0, Math.min(cap, 2))`). Nothing bounds the
+        result, so merged archives compound and every reader's peak grows with them. W1-T4262 made compaction
+        keep pace with rotation; it did not bound what it produces.
+    The daemon's heap is 8 GB (W1-T3368), and the measurement cadence alone makes several union reads per
+    fire, so an unbounded largest archive is the same OOM class W1-T3368 removed, reintroduced by size.
+  design: |
+    (i) A named ceiling on one archive's DECOMPRESSED bytes in src/lib/ledger-compact.ts, derived from the
+        measurement in the rationale and stated beside it (for example, the size at which one read's peak
+        stays under a stated budget), not picked.
+    (ii) Selection never merges archives whose combined decompressed size would exceed the ceiling. A merge
+        that would is skipped and counted, never silently truncated.
+    (iii) A compaction output larger than the ceiling is written as several archives, each under it, in time
+        order, with the same exact-row dedupe and atomic staging the pass already uses.
+    (iv) An archive ALREADY over the ceiling is re-split by the next pass, so the host's two existing
+        million-row archives drain without an operator step.
+    (v) No reader changes: the bound lives where archives are made.
+  acceptance:
+    - claim: "merges stay under the ceiling, oversized outputs split, and an existing oversized archive is re-split"
+      proof: "unit test: test/no-union-read-decompresses-a-million-row-archive.test.ts"
+    - claim: "the ceiling is a named constant in the compactor"
+      proof: "grep: LEDGER_COMPACT_MAX_ARCHIVE_BYTES in src/lib/ledger-compact.ts"
+  falsifier: |
+    Restore the two-at-a-time merge with no ceiling and a fixture of two outputs whose sum exceeds it must
+    produce one archive over the ceiling, failing the test. Truncate instead of splitting and the row-count
+    equality between sources and outputs must fail. Remove the re-split pass and a fixture holding one
+    over-ceiling archive must still hold it after a pass.
+  note: "Rescoped from the step-index idea (research:turbopuffer-scan-2026-09-23) after the host recon and a synthetic measurement showed the step index skips 0 of 34 files and read cost follows the largest archive. The future-dated archive name the recon also found (2027-10-14) is W1-T4100's, not this task's."
