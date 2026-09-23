@@ -45,6 +45,9 @@ test("a gardener's own head is admitted by the head-identity gate", () => {
     assert.equal(evaluateHeadIdentityGate({ ...GATE_GARDEN_HEAD, headRef: `${name}-garden-1790195325864` }).ok, true, name);
   }
   // Only the registered gardeners, and only a real epoch: a look-alike stays refused.
+  assert.equal(GARDEN_BRANCH_RE.test("gate-garden-1790195325864"), true);
+  assert.equal(GARDEN_BRANCH_RE.test("foo-garden-1790195325864"), false, "an unregistered gardener name is not a gardener");
+  assert.equal(GARDEN_BRANCH_RE.test("gate-garden-soon"), false, "the suffix must be an epoch");
   for (const headRef of ["foo-garden-1790195325864", "gate-garden-soon", "gate-garden-1790195325864-extra"]) {
     const refused = evaluateHeadIdentityGate({ ...GATE_GARDEN_HEAD, headRef });
     assert.equal(refused.ok, false, headRef);
