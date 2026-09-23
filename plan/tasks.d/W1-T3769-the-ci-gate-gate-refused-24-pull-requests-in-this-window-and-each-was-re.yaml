@@ -5,7 +5,9 @@
   type: implement
   verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T3769 into W1-T3589 — Its title and files repeat an older queued task.
   attempts: 0
   author_class: machine
   origin: "ci-learning:5852:ci-gate"
