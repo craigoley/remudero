@@ -1,0 +1,31 @@
+- id: W1-T4116
+  title: "ONCE GATES KNOW THEIR FIRE RATES, NOTHING ACTS ON THEM — add a gate gardener that tightens slack baselines, refreshes stale ones and proposes demoting a gate that never fires, judged by refusals repaired against refusals overridden"
+  repo: remudero
+  depends_on: [W1-T4110, W1-T4115]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23; research over origin/main d7b569e0d"
+  plan_refs: [W1-T4110, W1-T4115]
+  files: [src/lib/gate-gardener.ts, src/run-task.ts, test/the-gates-tend-themselves.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4115 records per-gate fire, repair and override rates. A one-way baseline with slack is never tightened, a stale
+    one never refreshed, and a gate that has not fired in its whole history keeps costing CI minutes.
+  design: |
+    (i) Classes: TIGHTEN-SLACK-BASELINE (lower a baseline to its measured value), REFRESH-STALE-BASELINE, PROPOSE-DEMOTION
+        (advisory, with a GATE_RATIONALE so gate-monotonic-check accepts it, `review: "operator"`).
+    (ii) Metric: refusals repaired against refusals overridden or dismissed, per gate, before and after.
+  acceptance:
+    - claim: "a slack baseline is tightened to its measured value"
+      proof: 'grep: test("W1-T4116: a slack baseline is tightened to its measured value" in test/the-gates-tend-themselves.test.ts'
+    - claim: "a demotion is only proposed for operator review"
+      proof: 'grep: test("W1-T4116: a demotion is only proposed for operator review" in test/the-gates-tend-themselves.test.ts'
+    - claim: "the daemon wires the gate gardener"
+      proof: 'grep: gateGardenSpec( in src/run-task.ts'
+  falsifier: |
+    Let a demotion auto-merge and the second test goes red.

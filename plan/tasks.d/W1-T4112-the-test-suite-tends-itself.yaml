@@ -1,0 +1,33 @@
+- id: W1-T4112
+  title: "THE TEST MANIFEST IS MEASURED IN CI AND THE MEASUREMENT IS THROWN AWAY — scripts/test-tier-manifest.json holds 521 entries at 0 ms (never measured), its last bulk refresh was 2026-09-08, one test measured 359 s against a 59 s entry (W1-T4071), CI's `--propose` output lives 7 days as an artifact and is never adopted, and FLAKE-RETRY is printed to stdout only: add a test-suite gardener that adopts material duration proposals, retiers repeat flakers, and shrinks one-way baselines"
+  repo: remudero
+  depends_on: [W1-T4110]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23; research over origin/main d7b569e0d"
+  plan_refs: [W1-T4110, W1-T4071]
+  files: [src/lib/test-gardener.ts, scripts/test-tier-manifest.mjs, scripts/test-with-retry.mjs, src/run-task.ts, test/the-test-suite-tends-itself.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 (research): 1,793 test files; the manifest's `--propose/--adopt` (proposalIsMaterial) exists and CI
+    runs `--propose`, but nothing adopts it; test-with-retry.mjs records flakes only as stdout; the source-text baseline
+    (213 files) has had one commit ever. W1-T4071 (queued) covers one stale entry; this subsumes it.
+  design: |
+    (i) test-with-retry.mjs ledgers `test.flake_retry {file, test}`, so flakes are a record, not a log line.
+    (ii) Classes: ADOPT-DURATIONS (land a material manifest proposal), RETIER-FLAKER (move a repeat flaker to the slow
+         tier), SHRINK-BASELINE (re-capture a one-way test baseline downward).
+    (iii) Metrics: CI wall-clock and shard skew for ADOPT; retry count for RETIER; baseline size for SHRINK.
+  acceptance:
+    - claim: "a material duration proposal is adopted and judged by shard skew"
+      proof: 'grep: test("W1-T4112: a material duration proposal is adopted and judged by shard skew" in test/the-test-suite-tends-itself.test.ts'
+    - claim: "a flake is ledgered, not only printed"
+      proof: 'grep: test("W1-T4112: a flake is ledgered, not only printed" in test/the-test-suite-tends-itself.test.ts'
+    - claim: "the daemon wires the test gardener"
+      proof: 'grep: testGardenSpec( in src/run-task.ts'
+  falsifier: |
+    Leave FLAKE-RETRY on stdout only and the second test finds no ledger row.

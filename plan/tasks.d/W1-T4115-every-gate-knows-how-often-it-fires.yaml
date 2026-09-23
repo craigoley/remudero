@@ -1,0 +1,33 @@
+- id: W1-T4115
+  title: "NO GATE KNOWS HOW OFTEN IT FIRES OR WHAT IT COSTS — 25 scripts/*-baseline.json and 23 workflows, baselines that only move one way (mutation-baseline untouched since 2026-07-29, comment-load-baseline 73 commits in a week), and unwired-gate-check still counting a step behind `if: false` as wired: record each gate's fire rate, repair rate and CI minutes from Actions runs, so dead and noisy gates become visible"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23; research over origin/main d7b569e0d"
+  plan_refs: []
+  files: [src/lib/gate-fire-rate.ts, scripts/unwired-gate-check.mjs, src/run-task.ts, test/every-gate-knows-how-often-it-fires.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 (research): gate-monotonic-check and baseline-monotonic-check keep gates one-way; judgeCiLessonEfficacy
+    (ci-lesson-recurrence.ts) gives held/recurred verdicts and reports only; no per-gate fire rate, repair rate or
+    CI-minute cost is recorded anywhere, so a gate that never fires and one that always fires look the same.
+  design: |
+    (i) A cadence reads recent Actions runs (REST, paced) and ci-failure-corpus, and ledgers per gate: runs, refusals,
+        refusals later repaired on the same PR, refusals overridden, and minutes.
+    (ii) unwired-gate-check treats a step guarded by `if: false` as unwired.
+    (iii) The digest reports the never-firing and always-firing gates. Acting on them is W1-T4116.
+  acceptance:
+    - claim: "each gate's fire and repair rate is ledgered"
+      proof: 'grep: test("W1-T4115: each gate.s fire and repair rate is ledgered" in test/every-gate-knows-how-often-it-fires.test.ts'
+    - claim: "a step behind if false is not counted as wired"
+      proof: 'grep: test("W1-T4115: a step behind if false is not counted as wired" in test/every-gate-knows-how-often-it-fires.test.ts'
+    - claim: "the cadence calls the measurement"
+      proof: 'grep: measureGateFireRates( in src/run-task.ts'
+  falsifier: |
+    Keep reading `if: false` steps as wired and the second test goes red.

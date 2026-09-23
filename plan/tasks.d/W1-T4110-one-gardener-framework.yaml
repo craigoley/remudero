@@ -1,0 +1,39 @@
+- id: W1-T4110
+  title: "EVERY SELF-IMPROVING LOOP SHOULD JUDGE ITS OWN ACTIONS AND NONE BUT ONE DOES — rmd has many measurement and filing loops (adoption scan, rule efficacy, mount recommender, coverage improvement, ci-lesson recurrence) and none keeps a per-action record or checks whether its changes helped; the knowledge gardener (W1-T4095) does: extract its general half into src/lib/gardener.ts so each new gardener is a small spec, not a copy"
+  repo: remudero
+  depends_on: [W1-T4095]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-23: other gardeners for self improvement; research over origin/main d7b569e0d"
+  plan_refs: [W1-T4095]
+  files: [src/lib/gardener.ts, src/lib/knowledge-gardener.ts, test/a-gardener-judges-its-own-actions.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23. src/lib/knowledge-gardener.ts (W1-T4095) splits cleanly: GENERAL — per-class Beta records, the
+    one-class-per-pass Thompson draw, judgePending (a closed PR debits; after a merge only a change beyond one standard
+    error credits or debits), the state/<NAME>_OFF-<class> switches, the cheap-then-full fingerprint skip, the one-PR
+    workspace, the dated garden log and the <name>.scorecard ledger row, the never-overlapping timer. SPECIFIC —
+    inventory, value model, action planners, apply, PR proofs. No other loop in src/ keeps a posterior or judges an
+    applied change (grep for Beta/posterior/judge over src/lib: only knowledge-value.ts and knowledge-gardener.ts).
+  design: |
+    (i) src/lib/gardener.ts exports `runGarden(spec, deps)` and `startGarden(spec, deps, intervalMs)`. A spec supplies:
+        name, action classes, cheapFingerprint, inventory, fingerprint, `metric(inventory) -> {successes, trials}` per
+        class (so classes are judged on their own outcome, not one shared scalar), plan(items, actingClass, rng),
+        apply(workspace, actions) -> paths, and the PR body.
+    (ii) The knowledge gardener becomes a spec over it with unchanged behaviour; its tests keep passing unmodified.
+    (iii) A spec may declare a class `review: "operator"`: its PR is opened without auto-merge and says why, for actions
+          doctrine reserves to a person.
+  acceptance:
+    - claim: "a spec's class is judged by its own metric"
+      proof: 'grep: test("W1-T4110: a spec.s class is judged by its own metric" in test/a-gardener-judges-its-own-actions.test.ts'
+    - claim: "an operator-review class opens its PR without auto-merge"
+      proof: 'grep: test("W1-T4110: an operator-review class opens its PR without auto-merge" in test/a-gardener-judges-its-own-actions.test.ts'
+    - claim: "the knowledge gardener runs on the framework"
+      proof: 'grep: runGarden( in src/lib/knowledge-gardener.ts'
+  falsifier: |
+    Judge every class on one shared scalar and the first test credits a class whose own metric fell.

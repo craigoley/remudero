@@ -1,0 +1,32 @@
+- id: W1-T4117
+  title: "THE ADOPTION SCAN FINDS DEAD CODE AND NOTHING REMOVES IT — 200 live `adoption:symbol-no-caller` proposals, and run-task.ts grew from 25,956 lines (2026-08-21) to 44,682: add a dead-export gardener that deletes an export the scan has shown unreferenced, judged by CI staying green and the export not being re-added or reverted"
+  repo: remudero
+  depends_on: [W1-T4110]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-23; research over origin/main d7b569e0d"
+  plan_refs: [W1-T4110]
+  files: [src/lib/export-gardener.ts, src/run-task.ts, test/dead-exports-are-pruned.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-09-23 (research): state/adoption-latest.json lists unreferenced exports and the matching proposals retire
+    themselves when the finding clears, but nothing deletes the export. Deleting code carries more risk than the other
+    gardeners, so it is last, small-batch, and fully judged.
+  design: |
+    (i) One class, DELETE-UNREFERENCED-EXPORT: a symbol the scan has reported unreferenced across two scans, with no
+        dynamic reference (string lookups, registries) found by grep, is deleted in a small batch; the revert is the undo.
+    (ii) Metric: the PR's CI stays green and the symbol is not re-added or reverted within the window.
+  acceptance:
+    - claim: "an export reported unreferenced twice is deleted in a small batch"
+      proof: 'grep: test("W1-T4117: an export reported unreferenced twice is deleted in a small batch" in test/dead-exports-are-pruned.test.ts'
+    - claim: "an export named in a string lookup is kept"
+      proof: 'grep: test("W1-T4117: an export named in a string lookup is kept" in test/dead-exports-are-pruned.test.ts'
+    - claim: "the daemon wires the export gardener"
+      proof: 'grep: exportGardenSpec( in src/run-task.ts'
+  falsifier: |
+    Skip the dynamic-reference check and the second test deletes a registry-named export.
