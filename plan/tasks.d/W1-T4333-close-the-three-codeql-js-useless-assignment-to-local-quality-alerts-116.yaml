@@ -100,11 +100,11 @@
     decision for a separate proposal, not smuggled into a three-alert cleanup).
   acceptance:
     - claim: "each of alerts #116, #125 and #145 is accounted for by live API evidence recorded in the fixture — either its flagged assignment is fixed in this diff, or the alert is shown already-closed and dropped"
-      proof: "unit test: test/useless-assignment-alerts.test.ts"
+      proof: 'grep: test("W1-T4333: each of alerts #116, #125 and #145 is accounted for by live API evidence" in test/useless-assignment-alerts.test.ts'
     - claim: "no useless assignment remains at any site this PR fixed — the dead store, and its now-unused declaration where nothing else reads it, is removed, while any side-effecting right-hand expression is preserved as a bare statement"
-      proof: "unit test: test/useless-assignment-alerts.test.ts"
+      proof: 'grep: test("W1-T4333: no useless assignment remains at a fixed site and side-effecting expressions are preserved" in test/useless-assignment-alerts.test.ts'
     - claim: "observable behavior at every touched site is unchanged — the full existing test suite passes and typecheck reports zero NEW noUnusedLocals/noUnusedParameters violations introduced by the removal"
-      proof: "unit test: test/useless-assignment-alerts.test.ts"
+      proof: 'grep: test("W1-T4333: observable behavior at every touched site is unchanged" in test/useless-assignment-alerts.test.ts'
     - claim: "no alert is dismissed by hand — every disposition is a code fix left for CodeQL's own next scan to close, or a pre-existing closure evidenced from the API, never a manual won't-fix"
       proof: "grep: alert-dismissed-by-hand: none in test/useless-assignment-alerts.test.ts"
   note: "risk:high / band_meaning:blast-radius set UP FRONT, not a sizing workaround: the three flagged
