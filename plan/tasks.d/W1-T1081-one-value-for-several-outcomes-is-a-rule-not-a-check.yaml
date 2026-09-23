@@ -129,6 +129,7 @@
       proof: "grep: diff-coverage is the gate for NEW in CLAUDE.md"
     - claim: "the growth is paid for by folding the bullet that says its own defects are fixed"
       proof: "grep: Both defects are FIXED in CLAUDE.md"
+      satisfied_by: "#2995"
   origin: "recon#one-value-for-several-outcomes-2026-08-20"
   plan_refs: ["W1-T1074", "W1-T1076", "W1-T1077", "W1-T1059"]
   files: [CLAUDE.md]
