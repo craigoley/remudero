@@ -11,7 +11,7 @@
   origin: "knowledge-system audit 2026-09-22"
   plan_refs: [W1-T4090, W1-T33, W1-T2760]
   files: [src/lib/knowledge-value.ts, src/lib/learnings.ts, src/lib/digest.ts, src/run-task.ts, test/a-learning-that-never-helps-sinks.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-22.

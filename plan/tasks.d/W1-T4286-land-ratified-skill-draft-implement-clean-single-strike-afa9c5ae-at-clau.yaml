@@ -1,0 +1,197 @@
+- id: W1-T4286
+  title: "Land ratified skill-draft implement-clean-single-strike-afa9c5ae at .claude/skills/, proven reachable via the LIVE W1-T3101 harness-injection call site (skill-draft:afa9c5aea4d3c168)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files: [".claude/skills/implement-clean-single-strike-afa9c5ae/SKILL.md", "test/implement-clean-single-strike-skill-is-injectable.test.ts"]
+  origin: architect
+  plan_refs: ["§7B", "P25", "W1-T2766", "W1-T3101"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RATIFIES inbox proposal skill-draft:afa9c5aea4d3c168 (skill-workshop.ts, W1-T2766): a
+    "clean_single_strike" procedural candidate mined from 79 merged implement runs, cleared the
+    module's own two-run floor by a wide margin, and was scanned clean by scanSkillDraft (no
+    disallowed host/path/tool, no injection-shaped line) before staging.
+
+    RULE 19 #588 MERITS: this is one cross-file invariant, not two piecewise tasks — the checked-in
+    skill file and its real-tree injection test must land together to prove this ratified skill is
+    selectable by the production harness route.
+
+    APPROVING A skill-draft PROPOSAL DOES NOT WRITE .claude/skills/ ITSELF — VERIFIED FROM SOURCE.
+    approveCommand/createRatificationBranch (src/run-task.ts) treat every proposal's cached draft
+    identically as a {fragmentYaml, stampLine} plan-task fragment, minted via
+    materializeDraftTaskIds and written as plan/tasks.d/ shards; there is no skill-draft:-specific
+    branch anywhere in inbox.ts or run-task.ts. So ratifying this proposal correctly means filing
+    THIS task, which a later implement worker executes (through the ordinary ci+remudero-review
+    gate) to actually create the file — matching stageSkillDraft's own comment that the write
+    happens "once rmd approve ratifies the staged proposal into a plan PR", i.e. via the worker's
+    own PR, not the ratification PR.
+
+    THE PROPOSAL'S OWN "NOT reachable by a worker today" TEXT IS STALE — this is the ratification's
+    load-bearing finding, not an assumption. describeWorkerSkillReachability (skill-workshop.ts:252)
+    answers ONLY whether the native SDK Skill-tool can load .claude/skills/ via settingSources
+    (still [], still false — WORKER_SETTING_SOURCES is untouched and untouchable, see W1-T4287's
+    rationale and this task's own falsifier below). But W1-T3101 (status: merged) built a SECOND,
+    ALREADY-LIVE route the reachability text never considers: run-task.ts:12091-12098 —
+    `selectSkillsForTask(loadInjectableSkills(join(repoRoot, ".claude", "skills")), task.type,
+    DEFAULT_KNOWLEDGE_BUDGET_CHARS)` — reads .claude/skills/<name>/SKILL.md straight off the repo
+    checkout and inlines any body whose frontmatter carries `applies-to:` matching the task's own
+    type into the implement prompt's CONTEXT block, ledgering skillsInjectedEvent. This draft
+    ALREADY carries `applies-to: implement` (renderSkillDraft emits it automatically for any
+    candidate.taskType in INJECTABLE_SKILL_TASK_TYPES, which "implement" is), so once this file
+    exists at the exact path, it becomes live-reachable for every implement-type dispatch with zero
+    further code change. The existing generic regression test
+    test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts already proves the MECHANISM;
+    this task's own new test proves THIS SPECIFIC skill is picked up by it, closing the loop from
+    "staged proposal" to "load-bearing prompt content" the P25 dead-consumer discipline requires.
+  design: |
+    (i) Create .claude/skills/implement-clean-single-strike-afa9c5ae/SKILL.md with EXACTLY the
+        content given verbatim in this task's `prompt` field below — the content was already
+        scanned and evidence-cited at staging time; do not reword, reformat, or re-derive it from a
+        fresh mineProceduralCandidates() pass (a fresh mine could produce a different run count/hash
+        and would bypass the scan that already ran against THIS exact text).
+    (ii) Add test/implement-clean-single-strike-skill-is-injectable.test.ts asserting, over the REAL
+         checked-in tree (repo root resolved the same way an existing test in this file resolves
+         it — VERIFY the convention other tests in this repo use for repoRoot-from-test before
+         inventing one):
+           - loadInjectableSkills(join(repoRoot, ".claude", "skills")) returns an entry named
+             "implement-clean-single-strike-afa9c5ae" whose appliesTo includes "implement";
+           - selectSkillsForTask(that list, "implement", DEFAULT_KNOWLEDGE_BUDGET_CHARS) includes
+             it (proving it survives the SAME budget gate run-task.ts applies in production, not
+             merely that the file parses);
+           - the file's "## Evidence" line count (lines matching `- [src: run#`) equals the number
+             stated in its own frontmatter description (e.g. "79" in "79 merged implement
+             run(s)") — a self-consistency check that catches a truncated/duplicated paste without
+             hardcoding the number twice.
+    (iii) settingSources IS NOT TOUCHED. This lands via the harness-injection route only; native
+          Skill-tool loading stays exactly as unreachable as it is today (grep-proven below).
+  prompt: |
+    Create the file `.claude/skills/implement-clean-single-strike-afa9c5ae/SKILL.md` with EXACTLY
+    the following content, byte-for-byte (do not reformat, reword, re-wrap lines, or regenerate the
+    evidence list from a fresh mining pass — this exact text was already scanned and ratified):
+
+    ---BEGIN FILE CONTENT---
+    ---
+    name: implement-clean-single-strike-afa9c5ae
+    description: A procedure shape proven across 79 merged implement run(s): clean_single_strike.
+    applies-to: implement
+    ---
+
+    <!-- DRAFTED by skill-workshop.ts (W1-T2766) from a mined procedural candidate — a Rule 15
+         plan write the Architect proposes and the operator ratifies, not yet ratified. -->
+
+    ## Procedure
+
+    - Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung.
+
+    ## Evidence
+
+    - [src: run#W1-T2632-1788436210940]
+    - [src: run#W1-T2637-1788436224312]
+    - [src: run#W1-T2638-1788453865657]
+    - [src: run#W1-T2639-1788461843923]
+    - [src: run#W1-T2640-1788467691547]
+    - [src: run#W1-T2641-1788473983531]
+    - [src: run#W1-T2642-1788481092387]
+    - [src: run#W1-T2643-1788481198350]
+    - [src: run#W1-T2644-1788490789144]
+    - [src: run#W1-T2645-1788490898416]
+    - [src: run#W1-T2646-1788498287176]
+    - [src: run#W1-T2647-1788498398242]
+    - [src: run#W1-T2648-1788508326964]
+    - [src: run#W1-T2649-1788508435345]
+    - [src: run#W1-T2650-1788516103669]
+    - [src: run#W1-T2651-1788522151900]
+    - [src: run#W1-T2652-1788536668341]
+    - [src: run#W1-T2653-1788793741718]
+    - [src: run#W1-T2654-1788799079243]
+    - [src: run#W1-T2659-1788735549261]
+    - [src: run#W1-T2660-1788522282191]
+    - [src: run#W1-T2661-1788741576268]
+    - [src: run#W1-T2662-1788749489289]
+    - [src: run#W1-T2665-1788536793072]
+    - [src: run#W1-T2667-1788549107880]
+    - [src: run#W1-T2672-1788745353036]
+    - [src: run#W1-T2674-1788749553968]
+    - [src: run#W1-T2686-1788760960866]
+    - [src: run#W1-T2687-1788735615891]
+    - [src: run#W1-T2690-1788741647156]
+    - [src: run#W1-T2691-1788745421191]
+    - [src: run#W1-T2694-1788765525875]
+    - [src: run#W1-T2695-1788771224807]
+    - [src: run#W1-T2697-1788778060735]
+    - [src: run#W1-T2699-1788754462548]
+    - [src: run#W1-T2701-1788761027886]
+    - [src: run#W1-T2702-1788785723912]
+    - [src: run#W1-T2705-1788789055505]
+    - [src: run#W1-T2762-1788799150056]
+    - [src: run#W1-T2766-1788807005000]
+    - [src: run#W1-T2885-1788838174276]
+    - [src: run#W1-T2886-1788845108364]
+    - [src: run#W1-T2887-1788852390932]
+    - [src: run#W1-T2888-1788880523823]
+    - [src: run#W1-T2889-1788914343433]
+    - [src: run#W1-T2891-1789036240352]
+    - [src: run#W1-T2892-1789079769157]
+    - [src: run#W1-T2895-1788863156410]
+    - [src: run#W1-T2896-1788841173870]
+    - [src: run#W1-T2897-1788814811693]
+    - [src: run#W1-T2898-1788838247407]
+    - [src: run#W1-T2900-1788819399681]
+    - [src: run#W1-T2901-1788848487982]
+    - [src: run#W1-T2902-1788824574770]
+    - [src: run#W1-T2903-1788830885382]
+    - [src: run#W1-T2904-1788841247989]
+    - [src: run#W1-T2906-1788845187757]
+    - [src: run#W1-T2907-1788863239756]
+    - [src: run#W1-T2909-1788868493194]
+    - [src: run#W1-T2910-1788868580611]
+    - [src: run#W1-T2911-1788871479523]
+    - [src: run#W1-T2912-1788887679433]
+    - [src: run#W1-T2916-1788887777448]
+    - [src: run#W1-T2918-1788892612578]
+    - [src: run#W1-T2920-1788916761404]
+    - [src: run#W1-T2921-1788919393730]
+    - [src: run#W1-T2922-1788914437088]
+    - [src: run#W1-T2925-1788916854945]
+    - [src: run#W1-T3098-1788834987708]
+    - [src: run#W1-T3130-1788858579692]
+    - [src: run#W1-T3183-1788896738533]
+    - [src: run#W1-T3192-1788899509774]
+    - [src: run#W1-T3200-1788899607534]
+    - [src: run#W1-T3207-1788902917008]
+    - [src: run#W1-T3208-1788903013185]
+    - [src: run#W1-T3215-1788910624736]
+    - [src: run#W1-T3217-1788907598855]
+    - [src: run#W1-T3218-1788910741532]
+    - [src: run#W1-T3222-1788919280286]
+    - Filed under: W1-T2632, W1-T2637, W1-T2638, W1-T2639, W1-T2640, W1-T2641, W1-T2642, W1-T2643, W1-T2644, W1-T2645, W1-T2646, W1-T2647, W1-T2648, W1-T2649, W1-T2650, W1-T2651, W1-T2652, W1-T2653, W1-T2654, W1-T2659, W1-T2660, W1-T2661, W1-T2662, W1-T2665, W1-T2667, W1-T2672, W1-T2674, W1-T2686, W1-T2687, W1-T2690, W1-T2691, W1-T2694, W1-T2695, W1-T2697, W1-T2699, W1-T2701, W1-T2702, W1-T2705, W1-T2762, W1-T2766, W1-T2885, W1-T2886, W1-T2887, W1-T2888, W1-T2889, W1-T2891, W1-T2892, W1-T2895, W1-T2896, W1-T2897, W1-T2898, W1-T2900, W1-T2901, W1-T2902, W1-T2903, W1-T2904, W1-T2906, W1-T2907, W1-T2909, W1-T2910, W1-T2911, W1-T2912, W1-T2916, W1-T2918, W1-T2920, W1-T2921, W1-T2922, W1-T2925, W1-T3098, W1-T3130, W1-T3183, W1-T3192, W1-T3200, W1-T3207, W1-T3208, W1-T3215, W1-T3217, W1-T3218, W1-T3222
+    ---END FILE CONTENT---
+
+    Then add test/implement-clean-single-strike-skill-is-injectable.test.ts per this task's design
+    clause (ii), and open the PR through the ordinary gate.
+  acceptance:
+    - claim: "the file exists with the exact ratified frontmatter, including the applies-to: implement opt-in that makes it eligible for harness injection"
+      proof: "grep: applies-to: implement in .claude/skills/implement-clean-single-strike-afa9c5ae/SKILL.md"
+    - claim: "the exact ratified Procedure step is preserved verbatim, not paraphrased"
+      proof: "grep: Resolve the task on the first attempt in .claude/skills/implement-clean-single-strike-afa9c5ae/SKILL.md"
+    - claim: "the production implement prompt still calls the W1-T3101 harness-injection selector this skill relies on"
+      proof: 'grep: test("W1-T4286: the production implement prompt still calls selectSkillsForTask" in test/implement-clean-single-strike-skill-is-injectable.test.ts'
+    - claim: "the skill is REACHABLE — selectSkillsForTask(loadInjectableSkills(...), 'implement', ...) selects it, reusing the SAME production call site run-task.ts:12091-12098 wires (W1-T3101), and the Evidence-line count matches the description's stated run count (a self-consistency proof, not a hardcoded duplicate)"
+      proof: "unit test: test/implement-clean-single-strike-skill-is-injectable.test.ts"
+    - claim: "native SDK reachability is untouched by this task — spawnWorker still passes settingSources: [] — this skill reaches a worker ONLY via the harness-injection route, never via native Skill-tool loading"
+      proof: 'grep: test("W1-T4286: spawnWorker still passes empty settingSources so native Skill-tool loading stays off" in test/implement-clean-single-strike-skill-is-injectable.test.ts'
+  note: |
+    Grounded against a live read of origin state before drafting (not assumed): skill-workshop.ts
+    (renderSkillDraft:85-115, describeWorkerSkillReachability:252-266, loadInjectableSkills:367-394,
+    selectSkillsForTask:406-422), run-task.ts:12091-12098 (the production injection call site) and
+    :22266-22272 (retroCommand's stageSkillDrafts call — see W1-T4287), plan/tasks.d/W1-T3101-*.yaml
+    (status: merged — the harness-injection route this task relies on already exists) and
+    plan/tasks.d/W1-T3137-*.yaml (status: queued — an investigate-only shard about NATIVE
+    settingSources reachability that does not touch, and is not touched by, this task).

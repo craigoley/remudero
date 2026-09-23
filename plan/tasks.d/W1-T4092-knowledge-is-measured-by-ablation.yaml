@@ -11,6 +11,7 @@
   origin: "knowledge-system audit 2026-09-22"
   plan_refs: [W1-T4090]
   files: [src/lib/measurement-cadence.ts, src/lib/policy.ts, plan/policy.yaml, src/lib/digest.ts, test/knowledge-is-measured-by-ablation.test.ts]
+  priority: 2
   status: queued
   attempts: 0
   rationale: |
