@@ -1,36 +1,21 @@
 /**
  * lib/incident-events.ts — `POST /v1/incidents/events` (W1-T4383, the SRE gardener's phase 1).
  *
- * NOTHING RECEIVES A RUNTIME ERROR today — the console and the gateway throw into logs nobody
- * reads. This is the one ingest endpoint that changes that: it SCRUBS each reported error, GROUPS
- * it by a stable fingerprint (error type + the IN-APP stack frames — never a library frame or a
- * line number, mirroring Sentry's documented model), and records it as one `incident.event`
- * ledger row. A burst past the per-fingerprint-per-minute cap collapses to a single
- * `incident.sampled` row instead of drowning the ledger.
- *
- * LEAST PRIVILEGE: this route is reachable by the ordinary write bearer, exactly like any other
- * write-scoped route, but it is ALSO the only route the new `ingest`-only token (see
- * service.ts's {@link import("./service.js").ingestTokenProvider}) can ever reach — so a public
- * surface (the marketing site, an onboarded app) can report an error without holding a token that
- * can pause or stop the fleet. That scoping lives in service.ts/serve.ts; this module owns none
- * of it — it only builds the plain {@link Route}.
- *
- * PURE HELPERS FIRST: {@link validateIncidentEventBody}, {@link scrubIncidentEvent} and
- * {@link fingerprintIncidentEvent} are exported and side-effect-free, so the grouping and scrub
- * rules are unit-testable without a live server. {@link buildIncidentEventsRoute} is the thin
- * HTTP/ledger wiring over them.
- *
- * Why: docs/forensics/incident-events.md#module-header (W1-T4383, operator ruling 2026-09-23).
+ * The console and the gateway throw into logs nobody reads. This route SCRUBS each reported error,
+ * GROUPS it by a fingerprint of the error type plus its IN-APP frames (Sentry's model: never a
+ * library frame or a line number), and ledgers one `incident.event` row; past the per-fingerprint
+ * per-minute cap a burst collapses to ONE `incident.sampled` row. The ingest-only token that can
+ * reach this route and nothing else is wired in serve.ts (`ingestTokenProvider`, service.ts).
  */
 
 import { createHash } from "node:crypto";
 import type { Route } from "./service.js";
 import { RawBodyTooLargeError, readBoundedRawBody } from "./service.js";
-import { sendJson } from "./panel-actions.js";
+import { sendJson, type PanelActionDeps } from "./panel-actions.js";
 import { appendLedger } from "./ledger.js";
+import { systemClock, type Clock } from "./clock.js";
 
-/** The route's own path/method — exported so `serve.ts`'s ingest-token wiring and this module's
- *  own route registration can never name it twice and drift apart. */
+/** Exported so serve.ts's ingest-token scoping and this route can never name it twice. */
 export const INCIDENT_INGEST_ROUTE_PATH = "/v1/incidents/events";
 export const INCIDENT_INGEST_ROUTE_METHOD = "POST" as const;
 
@@ -40,9 +25,7 @@ export type IncidentKind = "exception" | "http_5xx" | "latency" | "invariant";
 const VALID_SOURCES: ReadonlySet<string> = new Set<IncidentSource>(["console", "gateway", "daemon"]);
 const VALID_KINDS: ReadonlySet<string> = new Set<IncidentKind>(["exception", "http_5xx", "latency", "invariant"]);
 
-/** One reported stack frame — `file`/`fn` only, DELIBERATELY no line number: the design's own
- *  fingerprint rule ("never library frames or line numbers") can only hold if a line number was
- *  never part of the wire shape to begin with. */
+/** One reported stack frame — `file`/`fn` only: a line number is never part of the wire shape. */
 export interface IncidentEventFrame {
   file: string;
   fn: string;
@@ -60,9 +43,7 @@ export interface IncidentEventInput {
   at: string;
 }
 
-/** {@link IncidentEventInput} after {@link scrubIncidentEvent} — what fingerprinting and the
- *  ledger row are both derived from. `message` survives here for {@link fingerprintIncidentEvent}
- *  even though the ledger row itself never stores it (design's row shape is exhaustive). */
+/** {@link IncidentEventInput} after {@link scrubIncidentEvent}; `message` feeds the fingerprint only. */
 export interface ScrubbedIncidentEvent {
   source: IncidentSource;
   kind: IncidentKind;
@@ -73,21 +54,19 @@ export interface ScrubbedIncidentEvent {
   sha?: string;
 }
 
-// PRIMARY CONTROL (W1-T1266): the deliberate cap `scrubIncidentEvent` enforces on every stored
-// message — not a fallback for something else already having failed.
+// PRIMARY CONTROL (W1-T1266): the design's scrub cap on every stored message.
 export const INCIDENT_MESSAGE_MAX_CHARS = 500;
-// PRIMARY CONTROL: the deliberate cap `scrubIncidentEvent` enforces on the frames array before
-// anything downstream (fingerprinting, storage) ever sees it.
+// PRIMARY CONTROL: the design's scrub cap on frames, applied before fingerprinting.
 export const INCIDENT_FRAMES_MAX = 20;
 export const INCIDENT_FINGERPRINT_FRAME_COUNT = 3;
-// PRIMARY CONTROL: the deliberate per-fingerprint-per-minute rate the sampler enforces — the
-// mechanism itself, not a backstop for a separate control that failed.
+// PRIMARY CONTROL: the design's per-fingerprint-per-minute sampling rate itself.
 export const INCIDENT_SAMPLE_CAP_PER_MINUTE = 20;
+// PRIMARY CONTROL: bounds a public, low-trust body read far above a capped event.
+const MAX_BODY_BYTES = 16 * 1024;
+const SAMPLE_WINDOW_MS = 60_000;
 
 // ── scrub ─────────────────────────────────────────────────────────────────────────────────────
 
-/** A `?query` or `#fragment` suffix, stripped wherever it appears — applied to both `route` and
- *  `message` (design: "strip query strings and fragments from routes and messages"). */
 const QUERY_OR_FRAGMENT_PATTERN = /[?#]\S*/g;
 
 function stripQueryAndFragment(value: string): string {
@@ -96,8 +75,7 @@ function stripQueryAndFragment(value: string): string {
 
 const UUID_PATTERN = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
 const EMAIL_PATTERN = /\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g;
-/** A generic token shape: 20+ chars of the base64url/opaque-secret alphabet. Runs LAST, after the
- *  more specific UUID/email patterns, so it only ever mops up what they didn't already replace. */
+/** 20+ chars of an opaque-secret alphabet; runs after the UUID/email patterns. */
 const TOKEN_PATTERN = /\b[A-Za-z0-9_-]{20,}\b/g;
 const REDACTED = "[redacted]";
 
@@ -105,13 +83,11 @@ function redactSecrets(value: string): string {
   return value.replace(UUID_PATTERN, REDACTED).replace(EMAIL_PATTERN, REDACTED).replace(TOKEN_PATTERN, REDACTED);
 }
 
-/** Scrub rule (design): strip query/fragment from `route`/`message`, drop anything shaped like a
- *  token/email/uuid from `message`, cap `message` at {@link INCIDENT_MESSAGE_MAX_CHARS} and
- *  `frames` at {@link INCIDENT_FRAMES_MAX}. Runs BEFORE anything is stored or fingerprinted. */
+/** Strip query/fragment and redact token/email/uuid shapes from `route` and `message`, then cap
+ *  `message` and `frames` — before anything is stored or fingerprinted. */
 export function scrubIncidentEvent(input: IncidentEventInput): ScrubbedIncidentEvent {
-  const strippedMessage = stripQueryAndFragment(input.message);
-  const message = redactSecrets(strippedMessage).slice(0, INCIDENT_MESSAGE_MAX_CHARS);
-  const route = input.route !== undefined ? stripQueryAndFragment(input.route) : undefined;
+  const message = redactSecrets(stripQueryAndFragment(input.message)).slice(0, INCIDENT_MESSAGE_MAX_CHARS);
+  const route = input.route === undefined ? undefined : redactSecrets(stripQueryAndFragment(input.route));
   const frames = (input.frames ?? []).slice(0, INCIDENT_FRAMES_MAX);
   return {
     source: input.source,
@@ -126,24 +102,17 @@ export function scrubIncidentEvent(input: IncidentEventInput): ScrubbedIncidentE
 
 // ── fingerprint ───────────────────────────────────────────────────────────────────────────────
 
-/** A frame is "in the app" iff its file path doesn't pass through `node_modules` — the one
- *  boundary the design draws between "ours" and "a library's". */
 function isAppFrame(frame: IncidentEventFrame): boolean {
   return !frame.file.includes("node_modules");
 }
 
-/** Collapses a run of 6+ hex characters (a sha/commit/request id) OR any run of digits (a line
- *  number, a count, a numeric id) to a single `#` placeholder, so two errors differing only in
- *  those values fingerprint identically. Hex FIRST: `a1b2c3` must not also fall through the
- *  digit pass and get double-normalized into something a plain digit run wouldn't produce. */
+/** Hex ids (6+) then digit runs collapse to `#`, so line numbers and ids never split a group. */
 function normalizeIdsAndDigits(value: string): string {
   return value.replace(/[0-9a-fA-F]{6,}/g, "#").replace(/\d+/g, "#");
 }
 
-/** sha256(kind + name + message-with-digits-and-hex-ids-normalised + the first
- *  {@link INCIDENT_FINGERPRINT_FRAME_COUNT} IN-APP frames, each `file:fn`, no line numbers). A
- *  library frame is filtered out BEFORE the first-3 cut, so its mere presence (or position)
- *  never perturbs which app frames end up in the fingerprint. */
+/** sha256(kind, name, normalised message, the first 3 IN-APP frames as `file:fn`). Library frames
+ *  are dropped BEFORE the cut, so one never shifts which app frames are counted. */
 export function fingerprintIncidentEvent(
   event: Pick<ScrubbedIncidentEvent, "kind" | "name" | "message" | "frames">,
 ): string {
@@ -167,8 +136,7 @@ function isFrameShaped(value: unknown): value is IncidentEventFrame {
   return typeof f.file === "string" && typeof f.fn === "string";
 }
 
-/** A malformed body is refused with the reason (design: "A malformed body is 400 with the
- *  reason") — never defaulted or partially accepted. */
+/** A malformed body is refused with its reason, never defaulted or partially accepted. */
 export function validateIncidentEventBody(body: unknown): IncidentEventValidation {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return { ok: false, reason: "body must be a JSON object" };
@@ -219,55 +187,21 @@ export function validateIncidentEventBody(body: unknown): IncidentEventValidatio
 
 // ── route ─────────────────────────────────────────────────────────────────────────────────────
 
-export interface IncidentEventsDeps {
-  /** Same ledger every other console/daemon write already lands in. */
-  ledgerPath: string;
-  /** Injectable clock (ms since epoch) — a test drives the per-minute sampling window without
-   *  sleeping. Defaults to `Date.now`. */
-  now?: () => number;
-  /** Bounds the raw body read (a public, low-trust surface) — defaults to 16 KiB, comfortably
-   *  above a scrubbed+capped body (500-char message, 20 frames) with room for a client's own
-   *  padding, but far below anything worth flooding the ledger's disk with. */
-  maxBodyBytes?: number;
-  /** Overrides {@link INCIDENT_SAMPLE_CAP_PER_MINUTE} — a test seam only; production never sets this. */
-  sampleCapPerMinute?: number;
-}
-
-const DEFAULT_MAX_BODY_BYTES = 16 * 1024;
-const SAMPLE_WINDOW_MS = 60_000;
-
-interface SampleBucket {
-  windowStart: number;
-  count: number;
-  sampledEmitted: boolean;
-}
-
-/** One `incident.event`/`incident.sampled` ledger line — every field the design's row shape
- *  names, and nothing else (`message`/`frames` never leave this process). */
+/** One ledger row: exactly the design's fields — `message`/`frames` never leave this process. */
 function ledgerFields(fingerprint: string, event: ScrubbedIncidentEvent): Record<string, unknown> {
-  return {
-    fingerprint,
-    source: event.source,
-    kind: event.kind,
-    name: event.name,
-    route: event.route,
-    sha: event.sha,
-  };
+  return { fingerprint, source: event.source, kind: event.kind, name: event.name, route: event.route, sha: event.sha };
 }
 
-/**
- * `POST /v1/incidents/events` (scope write, tier low — see this module's header for how the
- * ingest-only token reaches it without holding the ordinary write bearer). Body -> validate ->
- * scrub -> fingerprint -> ledger. Past {@link INCIDENT_SAMPLE_CAP_PER_MINUTE} events for one
- * fingerprint in one 60s window, every further event in that window is answered `sampled: true`
- * but ledgers nothing more than the ONE `incident.sampled` row already written for it — never a
- * second one, and never another `incident.event` row until the window rolls over.
- */
-export function buildIncidentEventsRoute(deps: IncidentEventsDeps): Route {
-  const now = deps.now ?? Date.now;
-  const cap = deps.sampleCapPerMinute ?? INCIDENT_SAMPLE_CAP_PER_MINUTE;
-  const maxBodyBytes = deps.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
-  const buckets = new Map<string, SampleBucket>();
+/** `POST /v1/incidents/events` (write, tier low): validate -> scrub -> fingerprint -> ledger. Within
+ *  one 60s window a fingerprint ledgers up to `sampleCapPerMinute` `incident.event` rows, then ONE
+ *  `incident.sampled` row; later events in that window answer `sampled: true` and write nothing. */
+export function buildIncidentEventsRoute(
+  deps: Pick<PanelActionDeps, "ledgerPath">,
+  clock: Clock = systemClock,
+  sampleCapPerMinute: number = INCIDENT_SAMPLE_CAP_PER_MINUTE,
+): Route {
+  let windowStart = Number.NaN;
+  const counts = new Map<string, number>();
 
   return {
     method: INCIDENT_INGEST_ROUTE_METHOD,
@@ -277,7 +211,7 @@ export function buildIncidentEventsRoute(deps: IncidentEventsDeps): Route {
     handler: async (req, res) => {
       let rawBody: string;
       try {
-        rawBody = await readBoundedRawBody(req, maxBodyBytes);
+        rawBody = await readBoundedRawBody(req, MAX_BODY_BYTES);
       } catch (e) {
         if (e instanceof RawBodyTooLargeError) {
           sendJson(res, 413, { error: "body_too_large" });
@@ -288,7 +222,7 @@ export function buildIncidentEventsRoute(deps: IncidentEventsDeps): Route {
 
       let parsed: unknown;
       try {
-        parsed = rawBody.trim().length > 0 ? JSON.parse(rawBody) : {};
+        parsed = JSON.parse(rawBody);
       } catch {
         sendJson(res, 400, { error: "invalid_request", detail: "body is not valid JSON" });
         return;
@@ -303,29 +237,22 @@ export function buildIncidentEventsRoute(deps: IncidentEventsDeps): Route {
       const scrubbed = scrubIncidentEvent(validated.value);
       const fingerprint = fingerprintIncidentEvent(scrubbed);
 
-      const nowMs = now();
-      const windowStart = Math.floor(nowMs / SAMPLE_WINDOW_MS) * SAMPLE_WINDOW_MS;
-      let bucket = buckets.get(fingerprint);
-      if (!bucket || bucket.windowStart !== windowStart) {
-        bucket = { windowStart, count: 0, sampledEmitted: false };
-        buckets.set(fingerprint, bucket);
+      const nowMs = clock.now();
+      const window = Math.floor(nowMs / SAMPLE_WINDOW_MS) * SAMPLE_WINDOW_MS;
+      if (window !== windowStart) {
+        // Only the current window is ever consulted, so a rollover forgets every older count.
+        windowStart = window;
+        counts.clear();
       }
-      bucket.count += 1;
-      const sampled = bucket.count > cap;
+      const count = (counts.get(fingerprint) ?? 0) + 1;
+      counts.set(fingerprint, count);
+      const sampled = count > sampleCapPerMinute;
 
-      if (!sampled) {
+      if (count <= sampleCapPerMinute + 1) {
         appendLedger(deps.ledgerPath, {
           run_id: `INCIDENT-${nowMs}`,
           task_id: "INCIDENT",
-          step: "incident.event",
-          ...ledgerFields(fingerprint, scrubbed),
-        });
-      } else if (!bucket.sampledEmitted) {
-        bucket.sampledEmitted = true;
-        appendLedger(deps.ledgerPath, {
-          run_id: `INCIDENT-${nowMs}`,
-          task_id: "INCIDENT",
-          step: "incident.sampled",
+          step: sampled ? "incident.sampled" : "incident.event",
           ...ledgerFields(fingerprint, scrubbed),
         });
       }

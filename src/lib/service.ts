@@ -112,12 +112,7 @@ export interface SseRoute {
   subscribe: (send: SseSend) => () => void;
 }
 
-/** The bearer tokens this surface accepts. `write` also satisfies `read`-scoped routes.
- *  `ingest` (W1-T4383, env `RMD_SERVE_INGEST_TOKEN`) is OPTIONAL and, unlike `read`/`write`, is
- *  never a general credential — {@link ingestTokenProvider} is the only thing that consults it,
- *  and it scopes the grant to exactly one method+path pair, so this token reaches ONE route
- *  (`rmd serve`'s ingest wiring) and refuses everywhere else, even though it lives on the same
- *  `ServiceTokens` shape as the two general-purpose ones. */
+/** The bearer tokens this surface accepts. `write` also satisfies `read`-scoped routes. */
 export interface ServiceTokens {
   read: string;
   write: string;
@@ -538,9 +533,8 @@ function bearerToken(req: IncomingMessage): string | undefined {
   return match?.[1];
 }
 
-/** The `?token=` query-param credential, read ONLY for a route with `allowQueryToken` (the HTML
- *  shell, reached by a browser navigation with no `Authorization` header). Never honored on an
- *  API/data route — it would leak via `Referer` and logs. */
+/** The `?token=` credential, read ONLY for a route with `allowQueryToken` (the HTML shell, a browser
+ *  navigation with no `Authorization` header) — never an API route, where it leaks via `Referer`/logs. */
 function queryToken(req: IncomingMessage): string | undefined {
   const raw = new URL(req.url ?? "/", "http://localhost").searchParams.get("token");
   return raw && raw.length > 0 ? raw : undefined;
@@ -602,23 +596,11 @@ function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
   };
 }
 
-/**
- * W1-T4383 — the LEAST-PRIVILEGE grantor for `ServiceTokens.ingest` (env `RMD_SERVE_INGEST_TOKEN`):
- * scoped to exactly ONE `method`+`path` pair, so a caller holding only this token reaches that one
- * route and is refused (401) on every other one — {@link bearerTokenProvider} never recognizes it
- * (it only compares against `tokens.write`/`tokens.read`), and this provider itself declines any
- * request whose method or path doesn't match, falling through to whatever comes after it.
- *
- * NEVER part of `createService`'s fixed, pre-seam provider order (identity, then operator
- * session, then the bearer token) — it is a {@link ServiceOptions.providers} entry `rmd serve`'s
- * own assembler (serve.ts) appends, because ONLY the assembler knows which concrete route this
- * token is meant to reach (service.ts stays generic mechanism, never a concrete route).
- */
-export function ingestTokenProvider(opts: { token: string | undefined; method: Method; path: string }): IdentityProvider {
+/** W1-T4383: `tokens.ingest` grants write on ONE method+path and falls through everywhere else. */
+export function ingestTokenProvider(opts: { token: string; method: Method; path: string }): IdentityProvider {
   return {
     name: "ingest-token",
     grant: (req) => {
-      if (!opts.token) return undefined;
       const token = bearerToken(req);
       if (!token || !safeEqual(token, opts.token)) return undefined;
       const method = (req.method ?? "GET").toUpperCase();
@@ -626,8 +608,6 @@ export function ingestTokenProvider(opts: { token: string | undefined; method: M
       if (method !== opts.method || path !== opts.path) return undefined;
       return READ_WRITE;
     },
-    // Matches the ingest route's own declared tier (serve.ts) — LOW, the same bookkeeping-grade
-    // consequence the shared write bearer is itself pinned to (bearerTokenProvider, above).
     writeTier: "low",
   };
 }
