@@ -142,6 +142,20 @@ export function classifyCoverage(files) {
 }
 
 /**
+ * W1-T4395 — what the ordinary test lane runs for a diff under test/ only. The coverage lane may skip
+ * such a diff (source coverage cannot move), but the tests it changed must still run: #6867 changed one
+ * test file and no job ran it. Only `*.test.ts` files: run exactly those. Anything else under test/
+ * (helpers, fixtures, setup) can change many suites: run the full suite. Outside test/: `null`, the
+ * ordinary classification applies.
+ * @param {unknown} files
+ * @returns {{ mode: "files", files: string[] } | { mode: "full" } | null}
+ */
+export function testOnlyRun(files) {
+  if (!Array.isArray(files) || files.length === 0 || !files.every(isTestPath)) return null;
+  return files.every((f) => f.endsWith(".test.ts")) ? { mode: "files", files: [...files] } : { mode: "full" };
+}
+
+/**
  * Whether `content` (a test file's source) reads a repo-root path — the `REPO_ROOT` constant, or
  * an inline `join(__dirname, "..")`. Exported for its own unit tests below; `planReadingSuiteFiles`
  * no longer gates on it (see that function's doc).
@@ -313,6 +327,8 @@ export function main(argv) {
       // spend ~39 minutes installing browsers and collecting an unchanged source-coverage graph.
       "coverage-class": { type: "boolean", default: false },
       "list-plan-reading-suites": { type: "boolean", default: false },
+      // W1-T4395: prints "files" then the changed test files, or "full", or nothing (not a test-only diff).
+      "test-only-run": { type: "boolean", default: false },
       // W1-T2680: given a changed-file list, print every suite that WALKS a population those files
       // belong to, or READS one of them as text — the suites `git grep -l <symbol>` cannot reach.
       "list-census-suites": { type: "boolean", default: false },
@@ -326,6 +342,19 @@ export function main(argv) {
       "plan-reading-root": { type: "string" },
     },
   });
+
+  if (values["test-only-run"]) {
+    try {
+      const run = testOnlyRun(readChangedFilesArg(values["changed-files"]));
+      if (run) console.log(run.mode === "files" ? ["files", ...run.files].join("\n") : "full");
+      process.exitCode = 0;
+    } catch (err) {
+      // An unreadable list prints nothing, so the caller keeps the ordinary classification.
+      console.error(`diff-class: FAILED to read the changed files for --test-only-run — ${err && err.message ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
 
   if (values["list-census-suites"]) {
     try {
