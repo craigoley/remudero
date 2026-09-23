@@ -226,6 +226,7 @@ export function buildRepoDashboardRoute(deps: {
         try {
           plan = readPlan(planPath);
         } catch {
+          // An unreadable plan leaves queuedtasks null (unknown), never a zero count.
           plan = undefined;
         }
       }
