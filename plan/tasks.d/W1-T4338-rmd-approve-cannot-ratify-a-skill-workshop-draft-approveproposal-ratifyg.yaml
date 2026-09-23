@@ -72,13 +72,13 @@
         arguable concerns. This task is the write-path wiring alone.
   acceptance:
     - claim: "a proposal carrying a skillFile payload routes approval to writeSkillFile and never to createRatificationBranch"
-      proof: "unit test: test/skill-draft-ratification.test.ts"
+      proof: "unit test: a proposal carrying a skillFile payload routes approval to"
     - claim: "writeSkillFile writes the exact path .claude/skills/<name>/SKILL.md with the drafted markdown verbatim, on its own branch, before openPlanPr runs"
-      proof: "unit test: test/skill-draft-ratification.test.ts"
+      proof: "unit test: writeSkillFile writes the exact path .claude skills <name> SKILL.md"
     - claim: "a proposal with no skillFile field is byte-for-byte unaffected — createRatificationBranch is invoked exactly as it is today"
-      proof: "unit test: test/skill-draft-ratification.test.ts"
+      proof: "unit test: a proposal with no skillFile field is byte-for-byte unaffected"
     - claim: "stageSkillDraft populates the proposal's skillFile field with the SkillDraft's own name and markdown, not a re-parse of the composed summary string"
-      proof: "unit test: test/skill-draft-ratification.test.ts"
+      proof: "unit test: stageSkillDraft populates the proposal s skillFile field with the"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION IF `approveProposal` or `RatifyGateway` already special-case a
     `skill-draft:` (or otherwise `skillFile`-bearing) proposal shape. Re-check:
