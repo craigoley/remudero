@@ -7344,12 +7344,13 @@
     present. Decomposed from the four-gate W1-T25 so this single gate lands in one pass."
   acceptance:
     - claim: "the coverage ratchet BLOCKS a coverage-lowering change — its gate script exits non-zero below the recorded baseline"
-      proof: "unit test: the ratchet script, given fixture coverage data BELOW the recorded baseline, exits non-zero; given data AT/above baseline, exits zero — the falsifier fixture proves the gate is ACTIVE, not merely present"
+      proof: "unit test: coverage-ratchet CLI: BELOW-baseline fixture -> non-zero exit (the gate BLOCKS)"
   risk: high
   origin: architect
   plan_refs: ["§5"]
   files: [scripts/coverage-ratchet.mjs, .github/workflows/ci.yml]
   status: queued
+  pr: 170
   attempts: 0
   note: "Decomposed 2026-07-17 from the four-gate W1-T25 (coverage ratchet · mutation baseline · jscpd ·
     TS-strict) into W1-T25/W1-T96/W1-T97/W1-T98 — one gate per task, each landing in one pass. The
