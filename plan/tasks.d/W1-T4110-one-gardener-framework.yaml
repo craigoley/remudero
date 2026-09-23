@@ -37,5 +37,6 @@
       proof: 'grep: runGarden( in src/lib/knowledge-gardener.ts'
     - claim: "the daemon starts the knowledge gardener"
       proof: 'grep: startKnowledgeGardener( in src/lib/daemon.ts'
+      satisfied_by: "#6710"
   falsifier: |
     Judge every class on one shared scalar and the first test credits a class whose own metric fell.
