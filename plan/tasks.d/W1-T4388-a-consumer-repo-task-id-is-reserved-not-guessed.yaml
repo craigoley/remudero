@@ -1,0 +1,46 @@
+- id: W1-T4388
+  title: "A CONSUMER-REPO TASK ID IS GUESSED, NOT RESERVED — rmd next-task-id claims only W1-T ids, so console and site workers mint CONSOLE-T/PORTAL-T numbers as max+1 and two shards took CONSOLE-T58 within 47 minutes; reserve any prefix on its own repo's origin"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "id collision 2026-09-23: remudero-console #1695 vs #1699"
+  plan_refs: ["W1-T1055", "W1-T3091", "W1-T4389"]
+  files:
+    - src/lib/task-id-reservation.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23 on craigoley/remudero-console: a CONSOLE-T56 worker split out a gate fix and filed it
+    as CONSOLE-T58 on branch run-CONSOLE-T58-1790193411130 (19:56Z, PR #1695). At 20:43Z an operator filing
+    (#1699) merged a different CONSOLE-T58, the SRE gardener's console task. Nothing claimed either number:
+    the console repo holds zero refs/rmd-id/CONSOLE-T* refs (its 17 reservation refs are all W1-T), because
+    reserveTaskIdRemote defaults idFor to W1-T<n> and `rmd next-task-id` offers no other prefix. The damage
+    it nearly did: had #1695 merged, its run-CONSOLE-T58 branch name would have credited the SRE task as built
+    (the branch is an independent credit path), and that task would never have dispatched. It was caught
+    by hand, and only because #1695 was separately refused under rule 15. Renumbered to CONSOLE-T60 (#1700).
+    The same gap exists for the site's PORTAL-T ids.
+  design: |
+    PREVENTION: `rmd next-task-id --prefix <P> --repo <owner/name>` derives the next id for that prefix from
+    the target repo's origin/main plan (tasks.yaml plus tasks.d shards), its open PR titles, bodies and
+    run-<P><n> branches, and its refs/rmd-id/<P><n> refs, then reserves by pushing refs/rmd-id/<P><n> to THAT
+    repo's origin through reserveTaskIdRemote's existing idFor seam. W1-T behaviour is unchanged when
+    --prefix is absent. The worker brief for a consumer repo names this command as the only way to mint.
+    Detection of a collision that slips past this is W1-T4389.
+    Also: `task-id-reservation.ts` exports parsePrefixedTaskId(id), which splits an id into its prefix and number
+    for any prefix; run-task.ts calls it when parsing --prefix.
+  acceptance:
+    - claim: "a prefixed mint reserves the id on the target repo's origin and skips a held one"
+      proof: "unit test: a prefixed mint reserves the id on the target repo's origin and skips a held one"
+    - claim: "a W1-T mint without a prefix is unchanged"
+      proof: "unit test: a W1-T mint without a prefix is unchanged"
+    - claim: "the mint command parses a prefixed id through the shared parser"
+      proof: 'grep: parsePrefixedTaskId( in src/run-task.ts'
+  falsifier: |
+    CLOSE IF consumer-repo ids are already reserved on their own origin.
