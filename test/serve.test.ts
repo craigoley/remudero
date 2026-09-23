@@ -778,13 +778,15 @@ test("buildServeServer starts the prewarm timer only once a console connects, an
   });
   assert.equal(streamRes.status, 200);
   await new Promise((resolve) => setTimeout(resolve, 40));
-  const callsBeforeClose = fetchCalls;
-  assert.ok(callsBeforeClose >= 2, `a connected console must start the background timer, got ${callsBeforeClose} fetches`);
+  assert.ok(fetchCalls >= 2, `a connected console must start the background timer, got ${fetchCalls} fetches`);
 
-  server.close();
+  // Node emits "close" only once every connection has ended, so the baseline is taken after that
+  // event: a tick landing between close() and the event is not a fetch "after close()".
   ac.abort();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  const callsAtClose = fetchCalls;
   await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(fetchCalls, callsBeforeClose, "closing the server must stop the background prewarm timer — no further fetches after close()");
+  assert.equal(fetchCalls, callsAtClose, "closing the server must stop the background prewarm timer — no further fetches after close()");
 });
 
 test("DEFAULT_BOARD_PREWARM_MS matches buildBatchedGithub's own default TTL (15s) — the background refresh lands right as the cache would go stale", () => {

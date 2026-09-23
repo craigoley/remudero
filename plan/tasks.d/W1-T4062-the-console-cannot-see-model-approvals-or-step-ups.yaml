@@ -15,7 +15,7 @@
     - src/lib/analytics-route.ts
     - src/lib/serve.ts
     - test/the-console-can-see-approvals-and-step-ups.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Operator rulings 2026-09-22: Astra and Fable never run without human permission, and Opus/Sol

@@ -132,7 +132,7 @@
     - claim: "a branch classified closed_unmerged is reported by name with that reason, so the reason survives the trip to the ledger rather than collapsing into a count"
       proof: "unit test: closed_unmerged reaches the ledger as a reason and not a tally"
     - claim: "this change adds no deletion path: the reaper still reports and deletes nothing"
-      proof: "unit test: reporting the names does not add a deletion path"
+      proof: "unit test: the reaper reports held names without adding a deletion path"
   falsifier: |
     If a later run of `rmd reap-branches` ever reports a branch in `hold` whose per-head PR state is
     `closed`, then `planBranchReap`'s ordering has changed and the brief's original mechanism is

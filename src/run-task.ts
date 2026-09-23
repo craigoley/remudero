@@ -147,10 +147,11 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
-import { ratifyCliGateway } from "./lib/panel-graph.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
+import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
+import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { renderAnchorBlock } from "./lib/compaction.js";
@@ -1256,6 +1257,7 @@ import {
   type StatusProjection,
   planBranchReap,
   type BranchFacts,
+  BRANCH_REAP_REASON_LABEL,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
   taskIdFromSlugBranch,
@@ -19734,6 +19736,13 @@ export function reapBranchesCommand(
     `hold:      ${plan.hold.length}  (${confirmedHold} confirmed no PR + commits not in main, ` +
       `${plan.undetermined.length} state undetermined)`,
   );
+  if (plan.hold.length > 0) {
+    print("  held branches:");
+    for (const name of plan.hold) {
+      const reason = plan.reasons[name] ?? "state_undetermined";
+      print(`    ${name} — ${BRANCH_REAP_REASON_LABEL[reason]} [${reason}]`);
+    }
+  }
   if (plan.undetermined.length > 0) {
     print(`  undetermined: ${plan.undetermined.join(", ")}`);
   }
@@ -19766,6 +19775,8 @@ export function reapBranchesCommand(
       dangling_citations: danglingCitations,
       orphan_declarations: orphanDeclarations,
       missing_branches: deadDeclaredGuards,
+      held_branches: plan.hold,
+      reasons: plan.reasons,
     });
   }
 
@@ -29915,6 +29926,27 @@ export function memoryLintCorpus(root: string): KnowledgeText[] {
   return corpus;
 }
 
+export function inboxThreadDecider(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): ((ctx: ThreadDecisionContext) => Promise<unknown>) | undefined {
+  try {
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "inbox-thread-settings.json"),
+    });
+    return realThreadDecider({
+      mount: resolveDecisionSummaryMount(loadMounts(mountsPath(repoRoot))),
+      cwd: config.root,
+      settingsFile,
+    });
+  } catch (e) {
+    log("inbox.thread_reader_unavailable", { error: String((e as Error)?.message ?? e) });
+    return undefined;
+  }
+}
+
 export function plainInboxWriter(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -30948,6 +30980,13 @@ export async function daemonCommand(
           ledgerPath,
           mergedLastDay: () => mergedInLastDay(repoRoot),
           approve: (proposalId) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).approve(proposalId),
+        },
+        inboxResponder: {
+          threadStorePath: inboxThreadStorePath(config.root),
+          ledgerPath,
+          readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath),
+          reframe: (proposalId, feedback) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).reframe(proposalId, feedback),
+          decide: inboxThreadDecider(config, log),
         },
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];

@@ -109,7 +109,7 @@
 
     EXPLICITLY NOT IN SCOPE, AND EACH FOR A STATED REASON. (a) CHANGING THE DISPOSITION — see note (i).
     (b) COLLAPSING THE FAN-OUT: whether one repo-wide fault should raise ONE escalation for the pass
-    rather than one per PR is a real question — MASTER-PLAN design rule 8 already counts an
+    rather than one per PR is a real question — MASTER-PLAN DR-8 already counts an
     infrastructure event ONCE however many labels it wears — but it is a change to escalation VOLUME
     with its own blast radius, it interacts with W1-T514's dedup key, and it should be decided when the
     fault is finally observable rather than in the same breath that makes it observable. Filed as a

@@ -158,6 +158,8 @@ test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the 
     "GET /v1/drain/preview",
     "GET /v1/feedback",
     "GET /v1/inbox",
+    "GET /v1/inbox/thread",
+    "GET /v1/inbox/threads",
     "GET /v1/operator-activity",
     "GET /v1/plan/view",
     "GET /v1/trace",
@@ -168,6 +170,8 @@ test("W1-T2489: buildPanelGraphRoutes retains the existing routes alongside the 
     "POST /v1/inbox/decline",
     "POST /v1/inbox/reframe",
     "POST /v1/inbox/restore",
+    "POST /v1/inbox/thread/read",
+    "POST /v1/inbox/thread/reply",
     "POST /v1/policy/daily-cost-ceiling",
     "POST /v1/policy/daily-cost-ceiling/clear",
   ]);
