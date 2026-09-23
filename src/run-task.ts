@@ -151,6 +151,7 @@ import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
+import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -31083,6 +31084,31 @@ export async function daemonCommand(
                     log,
                   };
                   return startGarden(planGardenSpec(planGarden), planGarden, intervalMs);
+                },
+                // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
+                // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
+                (intervalMs: number) => {
+                  const gateGarden = {
+                    stateDir: join(config.root, "state"),
+                    repoRoot,
+                    openWorkspace: () => gardenCheckout({ name: "gate", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                    log,
+                  };
+                  let garden: { stop: () => void } | undefined;
+                  let stopped = false;
+                  loadGateProbes(repoRoot).then(
+                    (probes) => {
+                      if (!stopped) garden = startGarden(gateGardenSpec(gateGarden, probes), gateGarden, intervalMs);
+                    },
+                    (e: unknown) => log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) }),
+                  );
+                  return {
+                    stop: () => {
+                      stopped = true;
+                      garden?.stop();
+                    },
+                  };
                 },
               ],
             }
