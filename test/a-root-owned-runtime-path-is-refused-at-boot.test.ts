@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
@@ -60,14 +61,15 @@ interface Fixture {
 function makeFixture(): Fixture {
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}boot-writable-`));
   chmodSync(home, 0o755);
-  const origin = join(home, "origin");
+  const originRepo = gitRepo({ seedCommit: false, kind: "boot-writable-origin" });
+  const origin = originRepo.dir;
+  chmodSync(origin, 0o755);
   mkdirSync(join(origin, "bin"), { recursive: true });
-  git(origin, ["init", "-q", "-b", "main"]);
   writeFileSync(join(origin, "package.json"), '{"name":"fixture","version":"1.0.0"}\n');
   writeFileSync(join(origin, "bin", "rmd"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   chmodSync(join(origin, "bin", "rmd"), 0o755);
-  git(origin, ["add", "-A"]);
-  git(origin, ["commit", "-qm", "c1"]);
+  originRepo.git("add", "-A");
+  originRepo.git("commit", "-qm", "c1");
 
   const root = join(home, "Remudero");
   mkdirSync(root, { recursive: true });
@@ -79,7 +81,10 @@ function makeFixture(): Fixture {
   mkdirSync(join(root, "state"), { recursive: true });
   const ledger = join(root, "state", "ledger.ndjson");
   writeFileSync(ledger, "");
-  if (MODE === "setpriv") chownTree(home, NOBODY);
+  if (MODE === "setpriv") {
+    chownTree(home, NOBODY);
+    chownTree(origin, NOBODY);
+  }
   return { home, origin, tree, ledger, marker: join(home, "daemon-launched") };
 }
 
