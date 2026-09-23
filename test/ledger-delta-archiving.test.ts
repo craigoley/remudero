@@ -20,6 +20,7 @@ import { gunzipSync } from "node:zlib";
 import { fixedClock } from "../src/lib/clock.js";
 import { compactRotations, compactedArchiveName, ledgerCarriedPrefixPath, rotateLedger } from "../src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const T0 = Date.parse("2026-09-23T10:00:00.000Z");
 
@@ -40,12 +41,13 @@ function archiveRows(path: string): string[] {
   return (path.endsWith(".gz") ? gunzipSync(buf) : buf).toString("utf8").split("\n").filter(Boolean);
 }
 
-function withLedger(fn: (ledgerPath: string, dir: string) => void): void {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ledger-delta-`));
+/** Runs `fn` against a fresh live ledger from the shared fixture, then removes its directory. */
+function inTempState(fn: (ledgerPath: string, dir: string) => void): void {
+  const fixture = writeLedger();
   try {
-    fn(join(dir, "ledger.ndjson"), dir);
+    fn(fixture.path, fixture.dir);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(fixture.dir, { recursive: true, force: true });
   }
 }
 
@@ -53,7 +55,7 @@ const rotate = (ledgerPath: string, atMs: number, ceilingBytes = 4000) =>
   rotateLedger(ledgerPath, { ceilingBytes, now: () => new Date(atMs) });
 
 test("two consecutive rotations archive no row twice", () => {
-  withLedger((ledgerPath) => {
+  inTempState((ledgerPath) => {
     const first = batch("A", T0);
     writeFileSync(ledgerPath, first.join("\n") + "\n");
     const r1 = rotate(ledgerPath, T0 + 60_000);
@@ -74,7 +76,7 @@ test("two consecutive rotations archive no row twice", () => {
 });
 
 test("a shed pointer rides after the carried prefix and is archived by the next rotation", () => {
-  withLedger((ledgerPath) => {
+  inTempState((ledgerPath) => {
     // A core bigger than the ceiling forces a shed, which writes a pointer row that no archive holds yet.
     writeFileSync(ledgerPath, batch("S", T0, 60, 10).join("\n") + "\n");
     const r1 = rotate(ledgerPath, T0 + 60_000, 3000);
@@ -98,7 +100,7 @@ test("a rotation whose carried prefix does not match archives the full snapshot"
     ["a missing sidecar", (p) => rmSync(ledgerCarriedPrefixPath(p))],
   ];
   for (const [label, damage] of [["CONTROL: an intact sidecar", () => {}] as [string, (p: string) => void], ...sidecarCases]) {
-    withLedger((ledgerPath) => {
+    inTempState((ledgerPath) => {
       writeFileSync(ledgerPath, batch("C", T0).join("\n") + "\n");
       rotate(ledgerPath, T0 + 60_000);
       damage(ledgerPath);
@@ -116,7 +118,7 @@ test("a rotation whose carried prefix does not match archives the full snapshot"
 });
 
 test("a rotation whose snapshot is exactly the carried prefix writes no archive", () => {
-  withLedger((ledgerPath, dir) => {
+  inTempState((ledgerPath, dir) => {
     const body = Buffer.from(batch("E", T0, 0, 60).join("\n") + "\n", "utf8");
     writeFileSync(ledgerPath, body);
     const sha256 = createHash("sha256").update(body).digest("hex");
