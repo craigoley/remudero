@@ -10,7 +10,9 @@
     - plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml
   origin: "operator-session#needs-me-review-2026-09-21"
   plan_refs: [W1-T1274, W1-T3941]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3943 — Every acceptance proof already holds on main.
   attempts: 0
   note: |
     reservation hand-off: run-TRIAGE-fb-1789960088703-d1ca77-1789985870837 -> run-W1-T484-1789988294571
