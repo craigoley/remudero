@@ -7,7 +7,7 @@
  * It is the bounded archive executor shared by the CLI and the daemon compaction rung; it is
  * never a rotation-path dependency.
  */
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
@@ -46,7 +46,20 @@ export interface LedgerCompactFs {
   gunzipSync: (content: Buffer) => Buffer;
   /** Bytes on disk. Absent, every archive is treated alike, as before W1-T4262. */
   sizeOf?: (path: string) => number;
+  /** Cold storage: a merged source is MOVED, never deleted, until its retention lapses. */
+  mkdirSync?: (dir: string) => void;
+  renameSync?: (from: string, to: string) => void;
+  /** Stamps a moved file with the move time, so retention counts from when it went cold. */
+  touch?: (path: string, atMs: number) => void;
+  mtimeMs?: (path: string) => number;
 }
+
+/** Where merged sources go instead of being deleted; a union read lists only `ledger.*` names, so
+ *  this directory is never scanned. */
+export const LEDGER_COLD_STORE_DIRNAME = "ledger-superseded";
+/** Operator ruling 2026-09-23: a merged source stays recoverable for 30 days, then is deleted —
+ *  its rows already live in the compacted archive. */
+export const LEDGER_COLD_STORE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface LedgerCompactCommandDeps {
   stateDir?: string;
@@ -73,6 +86,10 @@ const realFs: LedgerCompactFs = {
   gzipSync: (content) => gzipSync(content),
   gunzipSync: (content) => gunzipSync(content),
   sizeOf: (path) => statSync(path).size,
+  mkdirSync: (dir) => mkdirSync(dir, { recursive: true }),
+  renameSync: (from, to) => renameSync(from, to),
+  touch: (path, atMs) => utimesSync(path, atMs / 1000, atMs / 1000),
+  mtimeMs: (path) => statSync(path).mtimeMs,
 };
 
 /** Select the oldest parseable rotations strictly older than the requested age. The hard source
@@ -255,11 +272,37 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     if (!fs.writeAtomic(targetPath, compressed)) {
       throw new Error(`atomic replacement withdrew before rename: ${targetPath}`);
     }
-    for (const path of removals) fs.rmSync(path);
+    coldStore(fs, stateDir, removals, now.getTime(), log);
   } catch (err) {
     log(`rmd ledger-compact: apply failed — ${(err as Error)?.message ?? String(err)}`);
     return 1;
   }
   out(report);
   return 0;
+}
+
+/** Move each merged source into {@link LEDGER_COLD_STORE_DIRNAME}, then delete cold files past
+ *  {@link LEDGER_COLD_STORE_RETENTION_MS}. A seam without the move falls back to deleting, as before. */
+export function coldStore(fs: LedgerCompactFs, stateDir: string, sources: readonly string[], nowMs: number, log: (line: string) => void): void {
+  const { mkdirSync: mkdir, renameSync: rename, touch, mtimeMs } = fs;
+  if (!mkdir || !rename || !touch || !mtimeMs) {
+    for (const path of sources) fs.rmSync(path);
+    return;
+  }
+  const coldDir = join(stateDir, LEDGER_COLD_STORE_DIRNAME);
+  mkdir(coldDir);
+  for (const path of sources) {
+    const target = join(coldDir, basename(path));
+    rename(path, target);
+    touch(target, nowMs);
+  }
+  let pruned = 0;
+  for (const name of fs.readdirSync(coldDir)) {
+    const path = join(coldDir, name);
+    if (nowMs - mtimeMs(path) > LEDGER_COLD_STORE_RETENTION_MS) {
+      fs.rmSync(path);
+      pruned++;
+    }
+  }
+  if (pruned > 0) log(`rmd ledger-compact: deleted ${pruned} cold-stored source(s) past the 30-day retention in ${coldDir}`);
 }
