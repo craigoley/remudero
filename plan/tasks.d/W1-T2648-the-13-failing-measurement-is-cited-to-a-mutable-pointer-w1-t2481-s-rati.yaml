@@ -10,7 +10,9 @@
   origin: "followup#W1-T2481-1788113218856"
   plan_refs: ["§5C", "W1-T2481"]
   files: [plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T2648 — Every acceptance proof already holds on main.
   attempts: 0
   rationale: |
     THE CITATION, VERBATIM. W1-T2481's rationale reads "Measured on #3305: applying the retirement

@@ -11,7 +11,9 @@
   plan_refs: []
   files: [src/lib/inbox.ts, test/an-orphaned-draft-is-collected.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4118 — Every acceptance proof already holds on main.
   attempts: 0
   rationale: |
     READ 2026-09-23 on the host: state/inbox-drafts.json holds 728 drafts; 482 are keyed by proposal ids absent from
