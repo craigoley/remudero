@@ -166,6 +166,12 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+          # W1-T4395: a diff under test/ only still runs its tests. test-only-run.txt holds "files" plus the
+          # changed test files, or "full" (a helper, fixture or setup file changed), or nothing.
+          : > test-only-run.txt
+          if [ "$CLASS" = "SOURCE" ] && [ -s changed-files.txt ]; then
+            node --import tsx scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt > test-only-run.txt 2>>diff-class.log || : > test-only-run.txt
+          fi
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (`npm run test:ci`), not plain
         # `npm test`. A green run spawns the same command once; a red run retries it once and names
@@ -186,13 +192,25 @@ jobs:
         # Why: measured on PR #3542 — docs/forensics/ci-yml.md.
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
+          # W1-T4395: the coverage lane skips a test-only diff, so the changed tests run here, through the
+          # same candidate lane as a plan/docs diff; a helper or fixture change runs the full suite.
+          TEST_ONLY_RUN="$(head -n 1 test-only-run.txt 2>/dev/null || true)"
+          case "$TEST_ONLY_RUN" in
+            files) CLASS="TEST_ONLY" ;;
+            full) ;;
+            *) TEST_ONLY_RUN="" ;;
+          esac
           TIER_BASE="HEAD"
           if [ -n "${GITHUB_BASE_REF}" ]; then
             TIER_BASE="origin/${GITHUB_BASE_REF}"
           fi
           if [ "$CLASS" != "SOURCE" ]; then
             COUNT=0
-            SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
+            if [ "$CLASS" = "TEST_ONLY" ]; then
+              SUITES="$(tail -n +2 test-only-run.txt)"
+            else
+              SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
+            fi
             if [ -z "$SUITES" ]; then
               if [ "${{ matrix.shard }}" = "1" ]; then
                 echo "W1-T3191 fast-lane: candidate enumeration FAILED or was empty — shard 1 owns the FULL suite fallback."
@@ -228,7 +246,7 @@ jobs:
           # names the tokens; this comment must not, because a comment inside a run body IS part of
           # the body the census reads.) It was briefly written as two adjacent string literals to
           # dodge the census by text, which is what prompted narrowing the rule instead.
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "$TEST_ONLY_RUN" != "full" ]; then
             echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
             echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
             exit 0
