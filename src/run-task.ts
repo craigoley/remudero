@@ -29806,6 +29806,27 @@ export function memoryLintCorpus(root: string): KnowledgeText[] {
   return corpus;
 }
 
+export function plainInboxWriter(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): SummarizeDeps["summarize"] | undefined {
+  try {
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "inbox-plain-settings.json"),
+    });
+    return realDecisionSummarizer({
+      mount: resolveDecisionSummaryMount(loadMounts(mountsPath(repoRoot))),
+      cwd: config.root,
+      settingsFile,
+    });
+  } catch (e) {
+    log("inbox.plain_writer_unavailable", { error: String((e as Error)?.message ?? e) });
+    return undefined;
+  }
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -30763,6 +30784,11 @@ export async function daemonCommand(
         // authority -- an action request is never a bypass.
         pendingPrActions: () => pendingPrActions(config.root),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
+        plainBackfill: {
+          stateDir: join(config.root, "state"),
+          readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
+          summarize: plainInboxWriter(config, log),
+        },
         runPrAction: async (request) => {
           const args = [String(request.prNumber), "--repo", target.repo];
           const exitCode = request.action === "fix"
