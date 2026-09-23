@@ -5,7 +5,17 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createService } from "../src/lib/service.js";
-import { buildRepoDashboardRoute, projectRepoTelemetry, type RepoDashboardEntry } from "../src/lib/repo-dashboard-route.js";
+import {
+  buildRepoDashboardRoute,
+  computeRepoTelemetryOffThread,
+  postRepoTelemetryWorkerResponse,
+  projectRepoTelemetry,
+  REPO_TELEMETRY_CACHE_TTL_MS,
+  type RepoDashboardEntry,
+  type RepoTelemetryRequest,
+} from "../src/lib/repo-dashboard-route.js";
+import { boundConsoleReadRoute, type ServeDeps } from "../src/lib/serve.js";
+import type { Route } from "../src/lib/service.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
 
@@ -154,7 +164,9 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
     worker("r1", "2026-09-21T00:00:00.000Z", 2, { input: 7 }),
     verdict("r1", "merged", "2026-09-21T01:00:00.000Z"),
   ].map((l) => JSON.stringify(l)).join("\n") + "\n");
-  const body = await readDashboard(buildRepoDashboardRoute({ root, ledgerPath, clock: fixedClock(NOW_MS) }));
+  const route = buildRepoDashboardRoute({ root, ledgerPath, clock: fixedClock(NOW_MS) });
+  const [body, concurrent] = await Promise.all([readDashboard(route), readDashboard(route)]);
+  assert.deepEqual(concurrent, body, "a concurrent read shares the one off-thread pass");
   const [alpha] = body.repos;
   assert.deepEqual(alpha.health, { status: "unknown", queuedtasks: 1, errorrate: 0, last_run: "2026-09-21T01:00:00.000Z", alerts: null });
   assert.deepEqual(alpha.telemetry, { tokens7d: 7, modelsused: [], cost_7d: 2 });
@@ -163,22 +175,151 @@ test("GET /v1/repos fills telemetry from the real ledger and plan files and keep
   assert.deepEqual(alpha.settings, { proofpolicy: null, workerpoolsize: null, alertthreshold: null });
 });
 
-test("GET /v1/repos leaves ledger fields null for an absent ledger and queued null for an unreadable plan", async () => {
+test("GET /v1/repos leaves ledger fields null for an absent ledger", async () => {
   const root = fixtureRoot();
   const missing = await readDashboard(buildRepoDashboardRoute({ root, ledgerPath: join(root, "state", "ledger.ndjson"), clock: fixedClock(NOW_MS) }));
   assert.deepEqual(missing.repos[0].telemetry, { tokens7d: null, modelsused: [], cost_7d: null });
   assert.equal(missing.repos[0].health.queuedtasks, null);
+});
 
-  const injected = await readDashboard(buildRepoDashboardRoute({
+async function getBound(route: Route): Promise<{ status: number; body: Record<string, unknown> }> {
+  const server = createService({ tokens: { read: READ_TOKEN, write: "unused-write-token" }, routes: [boundConsoleReadRoute(route, {} as ServeDeps)] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/repos`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  } finally {
+    server.close();
+  }
+}
+
+test("a warm repos read reuses its cached upstream result", async () => {
+  const root = fixtureRoot();
+  let ledgerReads = 0;
+  let planReads = 0;
+  const route = buildRepoDashboardRoute({
     root,
+    ledgerPath: join(root, "state", "ledger.ndjson"),
+    clock: fixedClock(NOW_MS),
+    readLedger: () => {
+      ledgerReads += 1;
+      return [start("r1", "alpha"), verdict("r1", "blocked_review", "2026-09-22T00:00:00.000Z")];
+    },
+    readPlan: () => {
+      planReads += 1;
+      return plan(task("A-1", "alpha"));
+    },
+  });
+  const cold = await readDashboard(route);
+  const warm = await readDashboard(route);
+  assert.deepEqual(warm, cold);
+  assert.equal(warm.repos[0].health.errorrate, 1);
+  assert.equal(ledgerReads, 1, "the warm read must not re-read the ledger union");
+  assert.equal(planReads, 1, "the warm read must not re-read the plan");
+});
+
+test("a repos read recomputes once an input changes or the cache ages out", async () => {
+  const root = fixtureRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  let reads = 0;
+  let nowMs = NOW_MS;
+  const clock = { now: () => nowMs, date: () => fixedClock(nowMs).date(), iso: () => fixedClock(nowMs).iso() };
+  const route = buildRepoDashboardRoute({ root, ledgerPath, clock, readLedger: () => (reads += 1, []), readPlan: () => plan(task("A-1", "alpha")) });
+  await readDashboard(route);
+  writeFileSync(ledgerPath, "{}\n");
+  await readDashboard(route);
+  assert.equal(reads, 2, "a changed ledger stamp recomputes");
+  nowMs += REPO_TELEMETRY_CACHE_TTL_MS;
+  await readDashboard(route);
+  assert.equal(reads, 3, "an aged entry recomputes");
+});
+
+test("a failed plan read is reported unavailable with its reason", async () => {
+  const route = buildRepoDashboardRoute({
+    root: fixtureRoot(),
     ledgerPath: "/unused",
     clock: fixedClock(NOW_MS),
-    readLedger: () => [start("r1", "alpha"), verdict("r1", "blocked_review", "2026-09-22T00:00:00.000Z")],
+    readLedger: () => [start("r1", "alpha")],
     readPlan: () => {
-      throw new Error("plan unreadable");
+      throw new Error("plan unreadable EACCES");
     },
-  }));
-  assert.equal(injected.repos[0].health.queuedtasks, null);
-  assert.equal(injected.repos[0].health.errorrate, 1);
-  assert.equal(injected.repos[0].telemetry.tokens7d, 0);
+  });
+  const { status, body } = await getBound(route);
+  assert.equal(status, 200);
+  assert.equal(body.repos, undefined, "no healthy default rows stand in for the failed read");
+  const staleness = body.staleness as { status: string; reason?: string };
+  assert.equal(staleness.status, "unavailable");
+  assert.equal(staleness.reason, "plan read failed: plan unreadable EACCES");
+});
+
+test("a failed ledger read after a good one serves the last result stale with its reason", async () => {
+  const root = fixtureRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  let fail = false;
+  let nowMs = NOW_MS;
+  const clock = { now: () => nowMs, date: () => fixedClock(nowMs).date(), iso: () => fixedClock(nowMs).iso() };
+  const route = buildRepoDashboardRoute({
+    root,
+    ledgerPath,
+    clock,
+    readLedger: () => {
+      if (fail) throw new Error("gunzip: unexpected end of file");
+      return [start("r1", "alpha"), verdict("r1", "merged", "2026-09-22T00:00:00.000Z")];
+    },
+    readPlan: () => plan(task("A-1", "alpha")),
+  });
+  const bound = boundConsoleReadRoute(route, {} as ServeDeps, 0);
+  const server = createService({ tokens: { read: READ_TOKEN, write: "unused-write-token" }, routes: [bound] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const get = async () => (await (await fetch(`http://127.0.0.1:${port}/v1/repos`, { headers: { authorization: `Bearer ${READ_TOKEN}` } })).json()) as Record<string, unknown>;
+  try {
+    await get();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fail = true;
+    nowMs += REPO_TELEMETRY_CACHE_TTL_MS;
+    await get();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const body = await get();
+    const staleness = body.staleness as { stale: boolean; reason?: string };
+    assert.equal(staleness.stale, true);
+    assert.equal(staleness.reason, "ledger read failed: gunzip: unexpected end of file");
+    assert.equal((body.repos as RepoDashboardEntry[])[0].health.errorrate, 0, "the last good result is what is served");
+  } finally {
+    server.close();
+  }
+});
+
+const REQ = (ledgerPath: string, planPath: string): RepoTelemetryRequest => ({
+  kind: "remudero-repo-telemetry",
+  repos: [ALPHA],
+  ledgerPath,
+  planPath,
+  nowMs: NOW_MS,
+});
+
+test("the repo telemetry worker body posts its computed outcome", () => {
+  const ledgerPath = join(fixtureRoot(), "ledger.ndjson");
+  writeFileSync(ledgerPath, JSON.stringify(start("r1", "alpha")) + "\n");
+  const posted: unknown[] = [];
+  postRepoTelemetryWorkerResponse({ postMessage: (v) => posted.push(v) }, REQ(ledgerPath, "/nonexistent/tasks.yaml"));
+  assert.equal(posted.length, 1);
+  const outcome = posted[0] as { ok: boolean; reason?: string };
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason ?? "", /^plan read failed: cannot read plan file/);
+  postRepoTelemetryWorkerResponse(null, REQ("/nonexistent/ledger.ndjson", "/nonexistent/tasks.yaml"));
+});
+
+test("an off-thread repo telemetry pass reports a dead worker as unavailable", async () => {
+  const req = REQ("/nonexistent/ledger.ndjson", "/nonexistent/tasks.yaml");
+  const crashed = await computeRepoTelemetryOffThread(req, new URL(`data:text/javascript,${encodeURIComponent("throw new Error('fixture crash');")}`));
+  assert.deepEqual(crashed, { ok: false, reason: "repo telemetry worker failed: fixture crash" });
+  const exited = await computeRepoTelemetryOffThread(req, new URL(`data:text/javascript,${encodeURIComponent("process.exit(3);")}`));
+  assert.deepEqual(exited, { ok: false, reason: "repo telemetry worker exited with code 3 before reporting" });
+  const unspawnable = await computeRepoTelemetryOffThread(req, new URL("http://127.0.0.1/not-a-worker.js"));
+  assert.equal(unspawnable.ok, false);
+  assert.match((unspawnable as { reason: string }).reason, /^repo telemetry worker could not start: /);
 });
