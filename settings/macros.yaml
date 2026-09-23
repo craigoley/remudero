@@ -177,6 +177,32 @@ macros:
       - "Investigation discipline"
       - "Coverage traps"
     args: true
+  # Idea from Matt Pocock's `improve-codebase-architecture` and `codebase-design`
+  # (mattpocock/skills, MIT); text written here (MASTER-PLAN §4F).
+  - name: architecture-scan
+    summary: "Find where the code is hardest to change, rank the candidates for making a module deeper, and hand the one I pick to /grill — no code changes."
+    expansion: |
+      Scan the codebase for places where a module is shallow: its interface is nearly as complex
+      as what it hides, one concept is spread over many small files, or a seam leaks. Do not
+      change any code.
+
+      1. SEED FROM EVIDENCE, NOT A HUNCH. Start where the code keeps changing (`git log` churn
+         over the last few hundred commits) and where this repo's own signals point: the output
+         of `npm run jscpd`, `npm run depcruise` and `npm run source-size-signal`. If I name an
+         area, start there instead.
+      2. READ THE DECISIONS FIRST. Read DECISIONS.md and docs/adr/ for the area. Do not propose
+         what a recorded decision already rejected unless the friction is real enough to reopen
+         it — then say so and name the decision.
+      3. TEST EACH CANDIDATE. Would deleting the module concentrate the complexity, or only move
+         it? Keep the candidates where it would concentrate.
+      4. REPORT, ranked, in the terminal or as docs/research/<slug>.md: for each candidate, the
+         files, the friction (OBSERVED with evidence, or INFERRED), the proposed deeper module,
+         how tests would get simpler, and a strength of Strong, Worth exploring or Speculative.
+      5. Ask which one to explore. Then run /grill on it; a confirmed design goes to
+         `rmd plan --mode=create` as its brief, never straight into code.
+    headlines:
+      - "Investigation discipline"
+    args: true
   - name: handoff
     summary: "Write a handoff so a fresh session can continue this work — state with evidence, the pending ledger, and the next prompt, paste-ready."
     expansion: |

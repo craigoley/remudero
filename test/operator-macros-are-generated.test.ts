@@ -374,6 +374,7 @@ test("external-scan macros: grill, diagnose, handoff and wait-what render operat
     grill: [/Do not start the work/, /YOUR RECOMMENDED ANSWER/, /Facts are yours to find; decisions are mine to make/, /Take no\s+action on the plan until I confirm/],
     research: [/Run the investigation in a background agent/, /Never write it under state\//, /run a positive control that proves the query could see its\s+corpus/],
     diagnose: [/never a\s+patch/, /Until this command exists, do not read code to build a\s+theory/, /If two patches have not moved the symptom, stop/, /undo it, show red, restore it, show green/],
+    "architecture-scan": [/Do not\s+change any code/, /never straight into code/, /Would deleting the module concentrate the complexity/],
     handoff: [/never inside the\s+repository/, /Redact every secret/, /FLOOR, not a claim/, /RECON or\s+IMPLEMENT/],
     "resolve-conflict": [/Stage explicit paths only/, /never rebase or force-push their history/, /push only when it passes/],
     "wait-what": [/ISO 24495-1/, /Do not add new material/],
