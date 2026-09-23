@@ -1,0 +1,14 @@
+- id: W1-T4284
+  title: "RATIFICATION CANDIDATE: verify-human-automate workflow readiness and constraints (P25)"
+  repo: MASTER-PLAN
+  depends_on: []
+  type: implement
+  verify:
+    proof: "grep: verify-human-automate presence in MASTER-PLAN.md and plan/tasks.yaml"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "MASTER-PLAN §7/P25 open candidate"
+  files:
+    - plan/verify-human-automate.yaml
+    - plan/tasks.yaml

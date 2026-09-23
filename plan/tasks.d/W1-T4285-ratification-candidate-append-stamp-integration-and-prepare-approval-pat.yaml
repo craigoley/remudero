@@ -1,0 +1,13 @@
+- id: W1-T4285
+  title: "RATIFICATION CANDIDATE: append stamp integration and prepare approval path (P25)"
+  repo: MASTER-PLAN
+  depends_on: [W1-T4284]
+  type: implement
+  verify:
+    proof: "grep: stamp integration section w/ placeholder W1-T4285 in MASTER-PLAN.md"
+  risk: low
+  status: queued
+  attempts: 0
+  origin: "STAMP integration preparation"
+  files:
+    - MASTER-PLAN.md
