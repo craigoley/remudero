@@ -4980,7 +4980,10 @@ derives from git + GitHub; local queue/locks are rebuildable cache.
 - **fix**: resume original session (round 1) → fresh session with distilled context (round 2).
 - **diagnose**: evidence-only worker dispatched after two strikes; per-step telemetry; no patches.
 - **reviewer**: fresh context, read-only + gh; adversarial audit vs. acceptance proofs + principles rubric.
-Workers get **no MCP config** (MCP auto-approves under bypass — surface stays zero).
+Workers get **no MCP config** (MCP auto-approves under bypass — surface stays zero): nothing from settings, the
+environment or a `.mcp.json`. The ONE exception is an in-process SDK server defined in remudero's own code,
+read-only, and on an explicit allowlist — today only `knowledge` (W1-T4094's rule lookup, which returns text
+the worker could already `Read`). Operator ruling 2026-09-24; `plan/claims.yaml` `worker-no-mcp-config` holds it.
 
 **Interface plane** — the **control panel**: one daemon API (REST + SSE, tailnet, bearer-scoped),
 with every client a **stateless projection** of it — the web dashboard (desktop: served on the Mac,
@@ -5899,7 +5902,7 @@ the ONLY skill permitted browser egress, and it runs under HARD CONSTRAINTS (fro
 ## 8. Security posture (consolidated)
 
 Worker credential = fine-grained PAT scoped to the product's repos, via GH_TOKEN env only. No MCP in
-workers. Deny-floor hook always installed (removable, on the owner's head): the repo ships a
+workers beyond the allowlisted in-process `knowledge` server (§1 Worker plane). Deny-floor hook always installed (removable, on the owner's head): the repo ships a
 **generic floor** (force-push to default branch, `gh auth` mutation, probe path) and appends the
 operator's concrete protected-path list from gitignored `local/deny.local` at runtime — instance
 specifics never live in the public tree. Hooks <1s. Craig overlay (`local/INSTANCE.md`, untracked):
@@ -6436,7 +6439,8 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    auto-merge is safe to leave armed, because the contract, not the runner, decides.
 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
 5. Never a third blind patch: two strikes → diagnose → one evidence-armed retry → escalate.
-6. Zero ask rules in worker settings. Hooks <1s. Workers carry scoped PATs only. No MCP in workers.
+6. Zero ask rules in worker settings. Hooks <1s. Workers carry scoped PATs only. No MCP in workers except the
+   allowlisted in-process `knowledge` server.
 7. **DISTRUST THE PROMPT OVER THE INSTALLED VERSION.** Empirically the highest-value line in the
    template: WS-0 caught `allowedDomains` nesting; W1-T1 caught that the SDK's own schema is `$loose`
    and silently strips unknown keys — a guard built as specified would have PASSED the typo it exists
