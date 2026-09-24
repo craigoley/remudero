@@ -1476,9 +1476,12 @@ deployed billing tier before treating the published row as a spend bound. A depl
 the next Luna rung for 30 minutes.
 
 Foundry Opus 5.5 uses a different resource endpoint: deploy it under the name
-`claude-opus-5-5`, then supply `RMD_FOUNDRY_CLAUDE_ENDPOINT` as the HTTPS base URL ending in
+`claude-opus-5-5` after accepting the Claude Azure Marketplace offer, then supply
+`RMD_FOUNDRY_CLAUDE_ENDPOINT` as the HTTPS base URL ending in
 `/anthropic` and `RMD_FOUNDRY_CLAUDE_API_KEY` to the daemon environment. Keep the key out of
-worker settings and repository files. Both Claude and Codex subscription capacity readings must
+worker settings and repository files. The daemon launch and recycle scripts carry these two
+variables by name and preserve their values across a normal container replacement. Both Claude
+and Codex subscription capacity readings must
 block before an eligible frontier task can divert there. The cash fallback switch must be on,
 the cash provider enabled, and the task must declare only tools the cash adapter serves. A
 frontier mount pinned directly to cash is still refused.
