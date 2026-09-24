@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { gitRepo } from "./helpers/git-repo.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -93,26 +94,22 @@ test("W1-T4404: a config or lockfile change selects the full suite", () => {
   assert.equal(broken.fullRun, true);
   assert.match(broken.reasons[0]!, /could not read its input — git ls-files failed/);
   // Reading a real repo: a tracked file gone from disk (ENOENT) imports nothing and is skipped, while
-  // any other read failure (EACCES) is real and becomes a named full run.
-  const repo = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4404-repo-`));
-  mkdirSync(join(repo, "src"));
-  for (const f of ["src/a.ts", "src/b.ts"]) writeFileSync(join(repo, f), TREE[f]!);
-  symlinkSync(join(REPO_ROOT, "scripts"), join(repo, "scripts"));
-  symlinkSync(join(REPO_ROOT, "node_modules"), join(repo, "node_modules"));
-  const git = (...args: string[]) => spawnSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" });
-  git("init", "-q");
-  git("add", "src");
-  git("commit", "-qm", "fixture");
-  rmSync(join(repo, "src/a.ts"));
-  assert.deepEqual([...readAffectedSuitesInput(repo, ["src/b.ts"]).files.keys()], ["src/b.ts"]);
-  chmodSync(join(repo, "src/b.ts"), 0o000);
-  try {
-    const denied = affectedSelectionOrFull(["src/b.ts"], () => readAffectedSuitesInput(repo, ["src/b.ts"]));
-    assert.equal(denied.fullRun, true);
-    assert.match(denied.reasons[0]!, /EACCES/);
-  } finally {
-    chmodSync(join(repo, "src/b.ts"), 0o644);
-  }
+  // any other read failure (here EISDIR: a directory where a tracked file was) is real and becomes a
+  // named full run.
+  const repo = gitRepo({ kind: "w1t4404" });
+  mkdirSync(join(repo.dir, "src"));
+  for (const f of ["src/a.ts", "src/b.ts"]) writeFileSync(join(repo.dir, f), TREE[f]!);
+  repo.git("add", "src");
+  repo.git("commit", "-qm", "fixture");
+  symlinkSync(join(REPO_ROOT, "scripts"), join(repo.dir, "scripts"));
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(repo.dir, "node_modules"));
+  rmSync(join(repo.dir, "src/a.ts"));
+  assert.deepEqual([...readAffectedSuitesInput(repo.dir, ["src/b.ts"]).files.keys()], ["src/b.ts"]);
+  rmSync(join(repo.dir, "src/b.ts"));
+  mkdirSync(join(repo.dir, "src/b.ts"));
+  const unreadable = affectedSelectionOrFull(["src/b.ts"], () => readAffectedSuitesInput(repo.dir, ["src/b.ts"]));
+  assert.equal(unreadable.fullRun, true);
+  assert.match(unreadable.reasons[0]!, /EISDIR/);
   const gone = (code: string) => (p: string) => {
     if (p === "src/b.ts") throw Object.assign(new Error(`${code} src/b.ts`), { code });
     return TREE[p]!;
