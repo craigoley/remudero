@@ -583,7 +583,8 @@ import {
   type GatePostureFinding,
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
-import { ghIssueCloser } from "./lib/panel-actions.js";
+import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
+import { PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
   buildReadyServeServer,
@@ -674,6 +675,7 @@ import {
   draftsDueOnDaemon,
   decideDraftDeferral,
   declinedReasonInLedger,
+  type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
   mergeDraftCaches,
@@ -1066,7 +1068,7 @@ import { reapGitObjects } from "./lib/object-reaper.js";
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. */
 export const OBJECT_REAP_CONTRACT_VERSION = "1";
-import { deriveTaskClass } from "./lib/task-class.js";
+import { deriveTaskClass, implementRouteClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord, type ClassClosure } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
@@ -12940,7 +12942,7 @@ export function softBudgetWarning(
  * every branch, including the fallback a complete committed table cannot reach. */
 export function resolveRunMounts(
   repoRootDir: string,
-  task: Pick<Task, "type" | "risk" | "files">,
+  task: Pick<Task, "type" | "risk" | "files" | "band_meaning">,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): {
   mount: Mount;
@@ -12972,7 +12974,7 @@ export function resolveRunMounts(
 } {
   const mountsTable = loadMounts(mountsPath(repoRootDir));
   const taskClass = deriveTaskClass(task);
-  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
+  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, implementRouteClass(task, taskClass));
   if (mountResolution.fellBackToDefault) {
     // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
     // a ledger line NAMING the missing class, never a silent number swap.
@@ -33299,6 +33301,7 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
+    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
     // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
     // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
     // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
@@ -41209,6 +41212,7 @@ function loadProposalForRatify(
   owner: string,
   repo: string,
   config: Config,
+  withDeclines = false,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -41233,6 +41237,7 @@ function loadProposalForRatify(
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+    ...(withDeclines ? { isDeclined: (id: string) => declinedReasonInLedger(ledgerLines, id) } : {}),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -42119,6 +42124,21 @@ export function readLedgerRawLines(path: string): readonly string[] {
     // no ledger yet (a fresh checkout) or unreadable — releases nothing, never throws into dispatch
     return [];
   }
+}
+
+export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const ledgerPath = ledgerPathFor(config);
+  const { owner, repo } = resolveOwnerRepo();
+  return proposalVerdictCommand(
+    kind,
+    rest,
+    (id) => {
+      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config, true);
+      return { exists: proposal !== undefined, classification };
+    },
+    (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),
+  );
 }
 
 export async function approveCommand(
@@ -45120,6 +45140,20 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready",
   },
   {
+    name: "decline",
+    syntax: PROPOSAL_VERDICT_SYNTAX.decline,
+    summary: "Decline an inbox proposal, recording why; reversible with rmd restore.",
+    detail:
+      "the terminal's route to the console's decline (POST /v1/inbox/decline, W1-T2604): re-classifies the proposal live, refuses one that is unknown, already RATIFIED, or already declined, and otherwise appends one panel.proposal_declined ledger row carrying the reason verbatim. Files nothing and opens no branch; the proposal stays in the registry and classifies as declined until restored. Exit 0 recorded, 1 refused, 2 a usage error",
+  },
+  {
+    name: "restore",
+    syntax: PROPOSAL_VERDICT_SYNTAX.restore,
+    summary: "Take back a decline, so the proposal returns to the inbox.",
+    detail:
+      "the reversal of rmd decline and the terminal's route to POST /v1/inbox/restore (W1-T3407): refuses a proposal that is unknown, already RATIFIED, or not declined, and otherwise appends one panel.proposal_restored ledger row carrying the reason. Exit 0 recorded, 1 refused, 2 a usage error",
+  },
+  {
     name: "verify-human-sweep",
     syntax: "rmd verify-human-sweep [--dry-run] [--limit <n>]",
     summary: "Judge the parked verify:human backlog and surface only the shards that still need you.",
@@ -45817,6 +45851,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await approveCommand(rest);
     },
   ],
+  ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
+  ["restore", (rest) => proposalVerdictCliCommand("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
   [

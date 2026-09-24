@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { canonicalWorkerProviderId, isWorkerProviderId, WORKER_PROVIDER_IDS, type WorkerProviderId } from "./config.js";
-import { DEFAULT_TASK_CLASS } from "./task-class.js";
+import { DEFAULT_TASK_CLASS, DESIGN_TASK_CLASS } from "./task-class.js";
 
 /**
  * .remudero/mounts.yaml loader + validator (mount-routing v0, MASTER-PLAN §9;
@@ -158,6 +158,8 @@ export interface CapabilityLadder {
    * `automatic`. Absent means every capability is a pure headroom auction.
    */
   providerPreference?: Record<string, "claude" | "codex">;
+  /** Capabilities that run ONLY on a subscription: never cash, never API-key billing. */
+  subscriptionOnly?: string[];
 }
 
 /** The whole parsed, validated routing table. */
@@ -295,6 +297,11 @@ function capabilityRank(capabilities: CapabilityLadder, model: string): number {
  *        given, the Architect's effort must also meet it. The plan-authorship floor
  *        ({@link ARCHITECT_EFFORT_FLOOR}) is enforced unconditionally.
  */
+/** G-17 as amended 2026-09-24 (DECISIONS.md): these rows may be a frontier PEER, never above. Code, so data cannot widen it. */
+export function frontierPeerWorkerRow(risk: string, cls: string): boolean {
+  return risk === "high" || cls === DESIGN_TASK_CLASS;
+}
+
 function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   const architectTier = m.tiers[m.architect.model];
   const judgeTier = m.tiers[m.judge.model];
@@ -326,24 +333,28 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
     for (const [risk, byClass] of Object.entries(byRisk)) {
       for (const [cls, mount] of Object.entries(byClass)) {
         const workerTier = m.tiers[mount.model];
-        if (workerTier >= architectFloor) {
+        const peer = frontierPeerWorkerRow(risk, cls);
+        if (peer ? workerTier > architectFloor : workerTier >= architectFloor) {
           throw new TierInvariantError(
             `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). The Architect must ride a higher tier than every worker.`,
           );
         }
-        if (workerTier >= judgeFloor) {
+        if (peer ? workerTier > judgeFloor : workerTier >= judgeFloor) {
           throw new TierInvariantError(
             `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). The Layer-2 judge must ride a higher tier than every worker it supervises.`,
           );
         }
         if (m.capabilities && architectCapabilityRank !== undefined) {
           const workerCapabilityRank = capabilityRank(m.capabilities, mount.model);
-          if (workerCapabilityRank >= architectCapabilityRank) {
+          if (peer ? workerCapabilityRank > architectCapabilityRank : workerCapabilityRank >= architectCapabilityRank) {
             throw new TierInvariantError(
               `Tier Invariant (G-17) violated on the capability axis (W1-T2573): worker routes.${type}.${risk}.${cls} rides '${mount.model}' (capability '${m.capabilities.claude[mount.model]}', rank ${workerCapabilityRank}) which is not strictly below the Architect '${m.architect.model}' (capability '${m.capabilities.claude[m.architect.model]}', rank ${architectCapabilityRank}). This is the provider-neutral generalisation of the tiers-based check above: it must hold on capability rank too, so it stays enforceable when a worker rides a different vendor.`,
             );
           }
-          if (judgeCapabilityRank !== undefined && workerCapabilityRank >= judgeCapabilityRank) {
+          if (
+            judgeCapabilityRank !== undefined &&
+            (peer ? workerCapabilityRank > judgeCapabilityRank : workerCapabilityRank >= judgeCapabilityRank)
+          ) {
             throw new TierInvariantError(
               `Tier Invariant (G-17) violated on the capability axis (W1-T2573): worker routes.${type}.${risk}.${cls} rides '${mount.model}' (capability '${m.capabilities.claude[mount.model]}', rank ${workerCapabilityRank}) which is not strictly below the flight judge '${m.judge.model}' (capability '${m.capabilities.claude[m.judge.model]}', rank ${judgeCapabilityRank}).`,
             );
@@ -526,6 +537,17 @@ function parseCapabilities(
     }
   }
 
+  let subscriptionOnly: string[] | undefined;
+  if (raw.subscription_only !== undefined) {
+    const listed = raw.subscription_only;
+    if (!Array.isArray(listed) || !listed.every((entry) => typeof entry === "string" && entry in ladder)) {
+      throw new MountsError(
+        `'capabilities.subscription_only' must be a list of ladder capabilities, got ${JSON.stringify(listed)}.`,
+      );
+    }
+    subscriptionOnly = [...listed];
+  }
+
   return {
     ladder,
     claude,
@@ -533,6 +555,7 @@ function parseCapabilities(
     codex,
     ...(cash ? { cash, openweight: cash } : {}),
     ...(providerPreference ? { providerPreference } : {}),
+    ...(subscriptionOnly ? { subscriptionOnly } : {}),
   };
 }
 
@@ -617,6 +640,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);
+  enforceSubscriptionOnly(mounts);
   // A PEER IS ALLOWED, ABOVE IS NOT — the bar `judge: opus` (3) already clears beside a squeeze
   // Architect on `gpt-5.6-terra` (3), because G-17 constrains worker ROUTES, not seats. Strict
   // dominance here refused the whole table under that squeeze. Operator ruling 2026-09-22.
@@ -626,6 +650,34 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     );
   }
   return mounts;
+}
+
+/** True when `model` resolves to a capability the table declares subscription-only. */
+export function subscriptionOnlyModel(capabilities: CapabilityLadder | undefined, model: string | undefined): boolean {
+  const listed = capabilities?.subscriptionOnly;
+  if (listed === undefined || model === undefined) return false;
+  const capability = capabilities!.claude[model.toLowerCase()];
+  return capability !== undefined && listed.includes(capability);
+}
+
+/** No mount may pin a subscription-only model to a pay-per-token provider (ruling 2026-09-24). */
+function enforceSubscriptionOnly(m: Mounts): void {
+  const rows: Array<[string, Mount | undefined]> = [
+    ["architect", m.architect],
+    ["judge", m.judge],
+    ["escalation_judge", m.escalation_judge],
+    ["verify_human_judge", m.verify_human_judge],
+    ["step_up", m.step_up],
+    ...Object.entries(m.synthesis).map(([role, mount]): [string, Mount] => [`synthesis.${role}`, mount]),
+    ...Object.entries(m.routes).flatMap(([type, byRisk]) =>
+      Object.entries(byRisk).flatMap(([risk, byClass]) =>
+        Object.entries(byClass).map(([cls, mount]): [string, Mount] => [`routes.${type}.${risk}.${cls}`, mount]))),
+  ];
+  for (const [where, mount] of rows) {
+    if (mount?.provider === "cash" && subscriptionOnlyModel(m.capabilities, mount.model)) {
+      throw new MountsError(`mount ${where}: '${mount.model}' is subscription-only and cannot be pinned to cash.`);
+    }
+  }
 }
 
 /** Load, parse, and validate `.remudero/mounts.yaml` from `path`. */

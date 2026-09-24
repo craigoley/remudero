@@ -95,6 +95,8 @@ usage:
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
+  rmd decline <proposalId> --reason "<text>"   # Decline an inbox proposal, recording why; reversible with rmd restore.
+  rmd restore <proposalId> --reason "<text>"   # Take back a decline, so the proposal returns to the inbox.
   rmd verify-human-sweep [--dry-run] [--limit <n>]   # Judge the parked verify:human backlog and surface only the shards that still need you.
   rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]   # An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
   rmd note <id> <text...>   # Record an operator guidance note against a task or proposal, for the weekly feedback docket.
@@ -911,6 +913,26 @@ rmd approve <P##> [<P##> ...]
 ```
 
 one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready
+
+### `rmd decline`
+
+Decline an inbox proposal, recording why; reversible with rmd restore.
+
+```
+rmd decline <proposalId> --reason "<text>"
+```
+
+the terminal's route to the console's decline (POST /v1/inbox/decline, W1-T2604): re-classifies the proposal live, refuses one that is unknown, already RATIFIED, or already declined, and otherwise appends one panel.proposal_declined ledger row carrying the reason verbatim. Files nothing and opens no branch; the proposal stays in the registry and classifies as declined until restored. Exit 0 recorded, 1 refused, 2 a usage error
+
+### `rmd restore`
+
+Take back a decline, so the proposal returns to the inbox.
+
+```
+rmd restore <proposalId> --reason "<text>"
+```
+
+the reversal of rmd decline and the terminal's route to POST /v1/inbox/restore (W1-T3407): refuses a proposal that is unknown, already RATIFIED, or not declined, and otherwise appends one panel.proposal_restored ledger row carrying the reason. Exit 0 recorded, 1 refused, 2 a usage error
 
 ### `rmd verify-human-sweep`
 
