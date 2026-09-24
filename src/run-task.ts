@@ -8971,11 +8971,9 @@ export async function runFixRung(opts: {
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
     worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
-    /** W1-T4458 design (i): test seam for starting a shell-less merge-conflict round's merge;
-     *  production runs the real `git merge --no-commit --no-ff origin/main`. */
+    /** W1-T4458 (i): test seam; production runs `git merge --no-commit --no-ff origin/main`. */
     startShellLessMergeConflictMerge?: typeof startShellLessMergeConflictMerge;
-    /** W1-T4458 design (ii): test seam for the round's own real commit-ahead count fed into
-     *  `harnessCommitForShellLessWorker`; production reads `git rev-list --count`. */
+    /** W1-T4458 (ii): test seam; production reads `git rev-list --count <roundStart>..HEAD`. */
     commitsAhead?: (worktreePath: string, base: string) => number;
     /**
      * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
@@ -10402,35 +10400,22 @@ export async function runFixRung(opts: {
       config: opts.config,
       prompt,
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
-      // W1-T210: ci-log mode's prompt carries an untrusted CI log tail
-      // (renderFixPrompt, above) — restrict this worker to the tools its
-      // fix-and-push job actually needs (FIX_WORKER_TOOLS) so a
-      // prompt-injection payload riding in that log can't reach the
-      // network via WebFetch/WebSearch.
-      // W1-T4458 design (iii): whenever the harness owns this round's commit, `Bash` is dropped
-      // from the PRIMARY surface too — not only `cashTools` below — so the prompt ("you have no
-      // shell on this round") and the actual tool list can never disagree.
+      // W1-T210: ci-log mode's prompt carries an untrusted CI log tail, so no WebFetch/WebSearch.
+      // W1-T4458 (iii): a round the harness commits loses Bash too, so its prompt and tools agree.
       tools: fixHarnessOwnsGit ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
       // W1-T3727: the surface a BLOCKED auction would divert this round to. Offered only when the
       // prompt above already said the harness commits — otherwise a retry hands a shell-less
       // worker a contract asking for `git push`.
       ...(fixCashTools === undefined ? {} : { cashTools: fixCashTools }),
-      // W1-T2261: the attribution markers `reclaimAbandonedWorker` later matches an abandoned
-      // spawn's live process against (worker.ts's `workerMarkerEnv` merges these into the
-      // child's env as REMUDERO_RUN_ID/REMUDERO_TASK_ID). Omitting them — the defect this
-      // closes — left `defaultReadMarkers` reading `undefined` for every candidate, so
-      // `markers?.runId === info.runId` could never match and the reclaim kill never fired on
-      // the one process it exists to stop.
+      // W1-T2261: the markers `reclaimAbandonedWorker` matches an abandoned spawn's live process
+      // against (`workerMarkerEnv` sets REMUDERO_RUN_ID/REMUDERO_TASK_ID). Without them every
+      // candidate read `undefined` and the reclaim kill never fired on the process it exists to stop.
       runId: opts.runId,
       taskId: opts.taskId,
     };
 
-    // W1-T4458 design (i): a shell-less merge-conflict round's prompt tells it (a few lines
-    // above) that it has no shell — so it must never ALSO be the one running `git merge`. The
-    // harness starts the merge HERE, before the worker's own turn, so `origin/main` is already
-    // merged into the tree with real conflict markers for a plain Read/Write/Edit resolve.
-    // Idempotent (see the helper's own doc): a strike that resumes an already-started merge
-    // leaves it untouched rather than re-merging onto a live MERGE_HEAD.
+    // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
+    // resolves the conflict markers it leaves.
     if (fixHarnessOwnsGit && currentMergeConflict !== undefined) {
       const merged = (deps.startShellLessMergeConflictMerge ?? startShellLessMergeConflictMerge)(opts.worktreePath);
       deps.log(merged.started ? "fix.merge_started" : "fix.merge_start_failed", {
@@ -10440,29 +10425,20 @@ export async function runFixRung(opts: {
     }
 
     const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
-    // W1-T4458 design (ii): THIS round's own starting head, read fresh right before the worker
-    // runs — never a hardcoded 0, and never `priorHeadSha` (review's own snapshot, which can lag
-    // behind the worktree when this rung just started a merge above). Whatever the harness's own
-    // commit step (below) finds ahead of THIS sha — worker-committed or not — is real work this
-    // round produced, and must be pushed rather than mistaken for a clean tree.
+    // W1-T4458 (ii): this round's own starting head; whatever lands ahead of it is this round's work.
     let roundStartSha: string | undefined;
     try {
       roundStartSha = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     } catch {
-      // best-effort, the same fail-open discipline `expectedHeadShaForPush` below already takes:
-      // an unreadable HEAD here just falls back to commitCount 0 (see harnessCommit below),
-      // never a thrown error mid-dispatch.
+      // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
     const fixRoundStartedAtMs = systemClock.now();
     let fixResult: WorkerResult;
-    // W1-T1219: the spawn's own elapsed milliseconds on the SUCCESS path — the same field
-    // `fix.spawn_abandoned` already carries on the failure path (below), folded into
-    // `fix.dispatch` so a completed spawn's duration is measurable at all (see design note
-    // (iii) of this task's own rationale for why the ledger could not measure it before).
+    // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
+    // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
     let spawnElapsedMs: number | undefined;
     try {
-      // W1-T1044: bounds this ONE spawn by wall-clock elapsed time — see
-      // spawnFixWorkerBounded's own doc for the measured incident this closes.
+      // W1-T1044: bounds this ONE spawn by wall-clock time (spawnFixWorkerBounded's doc: why).
       const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, {
         runId: opts.runId,
         taskId: opts.taskId,
@@ -10488,15 +10464,11 @@ export async function runFixRung(opts: {
       fixResult = deps.account(spawnOutcome.result);
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
-      // No subprocess ever launched — nothing ran, nothing was billed. Log this as
-      // an INFRA-tagged $0 line — deliberately NEVER a `fix.dispatch` line, the
-      // ONLY step `priorStrikesFor` counts as a strike — so budget forensics can
-      // separate "the task was expensive" from "the host was broken" (W1-T127
-      // design note iii), then propagate the refusal unchanged: `strikes` and
-      // attempts-toward-escalation never move, and no escalate() ever fires for it
-      // here — the caller's existing spawn-infra degrade-don't-die handling
-      // (daemon.ts's `isSpawnInfraBlocked`) decides what happens next, exactly
-      // like the initial implement dispatch already does.
+      // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
+      // `fix.dispatch` line (the only step `priorStrikesFor` counts), so forensics can separate "the
+      // task was expensive" from "the host was broken" (W1-T127 iii). The refusal propagates
+      // unchanged — strikes never move, nothing escalates here; daemon.ts's `isSpawnInfraBlocked`
+      // decides what happens next, exactly as for the initial implement dispatch.
       deps.log("fix.spawn_infra_blocked", {
         attempt,
         reason: e.message,
@@ -10512,23 +10484,12 @@ export async function runFixRung(opts: {
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
-    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, and HERE — before `readRoundCommits`
-    // decides what this round produced and what `deps.push` then carries. The helper is
-    // implement's, reused: it owns its own precondition, so a Claude round passes through
-    // untouched.
-    // CALLED UNCONDITIONALLY, and the guard is the helper's own: `!harnessOwnsGit || commitCount
-    // !== 0` returns the count untouched, so a Claude round passes straight through. Wrapping this
-    // in `if (fixHarnessOwnsGit)` would only duplicate that precondition — and would put eight
-    // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
-    // name.
-    // W1-T4458 design (ii): `commitCount` is `roundStartSha`'s REAL commits-ahead, never a
-    // hardcoded 0. A cash worker cannot have committed, so its count reads as 0 exactly as
-    // before — but a Claude round that kept `Bash` (the coherence gap point (iii) above closes,
-    // for every round FROM here on, but not for one already mid-strike on an old config) can
-    // still have committed for itself despite the prompt saying not to; reading the real count
-    // recognises that commit and carries it through `harnessCommitForShellLessWorker`'s own
-    // "already committed, leave it alone" guard, rather than re-reading a now-clean tree as
-    // "the worker changed nothing" and silently dropping it.
+    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
+    // what this round produced and `deps.push` carries. CALLED UNCONDITIONALLY: the helper's own
+    // guard (`!harnessOwnsGit || commitCount !== 0`) passes a Claude round through, and an `if` here
+    // would be a branch no default-config test reaches, which `diff-coverage` refuses by name.
+    // W1-T4458 (ii): `commitCount` is the REAL commits-ahead of `roundStartSha`, never a hardcoded 0,
+    // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
     const harnessCommit = (report: string) =>
@@ -36372,37 +36333,22 @@ export function commitWorkerEdits(
   };
 }
 
-/** True when `worktreePath` is mid-merge right now — the one fact both
- *  {@link startShellLessMergeConflictMerge}'s own idempotency guard and its no-conflict-vs-real-
- *  failure branch need from git. */
+/** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
 function mergeHeadPresent(runGit: GitRunner): boolean {
   try {
     runGit(["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
     return true;
   } catch {
-    // No MERGE_HEAD — either nothing is mid-merge, or the merge fast-forwarded cleanly with no
-    // conflict; both read as "not mid-merge" for this predicate's callers.
+    // No MERGE_HEAD: nothing is mid-merge.
     return false;
   }
 }
 
 /**
- * W1-T4458 design (i): STARTS a shell-less merge-conflict round's merge FOR the worker, so a
- * worker with no shell (renderFixPrompt's harnessCommits footer: "Do NOT run git or gh — you
- * have no shell on this round") is never ALSO told, a few lines earlier in the SAME prompt, that
- * its target is to run `git merge` — something it has no tool left to do.
- *
- * `--no-commit --no-ff` leaves `MERGE_HEAD` set and, on the real conflict this mode exists for,
- * conflict markers (`<<<<<<<`/`=======`/`>>>>>>>`) in the tree; the worker's Read/Write/Edit turn
- * then only ever resolves those markers by hand. The harness's own commit step
- * ({@link harnessCommitForShellLessWorker} -> {@link commitWorkerEdits}) completes the pending
- * merge once the worker's edits land: `git commit` always takes BOTH parents from a live
- * `MERGE_HEAD`, so the resulting commit is a real two-parent merge, not a squash of one side.
- *
- * IDEMPOTENT: a strike that resumes an already-started merge (an earlier strike started it and
- * got interrupted, or this is round 2+ of the SAME still-conflicted dispatch) finds `MERGE_HEAD`
- * already set and is left alone — `git merge` onto a live `MERGE_HEAD` refuses outright, and
- * re-running it would be worse than a no-op.
+ * W1-T4458 design (i): starts a shell-less merge-conflict round's merge FOR the worker, whose prompt
+ * says it has no shell. `--no-commit --no-ff` leaves MERGE_HEAD and conflict markers for a
+ * Read/Write/Edit resolve; the harness's own commit ({@link commitWorkerEdits}) then records a real
+ * two-parent merge. IDEMPOTENT: a live MERGE_HEAD (a resumed strike) is left alone.
  */
 export function startShellLessMergeConflictMerge(
   worktreePath: string,
@@ -36413,10 +36359,8 @@ export function startShellLessMergeConflictMerge(
   try {
     runGit(["merge", "--no-commit", "--no-ff", "origin/main"]);
   } catch (e) {
-    // `git merge --no-commit` EXITS NON-ZERO on a real conflict — that is this function's SUCCESS
-    // case (MERGE_HEAD set, conflict markers left for the worker to resolve by hand), never an
-    // erased failure. `reason` is kept only for the genuine-failure branch below, where
-    // MERGE_HEAD never got set at all (an unfetched origin/main, a dirty worktree, ...).
+    // A real conflict exits non-zero WITH MERGE_HEAD set: the success case. Only a merge that never
+    // started (an unfetched origin/main, a dirty tree) is a failure, and it keeps its reason.
     if (!mergeHeadPresent(runGit)) {
       return { started: false, reason: String((e as Error)?.message ?? e) };
     }

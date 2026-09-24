@@ -597,9 +597,9 @@ export function renderFixPrompt(opts: {
             `head then re-judges through the normal gate.`,
           ]
         : [
-            `Your target: MERGE origin/main into this SAME branch (${opts.branch}) — never rebase,`,
-            `never force-push — resolve the conflicting file(s) below, then push. The changed head`,
-            `re-judges through the normal gate.`,
+            `Your target: MERGE origin/main into this SAME branch (${opts.branch})`,
+            `— never rebase, never force-push — resolve the conflicting file(s) below, then push.`,
+            `The changed head re-judges through the normal gate.`,
           ]),
       "",
       `MERGE DISCIPLINE: resolve toward the UNION of both sides ONLY where merge-base analysis shows`,

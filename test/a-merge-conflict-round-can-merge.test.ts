@@ -45,7 +45,8 @@ import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
 const CONFLICT_FILE = "conflict.txt";
@@ -64,6 +65,10 @@ function divergedConflictPair(kind: string): { upstream: GitRepo; wt: GitRepo } 
   upstream.git("commit", "-m", "seed conflict file");
 
   const wt = gitRepo({ kind: `${kind}-branch`, cloneFrom: upstream.dir });
+  // The code under test shells git WITHOUT the fixture's env, and a CI runner has no global
+  // identity, so `git merge`/`git commit` there need the clone's own (the #1971 shape).
+  wt.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+  wt.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
 
   // This branch's OWN change (what a task's earlier rounds committed).
   writeFileSync(join(wt.dir, CONFLICT_FILE), "base line\nours\n");
@@ -133,7 +138,7 @@ function issues(): IssueGateway {
 }
 
 test("W1-T4458: the harness starts the merge a shell-less conflict round resolves", () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4458-start-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4458-start-`));
   const { wt } = divergedConflictPair("w1t4458-start");
   try {
     const before = wt.git("rev-parse", "HEAD");
@@ -258,7 +263,7 @@ test("W1-T4458: the fix rung's tools and prompt agree about who holds git", () =
 });
 
 test("W1-T4458: a commit the worker made is pushed, not discarded", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4458-push-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4458-push-`));
   const { wt } = divergedConflictPair("w1t4458-push");
   try {
     const startSha = wt.git("rev-parse", "HEAD");

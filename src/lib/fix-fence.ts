@@ -28,8 +28,7 @@ export const CI_LOG_FENCE_CLOSE = "=== END UNTRUSTED CI OUTPUT ===";
  * regardless of what the attacker wraps around it.
  */
 export function neutralizeFenceMarkers(text: string): string {
-  // U+200B (zero-width space), written as the JS escape below rather than a
-  // literal invisible character, so the source stays legible.
+  // U+200B (zero-width space) as a JS escape, never a literal invisible character, for legibility.
   const ZERO_WIDTH_SPACE = "\u200b";
   return text.replace(/=+/g, (run) => (run.length >= 3 ? run.split("").join(ZERO_WIDTH_SPACE) : run));
 }
@@ -53,29 +52,19 @@ export const FIX_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"
 
 /**
  * W1-T3727: the fix rung's surface when a NON-SUBSCRIPTION provider runs it.
- *
  * SHELL-LESS, AND THE RUNG SURVIVES IT. {@link FIX_WORKER_TOOLS}'s own doc gives two reasons Bash
  * is in the set — git commit/push, and running the project's test commands. `RunCheck` covers the
  * second, and the caller ALREADY pushes (`deps.push`/`gitPushRunBranch`), so only the COMMIT was
  * the worker's; `harnessCommitForShellLessWorker` already does that for implement.
- *
  * MEASURED on the first live squeeze, 2026-09-17: with claude weekly at 100% and codex unreadable,
  * this rung logged "fix rung: strike 1/2 REFUSED -- spawn infrastructure blocked" on every attempt.
  * Repair of red pull requests was dead for the whole window.
- *
- * NOT A NARROWING: `FIX_WORKER_TOOLS` is unchanged and still what Claude gets.
  */
 export const FIX_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];
 
 /**
- * W1-T4458 design (iii): the fix rung's PRIMARY surface — the `tools:` field every spawn
- * actually gets — for a round the harness commits. `FIX_CASH_TOOLS` above is only the surface a
- * BLOCKED AUCTION would divert a round to; a Claude round that stays on Claude was still handed
- * `FIX_WORKER_TOOLS` unconditionally, `Bash` included, even while its own prompt said "you have
- * no shell on this round" (renderFixPrompt's harnessCommits footer). MEASURED: a merge-conflict
- * round in that state used the leftover `Bash` to merge and commit itself; the harness, reading
- * what it believed was a clean tree, refused the commit and silently discarded it
- * (`harnessCommitForShellLessWorker`'s "the worker changed nothing" branch). `FIX_WORKER_TOOLS`
- * minus `Bash` — so the prompt and the tools agree, on every provider.
+ * W1-T4458 design (iii): the PRIMARY `tools:` surface of a round the harness commits, so its prompt
+ * ("you have no shell") and its tools agree. A leftover `Bash` let a merge-conflict round commit
+ * itself, and the harness then read a clean tree and discarded that commit.
  */
 export const FIX_WORKER_TOOLS_HARNESS_COMMITS: string[] = FIX_WORKER_TOOLS.filter((tool) => tool !== "Bash");
