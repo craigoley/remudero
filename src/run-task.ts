@@ -2147,6 +2147,7 @@ import {
   resolveGenericRouteToolBound,
   harnessOwnsGitFor,
   IMPLEMENT_CASH_TOOLS,
+  WORKER_RULE_TOOL_NAME,
   implementToolBound,
   resolveDispatchLaneToolBound,
   cashDivertSpawnFields,
@@ -12810,9 +12811,8 @@ function readRuleSourceFileOrUndefined(path: string): string | undefined {
  * file). `readFile` is injectable — default a real `readFileSync` — so a test can simulate an
  * unreadable source (the retrieval path failing) without touching disk.
  *
- * STILL NOT WIRED INTO A LIVE CALL SITE, even after W1-T2761: this resolves ONE headline's body
- * by name, for a future mid-run retrieval a worker asks for explicitly — that call site remains
- * unbuilt, per W1-T2508's own "NOT IN SCOPE: any change to what a worker is permitted to do".
+ * This older single-headline helper remains available to readers; implement workers use
+ * `lookupWorkerRule` through their rule tool to accept stable ids and phrases as well.
  * What W1-T2761 DOES wire in is this function's SIBLING primitive, {@link
  * retrieveRuleBodyOrDegrade}: {@link buildRuleHeadlinesPart} (below) reuses it to degrade the
  * WHOLE headline index to a synthetic full-rule line when CLAUDE.md is unreadable, the same
@@ -15028,12 +15028,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
     // block ran before W1-T86.
     const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
+    const learningHomes = {
+      projectDir: learningsDir,
+      userOverallDir: userOverallLearningsHome(config),
+      globalArtifactPath: globalArtifactPath(config),
+    };
     const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
-      homes: {
-        projectDir: learningsDir,
-        userOverallDir: userOverallLearningsHome(config),
-        globalArtifactPath: globalArtifactPath(config),
-      },
+      homes: learningHomes,
       taskFiles: task.files,
       selectionContext: {
         text: learningsSelectionText,
@@ -15043,6 +15044,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
+    const ruleLookup = implementTools?.includes(WORKER_RULE_TOOL_NAME)
+      ? {
+          onPulled: (id: string, status: "found" | "missing" | "error") => log("knowledge.pulled", { id, status }),
+          learningLookup: { homes: learningHomes, allowedIds: learningsResult.selectedIds },
+        }
+      : undefined;
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
@@ -15106,7 +15113,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
     // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
     // compaction from deleting the only syntax the deterministic judge is allowed to honour.
-    const prompt = `${renderedImplementPrompt}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const ruleToolPointer = ruleLookup
+      ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
+      : "";
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -15183,6 +15193,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3573: `undefined` for `implement`/`diagnose`/`recon` — byte-identical
           // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
           tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(ruleLookup === undefined ? {} : { ruleLookup }),
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
           ...(attemptMount === implementMount ? cashTrialSpawn : {}),
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
@@ -15449,6 +15460,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3573: same declared bound as the initial spawn above — a resumed session is
           // still the SAME lane, so it must not regain unrestricted tools on resume.
           tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(ruleLookup === undefined ? {} : { ruleLookup }),
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
           ...cashTrialSpawn,
           // W1-T3696: the RESUMED turn must restate the SAME contract the initial spawn was given.
@@ -15564,6 +15576,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         maxBudgetUsd: budgetUsd,
         config: implementConfig,
         tools: implementTools === undefined ? undefined : [...implementTools],
+        ...(ruleLookup === undefined ? {} : { ruleLookup }),
         ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
         ...cashTrialSpawn,
       }, { provider: impl.provider ?? implementMount.provider, title: task.title, report: fullText(impl), declaredPaths: task.files ?? [] }),
@@ -39120,6 +39133,9 @@ export async function wipeTestCommand(
 
   const config = deps.config ?? loadConfig();
   const runTaskFn = deps.runTaskFn ?? runTask;
+  const ablationRunTaskFn: typeof runTask = factor === "rules"
+    ? (id, options) => runTaskFn(id, { ...options, workerRuleHeadlinesEnabled: true })
+    : runTaskFn;
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
   const self = resolveOwnerRepo();
   const resolveMergedState = deps.resolveMergedState ?? ((tid, pp, cfg) => defaultWipeTestMergedState(tid, pp, cfg, self.owner));
@@ -39133,7 +39149,7 @@ export async function wipeTestCommand(
       owner: self.owner,
       selfRepo: self.repo,
       targetArgs: rest.slice(1),
-      runTaskFn,
+      runTaskFn: ablationRunTaskFn,
       execFileSyncFn,
       ledgerPath: ledgerPathFor(config),
       resolveMergedState,

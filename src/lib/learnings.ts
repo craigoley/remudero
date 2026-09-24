@@ -1901,9 +1901,8 @@ export function renderLearningsContext(selected: LearningEntry[]): string {
  * honour. Still not wired into {@link renderLearningsContext} — that block stays the
  * doctrine+matched-learnings pair it always was. W1-T2761 DOES wire the headline HALF into
  * `run-task.ts`'s `implementPromptParts`/`renderAnchorBlock` (via `buildRuleHeadlinesPart`,
- * policy-gated on `workerRuleHeadlines.enabled`); the on-demand BODY half
- * (`retrieveRuleBody`/`retrieveRuleBodyOnDemand`) stays exactly what it was — proof that the
- * retrieval path is safe — with no live call site asking for one rule's body by name yet.
+ * policy-gated on `workerRuleHeadlines.enabled`); `lookupWorkerRule` now supplies one selected
+ * body or learning's evidence to the implement worker's read-only rule tool.
  */
 
 /** One parsed rule bullet. INVARIANT: the headline wrapped in `**` markers, followed by `body`,
@@ -1981,6 +1980,41 @@ export function renderHeadlineOnlyIndex(rules: RuleHeadline[]): string {
  *  must never go silent on that use {@link retrieveRuleBodyOrDegrade}, never this directly. */
 export function retrieveRuleBody(index: Map<string, string>, headline: string): string | undefined {
   return index.get(headline);
+}
+
+export function lookupWorkerRule(
+  query: string,
+  source: string,
+  readStoreFile: (target: string) => string,
+  learnings: readonly LearningEntry[],
+): { id: string; text: string } | undefined {
+  const requested = query.trim();
+  const learningId = requested.startsWith("learnings#") ? requested.slice("learnings#".length) : undefined;
+  if (learningId !== undefined) {
+    const learning = learnings.find((entry) => entry.id === learningId);
+    return learning === undefined ? undefined : {
+      id: `learnings#${learning.id}`,
+      text: [learning.fact, learning.evidence].filter(Boolean).join("\n\n"),
+    };
+  }
+
+  const rules = parseRuleHeadlines(source);
+  const folded = requested.replace(/\s+/g, " ").toLowerCase();
+  const idFor = (headline: string) => headline.normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    .toLowerCase().slice(0, 64).replace(/-+$/g, "");
+  const matches = rules.filter((rule) => {
+    const pointer = parseRuleBodyPointer(rule.body);
+    return idFor(rule.headline) === requested
+      || pointer?.target === requested
+      || rule.headline.replace(/\s+/g, " ").toLowerCase().includes(folded);
+  });
+  if (matches.length > 1) throw new LearningsError(`lookupWorkerRule: ambiguous phrase "${requested}"`);
+  const rule = matches[0];
+  if (rule === undefined) return undefined;
+  const pointer = parseRuleBodyPointer(rule.body);
+  const body = pointer === undefined ? rule.body : resolveRuleBodyPointer(rule.headline, pointer, readStoreFile);
+  return { id: idFor(rule.headline), text: `- **${rule.headline}**${body}`.trimEnd() };
 }
 
 /**

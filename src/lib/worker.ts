@@ -23,7 +23,8 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { query, type Options, type PermissionMode, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
   loadConfig,
@@ -73,6 +74,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 import { hashInstallInputs } from "./install-hash.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
+import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
 // W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
   GH_RATE_LIMIT_BUCKET_UNKNOWN,
@@ -922,6 +924,11 @@ export interface SpawnWorkerArgs {
   permissionMode: PermissionMode;
   /** Path to the worker settings file (permissions + hooks + sandbox). */
   settingsFile: string;
+  /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
+  ruleLookup?: {
+    onPulled: (id: string, status: "found" | "missing" | "error") => void;
+    learningLookup?: { homes: LayeredLearningsHomes; allowedIds: readonly string[] };
+  };
   /** Tool names this spawn is never offered, threaded to the SDK's `Options.disallowedTools`. Deliberately NOT the settings
    * `deny` list: that floor is hook-enforced, and {@link DenyFloorVerdict} exists because the block can LEAK under
    * `bypassPermissions` (claude-code#20946), whereas a disallowed tool is never presented to the model at all. Default
@@ -1196,7 +1203,46 @@ export const IMPLEMENT_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit",
  * THE FALSIFIER NEEDS NO NEW CODE: `WorkerResult.permissionDenials` names a tool a worker asked for
  * and was refused. Widen this list from a denial that actually happened, never from a worry.
  */
-export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+export const WORKER_RULE_TOOL_NAME = "mcp__knowledge__rule";
+export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", WORKER_RULE_TOOL_NAME];
+
+/** The tool's only checkout operations are reads; its ledger sink is supplied by the run. */
+export function createWorkerRuleTool(
+  cwd: string,
+  onPulled: (id: string, status: "found" | "missing" | "error") => void,
+  learningLookup?: { homes: LayeredLearningsHomes; allowedIds: readonly string[] },
+) {
+  return tool(
+    "rule",
+    "Read a repository doctrine rule by stable id or headline phrase, or a learning's fact and evidence by learnings#id.",
+    { query: z.string().trim().min(1).max(200) },
+    async ({ query: requested }) => {
+      let found: ReturnType<typeof lookupWorkerRule>;
+      try {
+        found = lookupWorkerRule(
+          requested,
+          readFileSync(join(cwd, "CLAUDE.md"), "utf8"),
+          (target) => readFileSync(join(cwd, target), "utf8"),
+          requested.startsWith("learnings#")
+            ? learningLookup === undefined
+              ? loadLearningsCorpus(join(cwd, "learnings"))
+              : learningLookup.allowedIds.includes(requested.slice("learnings#".length))
+                ? loadLayeredLearnings(learningLookup.homes).entries
+                : []
+            : [],
+        );
+      } catch (error) {
+        onPulled(requested, "error");
+        return { isError: true, content: [{ type: "text" as const, text: `Rule lookup failed: ${String(error)}` }] };
+      }
+      onPulled(found?.id ?? requested, found === undefined ? "missing" : "found");
+      return found === undefined
+        ? { isError: true, content: [{ type: "text" as const, text: `No rule matches "${requested}".` }] }
+        : { content: [{ type: "text" as const, text: found.text }] };
+    },
+    { annotations: { readOnlyHint: true, destructiveHint: false } },
+  );
+}
 
 /**
  * Choose implement's tool surface from WHAT IS RUNNING IT (W1-T3696 step 2). A cash-billed mount
@@ -2451,6 +2497,18 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
     if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
     if (args.tools) options.tools = args.tools;
+    if (args.ruleLookup) {
+      if (args.tools === undefined || !args.tools.includes(WORKER_RULE_TOOL_NAME)) {
+        throw new Error(`rule lookup requires ${WORKER_RULE_TOOL_NAME} in the declared tool bound`);
+      }
+      options.mcpServers = {
+        knowledge: createSdkMcpServer({ name: "knowledge", tools: [createWorkerRuleTool(
+          args.cwd,
+          args.ruleLookup.onPulled,
+          args.ruleLookup.learningLookup,
+        )] }),
+      };
+    }
 
     // LIVE-SPAWN GUARD — the final authority gate before the SDK invocation, the only line that creates a paid worker.
     // Everything above is local and free and refuses on its own for bad input, so guarding higher would mask three of those
