@@ -2583,15 +2583,19 @@ export function writeRatificationShards(
 }
 
 /** W1-T4338: write an approved skill draft's SKILL.md, verbatim, at its one path under `worktreePath`. Returns that
- *  repo-relative path. Refuses rather than guesses on a name {@link approvedSkillRelPath} rejects. */
+ *  repo-relative path. Refuses rather than guesses on a name {@link approvedSkillRelPath} rejects, and refuses to
+ *  replace a skill already approved at that path — an approval adds a skill, it never silently rewrites one. */
 export function writeApprovedSkillFile(
   worktreePath: string,
   skillFile: SkillFilePayload,
-  fs: ShardWriteFs,
+  fs: ShardWriteFs & { existsSync: (path: string) => boolean },
   joinPath: (...parts: string[]) => string,
 ): string {
   const relPath = approvedSkillRelPath(skillFile.name);
   if (!relPath) throw new Error(`rmd approve: refusing to write skill ${JSON.stringify(skillFile.name)} — not a single safe path segment`);
+  if (fs.existsSync(joinPath(worktreePath, relPath))) {
+    throw new Error(`rmd approve: refusing to overwrite the approved skill at ${relPath} — retire it first, or stage the draft under another name`);
+  }
   fs.mkdirSync(joinPath(worktreePath, ".claude", "skills", skillFile.name), { recursive: true });
   fs.writeFileSync(joinPath(worktreePath, relPath), skillFile.markdown, "utf8");
   return relPath;
