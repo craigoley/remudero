@@ -475,7 +475,8 @@ test("GRILL WIRING (W1-T354): a grill delivery failure degrades to today's behav
     setBranch("run-PLAN-clarify");
     // NOT wrapped in withLiveWritesAllowed — see the section doc above.
     code = await planCommand(["--mode=clarify", "W1-T90"], {
-      spawn: async () => grillFailFakeWorker(`GRILL: ${question}`),
+      spawn: async () =>
+        grillFailFakeWorker(["OPTION: here|this repo only", "OPTION: both|add the sandbox too", "RECOMMENDATION: here", `GRILL: ${question}`].join("\n")),
     });
   });
 

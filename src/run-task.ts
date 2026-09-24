@@ -15322,9 +15322,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           chosen,
           band: recordVerdict.band,
           reason: recordVerdict.reason,
+          ...(decision.falsifier ? { falsifier: decision.falsifier } : {}),
         }).landed;
       }
-      log("decision.autochoose", { chosen, recorded: recordVerdict.record, risk_band: recordVerdict.band, landed });
+      log("decision.autochoose", {
+        chosen,
+        recorded: recordVerdict.record,
+        risk_band: recordVerdict.band,
+        landed,
+        falsifier: decision.falsifier ?? null,
+      });
       say(
         `DECISION_REQUEST auto-chose: ${chosen} (${
           recordVerdict.record
