@@ -89,7 +89,7 @@ function seededGates(opts: { ciGate?: string } = {}): string {
   return root;
 }
 
-type Landed = { paths: string[]; title: string; body: string; review?: "operator" };
+type Landed = { paths: string[]; title: string; body: string };
 function checkout(root: string, landed: Landed[]): () => GardenCheckout {
   return () => ({ root, land: (opts) => (landed.push(opts), "https://github.com/acme/remudero/pull/88"), dispose: () => {} });
 }
@@ -116,7 +116,8 @@ test("W1-T4116: a slack baseline is tightened to its measured value", async () =
   // today's count of uncovered routes (the fixture's client sources call none).
   assert.equal(JSON.parse(readFileSync(join(root, "scripts/source-size-baseline.json"), "utf8"))["src/lib/a.ts"], 500);
   assert.match(readFileSync(join(root, "scripts/contract-coverage-baseline.json"), "utf8"), /"_comment": "ceiling \\u2014 may fall",\n {2}"uncoveredCeiling": 0\n/);
-  assert.equal(landed[0]!.review, undefined, "a tightening lands for the fleet like any other change");
+  assert.equal("review" in landed[0]!, false, "a tightening lands for the fleet like any other change");
+  assert.doesNotMatch(landed[0]!.body, /^\*\*Judged by its outcome/, "an unreviewed class carries no note");
   assert.match(landed[0]!.body, /proof: grep: "src\/lib\/a\.ts": 500 in scripts\/source-size-baseline\.json/);
   assert.match(landed[0]!.body, /proof: grep: \^## Pass .*\$ in docs\/gate-garden-log\.md/);
   assert.ok(landed[0]!.paths.includes("docs/gate-garden-log.md"));
@@ -132,8 +133,9 @@ test("W1-T4116: a demotion is only proposed for operator review", async () => {
   const base = readFileSync(join(root, CI_GATE_YML), "utf8");
   const pass = runGarden(spec, deps(root, landed));
   assert.deepEqual(pass.plan?.actions.map((a) => a.target), ["quiet-gate"]);
-  assert.equal(landed[0]!.review, "operator", "a demotion opens for a person, never for auto-merge");
-  assert.match(landed[0]!.body, /^\*\*Held for operator review\.\*\*/);
+  // Operator ruling 2026-09-24: a demotion is never held or drafted — it is judged by whether it merges.
+  assert.equal("review" in landed[0]!, false, "nothing asks the checkout to hold or draft the PR");
+  assert.match(landed[0]!.body, /^\*\*Judged by its outcome\.\*\* The gate gardener's `demote` changes are judged by whether this PR merges/);
   const head = readFileSync(join(root, CI_GATE_YML), "utf8");
   const lists = (t: string) => probes.gm.readGateLists(t) as unknown as { required: Set<string> };
   assert.deepEqual([...lists(head).required].sort(), ["busy-gate", "ci"]);
