@@ -241,6 +241,24 @@ test("W1-T4096: forensics fold reports a named page that does not exist as missi
   }
 });
 
+test("W1-T4096: a dry-run forensics fold names the split files and creates nothing on disk", () => {
+  const root = tempRoot("forensics-dry-run");
+  try {
+    mkdirSync(join(root, "docs", "forensics"), { recursive: true });
+    writeFileSync(join(root, "docs", "forensics", "review.md"), FORENSICS_FIXTURE);
+    const report = foldNarrativeStore({ root, kind: "forensics", readingSizeBytes: 800, dryRun: true });
+    assert.equal(report.changed, true);
+    assert.ok(report.filesWritten.some((p) => p.endsWith(join("review", "examplefunction.md"))));
+    assert.equal(existsSync(join(root, "docs", "forensics", "review")), false);
+    assert.equal(readFileSync(join(root, "docs", "forensics", "review.md"), "utf8"), FORENSICS_FIXTURE);
+    // The size in the note is the byte length of the text that was split, not a separate stat.
+    const bytes = Buffer.byteLength(FORENSICS_FIXTURE, "utf8");
+    assert.ok(report.notes.some((n) => n.startsWith(`split docs/forensics/review.md (${bytes} bytes)`)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4096: splitForensicsPage slugs and rewriteWhyPointers agree on the same anchor", () => {
   const { pointerRewrites } = splitForensicsPage(FORENSICS_FIXTURE, { pageRelPath: "docs/forensics/review.md" });
   assert.equal(slugifyHeading("Second pass (2026-09-06)"), "second-pass-2026-09-06");
