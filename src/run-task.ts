@@ -796,6 +796,7 @@ import {
 import {
   AUTOMATED_RETRO_DECISION_ENV,
   decodeAutomatedRetroDecision,
+  retroExitAfterPrOpened,
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -27831,7 +27832,7 @@ async function retroCommand(
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
-      return 1;
+      return retroExitAfterPrOpened(ci);
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
@@ -27860,7 +27861,7 @@ async function retroCommand(
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
     const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
     say(`retro PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
-    return reviewCode;
+    return retroExitAfterPrOpened("green", reviewCode);
   } catch (e) {
     log("retro.error", retroErrorLedgerFields(e) ?? { error: String((e as Error)?.message ?? e) });
     try {
