@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
   plan_refs: []
-  files: [.github/workflows/ci.yml, src/lib/ci-parity.ts, scripts/list-rule-suites.mjs, test/the-rule-checks-run-first.test.ts]
+  files: [.github/workflows/ci.yml, src/lib/ci-parity.ts, src/lib/review.ts, scripts/list-rule-suites.mjs, test/the-rule-checks-run-first.test.ts]
   status: queued
   attempts: 0
   rationale: |

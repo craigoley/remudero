@@ -69,11 +69,9 @@ test("W1-T3762 criterion 3: the committed Codex balanced ladder is Luna-first wi
   const capabilities = loadMounts(mountsPath(repoRoot)).capabilities;
   assert.ok(capabilities, "the committed provider-neutral capability ladder must load");
   for (const effort of ["low", "medium", "high"] as const) {
-    assert.deepEqual(
-      capabilities.codex.balanced[effort].slice(0, 2),
-      ["gpt-6-luna", "gpt-5.6-luna"],
-      `balanced/${effort} must prefer GPT-6 Luna and retain GPT-5.6 Luna as its immediate fallback`,
-    );
+    // Operator ruling 2026-09-24 (the Sol-vs-Sonnet A/B) puts gpt-6-sol ahead of the Luna pair on high only.
+    const lunaPair: string[] = effort === "high" ? capabilities.codex.balanced[effort].slice(1, 3) : capabilities.codex.balanced[effort].slice(0, 2);
+    assert.deepEqual(lunaPair, ["gpt-6-luna", "gpt-5.6-luna"], `balanced/${effort} must keep GPT-6 Luna with GPT-5.6 Luna as its immediate fallback`);
     assert.equal(capabilities.codex.frontier[effort][0], "gpt-6-sol", `frontier/${effort} must not be silently demoted`);
   }
 });
@@ -144,9 +142,10 @@ test("the retro Architect's turn budget, resolved from the real mounts.yaml, is 
 // ── W1-T167: the class axis is WIRED into the spawn path, and a class miss ledgers LOUD ─
 
 test("the spawn path derives the task's class and resolves its mount THROUGH resolveMountForClass, not the class-blind resolveMount", () => {
-  assert.match(runTaskSrc, /import \{ deriveTaskClass \} from "\.\/lib\/task-class\.js";/);
+  assert.match(runTaskSrc, /import \{ deriveTaskClass, implementRouteClass \} from "\.\/lib\/task-class\.js";/);
   assert.match(runTaskSrc, /const taskClass = deriveTaskClass\(task\)/);
-  assert.match(runTaskSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, taskClass\)/);
+  // Ruling 2026-09-24: the implement route sends high-risk work without a declared danger band to the mid tier.
+  assert.match(runTaskSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, implementRouteClass\(task, taskClass\)\)/);
 });
 
 test("a class-miss fallback ledgers a LOUD `mount.class_fallback` line naming the unmatched class — never silent", () => {

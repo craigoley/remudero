@@ -34,6 +34,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
@@ -87,6 +88,7 @@ usage:
   rmd ratify <rung>   # Print a gated rung's live operation-hash row for the operator to commit; writes nothing.
   rmd skill list   # List the skill registry: every .remudero/skills/<name>.yaml entry.
   rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
+  rmd knowledge fold [--store <decisions|master-plan|forensics>] [--dry-run]   # Fold a narrative store that outgrew its reading size: statuses, dated archives, anchor split.
   rmd bundle export <path> | rmd bundle import <file> --pin <hash>   # Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
@@ -94,6 +96,8 @@ usage:
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
+  rmd decline <proposalId> --reason "<text>"   # Decline an inbox proposal, recording why; reversible with rmd restore.
+  rmd restore <proposalId> --reason "<text>"   # Take back a decline, so the proposal returns to the inbox.
   rmd verify-human-sweep [--dry-run] [--limit <n>]   # Judge the parked verify:human backlog and surface only the shards that still need you.
   rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]   # An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
   rmd note <id> <text...>   # Record an operator guidance note against a task or proposal, for the weekly feedback docket.
@@ -199,7 +203,7 @@ The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
 rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]
 ```
 
-W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: cli-reference:check, claims, learnings-budget-ratchet, jscpd, comment-load-signal, depcruise, api-client:check, no-hand-rolled-fetch:check, source-size-signal, lint-plan:fast, census:self-path-proof, census:bound-kind, census:ledger-literal, census:catch-erasure, census:negative-reachability, census:authority, census:no-shallowing, worker-branch-shape:check — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code
+W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: rule-checks:population, cli-reference:check, claims, learnings-budget-ratchet, jscpd, comment-load-signal, depcruise, api-client:check, no-hand-rolled-fetch:check, source-size-signal, lint-plan:fast, census:self-path-proof, census:bound-kind, census:ledger-literal, census:catch-erasure, census:negative-reachability, census:authority, census:no-shallowing, worker-branch-shape:check — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code
 
 ### `rmd next-task-id`
 
@@ -300,6 +304,16 @@ rmd ledger-grep <pattern>
 ```
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
+
+### `rmd routing-ab`
+
+Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
+
+```
+rmd routing-ab [--json]
+```
+
+Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive and the live ledger, takes each worker.assignment row whose routing.decision.ab names a live experiment (src/lib/routing-experiments.ts), and reports per arm: tasks, merges, merge rate, fix dispatches per task, median worker minutes, mean tokens and mean notional cost. A task is counted under the arm of its first tagged assignment; tasks that landed in both arms are counted separately. An arm below the experiment's minimum task count is reported as an insufficient sample, never a verdict, and the revisit date is flagged once due. READ-ONLY: writes no ledger line and no state file.
 
 ### `rmd ledger-compact`
 
@@ -831,6 +845,16 @@ rmd learnings export <out> | rmd learnings import <file> --pin <hash>
 
 the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. Export always emits `learnings-v2`: its hash binds the public projection, which replaces author `src` and Git locators with fixed redaction values. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks. Exact `learnings-v1`/`learnings-v2` select their hash canon; legacy non-prefixed versions remain V1, while any other `learnings-v*` version is refused.
 
+### `rmd knowledge`
+
+Fold a narrative store that outgrew its reading size: statuses, dated archives, anchor split.
+
+```
+rmd knowledge fold [--store <decisions|master-plan|forensics>] [--dry-run]
+```
+
+the knowledge gardener's FOLD tier by hand (W1-T4096, W1-T4095 design (iii)): stamps a `Status:` line onto every DECISIONS.md entry (accepted / withdrawn / superseded by <ref>, derived from a whole-entry `(SUPERSEDED BY ...)` heading marker; a partial or ambiguous mention is reported, never guessed at), archives MASTER-PLAN.md's `## SHIPPED log` waves older than the current month into docs/archive/master-plan-<yyyy-mm>.md behind a one-line pointer, and splits any docs/forensics/*.md page over its reading size into one file per `## ` anchor under docs/forensics/<page>/<slug>.md, rewriting the `// Why:` pointers under src/ that named a specific anchor. `--store` scopes to one operation; omitted runs all three. `--dry-run` reports the files that would change and writes nothing.
+
 ### `rmd bundle`
 
 Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
@@ -900,6 +924,26 @@ rmd approve <P##> [<P##> ...]
 ```
 
 one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready
+
+### `rmd decline`
+
+Decline an inbox proposal, recording why; reversible with rmd restore.
+
+```
+rmd decline <proposalId> --reason "<text>"
+```
+
+the terminal's route to the console's decline (POST /v1/inbox/decline, W1-T2604): re-classifies the proposal live, refuses one that is unknown, already RATIFIED, or already declined, and otherwise appends one panel.proposal_declined ledger row carrying the reason verbatim. Files nothing and opens no branch; the proposal stays in the registry and classifies as declined until restored. Exit 0 recorded, 1 refused, 2 a usage error
+
+### `rmd restore`
+
+Take back a decline, so the proposal returns to the inbox.
+
+```
+rmd restore <proposalId> --reason "<text>"
+```
+
+the reversal of rmd decline and the terminal's route to POST /v1/inbox/restore (W1-T3407): refuses a proposal that is unknown, already RATIFIED, or not declined, and otherwise appends one panel.proposal_restored ledger row carrying the reason. Exit 0 recorded, 1 refused, 2 a usage error
 
 ### `rmd verify-human-sweep`
 

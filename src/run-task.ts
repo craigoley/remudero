@@ -150,6 +150,7 @@ import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
@@ -582,7 +583,8 @@ import {
   type GatePostureFinding,
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
-import { ghIssueCloser } from "./lib/panel-actions.js";
+import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
+import { PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
   buildReadyServeServer,
@@ -673,6 +675,7 @@ import {
   draftsDueOnDaemon,
   decideDraftDeferral,
   declinedReasonInLedger,
+  type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
   mergeDraftCaches,
@@ -854,6 +857,7 @@ import {
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
+import { routingAbCommand } from "./lib/routing-experiments.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -1065,7 +1069,7 @@ import { reapGitObjects } from "./lib/object-reaper.js";
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. */
 export const OBJECT_REAP_CONTRACT_VERSION = "1";
-import { deriveTaskClass } from "./lib/task-class.js";
+import { deriveTaskClass, implementRouteClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord, type ClassClosure } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
@@ -12939,7 +12943,7 @@ export function softBudgetWarning(
  * every branch, including the fallback a complete committed table cannot reach. */
 export function resolveRunMounts(
   repoRootDir: string,
-  task: Pick<Task, "type" | "risk" | "files">,
+  task: Pick<Task, "type" | "risk" | "files" | "band_meaning">,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): {
   mount: Mount;
@@ -12971,7 +12975,7 @@ export function resolveRunMounts(
 } {
   const mountsTable = loadMounts(mountsPath(repoRootDir));
   const taskClass = deriveTaskClass(task);
-  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
+  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, implementRouteClass(task, taskClass));
   if (mountResolution.fellBackToDefault) {
     // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
     // a ledger line NAMING the missing class, never a silent number swap.
@@ -33298,6 +33302,7 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
+    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
     // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
     // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
     // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
@@ -41208,6 +41213,7 @@ function loadProposalForRatify(
   owner: string,
   repo: string,
   config: Config,
+  withDeclines = false,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -41232,6 +41238,7 @@ function loadProposalForRatify(
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+    ...(withDeclines ? { isDeclined: (id: string) => declinedReasonInLedger(ledgerLines, id) } : {}),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -42118,6 +42125,21 @@ export function readLedgerRawLines(path: string): readonly string[] {
     // no ledger yet (a fresh checkout) or unreadable — releases nothing, never throws into dispatch
     return [];
   }
+}
+
+export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const ledgerPath = ledgerPathFor(config);
+  const { owner, repo } = resolveOwnerRepo();
+  return proposalVerdictCommand(
+    kind,
+    rest,
+    (id) => {
+      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config, true);
+      return { exists: proposal !== undefined, classification };
+    },
+    (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),
+  );
 }
 
 export async function approveCommand(
@@ -44318,8 +44340,41 @@ export function skillLifecycleCommand(
   return 0;
 }
 
-// learningsCommand / learningsExportCommand / learningsImportCommand moved to
-// src/lib/report-commands.ts (W1-T2888) — imported/re-exported below.
+// learningsCommand/learningsExportCommand/learningsImportCommand live in src/lib/report-commands.ts (W1-T2888).
+
+const NARRATIVE_FOLD_KINDS: NarrativeFoldKind[] = ["decisions", "master-plan", "forensics"];
+
+/** `rmd knowledge fold` (W1-T4096): {@link foldNarrativeStore} per store; its COMMANDS `detail` is the contract. */
+export function knowledgeCommand(rest: string[], opts: { root?: string } = {}): number {
+  const sub = rest[0];
+  if (sub !== "fold") {
+    console.error(`rmd knowledge: unknown subcommand '${sub ?? ""}' — usage: rmd knowledge fold [--store <kind>] [--dry-run]\n` + USAGE);
+    return 2;
+  }
+  const args = rest.slice(1);
+  const badArg = unknownArgError("knowledge fold", args, ["--store"], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const storeFlag = flagValue(args, "--store");
+  if (storeFlag && !NARRATIVE_FOLD_KINDS.includes(storeFlag as NarrativeFoldKind)) {
+    console.error(`rmd knowledge fold: unknown --store '${storeFlag}' — one of ${NARRATIVE_FOLD_KINDS.join(", ")}\n` + USAGE);
+    return 2;
+  }
+  const kinds = storeFlag ? [storeFlag as NarrativeFoldKind] : NARRATIVE_FOLD_KINDS;
+  const dryRun = args.includes("--dry-run");
+  const root = opts.root ?? repoRoot;
+  let anyChanged = false;
+  for (const kind of kinds) {
+    const report = foldNarrativeStore({ root, kind, dryRun });
+    anyChanged = anyChanged || report.changed;
+    console.log(`rmd knowledge fold: ${kind} — ${report.changed ? `${report.filesWritten.length} file(s) written` : "already folded"}`);
+    for (const note of report.notes) console.log(`  ${note}`);
+  }
+  if (!anyChanged) console.log("rmd knowledge fold: nothing to fold");
+  return 0;
+}
 
 /**
  * `rmd bundle export|import` — dispatches the day-one knowledge bundle verbs (W1-T2580 export,
@@ -44735,6 +44790,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "routing-ab",
+    syntax: "rmd routing-ab [--json]",
+    summary: "Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.",
+    detail: "Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive and the live ledger, takes each worker.assignment row whose routing.decision.ab names a live experiment (src/lib/routing-experiments.ts), and reports per arm: tasks, merges, merge rate, fix dispatches per task, median worker minutes, mean tokens and mean notional cost. A task is counted under the arm of its first tagged assignment; tasks that landed in both arms are counted separately. An arm below the experiment's minimum task count is reported as an insufficient sample, never a verdict, and the revisit date is flagged once due. READ-ONLY: writes no ledger line and no state file.",
+  },
+  {
     name: "ledger-compact",
     syntax: "rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]",
     summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
@@ -45038,6 +45099,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. Export always emits `learnings-v2`: its hash binds the public projection, which replaces author `src` and Git locators with fixed redaction values. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks. Exact `learnings-v1`/`learnings-v2` select their hash canon; legacy non-prefixed versions remain V1, while any other `learnings-v*` version is refused.",
   },
   {
+    name: "knowledge",
+    syntax: "rmd knowledge fold [--store <decisions|master-plan|forensics>] [--dry-run]",
+    summary: "Fold a narrative store that outgrew its reading size: statuses, dated archives, anchor split.",
+    detail: "the knowledge gardener's FOLD tier by hand (W1-T4096, W1-T4095 design (iii)): stamps a `Status:` line onto every DECISIONS.md entry (accepted / withdrawn / superseded by <ref>, derived from a whole-entry `(SUPERSEDED BY ...)` heading marker; a partial or ambiguous mention is reported, never guessed at), archives MASTER-PLAN.md's `## SHIPPED log` waves older than the current month into docs/archive/master-plan-<yyyy-mm>.md behind a one-line pointer, and splits any docs/forensics/*.md page over its reading size into one file per `## ` anchor under docs/forensics/<page>/<slug>.md, rewriting the `// Why:` pointers under src/ that named a specific anchor. `--store` scopes to one operation; omitted runs all three. `--dry-run` reports the files that would change and writes nothing.",
+  },
+  {
     name: "bundle",
     syntax: "rmd bundle export <path> | rmd bundle import <file> --pin <hash>",
     summary: "Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.",
@@ -45078,6 +45145,20 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd approve <P##> [<P##> ...]",
     summary: "Ratify one or more READY proposals through the gate into a plan PR.",
     detail: "one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready",
+  },
+  {
+    name: "decline",
+    syntax: PROPOSAL_VERDICT_SYNTAX.decline,
+    summary: "Decline an inbox proposal, recording why; reversible with rmd restore.",
+    detail:
+      "the terminal's route to the console's decline (POST /v1/inbox/decline, W1-T2604): re-classifies the proposal live, refuses one that is unknown, already RATIFIED, or already declined, and otherwise appends one panel.proposal_declined ledger row carrying the reason verbatim. Files nothing and opens no branch; the proposal stays in the registry and classifies as declined until restored. Exit 0 recorded, 1 refused, 2 a usage error",
+  },
+  {
+    name: "restore",
+    syntax: PROPOSAL_VERDICT_SYNTAX.restore,
+    summary: "Take back a decline, so the proposal returns to the inbox.",
+    detail:
+      "the reversal of rmd decline and the terminal's route to POST /v1/inbox/restore (W1-T3407): refuses a proposal that is unknown, already RATIFIED, or not declined, and otherwise appends one panel.proposal_restored ledger row carrying the reason. Exit 0 recorded, 1 refused, 2 a usage error",
   },
   {
     name: "verify-human-sweep",
@@ -45657,6 +45738,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => checkProofCommand(rest)],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
@@ -45756,6 +45838,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["skill", async (rest) => await skillCommand(rest)],
   ["learnings", (rest) => learningsCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["bundle", (rest) => bundleCommand(rest)],
+  ["knowledge", (rest) => knowledgeCommand(rest)],
   [
     "trace",
     async (rest) =>
@@ -45776,6 +45859,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await approveCommand(rest);
     },
   ],
+  ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
+  ["restore", (rest) => proposalVerdictCliCommand("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
   [

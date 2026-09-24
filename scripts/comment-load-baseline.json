@@ -163,7 +163,7 @@
   "src/lib/measurement-cadence.ts": 750,
   "src/lib/model-gate.ts": 16,
   "src/lib/mount-recommender.ts": 195,
-  "src/lib/mounts.ts": 255,
+  "src/lib/mounts.ts": 259,
   "src/lib/notify.ts": 123,
   "src/lib/onboard/inventory.ts": 165,
   "src/lib/onboard/recon.ts": 167,
@@ -229,7 +229,7 @@
   "src/lib/supersession.ts": 50,
   "src/lib/sweep.ts": 3750,
   "src/lib/task-card.ts": 54,
-  "src/lib/task-class.ts": 37,
+  "src/lib/task-class.ts": 39,
   "src/lib/task-id-reservation.ts": 256,
   "src/lib/task-id.ts": 500,
   "src/lib/task-linter.ts": 1300,
@@ -248,6 +248,6 @@
   "src/lib/worker.ts": 1750,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 17000,
+  "src/run-task.ts": 17024,
   "src/spike.ts": 18
 }

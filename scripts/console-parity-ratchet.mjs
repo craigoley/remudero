@@ -44,6 +44,9 @@ export const ROUTE_MATCH = {
   // row is inert until that verb lands. Falsifier: test/note-is-preregistered-as-console-routed.test.ts.
   note: "POST /v1/operator-notes/add",
   reframe: "POST /v1/inbox/reframe",
+  // The CLI verbs and the console routes decide and record through the SAME applyProposalVerdict.
+  decline: "POST /v1/inbox/decline",
+  restore: "POST /v1/inbox/restore",
   peek: "GET /v1/peek",
   replay: "GET /v1/replay",
   skill: "GET /v1/skills",
@@ -105,6 +108,9 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      // 2026-09-24 ruling: an operator report over the ledger union on the daemon host; the console
+      // reads the same experiment through routing.decision on each worker.assignment row.
+      "routing-ab",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
       // not fleet state, and not reachable from the console's remote HTTP client.
       "memory-lint",
@@ -126,6 +132,7 @@ export const CLI_ONLY = {
       "ratify",
       "learnings",
       "bundle",
+      "knowledge",
       "rule",
       "init",
       "project",

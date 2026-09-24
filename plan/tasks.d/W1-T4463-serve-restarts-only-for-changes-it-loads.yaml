@@ -1,0 +1,48 @@
+- id: W1-T4463
+  title: "SERVE RESTARTS ON EVERY MERGE TO MAIN, INCLUDING THE ONES THAT CHANGE NOTHING IT LOADS — gateStaleCodeExit and assessGatewayCheckout.restartDue fire on any sha change, so a docs/test/learnings merge costs the console a restart and a cold read; restart only when the diff from the boot sha touches a path serve loads"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 console data-architecture gateway build: restart-gating follow-up (coordinator item 3)"
+  plan_refs: ["W1-T2229", "W1-T4229", "W1-T4451"]
+  files:
+    - src/lib/serve-restart-relevance.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 against origin/main: 10 serve.start rows in 3 h, one per merge the host checkout
+    (~/rmd-serve-repo) fast-forwarded. Of 182 merges in 24 h, 93 touched a path serve loads (src/, package.json,
+    package-lock.json, settings/, hooks/, bin/, deploy/), 62 were plan-only (plan/tasks.yaml, plan/tasks.d/,
+    plan/policy.yaml) and 27 touched neither (docs/, test/, learnings/, doctrine/). gateStaleCodeExit (serve.ts)
+    treats `isConsoleCodeStale(bootSha, currentSha)` and assessGatewayCheckout's `restartDue` (any `behindBy !== 0`)
+    as reasons to exit, so all 182 were restart candidates. Each restart empties serve's in-memory snapshots and
+    memos; the live console showed "/v1/action-results timed out after 5000 ms" on the first read after one.
+  design: |
+    New src/lib/serve-restart-relevance.ts exports `serveRestartRelevant(changedPaths: readonly string[]): boolean`,
+    true when any path is under src/, bin/, hooks/, settings/, deploy/ or is package.json / package-lock.json, plus a
+    reader `changedPathsSince(bootSha, targetRef)` over `git diff --name-only <bootSha> <targetRef>` (async
+    execFile, never execFileSync on serve's loop). gateStaleCodeExit's staleness test becomes "the sha moved AND
+    the paths it moved are serve-relevant". An unreadable diff counts as relevant, so the old behaviour is the
+    fallback and a restart is never lost to a read failure. The shell's STALE banner keeps reporting the raw sha
+    difference. serve.ts: zero net comment lines (over its comment ceiling).
+    OUT OF SCOPE, file separately if wanted: plan-only merges (62/182) would additionally need serve to reload
+    `boardDeps.plan` on a plan/tasks.d change, because serve loads the plan once at boot.
+  acceptance:
+    - claim: "a merge that touches only docs tests or learnings does not make serve's code stale"
+      proof: "unit test: a docs-only merge does not make serve restart"
+    - claim: "a merge that touches src makes serve's code stale as before"
+      proof: "unit test: a src merge still makes serve restart"
+    - claim: "an unreadable diff is treated as relevant"
+      proof: "unit test: an unreadable restart diff still restarts serve"
+    - claim: "the stale-code exit consults the restart relevance"
+      proof: "grep: serveRestartRelevant( in src/lib/serve.ts"
+  falsifier: |
+    CLOSE IF gateStaleCodeExit on main already skips a restart when the diff from its boot sha touches no src/, bin/,
+    hooks/, settings/, deploy/ or package manifest path.
