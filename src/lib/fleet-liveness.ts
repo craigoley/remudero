@@ -10,6 +10,7 @@
  * the ledgers of every OTHER instance, which only the gateway container mounts, so
  * instance-gateway.ts runs it (see `checkInstanceLiveness`).
  */
+import { fixedClock } from "./clock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { Escalation } from "./escalate.js";
 import { readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
@@ -168,7 +169,7 @@ export class LivenessLedgerUnreadableError extends RmdError {
  * A missing live ledger throws rather than reading as "no sweep", which would page about a mount.
  */
 export function readLivenessRows(instance: LivenessInstance, sinceMs: number, fsDeps: LedgerGrepFsDeps = realLedgerFs): LivenessRow[] {
-  const read = readLedgerUnionRecordsSync(instance.stateDir, { sinceTs: new Date(sinceMs).toISOString(), pattern: LIVENESS_ROW }, fsDeps);
+  const read = readLedgerUnionRecordsSync(instance.stateDir, { sinceTs: fixedClock(sinceMs).iso(), pattern: LIVENESS_ROW }, fsDeps);
   if (!read.liveFileRead) throw new LivenessLedgerUnreadableError(instance.stateDir);
   return read.rows;
 }
