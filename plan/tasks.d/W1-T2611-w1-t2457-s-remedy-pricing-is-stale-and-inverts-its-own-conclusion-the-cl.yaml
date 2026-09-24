@@ -10,7 +10,9 @@
   files: [plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml, plan/tasks.d/W1-T2282-docs-is-the-uncovered-knowledge-corpus.yaml]
   origin: "followup#W1-T2457-1788020906446"
   plan_refs: ["§8A", "W1-T2457", "W1-T2282", "W1-T1234"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T2611 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     THE FOLLOW-UP THIS RATIFIES ASKED A RESEARCH QUESTION THAT IS ALREADY ANSWERED, AND THE ANSWER
