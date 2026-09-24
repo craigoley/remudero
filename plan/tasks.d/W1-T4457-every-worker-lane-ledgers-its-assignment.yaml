@@ -1,0 +1,32 @@
+- id: W1-T4457
+  title: "ROUTING TELEMETRY UNDER-COUNTS CASH AND TRIAGE WORK — only run-task's dispatch wrapper passes onSelectionAssignment, so drafting, triage and other non-dispatch spawns print worker.selection.assigned to stdout and never ledger a worker.assignment row; ledger the assignment for every lane"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "2026-09-24 provider-routing research: 126 assignments on core stdout in 3 h, incl. cash gpt-5-nano x44, versus far fewer ledgered rows"
+  plan_refs: ["W1-T3762", "W1-T4453"]
+  files:
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at main 6a04d2f18: spawnWorker (src/lib/worker.ts) always prints `worker.selection.assigned` to stderr and
+    calls args.onSelectionAssignment only when a caller supplies it. The only caller that does is the dispatch spawn
+    wrapper in src/run-task.ts, which logs `worker.assignment` with `worker_assignment`. Every other lane's spawn
+    (cash drafting, triage, inbox and other non-dispatch lanes) leaves no ledger row, so /v1/analytics routingTelemetry
+    (built from worker.assignment rows) under-reports the cash and non-dispatch mix and spend.
+  design: |
+    Every spawnWorker call in src/run-task.ts that does not already pass onSelectionAssignment passes one that
+    ledgers the SAME row shape the dispatch wrapper writes: step `worker.assignment`, field `worker_assignment`
+    (the WorkerSelectionAssignment unchanged), plus the lane name it already carries. A sink failure keeps today's
+    behaviour: the worker catches it and routing is unchanged. No change to routing decisions.
+  acceptance:
+    - claim: "a non-dispatch worker spawn ledgers its worker assignment"
+      proof: "unit test: a non-dispatch worker spawn ledgers its worker assignment"
+  falsifier: |
+    CLOSE IF every spawnWorker caller in run-task.ts on main already passes onSelectionAssignment.

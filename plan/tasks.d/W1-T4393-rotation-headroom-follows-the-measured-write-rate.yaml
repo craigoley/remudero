@@ -1,5 +1,5 @@
 - id: W1-T4393
-  title: "THE CORE LEDGER ROTATES EVERY ~4 MINUTES BECAUSE ROTATION KEEPS IT AT 90% OF ITS CEILING — size the retained core from the measured append rate so rotation leaves about an hour of headroom, now that delta archives keep every row"
+  title: "THE CORE LEDGER ROTATES ~4 TIMES AN HOUR BECAUSE ITS RETAINED DECISION CORE FILLS THE CEILING — give rotation an hour of measured headroom ABOVE the retained core, shedding nothing a live reader keeps"
   repo: remudero
   depends_on: []
   priority: 2
@@ -25,20 +25,43 @@
     the daemon's loop, about 1.4 GB of rewrite a day for about 2 MB of new rows an hour. The retained core
     existed so live-only readers kept history. Since #6868 and #6876, union readers read the archives and
     the archives hold every row once, so a smaller live core loses nothing.
+  amendments: |
+    AMENDED 2026-09-24 AFTER #6936 (W1-T4394) DEPLOYED, per the parking ruling: re-measure the rotation rate,
+    then shed high-volume steps first and protect decision-critical live readers, or close. RE-MEASURED on the
+    fleet host (~/rmd-state2/state, deduped union of archives plus live file, 07:30-11:30Z): 3,522 rows/h,
+    1.30 MB/h; github.wake.* down from ~1,035 to ~110 rows/h; 18 archives 07:07-11:26Z, still ~4.2 rotations/h,
+    so the falsifier below is NOT met. The live file after rotation: 4,017,518 bytes in 6,110 rows, 3,803,838
+    bytes of them older than an hour, and ZERO rows of worker.activity, worker.turns, sweep.dispose,
+    sweep.dispose.not_open, board_gateway.* or github.wake.summary. HIGH-VOLUME STEPS ARE ALREADY SHED FIRST:
+    passes 1-4 of rotateLedger keep none of them. What fills the ceiling is the retained decision and render
+    core: sweep.disposed 865 KB, review.posted 829 KB, review.post_refused 450 KB, report.followups 191 KB,
+    main.health.observed 141 KB, review.unwired_advisory 124 KB. The original design (shed to ceiling minus an
+    hour of rate) would drop ~1.3 MB of exactly those rows oldest-first, which is why it was parked. #6987 cuts
+    ~10% of appends at the source (duplicate sweep.dispose rows) but none of the core, so it does not make this
+    moot. The design is therefore inverted: keep the core whole and raise the ceiling above it by the measured
+    rate. The earlier build on run-W1-T4393-1790216136013 implements the superseded design; do not reuse it.
   design: |
-    Replace the fixed 0.9 shed target with headroom derived from the measured append rate: bytes appended
-    since the previous rotation divided by the time since it (the previous rotation's time is the newest
-    archive's name), smoothed across rotations. Shed target = ceiling minus one hour of that rate. State the
-    hour beside the constant with its derivation. Retained lines are still shed OLDEST first by ts, and the
-    W1-T244 convergence invariant holds unchanged. With no prior rotation to measure, keep today's 0.9
-    target. Ledger each rotation's measured rate and chosen target on the existing rotation row.
-    W1-T4394 cuts the write rate; together they make rotation roughly hourly.
+    Keep every row passes 1-4 of rotateLedger retain; this task changes no retention set and no per-step cap.
+    After a rotation writes the carried core, compute the EFFECTIVE ceiling = max(LEDGER_ROTATION_CEILING_BYTES,
+    carried core bytes + one hour of the measured append rate), capped at LEDGER_ROTATION_CEILING_BYTES x
+    LEDGER_ROTATION_BACKSTOP_MULTIPLIER. The rate is bytes appended since the previous rotation (the live size at
+    rotation minus the previous carried core bytes) over the time since it (the newest archive's mtime, as
+    ledgerRotationDue already reads), smoothed across rotations. Persist the effective ceiling beside the carried
+    prefix in ledger.ndjson.carried.json, so the per-append ceiling check reads one small file and never lists
+    the archives. With no measured rate, or an unreadable sidecar, use today's fixed ceiling. The W1-T244
+    convergence shed is unchanged and still applies when the core itself exceeds the effective ceiling (only
+    at the backstop cap). Ledger the measured rate and the chosen ceiling on each rotation. TRADE, stated: a
+    live-only read grows from ~4.0 MB to ~5.3 MB at today's rate, while rotation rewrites fall from ~4.2 x 4 MB
+    an hour to ~1 x 5.3 MB, and union readers open ~4x fewer archives.
   acceptance:
-    - claim: "rotation sheds the retained core to leave an hour of the measured append rate as headroom"
-      proof: "unit test: rotation sheds the retained core to leave an hour of the measured append rate as headroom"
-    - claim: "a first rotation with no measured rate keeps the ninety percent target"
-      proof: "unit test: a first rotation with no measured rate keeps the ninety percent target"
-    - claim: "a rotated ledger is still strictly below its ceiling under the new target"
-      proof: "unit test: a rotated ledger is still strictly below its ceiling under the new target"
+    - claim: "the rotation ceiling rises to the retained core plus an hour of the measured append rate"
+      proof: "unit test: the rotation ceiling rises to the retained core plus an hour of the measured append rate"
+    - claim: "a rotation under the raised ceiling sheds no retained decision row"
+      proof: "unit test: a rotation under the raised ceiling sheds no retained decision row"
+    - claim: "a first rotation with no measured rate keeps the fixed ceiling"
+      proof: "unit test: a first rotation with no measured rate keeps the fixed ceiling"
+    - claim: "the raised ceiling never exceeds the backstop multiple of the fixed ceiling"
+      proof: "unit test: the raised ceiling never exceeds the backstop multiple of the fixed ceiling"
   falsifier: |
-    CLOSE IF the core ledger already rotates about hourly at the fleet's measured write rate.
+    CLOSE IF the core ledger already rotates about hourly at the fleet's measured write rate (re-measured
+    2026-09-24: ~4.2 an hour, not met). WRONG IF a live-only reader loses a row it read before this change.

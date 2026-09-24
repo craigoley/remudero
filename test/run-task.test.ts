@@ -115,7 +115,7 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { judgeReview, reviewInputDigest } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import { buildBatchedGithub, type GitHub, type StatusProjection } from "../src/lib/status.js";
+import { buildBatchedGithub, readLedgerLines, type GitHub, type StatusProjection } from "../src/lib/status.js";
 import type { AcceptanceCriterion, Plan, Task } from "../src/lib/plan.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -7931,17 +7931,15 @@ test("buildSweepLightHook (W1-T463): the concurrency fix does not widen what fir
     );
     await hook();
     assert.ok(!logs.some((l) => l.step === "sweep_light.error"), `no internal failure; logs=${JSON.stringify(logs)}`);
-    const disposed = logs.filter((l) => l.step === "sweep.dispose");
+    const disposed = readLedgerLines(join(root, "ledger.ndjson")).filter((l) => l.step === "sweep.disposed");
     assert.equal(disposed.length, 2, "both PRs were dispositioned — the concurrency fix still reaches every open PR");
     for (const l of disposed) {
-      assert.notEqual(l.extra?.disposition, "post-review", "neither fixture PR is post-review-eligible in this stub");
-      assert.equal(l.extra?.acted, false, `PR #${l.extra?.pr_number} (${l.extra?.disposition}) must stand down — not actionable in the light pass`);
+      assert.notEqual(l.disposition, "post-review", "neither fixture PR is post-review-eligible in this stub");
+      assert.equal(l.acted, false, `PR #${l.pr_number} (${l.disposition}) must stand down — not actionable in the light pass`);
     }
-    const notOpen = logs.filter((l) => l.step === "sweep.dispose.not_open");
-    assert.equal(notOpen.length, 2, "both stand-downs are named on the ledger, never silent");
     assert.ok(
-      notOpen.every((l) => /deferred to full sweep \(light pass\)/.test(String(l.extra?.reason))),
-      `both PRs deferred to the full sweep, unchanged by the concurrency fix; notOpen=${JSON.stringify(notOpen)}`,
+      disposed.every((l) => /deferred to full sweep \(light pass\)/.test(String(l.stand_down_reason))),
+      `both stand-downs are named on the ledger and deferred to the full sweep; disposed=${JSON.stringify(disposed)}`,
     );
   } finally {
     process.env.PATH = oldPath;

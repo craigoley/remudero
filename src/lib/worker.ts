@@ -947,8 +947,11 @@ export interface SpawnWorkerArgs {
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
   routingFallback?: { rule: "cash-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+<<<<<<< ours
   /** The cash-simple trial's decision for this run; the cash arm also restricts the cash ladder. */
   routingTrial?: { id: string; arm: string; reason: string; models?: readonly string[] };
+=======
+>>>>>>> theirs
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
   effort?: string;
   maxTurns?: number;
@@ -1455,7 +1458,10 @@ export function workerSelectionAssignment(
 
 function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelectionAssignment>[1]): RoutingRule {
   if (args.routingFallback) return args.routingFallback.rule;
+<<<<<<< ours
   if (args.routingTrial?.arm === "cash" && input.provider === "cash") return "cash-trial";
+=======
+>>>>>>> theirs
   if (input.mode !== "multi-provider") return input.mode;
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.capabilityPreference) return "capability-preference";
@@ -1484,6 +1490,7 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   for (const alternative of (input.alternatives ?? []).slice(0, 8)) {
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
+<<<<<<< ours
   const rule = routingRule(args, input);
   const ab = rule === "headroom-auction"
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
@@ -1495,6 +1502,11 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
     ...(args.routingTrial
       ? { trial: args.routingTrial.id, trialArm: args.routingTrial.arm, trialReason: args.routingTrial.reason }
       : {}),
+=======
+  return {
+    rule: routingRule(args, input),
+    ...(input.capability ? { capability: input.capability } : {}),
+>>>>>>> theirs
     considered,
     headroomPercent,
   };
@@ -1927,7 +1939,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     : routingPolicy.routableProviders.filter((provider) => provider !== "cash");
   const capabilities = resolveWorkerCapabilities(args.cwd);
   const requestedCapability = args.model && capabilities ? codexCapabilityForRequestedModel(capabilities, args.model) : undefined;
+<<<<<<< ours
   const subscriptionOnly = subscriptionOnlyModel(capabilities, args.model);
+=======
+>>>>>>> theirs
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
     : undefined;

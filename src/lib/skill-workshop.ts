@@ -344,7 +344,7 @@ export function stageSkillDraft(
         `Approving this proposal drafts a plan PR that writes '.claude/skills/${draft.name}/SKILL.md' — ` +
         `nothing writes under .claude/skills/ outside that PR.`;
       staged = true;
-      return [...current, { id, summary, evidenceAnchors: [] }];
+      return [...current, { id, summary, evidenceAnchors: [], skillFile: { name: draft.name, markdown: draft.markdown } }];
     },
     opts,
   );

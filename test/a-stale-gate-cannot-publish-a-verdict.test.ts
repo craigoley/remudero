@@ -268,7 +268,7 @@ test("W1-T3337: a throwing just-in-time reader is converted to an unreadable ref
       arm: () => "no-task-id",
       disarm: () => "not-armed",
     });
-    assert.match(verdict.codeFreshnessWithheld ?? "", /could not assess reviewer code freshness: Error: freshness reader unavailable/);
+    assert.match(verdict.verdictWithheld ?? "", /could not assess reviewer code freshness: Error: freshness reader unavailable/);
     assert.ok(
       readLedgerLines(join(root, "ledger.ndjson")).some((line) => line.step === "review.post_refused"),
       "the refusal must be durable and precede every binding status post",
@@ -284,7 +284,7 @@ test("W1-T3337: a throwing just-in-time reader is converted to an unreadable ref
 
 test("W1-T3337: a withheld re-review stands the fix rung down without another worker strike", async () => {
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const withheld = reviewResult({ codeFreshnessWithheld: "reviewer code is materially behind origin/main" });
+  const withheld = reviewResult({ verdictWithheld: "reviewer code is materially behind origin/main" });
   const worktree = gitRepo({ kind: "stale-review-fix-rung" });
   try {
     const result = await runFixRung({
@@ -319,7 +319,7 @@ test("W1-T3337: a withheld re-review stands the fix rung down without another wo
       },
     });
     assert.equal(result.outcome, "stood_down");
-    assert.equal(result.reason, withheld.codeFreshnessWithheld);
+    assert.equal(result.reason, withheld.verdictWithheld);
     assert.deepEqual(
       logs.filter((entry) => entry.step === "fix.stood_down").map((entry) => entry.extra?.site),
       ["rung.reviewer_code_freshness"],
@@ -348,7 +348,7 @@ test("W1-T3337: rmd review exits non-zero and names a withheld terminal verdict"
       fetchHead: () => {},
       materialize: () => ({ worktreePath: undefined, failure: { errorClass: "other", message: "not needed" } }),
       postReviewPending: async () => ({ posted: false }),
-      runReview: async () => reviewResult({ codeFreshnessWithheld: "reviewer code is materially behind origin/main" }),
+      runReview: async () => reviewResult({ verdictWithheld: "reviewer code is materially behind origin/main" }),
     });
     assert.equal(code, 2);
     assert.ok(printed.some((line) => /remudero-review=failure WITHHELD/.test(line) && /materially behind origin\/main/.test(line)));
@@ -428,7 +428,7 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
           Promise.resolve({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
         isolationExec: () =>
           Promise.resolve({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
-        runReview: async () => reviewResult({ codeFreshnessWithheld: "reviewer code is materially behind origin/main" }),
+        runReview: async () => reviewResult({ verdictWithheld: "reviewer code is materially behind origin/main" }),
       }),
     );
     assert.equal(result.verdict, "blocked");
@@ -452,6 +452,6 @@ test("W1-T3337 wiring: every production terminal-review path supplies a just-in-
   const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   const readers = source.match(/reviewerCodeFreshness: \(\) => checkReviewerCodeFreshness\(repoRoot, process\.env\)/g) ?? [];
   assert.equal(readers.length, 3, "run-task, its fix-rung re-reviews, and rmd review must all use the same freshness reader");
-  assert.match(source, /if \(review\.codeFreshnessWithheld\)/, "a withheld result must stand down before the primary fix rung");
+  assert.match(source, /if \(review\.verdictWithheld\)/, "a withheld result must stand down before the primary fix rung");
   assert.match(source, /site: "rung\.reviewer_code_freshness"/, "a re-review inside the fix rung must also stand down");
 });

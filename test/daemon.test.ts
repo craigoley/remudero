@@ -34,7 +34,7 @@ import { resolveHeadroomEnabled, type Config } from "../src/lib/config.js";
 import { runSweep, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
-import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
+import { deriveStatus, readLedgerLines, type GitHub, type PrRef } from "../src/lib/status.js";
 import {
   RUN_ID_ENV,
   TASK_ID_ENV,
@@ -3010,13 +3010,12 @@ test("W1-T513: two light passes cannot double review one pull request", async ()
   assert.equal(firstAction.acted, true, "the first pass to claim the review key genuinely acted");
   assert.equal(secondAction.disposition, "post-review");
   assert.equal(secondAction.acted, false, "the second, concurrent pass stood down rather than double-reviewing");
-  const standDown = disposeLines.find(
-    (l) => l.step === "sweep.dispose.not_open" && typeof l.extra.reason === "string" && /duplicate review key/.test(l.extra.reason as string),
-  );
+  const disposedRows = readLedgerLines(ledgerPath).filter((l) => l.step === "sweep.disposed");
+  const standDown = disposedRows.find((l) => /duplicate review key/.test(String(l.stand_down_reason)));
   assert.ok(
     standDown,
     "the second pass's stand-down is explicitly ledgered against the shared review-key mutex, never a silent drop " +
-      `(saw steps: ${JSON.stringify(disposeLines.map((l) => l.step))})`,
+      `(saw: ${JSON.stringify(disposedRows)})`,
   );
 });
 
