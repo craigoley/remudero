@@ -30811,6 +30811,10 @@ export async function daemonCommand(
     freshMs: policy.values.githubEventWake.checkSettleMs,
     readCiFailures: (rollup) => fetchCiFailures(target.owner, target.repo, [...(rollup ?? [])]),
     requeueCheck: (failure) => requeueActionsJob(target.owner, target.repo, failure, log),
+    // W1-T4056: judge only the checks that gate a merge. A scheduled monitor attaches its run to main's
+    // head too, and judging it filed 65 of 83 "main is red" issues; a red one is now ledgered as
+    // `advisory_failing_checks`. [] on any unreadable contract keeps "judge every check", never green.
+    readRequiredChecks: () => readCiGateRequiredChecks(targetCheckoutRoot),
   });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
