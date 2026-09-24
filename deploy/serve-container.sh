@@ -71,6 +71,7 @@
 #   RMD_CLAUDE_JSON_PATH=/path ./deploy/serve-container.sh   # if ~/.claude.json is not the host's
 #   RMD_GITHUB_WEBHOOK_SECRET_PATH=/path ./deploy/serve-container.sh   # arm POST /v1/hooks/github
 #   RMD_OPERATOR_IDENTITY_FILE=/path ./deploy/serve-container.sh       # if not ~/.config/remudero/operator-identity.json
+#   RMD_INCIDENT_INGEST_TOKEN_PATH=/path ./deploy/serve-container.sh   # if not ~/.config/remudero/incident-ingest-token
 #   RMD_GH_APP_PRIVATE_KEY_HOST_PATH=/path ./deploy/serve-container.sh # the pem's HOST path, resolved
 #                                                                      # without inspecting remudero-daemon
 #
@@ -102,6 +103,13 @@
 # daemon consumes the WAKE MARKER the shared state mount already carries, never the secret itself,
 # and a worker has no legitimate reason to hold a credential that authenticates GitHub TO this
 # fleet rather than this fleet to GitHub.
+#
+# W1-T4412: THE INCIDENT INGEST TOKEN. W1-T4383's ingest-only grantor (POST /v1/incidents/events and
+# nothing else) exists only when serve holds a token. A present host file is mounted read-only and
+# RMD_SERVE_INGEST_TOKEN_FILE names it; serve logs an empty or unreadable one as a refusal. Only
+# presence is printed. The operator mints it ONCE (this script never generates or prints it):
+#   umask 077; openssl rand -hex 32 > ~/.config/remudero/incident-ingest-token
+# and gives the same value to the console's and site's Vercel env as RMD_INCIDENT_INGEST_TOKEN.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
@@ -141,6 +149,8 @@ GITHUB_WEBHOOK_SECRET_PATH="${RMD_GITHUB_WEBHOOK_SECRET_PATH:-}"
 GITHUB_WEBHOOK_SECRET_MOUNT_DEST="/home/node/.rmd-github-webhook-secret"
 OPERATOR_IDENTITY_FILE="${RMD_OPERATOR_IDENTITY_FILE:-${HOME:-/root}/.config/remudero/operator-identity.json}"
 OPERATOR_IDENTITY_MOUNT_DEST="/home/node/.rmd-operator-identity.json"
+INGEST_TOKEN_PATH="${RMD_INCIDENT_INGEST_TOKEN_PATH:-${HOME:-/root}/.config/remudero/incident-ingest-token}"
+INGEST_TOKEN_MOUNT_DEST="/home/node/.rmd-incident-ingest-token"
 # W1-T2778: one file, never the daemon's whole credential directory. The host-side source is
 # resolved after GH_APP_* capture because a captured value names the daemon container's namespace.
 APP_PRIVATE_KEY_MOUNT_DEST="/home/node/.rmd-github-app-private-key.pem"
@@ -540,6 +550,18 @@ else
   echo "  Not a refusal. Set RMD_OPERATOR_IDENTITY_FILE if the file lives somewhere else on this host." >&2
 fi
 
+# ── 4f. INCIDENT INGEST TOKEN (W1-T4412) — as 4e: mounted when present, presence only printed ──
+INGEST_TOKEN_ARGS=()
+INGEST_TOKEN_STATE="absent"
+if [ -f "${INGEST_TOKEN_PATH}" ]; then
+  INGEST_TOKEN_ARGS=(-v "${INGEST_TOKEN_PATH}:${INGEST_TOKEN_MOUNT_DEST}:ro" -e "RMD_SERVE_INGEST_TOKEN_FILE=${INGEST_TOKEN_MOUNT_DEST}")
+  INGEST_TOKEN_STATE="supplied"
+  echo "serve-container: incident ingest token ${INGEST_TOKEN_PATH} -> ${INGEST_TOKEN_MOUNT_DEST} (read-only, content never printed)"
+else
+  echo "serve-container: NOTE — no incident ingest token at ${INGEST_TOKEN_PATH}; POST /v1/incidents/events accepts only the write bearer, so the site cannot report." >&2
+  echo "  Not a refusal. Mint it once with the command in this script's header, or set RMD_INCIDENT_INGEST_TOKEN_PATH." >&2
+fi
+
 # ── 5. AN EXISTING CONTAINER IS NEVER SILENTLY REPLACED ─────────────────────────────────────────
 # Replacing the console is a deliberate act: it is frequently the only surface an operator has on a
 # fleet they are away from, and this script is also the natural thing to re-run "just to check".
@@ -627,6 +649,7 @@ RUN_ARGS=(
   # that splice's own comment for why the bare `"${ARR[@]}"` form is unsafe under `set -u`.
   "${GITHUB_WEBHOOK_SECRET_ARGS[@]+"${GITHUB_WEBHOOK_SECRET_ARGS[@]}"}"
   "${OPERATOR_IDENTITY_ARGS[@]+"${OPERATOR_IDENTITY_ARGS[@]}"}"
+  "${INGEST_TOKEN_ARGS[@]+"${INGEST_TOKEN_ARGS[@]}"}"
   "${REF}"
   ./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}"
 )
@@ -723,6 +746,6 @@ fi
 if [ -n "${INSTANCE_NAME}" ]; then
   echo "serve-container: instance ${INSTANCE_NAME} gateway on ${CONTAINER_NAME}:${SERVE_PORT} for ${DAEMON_REPO}"
 fi
-echo "serve-container: OK — ${CONTAINER_NAME} on ${NETWORK}, state ${STATE_DIR}, code ${SERVE_REPO_DIR}, image ${REF}"
+echo "serve-container: OK — ${CONTAINER_NAME} on ${NETWORK}, state ${STATE_DIR}, code ${SERVE_REPO_DIR}, image ${REF}, incident ingest token ${INGEST_TOKEN_STATE}"
 echo "  The console URL carries the read token; read it from the log or from"
 echo "  ${STATE_DIR}/state/service-tokens.json (0600) rather than pasting it anywhere."

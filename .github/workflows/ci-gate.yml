@@ -12,15 +12,20 @@ name: CI gate
 # INVARIANT 2: it aggregates across workflow FILES. `needs:` + `join(needs.*.result)` resolves
 # only within one workflow, and this repo's required checks live in separate files, so the step
 # below reads the check-runs REST API (`checks: read`) and applies the same rule.
+# W1-T4400: this file is the CONTRACT (REQUIRED/IGNORE/ADVISORY and the step below). ci.yml's last
+# job runs this same step via scripts/ci-gate-from-contract.mjs once every ci.yml job has finished,
+# so no runner waits out the CI run; the job here re-aggregates only on an `edited` event.
 # Why: the synthwatch #102 replay, the class-bug argument and the branch-protection flip are in
 # docs/forensics/ci-gate-yml.md (W1-T24).
 
 on:
   pull_request:
-    # The two acceptance-body gates can change their result after a body-only repair.  Re-run the
-    # lightweight aggregate on `edited` so its required ci-gate context observes that new result
-    # without re-running ci.yml's expensive test jobs.
-    types: [opened, synchronize, reopened, edited]
+    # W1-T4400: `edited` ONLY. On opened/synchronize/reopened the required ci-gate context comes from
+    # ci.yml's last job, which runs THIS file's aggregation step (scripts/ci-gate-from-contract.mjs)
+    # once every ci.yml job has finished, instead of a job here polling for the whole CI run. The
+    # acceptance-body gates can still change their result after a body-only repair, so an edit
+    # re-runs the aggregate here without re-running ci.yml's expensive test jobs.
+    types: [edited]
 
 permissions:
   checks: read
