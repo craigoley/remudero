@@ -3359,6 +3359,10 @@ function foundryOpusUsageUsd(usage: {
     (usage.cache_creation_input_tokens ?? 0) * 8 + usage.output_tokens * 20) / 1_000_000;
 }
 
+function validFoundryTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 /** Emergency-only Foundry Claude transport. Each Messages turn uses the shared cash allowance. */
 export async function spawnFoundryOpusWorker(
   args: OpenWeightSpawnArgs,
@@ -3439,8 +3443,9 @@ export async function spawnFoundryOpusWorker(
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       const usage = payload.usage;
-      if (!usage || typeof usage.input_tokens !== "number" || typeof usage.output_tokens !== "number" ||
-          !Number.isFinite(usage.input_tokens) || !Number.isFinite(usage.output_tokens)) {
+      if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
+          (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
+          (usage.cache_creation_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_input_tokens))) {
         // The provider may have billed this request. Keep the conservative reservation.
         spentUsd += reservation.reservedUsd;
         budgetSettledUsd += reservation.reservedUsd;
@@ -3475,6 +3480,7 @@ export async function spawnFoundryOpusWorker(
           actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
         }), args.externalEffect);
       }
+      if (payload.stop_reason !== "tool_use") throw new Error(`cash Opus returned a tool call with stop_reason=${String(payload.stop_reason)}`);
       if (turns >= maxTurns) throw new Error(`cash Opus tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: payload.content });
       const results: Array<Record<string, unknown>> = [];
@@ -3487,7 +3493,9 @@ export async function spawnFoundryOpusWorker(
         try {
           result = executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
         } catch (error) {
-          result = { error: error instanceof Error ? error.message : String(error) };
+          // A failed tool invalidates this chain. Stop with a visible failed result rather than
+          // asking the model to turn an error-shaped tool response into a success claim.
+          throw new Error(`cash Opus tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
       }

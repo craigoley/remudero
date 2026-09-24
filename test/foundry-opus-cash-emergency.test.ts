@@ -158,6 +158,45 @@ test("Foundry Opus carries a real tool result into its next billed turn", async 
   } finally { f.cleanup(); }
 });
 
+test("Foundry Opus reports a failed tool instead of continuing a fabricated chain", async () => {
+  const f = fixture();
+  try {
+    let sent = 0;
+    const result = await spawnOpenWeightWorker({
+      cwd: f.root, workerHome: join(f.root, "home"), prompt: "Read the file", tools: ["Read"],
+      maxTurns: 3, cashSqueezed: true, env, clock: fixedClock(NOW),
+      fetchImpl: async () => {
+        sent++;
+        return new Response(JSON.stringify({
+          id: "msg-tool", stop_reason: "tool_use",
+          content: [{ type: "tool_use", id: "tool-1", name: "read_file", input: { path: "../outside.txt" } }],
+          usage: { input_tokens: 50, output_tokens: 20 },
+        }), { status: 200 });
+      },
+    }, f.config, { model: "claude-opus-5-5", effort: "medium" });
+    assert.equal(result.isError, true);
+    assert.match(result.stderr, /cash Opus tool read_file failed: tool path escapes/);
+    assert.equal(sent, 1, "a failed tool must not buy or run another model turn");
+  } finally { f.cleanup(); }
+});
+
+test("an invalid Foundry usage receipt cannot release a cash reservation", async () => {
+  const f = fixture();
+  try {
+    const result = await spawnOpenWeightWorker({
+      cwd: f.root, workerHome: join(f.root, "home"), prompt: "short answer", cashSqueezed: true,
+      env, clock: fixedClock(NOW), fetchImpl: async () => new Response(JSON.stringify({
+        id: "msg-invalid-usage", stop_reason: "end_turn", content: [{ type: "text", text: "answer" }],
+        usage: { input_tokens: -1, output_tokens: 20 },
+      }), { status: 200 }),
+    }, f.config, { model: "claude-opus-5-5", effort: "medium" });
+    assert.equal(result.isError, false);
+    const row = Object.values(allowance(f.root).reservations)[0];
+    assert.equal(row?.settledUsd, null);
+    assert.equal(result.costUsd, row?.reservedUsd);
+  } finally { f.cleanup(); }
+});
+
 test("Foundry Opus keeps an uncertain bill reserved and settles a definite 404 to zero", async () => {
   const f = fixture();
   try {
