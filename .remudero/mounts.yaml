@@ -218,10 +218,12 @@ capabilities:
   # explicit console preference still wins over this row.
   provider_preference:
     frontier: claude
-  # SUBSCRIPTION ONLY (operator ruling 2026-09-24, amending 2026-09-16): frontier work runs on Claude
-  # Opus or, below reserve, Codex Sol -- never on a cash mount, a cash divert, or API-key billing.
-  # The loader refuses a cash-pinned frontier mount; spawnWorker refuses both blocked-auction arms
-  # for it and never hands a frontier Claude spawn the API key. A fully blocked frontier spawn waits.
+  # Frontier starts on Claude Opus or Codex Sol subscriptions. The loader still refuses a cash pin.
+  # Operator amendment 2026-09-24: when BOTH subscriptions block, a bounded cash-tool frontier
+  # task may divert to Foundry Opus 5.5 if its daemon key and endpoint are present. That adapter
+  # shares dailyCapUsd with cheap cash and has an additional $10 squeeze-day Opus limit; absent
+  # credentials or an unsupported tool surface still holds the task. There is no ordinary cash
+  # diversion for frontier work. See the follow-up ruling in DECISIONS.md.
   subscription_only: [frontier]
   # W1-T3546: a pay-per-token deployment is selected by explicit mount affinity, never capacity.
   # The data shape mirrors `codex`: capability -> effort -> ordered deployment identifiers.
@@ -240,7 +242,8 @@ capabilities:
   # W1-T4079 (operator ruling 2026-09-22): gpt-6-luna leads every row gpt-5.6-luna appears in, with
   # 5.6 directly behind it. selectOpenWeightModel passes over a deployment until it is READY (price,
   # temperature and context rows exist, and it has not answered 404 within OPENWEIGHT_ABSENT_TTL_MS),
-  # so every lane resolves exactly as before until gpt-6-luna is deployed on Azure and priced.
+  # Luna now has Microsoft's Global Standard price, context and request-shape rows, so it is
+  # selectable. A live 404 still moves to 5.6 for the absence TTL.
   cash:
     # W1-T3614 — THE TWO ROWS LEAD WITH DIFFERENT DEPLOYMENTS, AND THAT IS THE POINT. Neither model
     # wins outright; the winner is decided by the INPUT:OUTPUT ratio of the lane, measured against

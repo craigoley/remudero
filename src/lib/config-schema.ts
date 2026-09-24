@@ -375,6 +375,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_ALLOW_LIVE_WRITES", "Opt-in guard for live write boundaries under tests.", ["src/lib/live-write-guard.ts", "src/run-task.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
+  envEntry("RMD_FOUNDRY_CLAUDE_API_KEY", "Daemon-only key for the bounded Foundry Opus cash adapter.", ["src/lib/worker-provider.ts"]),
+  envEntry("RMD_FOUNDRY_CLAUDE_ENDPOINT", "HTTPS Foundry /anthropic base URL for the bounded Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
   envEntry("RMD_GH_READ_BURST", "Overrides the GitHub read burst this process grants inside the shared cadence floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GH_SHARED_READ_GAP_MS", "Overrides the short cross-process gap between shared GitHub reads; not a second cadence budget window.", ["src/lib/github-transport.ts"]),

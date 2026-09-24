@@ -1466,3 +1466,27 @@ honest choices:
 A durable third path — a launchd wrapper that sources the key from a `600` file or the login
 keychain and execs `rmd daemon` with it exported (KeepAlive supervision *and* no plist secret) —
 is the intended follow-up; until it lands, prefer the env-only session above.
+
+### Foundry Opus cash emergency
+
+The cash ladder normally keeps economy work on OSS-120b, nano, and Luna. GPT-6 Luna needs its
+deployment at the existing Azure `cashEndpoint` and the daemon's `RMD_OPENWEIGHT_API_KEY`.
+Its short and long-context reservations use Microsoft's **Global Standard** rates; verify the
+deployed billing tier before treating the published row as a spend bound. A deployment 404 takes
+the next Luna rung for 30 minutes.
+
+Foundry Opus 5.5 uses a different resource endpoint: deploy it under the name
+`claude-opus-5-5`, then supply `RMD_FOUNDRY_CLAUDE_ENDPOINT` as the HTTPS base URL ending in
+`/anthropic` and `RMD_FOUNDRY_CLAUDE_API_KEY` to the daemon environment. Keep the key out of
+worker settings and repository files. Both Claude and Codex subscription capacity readings must
+block before an eligible frontier task can divert there. The cash fallback switch must be on,
+the cash provider enabled, and the task must declare only tools the cash adapter serves. A
+frontier mount pinned directly to cash is still refused.
+
+Every Foundry Messages turn reserves against the same UTC-day `dailyCapUsd` as the inexpensive
+cash requests. Opus has an additional $5 ordinary and $10 squeeze-day limit; automatic routing
+uses it only on squeeze days. Keep the production shared squeezed limit at or below **$25**. A
+missing endpoint/key, unsupported tool, exhausted allowance, or absent deployment leaves the
+task blocked or returns a named error; it does not claim completion. After provisioning, verify
+the running daemon's boot/image SHA, an actual Luna and Foundry response, and the allowance
+receipt before calling either lane live.
