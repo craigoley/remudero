@@ -1,0 +1,49 @@
+- id: W1-T4415
+  title: "A DRAFT PULL REQUEST SITS ON THE BOARD LIKE A STUCK ONE, AND NOTHING STOPS A NEW DRAFT SOURCE — the sweep holds drafts (held-draft) instead of readying them, and no gate refuses code that opens one; mark every open draft ready for review, and refuse draft-creating code in CI"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ruling 2026-09-24: never make draft PRs; a draft is as bad as a stuck PR"
+  plan_refs: ["W1-T3551", "W1-T4111"]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - scripts/no-draft-pull-request-census.mjs
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: the plan gardener (W1-T4111) opened #6912 as a draft at 00:31Z ("a retirement is a person's
+    call, so this PR is a draft"). #6913 removed that draft path from gardenCheckout and the gardeners, and today
+    nothing under src/, scripts/, deploy/ or .github/ passes --draft or draft=true. But nothing prevents the next
+    creator (a new gardener, a worker, another session) from reintroducing one. The sweep also treats a draft as
+    a thing to wait on: W1-T3551's `held-draft` disposition fires only for a green, reviewed draft and re-holds it
+    every pass, and a draft that isn't green gets no disposition that moves it. The operator's ruling: a draft is
+    as bad as a stuck PR; no process may leave one.
+  design: |
+    (i) SELF-HEALING, whatever the source: the sweep's draft row stops holding. For EVERY open draft PR on the
+        board (any author, any check state), the sweep marks it ready for review through GraphQL
+        markPullRequestReadyForReview, ledgers `sweep.draft_readied` {pr_number, author, head_sha}, and lets it flow
+        into the ordinary review and auto-merge path on the next pass. A failed mutation is ledgered with its
+        reason and retried next pass. It never closes or merges a PR.
+    (ii) PREVENTION: scripts/no-draft-pull-request-census.mjs, run in the fast gate, fails when any file under src/,
+        scripts/, deploy/ or .github/ contains a draft-creating PR call (`--draft`, `draft=true`, `draft: true` in a
+        pulls/createPullRequest payload, convertPullRequestToDraft). Every existing hit must be an allowlisted,
+        reasoned exception, and today there are none.
+    WIRING: sweep.ts exports readyDraftPullRequest(pr, deps), and run-task.ts's sweep effector wiring calls it.
+  acceptance:
+    - claim: "the sweep marks an open draft pull request ready for review and ledgers it"
+      proof: "unit test: the sweep marks an open draft pull request ready for review and ledgers it"
+    - claim: "a draft whose checks are not green is readied too"
+      proof: "unit test: a draft whose checks are not green is readied too"
+    - claim: "the census refuses a source file that opens a draft pull request"
+      proof: "unit test: the census refuses a source file that opens a draft pull request"
+    - claim: "the sweep effector wiring readies drafts"
+      proof: 'grep: readyDraftPullRequest( in src/run-task.ts'
+  falsifier: |
+    CLOSE IF the sweep already marks every open draft ready for review and CI already refuses draft-creating code.
