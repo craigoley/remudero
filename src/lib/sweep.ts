@@ -8281,7 +8281,12 @@ export function redCheckNames(pr: OpenPrView): string[] {
   return [...new Set(names)].sort();
 }
 
-/** A refusal blocks only the exact attempted head and red set, never a newly observed defect. */
+/** A refusal blocks only the exact attempted head and red set, never a newly observed defect.
+ *  W1-T4459: the attempt marker rides the EXISTING `sweep.disposed` step's `red_checks` field
+ *  (see `finalizeDisposition`'s `extraDisposedFields`) rather than a fourth ledger step name —
+ *  `sweep.disposed` and `fix.commit_refused` are both already DECISION_RELEVANT_LEDGER_STEPS
+ *  members, so this reuses two rows already guaranteed to survive rotation instead of adding
+ *  one the census in test/ledger-rotation.test.ts would then require registering. */
 export function sameHeadRedFixRefusal(
   lines: ReadonlyArray<Record<string, unknown>>,
   pr: OpenPrView,
@@ -8291,7 +8296,13 @@ export function sameHeadRedFixRefusal(
   let refusal: { reason: string; scopeAmendment?: string } | undefined;
   for (const line of lines) {
     if (line.task_id !== pr.taskId || line.head_sha !== pr.headSha) continue;
-    if (line.step === "sweep.fix_attempt" && line.pr_number === pr.prNumber) {
+    if (
+      line.step === "sweep.disposed" &&
+      line.pr_number === pr.prNumber &&
+      line.disposition === "blocked-fixable" &&
+      line.acted === true &&
+      line.red_checks !== undefined
+    ) {
       attempt = line;
       refusal = undefined;
     } else if (line.step === "fix.commit_refused" && attempt) {
@@ -9173,6 +9184,12 @@ export async function runSweep(
     // every call site except the walk's "blocked-fixable" arm, and even there only when this pass
     // classified the PR base-caused AND a main tip was actually read.
     baseCausedMainTipSha: string | undefined = undefined,
+    // W1-T4459: extra fields riding the SAME EXISTING `sweep.disposed` step, never a fourth ledger
+    // signal — the metadata-repair and same-head-red-refusal dedup keys below read them back off
+    // this already decision-relevant row instead of minting new step names test/ledger-rotation.
+    // test.ts's own census would then require registering. `undefined` for every call site except
+    // the main per-PR walk's "blocked-fixable" arm.
+    extraDisposedFields: Record<string, unknown> | undefined = undefined,
   ): void {
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
@@ -9246,6 +9263,7 @@ export async function runSweep(
         // ONLY when this pass classified the PR base-caused AND a main tip was read; see
         // {@link lastBaseCausedTipFromLedger} for the fold that reads it back next pass.
         ...(baseCausedMainTipSha !== undefined ? { main_tip_sha: baseCausedMainTipSha } : {}),
+        ...(extraDisposedFields ?? {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
       // W1-T905: mirrored in-memory with THIS PASS'S OWN `ts`, never re-read off disk. The real
@@ -9428,19 +9446,16 @@ export async function runSweep(
             ? true
             : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
+          // W1-T4459: no separate ledger step here — the SAME "sweep.disposed" row every disposition
+          // already writes (see `finalizeDisposition`'s "One ledger line per disposition" INVARIANT)
+          // carries this reason on `stand_down_reason` below, so a distinct audit step would only
+          // duplicate a fact this pass already records and require its own DECISION_RELEVANT_LEDGER_
+          // STEPS entry for a read that decides nothing beyond this same-pass sentence.
           dedupStandDownReason =
             refusal
               ? `fix refused at head ${pr.headSha.slice(0, 7)} with unchanged red checks: ${refusal.reason}`
               : `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
                 `before spending another strike`;
-          if (refusal && !deps.dryRun && !ledgerLines.some((line) =>
-            line.step === "sweep.fix_refusal_stand_down" && line.pr_number === pr.prNumber &&
-            line.head_sha === pr.headSha && JSON.stringify(line.red_checks) === JSON.stringify(redCheckNames(pr)))) {
-            appendLine(deps.ledgerPath, {
-              run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.fix_refusal_stand_down",
-              pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: redCheckNames(pr), reason: refusal.reason,
-            });
-          }
         }
         break;
       }
@@ -9575,6 +9590,10 @@ export async function runSweep(
     // W1-T2620: set ONLY by the base-caused branch, when this pass classified the PR base-caused
     // AND a main tip was read; otherwise `undefined`, so no `main_tip_sha` field is written.
     let baseCausedMainTipSha: string | undefined;
+    // W1-T4459: set ONLY by the "blocked-fixable" arm's metadata-repair, scope-amendment-escalation
+    // and dispatch-attempt branches, riding this pass's `sweep.disposed` row so the same-head-red
+    // and metadata-repair dedup checks read them back from an ALREADY decision-relevant step.
+    let extraDisposedFields: Record<string, unknown> | undefined;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
     // THIS PR's own line instead, so the loop always reaches the next PR.
@@ -9661,15 +9680,20 @@ export async function runSweep(
                 standDownReason = missingTrailerRepair.standDownReason;
                 break;
               }
+              // W1-T4459: both dedup checks below read a PRIOR "sweep.disposed" row's own extra
+              // fields (see `finalizeDisposition`'s `extraDisposedFields`) rather than a bespoke
+              // ledger step — "sweep.disposed" is already DECISION_RELEVANT_LEDGER_STEPS, so this
+              // dedup survives rotation without the census in test/ledger-rotation.test.ts requiring
+              // a new entry for a step that would otherwise carry the exact same two facts.
               const metadataChecks = metadataOnlyRed(pr);
               if (metadataChecks) {
                 const priorRepair = ledgerLines.find((line) =>
-                  line.step === "sweep.metadata_repair" && line.pr_number === pr.prNumber &&
-                  line.head_sha === pr.headSha && JSON.stringify(line.red_checks) === JSON.stringify(metadataChecks) &&
-                  (line.outcome === "repaired" || line.outcome === "escalated"));
+                  line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                  line.head_sha === pr.headSha && JSON.stringify(line.metadata_red_checks) === JSON.stringify(metadataChecks) &&
+                  (line.metadata_repair_outcome === "repaired" || line.metadata_repair_outcome === "escalated"));
                 if (priorRepair) {
                   acted = false;
-                  standDownReason = `metadata red already ${priorRepair.outcome} at this head and red set; awaiting a fresh edited-event verdict`;
+                  standDownReason = `metadata red already ${priorRepair.metadata_repair_outcome} at this head and red set; awaiting a fresh edited-event verdict`;
                   break;
                 }
                 const result = deps.repairMetadata
@@ -9683,11 +9707,7 @@ export async function runSweep(
                     renderClarificationQuestion(pr, result.reason, pr.strikeHistory ?? []),
                   );
                 }
-                if (!deps.dryRun) appendLine(deps.ledgerPath, {
-                  run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.metadata_repair",
-                  pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: metadataChecks,
-                  outcome, reason: result.reason,
-                });
+                extraDisposedFields = { metadata_red_checks: metadataChecks, metadata_repair_outcome: outcome };
                 acted = false;
                 standDownReason = `metadata-only red ${outcome}: ${result.reason}; no fix worker dispatched`;
                 break;
@@ -9696,16 +9716,12 @@ export async function runSweep(
               if (refusedSameRed?.scopeAmendment) {
                 const reason = `fix report requests a scope amendment: ${refusedSameRed.scopeAmendment}`;
                 const alreadyEscalated = ledgerLines.some((line) =>
-                  line.step === "sweep.scope_amendment_escalated" && line.pr_number === pr.prNumber &&
-                  line.head_sha === pr.headSha && JSON.stringify(line.red_checks) === JSON.stringify(redCheckNames(pr)));
+                  line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                  line.head_sha === pr.headSha && JSON.stringify(line.scope_amendment_red_checks) === JSON.stringify(redCheckNames(pr)));
                 if (!alreadyEscalated) {
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
-                  if (!deps.dryRun) appendLine(deps.ledgerPath, {
-                    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.scope_amendment_escalated",
-                    pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: redCheckNames(pr),
-                    reason,
-                  });
                 }
+                extraDisposedFields = { scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
                 standDownReason = reason;
                 break;
@@ -10033,10 +10049,10 @@ export async function runSweep(
                 break;
               }
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
-              if (!deps.dryRun) appendLine(deps.ledgerPath, {
-                run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.fix_attempt",
-                pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: redCheckNames(pr),
-              });
+              // W1-T4459: the attempted red set rides THIS PASS'S OWN "sweep.disposed" row (below,
+              // via `extraDisposedFields`) rather than a separate "sweep.fix_attempt" step — see
+              // `sameHeadRedFixRefusal`'s doc for why that avoids a new decision-relevant ledger step.
+              extraDisposedFields = { red_checks: redCheckNames(pr) };
               if (deps.detachFixWait) {
                 detachSweepAction(
                   fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)),
@@ -10533,6 +10549,7 @@ export async function runSweep(
       armOutcome,
       spent,
       baseCausedMainTipSha,
+      extraDisposedFields,
     );
   }
 

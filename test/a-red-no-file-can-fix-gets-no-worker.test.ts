@@ -51,7 +51,7 @@ test("W1-T4459: a title or body red is repaired without a fix worker", async () 
     await runSweep([subject(checks)], h.deps, DEFAULT_SWEEP_POLICY);
     assert.deepEqual(h.repairs, [checks]);
     assert.deepEqual(h.dispatched, []);
-    assert.ok(h.rows.some((row) => row.step === "sweep.metadata_repair" && row.outcome === "repaired"));
+    assert.ok(h.rows.some((row) => row.step === "sweep.disposed" && row.metadata_repair_outcome === "repaired"));
     await runSweep([subject(checks)], h.deps, DEFAULT_SWEEP_POLICY);
     assert.deepEqual(h.repairs, [checks], "a stale red at the unchanged head must not repeat the edit");
   }
@@ -71,19 +71,22 @@ test("W1-T4459: a title or body red is repaired without a fix worker", async () 
 test("W1-T4459: a refused round is not re-dispatched at the same head and red", async () => {
   const h = harness();
   h.rows.push(
-    { task_id: "W1-T4459", step: "sweep.fix_attempt", pr_number: 4459, head_sha: "head-a", red_checks: ["ci"] },
+    // W1-T4459: the attempted red set rides the dispatch pass's OWN "sweep.disposed" row (an
+    // already decision-relevant step) rather than a separate "sweep.fix_attempt" step.
+    { task_id: "W1-T4459", step: "sweep.disposed", pr_number: 4459, head_sha: "head-a", disposition: "blocked-fixable", acted: true, red_checks: ["ci"] },
     { task_id: "W1-T4459", step: "fix.commit_refused", head_sha: "head-a", reason: "the worker changed nothing" },
-    { task_id: "W1-T4459", step: "sweep.disposed", pr_number: 4459, head_sha: "head-a", disposition: "blocked-fixable", acted: true },
   );
   await runSweep([subject(["ci"])], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.dispatched, []);
-  assert.ok(h.rows.some((row) => row.step === "sweep.fix_refusal_stand_down" && row.reason === "the worker changed nothing"));
+  assert.ok(h.rows.some((row) =>
+    row.step === "sweep.disposed" && typeof row.stand_down_reason === "string" &&
+    row.stand_down_reason.includes("the worker changed nothing")));
 
   await runSweep([subject(["test:ci"])], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.dispatched, ["head-a"], "a changed red check re-earns a worker");
 
   const changedHead = harness();
-  changedHead.rows.push(...h.rows.slice(0, 3));
+  changedHead.rows.push(...h.rows.slice(0, 2));
   await runSweep([subject(["ci"], "head-b")], changedHead.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(changedHead.dispatched, ["head-b"], "a changed head re-earns a worker");
 });
@@ -128,9 +131,8 @@ test("a refused report requesting an out-of-scope file routes to a scope amendme
   );
   const h = harness();
   h.rows.push(
-    { task_id: "W1-T4459", step: "sweep.fix_attempt", pr_number: 4459, head_sha: "head-a", red_checks: ["ci"] },
+    { task_id: "W1-T4459", step: "sweep.disposed", pr_number: 4459, head_sha: "head-a", disposition: "blocked-fixable", acted: true, red_checks: ["ci"] },
     { task_id: "W1-T4459", step: "fix.commit_refused", head_sha: "head-a", reason: "scope refused", scope_amendment_detail: "src/lib/needed.ts is needed" },
-    { task_id: "W1-T4459", step: "sweep.disposed", pr_number: 4459, head_sha: "head-a", disposition: "blocked-fixable", acted: true },
   );
   await runSweep([subject(["ci"])], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.dispatched, []);
