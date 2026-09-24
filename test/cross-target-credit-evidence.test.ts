@@ -384,3 +384,31 @@ test("W1-T4043: missing implementation evidence leaves the escalation indetermin
   assert.equal(candidates[0].derived.merged, false, "unknown evidence cannot close the human receipt");
   assert.equal(candidates[0].derived.indeterminate, true, "unknown evidence waits for a readable pass");
 });
+
+test("the daemon credit rung spends no changed-files read on a prose-named uncredited build", () => {
+  // Profiled live 2026-09-24: projectPlan's uncredited-build warning inside this rung made one blocking
+  // changed-files read per prose-named merged PR on a cold gateway, freezing the daemon for 62-140 s.
+  const merged = {
+    number: 3095,
+    url: "https://github.com/o/target/pull/3095",
+    state: "MERGED",
+    title: "fix(sweep): stop the light-pass tick waiting",
+    headRefName: "fix/light-pass-tick",
+    body: "Builds W1-T2379, option (a) of its design.",
+  };
+  let reads = 0;
+  const gateway = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    listMergedHeadBranches: () => [merged],
+    changedFiles: () => {
+      reads++;
+      return ["src/lib/sweep.ts"];
+    },
+  };
+  const credits = buildCreditCandidates("o", "target", planOf("W1-T2379"), ledgerFile(), undefined, gateway as never, () => undefined);
+  assert.equal(credits.length, 0, "a prose mention still credits nothing");
+  assert.equal(reads, 0, "the credit rung never reads the uncredited-build warning it would pay for");
+});

@@ -9,6 +9,7 @@ import {
   type WorkflowRunObservation,
 } from "../src/lib/sweep.js";
 import {
+  CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES,
   WORKFLOW_RUN_HYDRATION_CAP,
   fetchWorkflowRunObservations,
   hydrateWorkflowRuns,
@@ -347,4 +348,36 @@ test("W1-T2340 producer: hydrateWorkflowRuns is best-effort per PR and capped", 
   const many = Array.from({ length: WORKFLOW_RUN_HYDRATION_CAP + 5 }, (_, i) => ({ number: i + 1, headRefOid: `H${i}` }));
   assert.equal(hydrateWorkflowRuns("o", "r", many, fetch).size, WORKFLOW_RUN_HYDRATION_CAP);
   assert.equal(hydrateWorkflowRuns("o", "r", [], fetch).size, 0, "an empty population costs nothing");
+});
+
+test("a concluded run attempt's jobs are read once across sweep passes and a re-run reads again", () => {
+  const cache = new Map();
+  const calls: string[] = [];
+  let attempt = 1;
+  const fetch = (args: string[]): unknown => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    if (path.includes("head_sha=")) {
+      return { workflow_runs: [{ id: 11, run_attempt: attempt, conclusion: "failure" }, { id: 22, run_attempt: 1, conclusion: null }] };
+    }
+    return { jobs: [{ status: attempt === 1 ? "completed" : "queued" }] };
+  };
+  const first = fetchWorkflowRunObservations("o", "r", "H", fetch, cache);
+  const second = fetchWorkflowRunObservations("o", "r", "H", fetch, cache);
+  assert.equal(calls.filter((c) => c.includes("/jobs")).length, 1, "the second pass spends no jobs read on a concluded attempt");
+  assert.deepEqual(second, first, "and observes exactly what the first pass read");
+  attempt = 2;
+  const rerun = fetchWorkflowRunObservations("o", "r", "H", fetch, cache);
+  assert.equal(calls.filter((c) => c.includes("/jobs")).length, 2, "a re-run is a new attempt and is read afresh");
+  assert.deepEqual(rerun[0]!.jobs, [{ status: "queued" }]);
+});
+
+test("the concluded-run jobs cache stays bounded by evicting its oldest attempt", () => {
+  const cache = new Map();
+  for (let id = 1; id <= CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES + 1; id++) {
+    fetchWorkflowRunObservations("o", "r", `H${id}`, (args: string[]): unknown =>
+      (args[1] ?? "").includes("head_sha=") ? { workflow_runs: [{ id, run_attempt: 1, conclusion: "success" }] } : { jobs: [] }, cache);
+  }
+  assert.equal(cache.size, CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES);
+  assert.equal(cache.has("o/r#1@1"), false, "the oldest attempt was evicted");
 });
