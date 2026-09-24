@@ -3041,3 +3041,30 @@ including the ledger census and the public benchmarks, is summarised in the PRs 
 **Rollback:** revert this entry and the PRs that implement it. Each part is its own PR and reverts
 independently. The G-17 amendment is the `frontierPeerWorkerRow` predicate and the `design` and
 risk:high rows in the mount table.
+
+## 2026-09-24 — OPERATOR FOLLOW-UP: Luna is an economy candidate, not a balanced worker fallback
+
+The operator supplied an external model test showing Luna errors in structured, repeated calls and
+a missed failure in a multi-step chain. Those results are small samples from another harness, not
+Remudero failure rates. Official OpenAI guidance positions Luna for focused, high-volume work and
+Sol for complex coding and agentic workflows. The executable boundary is the Codex candidate
+table: a Sonnet-class worker can use many tools and turns regardless of its effort setting, so
+`balanced.low`, `.medium`, and `.high` use Sol-class candidates and have no Luna fallback.
+
+- **AMENDS** section 2 above only where it says Luna leads balanced low and medium. The existing
+  `balanced.high` GPT-6 Sol-versus-Sonnet A/B and its 2026-10-08 revisit remain intact. The older
+  Sol fallback and lower-effort balanced assignments are not silently added to that experiment.
+- Economy rows keep GPT-6 Luna and GPT-5.6 Luna. No DeepSeek route exists in this
+  router, and the heartbeat runs as a script, so the external test's proposed provider replacement
+  does not describe a live Remudero switch.
+- This changes the Codex subscription candidates, not the independent cash ladder: a blocked
+  subscription auction may still reach cash Luna on balanced work. That residual route requires
+  its own measured decision; this amendment makes no end-to-end claim that Luna is absent.
+- Frontier keeps Claude Opus 5.5 first, with subscription-only Codex Sol when Claude is blocked.
+  No cash route, Astra approval, or API billing rule changes with this decision.
+- Compare joined assignments and terminal receipts by task type, risk, and provider. The external
+  test and API list prices do not establish a subscription invoice or a fleet quality result.
+
+**Rollback:** restore the earlier balanced candidate rows through review if the measured terminal
+quality, capacity, or latency regression warrants it; preserve the high-effort A/B boundary when
+interpreting the data.
