@@ -7,7 +7,7 @@
 //   - the daemon starts the SRE lane among its gardens (grep: startSreLane( in src/run-task.ts)
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,10 +15,16 @@ import { test } from "node:test";
 import { listFeedback } from "../src/lib/feedback.js";
 import {
   aggregateIncidents,
+  daemonSreLaneInput,
   fingerprintAlreadyOpen,
+  incidentEventFromLedgerRow,
   incidentFeedbackOrigin,
+  mergedPrsSince,
+  readSreLaneStore,
   runSreLanePass,
   sreLaneRoom,
+  sreLaneStorePath,
+  startSreLane,
   suspectPullRequests,
   worstOpenIncident,
   type IncidentLedgerEvent,
@@ -156,4 +162,88 @@ test("aggregateIncidents and worstOpenIncident rank by burn rate and skip open w
 
   const worst = worstOpenIncident(evidence, (fp) => fp === FP_A);
   assert.equal(worst?.fingerprint, FP_B, "the burning-but-already-open fingerprint is skipped");
+});
+
+test("a ledger row missing a field, or carrying an unparseable ts, is skipped rather than read", () => {
+  const row = { fingerprint: FP_A, kind: "exception", name: "TypeError", ts: "2026-09-23T10:00:00.000Z" };
+  assert.deepEqual(incidentEventFromLedgerRow(row, "core"), {
+    fingerprint: FP_A, ts: Date.parse(row.ts), kind: "exception", name: "TypeError",
+    message: undefined, route: undefined, sha: undefined, instance: "core",
+  });
+  const full = incidentEventFromLedgerRow({ ...row, message: "boom", route: "/api", sha: "abc123" }, "core");
+  assert.equal(full?.message, "boom");
+  assert.equal(full?.route, "/api");
+  assert.equal(full?.sha, "abc123");
+  assert.equal(incidentEventFromLedgerRow({ ...row, fingerprint: undefined }, "core"), undefined);
+  assert.equal(incidentEventFromLedgerRow({ ...row, ts: "not a date" }, "core"), undefined);
+});
+
+test("mergedPrsSince names each PR merged since the deploy sha, and nothing when git cannot answer", () => {
+  const calls: string[][] = [];
+  const run = (args: string[]): string => {
+    calls.push(args);
+    if (args[2] === "log") return "sha1\u0001feat: one (#101)\nsha2\u0001a torn subject with no number\n\n";
+    return "src/a.ts\nsrc/b.ts\n";
+  };
+  assert.deepEqual(mergedPrsSince("/repo", "o", "r", "dep1", run), [
+    { url: "https://github.com/o/r/pull/101", files: ["src/a.ts", "src/b.ts"] },
+  ]);
+  assert.equal(calls[0][3], "dep1..origin/main");
+  assert.deepEqual(calls[1], ["-C", "/repo", "show", "--name-only", "--format=", "sha1"]);
+  assert.equal(calls.length, 2, "a subject with no PR number is never shown, never guessed from");
+
+  calls.length = 0;
+  mergedPrsSince("/repo", "o", "r", undefined, run);
+  assert.ok(calls[0].includes("--since=24 hours ago"), "no deploy sha reads the last 24 hours");
+
+  // The real git, in a directory that is no repository: the read fails and names no suspects.
+  assert.deepEqual(mergedPrsSince(tmpRoot(), "o", "r", "dep1"), []);
+});
+
+test("an unreadable SRE lane store restarts empty", () => {
+  const root = tmpRoot();
+  const stateDir = join(root, "state");
+  assert.deepEqual(readSreLaneStore(stateDir), {});
+  writeFileSync(sreLaneStorePath(stateDir), "{ torn");
+  assert.deepEqual(readSreLaneStore(stateDir), {});
+  writeFileSync(sreLaneStorePath(stateDir), "null");
+  assert.deepEqual(readSreLaneStore(stateDir), {});
+});
+
+test("a failing SRE lane pass is logged, never thrown out of the timer", () => {
+  const root = tmpRoot();
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  const lane = startSreLane(baseDeps(root, {
+    readEvents: () => { throw new Error("ledger unreadable"); },
+    log: (step, extra) => { logged.push([step, extra]); },
+  }))(60_000);
+  lane.stop();
+  assert.deepEqual(logged, [["sre_lane.failed", { error: "ledger unreadable" }]]);
+});
+
+test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own ledger", () => {
+  const root = tmpRoot();
+  const ledgerPath = join(root, "ledger.jsonl");
+  const incident = { task_id: "INCIDENT", step: "incident.event", fingerprint: FP_A, kind: "exception", name: "TypeError", message: "boom", sha: "dep1" };
+  writeFileSync(ledgerPath, [
+    { ...incident, ts: "2026-09-23T10:00:00.000Z" },
+    { ...incident, step: "incident.sampled", ts: "2026-09-23T10:05:00.000Z" },
+    { ...incident, fingerprint: undefined, ts: "2026-09-23T10:06:00.000Z" },
+    { ...incident, task_id: "W1-T1", fingerprint: FP_B, ts: "2026-09-23T10:07:00.000Z" },
+    { ...incident, step: "run.start", fingerprint: FP_B, ts: "2026-09-23T10:08:00.000Z" },
+    { ...incident, step: "run.start", fingerprint: FP_B, ts: "2026-09-23T10:09:00.000Z" },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  // FP_B's three non-incident rows would outburn FP_A's two if they were read.
+  const logged: string[] = [];
+  const input = {
+    stateDir: join(root, "state"), root, ledgerPath, owner: "o", repo: "r",
+    mergedLastDay: () => 1, log: (step: string) => { logged.push(step); },
+  };
+
+  startSreLane(daemonSreLaneInput(input))(60_000).stop();
+  const entries = listFeedback(root);
+  assert.deepEqual(entries.map((e) => e.origin), [incidentFeedbackOrigin(FP_A)], "only the INCIDENT rows count");
+  assert.ok(entries[0].raw.includes("Count: 2"), "both incident steps are read, the torn row is not");
+  assert.ok(entries[0].raw.includes("Instance(s): r"));
+  assert.deepEqual(logged, ["sre_lane.filed"]);
 });

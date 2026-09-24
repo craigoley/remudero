@@ -6,6 +6,7 @@ import { fixedClock, systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
+import { readLedgerLines } from "./status.js";
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -343,21 +344,38 @@ export function runSreLanePass(deps: SreLaneInput): SreLanePass {
  *  exact shape `src/run-task.ts`'s daemon `gardens` array already takes every other lane as. */
 export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { stop: () => void } {
   return (pollIntervalMs: number) => {
-    let running = false;
+    // A pass is synchronous, so two ticks can never overlap and no re-entry guard is needed.
     const tick = () => {
-      if (running) return;
-      running = true;
       try {
         runSreLanePass(deps);
       } catch (e) {
         deps.log("sre_lane.failed", { error: String((e as Error)?.message ?? e) });
-      } finally {
-        running = false;
       }
     };
     tick();
     const timer = setInterval(tick, pollIntervalMs);
     timer.unref?.();
     return { stop: () => clearInterval(timer) };
+  };
+}
+
+/** The daemon's lane input (src/run-task.ts): `readEvents` reads only this daemon's own ledger and
+ *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. */
+export function daemonSreLaneInput(
+  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log"> & { ledgerPath: string; owner: string; repo: string },
+): SreLaneInput {
+  return {
+    stateDir: input.stateDir,
+    root: input.root,
+    readEvents: () =>
+      readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
+        .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
+        .map((row) => incidentEventFromLedgerRow(row, input.repo))
+        .filter((event): event is IncidentLedgerEvent => event !== undefined),
+    hasOpenTask: () => false,
+    framesFor: () => [],
+    mergedPrsSince: (sinceSha) => mergedPrsSince(input.root, input.owner, input.repo, sinceSha),
+    mergedLastDay: input.mergedLastDay,
+    log: input.log,
   };
 }
