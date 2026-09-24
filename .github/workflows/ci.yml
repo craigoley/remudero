@@ -63,13 +63,13 @@ jobs:
         run: node --import tsx scripts/acceptance-author-gate.mjs --commit-trailer-only
 
   ci:
-    name: ci-shard (${{ matrix.shard }}/4)
+    name: ci-shard (${{ matrix.shard }}/8)
     # W1-T1033: no `if:` here — this matrix and its aggregator run on both triggers above.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # W1-T1009: HEAVY band. 35m/2100s sits in the gap between the longest observed non-hung run
     # (1637s) and the first observed hang (2647s). INVARIANT: it must stay strictly below
     # ci-gate.yml's WAIT_CAP_SECONDS (2400s), or ci-gate times out first and the misattribution
@@ -214,18 +214,18 @@ jobs:
             if [ -z "$SUITES" ]; then
               if [ "${{ matrix.shard }}" = "1" ]; then
                 echo "W1-T3191 fast-lane: candidate enumeration FAILED or was empty — shard 1 owns the FULL suite fallback."
-                echo "- plan-reading shard summary: candidate_count=0, assigned_count=all, predicted_duration_ms=unknown, fallback=full-suite, shard=1/4" >> "$GITHUB_STEP_SUMMARY"
+                echo "- plan-reading shard summary: candidate_count=0, assigned_count=all, predicted_duration_ms=unknown, fallback=full-suite, shard=1/8" >> "$GITHUB_STEP_SUMMARY"
                 npm run test:ci
                 exit $?
               fi
               echo "W1-T3191 fast-lane: candidate enumeration FAILED or was empty — shard 1 owns the FULL suite fallback; shard ${{ matrix.shard }} does not duplicate it."
-              echo "- plan-reading shard summary: candidate_count=0, assigned_count=0, predicted_duration_ms=0, fallback=full-suite-owner-1, shard=${{ matrix.shard }}/4" >> "$GITHUB_STEP_SUMMARY"
+              echo "- plan-reading shard summary: candidate_count=0, assigned_count=0, predicted_duration_ms=0, fallback=full-suite-owner-1, shard=${{ matrix.shard }}/8" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             else
               printf '%s\n' "$SUITES" > plan-reading-suites.txt
               COUNT="$(grep -c . plan-reading-suites.txt)"
               if node scripts/test-tier-manifest.mjs \
-                --select-candidates plan-reading-suites.txt --shard ${{ matrix.shard }}/4 --base "$TIER_BASE" \
+                --select-candidates plan-reading-suites.txt --shard ${{ matrix.shard }}/8 --base "$TIER_BASE" \
                 > assigned-plan-reading-suites.txt 2> plan-reading-selector.log; then
                 cat plan-reading-selector.log
               else
@@ -235,8 +235,8 @@ jobs:
               fi
             fi
             if [ "$CLASS" = "SOURCE" ] && [ -n "$SUITES" ]; then
-              echo "plan-reading shard summary candidate_count=${COUNT} assigned_count=0 predicted_duration_ms=0 fallback=source shard=${{ matrix.shard }}/4"
-              echo "- plan-reading shard summary: candidate_count=${COUNT}, assigned_count=0, predicted_duration_ms=0, fallback=source, shard=${{ matrix.shard }}/4" >> "$GITHUB_STEP_SUMMARY"
+              echo "plan-reading shard summary candidate_count=${COUNT} assigned_count=0 predicted_duration_ms=0 fallback=source shard=${{ matrix.shard }}/8"
+              echo "- plan-reading shard summary: candidate_count=${COUNT}, assigned_count=0, predicted_duration_ms=0, fallback=source, shard=${{ matrix.shard }}/8" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           # PUSH-SAFE BY CONSTRUCTION. `GITHUB_EVENT_NAME` is set on EVERY trigger, so comparing it
@@ -252,7 +252,7 @@ jobs:
             exit 0
           fi
           if [ "$CLASS" = "SOURCE" ]; then
-            echo "CI sharding: class=SOURCE — running test shard ${{ matrix.shard }}/4."
+            echo "CI sharding: class=SOURCE — running test shard ${{ matrix.shard }}/8."
             set +e
             # The manifest assigns the fast tier by cumulative recorded duration. The explicit
             # base means tests newly merged to main default fast without making this branch update
@@ -260,13 +260,13 @@ jobs:
             RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/shard-${{ matrix.shard }}.json"
             export RMD_TEST_DURATION_OUTPUT
             node scripts/test-with-retry.mjs \
-              node scripts/test-tier-manifest.mjs --run fast --shard ${{ matrix.shard }}/4 --base "$TIER_BASE" \
+              node scripts/test-tier-manifest.mjs --run fast --shard ${{ matrix.shard }}/8 --base "$TIER_BASE" \
               2>&1 | tee test-shard-output.log
             CODE="${PIPESTATUS[0]}"
             set -e
             if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' test-shard-output.log; then
-              echo "::error::ci-shard ${{ matrix.shard }}/4 exited ${CODE} with NO node-test-runner summary ('# tests'/'# pass'/'# fail') anywhere in its output. A killed or timed-out run prints only the assertions it reached and no totals, so its failure set is a SUBSET BY CONSTRUCTION — this red is UNVERIFIED, not a diagnosed failure set (W1-T2597)."
-              echo "- **W1-T2597: NO-SUMMARY SHARD** — ci-shard (${{ matrix.shard }}/4) exited ${CODE} with no trailing \`# tests\` summary. Its failure set is UNVERIFIED (truncated evidence), distinct from a shard that reported a complete, genuine failure set." >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::ci-shard ${{ matrix.shard }}/8 exited ${CODE} with NO node-test-runner summary ('# tests'/'# pass'/'# fail') anywhere in its output. A killed or timed-out run prints only the assertions it reached and no totals, so its failure set is a SUBSET BY CONSTRUCTION — this red is UNVERIFIED, not a diagnosed failure set (W1-T2597)."
+              echo "- **W1-T2597: NO-SUMMARY SHARD** — ci-shard (${{ matrix.shard }}/8) exited ${CODE} with no trailing \`# tests\` summary. Its failure set is UNVERIFIED (truncated evidence), distinct from a shard that reported a complete, genuine failure set." >> "$GITHUB_STEP_SUMMARY"
             fi
             if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${{ matrix.shard }}" = "1" ]; then
               # W1-T3068: absolute ceilings can be crossed by a merge on main, after every PR stayed
@@ -317,7 +317,7 @@ jobs:
           ASSIGNED_COUNT="$(grep -c . assigned-plan-reading-suites.txt)"
           TOTAL="$(ls test/*.test.ts | grep -c .)"
           SUMMARY="$(grep '^test-tier-manifest: plan-reading shard summary ' plan-reading-selector.log)"
-          echo "W1-T3191 fast-lane: class=${CLASS} — running ${ASSIGNED_COUNT} of ${COUNT} plan-reading candidates on shard ${{ matrix.shard }}/4 (${TOTAL} repository suites total)."
+          echo "W1-T3191 fast-lane: class=${CLASS} — running ${ASSIGNED_COUNT} of ${COUNT} plan-reading candidates on shard ${{ matrix.shard }}/8 (${TOTAL} repository suites total)."
           echo "$SUMMARY"
           echo "- W1-T3191 fast-lane: ran **${ASSIGNED_COUNT} of ${COUNT}** candidates (${COUNT} of ${TOTAL} repository suites are in the conservative set); ${SUMMARY#test-tier-manifest: }" >> "$GITHUB_STEP_SUMMARY"
           sed 's/^/    /' assigned-plan-reading-suites.txt >> "$GITHUB_STEP_SUMMARY"
@@ -326,13 +326,13 @@ jobs:
           set +e
           RETRY_SCRIPT="scripts/test-with-retry.mjs"
           node "$RETRY_SCRIPT" \
-            node scripts/test-tier-manifest.mjs --run-candidates plan-reading-suites.txt --shard ${{ matrix.shard }}/4 --base "$TIER_BASE" \
+            node scripts/test-tier-manifest.mjs --run-candidates plan-reading-suites.txt --shard ${{ matrix.shard }}/8 --base "$TIER_BASE" \
             2>&1 | tee test-shard-output.log
           CODE="${PIPESTATUS[0]}"
           set -e
           if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' test-shard-output.log; then
-            echo "::error::plan-reading shard ${{ matrix.shard }}/4 exited ${CODE} with no node-test-runner summary — the failure set is unverified (W1-T2597)."
-            echo "- **W1-T2597: NO-SUMMARY PLAN-READING SHARD** — shard ${{ matrix.shard }}/4 exited ${CODE} with no trailing test summary." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::plan-reading shard ${{ matrix.shard }}/8 exited ${CODE} with no node-test-runner summary — the failure set is unverified (W1-T2597)."
+            echo "- **W1-T2597: NO-SUMMARY PLAN-READING SHARD** — shard ${{ matrix.shard }}/8 exited ${CODE} with no trailing test summary." >> "$GITHUB_STEP_SUMMARY"
           fi
           FLAKE_RETRY_DIR="${RUNNER_TEMP:-$PWD}/flake-retry"
           mkdir -p "$FLAKE_RETRY_DIR"
@@ -424,7 +424,7 @@ jobs:
             # when the proposal would change a shard assignment or give a file its first real
             # measurement; the adopt below runs against a COPY, so this step reports the shift
             # without touching the tracked manifest — landing it is the gated PR this names.
-            if node scripts/test-tier-manifest.mjs --propose --proposed test-tier-manifest.next.json >/dev/null 2>&1; then
+            if node scripts/test-tier-manifest.mjs --propose --proposed test-tier-manifest.next.json --shard-count 8 >/dev/null 2>&1; then
               cp scripts/test-tier-manifest.json /tmp/manifest-before.json
               ADOPTED="$(node scripts/test-tier-manifest.mjs --adopt test-tier-manifest.next.json 2>&1 || true)"
               cp /tmp/manifest-before.json scripts/test-tier-manifest.json
@@ -505,7 +505,7 @@ jobs:
 
           case "$SHARD_RESULT" in
             success)
-            echo "ci: all four test shards succeeded."
+            echo "ci: all eight test shards succeeded."
               ;;
             failure)
               echo "ci: a test shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
@@ -622,7 +622,7 @@ jobs:
             exit 0
           fi
           if node scripts/test-tier-manifest.mjs \
-            --select-candidates plan-reading-suites.txt --shard 1/4 --base "origin/${GITHUB_BASE_REF}" \
+            --select-candidates plan-reading-suites.txt --shard 1/8 --base "origin/${GITHUB_BASE_REF}" \
             > /dev/null 2> plan-reading-selector.log; then
             cat plan-reading-selector.log
             echo "established=true" >> "$GITHUB_OUTPUT"
@@ -633,7 +633,7 @@ jobs:
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
           if [ "${{ steps.plan-reading.outputs.established }}" = "true" ]; then
-            echo "W1-T3191: exact plan-reading matrix established — slow-tier files are already distributed across its four shards; suppressing duplicate execution."
+            echo "W1-T3191: exact plan-reading matrix established — slow-tier files are already distributed across its eight shards; suppressing duplicate execution."
             echo "- plan-reading matrix established: test-slow registered successfully and suppressed duplicate execution" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -967,12 +967,12 @@ jobs:
     # step below is a separate, diff-scoped check on the SAME job — sharing this job's
     # always-registers shape rather than adding a required context that could go absent — and
     # fails when the diff adds a source line lcov marks instrumented but never hit.
-    name: coverage-shard (${{ matrix.shard }}/4)
+    name: coverage-shard (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # W1-T1033: deliberately no `if:` here, at job or step level — test/diff-coverage.test.ts asserts
     # this job body carries none at all (the #729 discipline), so the job still registers on the push
     # trigger. Its collection step opens with a plain shell guard instead, and the staging step
@@ -1122,7 +1122,7 @@ jobs:
           # ci-gate's list — it must still register and still fail on a coverage regression. The
           # comment two blocks below is what makes artifact absence fail closed: no step in this job
           # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
-          if ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/4 --base HEAD^1 \
+          if ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
             > coverage-test-files.txt 2> coverage-shard-selection.log; then
             cat coverage-shard-selection.log || true
             echo "coverage-ratchet: duration-balanced test selection failed; refusing to run a partial or unclassified coverage shard."
@@ -1336,7 +1336,7 @@ jobs:
         id: coverage-artifact
         run: |
           EXPECTED=""
-          for SHARD in 1 2 3 4; do
+          for SHARD in 1 2 3 4 5 6 7 8; do
             CLASS_FILE="coverage-shards/coverage-shard-${SHARD}/class"
             if [ ! -s "$CLASS_FILE" ]; then
               echo "coverage-ratchet: expected coverage-shard-${SHARD} artifact metadata; refusing a missing or partial artifact."
@@ -1369,7 +1369,7 @@ jobs:
             echo "W1-T2428 fast-lane: class=${CLASS} — no coverage shards were collected."
             exit 0
           fi
-          for SHARD in 1 2 3 4; do
+          for SHARD in 1 2 3 4 5 6 7 8; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
             if ! find "$RAW_DIR" -maxdepth 1 -type f -name 'coverage-bundle-*.json' -print -quit 2>/dev/null | grep -q .; then
               echo "coverage-ratchet: expected compact V8 coverage for shard ${SHARD}; refusing a partial merge."
@@ -1378,8 +1378,11 @@ jobs:
           done
           mkdir -p coverage
           node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
+            --shard-count 8 \
             coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
-            coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw
+            coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
+            coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
+            coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw
       # INVARIANT (2026-08-13): Diff coverage runs BEFORE the aggregate ratchet. No step in this job
       # carries an `if:`, so a failing step skips every step after it — measured, in five of six
       # recent failing runs the ratchet concluded `failure` and `Diff coverage` was `skipped`, so the

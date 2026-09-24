@@ -48,6 +48,14 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_MANIFEST_RELATIVE_PATH = "scripts/test-tier-manifest.json";
 
+/** W1-T4436: the ONE shard count every caller of this script derives when it does not pass its
+ *  own `--shard <index>/<count>` (ci.yml's matrices always do — this is the fallback for a local
+ *  or CI-aggregator invocation that only ever names a total, never a specific shard). Mirrors
+ *  ci.yml's `ci` and `coverage-ratchet` matrices' own `strategy.matrix.shard` length; the two
+ *  move together by hand, the same as every other cross-file CI constant in this repo (e.g.
+ *  ci.yml's own HEAVY-band timeouts against ci-gate.yml's WAIT_CAP_SECONDS). */
+export const DEFAULT_CI_SHARD_COUNT = 8;
+
 /** A test file at or above this duration (ms) is SLOW. Chosen well below
  *  `test/run-task.test.ts`'s measured ~58s and `test/serve.live-state.test.ts`'s measured ~40s
  *  (both recorded in the shipped manifest) and well above the sub-second common case, so an
@@ -399,7 +407,7 @@ export function durationStalenessWarnings(manifest, measured, factor = DURATION_
  * is NOT material — no fixed cadence, no fixed byte threshold; the balancer's own assignment is
  * the only test. `shardCount` should match the real coverage matrix; this function does not guess it.
  */
-export function proposalIsMaterial(committed, proposed, shardCount = 4) {
+export function proposalIsMaterial(committed, proposed, shardCount = DEFAULT_CI_SHARD_COUNT) {
   const files = [...new Set([...Object.keys(committed.files ?? {}), ...Object.keys(proposed.files ?? {})])].sort();
   if (files.length === 0) return false;
 
@@ -526,7 +534,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     }
     const committedPath = getFlagValue(argv, "--committed") ?? manifestPath;
     const shardCountRaw = getFlagValue(argv, "--shard-count");
-    const shardCount = shardCountRaw ? Number(shardCountRaw) : 4;
+    const shardCount = shardCountRaw ? Number(shardCountRaw) : DEFAULT_CI_SHARD_COUNT;
     const committed = loadManifest(resolve(root, committedPath));
     const proposed = loadManifest(resolve(root, proposedPath));
     if (proposalIsMaterial(committed, proposed, shardCount)) {

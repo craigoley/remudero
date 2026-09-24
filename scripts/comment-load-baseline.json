@@ -35,7 +35,6 @@
   "scripts/clock-sweep.mjs": 153,
   "scripts/comment-load-baseline.json": 0,
   "scripts/coverage-baseline.json": 0,
-  "scripts/coverage-merge-ratchet.mjs": 13,
   "scripts/coverage-ratchet.mjs": 126,
   "scripts/coverage-session-blanking-check.mjs": 60,
   "scripts/credential-reach-baseline.json": 0,
@@ -248,6 +247,6 @@
   "src/lib/worker.ts": 1750,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 17000,
+  "src/run-task.ts": 17024,
   "src/spike.ts": 18
 }

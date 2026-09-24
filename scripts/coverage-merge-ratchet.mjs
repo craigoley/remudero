@@ -202,6 +202,28 @@ export function mergeRawCoverageDirectories(directories) {
   });
 }
 
+/**
+ * W1-T4436: the ONE shard count this run expects, passed by ci.yml's own canonical value (8, at
+ * time of writing — the `coverage-ratchet` matrix's own `strategy.matrix.shard` length) rather
+ * than guessed here. When given, this is the aggregator's own "did every shard produce an
+ * artifact" check: a caller that still only assembled 4 directories while claiming 8 shards ran
+ * is refused before any merge happens, rather than silently folding a partial set and leaving
+ * shards 5-8 uncounted.
+ */
+export function assertExpectedShardCount(directories, expectedShardCount) {
+  if (expectedShardCount === undefined) return;
+  const expected = Number(expectedShardCount);
+  if (!Number.isInteger(expected) || expected < 1) {
+    throw new Error(`--shard-count must be a positive integer, got ${expectedShardCount}`);
+  }
+  if (directories.length !== expected) {
+    throw new Error(
+      `expected exactly ${expected} shard director(y/ies), got ${directories.length}: ` +
+        `${JSON.stringify(directories)}`,
+    );
+  }
+}
+
 function main(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -209,11 +231,13 @@ function main(argv) {
     options: {
       output: { type: 'string', short: 'o' },
       'compact-output': { type: 'string' },
+      'shard-count': { type: 'string' },
     },
   });
   if (Boolean(values.output) === Boolean(values['compact-output'])) {
     throw new Error('exactly one of --output or --compact-output is required');
   }
+  assertExpectedShardCount(positionals, values['shard-count']);
   if (values['compact-output']) {
     const outputDirectory = values['compact-output'];
     mkdirSync(outputDirectory, { recursive: true });
