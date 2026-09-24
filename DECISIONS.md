@@ -2976,31 +2976,47 @@ moves, because no code ships with this entry.
 rules on three conflicts that session reported against earlier rulings. The research behind them,
 including the ledger census and the public benchmarks, is summarised in the PRs that carry this entry.
 
-### 1. OPUS TAKES THE FIRST ATTEMPT ON risk:high AND DESIGN WORK — AND ONLY EVER ON A SUBSCRIPTION
+### 1. OPUS TAKES THE FIRST ATTEMPT ON DESIGN WORK AND ON TRULY RISKY WORK — AND ONLY EVER ON A SUBSCRIPTION
 
+- **SCOPE: "design + truly risky only"** (the operator's words, 2026-09-24, amending this entry's
+  first draft). Two kinds of work start on Opus:
+  - **design work**, meaning any task in the `design` class;
+  - **risk:high work whose risk is danger, not size.**
+- **Large but routine work stays on the mid tier.** A risk:high task that declares
+  `band_meaning: span` is sized large, not dangerous. It routes as class `span` onto the mid tier
+  (Sonnet or Sol, per section 2). The rule is `implementRouteClass` in src/lib/task-class.ts.
+- **Repeated failures still step up to Opus.** Unchanged: the diagnose-informed last attempt, the
+  fix rung's final strike, the Architect, retro and the judge.
 - **AMENDS G-17 (MASTER-PLAN §9, the Tier Invariant).** A worker route whose risk band is `high`,
   or whose class is `design`, may ride the frontier as a **peer** of the Architect and the flight
-  judge. It may never ride above them. Every other worker route stays strictly below both, as before.
-  The admitted set is code (`frontierPeerWorkerRow`, src/lib/mounts.ts), not table data, so a mounts
-  edit cannot widen it.
-- **`design` is a task class.** A task is `design` when any declared file is part of the design
-  record: `docs/adr/`, `docs/design-review/`, `docs/architecture.md`, `docs/system-diagrams.md` or
-  `MASTER-PLAN.md`.
-- **UNCHANGED.** The step-ups keep Opus: the diagnose-informed last attempt, the fix rung's final
-  strike, the Architect, retro and the judge.
-- **AMENDS 2026-09-16 ("the squeeze seats are deleted"), which described `config.overflow:
-  "api_key"` as "full Claude capability on API credits".** Frontier capability is now
-  **subscription only**. It runs on Claude Opus, or on Codex Sol when Claude is below reserve. It is
-  never pinned to cash, never diverted to cash, and never billed to API credits.
-  - When every subscription is blocked, frontier work **waits**.
-  - This also withdraws the 2026-09-16 cash squeeze path for frontier work ("leverage Luna or Terra
-    if absolutely necessary in that tier").
-  - Balanced and economy work keeps both blocked-auction arms, unchanged.
+  judge. It may never ride above them. Every other worker route stays strictly below both.
+  - The admitted set is code (`frontierPeerWorkerRow`, src/lib/mounts.ts), not table data, so a
+    mounts edit cannot widen it.
+- **What counts as `design`.** A task is `design` when any declared file is part of the design
+  record:
+  - `docs/adr/`
+  - `docs/design-review/`
+  - `docs/architecture.md`
+  - `docs/system-diagrams.md`
+  - `MASTER-PLAN.md`
+- **AMENDS 2026-09-16 ("the squeeze seats are deleted").** That entry described
+  `config.overflow: "api_key"` as "full Claude capability on API credits".
+  - Frontier capability is now **subscription only**. It runs on Claude Opus, or on Codex Sol
+    when Claude is below reserve.
+  - It is never pinned to cash, never diverted to cash, and never billed to API credits.
+  - When every subscription is blocked, frontier work **waits**. The operator confirmed this after
+    reviewing it.
+  - This also withdraws the 2026-09-16 cash squeeze path for frontier work ("leverage Luna or
+    Terra if absolutely necessary in that tier").
   - Enforced by `capabilities.subscription_only` in `.remudero/mounts.yaml` and by `spawnWorker`.
-- **COST, STATED.** At filing, 1,615 of 2,037 implement shards were `risk: high`, most with
-  `band_meaning: span` (sizing, not danger). This ruling therefore moves most implement traffic onto
-  the frontier. The telemetry that shows whether that repays itself is `routing.decision` on each
-  `worker.assignment` row.
+- **SHARE, MEASURED AT FILING.** 1,263 of 2,037 implement shards (62.0%) start on Opus under this
+  scope:
+  - 7 are design work;
+  - 233 declare `band_meaning: blast-radius`;
+  - 1,023 are risk:high with **no declared band**. This ruling does not exclude those, so they
+    start on Opus.
+  - If unbanded risk:high were also treated as routine, the share would be 11.8%. That is left for
+    a later ruling.
 
 ### 2. SOL vs SONNET IS AN A/B TEST, NOT A PREFERENCE
 

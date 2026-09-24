@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { loadMounts, mountsPath, resolveMountForClass, validateMounts, TierInvariantError, MountsError } from "../src/lib/mounts.js";
-import { DESIGN_RECORD_GLOB_RE, deriveTaskClass } from "../src/lib/task-class.js";
+import { DESIGN_RECORD_GLOB_RE, deriveTaskClass, implementRouteClass } from "../src/lib/task-class.js";
+import { resolveRunMounts } from "../src/run-task.js";
 import type { ProviderCapacity } from "../src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
@@ -68,6 +69,18 @@ function table(implementHigh: string, extraTiers: Record<string, number> = {}) {
     },
   };
 }
+
+test("a high-risk span task does not start on Opus and a danger or design task does", () => {
+  const route = (task: { risk: string; band_meaning?: string; files: string[] }) =>
+    resolveRunMounts(REPO_ROOT, { type: "implement", ...task } as never, () => {}).mount.model;
+  assert.equal(route({ risk: "high", band_meaning: "span", files: ["src/lib/a.ts", "src/lib/b.ts"] }), "sonnet", "large but routine: mid tier");
+  assert.equal(route({ risk: "high", band_meaning: "span", files: ["docs/a.md"] }), "sonnet", "a span docs task does not fall back onto Opus");
+  assert.equal(route({ risk: "high", band_meaning: "blast-radius", files: ["src/lib/a.ts"] }), "opus");
+  assert.equal(route({ risk: "high", files: ["src/lib/a.ts"] }), "opus", "an undeclared band is not excluded by this ruling");
+  assert.equal(route({ risk: "high", band_meaning: "span", files: ["docs/adr/0001.md"] }), "opus", "design work starts on Opus whatever its band");
+  assert.equal(implementRouteClass({ type: "review", risk: "high", band_meaning: "span" }, "src"), "src", "only the implement route splits on band");
+  assert.equal(loadMounts(mountsPath(REPO_ROOT)).step_up?.model, "opus", "repeated failures still step up to Opus");
+});
 
 test("G-17 as amended admits a risk:high Opus worker row as a peer and never one above", () => {
   assert.doesNotThrow(() => validateMounts(table("opus")));

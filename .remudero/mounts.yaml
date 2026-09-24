@@ -510,10 +510,11 @@ routes:
     high:
       src:       { model: sonnet, effort: high,   max_turns: 40,   context_budget: 120000 }
       design:    { model: sonnet, effort: high,   max_turns: 40,   context_budget: 120000 }
-  # 2026-09-24 (operator ruling): risk:high and `design` implement work takes Opus on its FIRST
-  # attempt, resolved like any frontier request -- Claude Opus with headroom, Codex Sol below reserve,
-  # never cash or API key. MEASURED at filing: 1,615 of 2,037 implement shards are risk:high (most
-  # with band_meaning: span), so this moves most implement traffic onto the frontier.
+  # 2026-09-24 (operator ruling, amended): `design` work and risk:high work whose risk is DANGER take
+  # Opus on their FIRST attempt -- Claude Opus with headroom, Codex Sol below reserve, never cash or
+  # API key. A risk:high task whose band is SIZE (`band_meaning: span`) is large but routine: it routes
+  # as class `span` (implementRouteClass, src/lib/task-class.ts) onto the mid tier, where the
+  # Sonnet/Sol split applies. Repeated failures still step up to Opus via `step_up:`.
   implement:
     low:
       src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
@@ -527,6 +528,7 @@ routes:
       design:    { model: opus,   effort: high,   max_turns: 400, context_budget: 160000 }
     high:
       src:       { model: opus,   effort: high,   max_turns: 400, context_budget: 200000 }
+      span:      { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
       design:    { model: opus,   effort: high,   max_turns: 400, context_budget: 200000 }
   diagnose:
     low:
