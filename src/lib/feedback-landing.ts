@@ -1181,7 +1181,6 @@ export interface DecisionRecordParams {
   chosen: string;
   band: string;
   reason: string;
-  /** The worker's FALSIFIER line, when it gave one. */
   falsifier?: string;
   /** Defaults to `new Date().toISOString()` — injectable so a test can pin the timestamp. */
   ts?: string;
