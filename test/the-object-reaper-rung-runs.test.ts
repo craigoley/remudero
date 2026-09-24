@@ -64,7 +64,7 @@ const quietDeps = {
 
 // ── claim 1: the rung loads the DAEMON's policy, so it runs at all ─────────────────────────────
 
-test('W1-T4022: the disk reclaim rung loads the daemon policy and runs', () => {
+test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", () => {
   // config.root deliberately carries NO plan/policy.yaml — mirrors exactly the daemon checkout
   // the amended note measured: `loadPolicy(policyPath(config.root))` threw here on every tick.
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}no-policy-`));
@@ -93,7 +93,7 @@ test('W1-T4022: the disk reclaim rung loads the daemon policy and runs', () => {
   assert.equal(out.objectsPruned, 0);
 });
 
-test('W1-T4022: a policy load failure is logged, not silently folded into the generic catch', () => {
+test("W1-T4022: a policy load failure is logged, not silently folded into the generic catch", () => {
   const rows: Array<[string, Record<string, unknown>]> = [];
   logDiskReclaimRung({ root: "/wherever" } as never, (s, f) => rows.push([s, f]), {
     ...noSweeps,
@@ -111,7 +111,7 @@ test('W1-T4022: a policy load failure is logged, not silently folded into the ge
 
 // ── claim 2: the open-file refusal reads a REAL count, not the fail-closed constant ────────────
 
-test('W1-T4022: the open-file refusal reads a real count', () => {
+test("W1-T4022: the open-file refusal reads a real count", () => {
   let captured: { openFileCount?: (dir: string) => number } | undefined;
   logDiskReclaimRung({ root: scratch() } as never, () => {}, {
     ...noSweeps,
@@ -130,7 +130,7 @@ test('W1-T4022: the open-file refusal reads a real count', () => {
   );
 });
 
-test('W1-T4022: an injected real open-file count of zero is not treated as held', () => {
+test("W1-T4022: an injected real open-file count of zero is not treated as held", () => {
   // The behavioural half of the claim above: driven through the REAL reaper, not a double, an
   // empty directory that a REAL counter reports as unheld must actually proceed.
   const { repoDir } = repoWithGcLog();
@@ -146,7 +146,7 @@ test('W1-T4022: an injected real open-file count of zero is not treated as held'
 
 // ── claim 3: a refusal records how long the rung has been refusing ─────────────────────────────
 
-test('W1-T4022: consecutive refusals accumulate, and reset the instant the fleet goes quiet', () => {
+test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet goes quiet", () => {
   const streakPath = join(scratch(), "streak.json");
   const times = ["2026-09-01T00:00:00.000Z", "2026-09-01T01:00:00.000Z", "2026-09-01T02:00:00.000Z"];
   let i = 0;
@@ -187,7 +187,7 @@ test('W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
   assert.deepEqual(readRefusalStreak(streakPath), { consecutiveRefusals: 0, refusingSinceIso: null });
 });
 
-test('W1-T4022: below-the-floor never touches the refusal streak, a different condition entirely', () => {
+test("W1-T4022: below-the-floor never touches the refusal streak, a different condition entirely", () => {
   const streakPath = join(scratch(), "streak.json");
   recordRefusalStreak(streakPath, true, "2026-09-01T00:00:00.000Z");
   recordRefusalStreak(streakPath, true, "2026-09-01T01:00:00.000Z");
@@ -205,7 +205,7 @@ test('W1-T4022: below-the-floor never touches the refusal streak, a different co
 
 // ── claim 4: the reaper runs inside a quiesced window, re-checked before the destructive call ──
 
-test('W1-T4022: a quiesced window closes between the two checks and the prune never spawns', () => {
+test("W1-T4022: a quiesced window closes between the two checks and the prune never spawns", () => {
   const { repoDir, gcLog } = repoWithGcLog();
   let worktreeCalls = 0;
   const r = reapGitObjects(repoDir, "/i", {
@@ -224,7 +224,7 @@ test('W1-T4022: a quiesced window closes between the two checks and the prune ne
   assert.equal(existsSync(gcLog), true, "a window that closed must leave gc.log exactly where a first-check refusal would");
 });
 
-test('W1-T4022: a window that stays quiet at both ends prunes exactly as before', () => {
+test("W1-T4022: a window that stays quiet at both ends prunes exactly as before", () => {
   const { repoDir } = repoWithGcLog();
   let worktreeCalls = 0;
   const r = reapGitObjects(repoDir, "/i", {
@@ -239,7 +239,7 @@ test('W1-T4022: a window that stays quiet at both ends prunes exactly as before'
   assert.equal(r.refusedBecause, undefined);
 });
 
-test('W1-T4022: a survey never reaches the second, window-closing check — it returns before gc.log is touched', () => {
+test("W1-T4022: a survey never reaches the second, window-closing check — it returns before gc.log is touched", () => {
   const { repoDir, gcLog } = repoWithGcLog();
   let worktreeCalls = 0;
   const r = reapGitObjects(repoDir, "/i", {
