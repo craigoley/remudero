@@ -855,3 +855,47 @@ export function reserveTaskIdBlockRemote(
     handles,
   };
 }
+
+// ── COLLISION DETECTION AT REVIEW TIME (W1-T4389) ─────────────────────────────────────────────
+// Everything above MINTS an id; this catches a PR that never minted (a hand filing, an offline mint,
+// a worker ignoring its brief). MEASURED 2026-09-23: remudero-console #1695 added CONSOLE-T58 in a
+// file named unlike the one #1699 had merged it in, so git reported MERGEABLE, and its run-<ID>
+// branch would have credited #1699's task as built.
+
+/** One task id declared in one plan file, by a diff's lines or by the base's committed content. */
+export interface TaskIdDeclaration {
+  id: string;
+  file: string;
+}
+
+/** `id` is ADDED in `addedFile` while the base already declares it in `baseFile`, a DIFFERENT file. */
+export interface TaskIdCollision {
+  id: string;
+  addedFile: string;
+  baseFile: string;
+}
+
+/** Every added declaration whose id the base declares ONLY in other files. Editing the base's OWN
+ *  shard is never a collision, and a base declaration `removedDecls` deletes (a move to a new file)
+ *  no longer counts. Pure, so it is prefix-agnostic: W1-T, CONSOLE-T, PORTAL-T alike. */
+export function taskIdCollisions(
+  addedDecls: readonly TaskIdDeclaration[],
+  baseDecls: readonly TaskIdDeclaration[],
+  removedDecls: readonly TaskIdDeclaration[] = [],
+): TaskIdCollision[] {
+  const removed = new Set(removedDecls.map((d) => `${d.id}\u0000${d.file}`));
+  const baseFilesById = new Map<string, string[]>();
+  for (const d of baseDecls) {
+    if (removed.has(`${d.id}\u0000${d.file}`)) continue;
+    baseFilesById.set(d.id, [...(baseFilesById.get(d.id) ?? []), d.file]);
+  }
+  const collisions: TaskIdCollision[] = [];
+  const seen = new Set<string>();
+  for (const d of addedDecls) {
+    const baseFiles = baseFilesById.get(d.id);
+    if (baseFiles === undefined || baseFiles.includes(d.file) || seen.has(`${d.id}\u0000${d.file}`)) continue;
+    seen.add(`${d.id}\u0000${d.file}`);
+    collisions.push({ id: d.id, addedFile: d.file, baseFile: baseFiles[0] });
+  }
+  return collisions;
+}
