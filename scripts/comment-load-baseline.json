@@ -251,6 +251,7 @@
   "src/lib/github-transport.ts": 250,
   "src/lib/glance.ts": 56,
   "src/lib/grep-zero-cause.ts": 95,
+  "src/lib/grill-choices.ts": 250,
   "src/lib/hand-run-census.ts": 250,
   "src/lib/headroom.ts": 179,
   "src/lib/held-dependency-roots.ts": 250,

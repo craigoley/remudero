@@ -41,6 +41,7 @@ import {
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
   readLedgerUnionBounded,
+  readLedgerUnionMemoized,
   type GhFailureReason,
   type GitHub,
   type LedgerLines,
@@ -83,6 +84,7 @@ import {
   type Policy,
 } from "./policy.js";
 import { buildActionResultsRoute } from "./action-results.js";
+import { createLedgerRotationMemo } from "./ledger-union.js";
 import { fleetLaneDecisions, readFleetLaneStore, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
@@ -896,6 +898,36 @@ function activityRows(
     .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
 }
 
+/** Whether `ledgerLines` hold at least {@link OPERATOR_ACTIVITY_MAX_ITEMS} rows {@link activityRows} would keep. */
+function activitiesSaturate(ledgerLines: ReadonlyArray<Record<string, unknown>>): boolean {
+  let count = 0;
+  for (const row of ledgerLines) {
+    if (activityTimestamp(row.ts) && boundedActivityText(row.step, 120)) count += 1;
+    if (count >= OPERATOR_ACTIVITY_MAX_ITEMS) return true;
+  }
+  return false;
+}
+
+/**
+ * One rotation's rows reduced to those that could reach {@link activityRows}' bound: its newest
+ * {@link OPERATOR_ACTIVITY_MAX_ITEMS} activities, ties to the earlier row, kept in file order. The union's
+ * newest items are the newest of these, and every earlier row sharing an item's duplicate key ranks above
+ * that item, so it is kept too and each id's duplicate count is unchanged.
+ */
+export function operatorActivityCandidates(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const ranked: Array<{ index: number; ms: number }> = [];
+  rows.forEach((row, index) => {
+    const at = activityTimestamp(row.ts);
+    if (at && boundedActivityText(row.step, 120)) ranked.push({ index, ms: Date.parse(at) });
+  });
+  ranked.sort((a, b) => b.ms - a.ms || a.index - b.index);
+  return ranked
+    .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS)
+    .map((r) => r.index)
+    .sort((a, b) => a - b)
+    .map((index) => rows[index]);
+}
+
 function workstreamRows(
   plan: Plan,
   projection: ReadonlyMap<string, StatusProjection>,
@@ -1008,7 +1040,10 @@ export function buildOperatorActivityProjection(input: OperatorActivityProjectio
   }
   const activities = activityRows(input.ledgerLines, observedAt);
   const freshness: OperatorActivityFreshness = input.githubReadFailed ? "unknown" : "verified";
-  const workstreams = workstreamRows(input.plan, input.projection, input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
+  // Activities alone filling the bound leave `items` and `truncated` identical without the frontier.
+  const workstreams = activities.length >= OPERATOR_ACTIVITY_MAX_ITEMS
+    ? []
+    : workstreamRows(input.plan, input.projection, input.ledgerLines, observedAt, input.githubReadFailed === true, input.githubFailureReason);
   const artifacts = artifactRows(input.plan, input.projection, workstreams, observedAt, freshness);
   const items = [...activities, ...workstreams, ...artifacts].slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
   const latest = activities[0]?.observedAt ?? observedAt;
@@ -1031,13 +1066,14 @@ export function buildOperatorActivityProjection(input: OperatorActivityProjectio
  * empty workstream.
  */
 export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+  const rotations = createLedgerRotationMemo(operatorActivityCandidates);
   return {
     method: "GET",
     path: "/v1/operator-activity",
     scope: "read",
-    handler: (_req, res) => {
-      const observedLedger = readLedgerUnionBounded(deps.ledgerPath);
-      if (!observedLedger.present) {
+    handler: async (_req, res) => {
+      const candidates = await readLedgerUnionMemoized(deps.ledgerPath, rotations);
+      if (!candidates.present) {
         sendJson(res, 200, {
           version: OPERATOR_ACTIVITY_CONTRACT_VERSION,
           state: "unavailable",
@@ -1050,7 +1086,10 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
       }
       try {
         const plan = readPanelPlan(deps, readPlanSnapshot);
-        const projection = projectPlan(plan, {
+        // Saturated, the projection skips the frontier, so neither the whole union nor projectPlan is read.
+        const saturated = activitiesSaturate(candidates);
+        const observedLedger = saturated ? candidates : readLedgerUnionBounded(deps.ledgerPath);
+        const projection = saturated ? new Map<string, StatusProjection>() : projectPlan(plan, {
           ledgerPath: deps.ledgerPath,
           github: deps.statusGithub,
           readLedger: () => observedLedger,
