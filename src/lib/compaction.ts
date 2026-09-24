@@ -407,7 +407,8 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  the diff. One typed entry per line, its own one-line why included inline:",
     "  `research: <what, and why>` | `task: <what, and why>` | `action: <what, and why>`.",
     "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
-    "  (exactly two options, one marked RECOMMENDED, a reversibility note) and STOP.",
+    "  (exactly two options, one marked RECOMMENDED, a reversibility note, and a line",
+    "  `FALSIFIER: <what you would observe if RECOMMENDED is the wrong choice>`) and STOP.",
     // W1-T272: the output contract's third exit. Before this, a worker that correctly found
     // the task's acceptance ALREADY TRUE on origin/main had no PR-less exit that didn't halt
     // the drain (`no_pr` is the only PR-less verdict, and it stops the drain as anomalous) —
