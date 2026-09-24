@@ -1,7 +1,7 @@
-- id: W1-T4479
+- id: W1-T4521
   title: "A RELEASE DECISION LEAVES NO RECORD IN GIT — the primary's deploy judge decides when stale code is worth a restart, but only its own ledger knows, so no instance, operator or metric can see which commit was released or why: mint an annotated release tag carrying the judgment as a manifest"
   repo: remudero
-  depends_on: [W1-T4478]
+  depends_on: [W1-T4520]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,7 +9,7 @@
   risk: high
   band_meaning: span
   origin: "session: 2026-09-24 release-tag design"
-  plan_refs: ["W1-T4478", "W1-T3240"]
+  plan_refs: ["W1-T4520", "W1-T3240"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/run-task.ts, test/a-release-decision-is-recorded-as-a-tag.test.ts]
   status: queued
   attempts: 0
@@ -23,9 +23,9 @@
     OBSERVED: .github/workflows/acr-build.yml tags every successful image build `image/<date>-<sha7>`
     (a BUILD marker, pushed with GITHUB_TOKEN). There is no release marker.
     Phase 2 of the release-tag plan. It records releases and changes no deploy behavior: nothing
-    consumes the tag until W1-T4481.
+    consumes the tag until W1-T4523.
   design: |
-    (i) Only the primary (W1-T4478 isPrimaryDeployment === true) mints. Any other answer mints nothing.
+    (i) Only the primary (W1-T4520 isPrimaryDeployment === true) mints. Any other answer mints nothing.
     (ii) When runDeployCycle's pressure decision is `restart`, mint an ANNOTATED tag
          `release/<YYYYMMDD>-<n>` (n = 1 + today's highest n on origin) on the source SHA being deployed.
     (iii) The tag message is a manifest the next phases parse, one `key: value` per line after a title line:
@@ -40,10 +40,10 @@
     (wiring) runDeployCycle calls mintReleaseTag from release-tags.ts.
   acceptance:
     - claim: "the manifest round-trips through format and parse"
-      proof: 'grep: test("W1-T4479: a release manifest round-trips" in test/a-release-decision-is-recorded-as-a-tag.test.ts'
+      proof: 'grep: test("W1-T4521: a release manifest round-trips" in test/a-release-decision-is-recorded-as-a-tag.test.ts'
     - claim: "only the primary mints, and a restart decision mints exactly one tag"
-      proof: 'grep: test("W1-T4479: only the primary mints a release tag" in test/a-release-decision-is-recorded-as-a-tag.test.ts'
+      proof: 'grep: test("W1-T4521: only the primary mints a release tag" in test/a-release-decision-is-recorded-as-a-tag.test.ts'
     - claim: "a mint failure never blocks the deploy"
-      proof: 'grep: test("W1-T4479: a failed mint never blocks the deploy" in test/a-release-decision-is-recorded-as-a-tag.test.ts'
+      proof: 'grep: test("W1-T4521: a failed mint never blocks the deploy" in test/a-release-decision-is-recorded-as-a-tag.test.ts'
     - claim: "the deploy cycle calls the mint"
       proof: 'grep: mintReleaseTag( in src/lib/deployer.ts'
