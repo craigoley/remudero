@@ -3923,10 +3923,113 @@ export async function runDaemon(
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
 
-    // Concurrent dispatch, mirroring `runDrainLanes`: settle-all, never fail-fast, so a sibling lane's rejection can
-    // never abort another lane already in flight, and every lane's outcome is recorded before this tick decides
-    // anything. At one lane this settles on the same schedule a bare await inside a try/catch would (W1-T343).
-    const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
+    // Keep each lane occupied independently. A completed worker frees its lane immediately; the new
+    // candidate walk and every admission gate run again before that lane starts another task.
+    const outcomes = new Map<string, PromiseSettledResult<RunResult>>();
+    const inFlight = new Map<number, Promise<{ task: Task; outcome: PromiseSettledResult<RunResult> }>>();
+    const activeTasks = new Map<number, Task>();
+    for (let lane = 0; lane < admitted.length; lane++) {
+      const task = admitted[lane]!;
+      activeTasks.set(lane, task);
+      inFlight.set(
+        lane,
+        Promise.resolve()
+          .then(() => deps.runOne(task.id))
+          .then(
+            (value) => ({ task, outcome: { status: "fulfilled", value } as PromiseFulfilledResult<RunResult> }),
+            (reason: unknown) => ({ task, outcome: { status: "rejected", reason } as PromiseRejectedResult }),
+          ),
+      );
+    }
+    let refillHold: FleetControlHold | undefined;
+    let governorHeld = false;
+    let fatalSettlementSeen = false;
+    const excluded = new Set(admitted.map((task) => task.id));
+    const planByTask = new Map(admitted.map((task) => [task.id, planForBatch]));
+    while (inFlight.size > 0) {
+      const { lane, task, outcome } = await Promise.race(
+        [...inFlight].map(async ([lane, promise]) => ({ lane, ...(await promise) })),
+      );
+      inFlight.delete(lane);
+      activeTasks.delete(lane);
+      outcomes.set(task.id, outcome);
+
+      if (
+        outcome.status === "rejected" &&
+        !(outcome.reason instanceof TaskAdmissionError) &&
+        !isSpawnInfraBlocked(outcome.reason) &&
+        transientGhDispatchFailure(outcome.reason) === undefined
+      ) {
+        fatalSettlementSeen = true;
+      }
+
+      if (laneCount <= 1) continue;
+      if (!refillHold) refillHold = holdWorkerAdmission("dispatch") ?? resolveFleetControlHold(deps);
+      if (
+        refillHold ||
+        governorHeld ||
+        fatalSettlementSeen ||
+        (opts.max !== undefined && attempted.length >= opts.max)
+      ) continue;
+
+      const remainingLaneBudget = laneDispatchBudget({
+        laneCount,
+        wipLimit: opts.wipLimit,
+        openPrCount: deps.openPrCount?.(),
+      });
+      if (remainingLaneBudget <= 0) continue;
+
+      // The plan may have been reloaded while this run was in flight. Re-read runnable candidates
+      // and apply the ordinary overlap partition for every refill; prior admissions are excluded.
+      const planForRefill = plan;
+      const refillCandidates = runnableCandidates(planForRefill, isMerged, planForRefill.tasks.length, dispatchOpts).filter(
+        (candidate) => !excluded.has(candidate.id),
+      );
+      const activeIds = new Set([...activeTasks.values()].map((active) => active.id));
+      const refillPartition = partitionByFileOverlap(
+        [...activeTasks.values(), ...refillCandidates],
+        deps.observedByTask ?? NO_OBSERVED_SCOPE,
+      );
+      const next = refillPartition.dispatch.find((candidate) => !activeIds.has(candidate.id));
+      if (!next) continue;
+
+      const verdict = checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      if (verdict) {
+        deferredVerdict = verdict;
+        governorHeld = true;
+        log("dispatch.lane_governed", {
+          task: next.id,
+          admitted: admitted.length,
+          of: plan.tasks.length,
+          lane_count: laneCount,
+        });
+        continue;
+      }
+
+      const holdBeforeRefill = holdWorkerAdmission("dispatch") ?? resolveFleetControlHold(deps);
+      if (holdBeforeRefill) {
+        refillHold = holdBeforeRefill;
+        continue;
+      }
+      excluded.add(next.id);
+      admitted.push(next);
+      planByTask.set(next.id, planForRefill);
+      attempted.push(next.id);
+      log("daemon.iteration", { task: next.id, attempted: attempted.length, max: opts.max ?? null });
+      log("dispatch.lane_refilled", { lane, finished_task: task.id, next_task: next.id });
+      inFlight.set(
+        lane,
+        Promise.resolve()
+          .then(() => deps.runOne(next.id))
+          .then(
+            (value) => ({ task: next, outcome: { status: "fulfilled", value } as PromiseFulfilledResult<RunResult> }),
+            (reason: unknown) => ({ task: next, outcome: { status: "rejected", reason } as PromiseRejectedResult }),
+          ),
+      );
+      activeTasks.set(lane, next);
+    }
+
+    const settled = admitted.map((task) => outcomes.get(task.id)!);
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.
@@ -4017,7 +4120,7 @@ export async function runDaemon(
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
-      const outcome = await processDispatchResult(planForBatch, task, result, isMerged);
+      const outcome = await processDispatchResult(planByTask.get(task.id) ?? planForBatch, task, result, isMerged);
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
           blockedDetail ??= outcome.detail;
@@ -4082,6 +4185,24 @@ export async function runDaemon(
       });
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(backoffMs);
+    }
+
+    if (refillHold?.control === "STOP") {
+      await stopInterphaseReviewClock();
+      log("daemon.stop", { detail: refillHold.detail });
+      return summary("stopped", refillHold.detail);
+    }
+    if (refillHold?.control === "PAUSE") {
+      ticks++;
+      log("daemon.pause", {
+        tick: ticks,
+        detail: refillHold.detail,
+        poll_interval_ms: pollIntervalMs,
+        recheck: true,
+      });
+      if (await stopInterphaseReviewClock()) continue;
+      await sleepUntilSweepWake(pollIntervalMs);
+      continue;
     }
 
     await stopInterphaseReviewClock();
