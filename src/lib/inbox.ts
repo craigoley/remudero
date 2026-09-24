@@ -86,6 +86,9 @@ export interface Proposal {
   retainAfterRatification?: boolean;
   /** Present only for a structured lifecycle proposal whose materialization is owned by `rmd approve`. */
   lifecycleAction?: SkillLifecycleAction;
+  /** W1-T4338: present only on a skill-workshop draft. Approval writes this file on its own branch instead of filing
+   *  a task fragment, so the path and body come from the staged draft, never a re-parse of `summary`. */
+  skillFile?: SkillFilePayload;
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
@@ -135,6 +138,18 @@ export interface SkillLifecycleAction {
   skillName: string;
   skillPath: string;
   evidenceFingerprint: string;
+}
+
+/** W1-T4338: the skill a skill-workshop draft asks `rmd approve` to write — its directory name and SKILL.md body. */
+export interface SkillFilePayload {
+  name: string;
+  markdown: string;
+}
+
+/** The one repo-relative path an approved skill is written to, or null for a name that is not a single safe path
+ *  segment — a staged name is machine-derived, so it is checked here rather than trusted into a filesystem path. */
+export function approvedSkillRelPath(name: string): string | null {
+  return /^[a-z0-9][a-z0-9-]*$/.test(name) ? `.claude/skills/${name}/SKILL.md` : null;
 }
 
 /** Derive a staged policy proposal's id from its row hash — DERIVED, never random, mirroring
@@ -462,7 +477,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
 export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: ReadinessContext): Proposal[] {
   return proposals.filter((p) => {
-    if (p.lifecycleAction) return false;
+    if (p.lifecycleAction || p.skillFile) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
     const cached = drafts[p.id];
     return !cached || isDraftStale(cached, p.evidenceAnchors);
@@ -685,6 +700,8 @@ export interface InboxClassification {
   draft?: DraftedCandidate;
   /** Present iff this READY item is a structured lifecycle action rather than a drafted task. */
   lifecycleAction?: SkillLifecycleAction;
+  /** W1-T4338: present iff this READY item is a skill-workshop draft whose approval writes a skill file. */
+  skillFile?: SkillFilePayload;
   /** Present iff state === "drafting" — when the in-flight Architect worker for this proposal's draft was spawned
    *  (W1-T193's "never renders nothing during a legitimate multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
@@ -1126,6 +1143,10 @@ export function classifyProposal(
       lifecycleAction: proposal.lifecycleAction,
       ...referentUnverified,
     };
+  }
+  // W1-T4338: a skill draft needs no Architect-drafted task — the staged SKILL.md IS the artifact approval writes.
+  if (proposal.skillFile) {
+    return { proposalId: proposal.id, state: "ready", reasons: [], skillFile: proposal.skillFile, ...referentUnverified };
   }
 
   const reasons: PredicateFailure[] = [];
@@ -2276,6 +2297,10 @@ export interface RatifyGateway {
   /** OPTIONAL (W1-T903 iii/vi). COMPLETE an already-pushed branch carrying no PR, with NO new commit, re-push or
    *  re-mint. Called only when a branch was found and no PR was. */
   completeRatificationBranch?(branch: string, proposalId: string): string;
+
+  /** W1-T4338. Write `.claude/skills/<name>/SKILL.md` on a fresh branch, commit and push it, and return the branch —
+   *  the skill-draft twin of {@link createRatificationBranch}. A gateway without it cannot approve a skill draft. */
+  writeSkillFile?(proposalId: string, skillFile: SkillFilePayload): string;
 }
 
 export type ApproveResult =
@@ -2366,8 +2391,17 @@ export function approveProposal(
   gateway: RatifyGateway,
   deps: RatifyLedgerDeps,
 ): ApproveResult {
-  if (classification.state !== "ready" || !classification.draft) {
-    const refusal = refusalReason(classification);
+  // W1-T4338: a skill draft carries its file, not a task fragment, so it takes neither the draft requirement nor the
+  // duplicate-filing check below — both are about minting tasks. Everything after branch creation is shared.
+  const skillFile = classification.state === "ready" ? classification.skillFile : undefined;
+  const skillRefusal =
+    skillFile && !gateway.writeSkillFile
+      ? `${classification.proposalId} is a skill draft, and this gateway cannot write a skill file`
+      : skillFile && !approvedSkillRelPath(skillFile.name)
+        ? `${classification.proposalId}'s skill name ${JSON.stringify(skillFile.name)} is not a single safe path segment`
+        : undefined;
+  if ((!skillFile && (classification.state !== "ready" || !classification.draft)) || skillRefusal) {
+    const refusal = skillRefusal ?? refusalReason(classification);
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: classification.proposalId,
@@ -2377,11 +2411,12 @@ export function approveProposal(
     });
     return { ok: false, proposalId: classification.proposalId, state: classification.state, refusal };
   }
+  const draft = classification.draft;
   // W1-T2455: a READY proposal whose DRAFT would re-file work already on origin/main is refused HERE, with ZERO
   // gateway calls. BLOCKING ON THIS PATH ONLY: the same check stays `warn` for the whole-plan pass, where promoting
   // it would redden long-open siblings. Ratification MINTS, and a mint is not something a later reader can undo
   // cheaply.
-  const dup = draftedDuplicate(classification.draft.fragmentYaml, deps.duplicateCorpus ?? []);
+  const dup = !skillFile && draft ? draftedDuplicate(draft.fragmentYaml, deps.duplicateCorpus ?? []) : undefined;
   if (dup) {
     const refusal = draftedDuplicateRefusal(classification.proposalId, dup);
     appendLedger(deps.ledgerPath, {
@@ -2398,8 +2433,8 @@ export function approveProposal(
   }
   const payload: RatificationPayload = {
     proposalId: classification.proposalId,
-    fragmentYaml: classification.draft.fragmentYaml,
-    stampLine: classification.draft.stampLine,
+    fragmentYaml: draft?.fragmentYaml ?? "",
+    stampLine: draft?.stampLine ?? "",
   };
 
   const resumeBranch = gateway.findPushedBranch?.(classification.proposalId);
@@ -2410,6 +2445,8 @@ export function approveProposal(
     branch = resumeBranch as string;
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
+  } else if (skillFile && gateway.writeSkillFile) {
+    branch = gateway.writeSkillFile(classification.proposalId, skillFile);
   } else {
     branch = gateway.createRatificationBranch(payload);
   }
@@ -2435,6 +2472,7 @@ export function approveProposal(
     pr_url: prUrl,
     pr_number: prNumber,
     branch,
+    ...(skillFile ? { skill_file: approvedSkillRelPath(skillFile.name) } : {}),
   });
   return {
     ok: true,
@@ -2542,6 +2580,21 @@ export function writeRatificationShards(
   fs.mkdirSync(joinPath(worktreePath, "plan", "tasks.d"), { recursive: true });
   for (const file of shards.files) fs.writeFileSync(joinPath(worktreePath, file.relPath), file.contents, "utf8");
   return shards.files.map((f) => f.relPath);
+}
+
+/** W1-T4338: write an approved skill draft's SKILL.md, verbatim, at its one path under `worktreePath`. Returns that
+ *  repo-relative path. Refuses rather than guesses on a name {@link approvedSkillRelPath} rejects. */
+export function writeApprovedSkillFile(
+  worktreePath: string,
+  skillFile: SkillFilePayload,
+  fs: ShardWriteFs,
+  joinPath: (...parts: string[]) => string,
+): string {
+  const relPath = approvedSkillRelPath(skillFile.name);
+  if (!relPath) throw new Error(`rmd approve: refusing to write skill ${JSON.stringify(skillFile.name)} — not a single safe path segment`);
+  fs.mkdirSync(joinPath(worktreePath, ".claude", "skills", skillFile.name), { recursive: true });
+  fs.writeFileSync(joinPath(worktreePath, relPath), skillFile.markdown, "utf8");
+  return relPath;
 }
 
 export function applyFragmentToPlanYaml(tasksYaml: string, fragmentYaml: string): string {

@@ -1,0 +1,51 @@
+- id: W1-T4454
+  title: "EVERY CONSOLE PROJECTION IS COMPUTED ON SERVE'S ONE THREAD — feedback reconcile, status derive and operator activity block the loop for their whole duration, even behind the snapshot cache; compute them in a worker thread on a viewer-gated cadence and hand the main thread only the finished body"
+  repo: remudero
+  depends_on: [W1-T4451]
+  priority: 2
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 console data-architecture design (console dropouts): layers C2 + D1, sequence step 6"
+  plan_refs: ["W1-T4451", "W1-T4452", "W1-T4075", "W1-T4102"]
+  files:
+    - src/lib/console-projection-worker.ts
+    - src/lib/console-snapshot-cache.ts
+    - src/lib/serve.ts
+  note: |
+    HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
+    `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
+    if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4451 moves refresh off the request stack, but a synchronous projection still blocks the loop for its
+    whole duration whenever it runs, so every other route (tunnel health check, writes, SSE) waits on it. The
+    pattern to fix this already exists in core: src/lib/status.ts and src/lib/repo-dashboard-route.ts spawn a
+    worker_threads worker with a documented synchronous fallback. W1-T4075 moves the DAEMON tick's reads off its
+    loop; this task is the gateway (serve) side and does not touch the daemon.
+  design: |
+    (1) A new src/lib/console-projection-worker.ts exports startConsoleProjectionWorker and runs the feedback, status and operator-activity projections in a
+    worker thread that owns its own incremental ledger tail (bounded by window, never the full rotation union per
+    refresh) and posts the finished JSON as a string. The main thread only swaps the buffered body in the W1-T4451
+    cache. On worker spawn failure or crash it falls back to the synchronous build and logs a reason-carrying
+    ledger line, exactly as status.ts does. (2) Background refresh: while gatePrewarmOnClients.noteRead has seen a
+    reader within the last minute, each cached path refreshes on its own minRefreshMs cadence off the request path;
+    with no viewer nothing runs (the W1-T154 quota rule). serve.ts: zero net comment lines. Out of scope: watchInstanceLiveness and
+    fleet-liveness.ts; another agent is fixing that stall now.
+  acceptance:
+    - claim: "a feedback projection runs off the main thread"
+      proof: "unit test: a feedback projection runs off the main thread"
+    - claim: "a failed projection worker falls back to the synchronous build with a reason"
+      proof: "unit test: a failed projection worker falls back to the synchronous build"
+    - claim: "cached paths refresh on their cadence only while a viewer is present"
+      proof: "unit test: cached console paths refresh in the background only while a viewer is present"
+    - claim: "the snapshot cache starts the projection worker"
+      proof: "grep: startConsoleProjectionWorker( in src/lib/console-snapshot-cache.ts"
+    - claim: "serve builds its cached console reads through the snapshot cache"
+      proof: "grep: createConsoleSnapshotCache( in src/lib/serve.ts"
+  falsifier: |
+    CLOSE IF serve on main already computes the feedback projection in a worker thread.

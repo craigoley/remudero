@@ -1,0 +1,34 @@
+- id: W1-T4458
+  title: "A SHELL-LESS MERGE-CONFLICT FIX ROUND IS TOLD TO MERGE origin/main AND ALSO TOLD IT HAS NO GIT — so it cannot, or (with Bash still in its tools) it merges and commits itself and the harness, reading a clean tree, discards that commit; the harness must start the merge, and honour a commit the worker made"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
+  plan_refs: [W1-T4450, W1-T3727]
+  files: [src/run-task.ts, src/lib/prompt-render.ts, src/lib/fix-fence.ts, test/a-merge-conflict-round-can-merge.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the fix.done rows since 2026-09-23T15:59Z: 62 of 65 fix rounds ended commit_refused ($73.51). Reasons: 37 missing COMMIT_MESSAGE line and 9 regenerable-baseline edits refused (both W1-T4450), 12 'the worker changed nothing', 8 'the task declares no files'.
+    OBSERVED: W1-T4430's merge-conflict rounds at 10:24Z and 11:09Z obeyed "do not run git" and ended "the worker changed
+    nothing" (HEAD unchanged, no MERGE_HEAD). W1-T4100 at 22:11Z, a Claude round with Bash (FIX_WORKER_TOOLS includes it),
+    merged and committed itself; harnessCommitForShellLessWorker is called with a hardcoded commitCount: 0, saw a clean tree,
+    refused, and the refusal's early return skipped deps.push, so the worker's merge commit was silently dropped.
+  design: |
+    (i) Before a merge-conflict round whose harness commits, the harness runs `git merge --no-commit origin/main` in
+    the worktree, so the worker only edits the conflicted files; the harness commits the merge. (ii) The harness commit reads
+    the real commits-ahead of the round's starting head, so a commit the worker made is pushed, never discarded. (iii) Bash is
+    removed from the fix tools whenever the harness commits, so the prompt and the tools agree.
+  acceptance:
+    - claim: "the harness starts the merge a shell-less conflict round resolves"
+      proof: 'grep: test("W1-T4458: the harness starts the merge a shell-less conflict round resolves" in test/a-merge-conflict-round-can-merge.test.ts'
+    - claim: "a commit the worker made is pushed, not discarded"
+      proof: 'grep: test("W1-T4458: a commit the worker made is pushed, not discarded" in test/a-merge-conflict-round-can-merge.test.ts'
+  falsifier: |
+    Leave commitCount hardcoded to 0 and the second test finds the worker's own commit dropped.

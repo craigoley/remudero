@@ -23,7 +23,7 @@ import {
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
 import type { Clock } from "./clock.js";
-import { writeAtomic } from "./fs-race-safe.js";
+import { writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
 
 // ── (i) THE ALLOWLIST — never subscribe to or accept `*` ────────────────────────────────────
@@ -215,7 +215,7 @@ export interface DeliveryDedupStore {
   /** True iff `deliveryId` was already accepted. Pure: never records the candidate. */
   has(deliveryId: string): boolean;
   /** Record one successfully persisted wake, evicting the oldest id at the configured bound. */
-  record(deliveryId: string): void;
+  record(deliveryId: string): void | Promise<void>;
 }
 
 export function createDeliveryDedupStore(capacity: number, initial: ReadonlyArray<string> = []): DeliveryDedupStore {
@@ -251,8 +251,8 @@ export function githubDeliveryDedupPath(root: string): string {
   return join(root, "state", "github-webhook-deliveries.json");
 }
 
-/** Persists the recent-delivery FIFO as one atomically replaced JSON file, write-before-memory so
- *  a failed write can't poison an id. HMAC is the real auth boundary; losing this cache costs at most one extra wake. */
+/** Persists the recent-delivery FIFO (mode 0600, fsync off the loop), write-before-memory and serialized so a failed
+ *  write can't poison an id nor two deliveries drop each other's. HMAC is the real auth boundary; losing this costs one wake. */
 export function createPersistentDeliveryDedupStore(path: string, capacity: number): DeliveryDedupStore {
   let initial: string[] = [];
   try {
@@ -263,17 +263,23 @@ export function createPersistentDeliveryDedupStore(path: string, capacity: numbe
   }
   let order = [...new Set(initial)].slice(-capacity);
   let known = new Set(order);
+  let persisted: Promise<void> = Promise.resolve();
   return {
     has(deliveryId) {
       return known.has(deliveryId);
     },
     record(deliveryId) {
-      if (known.has(deliveryId)) return;
-      const nextOrder = [...order, deliveryId].slice(-capacity);
-      // W1-T2899: the shared primitive; `mode` lands on the stage, never briefly at the real path.
-      writeAtomic(path, JSON.stringify({ deliveryIds: nextOrder }), { mode: 0o600 });
-      order = nextOrder;
-      known = new Set(order);
+      const run = persisted.then(async () => {
+        if (known.has(deliveryId)) return;
+        const nextOrder = [...order, deliveryId].slice(-capacity);
+        await writeAtomicAsync(path, JSON.stringify({ deliveryIds: nextOrder }), { mode: 0o600 });
+        order = nextOrder;
+        known = new Set(order);
+      });
+      persisted = run.catch(() => {
+        // The caller's await carries this failure; the chain only has to stay usable for the next id.
+      });
+      return run;
     },
   };
 }
@@ -301,6 +307,10 @@ export function sweepWakeMarkerPath(root: string): string {
 export function writeSweepWakeMarkerAtomic(path: string, record: SweepWakeMarker): void {
   // W1-T2899: the shared primitive; its cleanup-on-failure arm was lifted from here.
   writeAtomic(path, JSON.stringify(record));
+}
+
+export async function writeSweepWakeMarkerAtomicAsync(path: string, record: SweepWakeMarker): Promise<void> {
+  await writeAtomicAsync(path, JSON.stringify(record));
 }
 
 /** `undefined` on any read/parse failure (absent, mid-write, corrupt) — never throws; an
@@ -425,7 +435,7 @@ export interface GithubEventWakeOptions {
   now?: () => Date;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Injectable ONLY for a test — production always gets {@link writeSweepWakeMarkerAtomic}. */
-  writeMarker?: (path: string, record: SweepWakeMarker) => void;
+  writeMarker?: ((path: string, record: SweepWakeMarker) => void) | ((path: string, record: SweepWakeMarker) => Promise<void>);
   /** When set, a delivery that arms no marker, an ignored one and a duplicate are counted here, not logged. */
   counters?: WakeCounters;
 }
@@ -444,7 +454,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
   const log = opts.log ?? (() => {});
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES;
   const now = opts.now ?? (() => new Date());
-  const writeMarker = opts.writeMarker ?? writeSweepWakeMarkerAtomic;
+  const writeMarker = opts.writeMarker ?? writeSweepWakeMarkerAtomicAsync;
   const semanticCheckMode = opts.semanticCheckMode ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE;
   const aggregateCheckNames =
     opts.aggregateCheckNames ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES;
@@ -564,7 +574,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       const classification = classifyGithubEventWake(event, action, body, aggregateCheckNames);
       recordClassification(classification, body);
       if (semanticCheckMode === "enforce" && !classification.actionable) {
-        opts.dedup.record(deliveryId);
+        await opts.dedup.record(deliveryId);
         sendJson(res, 202, { accepted: false, reason: "successful_leaf" });
         return;
       }
@@ -577,8 +587,8 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         receivedAtIso: now().toISOString(),
       };
       const armed = readSweepWakeMarker(opts.markerPath) === undefined;
-      writeMarker(opts.markerPath, record);
-      opts.dedup.record(deliveryId);
+      await writeMarker(opts.markerPath, record);
+      await opts.dedup.record(deliveryId);
       if (opts.counters && !armed) {
         countWake(opts.counters, "accepted_coalesced", event, action);
         sendJson(res, 202, { accepted: true });
