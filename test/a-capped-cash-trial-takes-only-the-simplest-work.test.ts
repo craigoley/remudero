@@ -141,7 +141,7 @@ test("the trial reads its window from the real ledger union", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-state-"));
   try {
     const failing = Array.from({ length: 5 }, (_, i) => [tagged(`f${i}`, `x${i}`, "cash"), verdict(`f${i}`, false)]).flat();
-    writeFileSync(join(stateDir, "ledger.ndjson"), [...failing.map((row) => JSON.stringify(row)), "{torn"].join("\n") + "\n");
+    writeFileSync(join(stateDir, "ledger.ndjson"), [...failing.map((row) => JSON.stringify(row)), '{"trial":"cash-simple","run_id":"torn'].join("\n") + "\n");
     const decision = decideCashTrial({ task: docsTask, taskClass: "docs", config: config(), harnessCommits: true, stateDir });
     assert.equal(decision?.arm, "held", "five failed cash runs on disk stop the trial");
   } finally {
