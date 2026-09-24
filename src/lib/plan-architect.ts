@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { shapeCommitMessage } from "./commit-message.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { regeneratePlanIndexFile } from "./plan-pr-emitter.js";
-import type { Escalation } from "./escalate.js";
+import type { Escalation, EscalationOption } from "./escalate.js";
+import { grillChoiceError, parseGrillFalsifier, parseGrillOptions, parseGrillRecommendation } from "./grill-choices.js";
 
 /**
  * `rmd plan --mode=create|clarify|expand` — the unified Architect PLAN skill (MASTER-PLAN
@@ -122,8 +123,8 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
       "  existing task id/§section, e.g. `CLEAR: already covered by W1-T27 / §5A`.",
       "",
       "  GRILL — the initiative is too underspecified to scaffold safely (e.g. it could mean two",
-      "  very different things). Touch NO files. End with a line starting exactly `GRILL:`",
-      "  naming the open question, e.g. `GRILL: onboard which repo — this one or a new one?`.",
+      "  very different things). Touch NO files. End as the GRILL CONTRACT below requires, e.g.",
+      "  `GRILL: onboard which repo — this one or a new one?`.",
       "",
       "  PROPOSED — scaffold it: add one or more NEW task(s) covering the initiative (see NEW TASK",
       "  PLACEMENT below for where a new task goes), and, if the initiative is big enough to need",
@@ -144,7 +145,7 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
       "  naming what you checked, e.g. `CLEAR: W1-T27's profile flag is fully specified`.",
       "",
       "  GRILL — a real ambiguity needs a human call this pass cannot safely make alone. Touch",
-      "  NO files. End with a line starting exactly `GRILL:` naming the open question, e.g.",
+      "  NO files. End as the GRILL CONTRACT below requires, e.g.",
       "  `GRILL: does W1-T90's 'the daemon' mean rmd daemon or rmd drain?`.",
       "",
       // CLARIFY REWRITES, it does not file: its ids already exist, so `monolithFilingViolations`
@@ -172,8 +173,7 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
     "  `CLEAR: §5C's linter already covers every rule scanned for gaps`.",
     "",
     "  GRILL — you found a candidate gap but closing it safely needs a human call (e.g. which",
-    "  of two directions to take). Touch NO files. End with a line starting exactly `GRILL:`",
-    "  naming the open question.",
+    "  of two directions to take). Touch NO files. End as the GRILL CONTRACT below requires.",
     "",
     "  PROPOSED — add one or more NEW task(s) filling the gap (see NEW TASK PLACEMENT below for",
     "  where a new task goes). Every new task's",
@@ -182,6 +182,26 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
     "  `PROPOSED: add W1-T301 for <gap>, citing <url>`.",
   ];
 }
+
+/**
+ * SETTLE BY LOOKUP, THEN GRILL — shared by all three modes, so one copy cannot drift. A headless
+ * Architect cannot ask, so every question grounding or research can answer is answered and
+ * recorded; only the remainder reaches the operator, and it arrives as a decision (options, a
+ * recommendation, and what would prove that recommendation wrong), never a bare question.
+ * {@link decidePlanArchitect} refuses a GRILL whose OPTION/RECOMMENDATION lines are not actionable.
+ */
+const GRILL_CONTRACT = [
+  "SETTLE BY LOOKUP FIRST — before choosing any verdict, list the open questions it turns on,",
+  "always including \"is this already filed or already decided?\". Answer every one that STEP 1 or",
+  "STEP 2 can settle: a question you could look up is never a grill. When you add or rewire a",
+  "task, record each settled answer in its `rationale:` as",
+  "`Settled by lookup: <question> -> <answer> (<file, task id or URL>)`.",
+  "GRILL CONTRACT — GRILL only on what lookups could not settle, and end with:",
+  "  OPTION: <short label>|<what choosing it means>   (at least TWO)",
+  "  RECOMMENDATION: <the exact label of the option you would pick>",
+  "  FALSIFIER: <the observation that would prove that recommendation wrong>",
+  "  GRILL: <the one open question>",
+];
 
 /**
  * The `rmd plan` Architect prompt — the SINGLE definition invoked by all three modes (W1-T45
@@ -245,6 +265,8 @@ export function planArchitectPrompt(
     "=== STEP 3 — CLEAR, GRILL, OR PROPOSE ===",
     ...step3Instructions(mode, brief),
     "",
+    ...GRILL_CONTRACT,
+    "",
     ...reservedIdsInstructions(reservedIds),
     // Same gap, one lane over (impl-ES trap 3): this prompt stated the proof dialect no more than
     // triage's did, and BOTH lanes file tasks into the SAME changed-tasks-only `lint-plan` gate.
@@ -298,7 +320,7 @@ export function planArchitectPrompt(
 
 export type PlanVerdict =
   | { kind: "clear"; note: string }
-  | { kind: "grill"; question: string }
+  | { kind: "grill"; question: string; options: EscalationOption[]; recommendation: string; falsifier: string }
   | { kind: "proposed"; summary: string };
 
 /**
@@ -318,7 +340,16 @@ export function parsePlanVerdict(text: string): PlanVerdict | null {
   }
   if (grill.length) {
     const m = grill[grill.length - 1];
-    hits.push({ at: m.index ?? 0, verdict: { kind: "grill", question: m[1].trim() } });
+    hits.push({
+      at: m.index ?? 0,
+      verdict: {
+        kind: "grill",
+        question: m[1].trim(),
+        options: parseGrillOptions(text),
+        recommendation: parseGrillRecommendation(text),
+        falsifier: parseGrillFalsifier(text),
+      },
+    });
   }
   if (proposed.length) {
     const m = proposed[proposed.length - 1];
@@ -385,7 +416,7 @@ export interface DecidePlanInput {
 
 export type PlanDecision =
   | { action: "no_action"; detail: string }
-  | { action: "grill"; detail: string }
+  | { action: "grill"; detail: string; options: EscalationOption[]; recommendation: string; falsifier: string }
   | { action: "propose"; detail: string; files: string[] }
   | { action: "error"; reason: string };
 
@@ -417,7 +448,10 @@ export function decidePlanArchitect(input: DecidePlanInput): PlanDecision {
     if (input.changedFiles.length > 0) {
       return { action: "error", reason: `GRILL but files were changed: ${input.changedFiles.join(", ")}` };
     }
-    return { action: "grill", detail: input.verdict.question };
+    const { question, options, recommendation, falsifier } = input.verdict;
+    const choiceError = grillChoiceError("GRILL", options, recommendation);
+    if (choiceError) return { action: "error", reason: choiceError.reason };
+    return { action: "grill", detail: question, options, recommendation, falsifier };
   }
   // proposed
   if (input.changedFiles.length === 0) {
@@ -454,13 +488,8 @@ export function formatPlanVerdictLine(mode: PlanMode, decision: PlanDecision): s
  *
  * NOT a reuse of `buildGrillEscalation` itself: that builder is feedback-shaped (it requires a
  * `FeedbackEntry` for `entry.id`/`entry.raw`, which this lane has no equivalent of — it has a
- * `mode`/`brief` instead) and its `decision.options`/`decision.recommendation` come from
- * `TriageDecision`'s grill arm, which `decideTriage` enforces carries >= 2 real `OPTION:` lines
- * parsed off the worker's own output. `decidePlanArchitect`'s grill arm carries no such thing —
- * the Architect prompt (see {@link planArchitectPrompt}) asks only for a single `GRILL: <question>`
- * line, never `OPTION:`/`RECOMMENDATION:` lines — so there is nothing of the Architect's own to
- * carry over. This is the "minimal real pair" design point (ii) calls for instead: the two actual
- * choices a human has for ANY plan-lane grill, regardless of what the question is about.
+ * `mode`/`brief` instead). The options and recommendation are the Architect's own, already
+ * checked by {@link decidePlanArchitect} through the same `grillChoiceError` triage uses.
  *
  * Pure — mirrors how `buildGrillEscalation`/`planCommitMessage` stay pure while `run-task.ts`'s
  * `planCommand` owns the real `escalate()`/`ghIssueGateway()` I/O.
@@ -485,18 +514,13 @@ export function buildPlanGrillEscalation(opts: {
       `Brief: ${brief || "(none given — the Architect considered the whole plan)"}`,
       "",
       `Open question: ${decision.detail}`,
+      `Recommended: ${decision.recommendation}`,
+      ...(decision.falsifier ? [`That recommendation is wrong if: ${decision.falsifier}`] : []),
+      "",
+      `After choosing, rerun \`${rerun}\` so the Architect can proceed with it settled.`,
     ].join("\n"),
-    options: [
-      {
-        label: "answer-and-rerun",
-        detail: `Answer the open question, then rerun \`${rerun}\` so the Architect can proceed with it settled.`,
-      },
-      {
-        label: "leave-as-is",
-        detail: "Leave the plan unchanged for now — no rerun needed yet.",
-      },
-    ],
-    recommendation: "answer-and-rerun",
+    options: decision.options,
+    recommendation: decision.recommendation,
   };
 }
 

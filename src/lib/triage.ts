@@ -1,4 +1,5 @@
 import type { Escalation, EscalationOption } from "./escalate.js";
+import { grillChoiceError, parseGrillOptions, parseGrillRecommendation } from "./grill-choices.js";
 import { join } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
@@ -214,33 +215,6 @@ export type TriageVerdict =
   | { kind: "proposed"; summary: string };
 
 /**
- * `OPTION: <label>|<detail>` lines anywhere in the worker's output — the grill's actionable
- * choices, meaningful only for an AMBIGUOUS verdict. Idempotent on the `(label, detail)` pair
- * (W1-T2205), since a model can restate or quote its own options back; first occurrence wins.
- */
-function parseGrillOptions(text: string): EscalationOption[] {
-  const seen = new Set<string>();
-  const options: EscalationOption[] = [];
-  for (const m of text.matchAll(/^[ \t]*OPTION[ \t]*:[ \t]*(.+)$/gim)) {
-    const raw = m[1].trim();
-    const sep = raw.indexOf("|");
-    const option = sep >= 0 ? { label: raw.slice(0, sep).trim(), detail: raw.slice(sep + 1).trim() } : { label: raw, detail: "" };
-    const key = JSON.stringify([option.label, option.detail]);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    options.push(option);
-  }
-  return options;
-}
-
-/** The LAST `RECOMMENDATION: <label>` line — {@link decideTriage} fails loud unless it matches
- * one of the parsed OPTION labels exactly. `""` when no such line appears. */
-function parseGrillRecommendation(text: string): string {
-  const hits = [...text.matchAll(/^[ \t]*RECOMMENDATION[ \t]*:[ \t]*(.+)$/gim)];
-  return hits.length ? hits[hits.length - 1][1].trim() : "";
-}
-
-/**
  * Extract the worker's terminal verdict from its output. Anchored to a line start, like {@link
  * "./worker.js".parseReport}'s `PR_URL:`, so a marker only mentioned in passing prose never
  * counts. The LAST marker line wins when more than one appears.
@@ -379,19 +353,12 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
     }
     // The async needs-human issue is the only grill mechanism (W1-T42) — fewer than 2 OPTION:
     // lines is not an actionable escalation; fail loud here, not deeper in escalate().
-    if (verdict.options.length < 2) {
-      // `cause` deliberately omitted here — see the DecideTriageInput.cause doc comment above.
-      return {
-        action: "error",
-        reason: `AMBIGUOUS verdict carries ${verdict.options.length} OPTION: line(s) — a grill needs at least 2 actionable choices`,
-      };
-    }
-    if (!verdict.options.some((o) => o.label === verdict.recommendation)) {
-      return {
-        action: "error",
-        reason: `AMBIGUOUS verdict's RECOMMENDATION (${JSON.stringify(verdict.recommendation)}) does not match any OPTION label (${verdict.options.map((o) => o.label).join(", ")})`,
-        cause: "inconsistent_verdict",
-      };
+    // `cause` is deliberately omitted for the too-few-options arm — see DecideTriageInput.cause.
+    const choiceError = grillChoiceError("AMBIGUOUS", verdict.options, verdict.recommendation);
+    if (choiceError) {
+      return choiceError.inconsistent
+        ? { action: "error", reason: choiceError.reason, cause: "inconsistent_verdict" }
+        : { action: "error", reason: choiceError.reason };
     }
     return {
       action: "grill",
