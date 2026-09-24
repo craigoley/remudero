@@ -6,11 +6,10 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 15.00
-  risk: high
-  band_meaning: span
+  risk: medium
   origin: "operator-approved follow-up 2026-09-24: local coverage-ratchet preflight erased its active shard TMPDIR while validating W1-T4422 and W1-T4443"
   plan_refs: [W1-T4422, W1-T4443]
-  files: [src/lib/ci-parity.ts, test/coverage-leaf-isolates-reentrant-scratch.test.ts, scripts/test-tier-manifest.json]
+  files: [src/lib/ci-parity.ts, test/coverage-leaf-isolates-reentrant-scratch.test.ts]
   priority: 1
   status: queued
   attempts: 0
@@ -28,7 +27,8 @@
          coverage scratch, give this nested coverage invocation a unique child scratch directory.
     (iii) Pass that child path to every nested shard and remove only that invocation's child in a
           `finally` path after its shards finish; never remove the parent's active scratch.
-    (iv) Fail closed if isolated nested scratch cannot be prepared. Add a regression that creates a
+    (iv) Fail closed if isolated nested scratch cannot be prepared. New test files default to the
+         fast tier; do not add a row to the shared tier manifest. Add a regression that creates a
          parent sentinel, executes the real coverage-leaf wiring with a recording spawn, verifies
          the sentinel is present during nested execution, the nested path differs, and cleanup
          removes only the nested path. Keep the test in the fast tier.
