@@ -1,0 +1,45 @@
+- id: W1-T4412
+  title: "THE INCIDENT INGEST TOKEN HAS NO WAY INTO THE GATEWAY — W1-T4383 reads RMD_SERVE_INGEST_TOKEN, but serve-container.sh never passes it and nothing mints it, so the site and every public surface can never report an error; mount it from a host secret file like the webhook secret"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "follow-up audit 2026-09-24 after W1-T4383 (#6894) merged"
+  plan_refs: ["W1-T4383", "PORTAL-T27", "CONSOLE-T58"]
+  files:
+    - deploy/serve-container.sh
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24 on the fleet host: W1-T4383's ingest-only grantor is created only when an ingest token is
+    present (serve.ts: `deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV]`, INGEST_TOKEN_ENV =
+    "RMD_SERVE_INGEST_TOKEN"). remudero-serve's environment carries no variable naming INGEST
+    (docker inspect ... Config.Env | grep -c INGEST -> 0), and nothing under deploy/ or scripts/ mentions it.
+    So the grantor never exists. The console can post with its write bearer, but the public site (PORTAL-T27)
+    is designed never to hold that bearer, so it cannot report at all. No task owned the wiring.
+  design: |
+    Follow the webhook-secret pattern already in serve-container.sh (a read-only mount plus an env var naming
+    the file, as RMD_GITHUB_WEBHOOK_SECRET_FILE does). When the host file
+    ~/.config/remudero/incident-ingest-token exists, mount it read-only and set RMD_SERVE_INGEST_TOKEN_FILE to
+    its in-container path. The token never appears in argv or a log. serve.ts reads the token from
+    RMD_SERVE_INGEST_TOKEN_FILE when RMD_SERVE_INGEST_TOKEN is unset; a file that is present but unreadable or
+    empty is a logged refusal, never a silent no-grantor. The script's startup summary states whether the
+    ingest token was supplied, by presence only. The operator mints the file once
+    (`umask 077; openssl rand -hex 32 > ~/.config/remudero/incident-ingest-token`) and gives the same value to
+    the console's and site's Vercel env as RMD_INCIDENT_INGEST_TOKEN. This task documents that in the
+    script's header; it never generates or prints the value.
+  acceptance:
+    - claim: "an ingest token supplied as a file grants the incident route and nothing else"
+      proof: "unit test: an ingest token supplied as a file grants the incident route and nothing else"
+    - claim: "an empty or unreadable ingest token file is refused with a logged reason"
+      proof: "unit test: an empty or unreadable ingest token file is refused with a logged reason"
+    - claim: "the gateway launch mounts the ingest token file read-only when the host file exists"
+      proof: 'grep: RMD_SERVE_INGEST_TOKEN_FILE in deploy/serve-container.sh'
+  falsifier: |
+    CLOSE IF remudero-serve already receives an incident ingest token without the operator editing the launch by hand.
