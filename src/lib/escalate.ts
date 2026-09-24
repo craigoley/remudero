@@ -368,8 +368,8 @@ const CLASS_LABEL: Record<EscalationClass, string> = {
  *  QUESTION the operator must ANSWER. See {@link classifyAsk}. */
 export type AskType = "action" | "question";
 
-/** Beside the per-class label, alongside `needs-human` — the ask-type queue split. */
-const ASK_TYPE_LABEL: Record<AskType, string> = {
+/** Beside the per-class label, alongside `needs-human` — the ask-type queue split (read by escalation-answers.ts). */
+export const ASK_TYPE_LABEL: Record<AskType, string> = {
   action: "needs-action",
   question: "needs-question",
 };
@@ -718,6 +718,16 @@ export function renderIssueBody(e: Escalation): string {
     "",
     "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
     "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+    // W1-T4471: how to answer — QUESTION issues only (an ACTION is performed, not answered);
+    // owner-only per G-6, see lib/escalation-answers.ts.
+    ...(classifyAsk(e) === "question"
+      ? [
+          "",
+          "**To answer:** reply on this issue (repository owner only — every other reply is",
+          "counted and ignored) or reply in the console's escalation panel. Either lands in the",
+          "same place the next fix round reads.",
+        ]
+      : []),
   ].filter((l): l is string => l !== undefined);
   return lines.join("\n");
 }
@@ -815,6 +825,12 @@ export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
  *  {@link matchesOptionalDimension} is permissive on an absent dimension, the wrong polarity there. */
 export function escalationHeadSha(body: string | undefined): string | undefined {
   return HEAD_SHA_LINE_RE.exec(body ?? "")?.[1];
+}
+
+/** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471) — via the
+ *  SAME {@link TASK_LINE_RE} dedup matches on, so lib/escalation-answers.ts reuses one parser. */
+export function escalationTaskId(body: string | undefined): string | undefined {
+  return TASK_LINE_RE.exec(body ?? "")?.[1];
 }
 
 /** The `**Contract:** <revision>` an already-open issue's body carries, or `undefined` (W1-T3579).

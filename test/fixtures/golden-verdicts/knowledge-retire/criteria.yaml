@@ -1,0 +1,8 @@
+# The knowledge gardener's (W1-T4095) own RETIRE pass, verbatim from fleet PR #7073: an active entry
+# flips to `lifecycle: superseded` under a gardener marker comment, its text kept, plus the pass's
+# garden-log section. These are the two criteria the gardener writes into its own PR body; each
+# proof executes for real against checkout/.
+- claim: this pass is recorded in the garden log
+  proof: "grep: ^## Pass 2026-09-24T21:47:59.074Z$ in docs/knowledge-garden-log.md"
+- claim: the gardener's retire of ls-remote-grep-matches-the-sha-column is marked in its entry
+  proof: "grep: knowledge gardener: retire ls-remote-grep-matches-the-sha-column$ in learnings/failures.yaml"

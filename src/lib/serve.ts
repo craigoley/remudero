@@ -120,6 +120,7 @@ import {
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
+import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import {
@@ -194,6 +195,7 @@ import {
   type RegistryDrift,
 } from "./instance-registry.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
+import { onboardingReadiness, type OnboardingReadinessGateway, type OnboardingRegistryRead } from "./onboarding-readiness.js";
 import {
   buildProviderAuthRoutes,
   ProviderAuthSessionStore,
@@ -450,6 +452,12 @@ export interface ServeDeps {
     hostRegistryPath?: string;
     clock?: Clock;
     /** Async on purpose: a console read route never blocks the event loop (W1-T3192's census). */
+    readText?: (path: string) => Promise<string>;
+  };
+  /** W1-T4264: `GET /v1/onboarding/readiness`'s inputs; `gateway` defaults to the real GitHub reads. */
+  onboardingReadiness?: {
+    gateway?: OnboardingReadinessGateway;
+    repoRegistryPath?: string;
     readText?: (path: string) => Promise<string>;
   };
   instances?: InstanceGatewayOptions;
@@ -2728,7 +2736,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     checkedAt: clock.iso(),
   };
   // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
-  return { state, restartDue: !svc.dirty && svc.behind !== null && behindBy !== 0 };
+  return { state, restartDue: !svc.dirty && svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths) };
 }
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
@@ -2803,6 +2811,7 @@ export interface StaleCodeExitDeps {
   assessCheckout?: () => Promise<GatewayCheckoutAssessment>;
   /** W1-T4229: {@link drainServer}; absent, the exit is immediate as before. */
   drain?: () => Promise<void>;
+  changedPathsSince?: ChangedPathsReader;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -2884,13 +2893,36 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let checkout: GatewayCheckoutAssessment | undefined;
   let exiting = false;
   let dirtyReported: string | undefined;
+  const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
+  const relevance = new Map<string, boolean | "pending">();
+  const settleRelevance = (currentSha: string, read: ChangedPathsRead): void => {
+    const relevant = serveRestartRelevant(read.diffUnreadable === undefined ? read.changedPaths : undefined);
+    relevance.set(currentSha, relevant);
+    if (!relevant) log("serve.stale_code_not_loaded", { bootSha: deps.bootSha, currentSha, changedPaths: read.changedPaths });
+    else if (read.diffUnreadable !== undefined) log("serve.restart_diff_unreadable", { bootSha: deps.bootSha, currentSha, reason: read.diffUnreadable });
+  };
+  const movedRelevantly = (currentSha: string): boolean => {
+    const known = relevance.get(currentSha);
+    if (known !== undefined) return known === true;
+    relevance.set(currentSha, "pending");
+    const read = readChangedPaths(deps.bootSha, currentSha);
+    if (!(read instanceof Promise)) {
+      settleRelevance(currentSha, read);
+      return relevance.get(currentSha) === true;
+    }
+    read.then(
+      (landed) => settleRelevance(currentSha, landed),
+      (err: unknown) => settleRelevance(currentSha, { diffUnreadable: err instanceof Error ? err.message : String(err) }),
+    ).then(maybeExit);
+    return false;
+  };
 
   const maybeExit = (): void => {
     if (exiting) return;
     // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
-    const codeStale = isConsoleCodeStale(deps.bootSha, currentSha);
+    const codeStale = isConsoleCodeStale(deps.bootSha, currentSha) && movedRelevantly(currentSha);
     const checkoutBehind = checkout?.restartDue === true;
     if (!codeStale && !checkoutBehind) {
       staleSince = undefined;
@@ -3106,6 +3138,42 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
         hostRegistry,
         ...(drift ? { drift } : {}),
       });
+    },
+  };
+}
+/** `owner/name` — the grammar {@link parseInstanceRegistry} requires, so both sides compare as-is. */
+const ONBOARDING_READINESS_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+export type OnboardingReadinessRouteInput = NonNullable<ServeDeps["onboardingReadiness"]> & { repoRegistryPath: string };
+
+/**
+ * W1-T4264 — `GET /v1/onboarding/readiness?repo=<owner/name>`: the eight checks of
+ * `onboarding-readiness.ts`, header-only auth like every other `/v1/*` data route.
+ * `already-onboarded` reads the SAME registry `GET /v1/registry` answers from; an unreadable one
+ * makes that ONE check `unknown` (path-free code, as buildRegistryRoute) — never a 503, never a pass.
+ */
+export function buildOnboardingReadinessRoute(deps: OnboardingReadinessRouteInput): Route {
+  const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
+  return {
+    method: "GET",
+    path: "/v1/onboarding/readiness",
+    scope: "read",
+    handler: async (req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const repoParam = url.searchParams.get("repo");
+      if (!repoParam || !ONBOARDING_READINESS_REPO.test(repoParam)) {
+        sendJson(res, 400, { error: "invalid_request", detail: "?repo=<owner/name> is required" });
+        return;
+      }
+      const [owner, name] = repoParam.split("/");
+      let registry: OnboardingRegistryRead;
+      try {
+        const parsed = parseInstanceRegistry(await readText(deps.repoRegistryPath));
+        registry = { repos: parsed.instances.filter((i) => i.live).map((i) => i.repo) };
+      } catch (error) {
+        registry = { unreadable: error instanceof InstanceRegistryError ? error.code : "unreadable" };
+      }
+      sendJson(res, 200, onboardingReadiness(owner, name, registry, deps.gateway));
     },
   };
 }
@@ -4016,6 +4084,11 @@ function assembleServeRoutes(
     buildRegistryRoute({
       ...deps.registry,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+    }),
+    // W1-T4264: defaults to the SAME registry path buildRegistryRoute (above) resolves.
+    buildOnboardingReadinessRoute({
+      ...deps.onboardingReadiness,
+      repoRegistryPath: deps.onboardingReadiness?.repoRegistryPath ?? deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
     }),
     // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
     // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to

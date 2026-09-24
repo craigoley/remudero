@@ -513,6 +513,7 @@ import {
   type AlertLaneAlert,
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
@@ -584,7 +585,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
+import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
   buildReadyServeServer,
@@ -32093,6 +32094,8 @@ export async function daemonCommand(
           undefined,
           targetCheckoutRoot,
           () => activePlanRef.current,
+          // W1-T4471: the one real wiring of the owner-reply reader.
+          ghEscalationAnswerGateway(target.owner, target.repo),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -38429,6 +38432,9 @@ export function buildSweepHook(
   // origin by accident.
   targetCheckoutRoot?: string,
   planAccessor?: () => Plan,
+  // W1-T4471: the owner-reply reader's gateway. Omitted ⇒ that rung is skipped, so a fixture
+  // never reaches GitHub; only the daemon's composition root passes the real one.
+  escalationAnswerGateway?: EscalationAnswerGateway,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -38484,6 +38490,16 @@ export function buildSweepHook(
       await mainHealthRung?.();
     } catch (e) {
       log("main.health.error", { error: String((e as Error)?.message ?? e) });
+    }
+    // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
+    // so a reply steers this same tick. Contained like `mainHealthRung` above.
+    if (escalationAnswerGateway) {
+      try {
+        const answers = readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
+      } catch (e) {
+        log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
+      }
     }
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
@@ -45539,14 +45555,14 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "decline",
-    syntax: PROPOSAL_VERDICT_SYNTAX.decline,
+    syntax: 'rmd decline <proposalId> --reason "<text>"',
     summary: "Decline an inbox proposal, recording why; reversible with rmd restore.",
     detail:
       "the terminal's route to the console's decline (POST /v1/inbox/decline, W1-T2604): re-classifies the proposal live, refuses one that is unknown, already RATIFIED, or already declined, and otherwise appends one panel.proposal_declined ledger row carrying the reason verbatim. Files nothing and opens no branch; the proposal stays in the registry and classifies as declined until restored. Exit 0 recorded, 1 refused, 2 a usage error",
   },
   {
     name: "restore",
-    syntax: PROPOSAL_VERDICT_SYNTAX.restore,
+    syntax: 'rmd restore <proposalId> --reason "<text>"',
     summary: "Take back a decline, so the proposal returns to the inbox.",
     detail:
       "the reversal of rmd decline and the terminal's route to POST /v1/inbox/restore (W1-T3407): refuses a proposal that is unknown, already RATIFIED, or not declined, and otherwise appends one panel.proposal_restored ledger row carrying the reason. Exit 0 recorded, 1 refused, 2 a usage error",
