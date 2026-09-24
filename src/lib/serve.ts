@@ -171,6 +171,7 @@ import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import {
   createConsoleSnapshotCache,
   createConsoleWriteGeneration,
@@ -247,6 +248,7 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  projectionWorker?: ConsoleProjectionWorker;
   /** W1-T3176 — the built console's directory. OMITTED means this daemon serves the string shell
    *  only: no mount is installed, no build is looked for, and nothing is reported. Set, it is
    *  verified at startup and the result is both logged and printed in the banner. */
@@ -3846,10 +3848,12 @@ function assembleServeRoutes(
   // W1-T193: `ratify` defaults to a REAL ratifyCliGateway (see ServeDeps.panelGraph's own doc)
   // when the caller doesn't inject one -- rmd serve's own CLI wiring relies on this default;
   // a test supplies `ratify` explicitly to inject a fake instead.
+  const projectionWorker = deps.projectionWorker;
   const panelGraphDeps = {
     ...deps.panelGraph,
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
+    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input), logProjection: deps.log } : {}),
   };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own

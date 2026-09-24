@@ -17,6 +17,7 @@
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { RECAP_ACK_HEADER } from "./board.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { startConsoleProjectionWorker, type ConsoleProjectionWorker } from "./console-projection-worker.js";
 import { bearerTokenId } from "./panel-actions.js";
 import type { Route } from "./service.js";
 
@@ -319,4 +320,11 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   };
 
   return { handler };
+}
+
+let sharedProjectionWorker: ConsoleProjectionWorker | undefined;
+/** The process's one projection worker (W1-T4454): the snapshot cache's heavy refreshes compute there, off serve's loop. */
+export function consoleProjectionWorker(): ConsoleProjectionWorker {
+  sharedProjectionWorker ??= startConsoleProjectionWorker();
+  return sharedProjectionWorker;
 }

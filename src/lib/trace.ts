@@ -330,7 +330,10 @@ function taskCreditedMerged(taskId: string, github: DischargeGithub): boolean {
  */
 export function feedbackDischargeState(entry: FeedbackEntry, plan: Plan, github: DischargeGithub): FeedbackDischarge {
   const tag = feedbackOriginTag(entry.id);
-  const taskIds = plan.tasks.filter((t) => t.origin === tag).map((t) => t.id);
+  return feedbackDischargeStateForTasks(plan.tasks.filter((t) => t.origin === tag).map((t) => t.id), github);
+}
+
+export function feedbackDischargeStateForTasks(taskIds: string[], github: DischargeGithub): FeedbackDischarge {
   if (taskIds.length === 0) return { state: "not_discharged", taskIds };
   if (github.readFailed?.() || github.readTruncated?.()) return { state: "undecidable", taskIds };
   const discharged = taskIds.every((id) => taskCreditedMerged(id, github));
