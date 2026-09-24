@@ -339,17 +339,42 @@ test("acceptance 6: coverage-ratchet classifies with bare Node before its depend
   }
 });
 
-test("acceptance 6: job-level conditions are only PR guards or stable-name aggregators", async () => {
+// W1-T4399: the ~17 one-runner gates folded into the `commitlint` job as steps. Their own ci.yml
+// job keys stay registered, permanently `if: false`, so ci-parity.ts's job table and the
+// every-pr-check census both need no edit alongside this workflow — see ci.yml's own comment on
+// the `commitlint` job for the full reasoning.
+const W1_T4399_SUPERSEDED_STUB_JOB_IDS = new Set([
+  "leak-grep",
+  "learnings-budget-ratchet",
+  "jscpd-gate",
+  "dashboard",
+  "claims",
+  "assertion-discrimination",
+  "lint-plan",
+  "depcruise",
+  "containment-probe",
+  "api-client-drift",
+  "no-hand-rolled-fetch",
+  "prompt-surface-gate",
+  "task-id-existence",
+  "source-size",
+  "comment-load-ratchet",
+  "baseline-monotonic",
+]);
+
+test("acceptance 6: job-level conditions are only PR guards, stable-name aggregators, or a W1-T4399 superseded stub", async () => {
   const { readFile } = await import("node:fs/promises");
   const { parse: parseYaml } = await import("yaml");
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string }> };
+  const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string | boolean }> };
   for (const [jobId, job] of Object.entries(doc.jobs)) {
     if (job.if === undefined) continue;
     if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must run even when a shard fails`);
+    } else if (W1_T4399_SUPERSEDED_STUB_JOB_IDS.has(jobId)) {
+      assert.equal(job.if, false, `superseded stub '${jobId}' must be permanently skipped (if: false)`);
     } else {
-      assert.match(job.if, /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);
+      assert.match(String(job.if), /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);
     }
   }
 });
@@ -633,26 +658,52 @@ test("W1-T2428 ci half: fail-closed 6 — an enumeration that fails runs the FUL
 // cannot move any of them, and each now classifies before npm ci and skips it on those two classes,
 // the SAME in-job shape `coverage-ratchet` already uses.
 
-const FAST_LANE_WIRED_JOBS = [
+// W1-T4399 folded these six gates' REAL COMMANDS into the `commitlint` job as STEPS, sharing one
+// classify step (also in `commitlint`, id "classify") instead of each carrying its own. Only
+// `mutation-ratchet` keeps its own job (its own heavy setup — Stryker's incremental cache — per
+// that task's design note (ii)), so it alone still carries a job-scoped classify+Install pair.
+const MUTATION_RATCHET_OWN_JOB = "mutation-ratchet";
+
+// Every step id, in the shared `commitlint` job, gated on `steps.classify.outputs.class ==
+// 'SOURCE'` — the population the W1-T3512 acceptance tests below walk. A gate that used to be
+// several STEPS of its own job (depcruise+cycle-ratchet, comment-load-ratchet's four) still lists
+// each constituent id here; `checkNameFor` maps each back to the ONE required check name it
+// reports under.
+const FAST_LANE_WIRED_STEP_IDS = [
   "depcruise",
-  "mutation-ratchet",
+  "cycle-ratchet",
   "jscpd-gate",
   "api-client-drift",
   "no-hand-rolled-fetch",
   "source-size",
   "comment-load-ratchet",
+  "expiring-fixture-census",
+  "contract-coverage-ratchet",
+  "console-parity",
 ];
 
-const FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_JOBS = ["claims", "containment-probe", "assertion-discrimination"];
+const FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_STEP_IDS = ["claims", "containment-probe", "assertion-discrimination"];
 
 /** Every job's steps, parsed from the real ci.yml — never a hand-copied excerpt. */
-function jobSteps(jobId: string): Array<{ name?: string; id?: string; run?: string; if?: string }> {
+function jobSteps(jobId: string): Array<{ name?: string; id?: string; run?: string; if?: string; env?: Record<string, string> }> {
   const doc = parseYaml(CI_YML) as {
-    jobs: Record<string, { steps?: Array<{ name?: string; id?: string; run?: string; if?: string }> }>;
+    jobs: Record<string, { steps?: Array<{ name?: string; id?: string; run?: string; if?: string; env?: Record<string, string> }> }>;
   };
   const steps = doc.jobs[jobId]?.steps;
   assert.ok(steps, `ci.yml must declare a '${jobId}' job with steps`);
   return steps!;
+}
+
+/** The commitlint job's steps — the shared runner FAST_LANE_WIRED_STEP_IDS and
+ *  FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_STEP_IDS both live in. */
+function commitlintJobSteps() {
+  return jobSteps("commitlint");
+}
+
+function findStepById(steps: ReturnType<typeof jobSteps>, id: string) {
+  const step = steps.find((s) => s.id === id);
+  assert.ok(step, `expected a step with id '${id}'`);
+  return step!;
 }
 
 function workflowRunStep(jobId: string, stepName: string): string {
@@ -694,132 +745,98 @@ function workflowRunForClass(jobId: string, stepName: string, cls: string) {
 }
 
 /**
- * Every classify-gated step this task wired, across every wired job — the population both the
- * pre-existing "behavioral" test below and the new W1-T3512-acceptance-phrased tests further down
- * drive. Hoisted to module scope so both can walk the SAME list rather than two hand-copies
- * drifting apart. None of these `run:` bodies shell out to `git`, so each is safe to execute in a
- * bare (non-git) scratch directory via {@link workflowRunForClass} — unlike mutation-ratchet's own
- * unconditional `trigger` step, which calls `git diff` directly and is exercised separately below.
+ * mutation-ratchet is the one wired job W1-T4399 left untouched (its own heavy Stryker setup, per
+ * that task's design note (ii)), so its bash-embedded class check is still exercised the ORIGINAL
+ * way — a real bash run with `${{ steps.classify.outputs.class }}` substituted in. The six gates
+ * this task moved no longer embed a class check in their `run:` body at all (see the acceptance
+ * tests below): the skip now lives entirely in a step-level `if:`, which is proven by reading the
+ * parsed YAML rather than executing bash.
  */
 const FAST_LANE_GUARDED_STEPS: Array<{ jobId: string; stepName: string; command: RegExp }> = [
   { jobId: "mutation-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-  { jobId: "jscpd-gate", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-  { jobId: "jscpd-gate", stepName: "jscpd duplication gate", command: /\/npm run --silent jscpd/ },
-  { jobId: "depcruise", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-  { jobId: "depcruise", stepName: "dependency-cruiser fitness rules", command: /\/npm run --silent depcruise/ },
-  { jobId: "depcruise", stepName: "Cycle-count ratchet", command: /\/npm run --silent cycle-ratchet/ },
-  { jobId: "api-client-drift", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-  { jobId: "api-client-drift", stepName: "api-client drift check", command: /\/npm run --silent api-client:check/ },
-  { jobId: "no-hand-rolled-fetch", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-  {
-    jobId: "no-hand-rolled-fetch",
-    stepName: "No-hand-rolled-fetch grep gate",
-    command: /\/npm run --silent no-hand-rolled-fetch:check/,
-  },
-  { jobId: "source-size", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-  { jobId: "source-size", stepName: "Source-size signal", command: /\/npm run --silent source-size-signal/ },
-  { jobId: "comment-load-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-  {
-    jobId: "comment-load-ratchet",
-    stepName: "Comment-load ratchet",
-    command: /\/npm run --silent comment-load-signal/,
-  },
-  {
-    jobId: "comment-load-ratchet",
-    stepName: "Expiring-fixture census",
-    command: /\/node scripts\/expiring-fixture-census\.mjs/,
-  },
-  {
-    jobId: "comment-load-ratchet",
-    stepName: "Contract-coverage ratchet",
-    command: /\/node scripts\/contract-coverage-ratchet\.mjs/,
-  },
-  {
-    jobId: "comment-load-ratchet",
-    stepName: "Console-parity ratchet",
-    command: /\/npm run --silent console-parity/,
-  },
 ];
 
-test("W1-T3512 acceptance 1: a PLAN_ONLY diff skips every source-only required gate wired to the classifier", () => {
-  for (const jobId of FAST_LANE_WIRED_JOBS) {
-    const steps = jobSteps(jobId);
-    const classifyStep = steps.find((s) => s.id === "classify");
-    assert.ok(classifyStep?.run, `${jobId} must carry a classify step`);
-    assert.match(classifyStep!.run!, /node scripts\/diff-class\.mjs --changed-files/, `${jobId}'s classify step must call the real classifier`);
-    assert.doesNotMatch(classifyStep!.run!, /--import tsx/, `${jobId}'s classify step must use bare node, not a package-installed loader (it runs before npm ci)`);
-    const installStep = steps.find((s) => s.name === "Install (clean, from lockfile)");
-    assert.ok(installStep?.run, `${jobId} must still carry an Install step`);
-    assert.match(installStep!.run!, /CLASS="\$\{\{ steps\.classify\.outputs\.class \}\}"/, `${jobId}'s Install step must read the canonical class output`);
-    assert.match(installStep!.run!, /\[ "\$CLASS" != "SOURCE" \]/, `${jobId} must skip npm ci on anything but SOURCE`);
+test("W1-T3512 acceptance 1: the commitlint job's shared classify step is bare Node and precedes every SOURCE-only wired step", () => {
+  const steps = commitlintJobSteps();
+  const classifyIndex = steps.findIndex((s) => s.id === "classify");
+  assert.ok(classifyIndex >= 0, "commitlint must carry a classify step");
+  const classifyStep = steps[classifyIndex]!;
+  assert.match(classifyStep.run!, /node scripts\/diff-class\.mjs --changed-files/, "the classify step must call the real classifier");
+  assert.doesNotMatch(classifyStep.run!, /--import tsx/, "the classify step must use bare node, not a package-installed loader (it runs before npm ci)");
+
+  for (const stepId of FAST_LANE_WIRED_STEP_IDS) {
+    const stepIndex = steps.findIndex((s) => s.id === stepId);
+    assert.ok(stepIndex >= 0, `commitlint must carry a '${stepId}' step`);
+    assert.ok(classifyIndex < stepIndex, `classify must precede '${stepId}'`);
   }
 });
 
-test("W1-T3512 acceptance 1: classification precedes npm ci in every wired job (bare Node before any package-installed step)", () => {
-  for (const jobId of FAST_LANE_WIRED_JOBS) {
-    const steps = jobSteps(jobId);
-    const classifyIndex = steps.findIndex((s) => s.id === "classify");
-    const installIndex = steps.findIndex((s) => s.name === "Install (clean, from lockfile)");
-    assert.ok(classifyIndex >= 0 && installIndex >= 0, `${jobId} must carry both a classify and an Install step`);
-    assert.ok(classifyIndex < installIndex, `${jobId}'s classify step must precede its Install step`);
-  }
-});
-
-test("W1-T3512 acceptance 2: every wired gate still registers a conclusion — the skip lives in bash, never a step- or job-level `if:`", () => {
-  const doc = parseYaml(CI_YML) as { jobs: Record<string, { if?: string; steps?: Array<{ name?: string; id?: string; if?: string }> }> };
-  for (const jobId of FAST_LANE_WIRED_JOBS) {
-    const job = doc.jobs[jobId];
+test("W1-T3512 acceptance 1: every wired step skips via its OWN step-level if:, reading the shared class output — never a re-derived class inside the step's own script", () => {
+  const steps = commitlintJobSteps();
+  for (const stepId of FAST_LANE_WIRED_STEP_IDS) {
+    const step = findStepById(steps, stepId);
     assert.equal(
-      job.if,
-      "github.event_name == 'pull_request'",
-      `${jobId}'s job-level if must stay a plain PR guard — a class-based job-level if would strand the check absent, deadlocking branch protection forever`,
-    );
-    const steps = job.steps ?? [];
-    const classifyStep = steps.find((s) => s.id === "classify");
-    const installStep = steps.find((s) => s.name === "Install (clean, from lockfile)");
-    assert.equal(classifyStep?.if, undefined, `${jobId}'s classify step must carry no step-level if:`);
-    assert.equal(installStep?.if, undefined, `${jobId}'s Install step must carry no step-level if: (the #729 discipline)`);
-  }
-});
-
-test("W1-T3512 acceptance 3: each wired gate's classify step fails closed to SOURCE on a crash or garbage output (same clamp shape as ci/coverage-ratchet)", () => {
-  for (const jobId of FAST_LANE_WIRED_JOBS) {
-    const steps = jobSteps(jobId);
-    const classifyStep = steps.find((s) => s.id === "classify");
-    assert.match(classifyStep!.run!, /\|\|\s*CLASS="SOURCE"/, `${jobId}'s classify step must fall back to SOURCE on a nonzero exit`);
-    assert.match(
-      classifyStep!.run!,
-      /PLAN_ONLY\|DOCS_ONLY\|SOURCE\)\s*;;\s*\n\s*\*\)\s*CLASS="SOURCE"/,
-      `${jobId}'s classify step must clamp any unrecognized token to SOURCE`,
+      step.if,
+      "steps.classify.outputs.class == 'SOURCE'",
+      `'${stepId}' must skip on anything but SOURCE via a step-level if: reading the shared classify step's output`,
     );
   }
 });
 
-test("W1-T3512 acceptance 3: an unreadable --changed-files list still classifies SOURCE for every wired job's own classify invocation shape (shared CLI contract)", () => {
-  // Every wired job's classify step drives the SAME `node scripts/diff-class.mjs --changed-files`
-  // CLI already proven fail-closed in acceptance 2's tests above; this pins that none of the seven
-  // respell the invocation in a way that could drift from that contract.
-  for (const jobId of FAST_LANE_WIRED_JOBS) {
-    const steps = jobSteps(jobId);
-    const classifyStep = steps.find((s) => s.id === "classify");
-    assert.match(classifyStep!.run!, /2>diff-class\.log/, `${jobId} must capture the classifier's stderr reason for the log, never discard it`);
+test("W1-T3512 acceptance 2: a class-based condition lives at the STEP level only — commitlint's own job-level if: stays the plain PR guard, and the report step (if: always()) still runs to post a conclusion for a skipped step", () => {
+  const doc = parseYaml(CI_YML) as { jobs: Record<string, { if?: string | boolean; steps?: Array<{ name?: string; id?: string; if?: string; env?: Record<string, string> }> }> };
+  const job = doc.jobs.commitlint!;
+  assert.equal(
+    job.if,
+    "github.event_name == 'pull_request'",
+    "commitlint's job-level if must stay a plain PR guard — a class-based job-level if would strand every gate it now hosts absent, deadlocking branch protection forever",
+  );
+  const classifyStep = job.steps!.find((s) => s.id === "classify");
+  assert.equal(classifyStep?.if, undefined, "the classify step must carry no step-level if: of its own — it always runs so every later step can read its output");
+
+  const reportStep = job.steps!.at(-1)!;
+  assert.equal(reportStep.if, "always()", "the reporting step must run even when a wired step above it was skipped, or the skip's check-run conclusion would never post");
+  for (const stepId of FAST_LANE_WIRED_STEP_IDS) {
+    const outcomeVar = `OUTCOME_${stepId.toUpperCase().replace(/-/g, "_")}`;
+    assert.ok(
+      Object.values(reportStep.env ?? {}).some((v) => v.includes(`steps.${stepId}.outcome`)),
+      `the reporting step must read '${stepId}'s outcome (looked for a ${outcomeVar}-shaped env entry)`,
+    );
   }
 });
 
-test("W1-T3512 acceptance 4: a SOURCE diff is unaffected — each wired gate's real command is still reachable, unconditionally, when CLASS=SOURCE", () => {
+test("W1-T3512 acceptance 3: the shared classify step fails closed to SOURCE on a crash or garbage output, and captures the classifier's stderr reason (same clamp shape as ci/coverage-ratchet)", () => {
+  const classifyStep = findStepById(commitlintJobSteps(), "classify");
+  assert.match(classifyStep.run!, /\|\|\s*CLASS="SOURCE"/, "the classify step must fall back to SOURCE on a nonzero exit");
+  assert.match(
+    classifyStep.run!,
+    /PLAN_ONLY\|DOCS_ONLY\|SOURCE\)\s*;;\s*\n\s*\*\)\s*CLASS="SOURCE"/,
+    "the classify step must clamp any unrecognized token to SOURCE",
+  );
+  assert.match(classifyStep.run!, /2>diff-class\.log/, "the classify step must capture the classifier's stderr reason for the log, never discard it");
+});
+
+test("W1-T3512 acceptance 4: a SOURCE diff is unaffected — each wired gate's real command is still reachable, unconditionally within its own step, when CLASS=SOURCE", () => {
+  const steps = commitlintJobSteps();
   const expectedCommand: Record<string, RegExp> = {
     depcruise: /npm run --silent depcruise/,
-    "mutation-ratchet": /node scripts\/mutation-ratchet\.mjs --changed-files/,
+    "cycle-ratchet": /npm run --silent cycle-ratchet/,
     "jscpd-gate": /npm run --silent jscpd/,
     "api-client-drift": /npm run --silent api-client:check/,
     "no-hand-rolled-fetch": /npm run --silent no-hand-rolled-fetch:check/,
     "source-size": /npm run --silent source-size-signal/,
     "comment-load-ratchet": /npm run --silent comment-load-signal/,
+    "expiring-fixture-census": /node scripts\/expiring-fixture-census\.mjs/,
+    "contract-coverage-ratchet": /node scripts\/contract-coverage-ratchet\.mjs/,
+    "console-parity": /npm run --silent console-parity/,
   };
-  for (const [jobId, re] of Object.entries(expectedCommand)) {
-    const steps = jobSteps(jobId);
-    const hit = steps.some((s) => re.test(s.run ?? ""));
-    assert.ok(hit, `${jobId} must still contain its real, unmodified check command`);
+  for (const [stepId, re] of Object.entries(expectedCommand)) {
+    const step = findStepById(steps, stepId);
+    assert.match(step.run ?? "", re, `'${stepId}' must still contain its real, unmodified check command`);
+    // The command is the ENTIRE run body now — no bash class-check wraps it — so reachability on
+    // SOURCE needs no stubbed-binary execution: the step either runs (if: true) and hits this
+    // line, or is skipped outright and reports success via the outcome mapping proven above.
+    assert.doesNotMatch(step.run ?? "", /steps\.classify\.outputs\.class/, `'${stepId}'s own run script must not re-derive the class — the skip lives in the step's if: alone`);
   }
 });
 
@@ -837,23 +854,32 @@ test("W1-T3512: every new fast-lane workflow guard is behavioral — PLAN_ONLY s
   }
 });
 
-test("W1-T3512: claims, containment-probe and assertion-discrimination are NOT wired to the classifier — each is named in ci.yml as not source-only", () => {
-  for (const jobId of FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_JOBS) {
-    const steps = jobSteps(jobId);
-    assert.ok(!steps.some((s) => s.id === "classify"), `${jobId} must not carry a fast-lane classify step — its walked population is not source-only`);
+test("W1-T3512: claims, containment-probe and assertion-discrimination are NOT wired to the classifier — each is a commitlint-job step with no if: naming the class", () => {
+  const steps = commitlintJobSteps();
+  for (const stepId of FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_STEP_IDS) {
+    const step = findStepById(steps, stepId);
+    assert.equal(step.if, undefined, `'${stepId}' must carry no if: — its walked population is not source-only, so it must run unconditionally within the job`);
   }
 });
 
-test("W1-T3512: ten ci.yml jobs now consult scripts/diff-class.mjs (three pre-existing plus the seven newly wired), up from three", () => {
+test("W1-T3512: five ci.yml jobs consult scripts/diff-class.mjs directly (three pre-existing, mutation-ratchet, and the shared commitlint job), and ten steps inside commitlint additionally consult its shared output", () => {
   const doc = parseYaml(CI_YML) as { jobs: Record<string, { steps?: Array<{ run?: string }> }> };
   const consulting = Object.entries(doc.jobs)
     .filter(([, job]) => (job.steps ?? []).some((s) => /diff-class\.mjs/.test(s.run ?? "")))
     .map(([id]) => id);
-  const expected = ["ci", "test-slow", "coverage-ratchet", ...FAST_LANE_WIRED_JOBS];
-  assert.equal(consulting.length, expected.length, `expected ${expected.length} jobs consulting diff-class.mjs, got ${consulting.length}: ${consulting.join(", ")}`);
-  for (const jobId of expected) {
+  const expectedJobs = ["ci", "test-slow", "coverage-ratchet", MUTATION_RATCHET_OWN_JOB, "commitlint"];
+  assert.equal(consulting.length, expectedJobs.length, `expected ${expectedJobs.length} jobs consulting diff-class.mjs, got ${consulting.length}: ${consulting.join(", ")}`);
+  for (const jobId of expectedJobs) {
     assert.ok(consulting.includes(jobId), `expected ${jobId} among the jobs consulting diff-class.mjs`);
   }
+
+  const commitlintSteps = commitlintJobSteps();
+  const consumingSteps = commitlintSteps.filter((s) => s.id !== "classify" && /steps\.classify\.outputs\.class/.test(s.if ?? ""));
+  assert.equal(
+    consumingSteps.map((s) => s.id).sort().join(","),
+    [...FAST_LANE_WIRED_STEP_IDS].sort().join(","),
+    "the set of steps consuming the shared classify output must match FAST_LANE_WIRED_STEP_IDS exactly",
+  );
 });
 
 // ── W1-T3512 task acceptance — literal proof names, run end-to-end (not just re-asserted by name) ──
@@ -886,7 +912,7 @@ test("W1-T3512 acceptance 2: a skipped source gate still registers a conclusion 
   }
 });
 
-test("W1-T3512 acceptance 3: an unreadable changed-file list runs the full gate — the real CLI fails closed to SOURCE and every wired job's Install step then runs npm ci", () => {
+test("W1-T3512 acceptance 3: an unreadable changed-file list runs the full gate — the real CLI fails closed to SOURCE, and mutation-ratchet's own Install step then runs npm ci", () => {
   const unreadable = join(REPO_ROOT, "definitely-does-not-exist-W1-T3512.txt");
   const result = runCli(["--changed-files", unreadable]);
   assert.equal(result.status, 0, "the CLI must always exit 0 in classify mode, even when --changed-files names a path that cannot be read");
@@ -894,11 +920,17 @@ test("W1-T3512 acceptance 3: an unreadable changed-file list runs the full gate 
   assert.equal(cls, CLASSES.SOURCE, "an unreadable --changed-files path must classify SOURCE, never PLAN_ONLY or DOCS_ONLY");
   assert.match(result.stderr, /could not read --changed-files/, "the CLI must name WHY it fell back, not fail silently");
 
-  for (const jobId of FAST_LANE_WIRED_JOBS) {
-    const install = workflowRunForClass(jobId, "Install (clean, from lockfile)", cls);
-    assert.equal(install.status, 73, `${jobId}'s Install step must reach the stubbed npm ci — the full gate — once the classify step failed closed to SOURCE`);
-    assert.match(install.calls, /\/npm ci/, `${jobId} must actually invoke npm ci when the changed-file list was unreadable`);
-  }
+  // mutation-ratchet is the one wired job that kept its own class-gated Install step (its own
+  // heavy Stryker setup, design note (ii)); the six W1-T4399-migrated gates share ONE always-run
+  // Install step in the commitlint job instead — proven unconditional directly below.
+  const install = workflowRunForClass(MUTATION_RATCHET_OWN_JOB, "Install (clean, from lockfile)", cls);
+  assert.equal(install.status, 73, "mutation-ratchet's Install step must reach the stubbed npm ci — the full gate — once the classify step failed closed to SOURCE");
+  assert.match(install.calls, /\/npm ci/, "mutation-ratchet must actually invoke npm ci when the changed-file list was unreadable");
+
+  const installStep = commitlintJobSteps().find((s) => s.name === "Install (clean, from lockfile)");
+  assert.ok(installStep, "commitlint must carry a shared Install step");
+  assert.equal(installStep!.if, undefined, "commitlint's shared Install step must carry no if: — it is unconditional so every non-fast-laned gate (commitlint itself, leak-grep, claims, ...) can still run regardless of class");
+  assert.doesNotMatch(installStep!.run ?? "", /steps\.classify\.outputs\.class/, "commitlint's shared Install step must not re-derive or consult the class at all");
 });
 
 test("W1-T3512 acceptance 4: a SOURCE diff still runs every source-only gate — every classify-gated step executes its real command end to end", () => {
@@ -924,12 +956,11 @@ test("W1-T3512 acceptance 4: a SOURCE diff still runs every source-only gate —
 
   // The three NAMED source-only gates left deliberately unwired never consult the classifier at
   // all, so a SOURCE diff (or any diff) reaches their real step unconditionally — same guarantee,
-  // simpler proof: no bash arm exists that could skip them.
-  for (const jobId of FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_JOBS) {
-    const steps = jobSteps(jobId);
-    assert.ok(
-      steps.every((s) => !/steps\.classify\.outputs\.class/.test(s.run ?? "")),
-      `${jobId} must carry no fast-lane class check anywhere in its steps — every diff, SOURCE included, reaches its real command unconditionally`,
-    );
+  // simpler proof: no if: or bash arm exists that could skip them.
+  const steps = commitlintJobSteps();
+  for (const stepId of FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_STEP_IDS) {
+    const step = findStepById(steps, stepId);
+    assert.equal(step.if, undefined, `'${stepId}' must carry no if: naming the class — every diff, SOURCE included, reaches its real command unconditionally`);
+    assert.doesNotMatch(step.run ?? "", /steps\.classify\.outputs\.class/, `'${stepId}' must carry no fast-lane class check anywhere in its run script`);
   }
 });

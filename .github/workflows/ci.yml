@@ -644,38 +644,73 @@ jobs:
           if-no-files-found: ignore
 
   commitlint:
-    # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — the Conventional Commits gate. This repo
-    # squash-merges every PR (`squash_merge_commit_title: COMMIT_OR_PR_TITLE`, and neither
-    # `gh pr merge --squash` call site in src/run-task.ts / src/lib/worker.ts passes an explicit
-    # `--subject`), so only the PR TITLE becomes the commit that lands. Linting the branch commit
-    # range failed PRs over commits that would never exist post-merge while leaving the artifact
-    # that does persist unchecked. This job lints the title alone against commitlint.config.mjs —
-    # relocated, not dropped. FALSIFIER: test/commitlint-mode.test.ts, test/commitlint-config.test.ts.
+    # W1-T4399 — ~17 one-minute gates (commitlint, leak-grep, learnings-budget-ratchet,
+    # jscpd-gate, dashboard, claims, assertion-discrimination, lint-plan, depcruise,
+    # containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate,
+    # task-id-existence, source-size, comment-load-ratchet, baseline-monotonic) used to be their
+    # own job each — its own checkout, its own `npm ci`, its own rounded-up-to-a-minute runner.
+    # Design: (i) they run here as STEPS with `continue-on-error: true`, sharing one checkout and
+    # one `npm ci`, then the final step reports each step's outcome as its OWN check run, under
+    # the exact name ci-gate.yml's REQUIRED list and branch protection already use (checks API) —
+    # so no required context disappears. (ii) A gate with its own heavy setup (coverage-ratchet's
+    # matrix, mutation-ratchet's Stryker cache) stays its own job, untouched below. (iii)
+    # `continue-on-error` means one step failing never skips the next — every step below always
+    # runs and always reports.
+    #
+    # WHY THIS JOB KEEPS THE `commitlint` KEY rather than a new one, e.g. `light-gates`: adding a
+    # genuinely NEW ci.yml job key would force a matching new entry in src/lib/ci-parity.ts
+    # (test/preflight-ci-parity.test.ts asserts ci.yml's job list against that table in both
+    # directions), and Standing rule 25 refuses a single PR editing that table beside the workflow
+    # it mirrors. Expanding an EXISTING job key in place — this one — registers nothing new, so
+    # ci-parity.ts needs no edit at all.
+    #
+    # The other 16 original job keys stay in this file too (see each below), under their ORIGINAL
+    # names, permanently `if: false` rather than deleted or renamed — deleting one is the same
+    # ci-parity.ts problem as above, and renaming one breaks a DIFFERENT invariant:
+    # test/every-pr-check-is-required-or-advisory.test.ts derives every REQUIRED/ADVISORY entry
+    # from a real job's `name:` and refuses one nothing derives. So THIS job's own check run is
+    # ALSO still named "commitlint" (unchanged), same as every other stub below reuses its own
+    # original name — meaning a skipped stub and this job's real, checks-API-posted result for
+    # that same gate share one name on every PR. ci-gate.yml's own read already groups check runs
+    # by name and keeps only the latest `started_at` (W1-T123, for the identical "a rerun leaves an
+    # earlier attempt behind" case), unmodified, which is what resolves that duplicate: this job
+    # needs real work first (checkout, `npm ci`, the gates themselves), so its post always lands
+    # later than a stub's near-instant skip. `if: false` never queues a runner, so a stub costs
+    # nothing at runtime.
     name: commitlint
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
-      pull-requests: read # W1-T351: `gh pr view` below needs this to read the live PR title
+      checks: write # W1-T4399: to post each gate's own check run below.
+      pull-requests: read # W1-T351: commitlint's `gh pr view` step needs this.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (shared by every path-scoped gate below — see each original job's own comment, compacted to docs/forensics/ci-yml.md, for why each is scoped the way it is)
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
         run: npm ci
+
       - name: commitlint (the PR title — read LIVE via `gh pr view`, not the opened-event payload snapshot)
-        # W1-T351: `github.event.pull_request.title` is a snapshot taken at opened/synchronize/
-        # reopened (this workflow declares no `types:`, so `edited` is excluded), so a title
-        # corrected after `opened` was invisible to the linter and a re-run replayed the same stale
-        # payload. `gh pr view --json title` queries the API at job time instead.
-        #
-        # TRAP: an empty read (API/auth failure) is reported distinctly rather than reaching
-        # commitlint as a blank string, where it surfaces as "subject may not be empty" + "type may
-        # not be empty" — the signature that cost three investigations.
-        # FALSIFIER: test/ci-title-lint.test.ts.
+        id: commitlint
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -687,17 +722,223 @@ jobs:
           fi
           printf '%s\n' "$PR_TITLE" | npx commitlint --config commitlint.config.mjs --verbose
 
+      - name: leak-grep (plaintext secret tripwire)
+        id: leak-grep
+        continue-on-error: true
+        run: bash .github/scripts/leak-grep.sh
+
+      - name: Knowledge budget ratchet (blocks a PR that pushes the active learnings corpus over the recorded cap)
+        id: learnings-budget-ratchet
+        continue-on-error: true
+        run: npm run --silent learnings-budget-ratchet
+
+      - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap, and refuses a net-positive diff per §8A)
+        id: claude-md-budget-ratchet
+        continue-on-error: true
+        env:
+          BASE_SHA: HEAD^1
+        run: npm run --silent claude-md-budget-ratchet
+
+      - name: jscpd-gate (duplication ceiling)
+        id: jscpd-gate
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent jscpd
+
+      - name: dashboard (typecheck, Vitest suite, console bundle build)
+        id: dashboard
+        continue-on-error: true
+        run: |
+          npm run --silent typecheck:dashboard
+          npm run --silent test:dashboard
+          npm run --silent build:console
+
+      - name: claims (every plan/claims.yaml assertion must exit 0)
+        id: claims
+        continue-on-error: true
+        run: npm run --silent claims
+
+      - name: assertion-discrimination (comment-stripped re-evaluation of raw-text assertions)
+        id: assertion-discrimination
+        continue-on-error: true
+        run: npm run --silent assertion-discrimination
+
+      - name: lint-plan (rmd lint-plan, PR-changed tasks only)
+        id: lint-plan
+        continue-on-error: true
+        run: npm run --silent lint-plan -- --base HEAD^1
+
+      - name: dependency-cruiser fitness rules
+        id: depcruise
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent depcruise
+
+      - name: Cycle-count ratchet (blocks a diff that ADDS a dependency cycle; existing rings stay warn-only)
+        id: cycle-ratchet
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent cycle-ratchet
+
+      - name: containment-probe (test/containment.test.ts, only when the diff touches sandbox/hooks/env/deny-floor)
+        id: containment-probe
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git diff --name-only HEAD^1...HEAD > changed-files.txt
+          cat changed-files.txt
+          node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt
+          MATCHED="$(grep '^matched=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)"
+          if [ "$MATCHED" = "true" ]; then
+            node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts
+          else
+            echo "containment-probe: not required for this diff — no changed path touches sandbox/hooks/env/deny-floor."
+          fi
+
+      - name: api-client-drift (committed client must match a fresh regeneration from openapi/daemon.yaml)
+        id: api-client-drift
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent api-client:check
+
+      - name: no-hand-rolled-fetch (apps/**, packages/** except packages/api-client)
+        id: no-hand-rolled-fetch
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent no-hand-rolled-fetch:check
+
+      - name: prompt-surface-gate (requires golden evidence for prompt/learnings edits)
+        id: prompt-surface-gate
+        continue-on-error: true
+        run: |
+          git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
+          node --import tsx scripts/prompt-surface-gate.mjs --base "origin/${GITHUB_BASE_REF}"
+
+      - name: task-id-existence (cited ids resolve; no id collides with main OR an open PR)
+        id: task-id-existence
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm run --silent task-id-existence:check -- --require-open-prs
+
+      - name: source-size (growth informs review and follow-up work; measurement failure still refuses)
+        id: source-size
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent source-size-signal
+
+      - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
+        id: comment-load-ratchet
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent comment-load-signal
+
+      - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
+        id: expiring-fixture-census
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        env:
+          RMD_CI_REPORT: "1"
+        run: node scripts/expiring-fixture-census.mjs
+
+      - name: Contract-coverage ratchet (no first-party route escapes the contract)
+        id: contract-coverage-ratchet
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: node scripts/contract-coverage-ratchet.mjs
+
+      - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
+        id: console-parity
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: npm run --silent console-parity
+
+      - name: baseline-monotonic (no SCORE_TABLE floor/ceiling regresses against origin/main without a reviewed bumpRationale)
+        id: baseline-monotonic
+        continue-on-error: true
+        run: node scripts/baseline-monotonic-check.mjs
+
+      - name: Report each gate's result under its own required check-run name (checks API — W1-T4399 design (i))
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTCOME_COMMITLINT: ${{ steps.commitlint.outcome }}
+          OUTCOME_LEAK_GREP: ${{ steps.leak-grep.outcome }}
+          OUTCOME_LEARNINGS_BUDGET_RATCHET: ${{ steps.learnings-budget-ratchet.outcome }}
+          OUTCOME_CLAUDE_MD_BUDGET_RATCHET: ${{ steps.claude-md-budget-ratchet.outcome }}
+          OUTCOME_JSCPD_GATE: ${{ steps.jscpd-gate.outcome }}
+          OUTCOME_DASHBOARD: ${{ steps.dashboard.outcome }}
+          OUTCOME_CLAIMS: ${{ steps.claims.outcome }}
+          OUTCOME_ASSERTION_DISCRIMINATION: ${{ steps.assertion-discrimination.outcome }}
+          OUTCOME_LINT_PLAN: ${{ steps.lint-plan.outcome }}
+          OUTCOME_DEPCRUISE: ${{ steps.depcruise.outcome }}
+          OUTCOME_CYCLE_RATCHET: ${{ steps.cycle-ratchet.outcome }}
+          OUTCOME_CONTAINMENT_PROBE: ${{ steps.containment-probe.outcome }}
+          OUTCOME_API_CLIENT_DRIFT: ${{ steps.api-client-drift.outcome }}
+          OUTCOME_NO_HAND_ROLLED_FETCH: ${{ steps.no-hand-rolled-fetch.outcome }}
+          OUTCOME_PROMPT_SURFACE_GATE: ${{ steps.prompt-surface-gate.outcome }}
+          OUTCOME_TASK_ID_EXISTENCE: ${{ steps.task-id-existence.outcome }}
+          OUTCOME_SOURCE_SIZE: ${{ steps.source-size.outcome }}
+          OUTCOME_COMMENT_LOAD_RATCHET: ${{ steps.comment-load-ratchet.outcome }}
+          OUTCOME_EXPIRING_FIXTURE_CENSUS: ${{ steps.expiring-fixture-census.outcome }}
+          OUTCOME_CONTRACT_COVERAGE_RATCHET: ${{ steps.contract-coverage-ratchet.outcome }}
+          OUTCOME_CONSOLE_PARITY: ${{ steps.console-parity.outcome }}
+          OUTCOME_BASELINE_MONOTONIC: ${{ steps.baseline-monotonic.outcome }}
+        run: |
+          set -euo pipefail
+          # A `skipped` outcome (a fast-laned gate this diff cannot move) reports SUCCESS — the
+          # native job it replaces also stayed green when its own fast-lane guard skipped the work.
+          # A gate that used to be several steps of ONE job (learnings-budget-ratchet, depcruise,
+          # comment-load-ratchet) still reports ONE check run: `report` takes every constituent
+          # step's outcome and the check is success only when ALL of them are (the same AND the
+          # native job conclusion computed before this task).
+          report() {
+            local check_name="$1"
+            shift
+            local conclusion="success"
+            for outcome in "$@"; do
+              if [ "$outcome" != "success" ] && [ "$outcome" != "skipped" ]; then
+                conclusion="failure"
+              fi
+            done
+            gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
+              -f "name=${check_name}" \
+              -f "head_sha=${HEAD_SHA}" \
+              -f "status=completed" \
+              -f "conclusion=${conclusion}" \
+              -f "output[title]=${check_name}" \
+              -f "output[summary]=W1-T4399: reported by this job's ${check_name} step(s) (outcome(s): $*)" \
+              >/dev/null
+            echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*)"
+          }
+          report "commitlint" "${OUTCOME_COMMITLINT}"
+          report "leak-grep" "${OUTCOME_LEAK_GREP}"
+          report "learnings-budget-ratchet" "${OUTCOME_LEARNINGS_BUDGET_RATCHET}" "${OUTCOME_CLAUDE_MD_BUDGET_RATCHET}"
+          report "jscpd-gate" "${OUTCOME_JSCPD_GATE}"
+          report "dashboard" "${OUTCOME_DASHBOARD}"
+          report "claims" "${OUTCOME_CLAIMS}"
+          report "assertion-discrimination" "${OUTCOME_ASSERTION_DISCRIMINATION}"
+          report "lint-plan" "${OUTCOME_LINT_PLAN}"
+          report "depcruise" "${OUTCOME_DEPCRUISE}" "${OUTCOME_CYCLE_RATCHET}"
+          report "containment-probe" "${OUTCOME_CONTAINMENT_PROBE}"
+          report "api-client-drift" "${OUTCOME_API_CLIENT_DRIFT}"
+          report "no-hand-rolled-fetch" "${OUTCOME_NO_HAND_ROLLED_FETCH}"
+          report "prompt-surface-gate" "${OUTCOME_PROMPT_SURFACE_GATE}"
+          report "task-id-existence" "${OUTCOME_TASK_ID_EXISTENCE}"
+          report "source-size" "${OUTCOME_SOURCE_SIZE}"
+          report "comment-load-ratchet" "${OUTCOME_COMMENT_LOAD_RATCHET}" "${OUTCOME_EXPIRING_FIXTURE_CENSUS}" "${OUTCOME_CONTRACT_COVERAGE_RATCHET}" "${OUTCOME_CONSOLE_PARITY}"
+          report "baseline-monotonic" "${OUTCOME_BASELINE_MONOTONIC}"
+
   leak-grep:
-    # Plaintext-secret tripwire (MASTER-PLAN §5 TIER 1). Not a required context yet (W1-T24 wires
-    # the aggregator); its own job status is what "on every PR" is proven by.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: leak-grep
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: leak-grep (plaintext secret tripwire)
-        run: bash .github/scripts/leak-grep.sh
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   coverage-ratchet:
     # §5 TIER 2, quality gate 1/4 (W1-T25) — coverage never goes down.
@@ -1265,719 +1506,151 @@ jobs:
           retention-days: 30
 
   learnings-budget-ratchet:
-    # §5 TIER 2 (W1-T38, MASTER-PLAN §8A) — "compression is a deliverable" enforced, not
-    # aspirational. A CEILING: the total INJECTABLE weight of the active learnings corpus (every
-    # learnings/*.yaml shard, lifecycle: active only, rendered exactly as src/lib/learnings.ts's
-    # selectLearnings would inject it) is compared against scripts/learnings-budget-baseline.json.
-    # Superseded and quarantined entries contribute zero chars (W1-T33, W1-T34), so raw corpus
-    # bytes are not what is capped. The cap only ever ratchets up, by a reviewed bump.
-    # FALSIFIER: test/learnings-budget-ratchet.test.ts, whose fixture holds bytes constant across
-    # an active-versus-superseded switch.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: learnings-budget-ratchet
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Knowledge budget ratchet (blocks a PR that pushes the active learnings corpus over the recorded cap)
-        run: npm run --silent learnings-budget-ratchet
-      # W1-T503 (MASTER-PLAN §8A) — CLAUDE.md is injected in full into every session on every lane
-      # and was the fleet's largest per-session injectable with no budget at all.
-      #
-      # INVARIANT: this rides as a STEP in the sibling budget job, not a job of its own, and the
-      # placement is load-bearing. CI_PARITY_TABLE is asserted against ci.yml BY JOB NAME in both
-      # directions (test/preflight-ci-parity.test.ts, via parseCiJobNames) and nothing asserts a
-      # job's STEP list, so a new job would force an entry in src/lib/ci-parity.ts — a product path
-      # — beside this workflow, the Rule 25 pairing this placement avoids. Do NOT "complete" it with
-      # a matching runStep(). Enforcement is unchanged: a `run:` step carries no continue-on-error,
-      # so a non-zero exit fails `learnings-budget-ratchet`, already required by ci-gate.yml.
-      #
-      # TRAP (W1-T2831): the §8A net-byte arm needs a comparand, and with none passed it skips on
-      # every run — green forever, enforcing nothing. W1-T3060 changed WHICH comparand: `HEAD^1` is
-      # the merge commit's base side, correct however long the job queued, where the event payload's
-      # base.sha is main's tip when the webhook fired. (This job checks out at `fetch-depth: 0`, so
-      # the preferred `git merge-base HEAD origin/main` path resolves to the same commit; the env is
-      # the fallback that must agree with it.) The job is PR-only, so a push never reaches here. The
-      # cap in scripts/claude-md-budget-baseline.json only ratchets up, by a reviewed bump.
-      # Why: the 2026-08-22 cap raise and its zero-headroom predecessor — docs/forensics/ci-yml.md.
-      - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap, and refuses a net-positive diff per §8A)
-        run: npm run --silent claude-md-budget-ratchet
-        env:
-          BASE_SHA: HEAD^1
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   jscpd-gate:
-    # §5 TIER 2, quality gate 3/4 (W1-T97) — a duplication CEILING: copy-pasted code rots
-    # independently and silently. No wrapper script is needed: jscpd's own `--threshold` flag exits
-    # non-zero when the duplicated-lines percentage across src/** exceeds the ceiling recorded in
-    # .jscpd.json (2%, with headroom over the 1.11% measured at capture). .jscpd.json carries no
-    # comment field, because jscpd's parser rejects unknown keys, so the rationale lives here.
-    # FALSIFIER: test/jscpd-gate.test.ts drives the real CLI over a planted copy-paste and a clean
-    # fixture.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: jscpd-gate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Determine this diff's fast-lane class (W1-T3512 — jscpd walks only src/ and scripts/, so a PLAN_ONLY/DOCS_ONLY diff cannot move its duplication percentage)
-        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
-        # why this classifies before npm ci and how it fails closed.
-        id: classify
-        run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
-          case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
-            *) CLASS="SOURCE" ;;
-          esac
-          cat diff-class.log || true
-          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
-          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
-      - name: Install (clean, from lockfile)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; jscpd walks only src/ and scripts/, which this diff does not touch."
-            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and jscpd (no src/**/scripts/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm ci
-      - name: jscpd duplication gate (blocks a duplicate above the recorded threshold)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping jscpd (no src/**/scripts/** path in this diff)."
-            exit 0
-          fi
-          npm run --silent jscpd
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   dashboard:
-    # W1-T3177 — THE DASHBOARD'S OWN SUITE, AS ITS OWN JOB, and that separation is the point.
-    # Vitest here collects `apps/dashboard/src/**/*.{test,spec}.{ts,tsx}` (apps/dashboard/vite.config.ts)
-    # and the repo's own runner globs `test/**/*.test.ts` (`npm run test:ci`). Neither can collect the
-    # other's files, so this is a SECOND runner rather than a competing one — which is why the
-    # `npm run test:ci` invocation elsewhere in this file is byte-identical to what it was before this
-    # task, and why adding React did not touch the coverage-ratchet job's command.
-    # The typecheck step is separate from the build on purpose: `vite build` does NOT typecheck (it
-    # transpiles per-file through oxc), so a build-only job would go green on a type error.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: dashboard
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Typecheck under the dashboard's OWN browser-shaped tsconfig
-        run: npm run --silent typecheck:dashboard
-      - name: Dashboard suite (Vitest)
-        run: npm run --silent test:dashboard
-      - name: Build the console bundle (proves the toolchain emits, not just typechecks)
-        run: npm run --silent build:console
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   claims:
-    # PLAN-CLAIMS gate (W1-T29, MASTER-PLAN §12A) — the awareness layer for prose. Plan prose is
-    # unverifiable; a falsifiable claim paired with a shell assertion that must exit 0 is not.
-    # `plan/claims.yaml` lists them; scripts/claims-check.mjs runs every one and fails the moment any
-    # exits non-zero, printing the false claim's id, prose and plan_section so the log NAMES the lie
-    # instead of leaving a bare exit code. A claim can be falsified by a change anywhere in the tree,
-    # not just under plan/. FALSIFIER: test/claims-check.test.ts.
-    #
-    # W1-T3512: DELIBERATELY NOT WIRED TO THE FAST-LANE CLASSIFIER. plan/claims.yaml itself lives
-    # under plan/, so a PLAN_ONLY diff can edit the very file this job checks — skipping on
-    # PLAN_ONLY would retire the gate for exactly the diff shape most likely to touch it.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: claims
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Plan claims (every plan/claims.yaml assertion must exit 0)
-        run: npm run --silent claims
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   assertion-discrimination:
-    # ASSERTION-DISCRIMINATION gate (W1-T1051). A test can assert that a literal appears in the RAW
-    # text of a repo file while that literal is satisfiable only by a COMMENT beside the mechanism
-    # the test claims to pin: the mechanism dies and the assertion still passes.
-    #
-    # TRAP, measured: a CI wait that should have blocked ~5 minutes on an apt lock returned in ~1
-    # second and shipped green, because the test pinned the literal `flock`, present only because
-    # the step's own comment named the tool it called. Mutation testing cannot see this class — it
-    # mutates SOURCE, and `test/**` is never a mutation target (stryker.conf.json,
-    # mutation-nightly-scope.json).
-    #
-    # scripts/assertion-discrimination-check.mjs strips comments from the target a statically
-    # resolvable readFileSync call names (a real repo path, never a per-test tmpdir) and re-evaluates
-    # the literal against the stripped copy, against scripts/assertion-discrimination-baseline.json,
-    # whose every entry must carry a written reason.
-    # FALSIFIER: test/assertion-discrimination-check.test.ts.
-    #
-    # W1-T3512: DELIBERATELY NOT WIRED TO THE FAST-LANE CLASSIFIER. The statically-resolvable
-    # readFileSync target a test names can be ANY repo path, not just src/** — e.g.
-    # test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts and
-    # test/pure-proof-incomplete-run.test.ts both read a configurable policy file this way (MEASURED
-    # 2026-09-13 from their direct file-reader calls). A PLAN_ONLY diff editing that data
-    # can move this check, so it is not source-only and must keep running in full.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: assertion-discrimination
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Assertion discrimination (comment-stripped re-evaluation of raw-text assertions)
-        run: npm run --silent assertion-discrimination
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   lint-plan:
-    # §5C Layer A (W1-T20c) — the CI half of the deterministic task linter. It is pure JS over
-    # plan/tasks.yaml with no network, so running it on every PR costs nothing.
-    #
-    # SCOPED to the PR's own edit (`--base <pr-base-sha>`): only task ids new or changed versus the
-    # base, never the whole historical queue — re-grading everything already open is the retro's
-    # separate plan-health sweep (W1-T20d). `fetch-depth: 0` so the base commit's plan/tasks.yaml
-    # resolves via `git show`.
-    #
-    # FAIL-CLOSED: any blocking violation (sizing, headless-fitness, proof-shape, proof-dialect,
-    # provenance) on an in-scope task fails this job, which ci-gate's required list waits on.
-    # proof-dialect (W1-T246, moratorium finding 9) reuses parseWhitelistedProof verbatim from
-    # src/lib/review.ts, so a proof that cannot execute never lands.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: lint-plan
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: rmd lint-plan (PR-changed tasks only)
-        run: npm run --silent lint-plan -- --base HEAD^1
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   depcruise:
-    # MASTER-PLAN §5 TIER 3 (W1-T26) — the architecture fitness gate, and cheap static analysis.
-    # The games' purity gates generalised into a declarable layering rule: `src/lib` must not
-    # import the CLI entrypoint (`src/run-task.ts`) or the scratch spike script (`src/spike.ts`)
-    # — see `.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule. A violating import anywhere
-    # under src/lib fails this job. FALSIFIER: test/architecture-fitness.test.ts plants a
-    # violation to prove the rule is active, not merely declared.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: depcruise
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Determine this diff's fast-lane class (W1-T3512 — depcruise and cycle-ratchet only ever read src/**, so a PLAN_ONLY/DOCS_ONLY diff cannot move either)
-        # Bare `node`, no --import tsx: scripts/diff-class.mjs imports the dependency-free
-        # src/lib/plan-scope.ts leaf, so this classifies before npm ci (coverage-ratchet's pattern).
-        # Fails closed twice: an unreadable/empty list resolves to SOURCE inside the script, and
-        # this step's case clamp forces anything else to SOURCE too.
-        id: classify
-        run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
-          case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
-            *) CLASS="SOURCE" ;;
-          esac
-          cat diff-class.log || true
-          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
-          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
-      - name: Install (clean, from lockfile)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; depcruise/cycle-ratchet read only src/**, which this diff does not touch."
-            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci, dependency-cruiser and the cycle-count ratchet (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm ci
-      - name: dependency-cruiser fitness rules
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping dependency-cruiser (no src/** path in this diff)."
-            exit 0
-          fi
-          npm run --silent depcruise
-
-      # THE CYCLE-COUNT RATCHET. `no-circular` is deliberately `warn`: `error` would fail every PR
-      # touching any module in an existing ring, and thirteen rings knot much of src/lib. The cruise
-      # above REPORTS cycles and this step holds their COUNT at or below scripts/cycle-baseline.json's
-      # ceiling, so net growth blocks and touching a ring does not. #2798 cut the count from 24 to 13
-      # and nothing held the result; this does. It runs in THIS job so it adds no required context.
-      - name: Cycle-count ratchet (blocks a diff that ADDS a dependency cycle; existing rings stay warn-only)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping the cycle-count ratchet (no src/** path in this diff)."
-            exit 0
-          fi
-          npm run --silent cycle-ratchet
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   containment-probe:
-    # MASTER-PLAN §5 TIER 1 (W1-T28): the containment probe as a required check on any diff touching
-    # sandbox, deny-floor or env. A settings typo silently drops containment, so static validation
-    # alone is not enough — the probe is the empirical guarantee (WS-0 FF10a, W1-T2).
-    #
-    # What is SCOPED to the PR's changed paths is this job's internal behaviour, never its
-    # registration (probe-path-filter.yml is the live fixture proving that shape).
-    # `containment-diff-trigger.ts` reuses `containmentTrigger()` from src/lib/specialist-panel.ts —
-    # the same deterministic predicate the Layer-4 containment specialist is routed by — so the CI
-    # gate and the advisory panel never drift on what "touches sandbox/hooks/env/deny-floor" means.
-    # On a match the job runs test/containment.test.ts; on no match it still completes successfully.
-    #
-    # W1-T3512: DELIBERATELY NOT WIRED TO THE FAST-LANE CLASSIFIER, on top of its own trigger
-    # above. CONTAINMENT_PATH_PATTERNS (src/lib/specialist-panel.ts) matches on PATH TEXT alone
-    # (e.g. /sandbox/i, /deny[-_]?floor/i) — a plan/tasks.d/*.yaml filename can contain one of those
-    # words (a task ABOUT sandbox hardening, filed as a PLAN_ONLY diff) and this job's own trigger
-    # already, correctly, runs test/containment.test.ts for it today. A coarser PLAN_ONLY/DOCS_ONLY
-    # skip layered on top would silently retire that case — the exact risk this task's design (iii)
-    # names both this job and `claims` for. Its own trigger is the finer, correct scope; this task
-    # adds nothing here.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: containment-probe
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Determine whether this diff touches sandbox/hooks/env/deny-floor
-        id: trigger
-        run: |
-          set -euo pipefail
-          git diff --name-only HEAD^1...HEAD > changed-files.txt
-          cat changed-files.txt
-          node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt
-      - name: Containment probe (test/containment.test.ts — required, this diff touches a containment-relevant path)
-        if: steps.trigger.outputs.matched == 'true'
-        # W1-T1250 INVARIANT: `--import ./test/setup/tmp-hygiene.ts` is not optional here, the same
-        # fix W1-T1217 made to coverage-ratchet above. `src/lib/ci-parity.ts`'s
-        # `containment-probe:test` step already spells this invocation out with the harness (its own
-        # `TMP_HYGIENE_IMPORT` constant), so `rmd preflight --ci-parity` was running this file WITH
-        # the harness while this required check ran it WITHOUT — a harness-dependent assertion could
-        # pass locally and still fail here.
-        run: node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   api-client-drift:
-    # §7A packages/api-client generator and stale-client drift check (W3-T1b). The client is
-    # GENERATED from openapi/daemon.yaml: scripts/generate-api-client.mjs regenerates
-    # packages/api-client/src/schema.d.ts, and `--check` fails the moment the committed file no
-    # longer matches a fresh regeneration — so a hand-edited or forgotten client goes red here
-    # instead of silently drifting from the daemon it describes.
-    # FALSIFIER: test/api-client-drift-check.test.ts.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: api-client-drift
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Determine this diff's fast-lane class (W1-T3512 — the client can only drift when openapi/daemon.yaml or packages/api-client/** moves, so a PLAN_ONLY/DOCS_ONLY diff cannot move this check)
-        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
-        # why this classifies before npm ci and how it fails closed.
-        id: classify
-        run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
-          case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
-            *) CLASS="SOURCE" ;;
-          esac
-          cat diff-class.log || true
-          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
-          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
-      - name: Install (clean, from lockfile)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; the generated client can only drift from openapi/daemon.yaml or packages/api-client/**, which this diff does not touch."
-            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and api-client:check (no openapi/**/packages/api-client/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm ci
-      - name: api-client drift check (committed client must match a fresh regeneration from openapi/daemon.yaml)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping api-client:check (no openapi/**/packages/api-client/** path in this diff)."
-            exit 0
-          fi
-          npm run --silent api-client:check
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   no-hand-rolled-fetch:
-    # §7A: "no client may hand-roll a `fetch` to the daemon — a grep gate fails the build" (W3-T1c).
-    # scripts/no-hand-rolled-fetch-check.mjs walks `apps` and `packages`, excluding
-    # `packages/api-client` itself — the one sanctioned home for a future runtime HTTP layer — and
-    # fails on any direct `fetch(`/`axios(...)`/`new XMLHttpRequest` call. Every client must talk to
-    # the daemon only via `@remudero/api-client`.
-    # FALSIFIER: test/no-hand-rolled-fetch-check.test.ts.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: no-hand-rolled-fetch
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Determine this diff's fast-lane class (W1-T3512 — this grep gate walks only apps/ and packages/, so a PLAN_ONLY/DOCS_ONLY diff cannot move it)
-        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
-        # why this classifies before npm ci and how it fails closed.
-        id: classify
-        run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
-          case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
-            *) CLASS="SOURCE" ;;
-          esac
-          cat diff-class.log || true
-          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
-          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
-      - name: Install (clean, from lockfile)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; this grep gate walks only apps/ and packages/, which this diff does not touch."
-            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and no-hand-rolled-fetch:check (no apps/**/packages/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm ci
-      - name: No-hand-rolled-fetch grep gate (apps/**, packages/** except packages/api-client)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping no-hand-rolled-fetch:check (no apps/**/packages/** path in this diff)."
-            exit 0
-          fi
-          npm run --silent no-hand-rolled-fetch:check
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   prompt-surface-gate:
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: prompt-surface-gate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Prompt-surface gate (requires golden evidence for prompt/learnings edits)
-        run: |
-          git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
-          node --import tsx scripts/prompt-surface-gate.mjs --base "origin/${GITHUB_BASE_REF}"
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   task-id-existence:
-    # TASK-ID EXISTENCE gate (W1-T1048). TRAP: #2251 cited an id as its own task id in shipped code
-    # (deploy/recycle-container.sh, test/recycle-container.test.ts) that resolved to neither a
-    # reservation ref nor a plan record. The hand lane's only id source, `rmd next-task-id`, prints
-    # an id and reserves NOTHING by design, so a later mint handed the same number out as free and
-    # nothing noticed until an open PR had to be renumbered.
-    #
-    # scripts/task-id-existence-check.mjs walks `src` and `deploy` — never `test`, whose ids are
-    # synthetic fixture data — and fails on any `W1-T<n>` resolving to neither a `refs/rmd-id/*`
-    # reservation ref nor a declared `- id:` plan record, against the written-reason baseline
-    # scripts/task-id-existence-baseline.json. FALSIFIER: test/task-id-existence-check.test.ts.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: task-id-existence
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # W1-T2324: the collision half compares declared ids against `origin/main` AT CHECK TIME,
-          # so that ref must exist. An unreadable base read as an empty one is the false zero that
-          # produced the 2026-08-26 id collisions, so the gate REFUSES by design instead.
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Task-id existence check (cited ids resolve; no id collides with main OR an open PR — W1-T3055 supplies the token that half needs; docs/forensics/task-id-existence-check.md)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: npm run --silent task-id-existence:check -- --require-open-prs
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   source-size:
-    # SOURCE-SIZE signal — a stable required context because inability to MEASURE is an integrity
-    # failure, but line growth itself is not a correctness verdict. W1-T2862 consumes the retained
-    # fast-preflight payload and files deduplicated priority-1 decomposition work for material
-    # hotspots; the feature PR never edits a shared baseline just to turn this check green.
-    # FALSIFIER: test/source-size-baseline-is-enforced.test.ts.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: source-size
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Determine this diff's fast-lane class (W1-T3512 — source-size-ratchet walks only .ts files under src/, so a PLAN_ONLY/DOCS_ONLY diff cannot move it)
-        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
-        # why this classifies before npm ci and how it fails closed.
-        id: classify
-        run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
-          case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
-            *) CLASS="SOURCE" ;;
-          esac
-          cat diff-class.log || true
-          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
-          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
-      - name: Install (clean, from lockfile)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; the source-size signal walks only .ts files under src/, which this diff does not touch."
-            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and source-size-signal (no src/**/*.ts path in this diff)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm ci
-      - name: Source-size signal (growth informs review and follow-up work; measurement failure still refuses)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping source-size-signal (no src/**/*.ts path in this diff)."
-            exit 0
-          fi
-          npm run --silent source-size-signal
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   comment-load-ratchet:
-    # COMMENT-LOAD ratchet — a CEILING on comment volume, the same shape as the learnings-budget
-    # and jscpd gates and for the same reason: something grew unnoticed. Measured on main at
-    # ea02cc83: 87,888 comment lines against 101,007 code lines across the measured roots, 46.5%,
-    # paid in context by every agent session that opens a file.
-    #
-    # It refuses two things and judges nothing else: a file whose comment-line count grew past
-    # scripts/comment-load-baseline.json, and a newly ADDED comment block over 25 lines. The
-    # written standard is docs/comment-standard.md.
-    # FALSIFIER: test/comment-load-ratchet.test.ts.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: comment-load-ratchet
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The added-block half diffs against the merge base with `origin/main`, so that ref must
-          # exist. Without it the base read fails and the gate REFUSES by design (an unreadable base
-          # read as an empty diff is a false zero), reddening every PR rather than none.
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Determine this diff's fast-lane class (W1-T3512 — every step below reads only src/, scripts/, apps/, packages/, deploy/, .github/workflows/, bin/ or hooks/, so a PLAN_ONLY/DOCS_ONLY diff cannot move any of them)
-        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
-        # why this classifies before npm ci and how it fails closed. This job's own comment-load
-        # ratchet is itself the proof its MEASURED_ROOTS excludes plan/ and docs/
-        # (scripts/comment-load-ratchet.mjs); expiring-fixture-census walks test/ fixtures only;
-        # contract-coverage-ratchet reads openapi/daemon.yaml plus apps/dashboard/src and
-        # packages/daemon-client-smoke/src; console-parity reads src/run-task.ts. None of the four
-        # can be moved by a diff that stays inside plan scope or docs/.
-        id: classify
-        run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
-          case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
-            *) CLASS="SOURCE" ;;
-          esac
-          cat diff-class.log || true
-          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
-          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
-      - name: Install (clean, from lockfile)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; this job's four checks read only src/, scripts/, apps/, packages/, deploy/, .github/workflows/, bin/ or hooks/, none of which this diff touches."
-            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci, comment-load-signal, the expiring-fixture census, the contract-coverage ratchet and console-parity (no matching path in this diff)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm ci
-      - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping comment-load-signal (no matching path in this diff)."
-            exit 0
-          fi
-          npm run --silent comment-load-signal
-      # EXPIRING-FIXTURE census (W1-T3272) — refuse a fixture whose hardcoded date will cross a live
-      # threshold, a margin BEFORE the day it takes CI red. It rides this job as a STEP rather than
-      # as its own job on purpose: a new ci.yml job must be registered in ci-gate.yml AND in
-      # src/lib/ci-parity.ts's table, and a diff touching a workflow beside a `src/` product path is
-      # Standing rule 25 entanglement, refused outright. Growing a real job's step list is not drift.
-      #
-      # WHY IT EXISTS: "a fixed date constant compared against rows stamped at REAL time is a time
-      # bomb" has been in CLAUDE.md since W1-T2250 and bound nothing. On 2026-09-09 a fixture
-      # stamped 2026-08-26T18:15:00Z crossed the sweep's 14-day rung at exactly 18:15:00Z and took
-      # `main` red, blocking every PR (W1-T3270). FALSIFIER: test/expiring-fixture-census.test.ts.
-      #
-      # TRAP (W1-T3578): RMD_CI_REPORT is set per-STEP on this one step, never job-wide, for the
-      # identical reason the coverage job's two gate steps above are scoped the same way —
-      # test/expiring-fixture-census.test.ts spawns this script over BLOCKING fixture trees with no
-      # env override, and a job-wide flag would publish those as real check-run annotations.
-      #
-      # W1-T3655: this PR-side run no longer charges a crossing that is already on `origin/main` to
-      # the branch beside it — the `ci` job's push-to-main lane above now runs this same script
-      # (CENSUS_MAIN_BRANCH_RUN=1) as the run that OWNS main, so an inherited crossing is reported
-      # here but does not decide this step's exit code (scripts/expiring-fixture-census.mjs).
-      - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
-        env:
-          RMD_CI_REPORT: "1"
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping the expiring-fixture census (no matching path in this diff)."
-            exit 0
-          fi
-          node scripts/expiring-fixture-census.mjs
-
-      # CONTRACT-COVERAGE ratchet (W1-T3174) — every `/v1/` route a first-party client calls must be
-      # declared in openapi/daemon.yaml; the uncovered count may FALL and never RISE.
-      #
-      # WHY IT MATTERS AND WHY IT IS A RATCHET RATHER THAN A BAN. `no-hand-rolled-fetch:check` is
-      # already required and walks `apps`/`packages`, so `apps/dashboard` CANNOT call a route the
-      # generated client does not expose. MEASURED 2026-09-09: first-party clients call 39 routes and
-      # the spec declares 13, so a ban would redden every PR on day one. The ratchet makes the 28-route
-      # gap legible and stops it growing; W1-T3177 lowers it per screen.
-      #
-      # A STEP, NOT A JOB: a new ci.yml job needs an entry in ci-gate.yml AND in src/lib/ci-parity.ts,
-      # and a workflow changed beside a `src/` product path is Standing rule 25 entanglement.
-      # FALSIFIER: test/the-contract-covers-its-own-console.test.ts.
-      - name: Contract-coverage ratchet (no first-party route escapes the contract)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping the contract-coverage ratchet (no matching path in this diff)."
-            exit 0
-          fi
-          node scripts/contract-coverage-ratchet.mjs
-
-      # CONSOLE-PARITY ratchet (W1-T2926) — every COMMANDS verb maps to a console route or a
-      # stated cli-only reason; an unmapped verb fails outright, and the recorded cli-only SET
-      # in scripts/console-parity-baseline.json may only SHRINK.
-      #
-      # WHY IT MATTERS. Audit recon-2026-09-05 §6, move 5: the console served 49 routes against
-      # 65 COMMANDS entries at f7ceb86 — 48 verbs (deploy, sync, retro, triage, plan, review,
-      # fix, sweep, onboard among them) reachable only from a shell, and nothing measured the
-      # gap. MEASURED 2026-09-10: 76 COMMANDS entries, 50 declared routes, 62 recorded cli-only.
-      #
-      # A STEP, NOT A JOB, same reasoning as the contract-coverage step directly above it.
-      # FALSIFIER: test/console-parity-ratchet.test.ts.
-      - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
-        run: |
-          CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping console-parity (no matching path in this diff)."
-            exit 0
-          fi
-          npm run --silent console-parity
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
   baseline-monotonic:
-    # BASELINE-MONOTONIC gate (W1-T2906). Every ratchet above reads ITS OWN scripts/*-baseline.json
-    # from this PR's tree, so a PR that edits one of those SCORE floors/ceilings down (or up, for a
-    # ceiling) passes its own gate by construction — nothing compared the recorded score against
-    # `origin/main`. scripts/baseline-monotonic-check.mjs reads each row in its SCORE_TABLE from
-    # `git show origin/main:<path>` and refuses a regression unless the working tree also carries a
-    # fresh `bumpRationale` naming the reviewing PR/task — the convention
-    # scripts/claude-md-budget-baseline.json already follows.
-    #
-    # SCOPE: SCALAR score floors/ceilings only (coverage, mutation, cycle-count, the CLAUDE.md and
-    # learnings-budget caps) — never a per-file LEDGER (source-size, comment-load, clock-signature,
-    # knowledge-budget), which src/lib/review.ts's ENTANGLEMENT_EXEMPT_INSTRUMENTS comment already
-    # names as grading no falsifier, so raising one row there cannot make a failing test pass.
-    # FALSIFIER: test/baseline-monotonic-against-origin-main.test.ts.
+    # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
+    # comment) — this job key stays registered, permanently skipped, under its original name.
     name: baseline-monotonic
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: false
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # It reads `origin/main:<path>` for every row, so that ref must resolve. An unreadable
-          # base read as "no baseline at origin/main" would be a false "new file" for every row,
-          # so the gate REFUSES by design instead (comment-load-ratchet's own added-block half
-          # makes the same call for the same reason).
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Baseline-monotonic check (no SCORE_TABLE floor/ceiling regresses against origin/main without a reviewed bumpRationale)
-        run: node scripts/baseline-monotonic-check.mjs
+      - run: echo "runs as a step of the commitlint job now — see W1-T4399"

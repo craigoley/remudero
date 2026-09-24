@@ -33,7 +33,7 @@ const CI_GATE_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml")
 
 type CiJob = {
   name?: string;
-  if?: string;
+  if?: string | boolean;
   steps?: Array<{ run?: string }>;
 };
 
@@ -41,6 +41,28 @@ type CiDoc = {
   on: { pull_request?: unknown; push?: { branches?: string[] } };
   jobs: Record<string, CiJob>;
 };
+
+// W1-T4399: the ~17 one-runner gates folded into the `commitlint` job as steps. Their own ci.yml
+// job keys stay registered, permanently `if: false`, for the reasons given where this set is used
+// below.
+const W1_T4399_SUPERSEDED_STUB_JOB_IDS = new Set([
+  "leak-grep",
+  "learnings-budget-ratchet",
+  "jscpd-gate",
+  "dashboard",
+  "claims",
+  "assertion-discrimination",
+  "lint-plan",
+  "depcruise",
+  "containment-probe",
+  "api-client-drift",
+  "no-hand-rolled-fetch",
+  "prompt-surface-gate",
+  "task-id-existence",
+  "source-size",
+  "comment-load-ratchet",
+  "baseline-monotonic",
+]);
 
 async function loadCiDoc(): Promise<CiDoc> {
   const raw = await readFile(CI_YAML_PATH, "utf8");
@@ -198,6 +220,18 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
     if (job.if === undefined) continue;
     if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must register even when its shards fail`);
+    } else if (W1_T4399_SUPERSEDED_STUB_JOB_IDS.has(jobId)) {
+      // W1-T4399: these 16 job keys stay registered — permanently `if: false` — only so
+      // src/lib/ci-parity.ts's job-name table (a src/ file, off this PR's declared scope, and
+      // Standing rule 25's own concern beside a workflow diff) needs no edit, and so
+      // test/every-pr-check-is-required-or-advisory.test.ts's census still finds their name
+      // derived from a real job. Each now runs as a STEP of the `commitlint` job instead, which
+      // posts the SAME check-run name via the checks API; this stub's own `skipped` run never
+      // decides the merge — ci-gate.yml's read already keeps only the latest `started_at` per
+      // name (W1-T123), and `commitlint`'s real post always lands after this stub's near-instant
+      // skip. So an `if: false` stub cannot go "silently absent": the name it shares is still
+      // registered, by the job that does the real work.
+      assert.equal(job.if, false, `superseded stub '${jobId}' must be permanently skipped (if: false), not path-filtered some other way`);
     } else {
       assert.equal(
         job.if,
