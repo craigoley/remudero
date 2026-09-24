@@ -46,11 +46,14 @@ const retryMod = (await import(pathToFileURL(TEST_WITH_RETRY_SCRIPT).href)) as {
 const { parseFailingTestNames } = retryMod;
 
 type CiStep = { name?: string; run?: string };
-type CiDoc = { jobs: Record<string, { steps?: CiStep[] }> };
+type CiJob = { strategy?: { matrix?: { shard?: unknown[] } }; steps?: CiStep[] };
+type CiDoc = { jobs: Record<string, CiJob> };
+const ciWorkflow = parseYaml(readFileSync(CI_YAML_PATH, "utf8")) as CiDoc;
+const CI_SHARD_COUNT = ciWorkflow.jobs.ci?.strategy?.matrix?.shard?.length ?? 0;
+assert.ok(CI_SHARD_COUNT > 0, "ci.yml must declare at least one shard");
 
 function loadTestStepRun(): string {
-  const doc = parseYaml(readFileSync(CI_YAML_PATH, "utf8")) as CiDoc;
-  const step = doc.jobs.ci.steps?.find((s) => s.name === "Test");
+  const step = ciWorkflow.jobs.ci.steps?.find((s) => s.name === "Test");
   assert.ok(step?.run, 'ci.yml\'s `ci` job must still have a step named "Test" with a `run:` body');
   return step!.run!;
 }
@@ -173,7 +176,7 @@ test("acceptance 1: a shard that exits non-zero with NO `# tests` summary anywhe
   assert.match(r.summary, /NO-SUMMARY SHARD/, `the step summary must flag the truncated run: ${JSON.stringify(r.summary)}`);
   assert.match(
     r.stdout + r.stderr,
-    /::error::ci-shard 1\/4 exited 1 with NO node-test-runner summary/,
+    new RegExp(`::error::ci-shard 1/${CI_SHARD_COUNT} exited 1 with NO node-test-runner summary`),
     "the raw log must carry a greppable ::error:: annotation naming the shard",
   );
 });

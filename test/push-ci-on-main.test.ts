@@ -34,6 +34,7 @@ const CI_GATE_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml")
 type CiJob = {
   name?: string;
   if?: string | boolean;
+  strategy?: { matrix?: { shard?: number[] } };
   steps?: Array<{ run?: string }>;
 };
 
@@ -82,6 +83,8 @@ test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
 
   const ci = doc.jobs.ci;
   assert.ok(ci, "ci.yml must still define the `ci` job");
+  const shardCount = ci!.strategy?.matrix?.shard?.length ?? 0;
+  assert.ok(shardCount > 0, "the ci job must declare at least one shard");
   assert.equal(
     ci!.if,
     undefined,
@@ -91,7 +94,7 @@ test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
 
   const runs = (ci!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
   assert.ok(
-    runs.some((r) => /node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/4 --base "\$TIER_BASE"/.test(r)),
+    runs.some((r) => new RegExp(String.raw`node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/${shardCount} --base "\$TIER_BASE"`).test(r)),
     "the `ci` matrix must run the duration-balanced fast shard through the retry harness on both PR and push events",
   );
 

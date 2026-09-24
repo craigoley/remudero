@@ -25,11 +25,17 @@ const { testOnlyRun } = (await import(pathToFileURL(SCRIPT).href)) as {
   testOnlyRun: (files: unknown) => { mode: "files"; files: string[] } | { mode: "full" } | null;
 };
 
-type CiDoc = { jobs: Record<string, { steps?: Array<{ name?: string; id?: string; run?: string }> }> };
+type CiJob = {
+  strategy?: { matrix?: { shard?: unknown[] } };
+  steps?: Array<{ name?: string; id?: string; run?: string }>;
+};
+type CiDoc = { jobs: Record<string, CiJob> };
 const doc = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as CiDoc;
 const steps = doc.jobs.ci!.steps!;
 const TEST_STEP = steps.find((s) => s.name === "Test")!.run!;
 const CLASSIFY_STEP = steps.find((s) => s.id === "classify")!.run!;
+const CI_SHARD_COUNT = doc.jobs.ci!.strategy?.matrix?.shard?.length ?? 0;
+assert.ok(CI_SHARD_COUNT > 0, "the ci matrix must declare at least one shard");
 
 function cli(changed: string[]): string {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4395-`));
@@ -80,7 +86,10 @@ test("W1-T4395: a test-only diff runs the changed test files", () => {
   const run = runTestStep(`files\n${changed.join("\n")}\n`);
   assert.equal(run.status, 0, run.out);
   assert.equal(run.candidates.trim(), changed.join("\n"));
-  assert.match(run.calls, /test-tier-manifest\.mjs --run-candidates plan-reading-suites\.txt --shard 1\/4/);
+  assert.ok(
+    run.calls.includes(`test-tier-manifest.mjs --run-candidates plan-reading-suites.txt --shard 1/${CI_SHARD_COUNT}`),
+    `the test-only candidate runner must use the ci matrix's ${CI_SHARD_COUNT}-shard denominator`,
+  );
   assert.doesNotMatch(run.out, /W1-T3207: coverage-ratchet owns/);
 });
 
@@ -100,7 +109,10 @@ test("W1-T4395: a helper or fixture change is not treated as test-only", () => {
   // "full" runs the sharded full suite rather than taking the W1-T3207 skip ...
   const full = runTestStep("full\n");
   assert.equal(full.status, 0, full.out);
-  assert.match(full.calls, /test-tier-manifest\.mjs --run fast --shard 1\/4/);
+  assert.ok(
+    full.calls.includes(`test-tier-manifest.mjs --run fast --shard 1/${CI_SHARD_COUNT}`),
+    `the full-suite runner must use the ci matrix's ${CI_SHARD_COUNT}-shard denominator`,
+  );
   // ... and a plain source diff (the control) still takes that skip, so the harness can tell them apart.
   const source = runTestStep(undefined);
   assert.equal(source.status, 0, source.out);
