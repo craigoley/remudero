@@ -167,6 +167,61 @@ export function ceilingForComments(comments) {
 }
 
 /**
+ * W1-T4431 -- AN ABSENT ROW ALREADY MEANS {@link CEILING_BUCKET_COMMENTS}. `evaluateCommentLoadRatchet`
+ * proved that on the RUNTIME side long before this task (an absent path is measured, never refused,
+ * and recorded at its own bucket); this predicate states the same fact as the CENSUS's own rule: a
+ * row is only INFORMATION when it says something an absent row would not, i.e. when the file's own
+ * bucket sits above the default. A brand-new file under the default needs no row -- there is nothing
+ * for one to say that "absent" does not already say.
+ *
+ * @param {number} comments a file's measured comment-line count
+ * @returns {boolean} whether scripts/comment-load-baseline.json must carry a row for it
+ */
+export function baselineRowRequired(comments) {
+  return ceilingForComments(comments) > CEILING_BUCKET_COMMENTS;
+}
+
+/**
+ * W1-T4431 -- THE MIRROR of {@link baselineRowRequired}: a row recorded at EXACTLY the default
+ * bucket carries no information an absent row would not, so it is REDUNDANT, not merely harmless --
+ * every PR that happens to touch a neighbouring line re-diffs it for nothing. Kept as its own
+ * one-line predicate, rather than folded into a bigger scan, so a fixture can pin it in isolation.
+ *
+ * @param {number} recorded a baseline row's own recorded ceiling
+ * @returns {boolean} whether that recorded value is redundant with "absent"
+ */
+export function isRedundantBaselineRow(recorded) {
+  return recorded === CEILING_BUCKET_COMMENTS;
+}
+
+/**
+ * W1-T4431 -- THE CENSUS RULE ITSELF, restated against the two predicates above: "every measured
+ * file above the default bucket carries a row, and no row sits at the default" -- replacing the
+ * older, stricter "every measured file carries a row, and nothing else does" that made a brand-new
+ * file's default-bucket row a shared merge surface (17 of the last 150 merged PRs touched this
+ * ledger; OBSERVED on #6922 and #6925, a new file needing a row whose value WAS the default). Pure:
+ * `missing` names a path that needs a row and has none, `redundant` names a recorded row that is
+ * exactly the default and so needs none. `baseline`'s own `_comment` prose key is skipped -- it is
+ * not a path.
+ *
+ * NOT wired into `main`'s exit code here -- the shipped baseline still carries rows recorded under
+ * the old, stricter rule, and this predicate is the mechanism a follow-up adopts to retire them; see
+ * this task's own PR body for that boundary.
+ *
+ * @param {Record<string, number>} currentComments this run's measured comment counts, by path
+ * @param {Record<string, number>} baseline the baseline object, as {@link readBaseline} returns it
+ */
+export function evaluateBaselineCensus(currentComments, baseline) {
+  const missing = Object.keys(currentComments)
+    .filter((path) => baseline[path] === undefined && baselineRowRequired(currentComments[path]))
+    .sort();
+  const redundant = Object.keys(baseline)
+    .filter((path) => path !== "_comment" && isRedundantBaselineRow(baseline[path]))
+    .sort();
+  return { missing, redundant, ok: missing.length === 0 && redundant.length === 0 };
+}
+
+/**
  * Pure verdict over one run's measured counts.
  *
  *   - absent from baseline      -> ADDED; recorded at today's count.
@@ -209,29 +264,30 @@ export function evaluateCommentLoadRatchet(currentComments, baseline) {
   const nextBaseline = {};
   for (const path of Object.keys(currentComments).sort()) {
     const comments = currentComments[path];
-    const recorded = baseline[path];
-    if (recorded === undefined) {
-      // W1-T3022: a new file records its BUCKET, so two PRs adding the same file agree.
-      added.push({ path, comments });
-      nextBaseline[path] = ceilingForComments(comments);
-    } else if (comments > recorded) {
+    // W1-T4431: AN ABSENT ROW MEANS THE DEFAULT BUCKET, not "no ceiling". A file at or under it needs
+    // no row -- so a new file never touches the baseline -- and one over it with no row is refused like
+    // any other growth, naming the row to record. Rows AT the default are dropped as redundant below.
+    const recorded = baseline[path] ?? CEILING_BUCKET_COMMENTS;
+    if (comments > recorded) {
       // Unchanged: growth past the recorded ceiling is still refused, and the old ceiling is still
       // never advanced automatically. Only the value the refusal ASKS for is bucketed.
       violations.push({ path, comments, baseline: recorded, overage: comments - recorded });
-      nextBaseline[path] = recorded;
+      if (!isRedundantBaselineRow(recorded)) nextBaseline[path] = recorded;
     } else if (ceilingForComments(comments) < recorded) {
       // W1-T3022: lowered only by a WHOLE BUCKET. An exact-count shrink used to rewrite this entry
       // on any decrease, which is the same every-PR-edits-the-same-line churn the bucket removes.
       shrunk.push({ path, from: recorded, to: ceilingForComments(comments) });
-      nextBaseline[path] = ceilingForComments(comments);
-    } else {
+      if (baselineRowRequired(comments)) nextBaseline[path] = ceilingForComments(comments);
+    } else if (!isRedundantBaselineRow(recorded)) {
       nextBaseline[path] = recorded;
     }
   }
-  const removed = Object.keys(baseline)
-    .filter((path) => path !== "_comment" && !(path in nextBaseline))
-    .sort();
-  return { ok: violations.length === 0, violations, shrunk, added, removed, nextBaseline };
+  const rows = Object.keys(baseline).filter((path) => path !== "_comment" && !(path in nextBaseline));
+  const removed = rows.filter((path) => !(path in currentComments)).sort();
+  // W1-T4431: a measured file whose row was dropped because it says no more than "absent" does.
+  const shrunkPaths = new Set(shrunk.map((entry) => entry.path));
+  const redundant = rows.filter((path) => path in currentComments && !shrunkPaths.has(path)).sort();
+  return { ok: violations.length === 0, violations, shrunk, added, removed, redundant, nextBaseline };
 }
 
 /**
@@ -458,6 +514,7 @@ export function main(argv) {
       shrunk: verdict.shrunk,
       added: verdict.added,
       removed: verdict.removed,
+      redundant: verdict.redundant,
     }));
     return causedViolations.length === 0 && blocks.length === 0 ? 0 : 1;
   }
@@ -478,12 +535,14 @@ export function main(argv) {
       `against ${measured.totals.code} code lines (${pct.toFixed(1)}%); none over its ceiling, no added block over ${MAX_ADDED_BLOCK_LINES} lines.`,
   );
 
-  const drift = verdict.shrunk.length + verdict.added.length + verdict.removed.length + split.inherited.length;
+  const drift =
+    verdict.shrunk.length + verdict.added.length + verdict.removed.length + verdict.redundant.length + split.inherited.length;
   if (values.check && drift > 0) {
     console.error(`comment-load-ratchet: CHECK FAILED -- ${drift} baseline change(s) are required and ${baselineRelPath} was left byte-identical:`);
     for (const a of verdict.added) console.error(`  add    "${a.path}": ${a.comments},`);
     for (const s of verdict.shrunk) console.error(`  lower  "${s.path}": ${s.from} -> ${s.to}`);
     for (const path of verdict.removed) console.error(`  remove "${path}"`);
+    for (const path of verdict.redundant) console.error(`  remove "${path}" (at the default bucket, which an absent row already means)`);
     console.error(`  Re-run without --check to record these non-growth changes.`);
     return 1;
   }
@@ -501,6 +560,7 @@ export function main(argv) {
     for (const s of verdict.shrunk) console.log(`  ratcheting down: ${s.path} ${s.from} -> ${s.to}`);
     for (const a of verdict.added) console.log(`  recording new file: ${a.path} at ${a.comments}`);
     for (const path of verdict.removed) console.log(`  dropping entry for a file no longer tracked: ${path}`);
+    for (const path of verdict.redundant) console.log(`  dropping a redundant default-bucket entry: ${path}`);
     for (const v of split.inherited) console.log(`  recording base-inherited growth: ${v.path} ${v.baseline} -> ${v.comments}`);
     // `_comment` is prose the baseline carries for whoever opens it; it is not a path, so
     // `evaluateCommentLoadRatchet` never sees it and it must be re-attached here or a write drops it.

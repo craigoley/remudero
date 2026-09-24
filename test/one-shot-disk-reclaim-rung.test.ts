@@ -295,6 +295,10 @@ describe("one ledger line, summarising the whole rung, and it is not decision-re
       sweepTempDirs: () => tempSummary({ removed: ["rmd-a", "rmd-b"] }),
       reapClonesSurvey: () => cloneSummary({ reaped: ["/x/review-1"], bytesReclaimed: 500 }),
       sweepWorkerHomes: () => homeSummary({ removed: ["worker-home-1"] }),
+      // W1-T4022: the object-reap sub-rung now actually REACHES its reaper (it no longer throws
+      // on CONFIG's policy-less root and gets silently swallowed) — neutralised here because this
+      // describe block is about the OTHER three sweeps' ledger line, not this fourth one's own.
+      reapObjects: (() => ({ pruned: 0, looseBefore: 9000 })) as never,
     });
     assert.equal(lines.length, 1, "exactly one ledger line for the whole rung, not one per sweep");
     const [step, fields] = lines[0];
@@ -311,6 +315,8 @@ describe("one ledger line, summarising the whole rung, and it is not decision-re
       sweepTempDirs: () => tempSummary(),
       reapClonesSurvey: () => cloneSummary(),
       sweepWorkerHomes: () => homeSummary(),
+      // W1-T4022: neutralise the now-live object-reap sub-rung — see the note above.
+      reapObjects: (() => ({ pruned: 0, looseBefore: 9000 })) as never,
     });
     assert.deepEqual(lines, [], "a pass that reclaims nothing writes no ledger line");
   });
@@ -327,6 +333,8 @@ describe("one ledger line, summarising the whole rung, and it is not decision-re
         roots: () => ["/fake-root"],
         reap: (() => cloneSummary({ reaped: ["/fake-root/review-1"], bytesReclaimed: 900, dryRun: false })) as never,
       },
+      // W1-T4022: neutralise the now-live object-reap sub-rung — see the note above.
+      reapObjects: (() => ({ pruned: 0, looseBefore: 9000 })) as never,
     });
     assert.equal(lines.length, 1, "no separate daemon.clone_reap line leaks out of the reused survey");
     assert.equal(lines[0][0], "run.disk_reclaim");

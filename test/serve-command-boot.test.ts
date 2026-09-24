@@ -71,7 +71,14 @@ test("serve boots on main, secures its logs 0600, and answers on the config-reso
   // both resolved by the SAME two functions this exercises).
   // `branch` injected as main: CI checks out a detached merge SHA, so neither the quiet path
   // nor the warning path would ever be DETERMINISTIC here without it (see the sibling test).
-  const running = serveCommand([], { branch: () => "main", buildBatchedGithub: () => fakeGitHub(BOARD_BRANCH_LISTS) });
+  let boardOpts: { ttlMs?: number; prewarmLeadMs?: number } | undefined;
+  const running = serveCommand([], {
+    branch: () => "main",
+    buildBatchedGithub: (_owner, _repo, opts) => {
+      boardOpts = opts;
+      return fakeGitHub(BOARD_BRANCH_LISTS);
+    },
+  });
   t.after(() => {
     console.log = realLog;
     console.error = realErr;
@@ -99,6 +106,9 @@ test("serve boots on main, secures its logs 0600, and answers on the config-reso
   assert.equal(unauthed.status, 401, "…and an unauthed one does not");
 
   assert.doesNotMatch(stderr.join("\n"), /WARNING: this checkout is on branch/, "on main: no branch noise");
+  // A warm on the TTL's own cadence must refresh ahead of it, or requests walk GitHub on the serving thread.
+  assert.equal(boardOpts?.prewarmLeadMs, boardOpts?.ttlMs, "serve's board gateway warms one full cadence ahead of expiry");
+  assert.ok((boardOpts?.prewarmLeadMs ?? 0) > 0);
 
   // SIGTERM is the shutdown launchd sends. It must return 0 — under KeepAlive:true the console
   // comes back from a clean exit too, which is why the unit does not use SuccessfulExit:false.

@@ -1,0 +1,52 @@
+- id: W1-T4456
+  title: "A HOST OR TUNNEL OUTAGE BLANKS THE CONSOLE BECAUSE THE CONSOLE CAN ONLY PULL — push each changed status and recent snapshot, HMAC-signed, to the console's ingest route so it can keep showing the last snapshot, labelled stale, while the gateway is unreachable (optional; take on if outages continue after the pull fixes)"
+  repo: remudero
+  depends_on: [W1-T4451]
+  priority: 3
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-09-24 console data-architecture design (console dropouts): layer E2 core half, sequence step 8 (optional)"
+  plan_refs: ["W1-T4451", "W1-T4412"]
+  files:
+    - src/lib/console-snapshot-push.ts
+    - src/lib/serve.ts
+  note: |
+    HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
+    `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
+    if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
+  status: queued
+  attempts: 0
+  rationale: |
+    Every console read is a pull through the Cloudflare tunnel to serve. When the host or tunnel is down, the console
+    has only whatever one Vercel instance happens to remember (CONSOLE-T66 widens that to the regional Runtime Cache).
+    A snapshot the gateway pushes out while it is up lets the console render the last known board, labelled stale,
+    through an outage. It adds a new outbound credential, so it is a blast-radius change and optional.
+  design: |
+    New module src/lib/console-snapshot-push.ts exports startConsoleSnapshotPush, called from serve's boot with a
+    one-line call site (serve.ts: zero net comment lines). It is
+    disabled unless both RMD_CONSOLE_INGEST_URL and RMD_CONSOLE_INGEST_SECRET_FILE (a read-only mounted file, the
+    W1-T4412 pattern) are set; register both in config-schema.ts. On its own 30 s timer, independent of viewers,
+    it reads the W1-T4451 buffered body for /v1/status and /v1/recent and POSTs it only when that body's ETag
+    changed, at most once per path per 5 s.
+    EXACT WIRE CONTRACT (CONSOLE-T71 pins it):
+    POST <RMD_CONSOLE_INGEST_URL> (the console's /api/console/ingest). Headers: `content-type: application/json`,
+    `x-rmd-timestamp: <epoch ms>`, `x-rmd-signature: sha256=<hex HMAC-SHA256 over "<timestamp>.<raw body>" with the
+    shared secret>`. Body: {"instance":"core","path":"/v1/status"|"/v1/recent","generated_at":"<ISO>","body":<the
+    route's JSON>}.
+    A failed push logs a reason-carrying ledger line and is dropped; it never retries in a loop and never blocks a
+    request. The secret is never logged.
+  acceptance:
+    - claim: "a changed status snapshot is pushed with a valid signature"
+      proof: "unit test: a changed status snapshot is pushed with a valid hmac signature"
+    - claim: "an unchanged snapshot is not pushed again"
+      proof: "unit test: an unchanged snapshot is not pushed again"
+    - claim: "the push is off when its url or secret is unset"
+      proof: "unit test: the snapshot push stays off without its ingest url or secret"
+    - claim: "serve starts the snapshot push at boot"
+      proof: "grep: startConsoleSnapshotPush( in src/lib/serve.ts"
+  falsifier: |
+    CLOSE IF serve on main already pushes snapshots to the console.
