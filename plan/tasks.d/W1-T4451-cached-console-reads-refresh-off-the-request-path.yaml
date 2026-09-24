@@ -18,7 +18,7 @@
     HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
     `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
     if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at main 6a04d2f18: boundConsoleReadRoute (src/lib/serve.ts) wraps CONSOLE_CACHED_READ_PATHS
