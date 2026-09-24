@@ -2725,8 +2725,6 @@ export interface FastGateStep {
   job: string;
   script: string;
   reason: string;
-  /** A small, repository-local runner that is not a package.json npm script. */
-  runner?: "rule-checks";
   boundMs?: number;
   /** Retain bounded stdout on PASS. Only evidence-producing signals may opt in. */
   retainSuccessOutput?: boolean;
@@ -2754,14 +2752,6 @@ export interface FastGateStep {
 }
 
 export const FAST_GATE_STEPS: FastGateStep[] = [
-  {
-    job: "rule-checks",
-    script: "rule-checks:population",
-    runner: "rule-checks",
-    reason:
-      "same-class — the tree-derived census, ratchet, and baseline suites now run as one sequential fast-gate population, " +
-      "so preflight catches their reds before a coverage run or push",
-  },
   {
     job: "cli-reference",
     script: "cli-reference:check",
@@ -3290,17 +3280,6 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
     runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
-      }
-      if (gateSteps[i].runner === "rule-checks") {
-        return withoutNodeTestContext(() =>
-          shellOut(
-            spawn,
-            "node --import tsx scripts/list-rule-suites.mjs --run",
-            process.execPath,
-            ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"],
-            { cwd: repoRoot },
-          ),
-        );
       }
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };

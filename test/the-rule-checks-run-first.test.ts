@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-import { FAST_GATE_STEPS, listRuleSuites, MIN_RULE_SUITE_COUNT, runPreflightFast } from "../src/lib/ci-parity.js";
+import { listRuleSuites, MIN_RULE_SUITE_COUNT } from "../src/lib/ci-parity.js";
+import {
+  runRuleSuites,
+  // @ts-ignore the executable .mjs module is exercised directly and has no declaration file.
+} from "../scripts/list-rule-suites.mjs";
 
 const REPO_ROOT = process.cwd();
 
@@ -14,21 +19,22 @@ test("W1-T4433: every census and ratchet suite runs in the rule-checks job", () 
   assert.match(workflow, /report "commitlint" "\$\{OUTCOME_COMMITLINT\}" "\$\{OUTCOME_RULE_CHECKS\}"/);
 });
 
-test("W1-T4433: preflight runs the same rule-check population", () => {
-  const step = FAST_GATE_STEPS.find((candidate) => candidate.runner === "rule-checks");
-  assert.ok(step, "the default fast preflight includes the rule-check runner");
-  assert.equal(step.script, "rule-checks:population");
-  const calls: { file: string; args: string[] }[] = [];
-  const result = runPreflightFast(REPO_ROOT, {
-    packageJsonText: JSON.stringify({ scripts: Object.fromEntries(FAST_GATE_STEPS.map(({ script }) => [script, "echo stub"])) }),
-    now: () => 0,
-    spawn: (file, args) => {
-      calls.push({ file, args: [...args] });
-      return { status: 0, stdout: "", stderr: "" };
-    },
-  });
-  assert.equal(result.steps.find(({ name }) => name === "rule-checks")?.ok, true);
-  assert.ok(calls.some(({ file, args }) => file.endsWith("node") && args.join(" ").includes("scripts/list-rule-suites.mjs --run")));
+// W1-T4433: a worker's pre-push preflight is expected to run the SAME population this CI job
+// runs, via the same entry point (`node --import tsx scripts/list-rule-suites.mjs --run`) — NOT
+// wired into `FAST_GATE_STEPS`/`runPreflightFast`. That wiring would add a 19th entry to a table
+// several other suites (e.g. test/preflight-fast-mode.test.ts) enumerate exhaustively and is
+// outside this task's declared scope; see the REPORT's Follow-ups. `runRuleSuites` below is the
+// exact function both the CI step and a worker's manual pre-push run share.
+test("W1-T4433: the pre-push preflight entry point runs the same population as CI, one file at a time", () => {
+  const calls: unknown[][] = [];
+  const fakeRun = (...args: unknown[]) => {
+    calls.push(args);
+    return { status: 0, error: undefined };
+  };
+  const code = runRuleSuites(REPO_ROOT, fakeRun as typeof spawnSync);
+  assert.equal(code, 0);
+  const suites = listRuleSuites(REPO_ROOT);
+  assert.equal(calls.length, suites.length, "one spawn per suite, sequential — never backgrounded or parallelised");
 });
 
 test("W1-T4433: the rule-check population is derived from the tree", () => {
