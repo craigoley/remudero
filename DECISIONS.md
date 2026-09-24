@@ -3071,3 +3071,31 @@ table: a Sonnet-class worker can use many tools and turns regardless of its effo
 **Rollback:** restore the earlier balanced candidate rows through review if the measured terminal
 quality, capacity, or latency regression warrants it; preserve the high-effort A/B boundary when
 interpreting the data.
+
+## 2026-09-24 — OPERATOR FOLLOW-UP: ready Luna cash lane and bounded Foundry Opus emergency
+
+**Operator-authored direction:** Set up GPT-6 Luna and Opus 5.5 on cash now. Keep simple work on
+the inexpensive OSS-120b, nano, and Luna routes. Opus is an exception for a subscription squeeze,
+with at most $5 per UTC day in ordinary cash allowance and $10 during a squeeze, inside the shared
+$25 squeeze-day cash ceiling.
+
+- GPT-6 Luna now has published Microsoft Foundry Global Standard short and long-context rates,
+  context bound, and a Chat Completions tool-call shape (`reasoning_effort: none`). Its ready row
+  can lead the squeezed Luna ladder; the ordinary economy ordering continues to favor OSS-120b.
+  A measured 404 suppresses the deployment for the existing absence TTL and takes the 5.6 rung.
+- The `subscription_only: [frontier]` mount rule still prevents direct cash pins and ordinary
+  frontier diversions. Only a **blocked subscription auction** may set the Foundry Opus emergency
+  marker. It must also have the declared cash tool surface, cash fallback enabled, a finite daily
+  allowance, and daemon-only Foundry endpoint and key. Ineligible tasks remain held.
+- Foundry Opus uses the separate `/anthropic/v1/messages` protocol. Every request reserves the
+  shared cash allowance before transport, settles from its usage receipt, and also counts against
+  the Opus-only $10 squeezed ceiling. The $5 ordinary ceiling applies to any non-squeezed Opus
+  reservation; the automatic router does not make such a reservation. The configured shared cash
+  daily cap remains the authority; production must be configured at or below $25 for the stated
+  total ceiling. A failed request with uncertain billing keeps its conservative reservation.
+- Deployment and billing are separate from source readiness. Keep this route off until Foundry
+  Opus is deployed, the endpoint/key are installed on the daemon, the Luna deployment answers a
+  probe, and the running daemon's boot/image SHA and shared allowance are verified.
+
+**Sources read 2026-09-24:** Microsoft Azure GPT-6 launch pricing;
+Microsoft Foundry Claude Messages API and deployment guidance; Anthropic Opus 5.5 price sheet.
