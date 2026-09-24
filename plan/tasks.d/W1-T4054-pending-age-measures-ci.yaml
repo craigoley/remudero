@@ -11,7 +11,9 @@
   origin: "oper#review-latency-research-2026-09-22"
   plan_refs: [W1-T176, W1-T114, W1-T2300]
   files: [src/run-task.ts, src/lib/sweep.ts, src/lib/producer-completeness.ts, test/a-pending-age-measures-ci.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4054 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     (1) NO PRODUCER. `OpenPrView.checksPendingSince` (src/lib/sweep.ts) is read by `pendingAgeMinutes` as
