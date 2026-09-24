@@ -1,0 +1,39 @@
+- id: W1-T4441
+  title: "THE ADOPTION SCAN CAN NEVER CLEAR AN EXPORTED CONSTANT — scanUnadoptedSymbols counts only a CALL `name(` as adoption, so every `export const` that is read but never called (USAGE_CACHE_MAX_AGE_MS, REQUIRED_CHECK_OK) is reported symbol-no-caller forever and fills adoption-latest.json with ~2,380 permanent findings; count a reference to an imported constant as adopted"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "2026-09-24 console/daemon incident follow-up: adoption-latest.json carried 2,377-2,392 symbol-no-caller findings"
+  plan_refs: ["W1-T4117"]
+  files:
+    - src/lib/measurement-cadence.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: adoption-latest.json holds 2,377-2,392 `symbol-no-caller` findings, and the core
+    inbox drafts proposals from them (e.g. adoption:symbol-no-caller:src/lib/sweep.ts:REQUIRED_CHECK_OK,
+    adoption:symbol-no-caller:src/lib/project-init.ts:KNOWN_PROFILES). Read at main: scanUnadoptedSymbols
+    (src/lib/measurement-cadence.ts) collects BOTH `export function NAME(` and `export const NAME =` through
+    EXPORT_DECL_RE, but the only evidence it accepts is a call-shaped match, `(?<![\w$.])NAME\s*\(`, in a
+    reachable module that imports it. A constant is read, never called, so an exported constant can never
+    reach `reached = true`. Every one is a permanent finding, and each minted proposal is spend on a
+    non-defect. The finding set is mostly noise, so the few real unreached functions are hard to see.
+  design: |
+    In scanUnadoptedSymbols, keep the call-shaped test for an `export function` (and for a `const` bound to an
+    arrow or function expression, if the implementer chooses to classify it). For a plain `export const` value,
+    count ANY identifier reference to the imported local name in a reachable importing module's executable
+    text, meaning `(?<![\w$.])NAME(?![\w$])` outside its import clause. The same reachability and import-binding
+    rules apply. A constant with no importer, or one imported only by a test or an unreachable module, is still
+    reported. Nothing else changes: the finding shape, the mint shapes and the report format stay the same.
+    Existing proposals for constants clear through the retirement path that already exists
+    (test/an-adoption-proposal-retires-when-its-finding-goes.test.ts). No new mechanism is needed.
+  acceptance:
+    - claim: "an exported constant read by a reachable importing module is not reported as symbol-no-caller"
+      proof: "unit test: an exported constant read by a reachable importing module is not reported"
+  falsifier: |
+    CLOSE IF scanUnadoptedSymbols on main already treats a read of an imported constant as adoption.

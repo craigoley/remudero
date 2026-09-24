@@ -1681,6 +1681,7 @@
     "test/the-mailbox-is-its-own-section.test.ts": 0,
     "test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts": 252,
     "test/the-measurement-cadence-does-not-block-the-loop.test.ts": 0,
+    "test/the-measurement-cadence-never-blocks-the-daemon-loop.test.ts": 0,
     "test/the-mint-blames-the-fleet-for-its-own-caller.test.ts": 1215,
     "test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts": 2060,
     "test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts": 1049,

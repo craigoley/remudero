@@ -1,0 +1,45 @@
+- id: W1-T4443
+  title: "/v1/status KEEPS A DEAD RUN IN PHASE fix-rung FOR HOURS — deriveRunState never closes a run on `run.error`, and its liveness clock is refreshed by ANY row naming the task (the daemon's sweep.disposed every few minutes), so W1-T4052 and W1-T4384 read in-flight from 01:46Z until merge with no worker; close on run.error and age a run by its own rows"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "2026-09-24 console/daemon incident follow-up: /v1/status showed W1-T4052 and W1-T4384 running (fix-rung) while the Fleet map showed 0 workers"
+  plan_refs: ["W1-T1240", "W1-T179", "W1-T155", "W1-T282"]
+  files:
+    - src/lib/status.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: /v1/status projected W1-T4052 and W1-T4384 in phase `fix-rung` from 01:46Z until their
+    PRs merged, and the console Fleet map correctly showed 0 workers. The core ledger for W1-T4052 has run
+    W1-T4052-1790214302348 (pid 2180276), which reaches pr.opened at 02:06:26 and then `run.error` at 02:07:59,
+    followed by worktree.remove and dispatch.claim_released. It writes no verdict. Every later row naming the
+    task is written by a DIFFERENT daemon run, DAEMON-* under pids 2529448, 2874899 and 2922931. These are
+    sweep.disposed every few minutes, fix.base_refresh_checked, one fix.dispatch/fix.done pair at 02:32:37
+    (commit refused), sweep.ci_gate_reaggregated and automerge.*.
+    Read at main, deriveRunState (src/lib/status.ts) has two defects: (a) `run.error`, the unexpected-throw
+    terminal run-task writes when no verdict follows, is not in LANE_TERMINAL_STEPS, so the run stays in flight;
+    (b) `lastActivityTs` advances on EVERY row with the task_id, so the daemon's own sweep chatter keeps
+    `recentActivity` true inside DEFAULT_LIVENESS_BOUND_MS indefinitely. That also means W1-T1240's
+    processUnevidenced marker never fires. The late fix.dispatch then sets phase `fix-rung`, and no fix.resolved
+    ever clears it.
+  design: |
+    ONE CONCERN, deriveRunState's close and liveness inputs. (i) `run.error` joins LANE_TERMINAL_STEPS.
+    (ii) `lastActivityTs`, the input to the liveness bound, advances only on rows belonging to the in-flight run:
+    its own run_id, or a fix-lane row between that run's fix.dispatch and the fix's own terminal. A daemon sweep
+    row that merely names the task (sweep.*, automerge.*, verdict.merged backfill, review.*) never refreshes it.
+    (iii) W1-T1240/W1-T179 CONSTRAINTS HOLD: an open PR still renders the `running` status WORD. What changes is
+    that a closed or unevidenced run no longer carries a live `phase`, or it carries processUnevidenced, as
+    W1-T1240 designed. Out of scope: the status word, the lock predicate (W1-T368), and the bound's value.
+  acceptance:
+    - claim: "a run that ended in a run error row is not projected in flight"
+      proof: "unit test: a run that ended in a run error row is not projected in flight"
+    - claim: "sweep rows naming a task do not refresh its dead run's liveness"
+      proof: "unit test: sweep rows naming a task do not refresh its dead run's liveness"
+  falsifier: |
+    CLOSE IF a task whose run ended in run.error, with only daemon sweep rows after it, already projects no live phase on main.
