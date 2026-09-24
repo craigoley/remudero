@@ -1,0 +1,42 @@
+- id: W1-T4466
+  title: "ONE LANE'S GITHUB CALL ENDS THE WHOLE DAEMON PASS — a second REST PR create for a branch whose PR already exists returns 422 and a failed check-runs read throws; both reach the daemon's fatalError and stop the pass (6 of 26 passes in 30 hours). Adopt the existing PR, and end only the lane on a read failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; dispatch-starvation investigation"
+  plan_refs: [W1-T1202, W1-T113]
+  files: [src/run-task.ts, src/lib/daemon.ts, test/one-lane-s-github-failure-does-not-end-the-pass.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED from the daemon container's stdout over 30 hours (2026-09-23T16:57Z to 2026-09-24T15:44Z): 26 daemon passes
+    ended; 20 stale (routine freshness), 6 "error". Four errors are "Command failed: gh api --method POST
+    repos/craigoley/remudero/pulls" with "gh: Validation Failed (HTTP 422)" (W1-T4384, W1-T4425, W1-T4022, W1-T4093). Each
+    of those tasks already had its PR on the SAME run branch (#6931, #6971, #6979, #6997, all later merged), so the create
+    was a duplicate. Two errors are "Command failed: gh api repos/.../commits/<sha>/check-runs?per_page=100" (W1-T4351,
+    W1-T4436). No sibling lane's work was lost, but each error ends the pass, restarts the entrypoint and resets every
+    in-process backoff and cadence.
+    OBSERVED: runGhPrCreate (src/run-task.ts) rethrows any non-rate-limit failure; the daemon's lane loop
+    (src/lib/daemon.ts, fatalError) turns any lane throw that is neither spawn-infra nor transient-transport into
+    summary("error").
+  design: |
+    (i) runGhPrCreate: on a 422 whose response says a pull request already exists for the head, read the open PR for that
+    head (GET pulls?head=<owner>:<branch>&state=open) and return it as the created PR, ledgered pr_create.adopted_existing.
+    Any other 422 still throws.
+    (ii) Find which earlier step in the same run opened the first PR and record it in the adopted row, so the double create
+    is visible rather than silently absorbed.
+    (iii) A failed GitHub READ inside one lane ends that lane with a named verdict and the pass continues, using the same
+    classification path daemon.dispatch_transport_deferred already uses; a write failure keeps today's behaviour.
+  acceptance:
+    - claim: "a create for a branch whose pull request already exists adopts that pull request"
+      proof: 'grep: test("W1-T4466: a create for a branch whose pull request already exists adopts that pull request" in test/one-lane-s-github-failure-does-not-end-the-pass.test.ts'
+    - claim: "a failed check-runs read ends its lane and not the daemon pass"
+      proof: 'grep: test("W1-T4466: a failed check-runs read ends its lane and not the daemon pass" in test/one-lane-s-github-failure-does-not-end-the-pass.test.ts'
+  falsifier: |
+    Rethrow the 422 unchanged and the first test finds the create failing instead of returning the existing PR.
