@@ -150,6 +150,7 @@ import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
@@ -44338,8 +44339,41 @@ export function skillLifecycleCommand(
   return 0;
 }
 
-// learningsCommand / learningsExportCommand / learningsImportCommand moved to
-// src/lib/report-commands.ts (W1-T2888) — imported/re-exported below.
+// learningsCommand/learningsExportCommand/learningsImportCommand live in src/lib/report-commands.ts (W1-T2888).
+
+const NARRATIVE_FOLD_KINDS: NarrativeFoldKind[] = ["decisions", "master-plan", "forensics"];
+
+/** `rmd knowledge fold` (W1-T4096): {@link foldNarrativeStore} per store; its COMMANDS `detail` is the contract. */
+export function knowledgeCommand(rest: string[], opts: { root?: string } = {}): number {
+  const sub = rest[0];
+  if (sub !== "fold") {
+    console.error(`rmd knowledge: unknown subcommand '${sub ?? ""}' — usage: rmd knowledge fold [--store <kind>] [--dry-run]\n` + USAGE);
+    return 2;
+  }
+  const args = rest.slice(1);
+  const badArg = unknownArgError("knowledge fold", args, ["--store"], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const storeFlag = flagValue(args, "--store");
+  if (storeFlag && !NARRATIVE_FOLD_KINDS.includes(storeFlag as NarrativeFoldKind)) {
+    console.error(`rmd knowledge fold: unknown --store '${storeFlag}' — one of ${NARRATIVE_FOLD_KINDS.join(", ")}\n` + USAGE);
+    return 2;
+  }
+  const kinds = storeFlag ? [storeFlag as NarrativeFoldKind] : NARRATIVE_FOLD_KINDS;
+  const dryRun = args.includes("--dry-run");
+  const root = opts.root ?? repoRoot;
+  let anyChanged = false;
+  for (const kind of kinds) {
+    const report = foldNarrativeStore({ root, kind, dryRun });
+    anyChanged = anyChanged || report.changed;
+    console.log(`rmd knowledge fold: ${kind} — ${report.changed ? `${report.filesWritten.length} file(s) written` : "already folded"}`);
+    for (const note of report.notes) console.log(`  ${note}`);
+  }
+  if (!anyChanged) console.log("rmd knowledge fold: nothing to fold");
+  return 0;
+}
 
 /**
  * `rmd bundle export|import` — dispatches the day-one knowledge bundle verbs (W1-T2580 export,
@@ -45056,6 +45090,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd learnings export <out> | rmd learnings import <file> --pin <hash>",
     summary: "The knowledge-commons transport: export/import opted-in learnings, hash-pinned.",
     detail: "the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. Export always emits `learnings-v2`: its hash binds the public projection, which replaces author `src` and Git locators with fixed redaction values. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks. Exact `learnings-v1`/`learnings-v2` select their hash canon; legacy non-prefixed versions remain V1, while any other `learnings-v*` version is refused.",
+  },
+  {
+    name: "knowledge",
+    syntax: "rmd knowledge fold [--store <decisions|master-plan|forensics>] [--dry-run]",
+    summary: "Fold a narrative store that outgrew its reading size: statuses, dated archives, anchor split.",
+    detail: "the knowledge gardener's FOLD tier by hand (W1-T4096, W1-T4095 design (iii)): stamps a `Status:` line onto every DECISIONS.md entry (accepted / withdrawn / superseded by <ref>, derived from a whole-entry `(SUPERSEDED BY ...)` heading marker; a partial or ambiguous mention is reported, never guessed at), archives MASTER-PLAN.md's `## SHIPPED log` waves older than the current month into docs/archive/master-plan-<yyyy-mm>.md behind a one-line pointer, and splits any docs/forensics/*.md page over its reading size into one file per `## ` anchor under docs/forensics/<page>/<slug>.md, rewriting the `// Why:` pointers under src/ that named a specific anchor. `--store` scopes to one operation; omitted runs all three. `--dry-run` reports the files that would change and writes nothing.",
   },
   {
     name: "bundle",
@@ -45790,6 +45830,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["skill", async (rest) => await skillCommand(rest)],
   ["learnings", (rest) => learningsCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["bundle", (rest) => bundleCommand(rest)],
+  ["knowledge", (rest) => knowledgeCommand(rest)],
   [
     "trace",
     async (rest) =>

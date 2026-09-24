@@ -35,6 +35,7 @@
     "init",
     "install-checkout",
     "issues",
+    "knowledge",
     "learnings",
     "ledger-compact",
     "ledger-grep",
