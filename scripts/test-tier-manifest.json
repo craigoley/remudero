@@ -818,6 +818,7 @@
     "test/every-inbox-message-meets-the-standard.test.ts": 1051,
     "test/every-message-names-one-declared-sender.test.ts": 263,
     "test/every-pr-check-is-required-or-advisory.test.ts": 679,
+    "test/every-routing-decision-records-why.test.ts": 0,
     "test/every-shard-on-main-is-lintable.test.ts": 0,
     "test/evidence-is-retrieved-never-injected.test.ts": 0,
     "test/experiment-promotion.test.ts": 0,

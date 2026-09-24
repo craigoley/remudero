@@ -113,6 +113,7 @@ import {
   beginProviderWindowMeasurement,
   claudeCapacityFromUsage,
   finishProviderWindowMeasurement,
+  providerEligibility,
   readCodexCapacity,
   selectOpenWeightModel,
   spawnCodexWorker,
@@ -338,6 +339,8 @@ export interface WorkerSelectionAssignment {
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     /** Present when the requested capability's declared preference governed an automatic auction. */
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    /** WHY: the rule that fired, what it weighed, and each subscription's headroom at that moment. */
+    decision?: RoutingDecision;
   };
   candidates: Array<{
     provider: WorkerProviderId;
@@ -355,6 +358,30 @@ export interface WorkerSelectionAssignment {
       capabilityFallbackReason?: string;
     };
   }>;
+}
+
+/** The named rule that chose a spawn's provider: one value per branch of {@link spawnWorker}'s router. */
+export type RoutingRule =
+  | "claude-only"
+  | "mount-affinity"
+  | "headroom-auction"
+  | "capability-preference"
+  | "operator-preference"
+  | "preference-bypassed"
+  | "cash-fallback"
+  | "overflow-fallback";
+
+export interface RoutingDecision {
+  rule: RoutingRule;
+  considered: Array<{
+    provider: WorkerProviderId;
+    model?: string;
+    eligible: boolean;
+    selected: boolean;
+    reason?: string;
+  }>;
+  /** Tightest remaining window per subscription read for this decision; `null` means unreadable. */
+  headroomPercent: Partial<Record<WorkerProviderId, number | null>>;
 }
 
 /** The DEFAULT billing mode. Absent the opt-in overflow valve, `buildWorkerEnv` strips every `ANTHROPIC_*` var before a worker
@@ -907,6 +934,9 @@ export interface SpawnWorkerArgs {
    *  by that fallback alone -- routine mount-affinity cash work must never carry it, or the raised
    *  ceiling becomes the everyday one. */
   cashSqueezed?: boolean;
+  /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
+   *  subscription readings that sent it there rather than claiming plain mount affinity. */
+  routingFallback?: { rule: "cash-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
   effort?: string;
   maxTurns?: number;
@@ -1369,6 +1399,8 @@ export function workerSelectionAssignment(
     selection?: ProviderSelection;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    /** Further models the provider's own ladder held in reserve (the cash walk's alternatives). */
+    alternatives?: readonly string[];
   },
 ): WorkerSelectionAssignment {
   const selected = input.capacity;
@@ -1401,9 +1433,43 @@ export function workerSelectionAssignment(
         : {}),
       ...(input.preferenceBypass ? { preferenceBypass: input.preferenceBypass } : {}),
       ...(input.capabilityPreference ? { capabilityPreference: input.capabilityPreference } : {}),
+      decision: routingDecision(args, input),
     },
     candidates: (input.capacities ?? (selected ? [selected] : [])).slice(0, 8).map(selectionCandidateSnapshot),
   };
+}
+
+function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelectionAssignment>[1]): RoutingRule {
+  if (args.routingFallback) return args.routingFallback.rule;
+  if (input.mode !== "multi-provider") return input.mode;
+  if (input.preferenceBypass) return "preference-bypassed";
+  if (input.capabilityPreference) return "capability-preference";
+  return input.policy.preference === "automatic" ? "headroom-auction" : "operator-preference";
+}
+
+function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerSelectionAssignment>[1]): RoutingDecision {
+  const model = input.model ?? input.capacity?.model;
+  const weighed = args.routingFallback?.capacities ?? input.capacities ?? [];
+  const headroomPercent: RoutingDecision["headroomPercent"] = {};
+  const considered: RoutingDecision["considered"] = weighed.slice(0, 8).map((capacity) => {
+    const verdict = providerEligibility(capacity, input.policy.reservePercent);
+    headroomPercent[capacity.provider] = verdict.headroomPercent;
+    const chosen = capacity.provider === input.provider;
+    return {
+      provider: capacity.provider,
+      ...(chosen && model ? { model } : capacity.model ? { model: capacity.model } : {}),
+      eligible: verdict.eligible,
+      selected: chosen,
+      ...(verdict.reason ? { reason: verdict.reason } : {}),
+    };
+  });
+  if (!considered.some((entry) => entry.selected)) {
+    considered.push({ provider: input.provider, ...(model ? { model } : {}), eligible: true, selected: true });
+  }
+  for (const alternative of (input.alternatives ?? []).slice(0, 8)) {
+    considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
+  }
+  return { rule: routingRule(args, input), considered, headroomPercent };
 }
 
 /** Emit the assignment to the caller's durable ledger sink. A sink failure is visible but never
@@ -1970,6 +2036,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // means every subscription was unreadable or exhausted, which is exactly the day the
             // operator raised the cap for.
             cashSqueezed: true,
+            routingFallback: { rule: "cash-fallback", capacities },
             ...(divertTools === undefined ? {} : { tools: [...divertTools] }),
           });
         }
@@ -1992,7 +2059,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           // Setting `mountProvider` makes the retry SKIP the auction rather than re-enter it, and it
           // is the SAME structural recursion bound the cash arm relies on: the outer guard requires
           // `args.mountProvider === undefined`, so neither arm can fire twice.
-          return await spawnWorker({ ...args, mountProvider: "claude" as WorkerProviderId });
+          return await spawnWorker({
+            ...args,
+            mountProvider: "claude" as WorkerProviderId,
+            routingFallback: { rule: "overflow-fallback", capacities },
+          });
         }
         console.error(JSON.stringify({
           event: "worker.provider.overflow_fallback_refused",
@@ -2176,6 +2247,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       mode: "mount-affinity",
       selectionPath: "mount-affinity",
       policy: routingPolicy,
+      alternatives: openWeight.alternatives,
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
