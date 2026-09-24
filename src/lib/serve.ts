@@ -144,11 +144,16 @@ import {
   type RefreshOptions,
 } from "./github-app.js";
 import {
+  acceptedWakeCount,
   createGitHubEventWakeHandler,
   createPersistentDeliveryDedupStore,
+  createWakeCounters,
   githubDeliveryDedupPath,
+  startWakeSummaryFlush,
   sweepWakeMarkerPath,
+  wakeSummaryRow,
   type GithubEventWakeSemanticMode,
+  type WakeCounters,
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
@@ -465,6 +470,7 @@ export interface ServeDeps {
     dedupCapacity?: number;
     semanticCheckMode?: GithubEventWakeSemanticMode;
     aggregateCheckNames?: readonly string[];
+    counters?: WakeCounters;
   };
 }
 
@@ -772,7 +778,7 @@ const CONSOLE_TIME_SERIES_SPECS: readonly ConsoleTimeSeriesSpec[] = [
   {
     id: "wake-volume",
     label: "wake volume",
-    value: (line) => (line.step === "github.wake.accepted" ? 1 : undefined),
+    value: acceptedWakeCount,
   },
   {
     id: "sweep-prs",
@@ -4187,6 +4193,7 @@ function assembleServeRoutes(
       ),
       semanticCheckMode: deps.githubEventWake?.semanticCheckMode,
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
+      counters: deps.githubEventWake?.counters,
       log: deps.log,
     }),
     buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
@@ -4281,12 +4288,19 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // {@link readAttention}.
   let lastReadAt: number | undefined;
   let drainTarget: Server | undefined;
+  const wakeCounters = createWakeCounters();
+  const stopWakeSummary = startWakeSummaryFlush({
+    counters: wakeCounters,
+    clock: systemClock,
+    write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
+  });
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
     beforeExit: () => {
       analyticsCache.stop();
       liveAnalyticsCache.stop();
+      stopWakeSummary();
     },
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
@@ -4310,6 +4324,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       ...deps,
       consoleSha,
       confirmNonces,
+      githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
@@ -4379,6 +4394,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   drainTarget = server;
   server.on("close", staleExit.stop);
   server.on("close", prewarm.stop);
+  server.on("close", stopWakeSummary);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", liveAnalyticsCache.start);
