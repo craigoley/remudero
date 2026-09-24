@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 import { FAST_GATE_STEPS, listRuleSuites, MIN_RULE_SUITE_COUNT, runPreflightFast } from "../src/lib/ci-parity.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import {
+  main,
   runRuleSuites,
   // @ts-ignore the executable .mjs module is exercised directly and has no declaration file.
 } from "../scripts/list-rule-suites.mjs";
@@ -56,4 +59,57 @@ test("W1-T4433: the rule-check population is derived from the tree", () => {
   assert.ok(suites.includes("test/deps-interface-census.test.ts"));
   assert.ok(suites.includes("test/comment-load-ratchet.test.ts"));
   assert.equal(new Set(suites).size, suites.length, "each tracked suite appears once");
+});
+
+test("the rule-check runner fails the population when a suite cannot spawn or exits non-zero", (t) => {
+  t.mock.method(console, "log", () => {});
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => errors.push(line));
+  const spawnFailed = () => ({ status: null, error: new Error("spawn ENOENT") });
+  assert.equal(runRuleSuites(REPO_ROOT, spawnFailed as unknown as typeof spawnSync), 1);
+  assert.match(errors[0] ?? "", /: spawn ENOENT$/);
+  errors.length = 0;
+  const redSuite = () => ({ status: 1, error: undefined });
+  assert.equal(runRuleSuites(REPO_ROOT, redSuite as unknown as typeof spawnSync), 1);
+  assert.match(errors[0] ?? "", /: failed \(1\)$/);
+});
+
+test("list-rule-suites CLI: --list prints the population, --run runs it, an unknown flag is a usage error", (t) => {
+  const printed: string[] = [];
+  t.mock.method(console, "log", (line: string) => printed.push(line));
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => errors.push(line));
+  assert.equal(main(["--list"]), 0);
+  assert.deepEqual(printed, listRuleSuites(REPO_ROOT));
+  let spawned = 0;
+  const fakeRun = () => {
+    spawned += 1;
+    return { status: 0, error: undefined };
+  };
+  assert.equal(main(["--run"], fakeRun as unknown as typeof spawnSync), 0);
+  assert.equal(spawned, listRuleSuites(REPO_ROOT).length);
+  assert.equal(main(["--bogus"]), 2);
+  assert.match(errors.join("\n"), /usage: .*\[--list\|--run\]/);
+});
+
+test("listRuleSuites refuses rather than returning an empty population when git cannot list the tree", () => {
+  const repo = gitRepo({ kind: "rule-suites-absent" });
+  try {
+    assert.throws(() => listRuleSuites(join(repo.dir, "absent")), /git ls-files -- test failed: .*ENOENT/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("listRuleSuites refuses a population below MIN_RULE_SUITE_COUNT and counts only committed-to-index suites", () => {
+  const repo = gitRepo({ kind: "rule-suites-small" });
+  try {
+    mkdirSync(join(repo.dir, "test"));
+    writeFileSync(join(repo.dir, "test", "tracked-census.test.ts"), "");
+    writeFileSync(join(repo.dir, "test", "untracked-ratchet.test.ts"), "");
+    repo.git("add", "test/tracked-census.test.ts");
+    assert.throws(() => listRuleSuites(repo.dir), /rule-check population too small: found 1, expected at least 20/);
+  } finally {
+    repo.cleanup();
+  }
 });

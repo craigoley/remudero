@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
 
 import { listRuleSuites } from "../src/lib/ci-parity.ts";
+import { isMainModule } from "./lib/argv.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -36,8 +36,9 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
   return failed ? 1 : 0;
 }
 
-function main(argv) {
-  if (argv.includes("--run")) return runRuleSuites();
+/** The CLI: `--list` (the default) prints the population, `--run` executes it via `run`. */
+export function main(argv, run = spawnSync) {
+  if (argv.includes("--run")) return runRuleSuites(root, run);
   if (argv.length > 0 && !argv.includes("--list")) {
     console.error("usage: node --import tsx scripts/list-rule-suites.mjs [--list|--run]");
     return 2;
@@ -46,6 +47,4 @@ function main(argv) {
   return 0;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  process.exitCode = main(process.argv.slice(2));
-}
+if (isMainModule(import.meta.url)) process.exitCode = main(process.argv.slice(2));
