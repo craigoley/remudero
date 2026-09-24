@@ -1,0 +1,39 @@
+- id: W1-T4416
+  title: "ONE SLOW WORKER IDLES EVERY OTHER LANE — the daemon awaits Promise.allSettled over its whole dispatch batch, so a lane that finishes sits empty until the slowest sibling ends; refill each lane the moment it frees"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "follow-up audit 2026-09-24 (operator: improve automated flow and self-improvement)"
+  plan_refs: ["W1-T343", "W1-T340"]
+  files:
+    - src/lib/daemon.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 on the fleet host: the core daemon admitted one batch (W1-T4399, W1-T4401) at 23:55Z
+    and started no other task until 01:31Z, while sweep.fix_capacity reported host_worker_budget 8,
+    active_workers 0 and headroom 64% of the weekly budget. W1-T4399's worker alone ran 23:39Z to 01:15Z.
+    src/lib/daemon.ts dispatches with `await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)))`, so a lane
+    that finishes early cannot take new work until the whole batch settles. Priority-1 tasks (W1-T4052,
+    W1-T4409's siblings) sat unclaimed the whole time. dispatchLanes is 2 by an operator ruling on host memory
+    (plan/policy.yaml); this task does NOT raise it, only keeps each lane busy.
+  design: |
+    Replace the batch await with a lane pool: up to laneCount runs are in flight; whenever one settles, its outcome is
+    classified exactly as today (per-lane, never fail-fast) and the lane immediately admits the next runnable task
+    from a FRESH candidate read, so dependencies, pauses, the stop signal and the ceiling are re-checked per
+    admission. Admission still goes through the existing dispatch claim and every gate. A settled lane
+    ledgers `dispatch.lane_refilled` {lane, finished_task, next_task}. At one lane behaviour is unchanged.
+    The per-batch plan snapshot (W1-T340) becomes per-admission.
+  acceptance:
+    - claim: "a lane that finishes first admits the next task while its sibling is still running"
+      proof: "unit test: a lane that finishes first admits the next task while its sibling is still running"
+    - claim: "a refilled lane re-checks the pause and the stop signal before admitting"
+      proof: "unit test: a refilled lane re-checks the pause and the stop signal before admitting"
+  falsifier: |
+    CLOSE IF the daemon already dispatches a new task into a freed lane while another lane's run is in flight.

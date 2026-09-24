@@ -14,6 +14,7 @@
   files:
     - src/lib/task-id-reservation.ts
     - src/lib/review.ts
+    - src/run-task.ts
   status: queued
   attempts: 0
   rationale: |
@@ -34,9 +35,15 @@
     from the PR head ("id <id> is reserved by <branch>, not this PR — renumber"). EXEMPT: ids the base
     already declares (edits, not filings); run-<ID> branches whose reservation was taken by the daemon's own
     auto-triage filing lane, which the anchor records with source=automatic and the same branch rule; and
-    ids listed in a baseline file with reasons, for pre-allocator history. An unreachable origin is an
+    ids listed in a baseline file with reasons, for pre-allocator history.
+    AMENDED 2026-09-24: `rmd next-task-id` gains `--branch <name>`, recorded as the reservation's holder branch
+    instead of the caller's current branch. So an operator can mint a consumer-repo id from any checkout for the
+    filing branch they will open in the target repo, and this check can match it. Without the flag, the
+    current-branch default and its refusal on main are unchanged. An unreachable origin is an
     UNKNOWN that holds the verdict (never a pass), and the refusal fits the 140-char status cap.
   acceptance:
+    - claim: "a reservation minted with --branch names that branch as its holder"
+      proof: "unit test: a reservation minted with --branch names that branch as its holder"
     - claim: "a pull request adding a shard whose id is reserved by another branch is refused and told to renumber"
       proof: "unit test: a pull request adding a shard whose id is reserved by another branch is refused and told to renumber"
     - claim: "a pull request adding a shard whose id is not reserved at all is refused with the mint command"

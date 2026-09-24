@@ -1,0 +1,39 @@
+- id: W1-T4423
+  title: "A CONSUMER-REPO FILING PASSES REVIEW AS 'GATED BY LINT-PLAN' WHEN NO LINT-PLAN EVER RAN — the plan-only carve-out trusts core's CI jobs, which console and site do not have; run lint-plan on the consumer's own plan inside review before a plan-only PASS"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "follow-up audit 2026-09-24: remudero-site PORTAL-T22/T24/T27 were ill-formed on main"
+  plan_refs: ["W1-T205", "W1-T3702"]
+  files:
+    - src/lib/review.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: remudero-site #133 filed PORTAL-T27 with two lint-plan violations (Rule 19 sizing at
+    risk:medium; proofs naming a test outside its files). It passed remudero-review as "PASS — plan-only PR (1 criteria),
+    gated deterministically (lint-plan + the plan-PR emitter + plan-index checks)" and merged. The site daemon then
+    refused it at dispatch as blocked_illformed, and PORTAL-T22/T24 had sat ill-formed the same way since
+    2026-09-22. The planOnlySummary text (src/lib/review.ts) names checks that exist as CI jobs in core only;
+    remudero-console and remudero-site run check-plan-dependencies, not lint-plan. Run by hand, core's
+    `rmd lint-plan --plan plan/tasks.yaml` refused all three on the site plan. The status claimed a gate that
+    never ran: a check that passes while comparing nothing.
+  design: |
+    Before granting the plan-only PASS, review runs the same changed-task lint-plan pass core CI runs (the
+    lint-plan:fast selection against the PR's merge base) over the TARGET repo's plan at the PR head. That is the
+    consumer's own plan/ when reviewing a consumer repo. Any violation fails the review with the violation text,
+    capped to the status length, with the full list in the ledger. The status text names what actually ran.
+    For core, where CI already runs lint-plan, the result is the same, so behaviour is unchanged. A lint that
+    cannot run is an UNKNOWN that withholds the PASS, never a pass.
+  acceptance:
+    - claim: "a consumer plan-only pull request with a lint-plan violation fails review with the violation named"
+      proof: "unit test: a consumer plan-only pull request with a lint-plan violation fails review with the violation named"
+    - claim: "a plan-only review whose lint cannot run withholds the pass"
+      proof: "unit test: a plan-only review whose lint cannot run withholds the pass"
+  falsifier: |
+    CLOSE IF a consumer-repo plan-only PR is already linted by lint-plan before review passes it.
