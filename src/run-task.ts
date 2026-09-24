@@ -41213,6 +41213,7 @@ export function skillFileApproveCommitMessage(proposalId: string, relPath: strin
 
 /** W1-T4338: the PR body for an approved skill draft — an executable Acceptance proof on the file this PR adds. */
 export function skillFileApprovePrBody(proposalId: string, name: string, relPath: string): string {
+  const filedPaths = [relPath];
   return buildPlanPrBody({
     intro: [
       `Proposal ${proposalId} adds approved skill \`${name}\`.`,
@@ -41221,7 +41222,7 @@ export function skillFileApprovePrBody(proposalId: string, name: string, relPath
       "auto-merges without that review.",
     ].join("\n"),
     criteria: [{ claim: `${relPath} is the approved skill draft ${name}`, proof: `grep: name: ${name} in ${relPath}` }],
-    changedFiles: [relPath],
+    changedFiles: filedPaths,
   });
 }
 
