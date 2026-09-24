@@ -10,6 +10,8 @@ import { runReview } from "../src/run-task.js";
 import { judgeReview, planOnlyDiff, reviewerOutcome } from "../src/lib/review.js";
 
 const REPO_ROOT = process.cwd();
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 
 /**
@@ -54,7 +56,7 @@ const REPORT =
   "The advisory reviewer spawn is skipped for a filing changeset: skipped advisory reviewer, filing changeset, spawn skipped.";
 
 test("skipping the spawn cannot change a plan-only verdict: judging WITH full semantic downgrades and WITHOUT any semantic input is byte-identical", () => {
-  const evidence = { diff: PLAN_ONLY_DIFF, report: REPORT };
+  const evidence = { diff: PLAN_ONLY_DIFF, report: REPORT, planLint: CLEAN_PLAN_LINT };
   const withSpawn = judgeReview(CRITERIA as never, { ...evidence, semantic: [false] } as never);
   const withoutSpawn = judgeReview(CRITERIA as never, evidence as never);
 
@@ -196,6 +198,8 @@ esac
       disarm: () => {},
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
       headCheckoutDir: REPO_ROOT,
+      // W1-T4423: the plan-only lint seam, so this harness never fetches or lints the real checkout.
+      lintPlanForReviewFn: async () => CLEAN_PLAN_LINT,
       ledgerPath,
       runId: "REVIEW-PLAN-ONLY-SPAWN-1",
     } as never);
@@ -254,8 +258,8 @@ test("DRIVEN: the plan-only verdict summary still reads as deterministically gat
   // stays printed, so the assertion pins the whole string rather than a fragment of it.
   assert.equal(
     r.summary,
-    "remudero-review: PASS — plan-only PR (1 criteria), gated deterministically " +
-      "(lint-plan + the plan-PR emitter + plan-index checks); no proof execution attempted, by design (W1-T205)",
+    "remudero-review: PASS — plan-only PR (1 criteria); lint-plan ran on its changed tasks " +
+      "(1 checked, 0 failing); no proof run",
     "the plan-only verdict string must be byte-identical to what it was before the spawn was skipped",
   );
 });

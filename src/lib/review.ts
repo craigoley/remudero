@@ -453,7 +453,12 @@ export interface ReviewEvidence {
    *  UNRESOLVED diff overlaps. "Unresolved" is read off {@link taskDeclaredFiles} being empty, NEVER off whether a
    *  `Remudero-Task:` trailer appears — keyed on the trailer it misfired on #1731. Absent ⇒ never fires. */
   openTaskDeclaredFiles?: ReadonlyMap<string, readonly string[]>;
+  planLint?: PlanLintOutcome; // W1-T4423: lint-plan over the TARGET plan at the head; absent withholds a plan-only PASS
 }
+
+export type PlanLintOutcome =
+  | { ran: true; label: string; checked: number; violations: string[]; skipped?: string }
+  | { ran: false; reason: string };
 
 /** See {@link ReviewVerdict.unwiredAdvisories}'s doc for what each code means and why
  *  `net_state_claim` never appears here (retro-time only). */
@@ -592,6 +597,7 @@ export interface ReviewVerdict {
   /** W1-T305: how many criteria COULD have executed (every criterion except `satisfied_by`) — the SAME set `capped`
    *  counts against, exposed here so `passSummary`'s partial annotation reads it rather than re-deriving it. */
   executableProofCount?: number;
+  planLint?: PlanLintOutcome; // W1-T4423: ledgered in full through `decision_verdict`
   /** W1-T3704 (design i) — a content hash of the pull request's OWN diff (base...head) at the moment this verdict was
    *  judged. Recorded on the `review.posted` ledger line as `own_diff_digest` so a LATER push can compare against it
    *  without re-deriving a verdict that did not change. `undefined` when the caller could not compute one (an
@@ -3793,7 +3799,9 @@ export function judgeReview(
   // happened not to execute" — the same shape `criteriaTampered` uses. A code diff is byte-identical: `unmetForState
   // === unmet`.
   const unmetForState = planOnly ? floorUnmet : unmet;
+  const planLintRefusal = planOnly ? planLintRefusalText(evidence.planLint) : undefined;
   const failsWithoutUnknown =
+    planLintRefusal !== undefined ||
     noCriteria ||
     unmetForState.length > 0 ||
     testTheater ||
@@ -3819,6 +3827,7 @@ export function judgeReview(
   // exactly as they bind `state`: a tampering or contradiction failure can never be suppressed by verdict stability,
   // which only ever forgives a SEMANTIC downgrade. The anchor a re-review of an unchanged head checks.
   const floorState: ReviewState =
+    planLintRefusal !== undefined ||
     noCriteria ||
     floorUnmet.length > 0 ||
     testTheater ||
@@ -3864,10 +3873,13 @@ export function judgeReview(
   // measured. A PLAN-ONLY success renders via {@link planOnlySummary}, because "0 proofs executed" is not a
   // degradation for a PR with nothing executable to point at. W1-T2221: `planOnly` is consulted BEFORE `capped`, so a
   // plan-only diff whose declared proof path happened to resolve and RUN still reaches that summary.
+  const onlyPlanLintFailed =
+    unmetForState.length === 0 && !testTheater && !noCriteria && !criteriaTampered && idCollisions.length === 0 && idOwnership.length === 0 &&
+    changesetContradictions.length === 0 && refusalContradictions.length === 0 && unprovenancedDecisionsEntries.length === 0;
   const summary =
     state === "success"
       ? planOnly
-        ? planOnlySummary(verdicts.length)
+        ? planOnlySummary(verdicts.length, evidence.planLint)
         : capped
           ? cappedSummary(verdicts.length, keywordOnly, enforcementData)
           : passSummary(
@@ -3877,7 +3889,9 @@ export function judgeReview(
     // observed one — the fraction actually executed rides on the same commit-status text.
               partiallyExecuted ? { executed: executedCount, executable: executableCriteria.length } : undefined,
             )
-      : failSummary(
+      : planLintRefusal !== undefined && onlyPlanLintFailed
+        ? planLintRefusal
+        : failSummary(
     // Only VISIBLE unmet claims name themselves in the posted summary (W1-T166); a holdout
     // claim never reaches this text, which becomes both the commit-status description and the
     // ledger's failure text, each worker-readable. W1-T2221 uses `unmetForState`, not `unmet`,
@@ -3932,7 +3946,22 @@ export function judgeReview(
     partiallyExecuted,
     executedProofCount: executedCount,
     executableProofCount: executableCriteria.length,
+    planLint: planOnly ? evidence.planLint : undefined,
   };
+}
+
+/** W1-T4423: why a plan-only PASS is refused, or `undefined` when lint-plan RAN clean; a lint that never ran is no pass. */
+function planLintRefusalText(lint: PlanLintOutcome | undefined): string | undefined {
+  const clip = (text: string): string => (text.length > STATUS_DESC_MAX ? `${text.slice(0, STATUS_DESC_MAX - 1)}…` : text);
+  if (lint === undefined || !lint.ran) {
+    return clip(`${FAIL_PREFIX}plan-only PASS withheld, lint-plan could not run: ${lint?.reason ?? "no lint was run"}`);
+  }
+  if (lint.violations.length === 0) return undefined;
+  const more = lint.violations.length > 1 ? ` (+${lint.violations.length - 1} more)` : "";
+  const head = `${FAIL_PREFIX}lint-plan: `;
+  const budget = STATUS_DESC_MAX - head.length - more.length;
+  const first = lint.violations[0];
+  return `${head}${first.length > budget ? `${first.slice(0, budget - 1)}…` : first}${more}`;
 }
 
 /** The exact PASS status-description text, shared by {@link judgeReview} and a verdict-stability suppression so a
@@ -3972,14 +4001,10 @@ function cappedSummary(criteriaCount: number, keywordOnly = false, enforcementDa
 
 /** The PLAN-ONLY status-description text (W1-T205), posted in place of {@link cappedSummary} whenever a capped
  *  success's diff is plan-only. Deliberately never says "CAPPED" or "not certified": those read as something going
- *  wrong, and nothing did — filing a task has no code to run a proof against. Names what actually gated the PR, so an
- *  operator is told the truth (standing rule 22). */
-function planOnlySummary(criteriaCount: number): string {
-  return (
-    `remudero-review: PASS — plan-only PR (${criteriaCount} criteria), gated deterministically ` +
-    `(lint-plan + the plan-PR emitter + plan-index checks); no proof execution attempted, ` +
-    `by design (W1-T205)`
-  );
+ *  wrong, and nothing did. Names only the lint THIS review ran (W1-T4423; standing rule 22). */
+function planOnlySummary(criteriaCount: number, lint?: PlanLintOutcome): string {
+  const checked = lint?.ran ? `${lint.checked} checked, 0 failing${lint.skipped ? ", shard rule n/a" : ""}` : "not run";
+  return `remudero-review: PASS — plan-only PR (${criteriaCount} criteria); lint-plan ran on its changed tasks (${checked}); no proof run`;
 }
 
 // ── VERDICT STABILITY (W1-T178) ─────────────────────────────────────────────

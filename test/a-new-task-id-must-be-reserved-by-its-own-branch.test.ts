@@ -20,6 +20,9 @@ import { cloneTargetPlan, nextTaskIdCommand, runReview } from "../src/run-task.j
 import { ghShim } from "./helpers/gh-shim.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 const CRITERIA: AcceptanceCriterion[] = [{ claim: "the widget renders", proof: "the widget renders" }];
 const REPORT = "REPORT\n- the widget renders.\nPR_URL: https://github.com/o/r/pull/7";
 const HEAD = "file/control-status-read-path";
@@ -54,7 +57,7 @@ const T60 = shardDiff("plan/tasks.d/CONSOLE-T60-control-status.yaml", ["+- id: C
 
 test("a pull request adding a shard whose id is reserved by another branch is refused and told to renumber", () => {
   const { head } = consoleReview({ "CONSOLE-T60": OTHER });
-  const v = judgeReview(CRITERIA, { diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
   assert.deepEqual(v.taskIdOwnership, [{ id: "CONSOLE-T60", file: "plan/tasks.d/CONSOLE-T60-control-status.yaml", kind: "foreign", holder: OTHER }]);
   assert.equal(v.state, "failure");
   assert.equal(v.floorState, "failure");
@@ -64,7 +67,7 @@ test("a pull request adding a shard whose id is reserved by another branch is re
 
 test("a pull request adding a shard whose id is not reserved at all is refused with the mint command", () => {
   const { head } = consoleReview({});
-  const v = judgeReview(CRITERIA, { diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
   assert.deepEqual(v.taskIdOwnership?.map((f) => f.kind), ["unreserved"]);
   assert.equal(v.state, "failure");
   assert.equal(v.summary, "remudero-review: FAIL — id CONSOLE-T60 is not reserved — mint it with rmd next-task-id --prefix");
@@ -72,8 +75,8 @@ test("a pull request adding a shard whose id is not reserved at all is refused w
 
 test("a shard id reserved by the pull request's own head branch passes", () => {
   const { head } = consoleReview({ "CONSOLE-T60": HEAD });
-  const v = judgeReview(CRITERIA, { diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
-  const control = judgeReview(CRITERIA, { diff: T60, report: REPORT, headCheckoutDir: head.dir });
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const control = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir });
   assert.deepEqual(v.taskIdOwnership, []);
   assert.equal(v.state, "success");
   assert.equal(v.state, control.state, "ownership adds nothing to a verdict whose holder is this head");
@@ -85,7 +88,7 @@ test("W1-T4414: two refused ids name the actionable one first and count the rest
   const long = `file/${"a-holder-branch-named-after-its-whole-rationale-".repeat(3)}end`;
   const { head } = consoleReview({ "CONSOLE-T60": long });
   const diff = [T60, shardDiff("plan/tasks.d/CONSOLE-T61-y.yaml", ["+- id: CONSOLE-T61"])].join("\n");
-  const v = judgeReview(CRITERIA, { diff, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
   assert.equal(v.taskIdOwnership?.length, 2);
   assert.match(v.summary, /^remudero-review: FAIL — id CONSOLE-T60 is reserved by file\/a-holder.*…, not this PR — renumber \(\+1 more\)$/);
   assert.equal(v.summary.length, 140, "clipped to exactly the commit-status cap");
@@ -104,21 +107,21 @@ test("W1-T4414: ids the base declares, baselined ids, suffixed ids and a recorde
     shardDiff("plan/tasks.d/W1-T1B-s.yaml", ["+- id: W1-T1B"]),
     shardDiff("plan/tasks.d/CONSOLE-T64-h.yaml", ["+- id: CONSOLE-T64", "+  note: |", `+    reservation hand-off: unknown -> ${HEAD}`]),
   ].join("\n");
-  const v = judgeReview(CRITERIA, { diff, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
   assert.deepEqual(v.taskIdOwnership, [{ id: "CONSOLE-T63", file: "plan/tasks.d/CONSOLE-T63-z.yaml", kind: "unreserved" }], "a baseline row with no reason exempts nothing");
-  const noHandoff = judgeReview(CRITERIA, { diff: shardDiff("plan/tasks.d/CONSOLE-T64-h.yaml", ["+- id: CONSOLE-T64"]), report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const noHandoff = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: shardDiff("plan/tasks.d/CONSOLE-T64-h.yaml", ["+- id: CONSOLE-T64"]), report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
   assert.deepEqual(noHandoff.taskIdOwnership, [{ id: "CONSOLE-T64", file: "plan/tasks.d/CONSOLE-T64-h.yaml", kind: "foreign", holder: "unknown" }], "control: without the note the unattributed holder is refused");
 });
 
 test("W1-T4414: an unreachable origin is UNKNOWN and withholds the verdict rather than passing it", () => {
   const { head } = consoleReview({ "CONSOLE-T60": HEAD });
   head.git("remote", "set-url", "origin", join(head.dir, "no-such-origin"));
-  const v = judgeReview(CRITERIA, { diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
   assert.equal(v.taskIdOwnership?.[0]?.kind, "unknown");
   assert.equal(v.state, "failure", "never a pass");
   assert.equal(v.taskIdOwnershipWithheld, v.summary);
   assert.equal(v.summary, "remudero-review: FAIL — id CONSOLE-T60 reservation unreadable (UNKNOWN) — verdict withheld");
-  const noHead = judgeReview(CRITERIA, { diff: T60, report: REPORT, headCheckoutDir: head.dir });
+  const noHead = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir });
   assert.deepEqual(noHead.taskIdOwnership, [], "no head ref means no holder to compare, so the check does not run");
 });
 
@@ -129,7 +132,7 @@ test("W1-T4414: an UNKNOWN beside a certain failure posts the failure instead of
   assert.deepEqual(findings.map((f) => f.kind), ["unknown", "unreserved"]);
   const { head } = consoleReview({});
   head.git("remote", "set-url", "origin", join(head.dir, "no-such-origin"));
-  const v = judgeReview([], { diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
+  const v = judgeReview([], { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir, headRefName: HEAD });
   assert.equal(v.taskIdOwnershipWithheld, undefined, "a review failing for another reason is not withheld");
 });
 
@@ -221,6 +224,7 @@ test("W1-T4414: a withheld ownership verdict posts no terminal review status", a
     process.env.PATH = `${gh.dir}:${priorPath}`;
     const steps: string[] = [];
     const verdict = await runReview({
+      lintPlanForReviewFn: async () => CLEAN_PLAN_LINT,
       owner: "acme",
       repo: "console",
       prUrl: "https://github.com/acme/console/pull/1",
