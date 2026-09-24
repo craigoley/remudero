@@ -115,9 +115,11 @@ test("W1-T4404: shadow mode records each real failure as selected or missed and 
 
   // The real CLI, on the real tree: reads failures from a TAP log and prints the record; exit 0.
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4404-`));
-  writeFileSync(join(dir, "changed.txt"), "src/lib/tmp.ts\n");
+  writeFileSync(join(dir, "changed.txt"), "src/lib/tmp.ts\ndocs/comment-standard.md\n");
+  writeFileSync(join(dir, "change.diff"), "+++ b/src/lib/tmp.ts\n@@ -1 +1 @@\n");
+  writeFileSync(join(dir, "recent.txt"), "test/the-affected-suite-selector-runs-in-shadow.test.ts\n");
   writeFileSync(join(dir, "fail.log"), `not ok 1 - x\n  ---\n  location: '${REPO_ROOT}/test/the-affected-suite-selector-runs-in-shadow.test.ts:1:1'\n  ...\n`);
-  const cli = spawnSync(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts/select-affected-suites.mjs"), "--changed-files", join(dir, "changed.txt"), "--failed-from", join(dir, "fail.log")], {
+  const cli = spawnSync(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts/select-affected-suites.mjs"), "--changed-files", join(dir, "changed.txt"), "--diff", join(dir, "change.diff"), "--recent-failures", join(dir, "recent.txt"), "--failed-from", join(dir, "fail.log")], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: { ...process.env, GITHUB_STEP_SUMMARY: join(dir, "summary.md") },
@@ -125,7 +127,9 @@ test("W1-T4404: shadow mode records each real failure as selected or missed and 
   assert.equal(cli.status, 0, cli.stderr);
   assert.match(cli.stdout, /SHADOW — nothing skipped/);
   const json = JSON.parse(/^AFFECTED-SUITES-SHADOW: (.*)$/m.exec(cli.stdout)![1]!);
-  assert.deepEqual(json.failures, [{ file: "test/the-affected-suite-selector-runs-in-shadow.test.ts", floor: "selected" }]);
+  // With a diff the narrow candidate is measured too; a recent failure stays in both selections.
+  assert.deepEqual(json.failures, [{ file: "test/the-affected-suite-selector-runs-in-shadow.test.ts", floor: "selected", narrow: "selected" }]);
+  assert.ok(json.narrowSize > 0 && json.narrowSize <= json.floorSize, `narrow ${json.narrowSize} vs floor ${json.floorSize}`);
   assert.match(readFileSync(join(dir, "summary.md"), "utf8"), /W1-T4404 affected-suite selector/);
   const usage = spawnSync(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts/select-affected-suites.mjs")], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(usage.status, 2);
