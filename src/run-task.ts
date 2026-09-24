@@ -33217,13 +33217,11 @@ export async function serveCommand(
     })();
   });
 
-  // THE PRINTED URL CARRIES THE READ TOKEN ONLY, and the write token is never echoed at all.
-  // These lines are the operator's console bookmark, and under the real launch stdout is
-  // redirected to serve.log — so whatever is printed here is written to disk in the clear and
-  // outlives the process. A bookmark needs to VIEW the board; arming a write action can pay the
-  // one-time cost of reading the 0600 tokens file. See resolveServiceTokens for rotation.
+  // NO TOKEN IS PRINTED. In a container stdout is `docker logs`, readable by anyone in the docker
+  // group and kept past the process, so the banner names the tokens file and `rmd console-url`
+  // prints the tokened bookmark on demand. See resolveServiceTokens for rotation.
   console.log(`### rmd serve — listening on ${hosts.map((h) => `http://${h}:${port}`).join(", ")} (repo ${self.owner}/${self.repo})`);
-  for (const h of hosts) console.log(`    console:     http://${h}:${port}/?token=${tokens.read}`);
+  for (const h of hosts) console.log(`    console:     http://${h}:${port}/ (tokened bookmark: rmd console-url)`);
   // W1-T3176 — the console BUILD's state, on the line under the console URL, because the failure
   // this prevents is an operator opening that URL and getting a blank tab. Absent when no build is
   // configured (`RMD_CONSOLE_BUILD_ROOT` unset), so a daemon serving only the string shell says
