@@ -1,0 +1,35 @@
+- id: W1-T4459
+  title: "FIX WORKERS ARE SENT AT REDS NO FILE EDIT CAN FIX, AND RE-SENT AT THE SAME HEAD — commitlint (the PR title) and acceptance-author-gate (the PR body) reds took 5 worker rounds that could only change nothing, three of them on one unchanged head; route metadata reds to title/body repair and never re-dispatch until the head or the red changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
+  plan_refs: [W1-T4351, W1-T3868]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-red-no-file-can-fix-gets-no-worker.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the fix.done rows since 2026-09-23T15:59Z: 62 of 65 fix rounds ended commit_refused ($73.51). Reasons: 37 missing COMMIT_MESSAGE line and 9 regenerable-baseline edits refused (both W1-T4450), 12 'the worker changed nothing', 8 'the task declares no files'.
+    OBSERVED: W1-T4350 (#6853) had four "changed nothing" rounds, three on head 7206953 (19:28, 19:38, 19:44Z), all
+    at commitlint / acceptance-author-gate reds; W1-T4052 (02:32Z) the same with a body-only fix. A refused round stands
+    down and the sweep re-dispatches ~10 min later at the same head (fixRungStalledWithoutNewHead re-arms on a refusal).
+  design: |
+    (i) When every failing required check reads the PR title or body (commitlint, acceptance-author-gate,
+    proof-discrimination on the body), the sweep does not dispatch a fix worker; it routes to the existing title/body repair
+    (repairMissingTaskTrailer's path), which must produce a NEW event because those gates read the stored payload. (ii) A
+    refused or changed-nothing round at a head blocks re-dispatch until the head or the set of red checks changes; the block
+    is ledgered with its reason. (iii) A round whose report names a needed out-of-scope path escalates for a scope amendment
+    instead of spending another strike.
+  acceptance:
+    - claim: "a title or body red is repaired without a fix worker"
+      proof: 'grep: test("W1-T4459: a title or body red is repaired without a fix worker" in test/a-red-no-file-can-fix-gets-no-worker.test.ts'
+    - claim: "a refused round is not re-dispatched at the same head and red"
+      proof: 'grep: test("W1-T4459: a refused round is not re-dispatched at the same head and red" in test/a-red-no-file-can-fix-gets-no-worker.test.ts'
+  falsifier: |
+    Dispatch on every red and the first test finds a worker spawned for a commitlint-only red.

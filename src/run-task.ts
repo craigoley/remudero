@@ -800,6 +800,7 @@ import {
   reconcileRetroChangesetClaim,
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
+  renderAcceptanceBlock,
   replaceAcceptanceBlock,
 } from "./lib/plan-pr-emitter.js";
 import {
@@ -5972,7 +5973,7 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
 export type ReviewRunResult = ReviewVerdict & {
   headSha: string;
   reviewerOutcome: string;
-  codeFreshnessWithheld?: string;
+  verdictWithheld?: string;
   reviewDecisionDigest?: string;
   decisionDisposition?: "computed" | "replayed" | "in_flight" | "conflict";
   evaluatorProvenance?: ReviewEvaluatorProvenance;
@@ -6511,7 +6512,7 @@ async function runReview(args: {
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
     log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld });
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
-    return { ...verdict, headSha, reviewerOutcome: outcome, codeFreshnessWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
   try {
@@ -6567,7 +6568,7 @@ async function runReview(args: {
       headSha,
       reviewerOutcome: outcome,
       ...(reviewerCodeFreshness !== undefined && reviewerCodeFreshness.status !== "fresh"
-        ? { codeFreshnessWithheld: posted.reason ?? "reviewer code freshness withheld the terminal verdict" }
+        ? { verdictWithheld: posted.reason ?? "reviewer code freshness withheld the terminal verdict" }
         : {}),
       reviewDecisionDigest: decisionDigest,
       decisionDisposition,
@@ -10954,9 +10955,9 @@ export async function runFixRung(opts: {
       runId: opts.runId,
       openTaskIds: opts.openTaskIds,
     });
-    if (review.codeFreshnessWithheld) {
-      deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.codeFreshnessWithheld });
-      return { outcome: "stood_down", review, strikes, retriggers, reason: review.codeFreshnessWithheld, standDownReason: review.codeFreshnessWithheld };
+    if (review.verdictWithheld) {
+      deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
     }
     // W1-T100: a real review verdict now exists for THIS head — the CURRENT
     // strike stays review-mode from here. W1-T138: this can still flip back
@@ -15721,6 +15722,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       gitPushRunBranch(worktreePath);
     }
+    // W1-T4425: when the worker already reported its OWN PR, normalize its body from THIS run's
+    // plan record before the trailer-amend push below, so `trailer-body-proof-divergence` never
+    // reaches CI (#6888, #6929, #6931). Best-effort/no-op cases are documented on the function
+    // itself. The `gh pr create --fill` fallback below has no Acceptance block to diverge.
+    if (prUrl) {
+      normalizeRunPrAcceptanceFromPlan(prUrl, taskId, task.acceptance ?? [], log);
+    }
     // W1-T1012: append the `Remudero-Task:` trailer to the branch's actual tip commit HERE —
     // after both push paths above (the worker's own sandbox push, or the orchestrator
     // fallback just above) have already landed it on origin, and before EITHER PR path below
@@ -15896,11 +15904,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       openTaskIds,
     });
 
-    if (review.codeFreshnessWithheld) {
+    if (review.verdictWithheld) {
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
-        reason: review.codeFreshnessWithheld,
+        reason: review.verdictWithheld,
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
@@ -17172,6 +17180,79 @@ export function repairRetroAcceptanceBlock(
   }
 }
 
+/**
+ * W1-T4425 — a run PR's OWN `## Acceptance`/`Acceptance:` block must never diverge from its plan.
+ * `trailerBodyProofDivergenceRefusal` (scripts/acceptance-author-gate.mjs, W1-T3658) refuses a
+ * trailered PR whose own block names different proofs than the task it credits (#6888, #6929,
+ * #6931 each paid a fix-lane round for this). W1-T3739's {@link
+ * "./lib/plan-pr-emitter.js".renderAcceptanceBlock} round-trips through {@link
+ * "./lib/review.js".parseAcceptanceBlock} by construction, but the worker-opened PR path never
+ * called it — this closes that gap, called once from `runTaskBody` right before W1-T1012's
+ * trailer-amend push, so the divergence is unreachable rather than refused-then-repaired.
+ * `taskId`/`planCriteria` come from the SAME task record this run is building, never re-resolved
+ * from the body's own (possibly still-unstamped) trailer.
+ *
+ * Compares proof TEXT AS A SET (order/claim wording ignored) — the exact comparison the gate
+ * itself runs. `"no-block"` (a trailer-only body, or none at all) is the gate's own "nothing to
+ * compare" shape and is left alone, as is a block that already names the identical proof set
+ * (`"healthy"`). {@link "./lib/review.js".acceptanceBlockRegion} gives the block's own
+ * `[headerLine, endLine)` span, spliced out for `renderAcceptanceBlock(planCriteria)` so the rest
+ * of the worker's prose survives; any trailer is stripped and re-appended LAST (the worker
+ * prompt's contract), so it can never end up stranded above the fresh block.
+ *
+ * Best-effort like {@link repairRetroAcceptanceBlock}: every throw is caught and ledgered, never
+ * propagated. `pr.body_normalized` carries `removed_proofs` (named only in the old block) and
+ * `rendered_proofs` (the plan's own proof set now rendered).
+ */
+export function normalizeRunPrAcceptanceFromPlan(
+  prUrl: string,
+  taskId: string,
+  planCriteria: readonly AcceptanceCriterion[],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
+  // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
+  deps: Omit<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "diff"> = {},
+): "rewritten" | "healthy" | "no-block" | "error" {
+  if (planCriteria.length === 0) return "no-block";
+  const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };
+  try {
+    const body = fetchBody(prUrl);
+    const bodyCriteria = parseAcceptanceBlock(body);
+    // A trailer-only body, or one with no parseable block at all — not this function's business,
+    // the same "nothing to compare" contract trailerBodyProofDivergenceRefusal itself keeps.
+    if (bodyCriteria.length === 0) return "no-block";
+    const planProofs = new Set(planCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0));
+    const bodyProofs = bodyCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
+    const bodyProofSet = new Set(bodyProofs);
+    const removedProofs = [...new Set(bodyProofs.filter((p) => !planProofs.has(p)))];
+    const onlyInPlan = [...planProofs].filter((p) => !bodyProofSet.has(p));
+    // Identical proof sets (order and claim wording both ignored) — nothing to rewrite.
+    if (removedProofs.length === 0 && onlyInPlan.length === 0) return "healthy";
+
+    // Both parseAcceptanceBlock and acceptanceBlockRegion walk the SAME exported header regex
+    // (ACCEPTANCE_HEADER_RE, lib/review.ts), so a body that just parsed >0 criteria above cannot
+    // fail to resolve a region here — asserted rather than re-branched into an untestable arm.
+    const region = acceptanceBlockRegion(body)!;
+    const lines = body.split("\n");
+    const surroundingProse = [...lines.slice(0, region.headerLine), ...lines.slice(region.endLine)]
+      .join("\n")
+      // Strip any anchored trailer from the surviving prose first — it is re-appended LAST below,
+      // the only place the worker prompt's own contract says it may live.
+      .replace(/^Remudero-Task:\s*\S+\s*$/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/\s*$/, "");
+    const rewritten =
+      `${surroundingProse}\n\n${renderAcceptanceBlock(planCriteria as AcceptanceCriterion[])}\n\n` +
+      `Remudero-Task: ${taskId}\n`;
+    editBody(prUrl, rewritten);
+    log("pr.body_normalized", { pr: prUrl, removed_proofs: removedProofs, rendered_proofs: [...planProofs] });
+    return "rewritten";
+  } catch (e) {
+    log("pr.body_normalize.error", { pr_url: prUrl, error: String((e as Error)?.message ?? e) });
+    return "error";
+  }
+}
+
 function defaultRetroFetchBody(url: string): string {
   const view = ghJson(["pr", "view", url, "--json", "body"]) as { body?: string };
   return view.body ?? "";
@@ -17974,14 +18055,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   );
 
   console.log(
-    `\nremudero-review=${verdict.state} ${verdict.codeFreshnessWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
-      (verdict.codeFreshnessWithheld ? ` — ${verdict.codeFreshnessWithheld}` : "") +
+    `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+      (verdict.verdictWithheld ? ` — ${verdict.verdictWithheld}` : "") +
       (reviewVerdictAnnotation(verdict) ? ` — ${reviewVerdictAnnotation(verdict)}` : "") +
       // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
-  if (verdict.codeFreshnessWithheld) return 2;
+  if (verdict.verdictWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, subjectRepoDir)) {
     console.log(
@@ -33000,6 +33081,7 @@ export async function serveCommand(
     log,
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
+    prewarmLeadMs: DEFAULT_BOARD_POLL_TTL_MS,
     snapshotCache: serveBoardSnapshot,
     // A merged PR's file list survives the restart on disk, and a miss never blocks the first snapshot.
     changedFilesCache: createChangedFilesCache(config.root, self.owner, self.repo, { log }),

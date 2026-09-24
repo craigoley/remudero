@@ -61,6 +61,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
+import { evaluatePauseTier, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
@@ -924,6 +925,11 @@ export interface DaemonDeps {
    *  iterations only, after the current dispatch has resolved, so in-flight work always runs to full
    *  completion before a pause is honoured (W1-T11). */
   checkPause?: () => string | undefined;
+  /** W1-T4429: the hold behind `checkPause` (owner/expiry/liveness); absent, no governor runs. It calls
+   *  `clearPauseHold` once at `lapsed` and `onPauseNeedsHuman` once at `needs_human`. */
+  checkPauseHold?: () => PauseHoldGovernorInput | undefined;
+  clearPauseHold?: () => void | Promise<void>;
+  onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => FleetControlHold | undefined;
   /** An optional check, consulted once per tick with the same between-iterations-only discipline as the
    *  operator holds, so it can never interrupt work already in flight. A stale result stops the loop with a
@@ -1207,27 +1213,31 @@ export function reportLoopLag(
   }
 }
 
+/** W1-T4429: a `"pause"` clock skips the `checkPause` re-check — it runs BECAUSE the fleet is paused. */
+export type InterphaseReviewClockScope = "drain" | "pause";
+
 /** The review-only clock for the part of an iteration that previously had none: after the full
  *  reconciliation await returns and before a phase ticker or an idle wait takes over. It owns only
  *  the light pass, so it adds no action that pass does not already take — which, with nothing in
- *  flight, includes a fix (W1-T1211); `duringDrain` is the scope that closes that lane. A wake
+ *  flight, includes a fix (W1-T1211); a `scope` closes that lane. A wake
  *  observed during an active pass stays pending and makes the next wait resolve immediately, which
  *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md.
- *  W1-T4053: `duringDrain` runs the same clock beside a freshness drain, over the review-only pass, and
- *  ledgers every pass it admits with `during_drain: true`. */
+ *  W1-T4053: `scope: "drain"` runs it beside a freshness drain, ledgering `during_drain: true`; W1-T4429:
+ *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts. */
 export function startInterphaseReviewClock(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  duringDrain = false,
+  scope?: InterphaseReviewClockScope,
 ): InterphaseReviewClock {
   let active = true;
   let eventWakeSeen = false;
   let eventWakePending = false;
   let elapsedMs = 0;
   let passes = 0;
-  const phase = duringDrain ? "freshness_drain" : "interphase";
-  const drainTag = duringDrain ? { during_drain: true } : {};
+  const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
+  const scopeTag: Record<string, boolean> =
+    scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
   const wait = deps.sleepUntilSweepWake;
   const quantumMs = Math.max(1, Math.min(pollIntervalMs, INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS));
   // W1-T2897 Clock port: the same instant source as `deps.now`, never a second bare `new Date()`
@@ -1261,7 +1271,7 @@ export function startInterphaseReviewClock(
           if (!active) break;
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
 
-          const halt = deps.checkStop?.() ?? deps.checkPause?.();
+          const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
 
           const trigger = eventWakePending ? "github-event" : "interval";
@@ -1270,11 +1280,11 @@ export function startInterphaseReviewClock(
           lastPassAtMs = interphaseClock.now();
           passes += 1;
           try {
-            await (duringDrain ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
-            if (duringDrain) log("daemon.review_clock.pass", { trigger, ...drainTag });
-            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...drainTag });
+            await (scope ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
+            if (scope) log("daemon.review_clock.pass", { trigger, ...scopeTag });
+            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
           } catch (e) {
-            log("daemon.sweep_light.failed", { phase, ...drainTag, error: String((e as Error)?.message ?? e) });
+            log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
           }
         }
       })()
@@ -1287,6 +1297,59 @@ export function startInterphaseReviewClock(
       return { eventWakeSeen, passes };
     },
   };
+}
+
+export interface PauseHoldOwner {
+  pid: string;
+  host: string;
+  sessionId?: string;
+  reason?: string;
+}
+
+export interface PauseHoldGovernorInput extends PauseTierInput {
+  /** The anchor sha, or `"local"`: a NEW hold never inherits an old hold's tier. */
+  holdId: string;
+  owner: PauseHoldOwner;
+}
+
+/** The last tier seen for ONE hold (keyed by `holdId`, process-lifetime), so a transition ledgers once. */
+export interface PauseHoldGovernorState {
+  lastTier?: PauseTier;
+}
+
+/** W1-T4429 design (ii): on a TRANSITION only, ledger `pause.<tier>`. `orphaned` leaves the hold alone;
+ *  `needs_human` pages via `onPauseNeedsHuman` (a throw ledgers `pause.needs_human_failed`); `lapsed`
+ *  calls `clearPauseHold`. `held` ledgers nothing. Returns the tier. */
+export async function stepPauseHoldGovernor(
+  input: PauseHoldGovernorInput,
+  state: PauseHoldGovernorState,
+  deps: Pick<DaemonDeps, "clearPauseHold" | "onPauseNeedsHuman">,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<PauseTier> {
+  const tier = evaluatePauseTier(input);
+  if (tier === state.lastTier) return tier;
+  state.lastTier = tier;
+  const base = {
+    hold_id: input.holdId,
+    owner_pid: input.owner.pid,
+    owner_host: input.owner.host,
+    owner_session: input.owner.sessionId ?? null,
+    reason: input.owner.reason ?? null,
+  };
+  if (tier === "orphaned") {
+    log("pause.orphaned", base);
+  } else if (tier === "needs_human") {
+    log("pause.needs_human", { ...base, expires_at: input.expiresAt });
+    try {
+      await deps.onPauseNeedsHuman?.({ holdId: input.holdId, owner: input.owner, expiresAt: input.expiresAt });
+    } catch (e) {
+      log("pause.needs_human_failed", { ...base, error: String((e as Error)?.message ?? e) });
+    }
+  } else if (tier === "lapsed") {
+    log("pause.lapsed", { ...base, expires_at: input.expiresAt });
+    await deps.clearPauseHold?.();
+  }
+  return tier;
 }
 
 /** Wraps a fired retro, and auto-triage, in the same restricted light-sweep ticker dispatch already uses. Either is an
@@ -2177,6 +2240,7 @@ export async function runDaemon(
   // CALLBACK to the first observation of each task id this run; the predicate itself is still
   // consulted, and still excludes the task, every tick (P29(ii)).
   const circuitEscalated = new Set<string>();
+  const pauseHoldGovernorStates = new Map<string, PauseHoldGovernorState>();
   // W1-T4025: lifetime pressure is a sensor. Keep one task per tick for the asynchronous judge;
   // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
   const lifetimePressureTasks = new Map<string, Task>();
@@ -2338,7 +2402,7 @@ export async function runDaemon(
       // W1-T4053 — REVIEWS KEEP FLOWING THROUGH THE DRAIN. With the clock stopped, 42 drains in three days
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
-      const drainReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, true);
+      const drainReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "drain");
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
       let reviewPasses = 0;
       try {
@@ -2625,7 +2689,20 @@ export async function runDaemon(
     if (paused) {
       ticks++;
       log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
-      await sleepUntilSweepWake(pollIntervalMs);
+      // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
+      const pauseHold = deps.checkPauseHold?.();
+      if (pauseHold) {
+        const holdState = pauseHoldGovernorStates.get(pauseHold.holdId) ?? { lastTier: undefined };
+        pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
+        await stepPauseHoldGovernor(pauseHold, holdState, deps, log);
+      }
+      const pauseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "pause");
+      try {
+        await sleepUntilSweepWake(pollIntervalMs);
+      } finally {
+        const { passes } = await pauseReviewClock.stop();
+        if (passes > 0) log("daemon.pause.review_passes", { tick: ticks, passes });
+      }
       continue;
     }
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
