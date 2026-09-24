@@ -8,14 +8,27 @@
 // `test:complete` events and records their file and duration_ms fields.
 //
 // THIS FILE is the manifest side: a recorded `durationMs` per test-file path
-// (scripts/test-tier-manifest.json), `tierForDuration`, and a `--check` mode that refuses a test
-// file the manifest has never heard of — "a new test file must be tiered" (this task's own
-// acceptance). A file recorded at 0 is NOT missing: 0 is "seeded, unmeasured, defaults to fast"
-// (see `--seed`), distinct from no entry at all, which `--check` refuses.
+// (scripts/test-tier-manifest.json), `tierForDuration`, and (until W1-T4430) a `--check` mode
+// that refused a test file the manifest had never heard of.
 //
-// `--seed` only ADDS placeholders. CI writes per-shard evidence outside the checkout and
-// `--record-evidence` merges that evidence into a separate proposal artifact. Applying that
-// proposal remains a reviewed baseline change; a running job never dirties its checkout.
+// W1-T4430 — AN ABSENT FILE IS THE FAST TIER, PERIOD, SO A NEW TEST NEVER TOUCHES THE MANIFEST.
+// MEASURED: this JSON file was the single most-conflicted file in the repo (changed by 46 of the
+// 150 most recent merged PRs) precisely because the retired `--check` demanded a seeded row for
+// every new test file, and `hooks/pre-commit` supplied it — two independent PRs adding tests
+// collided on the same JSON keys every time. `--check` now refuses the OPPOSITE condition: a row
+// that NAMES A FILE THAT DOES NOT EXIST (see {@link findGhostRows}), which is the one thing left
+// that can go wrong once nothing routinely writes a placeholder. `hooks/pre-commit` no longer
+// seeds; the manifest's only writer is now `flake-retry-aggregate`'s reviewed `--adopt` (design
+// iii below), so an entry only ever exists once someone has actually reviewed a measurement of it.
+//
+// `--seed` still exists for that reviewed writer to use, but nothing in this repo's own hooks or
+// CI calls it anymore. `--select-all` and `--run` likewise stopped refusing an untiered file —
+// {@link tierFiles} already defaults a missing entry to duration 0 (fast), so refusing execution
+// on that same absence was blocking the exact case this task makes normal.
+//
+// CI writes per-shard evidence outside the checkout and `--record-evidence` merges that evidence
+// into a separate proposal artifact. Applying that proposal remains a reviewed baseline change; a
+// running job never dirties its checkout.
 //
 // W1-T3699: the proposal artifact had zero consumers, so 300 of 1,566 files stayed at duration 0
 // forever and the SHARD ALLOCATOR (not `tierForDuration`) treated each as free. Three additions,
@@ -131,17 +144,21 @@ export function unmeasuredSummary(testFiles, manifest) {
   return { unmeasuredCount, total, share: total === 0 ? 0 : unmeasuredCount / total };
 }
 
-/** Test files present on disk (`testFiles`) that `manifest` records NO ENTRY for at all — order
- *  preserved from `testFiles`. This is the refusal W1-T2904's acceptance names: "a test file
- *  absent from the tier manifest is refused." A file recorded at duration 0 (§ file header) is
- *  present, not missing, and never appears here. */
-export function findUntieredFiles(testFiles, manifest) {
-  return testFiles.filter((f) => !(f in manifest.files));
+/** Rows in `manifest` that name a file NOT present in `testFiles` — a GHOST row: the file was
+ *  deleted, renamed, or never existed, so the row can no longer be trusted as a measurement of
+ *  anything on disk. This is the ONLY condition W1-T4430's `--check` refuses: an absent file is
+ *  never an error (§ file header — it defaults to the fast tier at duration 0), only a row that
+ *  outlived the file it named is. Sorted for a deterministic report. */
+export function findGhostRows(testFiles, manifest) {
+  const known = new Set(testFiles);
+  return Object.keys(manifest.files ?? {})
+    .filter((f) => !known.has(f))
+    .sort();
 }
 
 /** Buckets every file in `testFiles` into `{ fast, slow }` using `manifest`'s recorded duration
- *  (missing entries default to 0ms, i.e. fast — callers that must refuse an untiered file check
- *  {@link findUntieredFiles} first). */
+ *  (missing entries default to 0ms, i.e. fast — W1-T4430: this is not a degrade, it is the whole
+ *  point, so no caller needs to refuse an untiered file before calling this). */
 export function tierFiles(testFiles, manifest) {
   const fast = [];
   const slow = [];
@@ -275,22 +292,6 @@ export function selectPlanReadingShard(candidateText, testFiles, manifest, shard
     files,
     predictedDurationMs: files.reduce((sum, file) => sum + weightedDurationMs(file, manifest), 0),
     balance,
-  };
-}
-
-/** Separates a moving base's untiered files from files this branch introduced. An explicit base
- * is required for inheritance; without one the author-time check remains fail-closed. */
-export function inheritedUntieredFiles(missing, baseRef, root, spawn = spawnSync) {
-  if (!baseRef) return { inherited: [], blocking: [...missing] };
-  const result = spawn("git", ["-C", root, "ls-tree", "-r", "--name-only", baseRef, "--", "test"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  if (result.status !== 0) return { inherited: [], blocking: [...missing] };
-  const baseFiles = new Set((result.stdout ?? "").split(/\r?\n/).filter(Boolean));
-  return {
-    inherited: missing.filter((file) => baseFiles.has(file)),
-    blocking: missing.filter((file) => !baseFiles.has(file)),
   };
 }
 
@@ -449,7 +450,6 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   const manifestPath = resolve(root, getFlagValue(argv, "--manifest") ?? DEFAULT_MANIFEST_RELATIVE_PATH);
   const manifest = loadManifest(manifestPath);
   const testFiles = listTestFiles(root);
-  const baseRef = getFlagValue(argv, "--base");
 
   const spawnTestFiles = (files) => {
     const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
@@ -531,62 +531,34 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     return 1;
   }
 
-  const classifyMissing = () => {
-    const missing = findUntieredFiles(testFiles, manifest);
-    const result = inheritedUntieredFiles(missing, baseRef, root, spawn);
-    if (result.inherited.length > 0) {
-      console.error(
-        `test-tier-manifest: ${result.inherited.length} untiered file(s) came from ${baseRef}; ` +
-          "defaulting them to the fast tier without charging this branch for base movement.",
-      );
-    }
-    return result.blocking;
-  };
-
   if (argv.includes("--check")) {
-    const missing = classifyMissing();
-    if (missing.length > 0) {
+    // W1-T4430 — THE REFUSAL FLIPPED. An absent file is never wrong (§ file header); the only row
+    // this gate can no longer trust is one that names a file that isn't there to measure. `--base`
+    // is still accepted (CI and hooks/pre-push both pass one) but is no longer read here — a ghost
+    // row is exactly as stale whichever commit introduced it.
+    const ghosts = findGhostRows(testFiles, manifest);
+    if (ghosts.length > 0) {
       console.error(
-        `test-tier-manifest: ${missing.length} test file(s) are not recorded in ` +
-          `${DEFAULT_MANIFEST_RELATIVE_PATH} — a new test file must be tiered before the fast/slow ` +
-          "split can trust it:",
+        `test-tier-manifest: ${ghosts.length} row(s) in ${DEFAULT_MANIFEST_RELATIVE_PATH} name a ` +
+          "test file that does not exist on disk — a new test file never needs a row (it defaults " +
+          "to the fast tier), so a stale row is the one thing left this gate refuses:",
       );
-      for (const f of missing) console.error(`  ${f}`);
-      // W1-T3203 — SAY WHAT THIS READING IS, and say it BEFORE offering a remedy for it.
-      //
-      // With no --base, `inheritedUntieredFiles` cannot separate a file this branch ADDED from one
-      // the merge base already had, so it fails closed and reports both. That reading is honest
-      // about what it measured and is NOT what CI decides — CI passes --base. MEASURED 2026-09-08:
-      // an operator read the bare form as "main is failing its own gate and blocking every open
-      // PR", opened a 21-row seeding PR on that diagnosis, and merged it. The rows were harmless;
-      // the diagnosis was false, and THIS BLOCK'S OWN REMEDY LINE is what led there.
-      //
-      // So the --seed remedy is withheld in exactly the case it cannot be known to apply. The
-      // refusal itself does NOT soften: a file this tree genuinely adds still exits 1, with or
-      // without a base, which is the case the gate exists for.
-      //
-      // The sibling `scripts/task-id-existence-check.mjs` announces the same degrade in as many
-      // words ("collision check SKIPPED -- no --base given ... Pass --base origin/main"); this is
-      // that sentence, one gate over.
-      if (!baseRef) {
-        console.error(
-          "test-tier-manifest: this reading is not CI's verdict — with no --base, a file inherited " +
-            "from the merge base cannot be told from one this branch added, so both are listed above.",
-        );
-        console.error(
-          "  Pass --base origin/main to get CI's reading. Seed only files this branch really adds.",
-        );
-        return 1;
-      }
-      console.error("Record it with: node scripts/test-tier-manifest.mjs --seed");
+      for (const f of ghosts) console.error(`  ${f}`);
+      console.error("Remove the row(s) above, or restore the file they name.");
       return 1;
     }
-    console.log(`test-tier-manifest: OK — all ${testFiles.length} test file(s) are tiered.`);
+    console.log(
+      `test-tier-manifest: OK — every row in ${DEFAULT_MANIFEST_RELATIVE_PATH} names an existing ` +
+        `test file (${testFiles.length} test file(s) on disk).`,
+    );
     return 0;
   }
 
   if (argv.includes("--seed")) {
-    const missing = findUntieredFiles(testFiles, manifest);
+    // `--seed` is no longer called by hooks/pre-commit (W1-T4430 design ii) — it survives for
+    // `flake-retry-aggregate`'s reviewed --adopt writer to place a first placeholder ahead of a
+    // real measurement, never for an author's own commit to carry one.
+    const missing = testFiles.filter((f) => !(f in manifest.files));
     if (missing.length === 0) {
       console.log("test-tier-manifest: nothing to seed — every test file already has a recorded duration.");
       return 0;
@@ -652,13 +624,9 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.error('test-tier-manifest: --select-all requires --shard "<index>/<count>" with 1 <= index <= count');
       return 2;
     }
-    const missing = classifyMissing();
-    if (missing.length > 0) {
-      console.error(
-        `test-tier-manifest: refusing to select coverage tests — ${missing.length} test file(s) are untiered (see --check).`,
-      );
-      return 1;
-    }
+    // W1-T4430: an untiered file is no longer refused here — it defaults into the fast tier at
+    // duration 0, same as `tierFiles` everywhere else. `--check` is the only gate left that cares
+    // whether a manifest row is trustworthy (a GHOST row, never an absent one).
     if (testFiles.length < shard.count) {
       console.error(
         `test-tier-manifest: refusing to select coverage tests — ${testFiles.length} test file(s) cannot fill ${shard.count} shards.`,
@@ -690,13 +658,8 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.error('test-tier-manifest: --shard requires "<index>/<count>" with 1 <= index <= count');
       return 2;
     }
-    const missing = classifyMissing();
-    if (missing.length > 0) {
-      console.error(
-        `test-tier-manifest: refusing to run — ${missing.length} test file(s) are untiered (see --check).`,
-      );
-      return 1;
-    }
+    // W1-T4430: an untiered file runs in the fast tier rather than blocking the run — see the
+    // `--select-all` comment just above.
     const { fast, slow } = tierFiles(testFiles, manifest);
     const tier = runTier === "fast" ? fast : slow;
     const files = shard ? balanceFilesByDuration(tier, manifest, shard.count)[shard.index - 1] : tier;
