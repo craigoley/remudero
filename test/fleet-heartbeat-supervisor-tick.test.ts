@@ -217,14 +217,16 @@ test("a beat seeded with a deploy line older than the window publishes an overdu
 // `iso()` helper already anchors to removes that race without touching what is actually asserted.
 // ABSOLUTE PATH, never `env date`: this dir is FIRST on PATH, so resolving through PATH would
 // re-exec this stub forever — mirrors `BSD_DATE` in test/fleet-heartbeat.test.ts.
-const FIXED_NOW_DATE = (epochS: number): string =>
-  [
+const FIXED_NOW_DATE = (epochS: number): string => {
+  const fixedIso = new Date(epochS * 1000).toISOString().replace(".000Z", "Z");
+  return [
     "#!/usr/bin/env bash",
     `if [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then printf '%s\\n' ${epochS}; exit 0; fi`,
-    `if [ "$1" = "-u" ] && [ "$2" = "+%Y-%m-%dT%H:%M:%SZ" ]; then exec /usr/bin/date -u -d "@${epochS}" +%Y-%m-%dT%H:%M:%SZ; fi`,
-    'exec /usr/bin/date "$@"',
+    `if [ "$1" = "-u" ] && [ "$2" = "+%Y-%m-%dT%H:%M:%SZ" ]; then printf '%s\\n' '${fixedIso}'; exit 0; fi`,
+    'exec /bin/date "$@"',
     "",
   ].join("\n");
+};
 
 test("the staleness predicate discriminates at its own boundary, in both directions", () => {
   // SUPERVISOR_STALE_AFTER_S=1200 in the script: exactly at the threshold still reads live (the
