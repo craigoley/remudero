@@ -63,7 +63,11 @@ test("W1-T2550: every buildPlanPrBody call site in src/ passes its actual change
   // Guard the production surface. A new caller must be deliberate about this evidence rather
   // than silently opening a body that cannot account for its own diff.
   const callSites = [...RUN_TASK_SRC.matchAll(/buildPlanPrBody\(\{/g)];
-  assert.equal(callSites.length, 3, "src/run-task.ts must have the two approval sites and the autonomous plan site");
+  assert.equal(
+    callSites.length,
+    4,
+    "src/run-task.ts must have the two approval sites, the autonomous plan site, and the approved-skill site (W1-T4338)",
+  );
   for (const m of callSites) {
     const from = m.index!;
     const to = RUN_TASK_SRC.indexOf("});", from);
