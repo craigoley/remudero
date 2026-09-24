@@ -23,6 +23,7 @@
  * decomposition step that lifts those shared REST readings into their own lib module could then
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
+import { systemClock } from "./clock.js";
 import { execFileSync } from "node:child_process";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
@@ -383,10 +384,11 @@ export function realArmDeps(
     // Cached per PR for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST
     // reads per attempt would spend the core budget on a setting that changes almost never.
     mergeQueue: (prUrl) => {
+      const now = systemClock.now();
       const hit = mergeQueueReads.get(prUrl);
-      if (hit && Date.now() - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
+      if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
       const value = baseBranchRequiresMergeQueue(prUrl);
-      mergeQueueReads.set(prUrl, { at: Date.now(), value });
+      mergeQueueReads.set(prUrl, { at: now, value });
       return value;
     },
     enqueue: (prUrl) => {
