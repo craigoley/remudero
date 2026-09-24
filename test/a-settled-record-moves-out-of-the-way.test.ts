@@ -30,6 +30,7 @@ import {
   slugifyHeading,
   splitForensicsPage,
 } from "../src/lib/narrative-fold.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { knowledgeCommand } from "../src/run-task.js";
 
@@ -292,7 +293,7 @@ test("W1-T4096: rmd knowledge fold runs all three operations against a real chec
     writeFileSync(join(root, "src", "lib", "a.ts"), "export const a = 1;\n");
 
     for (const kind of ["decisions", "master-plan"] as const) {
-      const report = foldNarrativeStore({ root, kind, now: () => new Date("2026-09-24T00:00:00Z") });
+      const report = foldNarrativeStore({ root, kind, clock: fixedClock(Date.parse("2026-09-24T00:00:00Z")) });
       assert.equal(report.changed, true);
     }
     assert.match(readFileSync(join(root, "DECISIONS.md"), "utf8"), /Status: /);

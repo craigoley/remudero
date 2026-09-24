@@ -44311,19 +44311,11 @@ export function skillLifecycleCommand(
   return 0;
 }
 
-// learningsCommand / learningsExportCommand / learningsImportCommand moved to
-// src/lib/report-commands.ts (W1-T2888) — imported/re-exported below.
+// learningsCommand/learningsExportCommand/learningsImportCommand live in src/lib/report-commands.ts (W1-T2888).
 
 const NARRATIVE_FOLD_KINDS: NarrativeFoldKind[] = ["decisions", "master-plan", "forensics"];
 
-/**
- * `rmd knowledge fold [--store <decisions|master-plan|forensics>] [--dry-run]` (W1-T4096, design
- * (iv)): runs {@link foldNarrativeStore} against this checkout's real DECISIONS.md, MASTER-PLAN.md
- * and docs/forensics/*.md — every store when `--store` is omitted. The knowledge gardener
- * (W1-T4095) is what calls this on its own timer once a store outgrows its reading size; this verb
- * is the same operation available by hand, and what proved the fold once as this task's design says
- * to. `--dry-run` reports what would change and writes nothing.
- */
+/** `rmd knowledge fold` (W1-T4096): {@link foldNarrativeStore} per store; its COMMANDS `detail` is the contract. */
 export function knowledgeCommand(rest: string[], opts: { root?: string } = {}): number {
   const sub = rest[0];
   if (sub !== "fold") {

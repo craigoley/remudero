@@ -1,10 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
+import { readFileIfExists } from "./fs-race-safe.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 
 /**
  * lib/narrative-fold.ts (W1-T4096) — the operations the knowledge gardener's FOLD tier (W1-T4095
  * design (iii)) runs on a narrative store once it outgrows its reading size: DECISIONS.md gets a
- * `Status:` line per entry, MASTER-PLAN.md's `## SHIPPED log` archives waves older than the
+ * `Status:` line per entry, the master plan's `## SHIPPED log` archives waves older than the
  * current one, and an oversized `docs/forensics/*.md` page splits one file per `## ` anchor.
  * Each operation is a pure text transform ({@link deriveDecisionStatuses},
  * {@link foldMasterPlanShippedLog}, {@link splitForensicsPage}) — what the tests below drive —
@@ -26,8 +29,8 @@ export function slugifyHeading(heading: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function monthOf(now: Date): string {
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+function monthOf(clock: Clock): string {
+  return clock.iso().slice(0, 7);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -120,7 +123,7 @@ function monthBucketOf(entryText: string): string {
   return m ? `${m[1]}-${m[2]}` : "earlier";
 }
 
-/** Archive every `### ` entry of MASTER-PLAN.md's `## SHIPPED log` older than
+/** Archive every `### ` entry of the master plan's `## SHIPPED log` older than
  *  `opts.currentWaveMonth` ("YYYY-MM") into one `docs/archive/master-plan-<bucket>.md` per month
  *  (undated entries bucket as `earlier`), leaving one `### Archived — <bucket> ...` pointer line
  *  in their place. Idempotent: an existing pointer entry is kept as-is, never re-archived, so a
@@ -167,7 +170,7 @@ export function foldMasterPlanShippedLog(
     }
     const archiveRelPath = `${archiveDirRel}/master-plan-${bucket}.md`;
     const header =
-      `# MASTER-PLAN archive — ${bucket}\n\nFolded out of MASTER-PLAN.md's \`## SHIPPED log\` by ` +
+      `# MASTER-PLAN archive — ${bucket}\n\nFolded out of the master plan's \`## SHIPPED log\` by ` +
       `\`foldNarrativeStore\` (W1-T4096) so the live plan keeps only the current wave. Newest first.\n\n`;
     archives[archiveRelPath] = (archives[archiveRelPath] ?? header) + run.join("");
     const label = bucket === "earlier" ? "earlier than the dated waves above" : bucket;
@@ -241,7 +244,7 @@ export type NarrativeFoldKind = "decisions" | "master-plan" | "forensics";
 export interface FoldNarrativeStoreOptions {
   root: string;
   kind: NarrativeFoldKind;
-  now?: () => Date;
+  clock?: Clock;
   /** forensics only: repo-relative page paths to consider; defaults to every docs/forensics/*.md */
   forensicsPages?: string[];
   readingSizeBytes?: number;
@@ -265,15 +268,17 @@ export function foldNarrativeStore(opts: FoldNarrativeStoreOptions): FoldNarrati
 }
 
 function writeIfNeeded(path: string, content: string, dryRun: boolean | undefined, written: string[]): void {
-  mkdirSync(dirname(path), { recursive: true });
-  if (!dryRun) writeFileSync(path, content, "utf8");
+  if (!dryRun) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content, "utf8");
+  }
   written.push(path);
 }
 
 function foldDecisionsStore(opts: FoldNarrativeStoreOptions): FoldNarrativeStoreReport {
   const path = join(opts.root, "DECISIONS.md");
-  if (!existsSync(path)) return { kind: "decisions", changed: false, filesWritten: [], notes: ["no DECISIONS.md"] };
-  const before = readFileSync(path, "utf8");
+  const before = readFileIfExists(path);
+  if (before === undefined) return { kind: "decisions", changed: false, filesWritten: [], notes: ["no DECISIONS.md"] };
   const { text, unclassified } = deriveDecisionStatuses(before);
   const changed = text !== before;
   const written: string[] = [];
@@ -283,10 +288,10 @@ function foldDecisionsStore(opts: FoldNarrativeStoreOptions): FoldNarrativeStore
 }
 
 function foldMasterPlanStore(opts: FoldNarrativeStoreOptions): FoldNarrativeStoreReport {
-  const path = join(opts.root, "MASTER-PLAN.md");
-  if (!existsSync(path)) return { kind: "master-plan", changed: false, filesWritten: [], notes: ["no MASTER-PLAN.md"] };
-  const before = readFileSync(path, "utf8");
-  const currentWaveMonth = monthOf((opts.now ?? (() => new Date()))());
+  const path = resolveRepoLayout(opts.root).masterPlan;
+  const before = readFileIfExists(path);
+  if (before === undefined) return { kind: "master-plan", changed: false, filesWritten: [], notes: [`no ${path}`] };
+  const currentWaveMonth = monthOf(opts.clock ?? systemClock);
   const { folded, archives } = foldMasterPlanShippedLog(before, { currentWaveMonth });
   const changed = folded !== before;
   const written: string[] = [];
@@ -324,13 +329,14 @@ function foldForensicsStore(opts: FoldNarrativeStoreOptions): FoldNarrativeStore
   const allRewrites: Record<string, string> = {};
   for (const pageRelPath of candidates) {
     const abs = join(opts.root, pageRelPath);
-    if (!existsSync(abs)) {
+    // One read, then measure what was read: a stat-then-read pair could size one file and split another.
+    const content = readFileIfExists(abs);
+    if (content === undefined) {
       notes.push(`missing: ${pageRelPath}`);
       continue;
     }
-    const bytes = statSync(abs).size;
+    const bytes = Buffer.byteLength(content, "utf8");
     if (bytes < threshold) continue;
-    const content = readFileSync(abs, "utf8");
     const { index, files, pointerRewrites } = splitForensicsPage(content, { pageRelPath });
     writeIfNeeded(abs, index, opts.dryRun, written);
     for (const [relPath, fileText] of Object.entries(files)) writeIfNeeded(join(opts.root, relPath), fileText, opts.dryRun, written);
