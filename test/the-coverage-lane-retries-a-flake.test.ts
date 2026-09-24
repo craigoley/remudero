@@ -71,7 +71,10 @@ function runCoverageLane(dir: string, testFile: string, outerRaw?: string) {
   // suite runs in the coverage lane. NODE_TEST_CONTEXT must be DELETED — even an empty one makes
   // the nested node --test skip its files as a recursive run.
   env.NODE_V8_COVERAGE = "";
-  if (outerRaw) env.NODE_V8_COVERAGE = outerRaw;
+  // With no explicit outer directory, the real enclosing one (the coverage lane's) passes through,
+  // so the wrapper's own lines are measured; pass one and the retry get their own values anyway.
+  const outer = outerRaw ?? process.env.NODE_V8_COVERAGE;
+  if (outer) env.NODE_V8_COVERAGE = outer;
   delete env.NODE_TEST_CONTEXT;
   delete env.GITHUB_STEP_SUMMARY;
   delete env.TEST_RETRY;
