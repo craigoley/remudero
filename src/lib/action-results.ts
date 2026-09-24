@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readLedgerUnionBounded, type LedgerLines } from "./status.js";
+import { createLedgerRotationMemo } from "./ledger-union.js";
+import { readLedgerUnionMemoized, type LedgerLines } from "./status.js";
 import type { ExternalEffectResult, ExternalEffectState } from "./action-reconciliation.js";
 import type { Route } from "./service.js";
 import { redactConnectorEvidence } from "./action-reconciliation.js";
@@ -303,11 +304,13 @@ function parseFilter(url: URL): { filter: ActionResultsFilter } | { error: strin
 
 /** GET /v1/action-results — bounded, read-only projection of redacted external-effect receipts. */
 export function buildActionResultsRoute(ledgerPath: string): Route {
+  // Only reconciled rows reach the projection; the memo keeps each rotation's torn count for `ledger-partial`.
+  const rotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "external_effect.reconciled"));
   return {
     method: "GET",
     path: "/v1/action-results",
     scope: "read",
-    handler: (req: IncomingMessage, res: ServerResponse) => {
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       const parsed = parseFilter(url);
       if ("error" in parsed) {
@@ -319,7 +322,7 @@ export function buildActionResultsRoute(ledgerPath: string): Route {
         const onTorn = (raw: string): void => {
           if (tornRowCouldBeExternalEffect(raw)) tornExternal += 1;
         };
-        const lines = readLedgerUnionBounded(ledgerPath, { onTorn });
+        const lines = await readLedgerUnionMemoized(ledgerPath, rotations, onTorn);
         sendJson(res, 200, buildActionResultsProjection(lines, parsed.filter, undefined, tornExternal));
       } catch (error) {
         // Reason: a ledger read failure is an explicit unavailable result, never an empty success.

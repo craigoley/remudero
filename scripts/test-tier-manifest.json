@@ -1024,6 +1024,7 @@
     "test/ledger-repo-scope.test.ts": 887,
     "test/ledger-rotation-convergence.test.ts": 231,
     "test/ledger-rotation-is-locked.test.ts": 437,
+    "test/ledger-rotation-memo.test.ts": 0,
     "test/ledger-rotation.test.ts": 4435,
     "test/ledger-union.test.ts": 183,
     "test/legacy-board-review-proposals-can-retire.test.ts": 873,
