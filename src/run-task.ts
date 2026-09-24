@@ -29852,7 +29852,7 @@ export function logDiskReclaimRung(
     // (measured: 0 `objects_declined` rows in four days).
     let policyBlock: { enabled: boolean };
     try {
-      policyBlock = (deps.objectPolicy ?? (() => loadDefaultPolicy().values.objectReap))();
+      policyBlock = deps.objectPolicy?.() ?? loadDefaultPolicy().values.objectReap;
     } catch (err) {
       // Named and logged HERE, not folded silently into the generic "a sweep threw" catch below
       // — a policy this rung cannot load is a different failure than a worktree it cannot list,
