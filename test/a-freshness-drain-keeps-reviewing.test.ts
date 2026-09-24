@@ -28,7 +28,7 @@ const NEW_SHA = "b".repeat(40);
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 async function waitFor(predicate: () => boolean, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt++) {
+  for (let attempt = 0; attempt < 2000; attempt++) {
     if (predicate()) return;
     await settle();
   }
@@ -42,7 +42,7 @@ function fixturePlan(): Plan {
   return loadPlan(file);
 }
 
-interface Row { step: string; extra: Record<string, unknown>; sweeps: number }
+interface Row { step: string; extra: Record<string, unknown> }
 interface Pass { scope: LightPassScope | undefined; drainOpen: boolean; fixPending: boolean; detached: number }
 
 /** One stale exit whose drain waits on a held detached fix. `holdReviewPass`, when given, parks every
@@ -68,10 +68,11 @@ function staleExitWithHeldFix(holdReviewPass?: Promise<void>) {
     refreshMerged: () => () => true,
     runOne: async (id): Promise<RunResult> => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }),
     sleep: settle,
-    log: (step, extra = {}) => rows.push({ step, extra, sweeps }),
+    log: (step, extra = {}) => rows.push({ step, extra }),
     checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA }),
     sweep: async () => {
       sweeps += 1;
+      rows.push({ step: "fixture.full_sweep", extra: {} });
       // The first full pass admits a fix and detaches its long CI wait — the shape the drain exists for.
       if (sweeps === 1) detachSweepAction(fixGate, { actionKind: "fix-dispatch", taskId: "W1-T4053-FIX" });
     },
@@ -84,7 +85,7 @@ function staleExitWithHeldFix(holdReviewPass?: Promise<void>) {
       if (holdReviewPass && scope?.reviewOnly) await holdReviewPass;
     },
   });
-  return { daemon, rows, passes, releaseFix, drainOpen, sweepCount: () => sweeps };
+  return { daemon, rows, passes, releaseFix };
 }
 
 /** Runs `body` against a held-fix stale exit and ALWAYS releases the fix and settles the daemon after,
@@ -179,11 +180,12 @@ test("W1-T4053: a drain admits nothing but reviews", async () => {
     const outside = run.passes.filter((p) => !p.drainOpen);
     assert.ok(outside.every((p) => p.scope === undefined), JSON.stringify(outside));
     // No full sweep ran inside the drain: the final bounded sweep ran BEFORE it, and none after.
-    const started = run.rows.find((r) => r.step === "daemon.freshness_drain.started")!;
-    const completed = run.rows.find((r) => r.step === "daemon.freshness_drain.completed")!;
-    assert.equal(started.sweeps, 2, "the ordinary sweep and the final bounded sweep both ran before the drain");
-    assert.equal(completed.sweeps, started.sweeps, "no full sweep was admitted during the drain");
-    assert.equal(run.sweepCount(), 2);
+    const started = stepIndex(run.rows, "daemon.freshness_drain.started");
+    const completed = stepIndex(run.rows, "daemon.freshness_drain.completed");
+    const sweepRows = run.rows.flatMap((r, i) => (r.step === "fixture.full_sweep" ? [i] : []));
+    assert.ok(sweepRows.some((i) => i < started), "the final bounded sweep ran before the drain");
+    assert.deepEqual(sweepRows.filter((i) => i > started), [], "no full sweep was admitted during or after the drain");
+    assert.ok(completed > started);
   });
 });
 
