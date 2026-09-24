@@ -27,6 +27,7 @@ const BASE = [
   "const PATTERN = /[/\"'`]+/g;",
   "const HELP = `",
   "function notReal() {",
+  "an escaped \\` tick",
   "`;",
   "",
   "async function runReview(args: { pr: string }): Promise<string> {",
