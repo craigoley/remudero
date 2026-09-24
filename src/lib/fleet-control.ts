@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { repoScopedTaskKey } from "./ledger.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
@@ -153,11 +153,11 @@ export function resolvePauseExpiry(
 ): { expiresAt: string | null; indefinite: boolean } {
   if (until === "indefinite") return { expiresAt: null, indefinite: true };
   if (until) {
-    const parsed = new Date(until);
-    if (!Number.isNaN(parsed.getTime())) return { expiresAt: parsed.toISOString(), indefinite: false };
+    const parsedMs = Date.parse(until);
+    if (!Number.isNaN(parsedMs)) return { expiresAt: fixedClock(parsedMs).iso(), indefinite: false };
   }
   const ttlMs = PAUSE_DEFAULT_TTL_MS[classifyPauseReason(reason)];
-  return { expiresAt: new Date(now.getTime() + ttlMs).toISOString(), indefinite: false };
+  return { expiresAt: fixedClock(now.getTime() + ttlMs).iso(), indefinite: false };
 }
 
 /** The owner half of design (i): pid/host, exactly as {@link writeFlag} already recorded, plus a
@@ -191,7 +191,7 @@ export function requestPause(
   deps?: SharedPauseGitDeps,
   options?: RequestPauseOptions,
 ): FleetControlInfo {
-  const now = options?.now ?? new Date();
+  const now = options?.now ?? systemClock.date();
   const { expiresAt, indefinite } = resolvePauseExpiry(reason, options?.until, now);
   const sessionId = resolvePauseOwnerSessionId();
   const info = writeFlag(pauseFilePath(root), reason, { sessionId, expiresAt, indefinite });
@@ -651,10 +651,10 @@ export function evaluatePauseTier(input: PauseTierInput): PauseTier {
   const { setAt, expiresAt, indefinite, setterAlive, now } = input;
   const nowMs = now.getTime();
   if (!indefinite && expiresAt) {
-    const expiryMs = new Date(expiresAt).getTime();
+    const expiryMs = Date.parse(expiresAt);
     if (Number.isFinite(expiryMs)) {
       if (nowMs >= expiryMs) return "lapsed";
-      const setAtMs = new Date(setAt).getTime();
+      const setAtMs = Date.parse(setAt);
       if (Number.isFinite(setAtMs)) {
         const halfwayMs = setAtMs + (expiryMs - setAtMs) / 2;
         if (nowMs >= halfwayMs) return "needs_human";

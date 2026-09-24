@@ -40,7 +40,6 @@ import {
   stepPauseHoldGovernor,
   type DaemonDeps,
   type LightPassScope,
-  type PauseHoldGovernorDeps,
   type PauseHoldGovernorInput,
   type PauseHoldGovernorState,
   type PauseHoldOwner,
@@ -194,22 +193,23 @@ test("W1-T4429: ANCHOR_SESSION_RE/ANCHOR_REASON_RE/ANCHOR_EXPIRES_RE recognise t
 interface GovernorHarness {
   rows: Array<{ step: string; extra: Record<string, unknown> }>;
   counts: { cleared: number; needsHuman: number };
-  deps: PauseHoldGovernorDeps;
+  deps: Pick<DaemonDeps, "clearPauseHold" | "onPauseNeedsHuman">;
+  log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
 function governorHarness(): GovernorHarness {
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const counts = { cleared: 0, needsHuman: 0 };
-  const deps: PauseHoldGovernorDeps = {
-    log: (step, extra = {}) => rows.push({ step, extra }),
-    clearHold: () => {
+  const deps: Pick<DaemonDeps, "clearPauseHold" | "onPauseNeedsHuman"> = {
+    clearPauseHold: () => {
       counts.cleared += 1;
     },
-    onNeedsHuman: () => {
+    onPauseNeedsHuman: () => {
       counts.needsHuman += 1;
     },
   };
-  return { rows, counts, deps };
+  const log = (step: string, extra: Record<string, unknown> = {}) => rows.push({ step, extra });
+  return { rows, counts, deps, log };
 }
 
 const OWNER: PauseHoldOwner = {
@@ -238,7 +238,7 @@ test("W1-T4429: an orphaned pause escalates and then lapses", async () => {
 
   // Shortly after the setter died: well before either time tier, so it reads `orphaned` — escalated,
   // never touched.
-  const tier1 = await stepPauseHoldGovernor(input("2026-09-24T02:43:00.000Z"), state, harness.deps);
+  const tier1 = await stepPauseHoldGovernor(input("2026-09-24T02:43:00.000Z"), state, harness.deps, harness.log);
   assert.equal(tier1, "orphaned");
   assert.ok(harness.rows.some((r) => r.step === "pause.orphaned"), "the orphan is ledgered");
   assert.equal(harness.rows.find((r) => r.step === "pause.orphaned")!.extra.reason, OWNER.reason, "the ledger row names the reason");
@@ -246,13 +246,13 @@ test("W1-T4429: an orphaned pause escalates and then lapses", async () => {
 
   // A second tick, still orphaned, still before the halfway mark: dedup — never re-ledgered.
   harness.rows.length = 0;
-  const tier1b = await stepPauseHoldGovernor(input("2026-09-24T02:50:00.000Z"), state, harness.deps);
+  const tier1b = await stepPauseHoldGovernor(input("2026-09-24T02:50:00.000Z"), state, harness.deps, harness.log);
   assert.equal(tier1b, "orphaned");
   assert.equal(harness.rows.length, 0, "an unchanged tier is never re-ledgered");
 
   // Past HALF the window (setAt 02:42:32, expiry 04:42:32 → halfway 03:42:32): needs_human.
   harness.rows.length = 0;
-  const tier2 = await stepPauseHoldGovernor(input("2026-09-24T03:50:00.000Z"), state, harness.deps);
+  const tier2 = await stepPauseHoldGovernor(input("2026-09-24T03:50:00.000Z"), state, harness.deps, harness.log);
   assert.equal(tier2, "needs_human");
   assert.ok(harness.rows.some((r) => r.step === "pause.needs_human"), "the needs-human tier is ledgered");
   assert.equal(harness.counts.needsHuman, 1, "the needs-human escalation callback fired exactly once");
@@ -261,7 +261,7 @@ test("W1-T4429: an orphaned pause escalates and then lapses", async () => {
   // Past the FULL expiry: THIS is the falsifier's own condition ("stood past its expiry with no
   // escalation") — here it both ledgers pause.lapsed AND clears the hold.
   harness.rows.length = 0;
-  const tier3 = await stepPauseHoldGovernor(input("2026-09-24T04:50:00.000Z"), state, harness.deps);
+  const tier3 = await stepPauseHoldGovernor(input("2026-09-24T04:50:00.000Z"), state, harness.deps, harness.log);
   assert.equal(tier3, "lapsed");
   assert.ok(harness.rows.some((r) => r.step === "pause.lapsed"), "the lapse is ledgered");
   assert.equal(harness.counts.cleared, 1, "the hold is cleared exactly once, at expiry");
@@ -276,6 +276,7 @@ test("W1-T4429: an indefinite pause only escalates, never lapses", async () => {
     { holdId: "hold-indef", setAt: "2026-09-24T00:00:00.000Z", expiresAt: null, indefinite: true, setterAlive: false, owner: OWNER, now: farFuture },
     state,
     harness.deps,
+    harness.log,
   );
   assert.equal(tier, "orphaned", "an indefinite hold can still be orphaned");
   assert.equal(harness.counts.cleared, 0, "…but it is NEVER cleared — design (ii): only escalates, never lapses");
@@ -285,6 +286,7 @@ test("W1-T4429: an indefinite pause only escalates, never lapses", async () => {
     { holdId: "hold-indef", setAt: "2026-09-24T00:00:00.000Z", expiresAt: null, indefinite: true, setterAlive: false, owner: OWNER, now: new Date("2030-01-01T00:00:00.000Z") },
     state,
     harness.deps,
+    harness.log,
   );
   assert.notEqual(tier2, "lapsed");
   assert.equal(harness.counts.cleared, 0);

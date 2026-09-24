@@ -935,13 +935,13 @@ export interface DaemonDeps {
    *  this task) behaves exactly as before: PAUSE still holds dispatch, the governor below simply
    *  never runs. */
   checkPauseHold?: () => PauseHoldGovernorInput | undefined;
-  /** Clears whatever hold `checkPauseHold` described. Called at most once, only when the governor
-   *  reaches `lapsed` (design (ii): "at expiry it lapses the hold"). Required whenever
-   *  `checkPauseHold` is supplied — the real command wires both together. */
+  /** Clears whatever hold `checkPauseHold` described. Called AT MOST once per hold, only when the
+   *  governor reaches `lapsed` (design (ii): "at expiry it lapses the hold"); an `indefinite` hold never
+   *  reaches `lapsed`, so never here. Required whenever `checkPauseHold` is supplied. */
   clearPauseHold?: () => void | Promise<void>;
-  /** Best-effort needs-human escalation, called at most once, only when the governor reaches
-   *  `needs_human`. Optional even when `checkPauseHold` is wired — a caller that omits it still gets
-   *  the `pause.needs_human` ledger row (see {@link stepPauseHoldGovernor}). */
+  /** Best-effort needs-human escalation naming the owner and reason, called at most once per hold,
+   *  only when the governor reaches `needs_human`. Optional even when `checkPauseHold` is wired — a
+   *  caller that omits it still gets the `pause.needs_human` ledger row (see {@link stepPauseHoldGovernor}). */
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => FleetControlHold | undefined;
   /** An optional check, consulted once per tick with the same between-iterations-only discipline as the
@@ -1359,26 +1359,13 @@ export interface PauseHoldGovernorState {
   lastTier?: PauseTier;
 }
 
-export interface PauseHoldGovernorDeps {
-  log: (step: string, extra?: Record<string, unknown>) => void;
-  /** Clears the hold this governor is watching. Called AT MOST once per hold — only on the first
-   *  tick that reaches `lapsed` (design (ii): "at expiry it lapses the hold"). An `indefinite` hold
-   *  can never reach `lapsed` ({@link evaluatePauseTier}'s own contract), so this is never called for
-   *  one — design (ii): "a hold declared --indefinite only escalates, never lapses". */
-  clearHold: () => void | Promise<void>;
-  /** Best-effort needs-human escalation, naming the owner and reason (design (ii)). Called at most
-   *  once per hold — only on the first tick that reaches `needs_human`. A caller that omits this
-   *  still gets the `pause.needs_human` ledger row; only the actual paging is skipped. */
-  onNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
-}
-
 /**
  * ONE hold's per-tick governor step. Re-classifies via {@link evaluatePauseTier} and, only on a
  * TRANSITION away from `state.lastTier`, ledgers the new tier and takes its one associated action:
  *   - `orphaned`    → `pause.orphaned` (the setter is confirmed dead; the hold itself is untouched).
- *   - `needs_human` → `pause.needs_human`, then `deps.onNeedsHuman` (best-effort — a throw there is
+ *   - `needs_human` → `pause.needs_human`, then `deps.onPauseNeedsHuman` (best-effort — a throw there is
  *                     ledgered as `pause.needs_human_failed` and never costs the tick).
- *   - `lapsed`      → `pause.lapsed`, then `deps.clearHold` (this IS the auto-clear design (ii)
+ *   - `lapsed`      → `pause.lapsed`, then `deps.clearPauseHold` (this IS the auto-clear design (ii)
  *                     describes — "at expiry it lapses the hold").
  * `held` ledgers nothing: an ordinary, live, in-window pause is not new information every tick.
  * Returns the tier observed, so a caller that wants it (a test, or a richer log line) need not
@@ -1387,7 +1374,8 @@ export interface PauseHoldGovernorDeps {
 export async function stepPauseHoldGovernor(
   input: PauseHoldGovernorInput,
   state: PauseHoldGovernorState,
-  deps: PauseHoldGovernorDeps,
+  deps: Pick<DaemonDeps, "clearPauseHold" | "onPauseNeedsHuman">,
+  log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<PauseTier> {
   const tier = evaluatePauseTier(input);
   if (tier === state.lastTier) return tier;
@@ -1400,17 +1388,17 @@ export async function stepPauseHoldGovernor(
     reason: input.owner.reason ?? null,
   };
   if (tier === "orphaned") {
-    deps.log("pause.orphaned", base);
+    log("pause.orphaned", base);
   } else if (tier === "needs_human") {
-    deps.log("pause.needs_human", { ...base, expires_at: input.expiresAt });
+    log("pause.needs_human", { ...base, expires_at: input.expiresAt });
     try {
-      await deps.onNeedsHuman?.({ holdId: input.holdId, owner: input.owner, expiresAt: input.expiresAt });
+      await deps.onPauseNeedsHuman?.({ holdId: input.holdId, owner: input.owner, expiresAt: input.expiresAt });
     } catch (e) {
-      deps.log("pause.needs_human_failed", { ...base, error: String((e as Error)?.message ?? e) });
+      log("pause.needs_human_failed", { ...base, error: String((e as Error)?.message ?? e) });
     }
   } else if (tier === "lapsed") {
-    deps.log("pause.lapsed", { ...base, expires_at: input.expiresAt });
-    await deps.clearHold();
+    log("pause.lapsed", { ...base, expires_at: input.expiresAt });
+    await deps.clearPauseHold?.();
   }
   return tier;
 }
@@ -2763,13 +2751,7 @@ export async function runDaemon(
       if (pauseHold) {
         const holdState = pauseHoldGovernorStates.get(pauseHold.holdId) ?? { lastTier: undefined };
         pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
-        await stepPauseHoldGovernor(pauseHold, holdState, {
-          log,
-          clearHold: async () => {
-            await deps.clearPauseHold?.();
-          },
-          onNeedsHuman: deps.onPauseNeedsHuman,
-        });
+        await stepPauseHoldGovernor(pauseHold, holdState, deps, log);
       }
       // W1-T4429 — REVIEWS KEEP FLOWING THROUGH A PAUSE. Design (iii): a pause stops dispatching NEW
       // work, never judging work that is already finished. Before this, PAUSE's whole idle branch was
