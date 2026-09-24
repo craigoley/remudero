@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { evaluateCensusPrecheck } from "../scripts/census-precheck.mjs";
+import { evaluateCensusPrecheck, main } from "../scripts/census-precheck.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -93,6 +93,14 @@ test("census precheck: growth main already carries is not this branch's, but gro
   assert.deepEqual(evaluate({ ...base, "src/a.ts": "Date.now();\nDate.now();\n// edit\n" }, base), []);
   const grown = evaluate({ ...base, "src/a.ts": "Date.now();\nDate.now();\nDate.now();\n" }, base);
   assert.equal(grown.length, 1, grown.join("\n"));
+});
+
+test("census precheck: lowering a clock row below the file's own count is refused, like growth", () => {
+  const base = { ...baselines, "src/a.ts": "export const t = Date.now();\n" };
+  const head = { ...base, [CLOCK]: JSON.stringify({ "src/a.ts": { legacy: 0, dateNow: 0, newDate: 0 } }) };
+  const found = evaluate(head, base);
+  assert.equal(found.length, 1, found.join("\n"));
+  assert.match(found[0], /clock-signature: src\/a\.ts dateNow 1 > baseline 0/);
 });
 
 test("census precheck: a clean change, a deleted file and a changed census suite report nothing", () => {
@@ -182,4 +190,44 @@ test("census precheck: a real git push of a clean change passes, and one with no
   });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /census-precheck could not measure — not blocking/);
+});
+
+/** A repo on branch `work`, cut from `main` holding `seed`, with `change` committed on top — for
+ *  driving `main()` in-process, so its git and file readers run against a real tree. */
+function branchFixture(seed: Tree, change: Tree): string {
+  const repo = gitRepo({ kind: "census-precheck-main" });
+  const write = (tree: Tree) => {
+    for (const [path, text] of Object.entries(tree)) {
+      mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+      writeFileSync(join(repo.dir, path), text);
+    }
+  };
+  write(seed);
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "the base");
+  repo.git("switch", "--quiet", "-c", "work");
+  write(change);
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "the change");
+  return repo.dir;
+}
+
+test("census precheck main(): 1 and the named finding for caused growth, 0 for a clean change", (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const logs = t.mock.method(console, "log", () => {});
+  const seed = { ...baselines, "src/a.ts": "export const t = Date.now();\n" };
+  const grown = branchFixture(seed, { "src/a.ts": "export const t = Date.now();\nexport const u = Date.now();\n" });
+  assert.equal(main(["--root", grown, "--base", "main"]), 1);
+  assert.match(errors.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /src\/a\.ts dateNow 2 > baseline 1/);
+  const clean = branchFixture(seed, { "src/a.ts": "export const t = Date.now(); // tidy\n" });
+  assert.equal(main(["--root", clean, "--base", "main"]), 0);
+  assert.match(String(logs.mock.calls.at(-1)?.arguments[0]), /census-precheck: OK — 1 changed file\(s\)/);
+});
+
+test("census precheck main(): an unknown base or an unknown flag is 2, could-not-measure, never a violation", (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const dir = branchFixture({ ...baselines }, { "src/a.ts": "export {};\n" });
+  assert.equal(main(["--root", dir, "--base", "no-such-ref"]), 2);
+  assert.equal(main(["--no-such-flag"]), 2);
+  assert.ok(errors.mock.calls.every((c) => /could not measure/.test(String(c.arguments[0]))));
 });
