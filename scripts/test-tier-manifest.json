@@ -29,6 +29,7 @@
     "test/a-cash-request-is-bounded-and-its-reply-is-whole.test.ts": 0,
     "test/a-cash-worker-reaches-the-web-only-through-an-attributed-search.test.ts": 0,
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts": 4481,
+    "test/a-census-this-branch-grows-is-refused-before-the-push.test.ts": 0,
     "test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts": 1385,
     "test/a-changed-resource-policy-reaches-a-running-container.test.ts": 0,
     "test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts": 252,
