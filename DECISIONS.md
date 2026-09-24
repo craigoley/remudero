@@ -2978,12 +2978,12 @@ including the ledger census and the public benchmarks, is summarised in the PRs 
 
 ### 1. OPUS TAKES THE FIRST ATTEMPT ON DESIGN WORK AND ON TRULY RISKY WORK — AND ONLY EVER ON A SUBSCRIPTION
 
-- **SCOPE: "design + truly risky only"** (the operator's words, 2026-09-24, amending this entry's
-  first draft). Two kinds of work start on Opus:
+- **SCOPE: "design + truly risky only"** (the operator's words, 2026-09-24). The operator ruled on it
+  twice that day. This entry states the final rule. Only two kinds of work start on Opus:
   - **design work**, meaning any task in the `design` class;
-  - **risk:high work whose risk is danger, not size.**
-- **Large but routine work stays on the mid tier.** A risk:high task that declares
-  `band_meaning: span` is sized large, not dangerous. It routes as class `span` onto the mid tier
+  - **risk:high work that explicitly declares danger**, meaning `band_meaning: blast-radius`.
+- **Every other risk:high implement task is routine.** That covers both `band_meaning: span`
+  (sizing) and **no declared band at all**. These tasks route as class `routine` onto the mid tier
   (Sonnet or Sol, per section 2). The rule is `implementRouteClass` in src/lib/task-class.ts.
 - **Repeated failures still step up to Opus.** Unchanged: the diagnose-informed last attempt, the
   fix rung's final strike, the Architect, retro and the judge.
@@ -3009,14 +3009,9 @@ including the ledger census and the public benchmarks, is summarised in the PRs 
   - This also withdraws the 2026-09-16 cash squeeze path for frontier work ("leverage Luna or
     Terra if absolutely necessary in that tier").
   - Enforced by `capabilities.subscription_only` in `.remudero/mounts.yaml` and by `spawnWorker`.
-- **SHARE, MEASURED AT FILING.** 1,263 of 2,037 implement shards (62.0%) start on Opus under this
-  scope:
-  - 7 are design work;
-  - 233 declare `band_meaning: blast-radius`;
-  - 1,023 are risk:high with **no declared band**. This ruling does not exclude those, so they
-    start on Opus.
-  - If unbanded risk:high were also treated as routine, the share would be 11.8%. That is left for
-    a later ruling.
+- **SHARE, MEASURED AT FILING.** 240 of 2,037 implement shards (11.8%) start on Opus: 7 design and
+  233 `blast-radius`. The 1,375 other risk:high shards start on the mid tier: 352 declare `span` and
+  1,023 declare no band.
 
 ### 2. SOL vs SONNET IS AN A/B TEST, NOT A PREFERENCE
 
