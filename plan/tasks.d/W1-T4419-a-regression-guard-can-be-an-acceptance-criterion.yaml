@@ -1,0 +1,36 @@
+- id: W1-T4419
+  title: "A REGRESSION GUARD CAN NEVER BE AN ACCEPTANCE CRITERION — proof-discrimination refuses every proof that passes at the merge base, which a guard does by design; let a criterion declare `kind: guard` so review runs it and discrimination skips it"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "follow-up audit 2026-09-24 (operator: improve automated flow and self-improvement)"
+  plan_refs: ["W1-T4409", "W1-T4413", "W1-T4388"]
+  files:
+    - src/lib/plan.ts
+    - scripts/proof-discrimination-gate.mjs
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: three shards (W1-T4409, W1-T4413, W1-T4388) each carried a legitimate regression guard
+    ("loadPlan itself still refuses a duplicate id", "a genuinely merged task is still reported merged", "a W1-T mint
+    without a prefix is unchanged"). proof-discrimination refused #6916 on it, and an operator amendment (#6918) had
+    to delete all three. The guard tests still run in the suites, but the plan no longer records that the task
+    must preserve those behaviours.
+  design: |
+    An acceptance entry may carry `kind: guard` (default `change`). plan.ts parses and validates it. Review runs a
+    guard proof exactly like any other; it must pass at head. scripts/proof-discrimination-gate.mjs skips guard
+    criteria for the head-versus-base comparison and says so in its output. A task whose criteria are ALL guards is
+    refused by lint-plan: something must discriminate. Everything else is unchanged.
+  acceptance:
+    - claim: "a guard criterion is exempt from proof discrimination but still must pass at head"
+      proof: "unit test: a guard criterion is exempt from proof discrimination but still must pass at head"
+    - claim: "a task whose criteria are all guards is refused"
+      proof: "unit test: a task whose criteria are all guards is refused"
+  falsifier: |
+    CLOSE IF an acceptance criterion can already be declared a guard that discrimination skips.
