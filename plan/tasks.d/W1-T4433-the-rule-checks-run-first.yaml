@@ -11,7 +11,18 @@
   band_meaning: span
   origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
   plan_refs: []
-  files: [.github/workflows/ci.yml, src/lib/ci-parity.ts, src/lib/review.ts, scripts/list-rule-suites.mjs, test/the-rule-checks-run-first.test.ts]
+  # Scope ratified in a plan-only follow-up: these docs and regression suites shipped with #6980 and directly support the new rule-check gate.
+  files:
+    - .github/workflows/ci.yml
+    - docs/cli-reference.md
+    - scripts/list-rule-suites.mjs
+    - src/lib/ci-parity.ts
+    - src/lib/review.ts
+    - test/fast-gate-admits-the-census-class.test.ts
+    - test/preflight-coverage-mode.test.ts
+    - test/preflight-fast-mode.test.ts
+    - test/the-census-admission-set-is-derived-not-enumerated.test.ts
+    - test/the-rule-checks-run-first.test.ts
   status: queued
   attempts: 0
   rationale: |
