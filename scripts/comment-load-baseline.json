@@ -117,6 +117,7 @@
   "scripts/mutation-ratchet.mjs": 296,
   "scripts/mutation-relevant-paths.json": 0,
   "scripts/needs-human-issue.mjs": 250,
+  "scripts/no-draft-pull-request-census.mjs": 14,
   "scripts/no-hand-rolled-fetch-check.mjs": 32,
   "scripts/plan-state-claims.mjs": 60,
   "scripts/prompt-surface-gate.mjs": 250,
