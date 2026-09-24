@@ -1,20 +1,14 @@
 /**
  * lib/github-event-wake.ts — the signed GitHub-event wake (W1-T2568, MASTER-PLAN, plan_refs
  * W1-T463/W1-T473/W1-T526/W1-T1272/W1-T2430/W1-T2519).
- * The daemon's poll loop (`lib/daemon.ts`) only notices a GitHub change on its next scheduled
- * `pollIntervalMs` tick. This module is an early wake for that SAME reconciliation, never a
- * second one: a signed webhook delivery writes one durable "recheck GitHub" marker, and the
- * daemon skips the rest of its current wait, every other gate untouched.
+ * An early wake for the daemon's SAME poll reconciliation, never a second one: a signed webhook
+ * delivery writes one durable "recheck GitHub" marker and the daemon skips the rest of its wait.
  *
- * Three pieces: {@link createGitHubEventWakeHandler}, the self-authenticated webhook route; the
- * marker primitives (one atomic JSON file under the shared state directory both processes mount
- * read-write — {@link sweepWakeMarkerPath}, {@link readSweepWakeMarker},
- * {@link writeSweepWakeMarkerAtomic}, {@link consumeSweepWakeMarker}); and the daemon-side wake
- * ({@link createSweepWakeSignal}, {@link watchSweepWakeMarker}, {@link wireSweepWakeToDaemon}),
- * wrapping `DaemonDeps.sleep` so a marker write resolves the poll wait through the same gated sweep.
- * INVARIANT: never calls GitHub, decides a PR's disposition, selects a merge method, or bypasses
- * the merge hold — a missed/failed webhook recovers on the next ordinary poll. A marker means
- * only "something may have changed," never the queue's actual state.
+ * Three pieces: the route {@link createGitHubEventWakeHandler}; the marker primitives (one atomic JSON
+ * file in the shared state directory, {@link sweepWakeMarkerPath}); and the daemon-side wake
+ * ({@link wireSweepWakeToDaemon}), resolving `DaemonDeps.sleep` through the same gated sweep.
+ * INVARIANT: never calls GitHub, decides a PR's disposition, selects a merge method, or bypasses the
+ * merge hold; a missed webhook recovers on the next poll. A marker means only "something may have changed".
  * FALSIFIER: test/github-event-sweep-wake.test.ts, test/main-health-event-wake.test.ts.
  * Why: docs/forensics/github-event-wake.md#module-header (W1-T2568). */
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -343,6 +337,71 @@ export function consumeSweepWakeMarker(path: string): SweepWakeMarker | undefine
   }
 }
 
+/** W1-T4394: deliveries that change nothing the daemon acts on, counted until the next summary flush. */
+export interface WakeCounters {
+  accepted_coalesced: number;
+  ignored: number;
+  duplicate: number;
+  by_event: Record<string, number>;
+}
+
+export type WakeSummaryRow = { window_start: string; window_end: string } & WakeCounters;
+
+/** One summary row a minute: MEASURED 2026-09-23, per-delivery wake rows were 75% of core-ledger writes. */
+export const WAKE_SUMMARY_FLUSH_MS = 60_000;
+
+export function createWakeCounters(): WakeCounters {
+  return { accepted_coalesced: 0, ignored: 0, duplicate: 0, by_event: {} };
+}
+
+function countWake(counters: WakeCounters, kind: "accepted_coalesced" | "ignored" | "duplicate", event?: string, action?: string): void {
+  counters[kind]++;
+  const key = `${event ?? "-"}/${action ?? "-"}`;
+  counters.by_event[key] = (counters.by_event[key] ?? 0) + 1;
+}
+
+export function wakeSummaryRow(counters: WakeCounters, window: { start: string; end: string }): WakeSummaryRow {
+  return { window_start: window.start, window_end: window.end, ...counters, by_event: { ...counters.by_event } };
+}
+
+/** Accepted deliveries one ledger row stands for: 1 for a full accepted row, a summary's coalesced count. */
+export function acceptedWakeCount(line: Record<string, unknown>): number | undefined {
+  if (line.step === "github.wake.accepted") return 1;
+  const n = line.step === "github.wake.summary" ? line.accepted_coalesced : undefined;
+  return typeof n === "number" && n > 0 ? n : undefined;
+}
+
+/** Writes the window since the last successful write each interval, then zeroes `counters`; a throwing
+ *  `write` keeps every count and the window start. Unref'd; the returned stop is the shutdown flush. */
+export function startWakeSummaryFlush(opts: {
+  counters: WakeCounters;
+  write: (window: { start: string; end: string }) => void;
+  now: () => string;
+  intervalMs?: number;
+}): () => void {
+  let start = opts.now();
+  const flush = (): void => {
+    const end = opts.now();
+    const { counters } = opts;
+    if (counters.accepted_coalesced + counters.ignored + counters.duplicate > 0) {
+      try {
+        opts.write({ start, end });
+      } catch (e) {
+        console.error(`github.wake.summary: flush failed, counts kept for the next one (${String((e as Error)?.message ?? e)})`);
+        return;
+      }
+      Object.assign(counters, createWakeCounters());
+    }
+    start = end;
+  };
+  const timer = setInterval(flush, opts.intervalMs ?? WAKE_SUMMARY_FLUSH_MS);
+  timer.unref();
+  return () => {
+    clearInterval(timer);
+    flush();
+  };
+}
+
 // ── (v) THE ROUTE — the self-authenticated POST /v1/hooks/github ───────────────────────────
 
 /** Bytes, bounded BEFORE buffering, never after. 1 MiB is far above any real delivery — a
@@ -366,6 +425,8 @@ export interface GithubEventWakeOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Injectable ONLY for a test — production always gets {@link writeSweepWakeMarkerAtomic}. */
   writeMarker?: (path: string, record: SweepWakeMarker) => void;
+  /** When set, a delivery that arms no marker, an ignored one and a duplicate are counted here, not logged. */
+  counters?: WakeCounters;
 }
 
 /**
@@ -480,7 +541,8 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       const event = firstHeader(req, "x-github-event");
       const action = extractAction(body);
       if (!event || !isAllowlistedGithubEvent(event, action)) {
-        log("github.wake.ignored", { reason: "unsupported_event_or_action", event, action });
+        if (opts.counters) countWake(opts.counters, "ignored", event, action);
+        else log("github.wake.ignored", { reason: "unsupported_event_or_action", event, action });
         sendJson(res, 202, { error: "ignored" });
         return;
       }
@@ -492,7 +554,8 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         return;
       }
       if (opts.dedup.has(deliveryId)) {
-        log("github.wake.duplicate", { delivery_id: deliveryId, event, action });
+        if (opts.counters) countWake(opts.counters, "duplicate", event, action);
+        else log("github.wake.duplicate", { delivery_id: deliveryId, event, action });
         sendJson(res, 202, { duplicate: true });
         return;
       }
@@ -512,8 +575,14 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         repository,
         receivedAtIso: now().toISOString(),
       };
+      const armed = readSweepWakeMarker(opts.markerPath) === undefined;
       writeMarker(opts.markerPath, record);
       opts.dedup.record(deliveryId);
+      if (opts.counters && !armed) {
+        countWake(opts.counters, "accepted_coalesced", event, action);
+        sendJson(res, 202, { accepted: true });
+        return;
+      }
       const summary = flushSemanticSummary();
       log("github.wake.accepted", {
         delivery_id: deliveryId,
