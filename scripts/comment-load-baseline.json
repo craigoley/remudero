@@ -38,7 +38,7 @@
   "deploy/recycle-container.sh": 750,
   "deploy/resource-policy.sh": 250,
   "deploy/runtime-env-vars.sh": 39,
-  "deploy/serve-container.sh": 256,
+  "deploy/serve-container.sh": 265,
   "deploy/verify-image.sh": 322,
   "hooks/commit-msg": 37,
   "hooks/deny-floor.sh": 250,
