@@ -350,7 +350,19 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // THIRTY-ONE since the advisory reviewer's `clockBound` (run-task.ts, W1-T3960) landed. The
   // reviewer uses the existing `reviewerClockBoundMs ?? loadDefaultPolicy()` seam, so it receives
   // the same injectable quiet-stream policy as every ordinary worker spawn.
-  assert.equal(readers.length, 31, `expected 31 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-TWO since `logDiskReclaimRung`'s object-reap sub-rung (run-task.ts, W1-T4022) started
+  // reading `loadDefaultPolicy().values.objectReap` instead of `loadPolicy(policyPath(config.root))`
+  // — the PRIOR line read `config.root`, not `repoRoot`, so it never matched UNREDIRECTABLE at all
+  // and was invisible to this detector; that was also, independently, the bug this task fixes:
+  // `config.root` is the daemon's own root, which has no `plan/policy.yaml`, so the read threw on
+  // every tick and was silently swallowed. The replacement, `deps.objectPolicy?.() ??
+  // loadDefaultPolicy().values.objectReap`, is SEAMED from the moment it was written — the SAME
+  // `readPolicy?.() ?? loadDefaultPolicy()` shape `checkProofTimeoutMs`'s own reader
+  // (run-task.ts, already in this corpus) already uses — so it is NOT allowlisted; adding it to
+  // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
+  // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
+  // needed no edit.
+  assert.equal(readers.length, 32, `expected 32 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

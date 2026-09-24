@@ -104,6 +104,8 @@ function baseOpts(log: (step: string, extra?: Record<string, unknown>) => void, 
       say: () => {},
       account: (result: WorkerResult) => result,
       harnessCommitForShellLessWorker: refusedHarness("no anchored COMMIT_MESSAGE line in the report"),
+      // W1-T4450: these rounds leave no edits, so the fix lane's one re-ask never fires here.
+      worktreeHasUncommittedChanges: () => false,
     },
   };
 }
