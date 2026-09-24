@@ -684,6 +684,9 @@ import {
   parseReopenedKeysCache,
   writeReopenedKeys,
   gitGrepAnchorTrue,
+  cachedAnchorGrep,
+  createAnchorGrepCache,
+  readOriginMainSha,
   inboxDraftPrompt,
   isDraftStale,
   isRatifiedInLedger,
@@ -31032,7 +31035,7 @@ export async function daemonCommand(
     boardOpenPrCount.reset();
     const proj = projectPlan(
       planOverride,
-      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
+      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe, skipUncreditedBuildWarning: true },
       statusPath,
     );
     lastProj = proj;
@@ -35334,6 +35337,7 @@ export function buildCreditCandidates(
     mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
     readLedger,
     skipTasklessEscalations: true,
+    skipUncreditedBuildWarning: true,
   };
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
@@ -40786,9 +40790,12 @@ export function buildInboxDraftHook(
     runId: string,
     log: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
+  grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
+  mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
 ): () => Promise<void> {
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
+  const anchorGrepCache = createAnchorGrepCache();
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -40848,11 +40855,12 @@ export function buildInboxDraftHook(
         const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
         const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
+        const sha = mainSha();
         draftReadiness = {
           plan,
           isMerged,
           depsUnobservable,
-          grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+          grepAnchorTrue: (a: EvidenceAnchor) => cachedAnchorGrep(anchorGrepCache, sha, a, grepAnchor),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
           isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
