@@ -2,9 +2,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+import type { FleetLaneDeps } from "./fleet-lane.js";
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -263,8 +264,8 @@ export function readSreLaneStore(stateDir: string): SreLaneStore {
 function incidentFeedbackRaw(evidence: IncidentEvidence, suspectPrs: readonly string[]): string {
   const lines = [
     `Incident ${evidence.fingerprint.slice(0, 12)}: ${evidence.kind} ${evidence.name}`,
-    `First seen: ${new Date(evidence.firstSeenMs).toISOString()}`,
-    `Last seen: ${new Date(evidence.lastSeenMs).toISOString()}`,
+    `First seen: ${fixedClock(evidence.firstSeenMs).iso()}`,
+    `Last seen: ${fixedClock(evidence.lastSeenMs).iso()}`,
     `Count: ${evidence.count}, burn: ${evidence.burnPerHour.toFixed(2)}/hr`,
     `Deploy sha(s): ${evidence.deployShas.length ? evidence.deployShas.join(", ") : "unknown"}`,
     `Instance(s): ${evidence.instances.join(", ")}`,
@@ -278,8 +279,9 @@ function incidentFeedbackRaw(evidence: IncidentEvidence, suspectPrs: readonly st
 
 // ── one pass ─────────────────────────────────────────────────────────────────────────────────
 
-export interface SreLaneDeps {
-  stateDir: string;
+/** `stateDir`, `mergedLastDay` and `clock` are fleet-lane.ts's own members — this lane paces and
+ *  pauses exactly as that one does — so they are reused from {@link FleetLaneDeps}, not redeclared. */
+export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "clock"> & {
   /** Repo root — where {@link captureFeedback}/{@link listFeedback} read and write. */
   root: string;
   /** Every incident.event/incident.sampled row this pass should consider, read-only. */
@@ -290,11 +292,8 @@ export interface SreLaneDeps {
   framesFor: (fingerprint: string) => IncidentFrameLike[];
   /** Merged PRs (with files) since a deploy sha — `undefined` sha reads the last 24 hours. */
   mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[];
-  /** How many PRs the fleet merged in the last 24 hours — the pace this lane files at. */
-  mergedLastDay: () => number;
-  clock?: Clock;
   log: (step: string, extra?: Record<string, unknown>) => void;
-}
+};
 
 export interface SreLanePass {
   /** The fingerprint filed this pass, if any. */
@@ -307,7 +306,7 @@ export interface SreLanePass {
  *  worst-burning survivor at the fleet's own pace. Never files more than one fingerprint a pass —
  *  the same one-at-a-time discipline fleet-lane.ts's `triageFleetLane` uses, and for the same
  *  reason: a burst of concurrent filers racing the same checkout is worse than a slower lane. */
-export function runSreLanePass(deps: SreLaneDeps): SreLanePass {
+export function runSreLanePass(deps: SreLaneInput): SreLanePass {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
   const store = readSreLaneStore(deps.stateDir);
@@ -328,7 +327,7 @@ export function runSreLanePass(deps: SreLaneDeps): SreLanePass {
     origin: incidentFeedbackOrigin(worst.fingerprint),
     id: `incident-${worst.fingerprint.slice(0, 16)}`,
   });
-  store[worst.fingerprint] = { ts: new Date(now).toISOString() };
+  store[worst.fingerprint] = { ts: fixedClock(now).iso() };
   writeAtomic(sreLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
   deps.log("sre_lane.filed", {
     fingerprint: worst.fingerprint,
@@ -342,7 +341,7 @@ export function runSreLanePass(deps: SreLaneDeps): SreLanePass {
 /** Run {@link runSreLanePass} on its own timer, never two at once — mirrors gardener.ts's and
  *  fleet-lane.ts's own tick wrappers exactly. Returns a `(pollIntervalMs) => {stop}` starter, the
  *  exact shape `src/run-task.ts`'s daemon `gardens` array already takes every other lane as. */
-export function startSreLane(deps: SreLaneDeps): (pollIntervalMs: number) => { stop: () => void } {
+export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { stop: () => void } {
   return (pollIntervalMs: number) => {
     let running = false;
     const tick = () => {

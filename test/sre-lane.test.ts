@@ -23,7 +23,7 @@ import {
   worstOpenIncident,
   type IncidentLedgerEvent,
   type MergedPrFiles,
-  type SreLaneDeps,
+  type SreLaneInput,
 } from "../src/lib/sre-lane.js";
 
 function tmpRoot(): string {
@@ -47,7 +47,7 @@ function event(fingerprint: string, atIso: string, extra: Partial<IncidentLedger
   };
 }
 
-function baseDeps(root: string, overrides: Partial<SreLaneDeps> = {}): SreLaneDeps {
+function baseDeps(root: string, overrides: Partial<SreLaneInput> = {}): SreLaneInput {
   return {
     stateDir: join(root, "state"),
     root,

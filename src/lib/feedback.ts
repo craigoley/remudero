@@ -24,13 +24,10 @@ import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.j
 export const FEEDBACK_ORIGINS = ["cli", "ui", "issue"] as const;
 export type NamedFeedbackOrigin = (typeof FEEDBACK_ORIGINS)[number];
 
-/** `FeedbackOrigin` is the named enum above plus four machine-origin shapes: `issue#<n>` (one
- * GitHub issue, W1-T57), `alert#<id>` (one scanning alert, W1-T56), `repair#<surface>`
- * (one recurring `sweep.disposed` disposition, W1-T905), and `incident#<fingerprint>` (one
- * fleet incident, `lib/sre-lane.ts`'s own SRE lane, W1-T4385 — the fingerprint is
- * `fingerprintIncidentEvent`'s own sha256 hex, `lib/incident-events.ts`). These name WHICH
- * machine source produced the entry, so `rmd trace` (W1-T43) can point straight back at it. Why:
- * the full citation is archived in docs/forensics/feedback.md. */
+/** `FeedbackOrigin` is the named enum above plus four machine-origin shapes: `issue#<n>` (W1-T57),
+ * `alert#<id>` (W1-T56), `repair#<surface>` (W1-T905) and `incident#<fingerprint>` (W1-T4385, one
+ * sre-lane.ts incident). They name WHICH machine source produced the entry, so `rmd trace` (W1-T43)
+ * can point straight back at it. Why: the full citation is archived in docs/forensics/feedback.md. */
 export type FeedbackOrigin =
   | NamedFeedbackOrigin
   | `issue#${number}`
@@ -44,8 +41,7 @@ const MACHINE_ORIGIN_ALERT = /^alert#(code-scanning|dependabot|secret-scanning)-
 /** `repair#<surface>` (W1-T905) — a `sweep.disposed` row's own lower-kebab-case `disposition`
  *  value (`DISPOSITION_RULES`, src/lib/sweep.ts), never invented text. */
 const MACHINE_ORIGIN_REPAIR = /^repair#[a-z][a-z-]*$/;
-/** `incident#<fingerprint>` (W1-T4385) — a sha256 hex digest, `fingerprintIncidentEvent`'s own
- *  output (`lib/incident-events.ts`), never invented text. */
+/** `incident#<fingerprint>` (W1-T4385) — `fingerprintIncidentEvent`'s sha256 hex, never invented. */
 const MACHINE_ORIGIN_INCIDENT = /^incident#[0-9a-f]{64}$/;
 
 /** True for any valid {@link FeedbackOrigin} — the named enum or a well-formed machine-origin
