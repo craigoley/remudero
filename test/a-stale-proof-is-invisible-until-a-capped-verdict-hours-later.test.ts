@@ -154,6 +154,7 @@ test("the workflow evaluates the PR head on body edits and ci-gate aggregates th
   assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
   assert.match(workflow, /fetch-depth: 0/);
   assert.match(workflow, /proof-discrimination-gate\.mjs/);
-  assert.match(ciGate, /types: \[opened, synchronize, reopened, edited\]/);
+  // W1-T4400: ci-gate.yml fires on the edit alone; ci.yml's last job aggregates every other event.
+  assert.match(ciGate, /types: \[edited\]/);
   assert.match(ciGate, /"proof-discrimination"/);
 });

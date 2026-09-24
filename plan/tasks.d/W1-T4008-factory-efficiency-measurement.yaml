@@ -17,7 +17,9 @@
     - openapi/daemon.yaml
     - test/factory-metrics.test.ts
     - test/factory-metrics-wiring.test.ts
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4008 — It depends on W1-T4007, which will never be built.
   attempts: 0
   rationale: |
     Warp defines factory success by shipped product relative to inference cost and human time, and

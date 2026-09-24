@@ -920,3 +920,45 @@ export function taskIdCollisions(
   }
   return collisions;
 }
+
+// ── OWNERSHIP AT REVIEW TIME (W1-T4414): two OPEN PRs can file one id; only the atomic ref's holder arbitrates.
+
+/** The percent-decoded `branch=` of an anchor's holder line; `undefined` for a legacy anchor with
+ *  no holder line, a malformed one, or the literal `unknown` a detached-HEAD mint records. */
+export function reservationHolderBranch(anchorMessage: string): string | undefined {
+  const parsed = parseReservationHolderLine(anchorMessage);
+  return parsed.status === "known" ? parsed.holder.branch : undefined;
+}
+
+/** One id's reservation as read from origin: its anchor message, provably no ref, or UNKNOWN. */
+export type ReservationAnchorRead =
+  | { status: "present"; message: string }
+  | { status: "absent" }
+  | { status: "unknown"; reason: string };
+
+/** Reads refs/rmd-id/<id> for each id from `run`'s origin. A failed listing makes EVERY id unknown:
+ *  an unread namespace is not an empty one, so it can never be read as "not reserved". */
+export function readReservationAnchors(
+  ids: readonly string[],
+  run: RemoteReserveDeps["run"],
+): Map<string, ReservationAnchorRead> {
+  const reads = new Map<string, ReservationAnchorRead>();
+  if (ids.length === 0) return reads;
+  const listed = run(["ls-remote", "origin", ...ids.map(taskIdReservationRef)]);
+  if (listed.status !== 0) {
+    for (const id of ids) reads.set(id, { status: "unknown", reason: `ls-remote failed: ${listed.stderr.trim()}` });
+    return reads;
+  }
+  const shaByRef = new Map(listed.stdout.split("\n").filter(Boolean).map((l) => [l.split("\t")[1], l.split("\t")[0]]));
+  for (const id of ids) {
+    const sha = shaByRef.get(taskIdReservationRef(id));
+    if (sha === undefined) {
+      reads.set(id, { status: "absent" });
+      continue;
+    }
+    const fetched = run(["fetch", "--quiet", "--no-tags", "origin", taskIdReservationRef(id)]);
+    const body = fetched.status === 0 ? run(["log", "-1", "--format=%B", sha]) : fetched;
+    reads.set(id, body.status === 0 ? { status: "present", message: body.stdout } : { status: "unknown", reason: body.stderr.trim() });
+  }
+  return reads;
+}

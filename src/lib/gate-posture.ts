@@ -519,6 +519,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "ci:baseline-monotonic": repair(true, "upward baselines must be justified or lowered"),
   "ci:ci": repair(true, "unit/type failures are computable implementation repairs"),
   "ci:ci-required": repair(true, "the required aggregator reflects repairable child checks"),
+  "ci:ci-gate": repair(true, "the required aggregate reflects repairable child checks (W1-T4400: runs ci-gate.yml's own step)"),
   "ci:claims": repair(true, "claim failures name the stale claim"),
   "ci:commitlint": repair(true, "the PR title is mechanically rewriteable"),
   "ci:comment-load-ratchet": repair(true, "comment-load prints the reviewed baseline line when growth is intended"),

@@ -39,6 +39,13 @@ export interface MainHealthRungDeps {
   ) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
   readMainRunHistory?: (branch: string) => MainHealthRunHistoryEntry[] | undefined | Promise<MainHealthRunHistoryEntry[] | undefined>;
   requeueCheck?: (failure: CiFailure) => boolean | void | Promise<boolean | void>;
+  readRequiredChecks?: () => readonly string[];
+}
+
+function judgedRollup(rollup: readonly RollupCheckEntry[], required: ReadonlySet<string>): RollupCheckEntry[] {
+  return required.size === 0
+    ? [...rollup]
+    : rollup.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""));
 }
 
 interface RepoMetadata {
@@ -166,7 +173,12 @@ export function buildMainHealthRung(
       ]) as CommitMetadata;
       const sha = requiredString(commit?.sha, "default branch head sha");
       const rollup = rollupFor(owner, repo, sha, deps.fetch);
-      let observation = mainHealthFromRollup(sha, rollup, undefined);
+      const required = new Set(deps.readRequiredChecks?.() ?? []);
+      let observation = mainHealthFromRollup(sha, rollup, required.size > 0 ? required : undefined);
+      const advisoryFailing =
+        required.size === 0
+          ? []
+          : mainHealthFromRollup(sha, rollup, undefined).failingChecks.filter((name) => !observation.failingChecks.includes(name));
       deps.log("main.health.observed", {
         branch,
         sha,
@@ -175,6 +187,8 @@ export function buildMainHealthRung(
         failing_checks: observation.failingChecks,
         pending_checks: observation.pendingChecks,
         non_evidence_checks: observation.nonEvidenceChecks,
+        judged_against: required.size > 0 ? "ci-gate-required" : "all-checks",
+        ...(advisoryFailing.length > 0 ? { advisory_failing_checks: [...advisoryFailing].sort() } : {}),
       });
 
       if (observation.state === "red") {
@@ -187,7 +201,7 @@ export function buildMainHealthRung(
         let failures: CiFailure[] | undefined;
         let ciFailuresUnavailable: string | undefined;
         try {
-          failures = deps.readCiFailures ? await deps.readCiFailures(rollup) : undefined;
+          failures = deps.readCiFailures ? await deps.readCiFailures(judgedRollup(rollup, required)) : undefined;
           if (!deps.readCiFailures) ciFailuresUnavailable = "no CI failure reader configured";
           if (deps.readCiFailures && failures === undefined) ciFailuresUnavailable = "the CI failure reader returned no evidence";
         } catch (error) {

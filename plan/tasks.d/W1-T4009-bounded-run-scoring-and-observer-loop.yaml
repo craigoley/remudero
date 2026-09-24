@@ -17,7 +17,9 @@
     - openapi/daemon.yaml
     - test/factory-scoring.test.ts
     - test/factory-observer.test.ts
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4009 — It depends on W1-T4007, which will never be built.
   attempts: 0
   rationale: |
     Warp's scoring and observer material closes the loop that most agent products leave open: retain

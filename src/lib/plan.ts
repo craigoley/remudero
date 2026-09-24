@@ -368,7 +368,7 @@ function validateRiskRulingShape(raw: unknown, sourceLabel: string, taskId: stri
  * a partial blob that legitimately depends on ids outside it (lib/inbox.ts's ratification-candidate
  * drafts, W1-T110) gets real per-task validation without a false "unknown task" failure.
  */
-export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
+export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicate?: (id: string) => void): Task[] {
   let raw: unknown;
   try {
     raw = parseYaml(text);
@@ -382,7 +382,10 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
     if (typeof entry !== "object" || entry === null) throw new PlanError("each task must be a mapping.");
     const e = entry as Record<string, unknown>;
     const id = req(e.id as string, "id", String(e.id ?? "<unknown>"));
-    if (byId.has(id)) throw new PlanError(`duplicate task id '${id}'`);
+    if (byId.has(id)) {
+      if (!onDuplicate) throw new PlanError(`duplicate task id '${id}'`);
+      onDuplicate(id);
+    }
     const risk = (e.risk ?? DEFAULT_RISK) as TaskRisk;
     if (!TASK_RISKS.includes(risk)) {
       throw new PlanError(`task ${id}: invalid risk '${risk}' (must be ${TASK_RISKS.join("|")})`);
@@ -588,33 +591,55 @@ export function loadPlanQuarantiningDuplicates(
   shardDir: string = join(dirname(path), "tasks.d"),
 ): { plan: Plan; quarantined: QuarantinedTask[] } {
   const duplicateFiles = new Map<string, string[]>();
-  const merged = readMergedPlan(path, io, shardDir, (earlier, shardPath) => {
-    const files = duplicateFiles.get(earlier.id) ?? [earlier.sourcePath ?? path];
-    files.push(shardPath);
-    duplicateFiles.set(earlier.id, files);
+  const merged = readMergedPlan(path, io, shardDir, (id, earlierPath, laterPath) => {
+    recordDuplicate(duplicateFiles, id, earlierPath ?? path, laterPath);
   });
-  if (duplicateFiles.size === 0) return { plan: validatedPlan(merged.tasks), quarantined: [] };
+  return quarantineDuplicates(merged.tasks, duplicateFiles, path);
+}
 
+/** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine, for the core daemon. */
+export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>): {
+  plan: Plan;
+  quarantined: QuarantinedTask[];
+} {
+  const duplicateFiles = new Map<string, string[]>();
+  const tasks = mergeBlobTasks(blobs, (id, earlierLabel, laterLabel) =>
+    recordDuplicate(duplicateFiles, id, earlierLabel, laterLabel),
+  );
+  return quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan");
+}
+
+function recordDuplicate(into: Map<string, string[]>, id: string, earlier: string, later: string): void {
+  const files = into.get(id) ?? [earlier];
+  if (!files.includes(later)) files.push(later);
+  into.set(id, files);
+}
+
+function quarantineDuplicates(
+  all: Task[],
+  duplicateFiles: Map<string, string[]>,
+  fallbackPath: string,
+): { plan: Plan; quarantined: QuarantinedTask[] } {
+  if (duplicateFiles.size === 0) return { plan: validatedPlan(all), quarantined: [] };
   const quarantined: QuarantinedTask[] = [...duplicateFiles].map(([id, files]) => ({ id, files, reason: "duplicate_id" }));
   const held = new Set(duplicateFiles.keys());
   for (let grew = true; grew; ) {
     grew = false;
-    for (const t of merged.tasks) {
+    for (const t of all) {
       if (held.has(t.id) || !t.depends_on.some((dep) => held.has(dep))) continue;
       held.add(t.id);
-      quarantined.push({ id: t.id, files: [t.sourcePath ?? path], reason: "depends_on_quarantined" });
+      quarantined.push({ id: t.id, files: [t.sourcePath ?? fallbackPath], reason: "depends_on_quarantined" });
       grew = true;
     }
   }
-  const tasks = merged.tasks.filter((t) => !held.has(t.id));
-  return { plan: validatedPlan(tasks), quarantined };
+  return { plan: validatedPlan(all.filter((t) => !held.has(t.id))), quarantined };
 }
 
 function readMergedPlan(
   path: string,
   io: FileIntegrityIO,
   shardDir: string,
-  onDuplicate?: (earlier: Task, shardPath: string) => void,
+  onDuplicate?: (id: string, earlierPath: string | undefined, laterPath: string) => void,
 ): Plan {
   let text: string;
   try {
@@ -622,7 +647,7 @@ function readMergedPlan(
   } catch (err) {
     throw new PlanError(`cannot read plan file (${path}): ${String(err)}`);
   }
-  const tasks = parseTasksFromYaml(text, path);
+  const tasks = parseTasksFromYaml(text, path, onDuplicate && ((id) => onDuplicate(id, path, path)));
   const byId = new Map(tasks.map((t) => [t.id, t]));
 
   for (const file of listShardFiles(shardDir)) {
@@ -637,13 +662,13 @@ function readMergedPlan(
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
       throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
     }
-    for (const t of parseTasksFromYaml(shardText, shardPath)) {
+    for (const t of parseTasksFromYaml(shardText, shardPath, onDuplicate && ((id) => onDuplicate(id, shardPath, shardPath)))) {
       const earlier = byId.get(t.id);
       if (earlier) {
         if (!onDuplicate) {
           throw new PlanError(`duplicate task id '${t.id}' (shard ${shardPath} collides with an earlier plan entry)`);
         }
-        onDuplicate(earlier, shardPath);
+        onDuplicate(t.id, earlier.sourcePath, shardPath);
         continue;
       }
       byId.set(t.id, t);
@@ -789,26 +814,30 @@ export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: str
   return texts;
 }
 
-/** Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s own contract.
- *  `label` names each blob in error text — the only thing that differs from a disk path. */
+/** Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s contract; `label` names each blob. */
 export function mergePlanBlobs(blobs: Array<{ label: string; text: string }>): Plan {
+  return validatedPlan(mergeBlobTasks(blobs));
+}
+
+function mergeBlobTasks(
+  blobs: Array<{ label: string; text: string }>,
+  onDuplicate?: (id: string, earlierLabel: string, laterLabel: string) => void,
+): Task[] {
   const tasks: Task[] = [];
-  const byId = new Map<string, Task>();
+  const labelOf = new Map<string, string>();
   for (const { label, text } of blobs) {
-    for (const t of parseTasksFromYaml(text, label)) {
-      if (byId.has(t.id)) {
-        throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);
+    for (const t of parseTasksFromYaml(text, label, onDuplicate && ((id) => onDuplicate(id, label, label)))) {
+      const earlier = labelOf.get(t.id);
+      if (earlier !== undefined) {
+        if (!onDuplicate) throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);
+        onDuplicate(t.id, earlier, label);
+        continue;
       }
-      byId.set(t.id, t);
+      labelOf.set(t.id, label);
       tasks.push(t);
     }
   }
-  for (const t of tasks) {
-    for (const dep of t.depends_on) {
-      if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
-    }
-  }
-  return { tasks, byId };
+  return tasks;
 }
 
 /** Select one task by id. Throws if absent. */

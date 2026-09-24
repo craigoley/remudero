@@ -17,7 +17,9 @@
     - openapi/daemon.yaml
     - test/spec-conformance.test.ts
     - test/spec-conformance-wiring.test.ts
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4010 — It depends on W1-T4007, which will never be built.
   attempts: 0
   rationale: |
     Warp's factory build guide describes a `validate-changes-match-specs` step that checks the

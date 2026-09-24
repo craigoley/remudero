@@ -400,6 +400,8 @@ test("daemonCommand supplies the real REST and issue gateways to the one event-a
   // the wiring delegates to that function, and that function targets ONE job by id, never the
   // whole-run `rerun-failed-jobs` endpoint.
   assert.match(call, /requeueCheck:\s*\(failure\)\s*=>\s*requeueActionsJob\(target\.owner, target\.repo, failure, log\)/);
+  // W1-T4056: main-health judges the target checkout's ci-gate contract, not every check on main.
+  assert.match(call, /readRequiredChecks:\s*\(\)\s*=>\s*readCiGateRequiredChecks\(targetCheckoutRoot\)/);
   const requeueFn = source.slice(source.indexOf("export function requeueActionsJob("));
   const requeueBody = requeueFn.slice(0, requeueFn.indexOf("\nexport "));
   assert.match(requeueBody, /actions\/jobs\/\$\{failure\.jobId\}\/rerun/);

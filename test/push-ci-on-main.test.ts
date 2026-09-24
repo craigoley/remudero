@@ -198,6 +198,9 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
     if (job.if === undefined) continue;
     if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must register even when its shards fail`);
+    } else if (jobId === "ci-gate") {
+      // W1-T4400: the required aggregate registers on every pull_request even when a needed job fails.
+      assert.equal(job.if, "${{ always() && github.event_name == 'pull_request' }}");
     } else {
       assert.equal(
         job.if,

@@ -5,6 +5,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
+import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
@@ -1536,6 +1537,7 @@ export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
  *  this ci.yml-only registry remains independently inspectable. */
 export const CI_PARITY_TABLE: CiParityEntry[] = [
   { job: "ci-required", mirrored: false, reason: "GitHub-only stable-name aggregator; the ci entry below runs the equivalent complete test surface locally" },
+  { job: "ci-gate", mirrored: false, reason: "GitHub-only required aggregate over the live check-runs API (W1-T4400: ci-gate.yml's own step, run as ci.yml's last job); it has no local subject to evaluate" },
   {
     job: "squash-trailer-gate",
     mirrored: false,
@@ -2385,6 +2387,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "the underlying scripts/state-citation-check.mjs walks git ls-files from the repo root (includes src/) with a real baseline " +
       "(scripts/state-citation-baseline.json), but the .test.ts file's only real-repo assertion is an aggregate subprocess " +
       "exit-status-0 check, never a per-file loop/assert inside the test file itself",
+  ),
+  refusedForPredicate(
+    "test/the-affected-suite-selector-runs-in-shadow.test.ts",
+    "b",
+    "W1-T4404's selector suite. It runs the selector's production deps once against the real tree (`git ls-files` over src/, " +
+      "scripts/, bin/ and test/, read as an import graph) and asserts properties of the SELECTION — one suite reached, many " +
+      "selected — never a property every walked file must hold, and it carries no baseline table",
   ),
   refusedForPredicate(
     "test/tracked-source-write-guard.test.ts",
@@ -3360,6 +3369,24 @@ function isChangedSourceFile(path: string): boolean {
   return true;
 }
 
+/** W1-T4404 (iii) — preflight reports the SAME selection CI's shadow computes, from the same
+ *  function, so local and CI can never disagree about what a change affects. Report-only while the
+ *  selector is in shadow: it names what it would run and never narrows this mode's full run. */
+export function affectedSuitesStep(
+  repoRoot: string,
+  changedFiles: readonly string[],
+  readInput: () => AffectedSuitesInput = () => readAffectedSuitesInput(repoRoot, changedFiles),
+): CiParityStepResult {
+  const name = "coverage-mode:affected-suites";
+  try {
+    const selection = selectAffectedSuites(changedFiles, readInput());
+    const what = selection.fullRun ? `the FULL suite (${selection.reasons[0]})` : `${selection.suites.length} suite(s)`;
+    return { name, ok: true, detail: `${name}: REPORT — the shadow selector would run ${what}; this mode still runs everything` };
+  } catch (e) {
+    return { name, ok: true, detail: `${name}: REPORT — the selector could not read its input (${(e as Error).message}); it would run the FULL suite` };
+  }
+}
+
 export interface PreflightCoverageDeps {
   spawn?: PreflightSpawn;
   /** Test seam — production reads the lcov this mode's own step just wrote. */
@@ -3412,6 +3439,7 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
     ok: true,
     detail: `coverage-mode:diff-scope: PASS — ${changedFiles.length} file(s) changed against a freshly refreshed origin/main...HEAD`,
   });
+  steps.push(affectedSuitesStep(repoRoot, changedFiles));
 
   const dirty = dirtyDiffedFiles(repoRoot, spawn, changedFiles);
   if (dirty.length > 0) {
