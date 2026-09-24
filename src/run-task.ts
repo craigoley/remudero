@@ -42097,6 +42097,19 @@ export async function approveCommand(
     }
     return repoDir;
   };
+  // A fresh, locked worktree on this run's branch at origin/main — shared by the two skill paths (W1-T4338's write,
+  // the lifecycle retirement), which write under .claude/skills/ rather than filing plan shards.
+  const freshSkillApproveWorktree = (): { branch: string; path: string } => {
+    const dir = ensureRepoDir();
+    const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+    const branch = approveRunBranch(runId);
+    // Set before worktreeAdd, so a failed add still leaves the path for the approve catch's cleanup.
+    const path = (worktreePath = join(worktreesDir(config), branch));
+    worktreeAdd(dir, path, branch, "origin/main", { log });
+    writeRunLock(path, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    return { branch, path };
+  };
   const gateway: RatifyGateway = deps.gateway ?? {
     // W1-T903 design (iii): evidence (ledger) + a real remote read — never guessed. A cheap
     // ledger-only miss (the overwhelming majority of approve calls: no prior run at all) never
@@ -42257,18 +42270,12 @@ export async function approveCommand(
     },
     // W1-T4338: the skill-draft twin of createRatificationBranch — one SKILL.md, verbatim, on a fresh branch.
     writeSkillFile(id, skillFile) {
-      const dir = ensureRepoDir();
-      const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-      if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-      const branch = approveRunBranch(runId);
-      worktreePath = join(worktreesDir(config), branch);
-      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
-      const relPath = writeApprovedSkillFile(worktreePath, skillFile, { mkdirSync, writeFileSync }, join);
+      const { branch, path } = freshSkillApproveWorktree();
+      const relPath = writeApprovedSkillFile(path, skillFile, { mkdirSync, writeFileSync }, join);
       log("approve.skill_written", { proposal_id: id, path: relPath });
-      execFileSync("git", ["-C", worktreePath, "add", "--", relPath], { stdio: "inherit" });
-      execFileSync("git", ["-C", worktreePath, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
-      gitPushRunBranch(worktreePath);
+      execFileSync("git", ["-C", path, "add", "--", relPath], { stdio: "inherit" });
+      execFileSync("git", ["-C", path, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
+      gitPushRunBranch(path);
       return branch;
     },
     openPlanPr(branch, id) {
@@ -42318,18 +42325,12 @@ export async function approveCommand(
   };
 
   const createSkillLifecycleBranch = (action: SkillLifecycleAction): string => {
-    const dir = ensureRepoDir();
-    const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-    const branch = approveRunBranch(runId);
-    worktreePath = join(worktreesDir(config), branch);
-    worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
-    const removed = applySkillLifecycleRemoval(worktreePath, action);
+    const { branch, path } = freshSkillApproveWorktree();
+    const removed = applySkillLifecycleRemoval(path, action);
     if (!removed.ok) throw new Error(`rmd approve: refusing lifecycle action for ${proposalId} — ${removed.reason}`);
-    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", action.skillPath], { stdio: "inherit" });
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", skillLifecycleApproveCommitMessage(action, proposalId)], { stdio: "inherit" });
-    gitPushRunBranch(worktreePath);
+    execFileSync("git", ["-C", path, "add", "-A", "--", action.skillPath], { stdio: "inherit" });
+    execFileSync("git", ["-C", path, "commit", "-m", skillLifecycleApproveCommitMessage(action, proposalId)], { stdio: "inherit" });
+    gitPushRunBranch(path);
     return branch;
   };
 

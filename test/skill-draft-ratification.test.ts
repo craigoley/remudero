@@ -5,10 +5,16 @@
 // proposal still reaches `createRatificationBranch` exactly as before.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 import {
   approveProposal,
@@ -26,7 +32,9 @@ import {
 } from "../src/lib/inbox.js";
 import { stageSkillDraft, workerAllowlistFromSettings, describeWorkerSkillReachability, type SkillDraft } from "../src/lib/skill-workshop.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { skillFileApprovePrBody } from "../src/run-task.js";
+import { approveCommand, skillFileApproveCommitMessage, skillFileApprovePrBody } from "../src/run-task.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const SKILL: SkillFilePayload = {
   name: "implement-clean-single-strike",
@@ -185,4 +193,70 @@ test("the skill PR body carries an executable grep proof on the one file it adds
   assert.deepEqual(parseAcceptanceBlock(body), [
     { claim: `${relPath} is the approved skill draft implement-clean-single-strike`, proof: `grep: name: implement-clean-single-strike in ${relPath}` },
   ]);
+});
+
+test("the skill commit names the one file it adds and carries no Remudero-Task trailer", () => {
+  const message = skillFileApproveCommitMessage("skill-draft:proc-1", ".claude/skills/implement-clean-single-strike/SKILL.md");
+  assert.match(message, /^chore\(skill\): add approved skill via rmd approve$/m);
+  assert.match(message, /adds exactly \.claude\/skills\/implement-clean-single-strike\/SKILL\.md/);
+  assert.doesNotMatch(message, /Remudero-Task:/);
+});
+
+/** A bare origin whose main holds a minimal plan, and no skills. */
+function skillOrigin() {
+  const bare = gitRepo({ bare: true, branch: "main", kind: "skill-draft-origin" });
+  const seed = gitRepo({ branch: "main", seedCommit: false, kind: "skill-draft-seed" });
+  mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T4\n  title: seed task\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n", "utf8");
+  writeFileSync(join(seed.dir, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n", "utf8");
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed skill-draft fixture");
+  seed.addRemote("origin", bare.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  seed.cleanup();
+  return bare;
+}
+
+test("rmd approve pushes the staged skill draft's SKILL.md verbatim on its own branch and opens the skill PR", async () => {
+  const bare = skillOrigin();
+  const root = tmp("rmd-skill-approve-command-");
+  const shim = ghShim([
+    { when: "headRefName", stdout: '{"headRefName":"main"}' },
+    { when: "pulls", stdout: '{"html_url":"https://github.com/craigoley/remudero/pull/74338","number":74338}' },
+  ], { kind: "skill-draft-gh" });
+  const savedPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shim.dir}:${savedPath}`;
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+    const repoDir = join(root, "repos", originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2]);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare.dir, repoDir], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+    mkdirSync(join(root, "state"), { recursive: true });
+    const proposal: Proposal = { id: "skill-draft:proc-1", summary: "s", evidenceAnchors: [], skillFile: SKILL };
+    writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [proposal] }, null, 2), "utf8");
+
+    const code = await withLiveWritesAllowed(() =>
+      approveCommand(["skill-draft:proc-1"], { config: { claudeBin: "/usr/bin/true", root } as never }),
+    );
+
+    assert.equal(code, 1, "the ownership guard stops the offline fixture after the skill PR is opened");
+    const refs = execFileSync("git", ["-C", bare.dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/run-*"], { encoding: "utf8" })
+      .split("\n")
+      .filter(Boolean);
+    assert.equal(refs.length, 1, `expected one skill approve branch, got ${JSON.stringify(refs)}`);
+    const written = execFileSync("git", ["-C", bare.dir, "show", `${refs[0]}:.claude/skills/implement-clean-single-strike/SKILL.md`], { encoding: "utf8" });
+    assert.equal(written, SKILL.markdown, "the pushed file is the staged draft, byte for byte");
+    const changed = execFileSync("git", ["-C", bare.dir, "diff", "--name-only", `main...${refs[0]}`], { encoding: "utf8" }).trim();
+    assert.equal(changed, ".claude/skills/implement-clean-single-strike/SKILL.md", "no plan shard, no MASTER-PLAN stamp");
+    assert.ok(shim.calls().some((c) => c.includes("chore(skill): add approved skill implement-clean-single-strike via rmd approve")));
+    const lines = readLedger(join(root, "state", "ledger.ndjson"));
+    assert.ok(lines.some((l) => l.step === "approve.skill_written" && l.path === ".claude/skills/implement-clean-single-strike/SKILL.md"));
+    assert.ok(lines.some((l) => l.step === "ratify.approved" && l.skill_file === ".claude/skills/implement-clean-single-strike/SKILL.md"));
+  } finally {
+    process.env.PATH = savedPath;
+    bare.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
