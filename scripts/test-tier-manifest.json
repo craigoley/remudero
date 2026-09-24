@@ -300,6 +300,7 @@
     "test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts": 1844,
     "test/a-wall-clock-bound-declares-itself.test.ts": 1057,
     "test/a-windowed-union-never-opens-an-archive-outside-it.test.ts": 250,
+    "test/a-withdrawn-credit-never-latches-a-task-blocked.test.ts": 0,
     "test/a-withdrawn-record-sizing-warning.test.ts": 0,
     "test/a-worker-branch-must-be-shaped-for-dispatch.test.ts": 1853,
     "test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts": 1018,
