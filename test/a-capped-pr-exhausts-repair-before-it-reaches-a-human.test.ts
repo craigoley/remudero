@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -240,6 +241,19 @@ function repoFixture(shardYaml?: string): string {
   return root;
 }
 
+/** Stops git's upward repository search at `root`'s parent for the duration of `fn`, so a real
+ *  spawn under `root` can never reach a checkout that happens to enclose the tmp dir. */
+async function withGitCeiling<T>(root: string, fn: () => T | Promise<T>): Promise<T> {
+  const prior = process.env.GIT_CEILING_DIRECTORIES;
+  process.env.GIT_CEILING_DIRECTORIES = dirname(root);
+  try {
+    return await fn();
+  } finally {
+    if (prior === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = prior;
+  }
+}
+
 function matchingShardYaml(): string {
   return [
     `id: ${TASK}`,
@@ -345,13 +359,35 @@ test("W1-T3390: dispatchPlanOnlyRepair's git seam defaults to a real spawn when 
   // rebaseDirtyFleetBranchViaGit's own uninjected-default coverage, sweep.ts).
   const repoDir = repoFixture(matchingShardYaml()); // a plain directory, deliberately not a git repo
   const f = planRepairFixture(repoDir, { planRepairGitImpl: undefined });
-  const result = await withLiveWritesAllowed(() => f.effects.dispatchPlanOnlyRepair!(pr(), PROOF));
+  const result = await withGitCeiling(repoDir, () => withLiveWritesAllowed(() => f.effects.dispatchPlanOnlyRepair!(pr(), PROOF)));
   assert.equal(result, true);
   // `repoDir` is not a git checkout, so every real spawn this rung makes against it fails — the
   // fetch is best-effort (swallowed), but the "add" spawn against the (fake, non-git) worktree
   // path is not, and reaches the outer catch.
   assert.equal(f.logged[0]![1]?.outcome, "error");
   assert.equal(f.removeCalls.length, 1, "the worktree is still reaped after the real spawn failed");
+});
+
+test("W1-T3390: the real git default never writes to a repository that encloses the fixture root", async () => {
+  // MEASURED 2026-09-23: with TMPDIR inside a checkout, the test above let git walk up from its
+  // "plain directory" and commit twice onto the operator's local branch. Rebuild that shape on
+  // purpose: the fixture root inside an outer repository that must come out untouched.
+  const outer = mkdtempSync(join(tmpdir(), "rmd-plan-repair-outer-"));
+  const who = { GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
+  const outerGit = (...args: string[]): string =>
+    execFileSync("git", ["-C", outer, ...args], { encoding: "utf8", env: { ...process.env, ...who } }).trim();
+  outerGit("init", "--quiet");
+  outerGit("commit", "--quiet", "--allow-empty", "-m", "outer");
+  const before = outerGit("rev-parse", "HEAD");
+  const repoDir = join(outer, "repo");
+  mkdirSync(join(repoDir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(repoDir, "plan", "tasks.d", `${TASK}-fixture.yaml`), matchingShardYaml());
+  const f = planRepairFixture(repoDir, { planRepairGitImpl: undefined });
+  const result = await withGitCeiling(repoDir, () => withLiveWritesAllowed(() => f.effects.dispatchPlanOnlyRepair!(pr(), PROOF)));
+  assert.equal(result, true);
+  assert.equal(f.logged[0]![1]?.outcome, "error", "no repository is reachable, so the add spawn fails");
+  assert.equal(outerGit("rev-parse", "HEAD"), before, "the outer repository gained no commit");
+  assert.equal(outerGit("status", "--porcelain", "--untracked-files=no"), "", "nothing was staged in the outer repository");
 });
 
 test("W1-T3390: dispatchPlanOnlyRepair falls back to the plan/tasks.yaml monolith when no shard file exists", async () => {

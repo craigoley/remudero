@@ -374,6 +374,7 @@ import {
   type HeadroomPolicy,
   type IntakeRungDecision,
   type IntakeRungRunResult,
+  type LightPassScope,
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
@@ -1202,6 +1203,7 @@ import {
   type CriterionRefusal,
   type ProofExecutor,
   type ReviewVerdict,
+  type PlanLintOutcome,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
 } from "./lib/review.js";
@@ -1306,6 +1308,7 @@ import {
   cancelledRequiredCheckNames,
   withoutDownstreamGateFailure,
   checksStateFromRollup,
+  checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
@@ -1463,8 +1466,9 @@ export type FreshTreeReviewSeams = {
    *  detached tree that helper already cuts for proof execution, just at the BASE revision instead
    *  of the PR head. One helper, two revisions — not a new hole in the census. */
   addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
-  /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code. */
-  spawnReview: (worktree: string, args: string[]) => Promise<number>;
+  /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
+   *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
+  spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void) => Promise<number>;
   /**
    * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
    * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
@@ -1561,9 +1565,14 @@ function prepareFreshReviewerWorktree(repoDir: string, worktreePath: string): bo
 export function buildFreshTreeReviewRunner(
   repoDir: string,
   deps: FreshTreeReviewSeams,
-): (prArg: string, rest: string[], freshness: { originMainSha: string }) => Promise<number | undefined> {
+): (
+  prArg: string,
+  rest: string[],
+  freshness: { originMainSha: string },
+  onFailure?: (failure: string) => void,
+) => Promise<number | undefined> {
   const prepared = new Map<string, string>();
-  return async (prArg, rest, freshness) => {
+  return async (prArg, rest, freshness, onFailure) => {
     const sha = freshness.originMainSha;
     try {
       let worktree = prepared.get(sha);
@@ -1585,27 +1594,63 @@ export function buildFreshTreeReviewRunner(
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
-      return await deps.spawnReview(worktree, [prArg, ...rest]);
+      return await deps.spawnReview(worktree, [prArg, ...rest], onFailure);
     } catch (err) {
       // Never a verdict (see the doc above): swallow the failure, but carry WHY so a reader of
       // stderr — not just the caller's silent `undefined` — can tell a fetch/worktree/spawn
-      // refusal from the ordinary "no runner wired" case.
+      // refusal from the ordinary "no runner wired" case. W1-T4055: and so can the ledger.
       process.stderr.write(`buildFreshTreeReviewRunner: falling back to the ordinary skip: ${String(err)}\n`);
+      onFailure?.(freshTreeFailureText(String(err)));
       return undefined;
     }
   };
 }
 
-export function spawnRmdReviewForFreshTree(worktree: string, args: string[]): Promise<number> {
+/** W1-T4055 — PRIMARY CONTROL on how much of one fresh-tree failure a ledger row carries. The child's
+ *  fatal error lands at the END of its stderr, so this keeps the tail, unlike `capStderrExcerpt`. */
+export const FRESH_TREE_FAILURE_MAX_CHARS = 2_000;
+
+/** How much of a running child's stderr is held in memory to take that tail from. */
+const FRESH_TREE_STDERR_HOLD_CHARS = 64 * 1024;
+
+/** A fresh-tree failure as a ledger field: credentials scrubbed BEFORE the cut, so a token sliced in
+ *  half at the boundary cannot leak a fragment (the `fallbackPushEvidence` order), then the tail kept
+ *  within {@link FRESH_TREE_FAILURE_MAX_CHARS}, and a cut never silent. */
+export function freshTreeFailureText(text: string): string {
+  const scrubbed = scrubGitCredentialText(text).trim();
+  if (scrubbed === "") return "no stderr";
+  if (scrubbed.length <= FRESH_TREE_FAILURE_MAX_CHARS) return scrubbed;
+  // Sized with the WHOLE length, which has at least as many digits as the count it will report, so
+  // the marker can only over-reserve and the result never exceeds the bound.
+  const kept = FRESH_TREE_FAILURE_MAX_CHARS - `…[${scrubbed.length} earlier chars cut] `.length;
+  return `…[${scrubbed.length - kept} earlier chars cut] ${scrubbed.slice(-kept)}`;
+}
+
+export function spawnRmdReviewForFreshTree(
+  worktree: string,
+  args: string[],
+  onFailure?: (failure: string) => void,
+): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const child = spawn(join(worktree, "bin", "rmd"), ["review", ...args], {
       cwd: worktree,
-      stdio: "inherit",
+      // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
+      stdio: ["inherit", "inherit", "pipe"],
       // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
       env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
     });
+    let held = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      process.stderr.write(chunk);
+      held = (held + chunk.toString("utf8")).slice(-FRESH_TREE_STDERR_HOLD_CHARS);
+    });
     child.on("error", reject);
-    child.on("exit", (code: number | null) => resolve(code ?? 1));
+    // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      const exitCode = code ?? 1;
+      if (exitCode !== 0) onFailure?.(signal && !held.trim() ? `killed by ${signal}` : freshTreeFailureText(held));
+      resolve(exitCode);
+    });
   });
 }
 
@@ -1616,11 +1661,12 @@ export function buildReviewerCodeFreshnessGate(
   /** W1-T3723 — runs `rmd review` from a fresh worktree instead of skipping a stale-code PR; see
    *  {@link buildFreshTreeReviewRunner} for why the daemon's own checkout never moves. Returns
    *  `undefined` when it could not run at all, so the caller falls back to the original skip and
-   *  W1-T3691's recurrence ladder stays the floor. */
+   *  W1-T3691's recurrence ladder stays the floor. W1-T4055: `onFailure` receives WHY, bounded. */
   reviewFromFreshTree?: (
     prArg: string,
     rest: string[],
     freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
+    onFailure?: (failure: string) => void,
   ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
@@ -1644,14 +1690,19 @@ export function buildReviewerCodeFreshnessGate(
         // multi-instance host then refused. A review does not need this process's modules — it
         // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
         if (reviewFromFreshTree) {
-          return reviewFromFreshTree(prArg, rest, freshness).then((code) => {
+          // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
+          // nothing but an exit code ledgered; the cause is what the next fix needs.
+          let failure: string | undefined;
+          return reviewFromFreshTree(prArg, rest, freshness, (why) => { failure = why; }).then((code) => {
             if (code !== undefined) {
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code });
+              const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
+              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ...why });
               return code;
             }
             // COULD NOT RUN — fall through to the original skip rather than judging with stale
             // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
-            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable" });
+            const reason = failure ?? "no reason reported";
+            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
             return 0;
           });
         }
@@ -5801,12 +5852,16 @@ function materializeReviewerSnapshot(
     );
   }
 
+  // `rev-parse` ascends to the enclosing work tree but `git clone <dir>` does not, so a
+  // `sourceDir` below its top level (a Stryker sandbox under `.stryker-tmp-*/`) passed the HEAD
+  // check and then failed the clone. Both steps now name the same repository: the top level.
   let sourceHead: string;
+  let sourceRepo: string;
   try {
-    sourceHead = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], {
+    [sourceRepo, sourceHead] = execFileSync("git", ["-C", sourceDir, "rev-parse", "--show-toplevel", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    }).trim().split("\n");
   } catch {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -5824,7 +5879,7 @@ function materializeReviewerSnapshot(
 
   const cwd = join(reviewRoot, "checkout");
   try {
-    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceDir, cwd], {
+    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
     execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
@@ -6059,6 +6114,8 @@ async function runReview(args: {
    * names — "when every test injects a fake, each catch arm is unreachable — write one per arm".
    */
   judgeRubricFn?: typeof judgeRubric;
+  /** W1-T4423: the plan-only lint seam; absent runs the real {@link lintPlanForReview}. */
+  lintPlanForReviewFn?: typeof lintPlanForReview;
   /**
    * W1-T322: task ids currently OPEN in the loaded plan — see {@link
    * "./lib/review.js".ReviewEvidence.openTaskIds}'s doc. Optional (fail-closed default: `undefined`,
@@ -6307,9 +6364,12 @@ async function runReview(args: {
   // execution to the PR HEAD (never the operator's working checkout) — so the
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
+  // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
+  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
   const computed = judgeReview(criteria, {
     diff,
     report,
+    planLint,
     headRefName: args.headRefName,
     implementationReport: args.implementationReport,
     target: { owner, repo },
@@ -15379,6 +15439,38 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say,
       onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
     });
+
+    // W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED. `resumeForMissingCommitLine`
+    // owns its own precondition (called unconditionally, exactly like the helper above) — it no-ops
+    // for every refusal EXCEPT the exact missing-line one, and only when the worktree still holds
+    // uncommitted changes. The resumed reply asks the SAME session for nothing but the line, and the
+    // recommit runs through the unchanged `harnessCommitForShellLessWorker`, so no other refusal path
+    // changes shape.
+    const commitLineRecovery = await resumeForMissingCommitLine({
+      commitCount,
+      refusalReason: harnessCommitRefusalState.reason,
+      report: fullText(impl),
+      worktreePath,
+      declaredPaths: task.files ?? [],
+      log,
+      say,
+      resume: commitLineResume(spawn, account, {
+        cwd: worktreePath,
+        permissionMode: "bypassPermissions",
+        settingsFile,
+        resumeSessionId: impl.sessionId,
+        model: implementMount.model,
+        mountProvider: implementMount.provider,
+        effort: implementMount.effort,
+        maxTurns: implementMount.maxTurns,
+        maxBudgetUsd: budgetUsd,
+        config: implementConfig,
+        tools: implementTools === undefined ? undefined : [...implementTools],
+        ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+      }),
+    });
+    commitCount = commitLineRecovery.commitCount;
+    harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
     const harnessCommitRefusalReason = harnessCommitRefusalState.reason;
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && commitCount === 0;
 
@@ -23468,6 +23560,83 @@ export function lintScopeMergeBase(
     );
     return baseRef;
   }
+}
+
+/**
+ * W1-T4423 — THE LINT A PLAN-ONLY PASS NAMES, RUN BY THE REVIEW ITSELF. A consumer repo's CI has no lint-plan job,
+ * so remudero-site #133 merged PORTAL-T27 with two violations under a status claiming lint-plan had gated it. This
+ * runs `lint-plan:fast`'s selection, {@link lintPlanCommand} offline over the tasks the PR changed against its merge
+ * base, on the TARGET repo's plan at the PR head. In-process: the body has no `await`, so every line it prints is
+ * written before the console is restored, and a missing summary line reads as "could not run", never as clean.
+ */
+export async function lintPlanForReview(
+  headCheckoutDir: string | undefined,
+  git: (cwd: string, args: string[]) => string = (cwd, args) =>
+    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 }),
+  lint: typeof lintPlanCommand = lintPlanCommand,
+): Promise<PlanLintOutcome> {
+  if (!headCheckoutDir) return { ran: false, reason: "no PR-head checkout" };
+  try {
+    // A stale origin/main moves the merge base back and widens the changed-task scope onto other filings.
+    git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
+  } catch (e) {
+    console.error(`### lint-plan for review: origin/main not refreshed (${String((e as Error).message).split("\n")[0]})`);
+  }
+  let mergeBase: string;
+  try {
+    mergeBase = git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"]).trim();
+  } catch (e) {
+    return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
+  }
+  const lines: string[] = [];
+  const saved = { log: console.log, error: console.error, warn: console.warn };
+  const capture = (...parts: unknown[]): void => void lines.push(parts.map(String).join(" "));
+  let pending: Promise<number>;
+  console.log = console.error = console.warn = capture;
+  try {
+    pending = lint(["--plan", join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase], {
+      offline: true,
+      repoRoot: headCheckoutDir,
+    });
+  } finally {
+    Object.assign(console, saved);
+  }
+  let code: number;
+  try {
+    code = await pending;
+  } catch (e) {
+    return { ran: false, reason: `lint-plan threw: ${String((e as Error).message).split("\n")[0]}` };
+  }
+  return planLintOutcomeFromOutput(code, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
+}
+
+/** W1-T4423: read {@link lintPlanCommand}'s printed report back into violations. `monolith-filing` is dropped for a
+ *  repo that keeps no `plan/tasks.d/`: the shard convention is core's, and such a repo can only file in the monolith. */
+export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBase: string, hasShardDir: boolean): PlanLintOutcome {
+  const summary = lines.map((l) => /rmd lint-plan: (\d+) task\(s\) checked/.exec(l)).find((m) => m !== null);
+  if (code === 2 || !summary) {
+    const said = lines.find((l) => l.startsWith("### rmd lint-plan:")) ?? `lint-plan exited ${code} with no summary`;
+    return { ran: false, reason: said.replace(/^### rmd lint-plan: /, "") };
+  }
+  const violations: string[] = [];
+  let taskId = "";
+  for (const line of lines) {
+    const header = /^✗ (\S+): \d+ violation\(s\)/.exec(line);
+    const row = /^ {4}\[([^\]]+)\] (.*)$/.exec(line);
+    if (header) taskId = header[1];
+    else if (line.startsWith("✗ ")) violations.push(line.slice(2)); // plan/policy.yaml, which names no task
+    else if (row) violations.push(`${taskId} [${row[1]}] ${row[2]}`);
+  }
+  const kept = hasShardDir ? violations : violations.filter((v) => !v.includes(" [monolith-filing] "));
+  if (code === 1 && violations.length === 0) kept.push("lint-plan exited 1 with no violation it could name");
+  const dropped = violations.length - kept.length;
+  return {
+    ran: true,
+    label: `lint-plan changed-task pass (offline) vs merge base ${mergeBase.slice(0, 12)}`,
+    checked: Number(summary[1]),
+    violations: kept,
+    ...(dropped > 0 ? { skipped: `${dropped} monolith-filing skipped, no plan/tasks.d` } : {}),
+  };
 }
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
@@ -34537,6 +34706,8 @@ export function buildOpenPrViews(
       reviewPendingOwnerDead,
       reviewVerdictPostedAt,
       checksState,
+      // W1-T4054: the pending check's own start, so a push, comment or label never resets the age.
+      checksPendingSince: checksPendingSinceFromRollup(pr.statusCheckRollup, requiredContexts),
       unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
       // `unmetCriteria` above is attributable to a plan task. The synthetic key can populate it
@@ -36066,6 +36237,11 @@ function lastCommitRefusalPromptLines(
   ];
 }
 
+/** W1-T4052: the exact reason `harnessCommitForShellLessWorker` names when the worker's report
+ *  carries no anchored COMMIT_MESSAGE line. Shared with `resumeForMissingCommitLine` below so the
+ *  two functions can never drift on what "the missing-line refusal" means. */
+const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -36088,7 +36264,7 @@ export function harnessCommitForShellLessWorker(
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined) {
-    const reason = "no anchored COMMIT_MESSAGE line in the report";
+    const reason = MISSING_COMMIT_MESSAGE_REASON;
     input.log("implement.harness_commit_refused", { reason });
     input.onRefusal?.(reason, []);
     return input.commitCount;
@@ -36112,6 +36288,138 @@ export function harnessCommitForShellLessWorker(
 export function createHarnessCommitRefusalRecorder(state: { reason?: string }): (reason: string) => void {
   return (reason) => {
     state.reason = reason;
+  };
+}
+
+/** W1-T4052: is there ANYTHING uncommitted in this worktree — declared surface or not? Checked
+ *  ahead of the resume decision because the missing-line refusal returns before
+ *  `harnessCommitForShellLessWorker` ever reads git status, so "changed nothing" and "forgot the
+ *  line" are otherwise indistinguishable from the refusal reason alone. */
+export function worktreeHasUncommittedChanges(worktreePath: string): boolean {
+  const raw = execFileSync(
+    "git",
+    ["-C", worktreePath, "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  return workerChangedPaths(raw).length > 0;
+}
+
+/**
+ * W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED.
+ *
+ * 188 harness-commit refusals across 82 runs and 112 tasks (since 2026-09-17) carried this exact
+ * reason: the worker did the work, saved it to the worktree, and one REPORT line was absent — the
+ * single largest way a shell-less implement run ended with nothing. The refusal itself stays
+ * correct: `harnessCommitForShellLessWorker` above still refuses to invent a subject, unchanged.
+ * But the run that DID the work is still addressable — the implement lane already resumes the SAME
+ * worker session for a DECISION_REQUEST follow-up (`implement.resumed`, W1-T3573/W1-T3696); this
+ * reuses that mechanism ONCE, asking for nothing but the missing line.
+ *
+ * OWNS ITS OWN PRECONDITION, called unconditionally like its sibling above: it no-ops unless the
+ * refusal was EXACTLY the missing-line reason (every other refusal — no files declared, outside the
+ * declared surface, changed nothing — is left untouched) AND the worktree actually holds
+ * uncommitted changes (a worker that changed nothing is left to that refusal rather than resumed to
+ * relearn it). ONE resume: a second report still lacking the line is refused with a reason naming
+ * that the resume was tried, never looped and never a synthesized subject — the resumed text is
+ * merely APPENDED to the original report and handed back through the unchanged
+ * `harnessCommitForShellLessWorker`, so every other refusal it can produce still applies.
+ */
+export async function resumeForMissingCommitLine(
+  input: {
+    commitCount: number;
+    refusalReason: string | undefined;
+    report: string;
+    worktreePath: string;
+    declaredPaths: readonly string[];
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+    /** Resume the worker's OWN session once with the ask-for-the-line prompt. A required
+     *  collaborator the implement lane wires, like `log`/`say` — not an optional seam. */
+    resume: () => Promise<{
+      text: string;
+      costUsd?: number;
+      sessionId?: string;
+      numTurns?: number;
+      subtype?: string;
+    }>;
+  },
+  // The SAME seam `harnessCommitForShellLessWorker` takes, forwarded to it unchanged: the retried
+  // commit is that helper's, so its `commit`/`ahead` fakes are the only seams this recovery needs.
+  deps: Parameters<typeof harnessCommitForShellLessWorker>[1] = {},
+): Promise<{ commitCount: number; refusalReason: string | undefined; report: string; resumed: boolean }> {
+  const noop = {
+    commitCount: input.commitCount,
+    refusalReason: input.refusalReason,
+    report: input.report,
+    resumed: false as const,
+  };
+  if (input.refusalReason !== MISSING_COMMIT_MESSAGE_REASON || input.commitCount !== 0) return noop;
+  if (!worktreeHasUncommittedChanges(input.worktreePath)) return noop;
+
+  input.log("implement.commit_line_requested", {});
+  input.say("no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
+  const resumed = await input.resume();
+  input.log("implement.resumed", {
+    ...(resumed.sessionId ? { session_id: resumed.sessionId } : {}),
+    cost_usd: resumed.costUsd,
+    ...(resumed.numTurns !== undefined ? { num_turns: resumed.numTurns } : {}),
+    ...(resumed.subtype !== undefined ? { subtype: resumed.subtype } : {}),
+    reason: "missing_commit_line",
+  });
+
+  // APPENDED, never replacing the original report — the original REPORT content (follow-ups,
+  // learnings-used, the worker's own narrative) survives; only the anchored COMMIT_MESSAGE line
+  // the resumed reply carries is new, and `parseReport`'s own "last one wins" rule picks it up.
+  const combinedReport = `${input.report}\n${resumed.text}`;
+  if (parseReport(combinedReport)?.commitMessage === undefined) {
+    const reason = `${MISSING_COMMIT_MESSAGE_REASON} (asked the worker's own session once; still absent)`;
+    input.log("implement.harness_commit_refused", { reason });
+    return { commitCount: input.commitCount, refusalReason: reason, report: combinedReport, resumed: true };
+  }
+
+  const refusalState: { reason?: string } = {};
+  const commitCount = harnessCommitForShellLessWorker(
+    {
+      harnessOwnsGit: true,
+      commitCount: input.commitCount,
+      report: combinedReport,
+      worktreePath: input.worktreePath,
+      declaredPaths: input.declaredPaths,
+      log: input.log,
+      say: input.say,
+      onRefusal: createHarnessCommitRefusalRecorder(refusalState),
+    },
+    deps,
+  );
+  return { commitCount, refusalReason: refusalState.reason, report: combinedReport, resumed: true };
+}
+
+/** W1-T4052: the ONLY thing the missing-line resume asks the worker's own session for. */
+export const COMMIT_LINE_RESUME_PROMPT =
+  "Your last REPORT carried no anchored COMMIT_MESSAGE line, so the harness could not " +
+  "commit your edits — they are still saved in the worktree. Make NO further edits and " +
+  "run NO git or gh commands. Reply with ONLY a REPORT whose last line is exactly " +
+  "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
+  "subject, at most 100 characters).";
+
+/** W1-T4052: build `resumeForMissingCommitLine`'s `resume` from the implement lane's own `spawn`
+ *  and `account`. `spawnArgs` is the original spawn's mount (it names `resumeSessionId`); the
+ *  prompt is always {@link COMMIT_LINE_RESUME_PROMPT}, and the resumed turn is accounted like any
+ *  other so its cost rides the run's budget. */
+export function commitLineResume(
+  spawn: typeof spawnWorker,
+  account: (r: WorkerResult) => WorkerResult,
+  spawnArgs: Omit<SpawnWorkerArgs, "prompt">,
+): () => Promise<{ text: string; costUsd: number; sessionId: string; numTurns: number; subtype: string }> {
+  return async () => {
+    const resumed = account(await spawn({ ...spawnArgs, prompt: COMMIT_LINE_RESUME_PROMPT }));
+    return {
+      text: workerTranscript(resumed),
+      costUsd: resumed.costUsd,
+      sessionId: resumed.sessionId,
+      numTurns: resumed.numTurns,
+      subtype: resumed.subtype,
+    };
   };
 }
 
@@ -37918,7 +38226,7 @@ export function buildSweepLightHook(
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
   planAccessor?: () => Plan,
-): () => Promise<void> {
+): (scope?: LightPassScope) => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
   const isMerged = legacyResequenceShape
@@ -37929,7 +38237,10 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  return async () => {
+  return async (scope) => {
+    // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
+    // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
+    const reviewOnly = scope?.reviewOnly === true;
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         planFilingFileCache,
@@ -37950,7 +38261,7 @@ export function buildSweepLightHook(
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
-      const fixRungAllowed = fixRungAllowedBesideInFlight(
+      const fixRungAllowed = !reviewOnly && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       );
@@ -37962,7 +38273,7 @@ export function buildSweepLightHook(
       // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
       // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
       // batch below, gated by `fixRungAllowed` exactly as before this task.
-      const requeueOnlyPrs = openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+      const requeueOnlyPrs = reviewOnly ? [] : openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
       const restPrs = requeueOnlyPrNumbers.size === 0 ? openPrs : openPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
       const passes: Array<Promise<unknown>> = [
@@ -38222,6 +38533,7 @@ export async function fixCommand(
     reviewState,
     reviewVerdictPostedAt,
     checksState,
+    checksPendingSince: checksPendingSinceFromRollup(raw.statusCheckRollup, requiredContexts),
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
     // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
     // reads it via the SAME sweep.ts row 7.

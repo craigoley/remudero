@@ -12,7 +12,7 @@ import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
@@ -873,6 +873,8 @@ export function readLedgerUnionBounded(
     satisfied?: (stepsSeen: ReadonlySet<string>) => boolean;
     /** How far back to read; defaults to {@link STATUS_BOARD_WINDOW_MS}. */
     windowMs?: number;
+    /** Receives the raw text of every torn row, live or rotated, that `.torn` counts. */
+    onTorn?: (raw: string) => void;
     ledgerFs?: LedgerFsDeps;
     readdirSync?: (dir: string) => string[];
     gunzipSync?: (buf: Buffer) => Buffer;
@@ -883,7 +885,7 @@ export function readLedgerUnionBounded(
 ): LedgerLines {
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
-  const live = readLedgerLines(path, ledgerFs);
+  const live = readLedgerLines(path, ledgerFs, opts.onTorn);
   const read = readLedgerUnionRecordsSync(
     dirname(path),
     {
@@ -895,6 +897,7 @@ export function readLedgerUnionBounded(
       readLiveRecords: () => live,
       satisfied: opts.satisfied,
       rotationRecords: opts.rotationRecords,
+      onTorn: opts.onTorn,
     },
     statusLedgerUnionFsDeps(ledgerFs, opts),
   );
@@ -903,14 +906,21 @@ export function readLedgerUnionBounded(
 
 /** {@link readLedgerUnionBounded} through a rotation memo: a request re-parses only the live file, and a rotation
  *  the memo lacks is loaded off the event loop before the union is read again. */
-export async function readLedgerUnionMemoized(path: string, memo: LedgerRotationMemo): Promise<LedgerLines> {
+export async function readLedgerUnionMemoized(path: string, memo: LedgerRotationMemo, onTorn?: (raw: string) => void): Promise<LedgerLines> {
+  // Only the complete pass's torn lines reach `onTorn`; an incomplete pass is discarded, so it must not count.
+  let tornLines: string[] = [];
+  const readPass = (pass: LedgerRotationMemoPass): LedgerLines => {
+    tornLines = [];
+    return readLedgerUnionBounded(path, { rotationRecords: pass.rotationRecords, onTorn: (raw) => tornLines.push(raw) });
+  };
   let pass = memo.pass();
-  let read = readLedgerUnionBounded(path, { rotationRecords: pass.rotationRecords });
+  let read = readPass(pass);
   while (!pass.complete()) {
     await memo.load(pass.missing());
     pass = memo.pass();
-    read = readLedgerUnionBounded(path, { rotationRecords: pass.rotationRecords });
+    read = readPass(pass);
   }
+  for (const raw of tornLines) onTorn?.(raw);
   return read;
 }
 
@@ -921,7 +931,7 @@ export async function readLedgerUnionMemoized(path: string, memo: LedgerRotation
  * or `ledger-read-intent: union` on the same line or the one above. A torn line is LOUD in TWO ways (W1-T206):
  * stderr for a human, and `.torn` for a consumer with no stderr, where the old fabricated-`{}` told neither.
  */
-export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): LedgerLines {
+export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs, onTorn?: (raw: string) => void): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
   // `present: false` is the whole point of this early return carrying metadata at all. The empty array itself
   // is unchanged, so no existing consumer moves.
@@ -934,6 +944,7 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
       out.push(JSON.parse(l) as Record<string, unknown>);
     } catch {
       torn++;
+      onTorn?.(l);
       console.error(`ledger: dropping unparseable line in ${path}: ${l}`);
     }
   }

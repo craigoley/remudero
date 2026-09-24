@@ -104,7 +104,7 @@ test("unit test: a rotation memo parses a failed load inline and a corrupt rotat
 
 test("unit test: a rotation memo reads an unstattable rotation uncached", () => {
   const memo = createLedgerRotationMemo(identity);
-  const parsed = { rows: [{ step: "run.start" }], torn: 1 };
+  const parsed = { rows: [{ step: "run.start" }], torn: 1, tornLines: ["{\"ts\":"] };
   assert.equal(memo.pass().rotationRecords({ path: "/nonexistent/ledger.2026-09-20T01-00-00-000Z.ndjson", form: "plain" }, () => parsed), parsed);
   assert.equal(memo.size(), 0);
 });

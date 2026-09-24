@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
   plan_refs: [W1-T3191, W1-T3207]
   files: [src/lib/affected-suites.ts, src/lib/ci-parity.ts, scripts/select-affected-suites.mjs, .github/workflows/ci.yml, test/the-affected-suite-selector-runs-in-shadow.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other

@@ -106,7 +106,19 @@ import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operat
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
-import { buildDaemonHealthRoute, type DaemonHealthDeps, type GatewayCheckoutState } from "./daemon-health.js";
+import {
+  buildDaemonHealthRoute,
+  createEventLoopLagMonitor,
+  type DaemonHealthDeps,
+  type EventLoopLag,
+  type GatewayCheckoutState,
+} from "./daemon-health.js";
+import {
+  evaluateIncidentInvariants,
+  eventLoopLagLedgerLine,
+  invariantFindingLedgerLine,
+  type IncidentInvariantRow,
+} from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
@@ -471,6 +483,15 @@ export interface ServeDeps {
     semanticCheckMode?: GithubEventWakeSemanticMode;
     aggregateCheckNames?: readonly string[];
     counters?: WakeCounters;
+  };
+  incidentInvariants?: {
+    intervalMs?: number;
+    readLedger?: (path: string) => ReadonlyArray<IncidentInvariantRow>;
+    writeLedger?: typeof appendLedger;
+    eventLoopLag?: () => EventLoopLag | undefined;
+    clock?: Clock;
+    setInterval?: typeof setInterval;
+    clearInterval?: typeof clearInterval;
   };
 }
 
@@ -4248,6 +4269,43 @@ interface ServeServerAssembly {
   githubAppReady?: Promise<void>;
 }
 
+export const INCIDENT_INVARIANTS_INTERVAL_MS = 60_000;
+
+export function startIncidentInvariantsMonitor(
+  ledgerPath: string,
+  deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
+): () => void {
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const writeLedger = deps.writeLedger ?? appendLedger;
+  const eventLoopLag = deps.eventLoopLag ?? createEventLoopLagMonitor();
+  const clock = deps.clock ?? systemClock;
+  const setTimer = deps.setInterval ?? setInterval;
+  const clearTimer = deps.clearInterval ?? clearInterval;
+  const intervalMs = deps.intervalMs ?? INCIDENT_INVARIANTS_INTERVAL_MS;
+
+  const tick = (): void => {
+    const nowMs = clock.now();
+    try {
+      const lag = eventLoopLag();
+      if (lag) writeLedger(ledgerPath, eventLoopLagLedgerLine(lag, nowMs));
+    } catch (e) {
+      deps.log?.("serve.incident_invariants.loop_lag_failed", { reason: String((e as Error)?.message ?? e) });
+    }
+    try {
+      const rows = readLedger(ledgerPath);
+      for (const finding of evaluateIncidentInvariants(rows, nowMs)) {
+        writeLedger(ledgerPath, invariantFindingLedgerLine(finding, nowMs));
+      }
+    } catch (e) {
+      deps.log?.("serve.incident_invariants.evaluate_failed", { reason: String((e as Error)?.message ?? e) });
+    }
+  };
+
+  const timer = setTimer(tick, intervalMs);
+  timer.unref?.();
+  return () => clearTimer(timer);
+}
+
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
  * `deps.board.github`'s background TTL refresh (W1-T154) runs ONLY while at least one console is
@@ -4399,6 +4457,11 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", analyticsCache.stop);
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
+  const stopIncidentInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, {
+    ...deps.incidentInvariants,
+    log: deps.log,
+  });
+  server.on("close", stopIncidentInvariants);
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 

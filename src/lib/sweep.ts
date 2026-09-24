@@ -168,6 +168,8 @@ export function discriminateReviewReuse(
     execProof: input.execProof,
     taskDeclaredFiles: input.taskDeclaredFiles,
   });
+  // W1-T4423: a plan-only verdict rests on a lint-plan run this reuse path does not repeat.
+  if (computed.planOnly) return { ok: false, reason: "a plan-only verdict needs a full review to re-run lint-plan" };
 
   const unreadable = computed.criteria.find(
     (criterion) =>
@@ -4031,16 +4033,8 @@ export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
 ): OpenPrView["checksState"] {
-  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
+  const { all, knownRequired, gate } = requiredCheckGate(rollup, requiredContexts);
   if (all.length === 0) return "none";
-  const required = new Set(requiredContexts ?? []);
-  const knownRequired = required.size > 0;
-  // Dedupe to ONE entry per check name — the LATEST attempt — before judging. Dedup cannot change
-  // whether `gate` is empty (grouping merges rows sharing a key, it never drops one), so the
-  // "required but not yet registered" distinction just below is unaffected (W1-T457).
-  const gate = dedupeRollupByLatestAttempt(
-    knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
-  );
   // Required contexts are configured but none has registered on this head yet
   // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
   if (gate.length === 0) return knownRequired ? "pending" : "none";
@@ -4056,6 +4050,42 @@ export function checksStateFromRollup(
     if (!ok.has(s)) anyPending = true;
   }
   return anyPending ? "pending" : "green";
+}
+
+/** The entries {@link checksStateFromRollup} judges, shared so every reading of a head's checks
+ *  covers the same gate. */
+function requiredCheckGate(
+  rollup: RollupCheckEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined,
+): { all: RollupCheckEntry[]; knownRequired: boolean; gate: RollupCheckEntry[] } {
+  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
+  const required = new Set(requiredContexts ?? []);
+  const knownRequired = required.size > 0;
+  // Dedupe to ONE entry per check name — the LATEST attempt — before judging. Dedup cannot change
+  // whether `gate` is empty (grouping merges rows sharing a key, it never drops one), so the
+  // "required but not yet registered" distinction the caller draws is unaffected (W1-T457).
+  const gate = dedupeRollupByLatestAttempt(
+    knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
+  );
+  return { all, knownRequired, gate };
+}
+
+/** W1-T4054 — when checks began pending on this head: the EARLIEST start among the entries that keep
+ *  {@link checksStateFromRollup} at "pending", over the same gate. A push, comment or label moves the
+ *  PR's `updated_at` but not a check's start, so this is the age of the CI itself. `undefined` when the
+ *  gate is red or green, or no pending entry carries a start, so `pendingAgeMinutes` keeps its fallback. */
+export function checksPendingSinceFromRollup(
+  rollup: RollupCheckEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined,
+): string | undefined {
+  let earliest: string | undefined;
+  for (const c of requiredCheckGate(rollup, requiredContexts).gate) {
+    const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+    if (REQUIRED_CHECK_FAIL.has(s)) return undefined;
+    if (REQUIRED_CHECK_OK.has(s) || !c.startedAt) continue;
+    if (earliest === undefined || Date.parse(c.startedAt) < Date.parse(earliest)) earliest = c.startedAt;
+  }
+  return earliest;
 }
 
 /** W1-T1223 — one required check whose LATEST attempt is CANCELLED. `checksState` stays "red"

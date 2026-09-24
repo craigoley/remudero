@@ -147,6 +147,7 @@ function scanLedgerBuffer(
   onRow: (row: Record<string, unknown>, line: string) => void,
   start = 0,
   maxLines = Number.POSITIVE_INFINITY,
+  onBad?: (line: string) => void,
 ): { bad: number; next: number } {
   let bad = 0;
   let lines = 0;
@@ -163,6 +164,7 @@ function scanLedgerBuffer(
         } catch {
           // deliberate: a malformed row increments torn and the remaining corpus still parses.
           bad += 1;
+          onBad?.(line);
         }
       }
     }
@@ -572,12 +574,16 @@ export interface LedgerUnionRecordReadOptions extends LedgerUnionRawReadOptions 
   satisfied?: (stepsSeen: ReadonlySet<string>) => boolean;
   /** Supplies a rotation's records in place of parsing it here; see {@link createLedgerRotationMemo}. */
   rotationRecords?: LedgerRotationHook;
+  /** Receives the raw text of each unparseable row counted in `torn`, so a caller can judge what it lost. */
+  onTorn?: (raw: string) => void;
 }
 
 /** One rotation's parsed rows, in file order, and its unparseable-line count. */
 export interface LedgerRotationRecords {
   rows: Array<Record<string, unknown>>;
   torn: number;
+  /** The raw text of each torn line, replayed to a union read's `onTorn`. */
+  tornLines: string[];
 }
 
 /** `parse` is the union's own read of `entry`; the hook may call it, or answer without reading. */
@@ -638,15 +644,16 @@ export function createLedgerRotationMemo(
       const buf = entry.form === "gzip" ? await gunzipAsync(raw) : raw;
       let rows: Array<Record<string, unknown>> = [];
       let torn = 0;
+      const tornLines: string[] = [];
       for (let at = 0; at < buf.length; ) {
         const slice: Array<Record<string, unknown>> = [];
-        const scanned = scanLedgerBuffer(buf, undefined, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN);
+        const scanned = scanLedgerBuffer(buf, undefined, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
         torn += scanned.bad;
         at = scanned.next;
         rows = reduce([...rows, ...slice]);
         await yieldTurn();
       }
-      memo.set(entry.path, { key, read: { rows, torn } });
+      memo.set(entry.path, { key, read: { rows, torn, tornLines } });
     } catch {
       // deliberate: a failed load leaves a keyed marker, so the next pass parses this rotation inline and a
       // corrupt archive still lands in the union's `unread` exactly as it would without a memo.
@@ -681,10 +688,10 @@ export function createLedgerRotationMemo(
         }
         if (hit?.key !== key) {
           missing.push(entry);
-          return { rows: [], torn: 0 };
+          return { rows: [], torn: 0, tornLines: [] };
         }
         const parsed = parse();
-        const fresh = { key, read: { rows: reduce(parsed.rows), torn: parsed.torn } };
+        const fresh = { key, read: { rows: reduce(parsed.rows), torn: parsed.torn, tornLines: parsed.tornLines } };
         memo.set(entry.path, fresh);
         touched.set(entry.path, fresh);
         return fresh.read;
@@ -746,8 +753,8 @@ export function readLedgerUnionRecordsSync(
   // Four callers, ~13.7 GB against an 8 GB heap cap — the daemon's abort. The first row is the
   // tell: 323 retained lines still cost 585 MB, so the driver is the per-file whole-string plus
   // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
-  const scanBuffer = (buf: Buffer, onRow: (row: Record<string, unknown>, line: string) => void): number =>
-    scanLedgerBuffer(buf, opts.pattern, onRow).bad;
+  const scanBuffer = (buf: Buffer, onRow: (row: Record<string, unknown>, line: string) => void, onBad = opts.onTorn): number =>
+    scanLedgerBuffer(buf, opts.pattern, onRow, 0, Number.POSITIVE_INFINITY, onBad).bad;
   const addBuffer = (buf: Buffer): void => {
     torn += scanBuffer(buf, addRecord);
   };
@@ -774,8 +781,9 @@ export function readLedgerUnionRecordsSync(
   const parseEntry = (entry: LedgerCorpusEntry): LedgerRotationRecords => {
     const buf = fsDeps.readFileSync(entry.path);
     const rows: Array<Record<string, unknown>> = [];
-    const bad = scanBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, (row) => rows.push(row));
-    return { rows, torn: bad };
+    const tornLines: string[] = [];
+    const bad = scanBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, (row) => rows.push(row), (line) => tornLines.push(line));
+    return { rows, torn: bad, tornLines };
   };
 
   const readEntry = (entry: LedgerCorpusEntry): boolean => {
@@ -785,6 +793,7 @@ export function readLedgerUnionRecordsSync(
         const read = opts.rotationRecords(entry, () => parseEntry(entry));
         filesRead += 1;
         torn += read.torn;
+        for (const line of read.tornLines) opts.onTorn?.(line);
         for (const row of read.rows) addRecord(row, opts.dedupe === false ? "" : JSON.stringify(row));
         return opts.satisfied?.(stepsSeen) ?? false;
       }

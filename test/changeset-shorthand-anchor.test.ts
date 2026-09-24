@@ -29,6 +29,9 @@ import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { bodyContradictsDiff, judgeReview } from "../src/lib/review.js";
 import { writeMutantModule } from "./helpers/mutant-module.js";
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 /** A diff that is NOT plan scope only and NOT data only — so any true claim contradicts it. */
 const SRC_DIFF = ["src/lib/status.ts", "test/trailer-credit-plan-only.test.ts"];
 
@@ -199,13 +202,13 @@ const PLAN_ONLY_DIFF = `diff --git a/plan/tasks.d/W1-T999-x.yaml b/plan/tasks.d/
 +  status: blocked`;
 
 test("PRECONDITION: the fixture meets the keyword floor, so a FAIL below is the contradiction and not an unmet claim", () => {
-  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.state, "success", "no contradiction and a met claim — anything else invalidates the traps below");
   assert.deepEqual(v.changesetContradictions, []);
 });
 
 test("THE TRAP: a body claiming exemption over a src/-touching diff still FAILS, via THIS arm", () => {
-  const v = judgeReview(CRITERIA, {
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT,
     diff: SRC_TOUCHING_DIFF,
     report: `${RESPONSIVE_REPORT}\n\nThis PR is plan-only.`,
   });
@@ -222,7 +225,7 @@ test("THE TRAP: a body claiming exemption over a src/-touching diff still FAILS,
 });
 
 test("THE TRAP, sibling shorthand: the label form over a src/-touching diff still FAILS", () => {
-  const v = judgeReview(CRITERIA, {
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT,
     diff: SRC_TOUCHING_DIFF,
     report: `${RESPONSIVE_REPORT}\n\ndata-only: no widget logic changed.`,
   });
@@ -234,7 +237,7 @@ test("THE TRAP, sibling shorthand: the label form over a src/-touching diff stil
 });
 
 test("CONTROL: the SAME exemption claim over a genuinely plan-scope diff passes — the contradiction is about the DIFF", () => {
-  const v = judgeReview(CRITERIA, {
+  const v = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT,
     diff: PLAN_ONLY_DIFF,
     report: `${RESPONSIVE_REPORT}\n\nThis PR is plan-only.`,
   });

@@ -37,13 +37,14 @@ const HARNESS_IMPORT = "--import ./test/setup/tmp-hygiene.ts";
 // node-test-runner call without also tripping on its own coverage flags.
 const TEST_RUNNER_FLAG_RE = /(^|\s)--test(\s|$)/;
 
-type CiStep = { name?: string; run?: string };
+type CiStep = { id?: string; name?: string; run?: string };
 type CiJob = { name?: string; steps?: CiStep[] };
 type CiWorkflow = { jobs?: Record<string, CiJob> };
 
 type RealInvocation = {
   file: string;
   jobId: string;
+  stepId: string | undefined;
   stepName: string;
   run: string;
 };
@@ -72,7 +73,7 @@ async function findRealInvocations(): Promise<RealInvocation[]> {
         const run = step.run;
         if (typeof run !== "string") continue;
         if (!TEST_RUNNER_FLAG_RE.test(run)) continue;
-        found.push({ file, jobId, stepName: step.name ?? "(unnamed step)", run });
+        found.push({ file, jobId, stepId: step.id, stepName: step.name ?? "(unnamed step)", run });
       }
     }
   }
@@ -105,10 +106,11 @@ test("W1-T1250: the scan sees the real node-test-runner invocations, not an empt
     );
   }
 
-  // The specific job this task fixes must be among what the scan found -- guards against the
-  // regex accidentally excluding containment-probe itself.
+  // The specific step this task fixes must be among what the scan found -- guards against the
+  // regex accidentally excluding containment-probe itself. W1-T4399 folded it into the
+  // `commitlint` job as a STEP (id: containment-probe) rather than its own job.
   assert.ok(
-    invocations.some((i) => i.file === "ci.yml" && i.jobId === "containment-probe"),
+    invocations.some((i) => i.file === "ci.yml" && i.stepId === "containment-probe"),
     "expected the scan to see ci.yml's containment-probe step",
   );
 });
@@ -133,10 +135,13 @@ test("W1-T1250: every workflow's node-test-runner invocation carries the fixture
 
 test("W1-T1250: containment-probe's required-check invocation matches what ci-parity mirrors locally", async () => {
   const invocations = await findRealInvocations();
+  // W1-T4399: containment-probe now runs as a STEP (id: containment-probe) of the `commitlint`
+  // job, one of ~17 gates consolidated onto one shared runner -- its own ci.yml job key stays
+  // registered but permanently skipped (if: false), so the real invocation lives here instead.
   const containmentProbe = invocations.find(
-    (i) => i.file === "ci.yml" && i.jobId === "containment-probe",
+    (i) => i.file === "ci.yml" && i.stepId === "containment-probe",
   );
-  assert.ok(containmentProbe, "expected ci.yml to still define a containment-probe job with a node-test-runner step");
+  assert.ok(containmentProbe, "expected ci.yml to still define a containment-probe step with a node-test-runner invocation");
 
   // src/lib/ci-parity.ts's TMP_HYGIENE_IMPORT constant is "./test/setup/tmp-hygiene.ts" and its
   // containment-probe:test step invokes exactly

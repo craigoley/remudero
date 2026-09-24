@@ -274,20 +274,23 @@ test("W1-T3055: CLI — a real collision on an open PR is still REFUSED, and sti
 test("W1-T3055: the ci.yml step supplies a token AND requires the read — the wiring the docblock measured as absent", async () => {
   const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
 
-  // Extract THIS job's block, the same way the W1-T1048 falsifier does, so a GH_TOKEN belonging to
-  // some other job (commitlint has had one all along) cannot satisfy this assertion.
-  const jobStart = ciYml.indexOf("\n  task-id-existence:\n");
-  assert.notEqual(jobStart, -1, "task-id-existence job block not found");
-  const nextJob = /\n {2}[a-zA-Z0-9_-]+:\n/.exec(ciYml.slice(jobStart + 1));
-  const jobBlock = nextJob ? ciYml.slice(jobStart, jobStart + 1 + nextJob.index) : ciYml.slice(jobStart);
+  // W1-T4399: task-id-existence now runs as a STEP (id: task-id-existence) of the consolidated
+  // `commitlint` job, so this extracts THAT STEP specifically, the same discipline the old
+  // whole-job extraction served — a GH_TOKEN belonging to a DIFFERENT step in the same shared job
+  // (commitlint's own step has had one all along) must not satisfy this assertion.
+  const stepStart = ciYml.indexOf("- name: task-id-existence (");
+  assert.notEqual(stepStart, -1, "task-id-existence step not found");
+  const nextStep = ciYml.indexOf("\n      - name:", stepStart + 1);
+  assert.notEqual(nextStep, -1, "task-id-existence step must be bounded by the next step");
+  const stepBlock = ciYml.slice(stepStart, nextStep);
 
-  assert.match(jobBlock, /GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/, "the job must pass a token; `gh api` is unauthenticated without one");
-  assert.match(jobBlock, /--require-open-prs/, "and must require the read, or an outage silently reports OK again");
+  assert.match(stepBlock, /GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/, "the step must pass a token; `gh api` is unauthenticated without one");
+  assert.match(stepBlock, /--require-open-prs/, "and must require the read, or an outage silently reports OK again");
 
-  // POSITIVE CONTROL on the extraction itself: the slice must be this job and not the whole file,
-  // or both assertions above would pass on commitlint's token 700 lines away.
-  assert.match(jobBlock, /task-id-existence:check/);
-  assert.doesNotMatch(jobBlock, /commitlint/);
+  // POSITIVE CONTROL on the extraction itself: the slice must be this step and not the whole
+  // shared job, or both assertions above would pass on commitlint's own token a few steps away.
+  assert.match(stepBlock, /task-id-existence:check/);
+  assert.doesNotMatch(stepBlock, /gh pr view/, "must not have captured the commitlint step's own gh call");
 });
 
 test("W1-T3055: the npm entry stays PERMISSIVE, so ci-parity does not refuse a lane for its environment", async () => {

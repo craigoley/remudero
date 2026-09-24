@@ -252,11 +252,15 @@ test("task-id-existence: an unconditional ci job runs the check on every pull re
   // `on:` block comment for why `ci` alone also runs on push) but no PATH filter -- extract just
   // this job's block and prove it has no `paths:`/`paths-ignore:` key, matching the claims/
   // no-hand-rolled-fetch precedent's own falsifier shape.
-  const jobStart = ciYml.indexOf("\n  task-id-existence:\n");
-  assert.notEqual(jobStart, -1, "task-id-existence job block not found");
+  //
+  // W1-T4399: task-id-existence now runs as a STEP of the consolidated `commitlint` job (one
+  // shared runner for ~17 gates) -- its own ci.yml job key stays registered but permanently
+  // skipped (if: false), so the real job whose shape this criterion cares about is `commitlint`.
+  const jobStart = ciYml.indexOf("\n  commitlint:\n");
+  assert.notEqual(jobStart, -1, "commitlint job block not found");
   const nextJobMatch = /\n {2}[a-zA-Z0-9_-]+:\n/.exec(ciYml.slice(jobStart + 1));
   const jobBlock = nextJobMatch ? ciYml.slice(jobStart, jobStart + 1 + nextJobMatch.index) : ciYml.slice(jobStart);
-  assert.doesNotMatch(jobBlock, /paths(-ignore)?:/, "task-id-existence must have no path filter (fail-closed shape)");
+  assert.doesNotMatch(jobBlock, /paths(-ignore)?:/, "the commitlint job (task-id-existence's new home) must have no path filter (fail-closed shape)");
 
   // The real repo, scanned for real, must be clean today (proves the checked-in baseline is
   // honest and the gate is wired against the actual src/deploy trees, not a stub).

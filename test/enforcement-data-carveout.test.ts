@@ -63,9 +63,11 @@ function diffTouching(...paths: string[]): string {
  *  rather than imported: "byte-identical to today" is the claim, and re-deriving it from the
  *  function under test would assert only that a formatter is self-consistent. */
 const PLAN_ONLY_SUMMARY_TODAY =
-  "remudero-review: PASS — plan-only PR (1 criteria), gated deterministically " +
-  "(lint-plan + the plan-PR emitter + plan-index checks); no proof execution attempted, " +
-  "by design (W1-T205)";
+  "remudero-review: PASS — plan-only PR (1 criteria); lint-plan ran on its changed tasks " +
+  "(1 checked, 0 failing); no proof run";
+
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
 
 // ── THE FIXTURE REACHES THE DECISION — asserted before any direction is read ─────────────────
 //
@@ -75,7 +77,7 @@ const PLAN_ONLY_SUMMARY_TODAY =
 // whose verdict is a failure would "prove" the denial while testing nothing.
 
 test("PRECONDITION: the shard fixture really lands on the capped-success branch the carve-out governs", () => {
-  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/tasks.d/W1-T999-some-shard.yaml"), report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/tasks.d/W1-T999-some-shard.yaml"), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
   assert.equal(v.state, "success", "the keyword floor must be MET, or nothing below exercises the arm path");
   assert.equal(v.capped, true, "and CAPPED (no headCheckoutDir ⇒ zero proofs executed) — the branch under test");
 });
@@ -83,7 +85,7 @@ test("PRECONDITION: the shard fixture really lands on the capped-success branch 
 // ── DIRECTION 1: enforcement data LOSES the carve-out, and the status says why ────────────────
 
 test("a diff touching only plan/claims.yaml is NOT plan-only, and the reason names the file and the category", () => {
-  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/claims.yaml"), report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/claims.yaml"), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
 
   assert.equal(v.planOnly, false, "THE FIX: plan scope alone no longer earns the carve-out");
   assert.equal(v.state, "success", "the DENIAL is not a failure — the review still passes, it just is not exempt");
@@ -94,7 +96,7 @@ test("a diff touching only plan/claims.yaml is NOT plan-only, and the reason nam
 });
 
 test("the denial has TEETH: the arm decision refuses without an override, which is the whole point", () => {
-  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/claims.yaml"), report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/claims.yaml"), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
   const decision = decideAutoMergeArm({ state: v.state, capped: v.capped, planOnly: v.planOnly }, false);
   assert.equal(decision.arm, false, "a blunted self-check must not reach an unattended auto-merge");
   assert.match(decision.reason, /CAPPED/);
@@ -104,6 +106,7 @@ test("the denial has TEETH: the arm decision refuses without an override, which 
   const shard = judgeReview(CRITERIA, {
     diff: diffTouching("plan/tasks.d/W1-T999-some-shard.yaml"),
     report: RESPONSIVE_REPORT,
+    planLint: CLEAN_PLAN_LINT,
   });
   const armed = decideAutoMergeArm({ state: shard.state, capped: shard.capped, planOnly: shard.planOnly }, false);
   assert.equal(armed.arm, true, "an ordinary filing still arms — the carve-out is intact where it belongs");
@@ -111,7 +114,7 @@ test("the denial has TEETH: the arm decision refuses without an override, which 
 
 test("every declared enforcement-data path loses the carve-out, not just the one the fixture names", () => {
   for (const path of Object.keys(ENFORCEMENT_DATA)) {
-    const v = judgeReview(CRITERIA, { diff: diffTouching(path), report: RESPONSIVE_REPORT });
+    const v = judgeReview(CRITERIA, { diff: diffTouching(path), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
     assert.equal(v.planOnly, false, `${path}: declared enforcement data must never be plan-only`);
     assert.match(v.summary, new RegExp(path.replace(/[.]/g, "\\.")), `${path}: named in the reason`);
   }
@@ -123,7 +126,7 @@ test("every declared enforcement-data path loses the carve-out, not just the one
 // filing — the cost W1-T427's design explicitly refused. This is the half that catches it.
 
 test("a diff touching only a plan/tasks.d/ shard KEEPS the carve-out, with the summary byte-identical to today", () => {
-  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/tasks.d/W1-T999-some-shard.yaml"), report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/tasks.d/W1-T999-some-shard.yaml"), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
 
   assert.equal(v.planOnly, true, "filing a task is exactly what the carve-out is for");
   assert.equal(v.summary, PLAN_ONLY_SUMMARY_TODAY, "and its rendering is unchanged, to the byte");
@@ -132,7 +135,7 @@ test("a diff touching only a plan/tasks.d/ shard KEEPS the carve-out, with the s
 
 test("the plan monolith, MASTER-PLAN.md and the excused record stores all keep the carve-out too", () => {
   for (const path of ["plan/tasks.yaml", "MASTER-PLAN.md", "plan/feedback/fb-1.yaml", "plan/plan-index.json"]) {
-    const v = judgeReview(CRITERIA, { diff: diffTouching(path), report: RESPONSIVE_REPORT });
+    const v = judgeReview(CRITERIA, { diff: diffTouching(path), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
     assert.equal(v.planOnly, true, `${path}: not enforcement data, so the carve-out is untouched`);
   }
 });
@@ -143,6 +146,7 @@ test("a diff touching a shard AND plan/policy.yaml pays the floor — enforcemen
   const v = judgeReview(CRITERIA, {
     diff: diffTouching("plan/tasks.d/W1-T999-some-shard.yaml", "plan/policy.yaml"),
     report: RESPONSIVE_REPORT,
+    planLint: CLEAN_PLAN_LINT,
   });
   assert.equal(v.planOnly, false);
   assert.match(v.summary, /plan\/policy\.yaml/, "the enforcement half is named…");
@@ -164,7 +168,7 @@ test("enforcementDataInDiff: exact paths only — a lookalike prefix and an inhe
 // never plan-only. What must NOT happen is a legitimate edit being FAILED.
 
 test("a legitimate enforcement-data edit still PASSES — it loses an exemption, it does not acquire a failure", () => {
-  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/policy.yaml"), report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: diffTouching("plan/policy.yaml"), report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
   assert.equal(v.state, "success", "the review still passes on its own merits");
   assert.equal(v.criteriaTampered, false, "and `!planOnly` must not drag a pure policy edit into the rule-15 guard");
   assert.equal(v.instrumentEntangled, false, "nor into instrument isolation — it touches no src/ product path");
@@ -181,12 +185,13 @@ test("the rule-15 interaction is REAL but empty here: criteriaTampered needs a c
 -      proof: "the old proof"
 +      proof: "the new proof"`;
 
-  const alone = judgeReview(CRITERIA, { diff: criterionEdit, report: RESPONSIVE_REPORT });
+  const alone = judgeReview(CRITERIA, { diff: criterionEdit, report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
   assert.equal(alone.criteriaTampered, false, "an Architect's plan-only criterion repair is still exempt");
 
   const withEnforcement = judgeReview(CRITERIA, {
     diff: `${criterionEdit}\n${diffTouching("plan/claims.yaml")}`,
     report: RESPONSIVE_REPORT,
+    planLint: CLEAN_PLAN_LINT,
   });
   assert.equal(
     withEnforcement.criteriaTampered,
