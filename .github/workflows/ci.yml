@@ -559,7 +559,9 @@ jobs:
     # event (W1-T1033), so the required context is never silently absent.
     name: test-slow
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    # W1-T4396: no job-level if — the push lane runs the slow tier too. W1-T3207 skips it on a
+    # SOURCE pull request, so without this the 107 slowest files ran on main nowhere at all. It is
+    # its own job, so it never lengthens the four fast shards' critical path.
     timeout-minutes: 35
     # W1-T2904 HEAVY BAND. `test-slow` carries a `playwright install` step because 9 of the 106
     # files at or over the manifest's 5000ms threshold are the Playwright-driven serve.* suites,
@@ -590,10 +592,19 @@ jobs:
       - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
         run: npx playwright install chromium
       - name: Check every test file is tiered (W1-T2904 unwired-gate wiring — `test:tier:check` refuses an untiered file so the fast/slow split can trust scripts/test-tier-manifest.json before either tier runs)
-        run: npm run --silent test:tier:check -- --base "origin/${GITHUB_BASE_REF}"
+        run: |
+          # A push has no base branch; the tier check is a per-PR admission gate that main already passed.
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            npm run --silent test:tier:check -- --base "origin/${GITHUB_BASE_REF}"
+          fi
       - name: Establish whether the exact plan-reading matrix owns this diff (W1-T3191)
         id: plan-reading
         run: |
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "class=PUSH" >> "$GITHUB_OUTPUT"
+            echo "established=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
           git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
           CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
@@ -633,7 +644,13 @@ jobs:
           fi
           RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/slow.json"
           export RMD_TEST_DURATION_OUTPUT
-          npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
+          if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
+            # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
+            echo "W1-T4396: push to main — running the slow tier."
+            node scripts/test-with-retry.mjs node scripts/test-tier-manifest.mjs --run slow --base HEAD
+          else
+            npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
+          fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

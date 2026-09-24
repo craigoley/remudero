@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  priority: 1
   principles: {tdd: strict}
   budget_usd: 45.00
   risk: high

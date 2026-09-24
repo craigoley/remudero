@@ -239,11 +239,16 @@ test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option bef
     /node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/4 --base "\$TIER_BASE"/,
     "the SOURCE matrix must invoke the retry wrapper around the duration-balanced fast-tier shard",
   );
+  // W1-T4396 added the slow tier's push lane as the second direct caller.
   assert.equal(
     executable.match(/node scripts\/test-with-retry\.mjs/g)?.length,
-    1,
-    "only ci's SOURCE lane may name the wrapper directly; coverage-ratchet must not retry (2026-08-28 ruling)",
+    2,
+    "only ci's SOURCE lane and test-slow's push lane may name the wrapper directly",
   );
+  assert.match(executable, /node scripts\/test-with-retry\.mjs node scripts\/test-tier-manifest\.mjs --run slow --base HEAD/);
+  const coverageJob = executable.slice(executable.indexOf("\n  coverage-ratchet:\n"), executable.indexOf("\n  coverage-ratchet-required:\n"));
+  assert.ok(coverageJob.length > 0, "the coverage-ratchet job must be found");
+  assert.doesNotMatch(coverageJob, /test-with-retry|test:ci/, "coverage-ratchet must not retry (2026-08-28 ruling)");
 
   const pkg = JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8"));
   assert.doesNotMatch(pkg.scripts.test, /test-with-retry/, "`npm test` must stay retry-free -- Stryker re-runs it once per mutant, where a retry would blur the kill signal");
