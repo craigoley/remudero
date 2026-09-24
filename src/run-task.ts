@@ -893,7 +893,7 @@ import {
   recordWipeTestCadenceFire,
   renderVerbCensusDigestLine,
   priorVerifyHumanAgeBandKeys,
-  runMeasurementCadenceReport,
+  runMeasurementCadenceReportAsync,
   runVerbCensus,
   verifyHumanCadence,
   wipeTestCadenceCheck,
@@ -25441,7 +25441,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       const planReconcileOption =
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
-      const report = runMeasurementCadenceReport({
+      const report = await runMeasurementCadenceReportAsync({
         stateDir: join(root, "state"),
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,

@@ -1,5 +1,6 @@
 import { reconcilePlan } from "./plan-reconcile.js";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
@@ -592,12 +593,33 @@ function buildAdoptionCorpus(checkoutDir: string): AdoptionCorpusFile[] {
  *  oldest add event (correct for a script, since the file IS the mechanism). */
 function defaultAdoptionShipDate(checkoutDir: string, file: string, needle?: string): string {
   try {
-    const args = needle
-      ? ["log", "-S", needle, "--format=%aI", "--", file]
-      : ["log", "--diff-filter=A", "--follow", "--format=%aI", "--", file];
-    const out = execFileSync("git", args, { cwd: checkoutDir, encoding: "utf8", maxBuffer: 1 << 24 }).trim();
-    const lines = out.split("\n").filter(Boolean);
-    return lines.length ? lines[lines.length - 1] : "unknown"; // git log is newest-first; oldest is last
+    const out = execFileSync("git", adoptionShipDateArgs(file, needle), { cwd: checkoutDir, encoding: "utf8", maxBuffer: 1 << 24 });
+    return oldestAdoptionShipDate(out);
+  } catch {
+    return "unknown";
+  }
+}
+
+function adoptionShipDateArgs(file: string, needle?: string): string[] {
+  return needle
+    ? ["log", "-S", needle, "--format=%aI", "--", file]
+    : ["log", "--diff-filter=A", "--follow", "--format=%aI", "--", file];
+}
+
+function oldestAdoptionShipDate(out: string): string {
+  const lines = out.trim().split("\n").filter(Boolean);
+  return lines.length ? lines[lines.length - 1] : "unknown"; // git log is newest-first; oldest is last
+}
+
+const execFileAsync = promisify(execFile);
+
+/** {@link defaultAdoptionShipDate}'s same `git log`, awaited — the daemon's lookup. Each pickaxe
+ *  costs ~0.36 s on the fleet host, and 2,377 of them run synchronously blocked the event loop
+ *  for 862 s (2026-09-24). A failed read is "unknown", exactly as the sync resolver says. */
+async function defaultAdoptionShipDateAsync(checkoutDir: string, file: string, needle?: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", adoptionShipDateArgs(file, needle), { cwd: checkoutDir, encoding: "utf8", maxBuffer: 1 << 24 });
+    return oldestAdoptionShipDate(stdout);
   } catch {
     return "unknown";
   }
@@ -1730,6 +1752,8 @@ export interface MeasurementCadenceReportOpts {
   checkoutDir?: string;
   /** Injectable only for tests; production takes `defaultAdoptionShipDate`. */
   shipDateFor?: (checkoutDir: string, file: string, needle?: string) => string;
+  /** {@link runMeasurementCadenceReportAsync}'s lookup; injectable only for tests. */
+  shipDateForAsync?: (checkoutDir: string, file: string, needle?: string) => Promise<string>;
   /** Injectable only for tests; production takes {@link resolveLedgerUnion}. */
   ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
   /** The board-review rung's input — the whole open board plus its own policy row and marker.
@@ -2368,6 +2392,46 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ...(opts.verifyHuman ? { verifyHuman: opts.verifyHuman } : {}),
     ...(knowledge ? { knowledge } : {}),
   };
+}
+
+/** How many ship-date `git log` children {@link runMeasurementCadenceReportAsync} keeps in flight. */
+const ADOPTION_SHIP_DATE_CONCURRENCY = 4;
+
+/**
+ * {@link runMeasurementCadenceReport} with the adoption report's ship-date lookups — one `git log`
+ * per finding, ~99% of the run — resolved asynchronously first, so the daemon's event loop keeps
+ * turning. The report is byte-for-byte the sync one: the scans run once to name every lookup, the
+ * dates resolve off the loop, then the sync report reads them from the map. A lookup the first
+ * pass did not name (the checkout moved in between) falls back to the sync resolver.
+ */
+export async function runMeasurementCadenceReportAsync(opts: MeasurementCadenceReportOpts): Promise<MeasurementCadenceRunResult> {
+  const resolved = new Map<string, string>();
+  const keyOf = (file: string, needle?: string) => `${file}\u0000${needle ?? ""}`;
+  if (opts.checkoutDir) {
+    const checkoutDir = opts.checkoutDir;
+    const wanted = new Map<string, { file: string; needle?: string }>();
+    const record = (_c: string, file: string, needle?: string) => {
+      wanted.set(keyOf(file, needle), { file, needle });
+      return "unknown";
+    };
+    const corpus = buildAdoptionCorpus(checkoutDir);
+    scanUnadoptedSymbols(checkoutDir, corpus, record);
+    scanUnadoptedFields(checkoutDir, record);
+    scanUnadoptedScripts(checkoutDir, corpus, record);
+    const lookup = opts.shipDateForAsync ?? defaultAdoptionShipDateAsync;
+    const queue = [...wanted];
+    const drain = async () => {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        resolved.set(next[0], await lookup(checkoutDir, next[1].file, next[1].needle));
+      }
+    };
+    await Promise.all(Array.from({ length: ADOPTION_SHIP_DATE_CONCURRENCY }, drain));
+  }
+  const fallback = opts.shipDateFor ?? defaultAdoptionShipDate;
+  return runMeasurementCadenceReport({
+    ...opts,
+    shipDateFor: (c, file, needle) => resolved.get(keyOf(file, needle)) ?? fallback(c, file, needle),
+  });
 }
 
 /** Keys of {@link MeasurementCadenceRunResult} that must never appear on the row
