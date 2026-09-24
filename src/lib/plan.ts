@@ -562,10 +562,8 @@ export function readWholeFile(path: string, io: FileIntegrityIO = defaultIntegri
  * Load plan/tasks.yaml and merge in shards under a sibling `tasks.d/*.yaml` directory (W1-T122):
  * one task per shard file so two concurrent filings add different files instead of racing to
  * append to one shared end-of-file. A duplicate id across the monolith and any shard fails loud.
- * `shardDir` defaults to `<path's own dir>/tasks.d` (today's behavior, unchanged for every
- * existing caller); an explicit value lets a caller whose monolith and shard directory don't share
- * a parent — a target resolved through a {@link RepoLayout} override (W1-T2922) — still find its
- * shards. See {@link loadPlanForLayout} for that caller.
+ * `shardDir` defaults to `<path's own dir>/tasks.d`; an explicit value lets a caller whose monolith and
+ * shards don't share a parent ({@link RepoLayout} override, W1-T2922: {@link loadPlanForLayout}) find them.
  * Why: docs/forensics/plan.md#loadplan.
  */
 export function loadPlan(
