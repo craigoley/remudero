@@ -72,7 +72,7 @@ import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionR
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
-import { buildInstanceGatewayRoutes, type InstanceGatewayOptions } from "./instance-gateway.js";
+import { buildInstanceGatewayRoutes, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -4383,6 +4383,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", analyticsCache.stop);
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
+  server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
