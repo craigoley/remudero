@@ -1,0 +1,19 @@
+violation: none
+rule: >
+  W1-T4095 / W1-T3077: a gardener RETIRE flips an active learning to `lifecycle: superseded` and
+  keeps its text — a learnings data change, so a prompt-surface change, opened unattended. A
+  retirement REMOVES an entry from injection and adds none, so the troubleshooting and drill
+  coverage items must not demand a write-up, and a correct pass whose proofs execute must arm.
+  A regression here stalls the self-maintenance loop silently.
+verdict:
+  state: success
+  testTheater: false
+  criteriaTampered: false
+  capped: false
+arm: true
+changesetContradictions: []
+criteria:
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
