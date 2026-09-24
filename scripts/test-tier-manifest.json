@@ -267,6 +267,7 @@
     "test/a-shards-proof-cannot-target-its-own-file.test.ts": 0,
     "test/a-shared-config-lock-outlives-its-reclaimer.test.ts": 0,
     "test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts": 4098,
+    "test/a-silent-daemon-is-noticed-by-another.test.ts": 0,
     "test/a-size-ledger-is-not-a-score-floor.test.ts": 1036,
     "test/a-slow-tier-suite-is-never-re-measured.test.ts": 0,
     "test/a-source-file-cannot-outgrow-its-baseline.test.ts": 2145,
