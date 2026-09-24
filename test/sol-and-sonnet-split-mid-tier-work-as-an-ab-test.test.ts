@@ -29,7 +29,7 @@ const MODELS: CodexModelInfo[] = ["gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"].map
 }));
 const SHARED = { rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 40, windowDurationMins: 10080 } } } };
 
-test("sonnet/high work reaches Sol on Codex while lower efforts stay on Luna", () => {
+test("high-effort sonnet work reaches Sol on Codex while lower efforts stay on Luna", () => {
   const ladder = loadMounts(mountsPath(REPO_ROOT)).capabilities!;
   assert.equal(ladder.codex.balanced.high[0], "gpt-6-sol");
   assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "sonnet", "high", ladder).model, "gpt-6-sol");
@@ -37,7 +37,7 @@ test("sonnet/high work reaches Sol on Codex while lower efforts stay on Luna", (
   assert.equal(SOL_VS_SONNET.revisitOn, "2026-10-08", "the ruling fixes the revisit two weeks out");
 });
 
-test("an assignment joins the A/B only when either arm could have won", () => {
+test("an assignment joins the experiment only when either arm could have won", () => {
   const both = [
     { provider: "claude" as const, model: "claude-sonnet-5", eligible: true },
     { provider: "codex" as const, model: "gpt-6-sol", eligible: true },
