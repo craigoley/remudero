@@ -1415,6 +1415,7 @@ import {
   type ArmAttemptOutcome,
   type ArmOutcomeName,
   type BuildSweepEffectsDeps,
+  type MetadataRepairResult,
   sweepArmTaskId,
   uncreditableHeadReason,
   creditSubjectIsImplementation,
@@ -4513,26 +4514,30 @@ export async function repairPrMetadata(
     if (!target) throw new Error(`metadata read: cannot resolve PR URL ${JSON.stringify(url)}`);
     return ghJson(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}`]) as { title?: string; body?: string };
   },
-): Promise<{ repaired: boolean; reason: string }> {
+): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
+  const bodyChecked = checks.includes("acceptance-author-gate") || checks.includes("proof-discrimination");
   if (checks.includes("commitlint")) {
     const liveTitle = live.title;
     if (typeof liveTitle !== "string" || liveTitle.trim() === "") {
       return { repaired: false, reason: "live PR title is unavailable" };
     }
     if (checkCommitMessage(liveTitle).length === 0) {
-      return { repaired: false, reason: "live PR title already satisfies commitlint; the red needs a fresh diagnosis" };
-    }
-    const conventional = liveTitle.match(/^((?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([^)]*\))?):\s*(.*)$/i);
-    const prefix = conventional && conventional[1] === conventional[1].toLowerCase() ? conventional[1] : "fix(pr)";
-    const subject = conventional?.[2]?.trim() || liveTitle.trim();
-    fields.title = shapeCommitMessage(prefix, subject).header;
-    if (checkCommitMessage(fields.title).length > 0) {
-      return { repaired: false, reason: "candidate PR title did not satisfy commitlint" };
+      if (!bodyChecked) {
+        return { repaired: false, notMetadata: true, reason: "live PR title already satisfies commitlint; the red is not a title defect" };
+      }
+    } else {
+      const conventional = liveTitle.match(/^((?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([^)]*\))?):\s*(.*)$/i);
+      const prefix = conventional && conventional[1] === conventional[1].toLowerCase() ? conventional[1] : "fix(pr)";
+      const subject = conventional?.[2]?.trim() || liveTitle.trim();
+      fields.title = shapeCommitMessage(prefix, subject).header;
+      if (checkCommitMessage(fields.title).length > 0) {
+        return { repaired: false, reason: "candidate PR title did not satisfy commitlint" };
+      }
     }
   }
-  if (checks.includes("acceptance-author-gate") || checks.includes("proof-discrimination")) {
+  if (bodyChecked) {
     if (live.body === undefined) return { repaired: false, reason: "live PR body is unavailable" };
     const repair = acceptanceGateBodyRepair(live.body, SWEEP_METADATA_ACCEPTANCE_FALLBACK);
     if (!repair) {

@@ -254,7 +254,9 @@ test("W1-T527: a base-caused red pull request spends no strike", async () => {
 
   // THE FALSIFIER Q2 DEMANDS: an in-diff red DOES consume one, through the same path.
   const x = redPr({ prNumber: 9101, ciFailures: [ciFailure({ name: "ci" })] });
-  const y = redPr({ prNumber: 9102, ciFailures: [ciFailure({ name: "depcruise" })] });
+  // W1-T4459 design (i): a commitlint-only red (the PR title) gets title repair, not a fix worker,
+  // so the second in-diff red here must be a check a file edit can fix.
+  const y = redPr({ prNumber: 9102, ciFailures: [ciFailure({ name: "lint-plan" })] });
   const spent = await sweepOnce([x, y]);
   assert.deepEqual(spent.dispatched, [9101, 9102], "an in-diff red must still reach the fix rung");
   assert.equal(spent.actedRows.length, 2, "and must still write acted:true, which is what spends the strike");

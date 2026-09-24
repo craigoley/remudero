@@ -461,7 +461,13 @@ test("W1-T474 — sweepPostFixReverification never pushes for a class whose fix 
 
 test("W1-T474 — the ordering the rationale requires: a PR redriven this pass is excluded before runSweep's fix rung ever sees it, so no strike is spent on it in the same pass", async () => {
   const matched = ciGateTimeoutPr({ prNumber: 1790, prUrl: "url/1790", headRefName: "run-W1-T1790-1" });
-  const unrelated = unrelatedRedPr({ prNumber: 1791, prUrl: "url/1791" });
+  // W1-T4459 design (i): unrelatedRedPr's default commitlint (PR title) red now gets title repair,
+  // never a fix worker, so the PR that must reach the fix rung carries a red a file edit can fix.
+  const unrelated = unrelatedRedPr({
+    prNumber: 1791,
+    prUrl: "url/1791",
+    ciFailures: [{ name: "ci", logTail: "AssertionError: expected 1 to equal 2" }],
+  });
   const openPrs = [matched, unrelated];
 
   const reverifySummary = await sweepPostFixReverification("o", "r", openPrs, ledgerPath(), "SWEEP-WIRE-4", () => {}, {
