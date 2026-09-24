@@ -16,7 +16,9 @@
     - openapi/daemon.yaml
     - test/factory-definition.test.ts
     - test/factory-definition-wiring.test.ts
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4007 — It depends on W1-T3958, which will never be built.
   attempts: 0
   rationale: |
     Warp's Software Factory work reframes engineering from operating isolated interactive agents to
