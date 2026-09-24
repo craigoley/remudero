@@ -244,7 +244,8 @@ export function summarizeShardBalance(testFiles, manifest, shardCount, balancedS
 
 /** Validate one newline-delimited conservative candidate set and select a duration-balanced
  * shard. The caller may execute only this returned subset. Any ambiguity throws so workflow
- * callers can take the complete source-CI fallback instead of manufacturing an empty green. */
+ * callers can take the complete source-CI fallback instead of manufacturing an empty green. A
+ * candidate with no manifest row is NOT ambiguous (W1-T4430): it is the fast tier at duration 0. */
 export function selectPlanReadingShard(candidateText, testFiles, manifest, shard) {
   if (!shard || !Number.isInteger(shard.index) || !Number.isInteger(shard.count) ||
       shard.count < 1 || shard.index < 1 || shard.index > shard.count) {
@@ -273,7 +274,12 @@ export function selectPlanReadingShard(candidateText, testFiles, manifest, shard
     }
     if (seen.has(file)) throw new Error(`duplicate plan-reading candidate: ${file}`);
     if (!known.has(file)) throw new Error(`unknown plan-reading candidate: ${file}`);
-    if (!(file in manifest.files)) throw new Error(`plan-reading candidate is absent from the duration manifest: ${file}`);
+    // W1-T4430: a candidate with NO manifest row is admitted, not refused — an absent row is the
+    // fast tier at duration 0 everywhere else in this file, and `balanceFilesByDuration` already
+    // weights it (at the median measured duration, W1-T3699). MEASURED on this PR's own tree once the
+    // 601 seeded rows were removed: 88 of 353 plan-reading candidates had no row, so the refusal
+    // that used to live here sent EVERY plan/docs PR to the full source fallback. `known` (the file
+    // is on disk) is the check that still matters, and it stays.
     seen.add(file);
   }
 

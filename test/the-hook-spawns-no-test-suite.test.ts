@@ -32,9 +32,10 @@ const CI_WORKFLOW = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 let counter = 0;
 
 /** A linked worktree with a bare remote and this repo's real hook installed via core.hooksPath —
- *  the same wiring spawnWorker gives every lane. `tiered` decides whether the tree carries an
- *  untiered test file, which is the one defect class the narrowed hook still exists to catch. */
-function fixture(opts: { untieredFile: boolean }) {
+ *  the same wiring spawnWorker gives every lane. `untieredFile` adds a test file with no manifest
+ *  row (W1-T4430: admitted, the fast tier); `ghostRow` adds a manifest row naming a test file that
+ *  is not on disk, which since W1-T4430 is the one tier defect the narrowed hook still catches. */
+function fixture(opts: { untieredFile: boolean; ghostRow?: boolean }) {
   const remote = gitRepo({ kind: "t3225-remote", bare: true });
   const parent = gitRepo({ kind: "t3225-parent" });
   const work = parent.addWorktree(join(dirname(parent.dir), `t3225-wt-${process.pid}-${counter++}`), "pushbranch");
@@ -48,7 +49,13 @@ function fixture(opts: { untieredFile: boolean }) {
   writeFileSync(join(work.dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
   writeFileSync(
     join(work.dir, "scripts", "test-tier-manifest.json"),
-    JSON.stringify({ thresholdMs: 1000, files: opts.untieredFile ? {} : { "test/seed.test.ts": 0 } }),
+    JSON.stringify({
+      thresholdMs: 1000,
+      files: {
+        ...(opts.untieredFile ? {} : { "test/seed.test.ts": 0 }),
+        ...(opts.ghostRow ? { "test/long-gone.test.ts": 2500 } : {}),
+      },
+    }),
   );
   writeFileSync(join(work.dir, "test", "seed.test.ts"), "// tiered\n");
   if (opts.untieredFile) writeFileSync(join(work.dir, "test", "brand-new.test.ts"), "// untiered\n");
@@ -72,12 +79,27 @@ function fixture(opts: { untieredFile: boolean }) {
   return { work, push };
 }
 
-test("W1-T3225: the hook still REFUSES an untiered test file, through a real git push", () => {
+// W1-T4430 retitled this from "the hook still REFUSES an untiered test file": an untiered file is
+// now admitted (the next test, through the same real push), and the tier admission's refusal is
+// a GHOST row. The hook must still reach a refusing verdict, name the offender, and name the fix.
+test("W1-T3225: the hook still REFUSES a ghost tier row, through a real git push", () => {
+  const { push } = fixture({ untieredFile: true, ghostRow: true });
+  const { status, stderr } = push();
+  assert.notEqual(status, 0, "the tier defect that remains must still stop a push");
+  assert.match(stderr, /long-gone\.test\.ts/, "and the refusal names the ghost row");
+  assert.match(stderr, /Remove the row\(s\) above, or restore the file they name\./, "and the remedy, which is what makes an early refusal worth having");
+  assert.match(stderr, /pre-push REFUSED/);
+  assert.doesNotMatch(stderr, /brand-new\.test\.ts/, "the untiered file beside it is not what refused");
+});
+
+test("W1-T4430: the hook ADMITS an untiered test file, through a real git push", () => {
+  // The defect class nine incidents were made of is no longer a defect: a new test file needs no
+  // manifest row, so the same real push that used to refuse must now land.
   const { push } = fixture({ untieredFile: true });
   const { status, stderr } = push();
-  assert.notEqual(status, 0, "the one defect class nine incidents were made of must still stop a push");
-  assert.match(stderr, /brand-new\.test\.ts/, "and the refusal names the file");
-  assert.match(stderr, /--seed/, "and the remedy, which is what makes an early refusal worth having");
+  assert.equal(status, 0, `an untiered test file must not stop a push: ${stderr}`);
+  assert.doesNotMatch(stderr, /pre-push REFUSED/);
+  assert.doesNotMatch(stderr, /brand-new\.test\.ts/, "and it is not reported at all");
 });
 
 test("W1-T3225: the hook still PASSES a clean tree, through a real git push", () => {
