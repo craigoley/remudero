@@ -61,6 +61,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
+import { evaluatePauseTier, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
@@ -924,6 +925,11 @@ export interface DaemonDeps {
    *  iterations only, after the current dispatch has resolved, so in-flight work always runs to full
    *  completion before a pause is honoured (W1-T11). */
   checkPause?: () => string | undefined;
+  /** W1-T4429: the hold behind `checkPause` (owner/expiry/liveness); absent, no governor runs. It calls
+   *  `clearPauseHold` once at `lapsed` and `onPauseNeedsHuman` once at `needs_human`. */
+  checkPauseHold?: () => PauseHoldGovernorInput | undefined;
+  clearPauseHold?: () => void | Promise<void>;
+  onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => FleetControlHold | undefined;
   /** An optional check, consulted once per tick with the same between-iterations-only discipline as the
    *  operator holds, so it can never interrupt work already in flight. A stale result stops the loop with a
@@ -1207,27 +1213,31 @@ export function reportLoopLag(
   }
 }
 
+/** W1-T4429: a `"pause"` clock skips the `checkPause` re-check — it runs BECAUSE the fleet is paused. */
+export type InterphaseReviewClockScope = "drain" | "pause";
+
 /** The review-only clock for the part of an iteration that previously had none: after the full
  *  reconciliation await returns and before a phase ticker or an idle wait takes over. It owns only
  *  the light pass, so it adds no action that pass does not already take — which, with nothing in
- *  flight, includes a fix (W1-T1211); `duringDrain` is the scope that closes that lane. A wake
+ *  flight, includes a fix (W1-T1211); a `scope` closes that lane. A wake
  *  observed during an active pass stays pending and makes the next wait resolve immediately, which
  *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md.
- *  W1-T4053: `duringDrain` runs the same clock beside a freshness drain, over the review-only pass, and
- *  ledgers every pass it admits with `during_drain: true`. */
+ *  W1-T4053: `scope: "drain"` runs it beside a freshness drain, ledgering `during_drain: true`; W1-T4429:
+ *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts. */
 export function startInterphaseReviewClock(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  duringDrain = false,
+  scope?: InterphaseReviewClockScope,
 ): InterphaseReviewClock {
   let active = true;
   let eventWakeSeen = false;
   let eventWakePending = false;
   let elapsedMs = 0;
   let passes = 0;
-  const phase = duringDrain ? "freshness_drain" : "interphase";
-  const drainTag = duringDrain ? { during_drain: true } : {};
+  const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
+  const scopeTag: Record<string, boolean> =
+    scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
   const wait = deps.sleepUntilSweepWake;
   const quantumMs = Math.max(1, Math.min(pollIntervalMs, INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS));
   // W1-T2897 Clock port: the same instant source as `deps.now`, never a second bare `new Date()`
@@ -1261,7 +1271,7 @@ export function startInterphaseReviewClock(
           if (!active) break;
           if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
 
-          const halt = deps.checkStop?.() ?? deps.checkPause?.();
+          const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
 
           const trigger = eventWakePending ? "github-event" : "interval";
@@ -1270,11 +1280,11 @@ export function startInterphaseReviewClock(
           lastPassAtMs = interphaseClock.now();
           passes += 1;
           try {
-            await (duringDrain ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
-            if (duringDrain) log("daemon.review_clock.pass", { trigger, ...drainTag });
-            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...drainTag });
+            await (scope ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
+            if (scope) log("daemon.review_clock.pass", { trigger, ...scopeTag });
+            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
           } catch (e) {
-            log("daemon.sweep_light.failed", { phase, ...drainTag, error: String((e as Error)?.message ?? e) });
+            log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
           }
         }
       })()
@@ -1287,6 +1297,59 @@ export function startInterphaseReviewClock(
       return { eventWakeSeen, passes };
     },
   };
+}
+
+export interface PauseHoldOwner {
+  pid: string;
+  host: string;
+  sessionId?: string;
+  reason?: string;
+}
+
+export interface PauseHoldGovernorInput extends PauseTierInput {
+  /** The anchor sha, or `"local"`: a NEW hold never inherits an old hold's tier. */
+  holdId: string;
+  owner: PauseHoldOwner;
+}
+
+/** The last tier seen for ONE hold (keyed by `holdId`, process-lifetime), so a transition ledgers once. */
+export interface PauseHoldGovernorState {
+  lastTier?: PauseTier;
+}
+
+/** W1-T4429 design (ii): on a TRANSITION only, ledger `pause.<tier>`. `orphaned` leaves the hold alone;
+ *  `needs_human` pages via `onPauseNeedsHuman` (a throw ledgers `pause.needs_human_failed`); `lapsed`
+ *  calls `clearPauseHold`. `held` ledgers nothing. Returns the tier. */
+export async function stepPauseHoldGovernor(
+  input: PauseHoldGovernorInput,
+  state: PauseHoldGovernorState,
+  deps: Pick<DaemonDeps, "clearPauseHold" | "onPauseNeedsHuman">,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<PauseTier> {
+  const tier = evaluatePauseTier(input);
+  if (tier === state.lastTier) return tier;
+  state.lastTier = tier;
+  const base = {
+    hold_id: input.holdId,
+    owner_pid: input.owner.pid,
+    owner_host: input.owner.host,
+    owner_session: input.owner.sessionId ?? null,
+    reason: input.owner.reason ?? null,
+  };
+  if (tier === "orphaned") {
+    log("pause.orphaned", base);
+  } else if (tier === "needs_human") {
+    log("pause.needs_human", { ...base, expires_at: input.expiresAt });
+    try {
+      await deps.onPauseNeedsHuman?.({ holdId: input.holdId, owner: input.owner, expiresAt: input.expiresAt });
+    } catch (e) {
+      log("pause.needs_human_failed", { ...base, error: String((e as Error)?.message ?? e) });
+    }
+  } else if (tier === "lapsed") {
+    log("pause.lapsed", { ...base, expires_at: input.expiresAt });
+    await deps.clearPauseHold?.();
+  }
+  return tier;
 }
 
 /** Wraps a fired retro, and auto-triage, in the same restricted light-sweep ticker dispatch already uses. Either is an
@@ -2031,6 +2094,39 @@ export function startPrActionPump(
   };
 }
 
+/** W1-T4416: a lane pool. Each task runs on its own lane; a lane that settles while a sibling is still
+ *  in flight may take `refill`'s next task, appended to `tasks`. Resolves, never rejects, once every lane
+ *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was. */
+export function runLanePool<T extends { id: string }, R>(
+  tasks: T[],
+  run: (id: string) => Promise<R>,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined,
+): Promise<PromiseSettledResult<R>[]> {
+  const settled: PromiseSettledResult<R>[] = [];
+  const firstWave = tasks.map((t) => run(t.id));
+  let inFlight = 0;
+  return new Promise((resolve) => {
+    if (tasks.length === 0) resolve(settled);
+    const start = (i: number, lane: number, p: Promise<R>): void => {
+      inFlight++;
+      p.then(
+        (value): PromiseSettledResult<R> => ({ status: "fulfilled", value }),
+        (reason: unknown): PromiseSettledResult<R> => ({ status: "rejected", reason }),
+      ).then((outcome) => {
+        settled[i] = outcome;
+        inFlight--;
+        const next = inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
+        if (next) {
+          tasks.push(next);
+          start(tasks.length - 1, lane, (async () => run(next.id))());
+        }
+        if (inFlight === 0) resolve(settled);
+      });
+    };
+    firstWave.forEach((p, i) => start(i, i, p));
+  });
+}
+
 export async function runDaemon(
   plan: Plan,
   deps: DaemonDeps,
@@ -2144,6 +2240,7 @@ export async function runDaemon(
   // CALLBACK to the first observation of each task id this run; the predicate itself is still
   // consulted, and still excludes the task, every tick (P29(ii)).
   const circuitEscalated = new Set<string>();
+  const pauseHoldGovernorStates = new Map<string, PauseHoldGovernorState>();
   // W1-T4025: lifetime pressure is a sensor. Keep one task per tick for the asynchronous judge;
   // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
   const lifetimePressureTasks = new Map<string, Task>();
@@ -2305,7 +2402,7 @@ export async function runDaemon(
       // W1-T4053 — REVIEWS KEEP FLOWING THROUGH THE DRAIN. With the clock stopped, 42 drains in three days
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
-      const drainReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, true);
+      const drainReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "drain");
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
       let reviewPasses = 0;
       try {
@@ -2500,6 +2597,21 @@ export async function runDaemon(
     return { ...hold, reason };
   };
 
+  // Shared by the top of tick and a lane refill (W1-T4416).
+  const reloadPlanBinding = (): void => {
+    if (!deps.reloadPlan) return;
+    try {
+      const fresh = deps.reloadPlan();
+      if (fresh) {
+        plan = fresh;
+        deps.onPlanReload?.(fresh);
+        log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
+      }
+    } catch (e) {
+      log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
@@ -2552,19 +2664,8 @@ export async function runDaemon(
     // landing on origin/main and the daemon next booting is 106 minutes (impl-FZ). Position is the safety argument:
     // after the stop check, so a halted fleet does no I/O, and before any dispatch decision reads the plan. A throw
     // is caught and ledgered, never fatal. Forensics: docs/forensics/daemon.md.
-    if (deps.reloadPlan) {
-      try {
-        const fresh = deps.reloadPlan();
-        if (fresh) {
-          plan = fresh;
-          deps.onPlanReload?.(fresh);
-          log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
-        }
-      } catch (e) {
-        log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
-      }
-    }
-    // One snapshot per dispatch batch (W1-T340; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
+    reloadPlanBinding();
+    // One snapshot per admission (W1-T340, W1-T4416; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
     // reload above, so code closing over the NAME reads whatever the most recent reload produced. That is invisible
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
     // silently re-judged against a blob it never saw. Reassignment rebinds the name and never mutates the object, so
@@ -2588,7 +2689,20 @@ export async function runDaemon(
     if (paused) {
       ticks++;
       log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
-      await sleepUntilSweepWake(pollIntervalMs);
+      // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
+      const pauseHold = deps.checkPauseHold?.();
+      if (pauseHold) {
+        const holdState = pauseHoldGovernorStates.get(pauseHold.holdId) ?? { lastTier: undefined };
+        pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
+        await stepPauseHoldGovernor(pauseHold, holdState, deps, log);
+      }
+      const pauseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "pause");
+      try {
+        await sleepUntilSweepWake(pollIntervalMs);
+      } finally {
+        const { passes } = await pauseReviewClock.stop();
+        if (passes > 0) log("daemon.pause.review_passes", { tick: ticks, passes });
+      }
       continue;
     }
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
@@ -3923,10 +4037,58 @@ export async function runDaemon(
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
 
-    // Concurrent dispatch, mirroring `runDrainLanes`: settle-all, never fail-fast, so a sibling lane's rejection can
-    // never abort another lane already in flight, and every lane's outcome is recorded before this tick decides
-    // anything. At one lane this settles on the same schedule a bare await inside a try/catch would (W1-T343).
-    const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
+    // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
+    // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
+    // that frees while a sibling runs refills from a FRESH read through the same gates; one lane never refills.
+    const snapshots = admitted.map(() => ({ plan: planForBatch, isMerged }));
+    const passIds = new Set(admitted.map((t) => t.id));
+    const inFlightTasks = new Set<Task>(admitted);
+    let refillClosed: string | undefined;
+    const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
+      inFlightTasks.delete(finished);
+      if (outcome.status === "rejected") refillClosed ??= "a lane rejected";
+      else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
+      const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const stopped = deps.checkStop?.();
+      const paused = deps.checkPause?.();
+      let reason =
+        refillClosed ??
+        (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
+        holdWorkerAdmission("lane-refill")?.reason ??
+        (stopped ? `stop: ${stopped}` : undefined) ??
+        (paused ? `pause: ${paused}` : undefined) ??
+        (deps.checkFreshness?.()?.stale ? "stale code" : undefined) ??
+        (governed ? `governor: ${governed.kind}` : undefined);
+      let next: Task | undefined;
+      if (reason === undefined) {
+        try {
+          reloadPlanBinding();
+          const snapshot = { plan, isMerged: deps.refreshMerged(plan) };
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
+            ...dispatchOpts,
+            dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...passIds]),
+          });
+          const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          next = fits.dispatch.find((t) => !inFlightTasks.has(t));
+          if (next) snapshots.push(snapshot);
+        } catch (e) {
+          reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
+        }
+      }
+      if (!next) {
+        log("dispatch.lane_refill_held", { lane, finished_task: finished.id, reason: reason ?? "no disjoint runnable task within the lane budget" });
+        return undefined;
+      }
+      passIds.add(next.id);
+      inFlightTasks.add(next);
+      log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
+      log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
+      attempted.push(next.id);
+      return next;
+    };
+    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane);
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.
@@ -3941,7 +4103,7 @@ export async function runDaemon(
     let fatalError: { taskId: string; message: string } | undefined;
     let spawnInfraSeenThisTick = false;
     let dispatchTransportSeenThisTick = false;
-    const toProcess: Array<{ task: Task; result: RunResult }> = [];
+    const toProcess: Array<{ task: Task; result: RunResult; snapshot: (typeof snapshots)[number] }> = [];
     for (let i = 0; i < admitted.length; i++) {
       const t = admitted[i];
       const outcome = settled[i];
@@ -3989,7 +4151,7 @@ export async function runDaemon(
       }
       const result = outcome.value;
       costUsd += result.costUsd;
-      toProcess.push({ task: t, result });
+      toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
 
     if (fatalError) {
@@ -4013,11 +4175,11 @@ export async function runDaemon(
     // Updated alongside block reasoning, never inside it — a pure additional observation over the same per-lane loop.
     // Lane order is the settlement order fixed above, so a batch is walked deterministically (W1-T2517).
     let apiWindowHoldMs = 0;
-    for (const { task, result } of toProcess) {
+    for (const { task, result, snapshot } of toProcess) {
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
-      const outcome = await processDispatchResult(planForBatch, task, result, isMerged);
+      const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged);
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
           blockedDetail ??= outcome.detail;

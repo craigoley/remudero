@@ -3012,6 +3012,8 @@ export interface DecisionRequest {
   raw: string;
   options: string[];
   recommended?: string;
+  /** What would show the RECOMMENDED option is wrong — carried into the ledger and any decision record. */
+  falsifier?: string;
 }
 
 export interface QuestionReport {
@@ -3184,7 +3186,8 @@ export function parseDecisionRequest(text: string): DecisionRequest | null {
     const marked = rawOptions.find((o) => /\(?\s*RECOMMENDED\s*\)?/i.test(o));
     recommended = marked ? stripDecoration(marked) : undefined;
   }
-  return { raw: text, options, recommended };
+  const falsifier = text.match(/^\s*FALSIFIER\s*[:=]\s*(.+?)\s*$/im)?.[1];
+  return { raw: text, options, recommended, ...(falsifier ? { falsifier } : {}) };
 }
 
 export function parseQuestion(text: string): QuestionReport | null {
