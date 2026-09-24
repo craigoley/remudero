@@ -327,7 +327,7 @@
   "src/lib/plan-pr-emitter.ts": 250,
   "src/lib/plan-reconcile.ts": 250,
   "src/lib/plan-scope.ts": 250,
-  "src/lib/plan.ts": 257,
+  "src/lib/plan.ts": 259,
   "src/lib/policy.ts": 500,
   "src/lib/poll-interval.ts": 250,
   "src/lib/pr-board.ts": 42,
