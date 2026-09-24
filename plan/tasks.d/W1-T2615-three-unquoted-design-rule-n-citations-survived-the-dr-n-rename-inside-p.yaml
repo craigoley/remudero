@@ -9,7 +9,9 @@
   files: [plan/tasks.d/W1-T2399-one-unreadable-protection-read-escalates-every-green-pr.yaml, plan/tasks.d/W1-T2416-a-rejected-recurrence-refiles-every-window.yaml, plan/tasks.d/W1-T2457-two-rule-namespaces-share-one-integer-range.yaml]
   origin: architect
   plan_refs: ["W1-T2457", "§12", "§5C"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T2615 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     HALF ONE OF A SPLIT FILING. The follow-up W1-T2457 harvested one finding; the linter refused it as

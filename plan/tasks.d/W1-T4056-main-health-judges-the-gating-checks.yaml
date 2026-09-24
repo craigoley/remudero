@@ -11,7 +11,9 @@
   origin: "oper#flow-research-2026-09-22"
   plan_refs: [W1-T2340]
   files: [src/lib/main-health-rung.ts, src/run-task.ts, test/main-health-judges-the-gating-checks.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4056 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     (1) THE REQUIRED FILTER IS NEVER GIVEN. `mainHealthFromRollup(sha, rollup, requiredContexts)`
