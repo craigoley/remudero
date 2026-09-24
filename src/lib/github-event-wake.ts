@@ -251,8 +251,8 @@ export function githubDeliveryDedupPath(root: string): string {
   return join(root, "state", "github-webhook-deliveries.json");
 }
 
-/** Persists the recent-delivery FIFO as one atomically replaced JSON file, write-before-memory so
- *  a failed write can't poison an id. HMAC is the real auth boundary; losing this cache costs at most one extra wake. */
+/** Persists the recent-delivery FIFO (mode 0600, fsync off the loop), write-before-memory and serialized so a failed
+ *  write can't poison an id nor two deliveries drop each other's. HMAC is the real auth boundary; losing this costs one wake. */
 export function createPersistentDeliveryDedupStore(path: string, capacity: number): DeliveryDedupStore {
   let initial: string[] = [];
   try {
@@ -269,11 +269,9 @@ export function createPersistentDeliveryDedupStore(path: string, capacity: numbe
       return known.has(deliveryId);
     },
     record(deliveryId) {
-      // Serialized: each write stages from the order the previous one committed, so two deliveries never drop each other.
       const run = persisted.then(async () => {
         if (known.has(deliveryId)) return;
         const nextOrder = [...order, deliveryId].slice(-capacity);
-        // W1-T2899: `mode` lands on the stage, never briefly at the real path; the fsync is off the loop.
         await writeAtomicAsync(path, JSON.stringify({ deliveryIds: nextOrder }), { mode: 0o600 });
         order = nextOrder;
         known = new Set(order);
@@ -311,7 +309,6 @@ export function writeSweepWakeMarkerAtomic(path: string, record: SweepWakeMarker
   writeAtomic(path, JSON.stringify(record));
 }
 
-/** The same atomic marker write off the event loop: serve's webhook route awaits it, nothing else waits. */
 export async function writeSweepWakeMarkerAtomicAsync(path: string, record: SweepWakeMarker): Promise<void> {
   await writeAtomicAsync(path, JSON.stringify(record));
 }

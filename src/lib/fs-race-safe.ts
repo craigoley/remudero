@@ -535,12 +535,6 @@ export function writeAtomic(
   }
 }
 
-/**
- * {@link writeAtomic}'s same stage-then-rename, over fs/promises: the fsync runs on the libuv pool,
- * so a slow disk (Docker Desktop's bind mount measured 1.1-1.8 s per fsync) costs the caller's
- * await, never the event loop every other request shares. A failed stage is removed and the
- * original error propagates.
- */
 export async function writeAtomicAsync(path: string, content: string | Buffer, opts: { mode?: number; tmpTag?: string } = {}): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmpPath = `${path}.${opts.tmpTag ?? "tmp"}-${process.pid}-${randomUUID()}`;
