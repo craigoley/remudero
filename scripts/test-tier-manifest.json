@@ -1046,6 +1046,7 @@
     "test/machine-filed-task-admission.test.ts": 0,
     "test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts": 402,
     "test/main-health-event-wake.test.ts": 1098,
+    "test/main-health-judges-the-gating-checks.test.ts": 0,
     "test/main-health-watch.test.ts": 1293,
     "test/main-health-wiring.test.ts": 2104,
     "test/main-plan-load-guard.test.ts": 2027,
