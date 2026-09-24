@@ -33081,6 +33081,7 @@ export async function serveCommand(
     log,
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
+    prewarmLeadMs: DEFAULT_BOARD_POLL_TTL_MS,
     snapshotCache: serveBoardSnapshot,
     // A merged PR's file list survives the restart on disk, and a miss never blocks the first snapshot.
     changedFilesCache: createChangedFilesCache(config.root, self.owner, self.repo, { log }),
