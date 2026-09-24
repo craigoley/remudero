@@ -19,7 +19,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { resumeForMissingCommitLine } from "../src/run-task.js";
+import { COMMIT_LINE_RESUME_PROMPT, commitLineResume, resumeForMissingCommitLine } from "../src/run-task.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 // The SHARED builder — see test/fixture-copy-census.test.ts, which refuses one more hand-rolled
 // `git init` copy of this exact fixture.
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
@@ -229,4 +230,66 @@ test("W1-T4052: the harness never invents a subject", async () => {
   } finally {
     handle.cleanup();
   }
+});
+
+test("W1-T4052: the resume spawns the worker's own session with only the commit-line prompt", async () => {
+  const spawned: SpawnWorkerArgs[] = [];
+  const accounted: WorkerResult[] = [];
+  const result: WorkerResult = {
+    sessionId: "s-resumed",
+    costUsd: 0.03,
+    numTurns: 2,
+    text: "COMMIT_MESSAGE: feat(a): add a",
+    blocks: ["REPORT"],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "claude-opus-5",
+    effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    compactionFailures: [],
+    qualitySuspect: false,
+  };
+  const resume = commitLineResume(
+    async (args) => {
+      spawned.push(args);
+      return result;
+    },
+    (r) => {
+      accounted.push(r);
+      return r;
+    },
+    {
+      cwd: "/wt/run",
+      permissionMode: "bypassPermissions",
+      settingsFile: "/wt/settings.json",
+      resumeSessionId: "s-original",
+      maxBudgetUsd: 4,
+    },
+  );
+  assert.equal(spawned.length, 0, "building the callback must not spawn anything");
+
+  const reply = await resume();
+
+  assert.equal(spawned.length, 1, "one resume, one spawn");
+  assert.equal(spawned[0]?.resumeSessionId, "s-original", "the worker's OWN session is the one resumed");
+  assert.equal(spawned[0]?.cwd, "/wt/run", "the resume runs in the worktree holding the saved edits");
+  assert.equal(spawned[0]?.permissionMode, "bypassPermissions");
+  assert.equal(spawned[0]?.maxBudgetUsd, 4, "the original spawn's mount rides the resume unchanged");
+  assert.equal(spawned[0]?.prompt, COMMIT_LINE_RESUME_PROMPT, "the resume asks for the commit line and nothing else");
+  assert.match(COMMIT_LINE_RESUME_PROMPT, /Make NO further edits/);
+  assert.match(COMMIT_LINE_RESUME_PROMPT, /`COMMIT_MESSAGE: <type>\(<scope>\): <subject>`/);
+  assert.deepEqual(accounted, [result], "the resumed turn is accounted against the run's budget");
+  assert.deepEqual(reply, {
+    text: "COMMIT_MESSAGE: feat(a): add a\nREPORT",
+    costUsd: 0.03,
+    sessionId: "s-resumed",
+    numTurns: 2,
+    subtype: "success",
+  });
 });

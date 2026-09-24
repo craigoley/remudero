@@ -15360,37 +15360,20 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       declaredPaths: task.files ?? [],
       log,
       say,
-      resume: async () => {
-        const resumedImpl = account(
-          await spawn({
-            cwd: worktreePath,
-            permissionMode: "bypassPermissions",
-            settingsFile,
-            resumeSessionId: impl.sessionId,
-            model: implementMount.model,
-            mountProvider: implementMount.provider,
-            effort: implementMount.effort,
-            maxTurns: implementMount.maxTurns,
-            maxBudgetUsd: budgetUsd,
-            config: implementConfig,
-            tools: implementTools === undefined ? undefined : [...implementTools],
-            ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
-            prompt:
-              "Your last REPORT carried no anchored COMMIT_MESSAGE line, so the harness could not " +
-              "commit your edits — they are still saved in the worktree. Make NO further edits and " +
-              "run NO git or gh commands. Reply with ONLY a REPORT whose last line is exactly " +
-              "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
-              "subject, at most 100 characters).",
-          }),
-        );
-        return {
-          text: workerTranscript(resumedImpl),
-          costUsd: resumedImpl.costUsd,
-          sessionId: resumedImpl.sessionId,
-          numTurns: resumedImpl.numTurns,
-          subtype: resumedImpl.subtype,
-        };
-      },
+      resume: commitLineResume(spawn, account, {
+        cwd: worktreePath,
+        permissionMode: "bypassPermissions",
+        settingsFile,
+        resumeSessionId: impl.sessionId,
+        model: implementMount.model,
+        mountProvider: implementMount.provider,
+        effort: implementMount.effort,
+        maxTurns: implementMount.maxTurns,
+        maxBudgetUsd: budgetUsd,
+        config: implementConfig,
+        tools: implementTools === undefined ? undefined : [...implementTools],
+        ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+      }),
     });
     commitCount = commitLineRecovery.commitCount;
     harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
@@ -36232,6 +36215,35 @@ export async function resumeForMissingCommitLine(
     deps,
   );
   return { commitCount, refusalReason: refusalState.reason, report: combinedReport, resumed: true };
+}
+
+/** W1-T4052: the ONLY thing the missing-line resume asks the worker's own session for. */
+export const COMMIT_LINE_RESUME_PROMPT =
+  "Your last REPORT carried no anchored COMMIT_MESSAGE line, so the harness could not " +
+  "commit your edits — they are still saved in the worktree. Make NO further edits and " +
+  "run NO git or gh commands. Reply with ONLY a REPORT whose last line is exactly " +
+  "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
+  "subject, at most 100 characters).";
+
+/** W1-T4052: build `resumeForMissingCommitLine`'s `resume` from the implement lane's own `spawn`
+ *  and `account`. `spawnArgs` is the original spawn's mount (it names `resumeSessionId`); the
+ *  prompt is always {@link COMMIT_LINE_RESUME_PROMPT}, and the resumed turn is accounted like any
+ *  other so its cost rides the run's budget. */
+export function commitLineResume(
+  spawn: typeof spawnWorker,
+  account: (r: WorkerResult) => WorkerResult,
+  spawnArgs: Omit<SpawnWorkerArgs, "prompt">,
+): () => Promise<{ text: string; costUsd: number; sessionId: string; numTurns: number; subtype: string }> {
+  return async () => {
+    const resumed = account(await spawn({ ...spawnArgs, prompt: COMMIT_LINE_RESUME_PROMPT }));
+    return {
+      text: workerTranscript(resumed),
+      costUsd: resumed.costUsd,
+      sessionId: resumed.sessionId,
+      numTurns: resumed.numTurns,
+      subtype: resumed.subtype,
+    };
+  };
 }
 
 /** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is
