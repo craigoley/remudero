@@ -16,6 +16,25 @@ concurrency:
   group: dependency-review-${{ github.ref }}
   cancel-in-progress: true
 
+# W1-T4401: BOTH jobs below only ever run their SUBSTANTIVE step when a manifest or lockfile
+# actually changed — a doc/plan-only PR (the common case) now costs one checkout instead of a
+# full dependency-graph diff or licence scan. Deliberately a STEP-level `if:`, computed inline in
+# EACH job from its own `git diff` against the PR's real base/head SHAs, never a job-level `if:`
+# and never a separate upfront job the other two `needs:`: `license-review` is REQUIRED by
+# ci-gate.yml, and this repo's own doctrine (ci.yml's header, test/a-shipped-detector-exits-one-
+# and-is-wired-to-nothing.test.ts) is that a REQUIRED job carries no job-level `if:` at all — a
+# skipped job is fine (GitHub still posts its check-run as "skipped", which ci-gate treats as a
+# pass), but a `needs:` on a job that can itself fail (e.g. checkout flaking) would silently skip
+# the required check too, and a `uses:`-only job (unlike this one) never posts a nested check-run
+# at all when skipped. A step-level guard inside an UNCONDITIONAL job sidesteps both failure
+# modes: the job (and its check-run) always runs, and only the expensive part inside it is
+# skipped. FAIL-OPEN, deliberately: an unreadable diff (`git diff` erroring, or `CHANGED` coming
+# back empty) leaves `changed=true`, so a broken diff read costs a redundant scan, never a missed
+# one. The match itself is intentionally broad — `package.json` or `package-lock.json` at ANY
+# depth, not just the root — because a nested manifest changing is still a dependency change,
+# even though `license-review`'s own script (below) only ever reads the ROOT lockfile; matching
+# wider than that script's own blast radius costs an occasional harmless no-op run, never a missed
+# licence check.
 jobs:
   dependency-review:
     name: Review
@@ -25,8 +44,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Detect whether a manifest or lockfile changed
+        id: deps-changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          CHANGED="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null)"
+          set -e
+          RESULT="true"
+          if [ -n "${CHANGED}" ] && ! printf '%s\n' "${CHANGED}" | grep -Eq '(^|/)package(-lock)?\.json$'; then
+            RESULT="false"
+          fi
+          echo "changed files:"
+          printf '%s\n' "${CHANGED}"
+          echo "changed=${RESULT}" >> "$GITHUB_OUTPUT"
 
       - name: Dependency Review
+        if: steps.deps-changed.outputs.changed == 'true'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         continue-on-error: true
         with:
@@ -91,12 +130,36 @@ jobs:
         with:
           fetch-depth: 0
 
+      # W1-T4401: same inline, fail-open detection as the `dependency-review` job above (kept
+      # duplicated rather than shared via a `needs:` job — see this file's own header). This job
+      # stays UNCONDITIONAL (no job-level `if:`) because it is REQUIRED by ci-gate.yml; only the
+      # two steps below it are gated, so a doc/plan-only PR still posts a green "License Review"
+      # check-run, in seconds, without installing Node or running the licence scan at all.
+      - name: Detect whether a manifest or lockfile changed
+        id: deps-changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          CHANGED="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null)"
+          set -e
+          RESULT="true"
+          if [ -n "${CHANGED}" ] && ! printf '%s\n' "${CHANGED}" | grep -Eq '(^|/)package(-lock)?\.json$'; then
+            RESULT="false"
+          fi
+          echo "changed files:"
+          printf '%s\n' "${CHANGED}"
+          echo "changed=${RESULT}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.deps-changed.outputs.changed == 'true'
         with:
           node-version-file: .nvmrc
           cache: npm
 
       - name: License Review
+        if: steps.deps-changed.outputs.changed == 'true'
         env:
           # SEEDED FIVE (2026-08-17) plus THREE RULED IN BY THE OPERATOR ON 2026-08-19. The three
           # additions were each ALREADY IN THIS TREE and were being re-flagged on every version

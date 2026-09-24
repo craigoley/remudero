@@ -5,9 +5,14 @@ on:
   schedule:
     # Weekly, off-peak (Mondays 02:23 UTC).
     - cron: "23 2 * * 1"
-  push:
-    branches: [main]
   workflow_dispatch:
+  # W1-T4401: `push: branches: [main]` REMOVED — this workflow has no `pull_request` trigger, so
+  # it never registers a PR check-run and dropping `push` cannot strand any required/advisory
+  # context (test/every-pr-check-is-required-or-advisory only censuses `pull_request`-firing
+  # jobs). Scorecard's own supply-chain signals (branch protection posture, pinned actions, token
+  # scopes) move on a human review cadence, not per-commit, so the weekly schedule plus
+  # `branch_protection_rule` (fires the moment protection itself changes) already catch what
+  # matters without re-running on every merge to main.
 
 # Least privilege at the top level; the job below elevates only what it needs.
 permissions: read-all

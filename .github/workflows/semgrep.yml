@@ -1,13 +1,27 @@
 name: Semgrep
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+    # W1-T4401: mirrors codeql.yml's own PLAN/DOCS fast lane (same four globs — never a
+    # `scripts/**`/`.github/**` exemption, both look like config and both are code Semgrep
+    # reads). Semgrep is ADVISORY (`Scan` in ci-gate.yml), never REQUIRED, so a skipped
+    # `pull_request` run here cannot deadlock a merge — the same INVARIANT
+    # test/a-plan-filing-does-not-pay-for-codeql.test.ts pins for CodeQL's identical shape.
+    paths-ignore:
+      - "plan/**"
+      - "docs/**"
+      - "learnings/**"
+      - "**/*.md"
   schedule:
-    # Weekly, off-peak (Mondays 05:23 UTC — staggered from CodeQL/OSV).
-    - cron: "23 5 * * 1"
+    # Nightly, off-peak (03:46 UTC — staggered from osv-scanner.yml's 03:14 and
+    # mutation-nightly.yml's 03:31). W1-T4401: REPLACES the old weekly cadence AND the
+    # `push: branches: [main]` trigger this workflow used to carry (this workflow has no other
+    # `pull_request` job, so dropping `push` cannot strand any required/advisory context — see
+    # test/every-pr-check-is-required-or-advisory.test.ts, which only censuses `pull_request`-
+    # firing jobs). A full, un-diffed multi-ruleset scan now runs once a night instead of on
+    # every merge to main, closing within 24h instead of accumulating for up to a week.
+    - cron: "46 3 * * *"
   workflow_dispatch:
 
 # Least privilege at the top level (Scorecard TokenPermissions: a topLevel write
@@ -44,16 +58,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # W1-T4401: `--baseline-commit` below needs the base commit's history reachable.
+          fetch-depth: 0
 
       - name: Run Semgrep
         # Never fail the build here; findings surface in the Security tab via SARIF.
+        env:
+          # W1-T4401: diff-aware ONLY on a pull_request run — "diff-aware where the tool
+          # supports it" for Semgrep specifically. `--baseline-commit` narrows FINDINGS to what
+          # changed since the PR's base (never the ruleset — every rule still runs); empty on
+          # push/schedule/workflow_dispatch, so those stay full, un-diffed sweeps, mirroring
+          # codeql.yml's own "PR fast lane, full analysis everywhere else" split.
+          BASELINE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         run: |
+          BASELINE_ARGS=""
+          if [ -n "${BASELINE_REF}" ]; then
+            BASELINE_ARGS="--baseline-commit ${BASELINE_REF}"
+          fi
           semgrep scan \
             --config p/typescript \
             --config p/javascript \
             --config p/security-audit \
             --config p/secrets \
-            --sarif --output semgrep.sarif
+            --sarif --output semgrep.sarif \
+            ${BASELINE_ARGS}
         continue-on-error: true
 
       - name: Upload SARIF to code scanning

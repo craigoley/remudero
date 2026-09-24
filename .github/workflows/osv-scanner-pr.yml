@@ -31,6 +31,18 @@ jobs:
     # registers NO check run under that nested name at all -- ci-gate.yml's own header documents
     # this as the synthwatch #102 deadlock class -- so exempting the actor would have permanently
     # blocked every Dependabot PR once ci-gate started awaiting this check instead of racing it.
+    #
+    # W1-T4401 evaluated (and deliberately did NOT add) a "manifest/lockfile changed" job-level
+    # `if:` here, the same shape dependency-review.yml's two jobs now carry. It is the wrong shape
+    # for THIS job specifically, for the identical reason the paragraph above already rules out an
+    # actor exemption: this is a `uses:` reusable-workflow caller, so a skip leaves the nested
+    # `scan-pr / osv-scan` check-run entirely UNREGISTERED rather than posting a green "skipped"
+    # conclusion -- ci-gate.yml's REQUIRED wait loop would then time out on every PR that doesn't
+    # touch a dependency (the common case), not merely fail to save the cost. This job already IS
+    # "diff-aware where the tool supports it" (this file's own header) -- Google's reusable
+    # workflow itself compares against the base branch's own scan and reports only newly
+    # introduced vulnerabilities -- so it stays unconditional, and dependency-review.yml's two
+    # jobs (which are NOT reusable-workflow callers) carry the manifest/lockfile gate instead.
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
     with:
       # Recursively scan the repo (picks up package-lock.json at the root).
