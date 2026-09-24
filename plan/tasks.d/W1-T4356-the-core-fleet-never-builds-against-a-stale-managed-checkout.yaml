@@ -13,7 +13,7 @@
   plan_refs: ["W1-T4193"]
   files:
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 on the fleet host: the core daemon claimed W1-T4267 and W1-T4100 at 18:08-18:09Z
