@@ -7,35 +7,27 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 
 /**
- * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane.
+ * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
+ * daemon: a shared thread starved by fix dispatches cannot see the stall it should catch (operator
+ * ruling 2026-09-23). A small own-timer loop (mirrors gardener.ts, fleet-lane.ts) reads incident
+ * evidence (W1-T4383 `incident.event`/`incident.sampled`, W1-T4384 invariant findings), dedupes
+ * against work the fleet already has open, gathers evidence, and files one `incident#<fingerprint>`
+ * entry per pass via {@link captureFeedback} — the existing feedback -> triage -> plan -> build
+ * pipeline builds the rest.
  *
- * Operator ruling 2026-09-23: the SRE runs in ITS OWN lane, not inside the core daemon. That day
- * the core daemon's single thread was starved by futile fix dispatches, and a watcher sharing that
- * thread cannot see the stall it is meant to catch. This module is that lane: a small, own-timer
- * loop (mirroring gardener.ts's and fleet-lane.ts's own timers) that reads incident evidence
- * (W1-T4383's `incident.event`/`incident.sampled` rows, W1-T4384's `incident.event` invariant
- * findings), dedupes against work the fleet already has open, gathers evidence, and files ONE
- * `incident#<fingerprint>` feedback entry a pass through {@link captureFeedback} — the existing
- * pipeline (feedback -> triage -> plan task -> fleet build) builds the rest.
+ * INVARIANT: filing feedback is this lane's entire write surface; it never dispatches a build
+ * itself, the same way other machine-origin feedback (`alert#…`, `repair#…`) already flows.
  *
- * NEVER DISPATCHES A BUILD ITSELF. Filing feedback is its entire write surface; everything after
- * that — proposing, planning, building — is the ordinary fleet pipeline the way every other
- * machine-origin feedback (`alert#…`, `repair#…`) already flows through it.
+ * PACING: never more filings a day than the fleet merged in the last day (mirrors fleet-lane.ts).
+ * `sre-lane-decisions.json` tracks what it filed; `state/SRE_LANE_OFF` is its pause switch.
  *
- * PACED BY THE FLEET'S OWN MERGE RATE, exactly like fleet-lane.ts: never more filings in a day
- * than the fleet merged in the last day, so filing follows real throughput rather than a fixed cap.
- * Its own state file (`sre-lane-decisions.json`) tracks what it has filed and when; the ledger
- * rotates, this does not. `state/SRE_LANE_OFF` is its pause switch (the same PAUSE pattern
- * fleet-lane.ts's per-kind `FLEET_LANE_OFF-<kind>` uses, collapsed to one switch since this lane
- * has exactly one class of work).
+ * TRAP left honest rather than papered over: production wiring (src/run-task.ts) cannot yet supply
+ * everything this lane wants. {@link RegistryInstance} has no `state_dir`, so `readEvents` reads
+ * only this daemon's own ledger; `framesFor` returns `[]` since incident-events.ts deliberately
+ * ledgers no raw frames yet.
  *
- * WHAT PRODUCTION WIRING (src/run-task.ts) CANNOT YET SUPPLY, HONESTLY: {@link RegistryInstance}
- * (instance-registry.ts) does not carry a `state_dir`, so `readEvents` below is wired to this
- * daemon's OWN ledger only, not every registry instance's — a follow-up, not a defect this module
- * can paper over. `framesFor` likewise has no live per-fingerprint frame store yet
- * (`incident-events.ts` deliberately never ledgers the raw frames it scrubs), so it is wired to
- * return `[]` in production until one exists; {@link suspectPullRequests} is fully proven here by
- * unit test with injected frames, ready the day a frame store lands.
+ * FALSIFIER: test/sre-lane.test.ts; {@link suspectPullRequests} is proven there with injected
+ * frames, ready the day a frame store lands.
  */
 
 // ── evidence ──────────────────────────────────────────────────────────────────────────────────
