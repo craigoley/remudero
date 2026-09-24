@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "../src/lib/capability-grant.js";
 import {
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_PRICES,
@@ -125,6 +126,58 @@ test("Foundry Opus sends Messages requests, settles measured usage, and refuses 
   } finally { f.cleanup(); }
 });
 
+test("Foundry Opus refuses an invalid Foundry endpoint before reserving or sending", async () => {
+  const f = fixture();
+  try {
+    let sent = 0;
+    const result = await spawnOpenWeightWorker({
+      cwd: f.root, workerHome: join(f.root, "home"), prompt: "work", cashSqueezed: true,
+      env: { ...env, RMD_FOUNDRY_CLAUDE_ENDPOINT: "http://foundry.example.test/anthropic" },
+      clock: fixedClock(NOW), fetchImpl: async () => { sent++; throw new Error("unexpected request"); },
+    }, f.config, { model: "claude-opus-5-5", effort: "medium" });
+    assert.equal(result.isError, true);
+    assert.match(result.stderr, /requires an HTTPS Foundry \/anthropic base endpoint/);
+    assert.equal(sent, 0);
+  } finally { f.cleanup(); }
+});
+
+test("Foundry Opus verifies a capability grant before transport and honors a valid use", async () => {
+  const f = fixture();
+  try {
+    const now = Date.now();
+    const store = new InMemoryCapabilityGrantStore();
+    const grant = createCapabilityGrant({
+      targetIdentity: "github-app:acme/widgets", operations: ["repo.read"], audience: "provider:cash",
+      expiresAt: new Date(now + 60_000).toISOString(),
+      approval: { approvedBy: "operator:alice", approvedAt: new Date(now - 1_000).toISOString() },
+      revocationLink: "https://revoke.example/cap-1",
+    });
+    store.issue(grant);
+    let sent = 0;
+    const run = (operation: string) => spawnOpenWeightWorker({
+      cwd: f.root, workerHome: join(f.root, "home"), prompt: "work", cashSqueezed: true,
+      env, clock: fixedClock(NOW),
+      capabilityGrant: { store, request: {
+        grantId: grant.id, operation, target: grant.targetIdentity, audience: grant.audience, nonce: operation,
+      } },
+      fetchImpl: async () => {
+        sent++;
+        return new Response(JSON.stringify({
+          id: "msg-granted", stop_reason: "end_turn", content: [{ type: "text", text: "granted" }],
+          usage: { input_tokens: 20, output_tokens: 5 },
+        }), { status: 200 });
+      },
+    }, f.config, { model: "claude-opus-5-5", effort: "medium" });
+    const refused = await run("repo.admin");
+    assert.equal(refused.isError, true);
+    assert.match(refused.stderr, /capability grant .* refused/);
+    assert.equal(sent, 0, "a refused grant must stop before the paid request");
+    const accepted = await run("repo.read");
+    assert.equal(accepted.isError, false, accepted.stderr);
+    assert.equal(sent, 1);
+  } finally { f.cleanup(); }
+});
+
 test("Foundry Opus carries a real tool result into its next billed turn", async () => {
   const f = fixture();
   try {
@@ -177,6 +230,28 @@ test("Foundry Opus reports a failed tool instead of continuing a fabricated chai
     assert.equal(result.isError, true);
     assert.match(result.stderr, /cash Opus tool read_file failed: tool path escapes/);
     assert.equal(sent, 1, "a failed tool must not buy or run another model turn");
+  } finally { f.cleanup(); }
+});
+
+test("Foundry Opus refuses an undeclared tool without continuing the chain", async () => {
+  const f = fixture();
+  try {
+    let sent = 0;
+    const result = await spawnOpenWeightWorker({
+      cwd: f.root, workerHome: join(f.root, "home"), prompt: "Read finding.txt", tools: ["Read"],
+      maxTurns: 3, cashSqueezed: true, env, clock: fixedClock(NOW),
+      fetchImpl: async () => {
+        sent++;
+        return new Response(JSON.stringify({
+          id: "msg-undeclared-tool", stop_reason: "tool_use",
+          content: [{ type: "tool_use", id: "tool-1", name: "write_file", input: { path: "finding.txt" } }],
+          usage: { input_tokens: 50, output_tokens: 20 },
+        }), { status: 200 });
+      },
+    }, f.config, { model: "claude-opus-5-5", effort: "medium" });
+    assert.equal(result.isError, true);
+    assert.match(result.stderr, /undeclared or malformed tool/);
+    assert.equal(sent, 1, "an undeclared tool must not trigger a second paid turn");
   } finally { f.cleanup(); }
 });
 
