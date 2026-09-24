@@ -34,13 +34,12 @@
     runs normally: the sweep, review and merge of every other PR go on, including the PR that removes the
     duplicate. loadPlan itself, lint-plan and every CI check stay strict; only the long-running daemon
     degrades.
+  amendment: "2026-09-24 GUARD CRITERION REMOVED: \"loadPlan itself still refuses a duplicate id\" is a regression guard that passes at the merge base too, so proof-discrimination can never accept it. Its test stays in the suite as a regression test."
   acceptance:
     - claim: "a plan with a duplicate id loads with both declarations quarantined and every other task intact"
       proof: "unit test: a plan with a duplicate id loads with both declarations quarantined and every other task intact"
     - claim: "the daemon keeps sweeping with a quarantined duplicate and escalates it once"
       proof: "unit test: the daemon keeps sweeping with a quarantined duplicate and escalates it once"
-    - claim: "loadPlan itself still refuses a duplicate id"
-      proof: "unit test: loadPlan itself still refuses a duplicate id"
     - claim: "the daemon loads its plan through the quarantining loader"
       proof: 'grep: loadPlanQuarantiningDuplicates( in src/run-task.ts'
   falsifier: |

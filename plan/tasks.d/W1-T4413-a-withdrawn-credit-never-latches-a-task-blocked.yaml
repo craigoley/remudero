@@ -32,10 +32,9 @@
     really is merged, deriveStatus has already returned at its merged-is-terminal line. If the credit was
     withdrawn, the task becomes dispatchable. Historical rows stay in the ledger for forensics. No other
     verdict changes meaning.
+  amendment: "2026-09-24 GUARD CRITERION REMOVED: \"a genuinely merged task is still reported merged, not queued\" is a regression guard that passes at the merge base too, so proof-discrimination can never accept it. Its test stays in the suite as a regression test."
   acceptance:
     - claim: "a task_already_merged refusal never blocks a task whose credit was withdrawn"
       proof: "unit test: a task_already_merged refusal never blocks a task whose credit was withdrawn"
-    - claim: "a genuinely merged task is still reported merged, not queued"
-      proof: "unit test: a genuinely merged task is still reported merged, not queued"
   falsifier: |
     CLOSE IF a task whose only independent-failure row is task_already_merged is already dispatchable once its credit is withdrawn.

@@ -35,11 +35,10 @@
     Detection of a collision that slips past this is W1-T4389.
     Also: `task-id-reservation.ts` exports parsePrefixedTaskId(id), which splits an id into its prefix and number
     for any prefix; run-task.ts calls it when parsing --prefix.
+  amendment: "2026-09-24 GUARD CRITERION REMOVED: \"a W1-T mint without a prefix is unchanged\" is a regression guard that passes at the merge base too, so proof-discrimination can never accept it. Its test stays in the suite as a regression test."
   acceptance:
     - claim: "a prefixed mint reserves the id on the target repo's origin and skips a held one"
       proof: "unit test: a prefixed mint reserves the id on the target repo's origin and skips a held one"
-    - claim: "a W1-T mint without a prefix is unchanged"
-      proof: "unit test: a W1-T mint without a prefix is unchanged"
     - claim: "the mint command parses a prefixed id through the shared parser"
       proof: 'grep: parsePrefixedTaskId( in src/run-task.ts'
   falsifier: |

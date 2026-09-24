@@ -856,6 +856,27 @@ export function reserveTaskIdBlockRemote(
   };
 }
 
+// ── CONSUMER-REPO PREFIXES (W1-T4388): CONSOLE-T, PORTAL-T and W1-T alike, on each repo's own origin.
+
+/** `CONSOLE-T58` → `{ prefix: "CONSOLE", n: 58 }`; `null` for anything else, a suffixed `W1-T1B` included. */
+export function parsePrefixedTaskId(id: string): { prefix: string; n: number } | null {
+  const m = /^([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)-T([0-9]+)$/.exec(id);
+  return m ? { prefix: m[1], n: Number(m[2]) } : null;
+}
+
+/** Every allocatable `<prefix>-T<n>` the texts mention; `prefix` comes from {@link parsePrefixedTaskId}, so holds no regex metacharacter. */
+export function prefixedTaskIdsIn(texts: readonly string[], prefix: string): number[] {
+  const re = new RegExp(`(?<![A-Za-z0-9])${prefix}-T([0-9]+)(?![A-Za-z0-9])`, "g");
+  return texts.flatMap((t) => [...t.matchAll(re)].map((m) => Number(m[1]))).filter(isAllocatableTaskId);
+}
+
+/** The walk's start. {@link reserveTaskIdRemote} skips `reservedFloor` when `idFor` is set, so the
+ *  caller folds the target's refs/rmd-id/ listing into `texts` and this stands in for that floor. */
+export function nextPrefixedTaskIdStart(texts: readonly string[], prefix: string): number {
+  const ids = prefixedTaskIdsIn(texts, prefix);
+  return ids.length ? Math.max(...ids) + 1 : 1;
+}
+
 // ── COLLISION DETECTION AT REVIEW TIME (W1-T4389) ─────────────────────────────────────────────
 // Everything above MINTS an id; this catches a PR that never minted (a hand filing, an offline mint,
 // a worker ignoring its brief). MEASURED 2026-09-23: remudero-console #1695 added CONSOLE-T58 in a
