@@ -5351,6 +5351,64 @@ export function lastBaseCausedTipFromLedger(lines: readonly Record<string, unkno
   return out;
 }
 
+/** One prior sweep's mergeability observation for an EXACT PR+head, and when the ledger row
+ *  carrying it was written — see {@link lastKnownMergeStateFromLedger}. */
+export interface KnownMergeState {
+  state: MergeState;
+  /** The ledger row's own `ts`, when present — carried into the inheriting pass's reason so a
+   *  flapping read is legible rather than a silent override (W1-T4470 design (iv)). */
+  observedAt?: string;
+}
+
+/**
+ * W1-T4470 — THE LAST KNOWN mergeability THIS EXACT HEAD disposed under, read from this module's
+ * OWN `sweep.disposed` rows. GitHub recomputes `mergeable_state` lazily, and a pass that catches it
+ * mid-recompute reads `unknown` — `OpenPrView.mergeState` is `undefined` (see
+ * `mergeStateFromRest`'s doc), which is NOT "no evidence": a PREVIOUS pass may have already proven
+ * this head `dirty`. Scoped pr_number+head_sha, deliberately NOT pr_number alone: a NEW push earns a
+ * NEW head with no history of its own, so mergeability must never carry across a head change. Reads
+ * `merge_state` alone, never `disposition`/`reason` prose — that field is written only when a pass's
+ * OWN effective mergeState (observed or itself inherited) was known, so hysteresis composes across
+ * any number of consecutive `unknown` reads on the SAME head rather than resetting after one.
+ */
+export function lastKnownMergeStateFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+  headSha: string,
+): KnownMergeState | undefined {
+  let out: KnownMergeState | undefined;
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed") continue;
+    if (line.pr_number !== prNumber) continue;
+    if (line.head_sha !== headSha) continue;
+    const state = line.merge_state;
+    if (state !== "clean" && state !== "dirty" && state !== "behind") continue;
+    // Ledger lines are append-ordered — the LAST match for this exact head is its most recent.
+    out = { state, ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}) };
+  }
+  return out;
+}
+
+/**
+ * W1-T4470 — APPLY THE HYSTERESIS ABOVE TO ONE PR VIEW. A `mergeState` this pass ACTUALLY OBSERVED
+ * is NEVER overridden — a fresh `dirty`/`clean`/`behind` read is always the truth, however it
+ * disagrees with history. Only a genuinely `undefined` read (GitHub had not computed mergeability
+ * this pass) may inherit, and only when a prior pass proved a state for this EXACT head. Returns the
+ * SAME `pr` object when nothing changes, so an unaffected PR costs nothing downstream. The returned
+ * `pr` is used for EVERYTHING the rest of this PR's reconciliation reads — disposition, the
+ * zero-check-run remedies, and the ledgered `sweep.disposed` row itself — so the inheritance is not
+ * a second opinion layered on top of the ordinary path, it IS this pass's mergeability fact.
+ */
+export function withInheritedMergeState(
+  pr: OpenPrView,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): { pr: OpenPrView; inherited?: KnownMergeState } {
+  if (pr.mergeState !== undefined) return { pr };
+  const inherited = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
+  if (!inherited) return { pr };
+  return { pr: { ...pr, mergeState: inherited.state }, inherited };
+}
+
 /** W1-T2620 — AT MOST ONE base-caused PR released per pass, oldest activity first. THE RELEASE
  *  CONDITION IS "main has moved since this PR last stood down", never "the cause is known". A PR
  *  with no prior record is NOT eligible: with no baseline nothing has advanced. Ordered by the SAME
@@ -9243,6 +9301,12 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        // W1-T4470 — the EFFECTIVE mergeability this exact head disposed under, observed this
+        // pass or inherited from a prior one (see `withInheritedMergeState`). Read back by
+        // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
+        // across any number of consecutive `unknown` reads on the SAME head rather than
+        // resetting the moment GitHub goes quiet again.
+        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState } : {}),
         ...(deduped ? { deduped: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
@@ -9288,8 +9352,20 @@ export async function runSweep(
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
-    const pr = openPrs[prIndex];
+    // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
+    // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
+    // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
+    // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
+    // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
+    // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
+    const { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
     let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
+    if (inheritedMergeState) {
+      reason =
+        `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
+        `observed ${inheritedMergeState.observedAt ?? "at an undated prior pass"} for this exact head ` +
+        `${pr.headSha.slice(0, 7)} (W1-T4470)`;
+    }
     // W1-T4351 — a positively classified plan filing has no implementation surface: every ci-log
     // fix was refused "the task declares no files". Escalate naming the red instead (deduped per
     // head like every escalation), never a worker strike that cannot produce a commit.
