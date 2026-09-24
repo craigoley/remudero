@@ -269,6 +269,7 @@ export interface ConsoleSignalsProjection {
   queue: LiveAnalyticsMetrics["queue"];
   provider: LiveAnalyticsMetrics["provider"];
   spend: { cash: CashSpendSnapshot };
+  routingTelemetry: RoutingTelemetrySnapshot;
 }
 
 export function buildConsoleSignalsProjection(base: AnalyticsSnapshot, live: LiveAnalyticsMetrics): ConsoleSignalsProjection {
@@ -279,6 +280,7 @@ export function buildConsoleSignalsProjection(base: AnalyticsSnapshot, live: Liv
     queue: live.queue,
     provider: live.provider,
     spend: base.spend ?? { cash: notCollectedCashSpend("snapshot predates cash collection; awaiting first refresh") },
+    routingTelemetry: base.routingTelemetry,
   };
 }
 

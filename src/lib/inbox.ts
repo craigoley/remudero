@@ -140,6 +140,9 @@ export interface SkillLifecycleAction {
   evidenceFingerprint: string;
 }
 
+/** Every skill-workshop draft's proposal id starts with this; `skillDraftProposalId` (skill-workshop.ts) builds them. */
+export const SKILL_DRAFT_ID_PREFIX = "skill-draft:";
+
 /** W1-T4338: the skill a skill-workshop draft asks `rmd approve` to write — its directory name and SKILL.md body. */
 export interface SkillFilePayload {
   name: string;
@@ -2394,8 +2397,15 @@ export function approveProposal(
   // W1-T4338: a skill draft carries its file, not a task fragment, so it takes neither the draft requirement nor the
   // duplicate-filing check below — both are about minting tasks. Everything after branch creation is shared.
   const skillFile = classification.state === "ready" ? classification.skillFile : undefined;
-  const skillRefusal =
-    skillFile && !gateway.writeSkillFile
+  // A skill draft staged before W1-T4338 carries no file, so approving it would file a TASK about the skill instead
+  // of writing it. The workshop's next pass backfills the file onto a procedure-keyed id; a legacy run-set id has no
+  // successor to gain one and is for the operator to decline.
+  const skillFileMissing =
+    classification.state === "ready" && !skillFile && classification.proposalId.startsWith(SKILL_DRAFT_ID_PREFIX);
+  const skillRefusal = skillFileMissing
+    ? `${classification.proposalId} is a skill draft staged without its skill file — approving it would file a task ` +
+      "instead of writing the skill; let the skill workshop re-stage it, which adds the file, or decline it"
+    : skillFile && !gateway.writeSkillFile
       ? `${classification.proposalId} is a skill draft, and this gateway cannot write a skill file`
       : skillFile && !approvedSkillRelPath(skillFile.name)
         ? `${classification.proposalId}'s skill name ${JSON.stringify(skillFile.name)} is not a single safe path segment`
