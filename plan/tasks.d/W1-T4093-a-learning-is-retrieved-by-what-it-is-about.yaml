@@ -12,7 +12,9 @@
   plan_refs: [W1-T19, W1-T33]
   files: [src/lib/learnings.ts, src/lib/knowledge-symbols.ts, scripts/learnings-derive-symbols.mjs, test/a-learning-is-retrieved-by-what-it-is-about.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4093 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     READ 2026-09-22 (learnings/*.yaml at origin/main, 1,056 live `learnings.injected` rows).

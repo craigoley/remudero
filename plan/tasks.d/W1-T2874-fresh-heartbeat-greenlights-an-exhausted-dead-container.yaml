@@ -14,7 +14,9 @@
     - test/fleet-heartbeat.test.ts
   origin: "operator-session#fresh-beat-dead-container-2026-09-05"
   plan_refs: ["W1-T483", "W1-T484", "W1-T2349", "W1-T2586", "W1-T2870"]
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T2874 — It depends on W1-T484, which will never be built.
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET AT 2026-09-05T08:40:01Z. Docker reported
