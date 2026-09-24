@@ -30192,8 +30192,9 @@ export function plainInboxWriter(
   }
 }
 
-/** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. A PR for
- *  operator review opens as a DRAFT, which GitHub refuses to merge until a person marks it ready. */
+/** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. Every
+ *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
+ *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
 export function gardenCheckout(opts: {
   name: GardenName;
   repoDir: string;
@@ -30210,7 +30211,7 @@ export function gardenCheckout(opts: {
   const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
     root,
-    land: ({ paths, title, body, review }) => {
+    land: ({ paths, title, body }) => {
       git("add", "--", ...paths);
       // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
       // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -30222,10 +30223,7 @@ export function gardenCheckout(opts: {
       git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
       const fetcher = opts.fetcher ?? ghJson;
-      const pr = { title, body, head: branch, base: "main" };
-      return review === "operator"
-        ? createPlanPrRest((args) => fetcher([...args, "-F", "draft=true"]), opts.owner, opts.repo, pr).prUrl
-        : createPlanPrRest(fetcher, opts.owner, opts.repo, pr).prUrl;
+      return createPlanPrRest(fetcher, opts.owner, opts.repo, { title, body, head: branch, base: "main" }).prUrl;
     },
     dispose: () => worktreeRemove(opts.repoDir, root),
   };
@@ -44284,7 +44282,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "onboard",
     syntax: "rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o> --repo <r>]",
     summary: "The `rmd onboard` family: inventory, recon, session and synthesize phases.",
-    detail: "the `rmd onboard` family (MASTER-PLAN ★P24, W1-T82/83/84/85): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout — languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence — via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json — every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; --phase session (src/lib/onboard/session.ts) generates a §2-QUESTION-contract set from the inventory's own gaps plus a fixed goal-elicitation set — every question names its decision and candidate answers — and drives a resumable CLI answer loop, writing ONLY plan/onboarding/answers.json + appending onboard.answered lines to plan/onboarding/ledger.ndjson; a second invocation re-presents only the unanswered set; no-TTY previews the backlog and never blocks; --phase synthesize (src/lib/onboard/synthesize.ts) REFUSES (non-zero exit, naming every unanswered question id) unless phase 3's full question set is answered — goals are never guessed — then drafts MASTER-PLAN.md + plan/tasks.yaml + AGENTS.md from all four phase 1-3 artifacts, iterates the drafted tasks.yaml against the real `rmd lint-plan` linter (§5C) until clean, and opens EXACTLY ONE draft PR to `onboard/<repo>-plan`, writing nothing outside that branch (never plan/onboarding/). Phases inventory/recon/session are read-only against the target + gh api; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED — any other value fails loud, spawning/writing nothing",
+    detail: "the `rmd onboard` family (MASTER-PLAN ★P24, W1-T82/83/84/85): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout — languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence — via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json — every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; --phase session (src/lib/onboard/session.ts) generates a §2-QUESTION-contract set from the inventory's own gaps plus a fixed goal-elicitation set — every question names its decision and candidate answers — and drives a resumable CLI answer loop, writing ONLY plan/onboarding/answers.json + appending onboard.answered lines to plan/onboarding/ledger.ndjson; a second invocation re-presents only the unanswered set; no-TTY previews the backlog and never blocks; --phase synthesize (src/lib/onboard/synthesize.ts) REFUSES (non-zero exit, naming every unanswered question id) unless phase 3's full question set is answered — goals are never guessed — then drafts MASTER-PLAN.md + plan/tasks.yaml + AGENTS.md from all four phase 1-3 artifacts, iterates the drafted tasks.yaml against the real `rmd lint-plan` linter (§5C) until clean, and opens EXACTLY ONE PR (never a draft) to `onboard/<repo>-plan`, writing nothing outside that branch (never plan/onboarding/). Phases inventory/recon/session are read-only against the target + gh api; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED — any other value fails loud, spawning/writing nothing",
   },
   {
     name: "feedback",

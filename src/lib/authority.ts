@@ -474,15 +474,15 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   },
   // ── src/lib/onboard/synthesize.ts ────────────────────────────────────────────────────────
   {
-    id: "onboard-draft-pr",
-    action: "open exactly one draft PR proposing onboarding output against a target repo",
+    id: "onboard-pr",
+    action: "open exactly one PR (never a draft) proposing onboarding output against a target repo",
     module: "src/lib/onboard/synthesize.ts",
-    symbol: "onboarding drafter (branch + push + `gh pr create --draft`)",
+    symbol: "onboarding drafter (branch + push + `gh pr create`)",
     boundary: "gh-pr-create",
     gate: "operator-verb",
     ledgerSteps: [],
     verb: "rmd onboard",
-    note: "Standing rule 15: exactly one branch, one commit, one draft PR — a human runs `rmd onboard` deliberately.",
+    note: "Standing rule 15: exactly one branch, one commit, one unarmed PR — a human runs `rmd onboard` deliberately.",
   },
   // ── src/lib/panel-actions.ts ─────────────────────────────────────────────────────────────
   {
