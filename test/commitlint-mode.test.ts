@@ -83,12 +83,21 @@ test("commitlint CI wiring: the job still runs commitlint against this repo's ow
   );
 });
 
-test("commitlint CI wiring: the checkout no longer requests full git history -- title-only linting needs no commit log", async () => {
+test("commitlint CI wiring: the commitlint step itself reads no base..head commit range, even though its shared job checks out full history for its sibling gates", async () => {
+  // W1-T4399: this job now also runs leak-grep, lint-plan, depcruise and the rest as STEPS (one
+  // shared checkout instead of ~17 separate ones), and several of THOSE need `fetch-depth: 0` to
+  // resolve `HEAD^1`/`origin/main`. commitlint's OWN step still only reads the PR title via `gh pr
+  // view` -- the property this test originally pinned -- so it is asserted directly on that step's
+  // own text instead of on the whole (now shared) job body.
   const jobBody = await commitlintJobBody();
+  const stepStart = jobBody.indexOf("- name: commitlint (");
+  assert.notEqual(stepStart, -1, "the commitlint step must be findable inside the shared job body");
+  const nextStepStart = jobBody.indexOf("\n      - name:", stepStart + 1);
+  const commitlintStep = nextStepStart === -1 ? jobBody.slice(stepStart) : jobBody.slice(stepStart, nextStepStart);
   assert.doesNotMatch(
-    jobBody,
-    /fetch-depth:\s*0/,
-    "fetch-depth: 0 existed only to walk the base..head commit range; title-only linting needs no history",
+    commitlintStep,
+    /HEAD\^1|origin\/main/,
+    "the commitlint step itself must still read only the live PR title, never a commit range -- fetch-depth: 0 above is for its sibling gates, not this one",
   );
 });
 

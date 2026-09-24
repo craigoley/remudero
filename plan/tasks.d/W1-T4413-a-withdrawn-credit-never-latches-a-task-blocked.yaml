@@ -12,7 +12,7 @@
   plan_refs: ["W1-T319", "W1-T1004", "W1-T3979"]
   files:
     - src/lib/status.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24 on remudero-site. Filing PRs #108 ("chore(plan): file public learning provenance

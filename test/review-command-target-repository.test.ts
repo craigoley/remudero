@@ -292,7 +292,8 @@ test("invalid explicit target refuses before controller access", async () => {
       });
 
       assert.equal(code, 1);
-      assert.deepEqual(posted, [{ state: "failure", description: `remudero-review: FAIL — ${c.reason}` }]);
+      // W1-T4410: a reviewer-environment refusal posts nothing on the PR.
+      assert.deepEqual(posted, []);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

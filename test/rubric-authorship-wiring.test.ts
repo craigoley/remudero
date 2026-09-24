@@ -125,6 +125,8 @@ async function advisoryFor(headRefName: string | undefined): Promise<string> {
       spawnReviewer: false,
       reviewerMount: MOUNT,
       headRefName,
+      // W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing.
+      lintPlanForReviewFn: async () => ({ ran: true as const, label: "fixture", checked: 1, violations: [] }),
       // THE POST-VERDICT ARM IS STUBBED, AND IT MUST BE. These cases are built so the binding
       // verdict PASSES (one substantiated criterion) — which is what leaves the advisory as the
       // only thing posted — and a passing verdict carries `runReview` on into

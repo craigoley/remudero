@@ -1,19 +1,21 @@
 name: Semgrep
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+    # W1-T4401: codeql.yml's PLAN/DOCS fast lane. Semgrep is ADVISORY, so a skipped run cannot deadlock ci-gate.
+    paths-ignore:
+      - "plan/**"
+      - "docs/**"
+      - "learnings/**"
+      - "**/*.md"
   schedule:
-    # Weekly, off-peak (Mondays 05:23 UTC — staggered from CodeQL/OSV).
-    - cron: "23 5 * * 1"
+    # Nightly, 03:46 UTC (W1-T4401: replaces push-to-main plus weekly; staggered from OSV's 03:14).
+    - cron: "46 3 * * *"
   workflow_dispatch:
 
-# Least privilege at the top level (Scorecard TokenPermissions: a topLevel write
-# permission scores worse than the identical permission scoped to job level, even
-# though this workflow has only one job — W1-T66); the job below elevates only
-# what it needs.
+# Least privilege at the top level (Scorecard TokenPermissions scores a topLevel write worse than the
+# same permission at job level, even with one job — W1-T66); the job elevates only what it needs.
 permissions:
   contents: read
 
@@ -32,28 +34,35 @@ jobs:
       security-events: write
       contents: read
       actions: read
-    # Standalone / community edition, run from the official pinned image — no pip
-    # install (Scorecard PinnedDependencies flagged the old `pip install
-    # semgrep==1.167.0` as unpinned; pip has no single-line hash-pin for a package
-    # plus its full transitive dependency set without also hash-locking every
-    # transitive dep, so W1-T66 switched to the vendor image instead, pinned by
-    # digest like every other action reference in this repo), no SEMGREP_APP_TOKEN,
-    # no Semgrep Cloud.
+    # Community edition from the official image pinned by digest (W1-T66: Scorecard PinnedDependencies
+    # flagged `pip install semgrep==…`, which cannot hash-pin its transitive deps in one line) — no pip,
+    # no SEMGREP_APP_TOKEN, no Semgrep Cloud.
     container:
       image: semgrep/semgrep@sha256:4095860d71cc40d42617b92b0b420711736ada7d67fdb254c5ef4f37dd8fc3ec # 1.167.0
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Run Semgrep
         # Never fail the build here; findings surface in the Security tab via SARIF.
+        env:
+          # W1-T4401: a PR run reports only findings new since its base (every rule still runs; needs
+          # fetch-depth 0). Empty on every other event, so those stay full, un-diffed sweeps.
+          BASELINE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         run: |
+          BASELINE_ARGS=""
+          if [ -n "${BASELINE_REF}" ]; then
+            BASELINE_ARGS="--baseline-commit ${BASELINE_REF}"
+          fi
           semgrep scan \
             --config p/typescript \
             --config p/javascript \
             --config p/security-audit \
             --config p/secrets \
-            --sarif --output semgrep.sarif
+            --sarif --output semgrep.sarif \
+            ${BASELINE_ARGS}
         continue-on-error: true
 
       - name: Upload SARIF to code scanning

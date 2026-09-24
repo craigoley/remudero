@@ -1,9 +1,7 @@
 name: Dependency Review
 
-# Inspects dependency changes in a PR diff and comments a summary.
-# Warn-only — catches a bad dep without walling merges; MAJOR-bump
-# exclusion from auto-merge is a separate dep-review-lane job (W1-T54),
-# not this workflow.
+# Inspects a PR's dependency changes and comments a summary. Warn-only; MAJOR-bump exclusion from
+# auto-merge is the dep-review lane's job (W1-T54), not this workflow's.
 on:
   pull_request:
     branches: [main]
@@ -16,6 +14,9 @@ concurrency:
   group: dependency-review-${{ github.ref }}
   cancel-in-progress: true
 
+# W1-T4401: each job's scan steps run only when a package.json or package-lock.json (any depth) changed.
+# A STEP-level `if:` inside an unconditional job, never a job-level `if:` or a `needs:` — `license-review`
+# is REQUIRED, and a skipped or needs-blocked required job can strand ci-gate. Fail-open on an unreadable diff.
 jobs:
   dependency-review:
     name: Review
@@ -25,8 +26,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Detect whether a manifest or lockfile changed
+        id: deps-changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          CHANGED="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null)"
+          set -e
+          RESULT="true"
+          if [ -n "${CHANGED}" ] && ! printf '%s\n' "${CHANGED}" | grep -Eq '(^|/)package(-lock)?\.json$'; then
+            RESULT="false"
+          fi
+          echo "changed files:"
+          printf '%s\n' "${CHANGED}"
+          echo "changed=${RESULT}" >> "$GITHUB_OUTPUT"
 
       - name: Dependency Review
+        if: steps.deps-changed.outputs.changed == 'true'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         continue-on-error: true
         with:
@@ -56,10 +77,8 @@ jobs:
   # for entangling a NEW `scripts/*.mjs` gate script with the `.github/workflows/` change wiring
   # it in, in the same PR).
   #
-  # `allow-licenses`, NEVER a deny-list (design (ii)): a deny-list fails OPEN on every licence
-  # nobody thought to enumerate — the wrong shape for an ALLOWED-list with copyleft flagged as the
-  # consequence, not the enumeration. `test/helpers/check-dependency-licences.mjs` only ever takes
-  # an allow-list (`ALLOW_LICENSES`), mirroring that choice; there is no deny-list input to misuse.
+  # `allow-licenses`, NEVER a deny-list (design (ii)): a deny-list fails OPEN on every licence nobody
+  # enumerated; `test/helpers/check-dependency-licences.mjs` takes only an allow-list (`ALLOW_LICENSES`).
   #
   # THE ALLOW-LIST, seeded exactly from the permissive family the originating feedback names
   # (MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / ISC) and NOT silently widened (design (vi)).
@@ -91,12 +110,32 @@ jobs:
         with:
           fetch-depth: 0
 
+      # W1-T4401: the same fail-open detector as `dependency-review` (see this file's header).
+      - name: Detect whether a manifest or lockfile changed
+        id: deps-changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          CHANGED="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null)"
+          set -e
+          RESULT="true"
+          if [ -n "${CHANGED}" ] && ! printf '%s\n' "${CHANGED}" | grep -Eq '(^|/)package(-lock)?\.json$'; then
+            RESULT="false"
+          fi
+          echo "changed files:"
+          printf '%s\n' "${CHANGED}"
+          echo "changed=${RESULT}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.deps-changed.outputs.changed == 'true'
         with:
           node-version-file: .nvmrc
           cache: npm
 
       - name: License Review
+        if: steps.deps-changed.outputs.changed == 'true'
         env:
           # SEEDED FIVE (2026-08-17) plus THREE RULED IN BY THE OPERATOR ON 2026-08-19. The three
           # additions were each ALREADY IN THIS TREE and were being re-flagged on every version

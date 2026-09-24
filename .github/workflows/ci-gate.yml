@@ -120,6 +120,20 @@ jobs:
       # W1-T3519: `gate-monotonic` starts ADVISORY per this block's own rule that a name joins
       # REQUIRED "once it is live on main". It refuses a REQUIRED context demoted with no reviewed
       # GATE_RATIONALE; promoting it is a one-line follow-up after it has run clean on main.
+      #
+      # W1-T4399: ~17 one-runner gates (commitlint, lint-plan, depcruise, containment-probe,
+      # jscpd-gate, claims, learnings-budget-ratchet, api-client-drift, no-hand-rolled-fetch,
+      # prompt-surface-gate, leak-grep, assertion-discrimination, task-id-existence,
+      # comment-load-ratchet, source-size, baseline-monotonic, dashboard) now run as STEPS of one
+      # job in ci.yml (the former `commitlint` job, expanded in place — see its own header comment
+      # there for why it keeps that key rather than a new one), which posts each gate's result
+      # under its OWN unchanged name via the checks API. No name here changes and no name is added:
+      # every one of the sixteen OTHER gates keeps its own ci.yml job key, registered but
+      # permanently `if: false`, under its ORIGINAL `name:` (never renamed — this file's REQUIRED/
+      # ADVISORY entries derive from a real job's `name:`, and a rename would leave the original
+      # stale). So a skipped stub and the consolidated job's real post SHARE one name on every PR;
+      # this file's own read already groups by name and keeps only the latest `started_at`
+      # (W1-T123), unmodified, which is what resolves that duplicate.
       ADVISORY: >-
         [
         "squash-trailer-gate",

@@ -45,27 +45,46 @@ test("scanner-gate-config: ci-gate REQUIRED lists the PR-time OSV scan's actual 
   assert.ok(
     required.includes("scan-pr / osv-scan"),
     `ci-gate REQUIRED is ${JSON.stringify(required)} — missing "scan-pr / osv-scan" ` +
-      `(osv-scanner-pr.yml's check-run name, verified against a live PR's check-runs API ` +
-      `response since a \`uses:\` reusable-workflow call is namespaced "<caller job> / ` +
-      `<reusable job>" by GitHub). Without it, ci-gate never waits for or fails on this check, ` +
+      `(osv-scanner-pr.yml's preserved check-run name). Without it, ci-gate never waits for or fails on this check, ` +
       `so a real OSV finding can turn it red and still merge.`,
   );
 });
 
-test("scanner-gate-config: osv-scanner-pr.yml's scan-pr job keeps fail-on-vuln: true (the check ci-gate now awaits must actually be able to fail)", async () => {
+test("scanner-gate-config: osv-scanner-pr.yml keeps fail-on-vuln: true in the blocking comparison (the check ci-gate awaits must actually fail on a new CVE)", async () => {
   const doc = await loadWorkflow("osv-scanner-pr.yml");
   const job = doc.jobs["scan-pr"];
+  const reporter = (job?.steps ?? []).find((s: any) => String(s?.uses ?? "").includes("osv-reporter-action"));
   assert.equal(
-    job?.with?.["fail-on-vuln"],
-    true,
-    "scan-pr must be configured fail-on-vuln: true — awaiting a scanner that can never fail on " +
+    job?.name,
+    "scan-pr / osv-scan",
+    "the native, locally hardened job must preserve the exact check-run name ci-gate awaits",
+  );
+  assert.match(
+    reporter?.with?.["scan-args"] ?? "",
+    /--fail-on-vuln=true/,
+    "scan-pr must compare results with fail-on-vuln: true — awaiting a scanner that can never fail on " +
       "a real CVE would make ci-gate's new REQUIRED entry a no-op gate.",
   );
 });
 
 // ── Claim 2: a REQUIRED job cannot be continue-on-error (claim and config cannot drift apart) ─
+//
+// W1-T4399 introduces exactly ONE deliberate exception: the `commitlint` job in ci.yml now runs
+// ~17 one-minute gates as STEPS, each `continue-on-error: true` so one failing never skips the
+// next, PRECISELY the shape this claim would otherwise refuse. It is not a silent drift, because
+// the job's own last step (`if: always()`) posts a SEPARATE check run per gate, under that gate's
+// own REQUIRED name, via the checks API — reading each step's real `outcome` (continue-on-error
+// masks a failed step's `conclusion` to success, but never its `outcome`). ci-gate.yml's own
+// read groups check runs by name and keeps only the LATEST `started_at` (W1-T123), so that
+// API-posted, outcome-accurate check run — which always lands after the native job's own,
+// continue-on-error-flattened one — is what ci-gate actually evaluates. So the REQUIRED claim
+// and the actual, ENFORCED behavior have NOT drifted apart; only the mechanism that carries a
+// step's real result to ci-gate changed. `KNOWN_COMPENSATED_CONTINUE_ON_ERROR_JOBS` is this
+// exception, deliberately narrow (an exact ci.yml job id, never a pattern), and the second test
+// below verifies the compensation it claims is real rather than trusting the exemption blindly.
+const KNOWN_COMPENSATED_CONTINUE_ON_ERROR_JOBS: ReadonlySet<string> = new Set(["ci.yml:commitlint"]);
 
-test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured continue-on-error: true anywhere in its steps", async () => {
+test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured continue-on-error: true, except the verified commitlint compensation and OSV scanner steps a blocking reporter follows", async () => {
   const { required } = await loadCiGateRequired();
   const files = (await readdir(WORKFLOWS_DIR)).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"));
 
@@ -73,6 +92,7 @@ test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured cont
   for (const file of files) {
     const doc = await loadWorkflow(file);
     for (const [jobId, job] of Object.entries<any>(doc.jobs ?? {})) {
+      if (KNOWN_COMPENSATED_CONTINUE_ON_ERROR_JOBS.has(`${file}:${jobId}`)) continue;
       const jobName: string = job?.name ?? jobId;
       // A required check-run name is either a bare job id/name (a native job in this repo) or
       // GitHub's synthesized "<caller job> / <reusable job>" form for a `uses:` call — match
@@ -87,6 +107,20 @@ test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured cont
       const steps: any[] = Array.isArray(job?.steps) ? job.steps : [];
       const stepLevelCoE = steps.some((s) => s && s["continue-on-error"] === true);
 
+      // REVIEW-RATIFIED SCOPE WIDENING (W1-T4401): the upstream reusable workflow's
+      // checkout/result-file symlink vulnerability requires exposing its two scanner steps here.
+      // Scanner exits are tolerated because findings are expected to be compared; only these two
+      // steps may continue, and a missing-results check plus a non-tolerated reporter must follow.
+      if (file === "osv-scanner-pr.yml" && jobId === "scan-pr") {
+        const tolerated = steps.filter((s) => s && s["continue-on-error"] === true).map((s) => s.name);
+        assert.deepEqual(tolerated, ["Run scanner on existing code", "Run scanner on proposed code"]);
+        assert.ok(steps.some((s) => s.name === "Check that both scans produced results"), "incomplete scans must fail closed");
+        const reporter = steps.find((s) => String(s?.uses ?? "").includes("osv-reporter-action"));
+        assert.ok(reporter, "the retained scan comparison must run");
+        assert.notEqual(reporter["continue-on-error"], true, "new vulnerability findings must fail the required job");
+        continue;
+      }
+
       if (jobLevelCoE || stepLevelCoE) {
         offenders.push(`${file}:${jobId} (required via ${JSON.stringify(matched)})`);
       }
@@ -100,6 +134,28 @@ test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured cont
       `produce a "failure" conclusion for ci-gate to detect — the REQUIRED claim and the actual ` +
       `config have drifted apart: ${offenders.join("; ") || "(none)"}`,
   );
+});
+
+test("W1-T4399: commitlint's continue-on-error exemption is real, not trusted blindly — every one of its gate steps is re-reported via the checks API, reading the step's OUTCOME (not its continue-on-error-flattened conclusion)", async () => {
+  const ci = await loadWorkflow("ci.yml");
+  const job = ci.jobs["commitlint"];
+  assert.ok(job, "ci.yml must still declare a commitlint job");
+  const steps: any[] = Array.isArray(job.steps) ? job.steps : [];
+
+  const coESteps = steps.filter((s) => s && s["continue-on-error"] === true && typeof s.id === "string");
+  assert.ok(coESteps.length >= 15, `expected at least the ~15 continue-on-error gate steps this task moved here, found ${coESteps.length}`);
+
+  const reportStep = steps.at(-1);
+  assert.equal(reportStep?.if, "always()", "the reporting step must run even when a gate step above it failed or was skipped");
+  const reportRun: string = reportStep?.run ?? "";
+  assert.match(reportRun, /gh api "repos\/\$\{GITHUB_REPOSITORY\}\/check-runs"/, "the reporting step must post via the real checks API, not merely log");
+
+  for (const step of coESteps) {
+    assert.ok(
+      Object.values(reportStep?.env ?? {}).some((v: any) => typeof v === "string" && v.includes(`steps.${step.id}.outcome`)),
+      `continue-on-error step '${step.id}' must have its OUTCOME (not its continue-on-error-flattened conclusion) read by the reporting step`,
+    );
+  }
 });
 
 test("scanner-gate-config: the advisory (continue-on-error) scanners stay OUT of ci-gate REQUIRED — dependency-review's Review job and semgrep.yml's Scan job are not silently promoted to gates by this fix", async () => {
