@@ -52,6 +52,7 @@
   "scripts/bound-kind-baseline.json": 0,
   "scripts/check.mjs": 30,
   "scripts/ci-control-plane-precheck.mjs": 250,
+  "scripts/ci-gate-from-contract.mjs": 250,
   "scripts/citation-anchor-census.mjs": 50,
   "scripts/claims-check.mjs": 71,
   "scripts/claude-md-budget-baseline.json": 0,

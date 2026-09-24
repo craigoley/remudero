@@ -377,6 +377,9 @@ test("acceptance 6: job-level conditions are only PR guards, stable-name aggrega
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must run even when a shard fails`);
     } else if (W1_T4399_SUPERSEDED_STUB_JOB_IDS.has(jobId)) {
       assert.equal(job.if, false, `superseded stub '${jobId}' must be permanently skipped (if: false)`);
+    } else if (jobId === "ci-gate") {
+      // W1-T4400: the required aggregate — always() on every pull_request, never on a push.
+      assert.equal(job.if, "${{ always() && github.event_name == 'pull_request' }}");
     } else {
       assert.match(String(job.if), /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);
     }

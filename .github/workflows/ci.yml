@@ -1686,3 +1686,42 @@ jobs:
     timeout-minutes: 10
     steps:
       - run: echo "runs as a step of the commitlint job now — see W1-T4399"
+
+  ci-gate:
+    # W1-T4400 — THE REQUIRED AGGREGATE, WITHOUT HOLDING A RUNNER. ci-gate.yml's pull_request job used
+    # to start with this workflow and poll until every required check finished: a waiter billed for
+    # the whole CI run. Here it is `needs:`-ordered after every other job in this file, so it starts
+    # only when they have finished; the required checks from OTHER workflows had all ended by minute
+    # 4 on every PR measured, so the step's own bounded wait loop is a formality. It runs ci-gate.yml's
+    # aggregation step read from that file (scripts/ci-gate-from-contract.mjs) — one copy of the gate,
+    # its REQUIRED list and its refusals. ci-gate.yml keeps only the `edited` re-aggregation.
+    #
+    # `always()` IS LOAD-BEARING: without it a failing needed job SKIPS this job, and GitHub counts a
+    # skipped required check as passing. FALSIFIER: test/the-ci-gate-does-not-hold-a-runner.test.ts.
+    name: ci-gate
+    runs-on: ubuntu-latest
+    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, dashboard, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    # Light band. Its wait starts only after every ci.yml job has finished, so it covers stragglers
+    # from OTHER workflows alone (all done by minute 4 on every PR measured): a 900 s WAIT_CAP_SECONDS
+    # here, plus ci-gate.yml's 600 s grace window, still ends inside this bound — so the gate's own
+    # named refusal always fires before the job is killed.
+    timeout-minutes: 30
+    permissions:
+      checks: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      WAIT_CAP_SECONDS: "900"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Aggregate sibling check results (ci-gate.yml's own step — fail only on a REAL failure)
+        run: node scripts/ci-gate-from-contract.mjs

@@ -1,0 +1,40 @@
+- id: W1-T4420
+  title: "HAND-OPENED PRS KEEP FAILING THE SAME GATES — a run branch without a body Remudero-Task line, a body Acceptance block that diverges from the plan, a draft; give sessions `rmd pr open` that writes the body the gates need and refuses what they would refuse"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "follow-up audit 2026-09-24 (operator: improve automated flow and self-improvement)"
+  plan_refs: ["W1-T1060", "W1-T4415"]
+  files:
+    - src/lib/pr-open.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: three operator-session PRs (#6915, #6916, #6917) failed acceptance-author-gate `no-header`
+    because the Remudero-Task trailer was only in the commit, and each needed a body PATCH plus a close and reopen
+    (the gate replays the event payload). The same sessions hand-assemble `gh api POST pulls` bodies for every
+    filing and build, and the gates' rules (trailer in the body for run branches, no Acceptance block that diverges
+    from the plan, discriminating proofs, never a draft) live only in doctrine and memory.
+  design: |
+    `rmd pr open --head <branch> --title <t> --body-file <f>` (src/lib/pr-open.ts, wired in run-task.ts) derives what
+    the branch needs: a run-<ID>-<epoch> branch gets `Remudero-Task: <ID>` appended to the body if absent, and a
+    body Acceptance block is refused when it diverges from the task's plan criteria. A file/ or run-unfiled branch
+    must carry an Acceptance block, and every grep proof in it is checked to discriminate against origin/main
+    before opening. It never opens a draft. It runs the same predicate acceptance-author-gate runs, before the PR
+    exists, then creates the PR via the REST writer. --dry-run prints the final body.
+  acceptance:
+    - claim: "a run branch body gains its Remudero-Task line before the pull request opens"
+      proof: "unit test: a run branch body gains its Remudero-Task line before the pull request opens"
+    - claim: "a body whose acceptance proof passes at the base is refused before opening"
+      proof: "unit test: a body whose acceptance proof passes at the base is refused before opening"
+    - claim: "the CLI opens pull requests through the shared helper"
+      proof: 'grep: openPullRequestChecked( in src/run-task.ts'
+  falsifier: |
+    CLOSE IF sessions already open PRs through a command that applies the author-time gates first.

@@ -562,16 +562,59 @@ export function readWholeFile(path: string, io: FileIntegrityIO = defaultIntegri
  * Load plan/tasks.yaml and merge in shards under a sibling `tasks.d/*.yaml` directory (W1-T122):
  * one task per shard file so two concurrent filings add different files instead of racing to
  * append to one shared end-of-file. A duplicate id across the monolith and any shard fails loud.
- * `shardDir` defaults to `<path's own dir>/tasks.d` (today's behavior, unchanged for every
- * existing caller); an explicit value lets a caller whose monolith and shard directory don't share
- * a parent — a target resolved through a {@link RepoLayout} override (W1-T2922) — still find its
- * shards. See {@link loadPlanForLayout} for that caller.
+ * `shardDir` defaults to `<path's own dir>/tasks.d`; an explicit value lets a caller whose monolith and
+ * shards don't share a parent ({@link RepoLayout} override, W1-T2922: {@link loadPlanForLayout}) find them.
  * Why: docs/forensics/plan.md#loadplan.
  */
 export function loadPlan(
   path: string,
   io: FileIntegrityIO = defaultIntegrityIO,
   shardDir: string = join(dirname(path), "tasks.d"),
+): Plan {
+  return readMergedPlan(path, io, shardDir);
+}
+
+export interface QuarantinedTask {
+  id: string;
+  files: string[];
+  reason: "duplicate_id" | "depends_on_quarantined";
+}
+
+/** W1-T4409 — {@link loadPlan} for a long-running daemon: a duplicated id and its dependents are held out and
+ *  reported, never thrown, so one bad filing cannot take the daemon down. Every other rule still throws. */
+export function loadPlanQuarantiningDuplicates(
+  path: string,
+  io: FileIntegrityIO = defaultIntegrityIO,
+  shardDir: string = join(dirname(path), "tasks.d"),
+): { plan: Plan; quarantined: QuarantinedTask[] } {
+  const duplicateFiles = new Map<string, string[]>();
+  const merged = readMergedPlan(path, io, shardDir, (earlier, shardPath) => {
+    const files = duplicateFiles.get(earlier.id) ?? [earlier.sourcePath ?? path];
+    files.push(shardPath);
+    duplicateFiles.set(earlier.id, files);
+  });
+  if (duplicateFiles.size === 0) return { plan: validatedPlan(merged.tasks), quarantined: [] };
+
+  const quarantined: QuarantinedTask[] = [...duplicateFiles].map(([id, files]) => ({ id, files, reason: "duplicate_id" }));
+  const held = new Set(duplicateFiles.keys());
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const t of merged.tasks) {
+      if (held.has(t.id) || !t.depends_on.some((dep) => held.has(dep))) continue;
+      held.add(t.id);
+      quarantined.push({ id: t.id, files: [t.sourcePath ?? path], reason: "depends_on_quarantined" });
+      grew = true;
+    }
+  }
+  const tasks = merged.tasks.filter((t) => !held.has(t.id));
+  return { plan: validatedPlan(tasks), quarantined };
+}
+
+function readMergedPlan(
+  path: string,
+  io: FileIntegrityIO,
+  shardDir: string,
+  onDuplicate?: (earlier: Task, shardPath: string) => void,
 ): Plan {
   let text: string;
   try {
@@ -595,14 +638,23 @@ export function loadPlan(
       throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
     }
     for (const t of parseTasksFromYaml(shardText, shardPath)) {
-      if (byId.has(t.id)) {
-        throw new PlanError(`duplicate task id '${t.id}' (shard ${shardPath} collides with an earlier plan entry)`);
+      const earlier = byId.get(t.id);
+      if (earlier) {
+        if (!onDuplicate) {
+          throw new PlanError(`duplicate task id '${t.id}' (shard ${shardPath} collides with an earlier plan entry)`);
+        }
+        onDuplicate(earlier, shardPath);
+        continue;
       }
       byId.set(t.id, t);
       tasks.push(t);
     }
   }
+  return onDuplicate ? { tasks, byId } : validatedPlan(tasks);
+}
 
+function validatedPlan(tasks: Task[]): Plan {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
   // Every dependency must resolve within the merged view (monolith + shards).
   for (const t of tasks) {
     for (const dep of t.depends_on) {

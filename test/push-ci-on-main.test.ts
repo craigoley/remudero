@@ -232,6 +232,9 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
       // skip. So an `if: false` stub cannot go "silently absent": the name it shares is still
       // registered, by the job that does the real work.
       assert.equal(job.if, false, `superseded stub '${jobId}' must be permanently skipped (if: false), not path-filtered some other way`);
+    } else if (jobId === "ci-gate") {
+      // W1-T4400: the required aggregate registers on every pull_request even when a needed job fails.
+      assert.equal(job.if, "${{ always() && github.event_name == 'pull_request' }}");
     } else {
       assert.equal(
         job.if,
