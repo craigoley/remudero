@@ -1,0 +1,41 @@
+- id: W1-T4445
+  title: "CONSOLE ANALYTICS SAYS PROVIDER HEADROOM IS NOT COLLECTED WHILE THE CORE DAEMON LEDGERS IT EVERY SWEEP — /v1/analytics reads only state/provider-routing-status.json, which the core daemon writes as `not-probed` with `providers: []`, while `daemon.headroom` (weekly 65%, resets_at) lands every sweep; project the newest headroom reading when the routing snapshot has none"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "2026-09-24 console/daemon incident follow-up: console analytics showed provider headroom not collected and windows not reported"
+  plan_refs: ["W1-T4024", "W1-T997"]
+  files:
+    - src/lib/live-analytics-snapshot-cache.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24 on the fleet host: state/provider-routing-status.json (the same file in remudero-daemon
+    and remudero-serve) reads `"state":"not-probed","freshness":"not-probed","providers":[]`. The core daemon
+    ledger meanwhile carries a fresh `daemon.headroom` row every sweep, for example window "weekly (all models)",
+    percent_used 65, resets_at 2026-09-27T05:00Z, enforced false. createLiveAnalyticsSnapshotCache reads
+    only readProviderRoutingStatus, and adaptLiveAnalyticsMetrics maps not-probed to
+    `provider.allowance.remaining` and `provider.accounts` = not-probed with no windows. The console
+    therefore reports headroom as not collected and windows as not reported, although the measurement exists
+    one file away. account-usage.ts and status-board.ts already read the same `daemon.headroom` rows for other
+    surfaces.
+  design: |
+    When the routing snapshot is absent or not-probed, the analytics cache falls back to the NEWEST
+    `daemon.headroom` row, found by a bounded tail read of the live ledger (never the rotation union on a refresh
+    tick). It projects that row as the claude account's window: name, usedPercent, remainingPercent and
+    resetsAt, with `asOf` set to the row's ts. Its freshness comes from the row's age measured against the
+    row's own poll_interval_ms (stale past a small multiple of it), and it is labelled with a source, so the
+    console can say where the number came from. A routing snapshot that IS probed still wins. No provider probe
+    and no credential read are added. Out of scope: routing-v1 telemetry, which reads
+    `not-collected-in-retained-ledger` because the core ledger holds 0 `worker.assignment` rows. That is
+    reported separately as an operator question about whether provider routing is enabled on the core daemon.
+  acceptance:
+    - claim: "a not-probed routing snapshot falls back to the newest headroom ledger reading"
+      proof: "unit test: a not-probed routing snapshot falls back to the newest headroom ledger reading"
+  falsifier: |
+    CLOSE IF /v1/analytics already reports an observed provider window while provider-routing-status.json is not-probed.
