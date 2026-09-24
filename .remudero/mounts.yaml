@@ -35,6 +35,10 @@
 # A mounts.yaml that violates it is REJECTED at load. The flywheel may lower
 # workers freely but can NEVER lower the Architect to or below the worker ceiling.
 #
+# AMENDED 2026-09-24 (operator ruling, DECISIONS.md): a risk:high or `design`-class worker row may
+# ride the frontier (Opus) on its FIRST attempt, as a PEER of the Architect and the judge, never above
+# them (`frontierPeerWorkerRow`, src/lib/mounts.ts). Every other worker row keeps the rule below.
+#
 # The invariant is RELATIVE, not absolute: because the Architect rides `opus`
 # (the top tier), every WORKER mount below is CAPPED at `sonnet` — a worker may
 # never reach the Architect's tier. So "diagnose steps up" and "high-risk review"
@@ -203,6 +207,11 @@ capabilities:
   # explicit console preference still wins over this row.
   provider_preference:
     frontier: claude
+  # SUBSCRIPTION ONLY (operator ruling 2026-09-24, amending 2026-09-16): frontier work runs on Claude
+  # Opus or, below reserve, Codex Sol -- never on a cash mount, a cash divert, or API-key billing.
+  # The loader refuses a cash-pinned frontier mount; spawnWorker refuses both blocked-auction arms
+  # for it and never hands a frontier Claude spawn the API key. A fully blocked frontier spawn waits.
+  subscription_only: [frontier]
   # W1-T3546: a pay-per-token deployment is selected by explicit mount affinity, never capacity.
   # The data shape mirrors `codex`: capability -> effort -> ordered deployment identifiers.
   # W1-T3598: gpt-5-nano LEADS economy and balanced — cheaper than gpt-oss-120b on both token axes
@@ -484,23 +493,33 @@ routes:
       src:       { model: sonnet, effort: medium, max_turns: 40,   context_budget: 60000 }
       docs:      { model: sonnet, effort: medium, max_turns: 40,   context_budget: 40000 }
       plan-lint: { model: sonnet, effort: medium, max_turns: 40,   context_budget: 40000 }
+      design:    { model: sonnet, effort: medium, max_turns: 40,   context_budget: 60000 }
     medium:
       src:       { model: sonnet, effort: medium, max_turns: 40,   context_budget: 90000 }
       docs:      { model: sonnet, effort: medium, max_turns: 40,   context_budget: 60000 }
       plan-lint: { model: sonnet, effort: medium, max_turns: 40,   context_budget: 60000 }
+      design:    { model: sonnet, effort: medium, max_turns: 40,   context_budget: 90000 }
     high:
       src:       { model: sonnet, effort: high,   max_turns: 40,   context_budget: 120000 }
+      design:    { model: sonnet, effort: high,   max_turns: 40,   context_budget: 120000 }
+  # 2026-09-24 (operator ruling): risk:high and `design` implement work takes Opus on its FIRST
+  # attempt, resolved like any frontier request -- Claude Opus with headroom, Codex Sol below reserve,
+  # never cash or API key. MEASURED at filing: 1,615 of 2,037 implement shards are risk:high (most
+  # with band_meaning: span), so this moves most implement traffic onto the frontier.
   implement:
     low:
       src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
       docs:      { model: haiku,  effort: low,    max_turns: 400, context_budget: 60000 }
       plan-lint: { model: haiku,  effort: low,    max_turns: 400, context_budget: 60000 }
+      design:    { model: opus,   effort: high,   max_turns: 400, context_budget: 120000 }
     medium:
       src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 160000 }
       docs:      { model: haiku,  effort: medium, max_turns: 400, context_budget: 90000 }
       plan-lint: { model: haiku,  effort: medium, max_turns: 400, context_budget: 90000 }
+      design:    { model: opus,   effort: high,   max_turns: 400, context_budget: 160000 }
     high:
-      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
+      src:       { model: opus,   effort: high,   max_turns: 400, context_budget: 200000 }
+      design:    { model: opus,   effort: high,   max_turns: 400, context_budget: 200000 }
   diagnose:
     low:
       src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }

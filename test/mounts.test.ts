@@ -12,6 +12,7 @@ import {
   resolveMountForClass,
   TierInvariantError,
   validateMounts,
+  frontierPeerWorkerRow,
 } from "../src/lib/mounts.js";
 import { DEFAULT_TASK_CLASS } from "../src/lib/task-class.js";
 
@@ -56,14 +57,11 @@ test("the SHIPPED .remudero/mounts.yaml loads and satisfies the Tier Invariant",
   for (const [type, byRisk] of Object.entries(m.routes)) {
     for (const [risk, byClass] of Object.entries(byRisk)) {
       for (const [cls, mount] of Object.entries(byClass)) {
-        assert.ok(
-          m.tiers[mount.model] < architectTier,
-          `${type}.${risk}.${cls} (${mount.model}) must ride below the Architect`,
-        );
-        assert.ok(
-          m.tiers[mount.model] < judgeTier,
-          `${type}.${risk}.${cls} (${mount.model}) must ride below the flight judge`,
-        );
+        // G-17 as amended 2026-09-24: a risk:high or design row may be a PEER, never above.
+        const peer = frontierPeerWorkerRow(risk, cls);
+        const under = (tier: number) => (peer ? m.tiers[mount.model] <= tier : m.tiers[mount.model] < tier);
+        assert.ok(under(architectTier), `${type}.${risk}.${cls} (${mount.model}) must ride below the Architect`);
+        assert.ok(under(judgeTier), `${type}.${risk}.${cls} (${mount.model}) must ride below the flight judge`);
       }
     }
   }
@@ -106,12 +104,12 @@ test("validateMounts accepts a correctly-shaped table", () => {
 
 test("REJECTS a worker riding the Architect's tier (Tier Invariant, G-17)", () => {
   const bad = goodRaw();
-  bad.routes.implement.high.src.model = "opus"; // worker == architect tier
+  bad.routes.implement.low.src.model = "opus"; // worker == architect tier, on a row the 2026-09-24 amendment does not admit
   assert.throws(
     () => validateMounts(bad),
     (e: unknown) =>
       e instanceof TierInvariantError &&
-      /routes\.implement\.high\.src/.test((e as Error).message) &&
+      /routes\.implement\.low\.src/.test((e as Error).message) &&
       /G-17/.test((e as Error).message),
     "must name the offending worker route (including its class) and cite the invariant",
   );
@@ -137,13 +135,13 @@ test("REJECTS a NON-default class row riding the Architect's tier (W1-T167 — t
 test("REJECTS a `reviewer` row riding the Architect's tier (W1-T63/G-17 — the new row is not exempt)", () => {
   const bad = goodRaw();
   (bad.routes as Record<string, unknown>).reviewer = {
-    high: { src: { model: "opus", effort: "high", max_turns: 400, context_budget: 200000 } },
+    medium: { src: { model: "opus", effort: "high", max_turns: 400, context_budget: 200000 } },
   };
   assert.throws(
     () => validateMounts(bad),
     (e: unknown) =>
       e instanceof TierInvariantError &&
-      /routes\.reviewer\.high\.src/.test((e as Error).message) &&
+      /routes\.reviewer\.medium\.src/.test((e as Error).message) &&
       /G-17/.test((e as Error).message),
   );
 });

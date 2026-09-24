@@ -34,6 +34,12 @@ const MARKDOWN_GLOB_RE = /\.mdx?$/i;
 const ROOT_DOC_GLOB_RE =
   /(^|\/)(README|CHANGELOG|LEARNINGS|DECISIONS|MASTER-PLAN|FINDINGS|DIAGNOSIS|SECURITY|CONTRIBUTING)(\.[a-zA-Z0-9]+)?$/;
 
+// Ruling 2026-09-24 (DECISIONS.md): one design-record file makes the task `design`, which may ride Opus.
+export const DESIGN_RECORD_GLOB_RE =
+  /(^|\/)(docs\/adr\/|docs\/design-review\/|docs\/architecture\.md$|docs\/system-diagrams\.md$|MASTER-PLAN\.md$)/;
+
+export const DESIGN_TASK_CLASS = "design";
+
 function isPlanGlob(glob: string): boolean {
   return PLAN_GLOB_RE.test(glob);
 }
@@ -62,6 +68,7 @@ function isDocsGlob(glob: string): boolean {
 export const deriveTaskClass = (task: { files?: string[] }): string => {
   const files = task.files;
   if (!files || files.length === 0) return DEFAULT_TASK_CLASS;
+  if (files.some((glob) => DESIGN_RECORD_GLOB_RE.test(glob))) return DESIGN_TASK_CLASS;
   if (files.every(isPlanGlob)) return "plan-lint";
   if (files.every(isDocsGlob)) return "docs";
   return DEFAULT_TASK_CLASS;

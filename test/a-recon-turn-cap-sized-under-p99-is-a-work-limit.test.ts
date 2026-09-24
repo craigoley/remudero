@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RECON_MAX_TURNS, workerErrorVerdict } from "../src/run-task.js";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
+import { frontierPeerWorkerRow, loadMounts, mountsPath } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -61,7 +61,7 @@ test("every recon cell clears the measured p99 by the recorded margin", () => {
   assert.ok(RECON_MAX_TURNS > RECON_MAX_OBSERVED_TURNS, "the cap clears the observed max");
 
   const reconCells = allWorkerCells("recon");
-  assert.equal(reconCells.length, 7, "every recon risk/class cell is present");
+  assert.equal(reconCells.length, 10, "every recon risk/class cell is present, including the design rows");
   for (const cell of reconCells) {
     assert.equal(cell.maxTurns, RECON_MAX_TURNS, `routes.recon.${cell.risk}.${cell.cls} mirrors RECON_MAX_TURNS`);
   }
@@ -89,14 +89,10 @@ test("the edited table still loads and preserves the Tier Invariant", () => {
   for (const [type, byRisk] of Object.entries(mounts.routes)) {
     for (const [risk, byClass] of Object.entries(byRisk)) {
       for (const [cls, mount] of Object.entries(byClass)) {
-        assert.ok(
-          mounts.tiers[mount.model] < architectTier,
-          `${type}.${risk}.${cls} must stay below the Architect tier`,
-        );
-        assert.ok(
-          mounts.tiers[mount.model] < judgeTier,
-          `${type}.${risk}.${cls} must stay below the flight-judge tier`,
-        );
+        // G-17 as amended 2026-09-24: a risk:high or design row may be a PEER, never above.
+        const ceiling = (tier: number) => (frontierPeerWorkerRow(risk, cls) ? mounts.tiers[mount.model] <= tier : mounts.tiers[mount.model] < tier);
+        assert.ok(ceiling(architectTier), `${type}.${risk}.${cls} must stay below the Architect tier`);
+        assert.ok(ceiling(judgeTier), `${type}.${risk}.${cls} must stay below the flight-judge tier`);
       }
     }
   }

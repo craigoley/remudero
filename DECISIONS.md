@@ -2969,3 +2969,64 @@ namespace removed and no token in env — and for an allowlist-confined single p
 
 **Rollback:** revert this entry and re-open W1-T3103. W1-T1289 returns to `blocked`; nothing else
 moves, because no code ships with this entry.
+
+## 2026-09-24 — OPERATOR RULING: model tiering — Opus first on high-risk and design work, subscription only; Sol vs Sonnet as an A/B; a capped cash trial
+
+**Operator-authored**, relayed to the building session by its coordinating session on 2026-09-24. It
+rules on three conflicts that session reported against earlier rulings. The research behind them,
+including the ledger census and the public benchmarks, is summarised in the PRs that carry this entry.
+
+### 1. OPUS TAKES THE FIRST ATTEMPT ON risk:high AND DESIGN WORK — AND ONLY EVER ON A SUBSCRIPTION
+
+- **AMENDS G-17 (MASTER-PLAN §9, the Tier Invariant).** A worker route whose risk band is `high`,
+  or whose class is `design`, may ride the frontier as a **peer** of the Architect and the flight
+  judge. It may never ride above them. Every other worker route stays strictly below both, as before.
+  The admitted set is code (`frontierPeerWorkerRow`, src/lib/mounts.ts), not table data, so a mounts
+  edit cannot widen it.
+- **`design` is a task class.** A task is `design` when any declared file is part of the design
+  record: `docs/adr/`, `docs/design-review/`, `docs/architecture.md`, `docs/system-diagrams.md` or
+  `MASTER-PLAN.md`.
+- **UNCHANGED.** The step-ups keep Opus: the diagnose-informed last attempt, the fix rung's final
+  strike, the Architect, retro and the judge.
+- **AMENDS 2026-09-16 ("the squeeze seats are deleted"), which described `config.overflow:
+  "api_key"` as "full Claude capability on API credits".** Frontier capability is now
+  **subscription only**. It runs on Claude Opus, or on Codex Sol when Claude is below reserve. It is
+  never pinned to cash, never diverted to cash, and never billed to API credits.
+  - When every subscription is blocked, frontier work **waits**.
+  - This also withdraws the 2026-09-16 cash squeeze path for frontier work ("leverage Luna or Terra
+    if absolutely necessary in that tier").
+  - Balanced and economy work keeps both blocked-auction arms, unchanged.
+  - Enforced by `capabilities.subscription_only` in `.remudero/mounts.yaml` and by `spawnWorker`.
+- **COST, STATED.** At filing, 1,615 of 2,037 implement shards were `risk: high`, most with
+  `band_meaning: span` (sizing, not danger). This ruling therefore moves most implement traffic onto
+  the frontier. The telemetry that shows whether that repays itself is `routing.decision` on each
+  `worker.assignment` row.
+
+### 2. SOL vs SONNET IS AN A/B TEST, NOT A PREFERENCE
+
+- **SUPERSEDES** W1-T3762's "Luna-first" rule for `capabilities.codex.balanced.high`, and the
+  2026-09-22 mounts.yaml line "Sol 6 only if absolutely necessary", for that row only.
+- `gpt-6-sol` leads `codex.balanced.high`. The headroom auction then splits sonnet/high work between
+  Claude Sonnet and Codex Sol. The split follows headroom and is independent of the task, so each
+  task type, risk and class gets a like-for-like comparison.
+- Each such assignment is tagged `ab: "sol-vs-sonnet"`. The comparison (merge rate, fix strikes,
+  duration, cost per task) is computed from the ledger.
+- Luna still leads the low and medium rows.
+- **REVISIT ON 2026-10-08**, two weeks from this ruling.
+
+### 3. THE CHEAP CASH MODELS GET A MEASURED TRIAL BEFORE THEY BECOME AN OPTION
+
+- **AMENDS 2026-09-15 (W1-T3572)** "stage on recon first, never implement", and W1-T3570's "no second
+  lane before the inbox-draft verdict". Both are amended only as far as needed for a small, capped
+  trial on the simplest implement work: low risk, `docs` or `plan-lint` class, one declared file.
+- The trial is tagged `trial: "cash-simple"`.
+- It has a budget cap.
+- It stops automatically when its success rate falls below a stated fraction of the subscription
+  lanes' rate on the same class, over a minimum sample. It re-enables itself after the next measured
+  window.
+- gpt-5-nano does not take implement work. MEASURED: 158 nano implement assignments, 54
+  `openweight_error`, 1 PR opened in 45 verdicts.
+
+**Rollback:** revert this entry and the PRs that implement it. Each part is its own PR and reverts
+independently. The G-17 amendment is the `frontierPeerWorkerRow` predicate and the `design` and
+risk:high rows in the mount table.

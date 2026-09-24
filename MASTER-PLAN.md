@@ -6004,7 +6004,9 @@ plan authorship). This is a **config-validation rule, deterministically enforced
 that violates it is rejected at load, and flywheel-proposed downgrades may lower workers freely but
 can NEVER lower the Architect to or below the worker ceiling. The invariant is RELATIVE, not
 absolute — an economy install may run Haiku workers under a Sonnet Architect and still comply; the
-model-tier ordering table is config-maintained since the lineup shifts.
+model-tier ordering table is config-maintained since the lineup shifts. **Amended 2026-09-24
+(operator ruling, DECISIONS.md):** a risk:high or `design`-class worker route may ride the frontier
+as a PEER of the Architect and judge, never above; frontier capability runs only on a subscription.
 
 **Routing is knowledge — golden-calibrated.** mounts.yaml changes ship as PRs behind the golden
 suite like every other knowledge change. The flywheel proposes DOWNGRADES when a cheaper mount
