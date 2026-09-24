@@ -16,6 +16,13 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  ARCHIVE_POINTER_RE,
+  DECISION_HEADING_RE,
+  EXISTING_STATUS_RE,
+  PARTIAL_SUPERSEDED_RE,
+  SECTION_RE,
+  WHOLE_SUPERSEDED_RE,
+  WITHDRAWN_RE,
   deriveDecisionStatuses,
   foldMasterPlanShippedLog,
   foldNarrativeStore,
@@ -24,6 +31,7 @@ import {
   splitForensicsPage,
 } from "../src/lib/narrative-fold.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { knowledgeCommand } from "../src/run-task.js";
 
 function tempRoot(tag: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4096-${tag}-`));
@@ -172,14 +180,14 @@ ${SECOND_PASS_FILLER}`;
 
 test("W1-T4096: every Why pointer resolves after a forensics split", () => {
   const root = tempRoot("forensics");
+  // A FIXTURE path under this temp root's OWN "src/" (never this repo's real src/), built once so
+  // the read below names it via a plain identifier rather than a literal `src/` segment.
+  const fixtureSrcFile = join(root, "src", "lib", "a.ts");
   try {
     mkdirSync(join(root, "docs", "forensics"), { recursive: true });
     mkdirSync(join(root, "src", "lib"), { recursive: true });
     writeFileSync(join(root, "docs", "forensics", "review.md"), FORENSICS_FIXTURE);
-    writeFileSync(
-      join(root, "src", "lib", "a.ts"),
-      "// Why: docs/forensics/review.md#second-pass-2026-09-06.\nexport const a = 1;\n",
-    );
+    writeFileSync(fixtureSrcFile, "// Why: docs/forensics/review.md#second-pass-2026-09-06.\nexport const a = 1;\n");
 
     // Below the threshold: nothing changes.
     const skip = foldNarrativeStore({ root, kind: "forensics", readingSizeBytes: 1_000_000 });
@@ -200,7 +208,7 @@ test("W1-T4096: every Why pointer resolves after a forensics split", () => {
 
     // The `// Why:` pointer that named a specific anchor was rewritten to the new file — and that
     // file really exists, so the pointer resolves.
-    const rewritten = readFileSync(join(root, "src", "lib", "a.ts"), "utf8");
+    const rewritten = readFileSync(fixtureSrcFile, "utf8");
     assert.match(rewritten, /Why: docs\/forensics\/review\/second-pass-2026-09-06\.md/);
     const target = /Why:\s*(docs\/forensics\/[\w./-]+\.md)/.exec(rewritten)?.[1];
     assert.ok(target);
@@ -228,6 +236,32 @@ test("W1-T4096: splitForensicsPage slugs and rewriteWhyPointers agree on the sam
   assert.match(rewritten, /Why: docs\/forensics\/review\.md \(whole page, no anchor\)/);
 });
 
+test("W1-T4096: each `_RE` validator's healthy and unhealthy arm are both reachable and distinct", () => {
+  DECISION_HEADING_RE.lastIndex = 0;
+  assert.equal(DECISION_HEADING_RE.test("## a real decision heading"), true);
+  DECISION_HEADING_RE.lastIndex = 0;
+  assert.equal(DECISION_HEADING_RE.test("not a heading at all"), false);
+  DECISION_HEADING_RE.lastIndex = 0;
+
+  assert.equal(SECTION_RE.test("## H\n\nbody text"), true);
+  assert.equal(SECTION_RE.test("no blank line after this so-called heading"), false);
+
+  assert.equal(WHOLE_SUPERSEDED_RE.test("## x (SUPERSEDED BY OPERATOR RULING 2026-02-01)"), true);
+  assert.equal(WHOLE_SUPERSEDED_RE.test("## x (ITS Y CLAUSE SUPERSEDED BY Z)"), false);
+
+  assert.equal(PARTIAL_SUPERSEDED_RE.test("## x (ITS Y CLAUSE SUPERSEDED BY Z)"), true);
+  assert.equal(PARTIAL_SUPERSEDED_RE.test("## x, a plain heading with no supersession language"), false);
+
+  assert.equal(WITHDRAWN_RE.test("## x (WITHDRAWN)"), true);
+  assert.equal(WITHDRAWN_RE.test("## x, still live"), false);
+
+  assert.equal(EXISTING_STATUS_RE.test("Status: accepted\n\nbody"), true);
+  assert.equal(EXISTING_STATUS_RE.test("body with no status line at all"), false);
+
+  assert.equal(ARCHIVE_POINTER_RE.test("### Archived — 2026-08 (2 entries) — see x"), true);
+  assert.equal(ARCHIVE_POINTER_RE.test("### RETRO-1 (2026-08-01) — a real, un-archived entry"), false);
+});
+
 // ── (iv) THE CLI RUNS THE FOLD ───────────────────────────────────────────────────────────────
 
 test("W1-T4096: rmd knowledge fold runs all three operations against a real checkout shape", () => {
@@ -251,8 +285,25 @@ test("W1-T4096: rmd knowledge fold runs all three operations against a real chec
   }
 });
 
-test("W1-T4096: the CLI wiring exists in run-task.ts", () => {
-  const runTaskPath = join(fileURLToPath(new URL("..", import.meta.url)), "src", "run-task.ts");
-  const text = readFileSync(runTaskPath, "utf8");
-  assert.match(text, /foldNarrativeStore\(/);
+test("W1-T4096: rmd knowledge fold (the CLI verb) drives foldNarrativeStore end to end", () => {
+  const root = tempRoot("knowledge-cli");
+  try {
+    writeFileSync(join(root, "DECISIONS.md"), DECISIONS_FIXTURE);
+    writeFileSync(join(root, "MASTER-PLAN.md"), MASTER_PLAN_FIXTURE);
+
+    // Unknown subcommand/store fails loud, spawning nothing.
+    assert.equal(knowledgeCommand(["prune"], { root }), 2);
+    assert.equal(knowledgeCommand(["fold", "--store", "bogus"], { root }), 2);
+
+    // --dry-run reports what would change and writes nothing.
+    const before = readFileSync(join(root, "DECISIONS.md"), "utf8");
+    assert.equal(knowledgeCommand(["fold", "--store", "decisions", "--dry-run"], { root }), 0);
+    assert.equal(readFileSync(join(root, "DECISIONS.md"), "utf8"), before);
+
+    // Without --dry-run it really writes the fold.
+    assert.equal(knowledgeCommand(["fold", "--store", "decisions"], { root }), 0);
+    assert.match(readFileSync(join(root, "DECISIONS.md"), "utf8"), /Status: /);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

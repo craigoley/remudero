@@ -87,6 +87,7 @@ usage:
   rmd ratify <rung>   # Print a gated rung's live operation-hash row for the operator to commit; writes nothing.
   rmd skill list   # List the skill registry: every .remudero/skills/<name>.yaml entry.
   rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
+  rmd knowledge fold [--store <decisions|master-plan|forensics>] [--dry-run]   # Fold a narrative store that outgrew its reading size: statuses, dated archives, anchor split.
   rmd bundle export <path> | rmd bundle import <file> --pin <hash>   # Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
@@ -830,6 +831,16 @@ rmd learnings export <out> | rmd learnings import <file> --pin <hash>
 ```
 
 the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. Export always emits `learnings-v2`: its hash binds the public projection, which replaces author `src` and Git locators with fixed redaction values. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks. Exact `learnings-v1`/`learnings-v2` select their hash canon; legacy non-prefixed versions remain V1, while any other `learnings-v*` version is refused.
+
+### `rmd knowledge`
+
+Fold a narrative store that outgrew its reading size: statuses, dated archives, anchor split.
+
+```
+rmd knowledge fold [--store <decisions|master-plan|forensics>] [--dry-run]
+```
+
+the knowledge gardener's FOLD tier by hand (W1-T4096, W1-T4095 design (iii)): stamps a `Status:` line onto every DECISIONS.md entry (accepted / withdrawn / superseded by <ref>, derived from a whole-entry `(SUPERSEDED BY ...)` heading marker; a partial or ambiguous mention is reported, never guessed at), archives MASTER-PLAN.md's `## SHIPPED log` waves older than the current month into docs/archive/master-plan-<yyyy-mm>.md behind a one-line pointer, and splits any docs/forensics/*.md page over its reading size into one file per `## ` anchor under docs/forensics/<page>/<slug>.md, rewriting the `// Why:` pointers under src/ that named a specific anchor. `--store` scopes to one operation; omitted runs all three. `--dry-run` reports the files that would change and writes nothing.
 
 ### `rmd bundle`
 

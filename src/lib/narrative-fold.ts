@@ -51,12 +51,14 @@ export interface DeriveDecisionStatusesResult {
   unclassified: string[];
 }
 
-const DECISION_HEADING_RE = /^## .*$/gm;
-const SECTION_RE = /^(## .*)\n\n([\s\S]*)$/;
-const WHOLE_SUPERSEDED_RE = /\(SUPERSEDED BY ([^()]+)\)\s*$/;
-const PARTIAL_SUPERSEDED_RE = /\([^()]*\bSUPERSEDED BY\b[^()]+\)/i;
-const WITHDRAWN_RE = /\(WITHDRAWN\)\s*$/i;
-const EXISTING_STATUS_RE = /^Status:\s.*\n\n?/;
+// Exported (not just module-scope) so test/a-settled-record-moves-out-of-the-way.test.ts can drive
+// each one's healthy AND unhealthy arm directly by identifier (negative-reachability-ratchet.test.ts).
+export const DECISION_HEADING_RE = /^## .*$/gm;
+export const SECTION_RE = /^(## .*)\n\n([\s\S]*)$/;
+export const WHOLE_SUPERSEDED_RE = /\(SUPERSEDED BY ([^()]+)\)\s*$/;
+export const PARTIAL_SUPERSEDED_RE = /\([^()]*\bSUPERSEDED BY\b[^()]+\)/i;
+export const WITHDRAWN_RE = /\(WITHDRAWN\)\s*$/i;
+export const EXISTING_STATUS_RE = /^Status:\s.*\n\n?/;
 
 /** Derive and stamp a `Status:` line onto every `## ` entry in a DECISIONS.md-shaped document.
  *  Classification reads ONLY the heading line's own trailing parenthetical — the one place this
@@ -110,7 +112,7 @@ export interface FoldMasterPlanResult {
 }
 
 const SHIPPED_HEADING = "## SHIPPED log";
-const ARCHIVE_POINTER_RE = /^### Archived —/;
+export const ARCHIVE_POINTER_RE = /^### Archived —/;
 
 function monthBucketOf(entryText: string): string {
   const headingLine = entryText.slice(0, entryText.indexOf("\n"));

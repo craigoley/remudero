@@ -265,6 +265,7 @@
     "test/a-second-instance-serves-its-own-gateway.test.ts": 0,
     "test/a-second-openweight-deployment-is-priced-by-its-own-row.test.ts": 0,
     "test/a-self-certifying-proof-warns-at-filing-time.test.ts": 1319,
+    "test/a-settled-record-moves-out-of-the-way.test.ts": 0,
     "test/a-shard-split-balances-by-measured-duration.test.ts": 0,
     "test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts": 1667,
     "test/a-shards-proof-cannot-target-its-own-file.test.ts": 0,
