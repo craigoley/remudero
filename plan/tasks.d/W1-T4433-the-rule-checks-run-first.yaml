@@ -1,0 +1,37 @@
+- id: W1-T4433
+  title: "THE MOST FREQUENT PR REDS ARE ONE-SECOND RULE CHECKS THAT ONLY RUN 20 MINUTES INTO COVERAGE — clock-signature, fixture-copy, comment-load and Deps censuses redden PRs after a full instrumented run, and preflight does not run them; run every census and ratchet suite in a fast CI job and in the worker's pre-push preflight"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: []
+  files: [.github/workflows/ci.yml, src/lib/ci-parity.ts, scripts/list-rule-suites.mjs, test/the-rule-checks-run-first.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    MEASURED over 45 failing PR test-shard logs: the most frequent failing tests are census/ratchet suites (clock-
+    signature 6 PRs, fixture-copy population 4, comment-load CENSUS 2, Deps census 2, census-roster preflight runs 2). Each
+    failed only after the ~20 min instrumented run, and each costs a full repair round. OBSERVED 2026-09-24: rmd preflight
+    PASSED on #6922 and #6925 and CI then failed three censuses on each.
+  design: |
+    (i) scripts/list-rule-suites.mjs derives the rule-check population from the tree (CENSUS_POPULATION members plus
+    suites named *-census / *-ratchet / *-baseline*), never a hand list, and asserts a minimum count. (ii) A `rule-checks` job
+    in ci.yml runs that population with plain `node --test` (no instrumentation) and finishes in ~1-2 min; it is REQUIRED
+    through ci-gate. (iii) rmd preflight runs the same population after the commit exists (they walk `git ls-files`, so an
+    uncommitted new file reads green), so the worker catches these before pushing. (iv) The suites still run in coverage.
+  acceptance:
+    - claim: "every census and ratchet suite runs in the rule-checks job"
+      proof: 'grep: test("W1-T4433: every census and ratchet suite runs in the rule-checks job" in test/the-rule-checks-run-first.test.ts'
+    - claim: "preflight runs the same rule-check population"
+      proof: 'grep: test("W1-T4433: preflight runs the same rule-check population" in test/the-rule-checks-run-first.test.ts'
+    - claim: "the rule-check population is derived from the tree"
+      proof: "grep: listRuleSuites( in src/lib/ci-parity.ts"
+  falsifier: |
+    Name the population by hand and the first test finds a census suite in the tree that the job does not run.
