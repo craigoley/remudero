@@ -937,6 +937,7 @@ import {
   releasedTaskIds,
   assertRunnable,
   loadPlan,
+  loadPlanQuarantiningDuplicates,
   selectTask,
   visibleCriteria,
   type AcceptanceCriterion,
@@ -30261,6 +30262,41 @@ export function plainInboxWriter(
   }
 }
 
+/**
+ * W1-T4409 — the daemon's boot-time plan read. A task id declared by two plan files is quarantined
+ * (with every task that depends on it) instead of thrown, ledgered, and escalated to a human ONCE per
+ * duplicated id (escalate's own open-issue dedup covers later boots). Everything else still throws.
+ */
+export function loadDaemonPlan(
+  planPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  raise: (escalation: Escalation) => string,
+  load: (path: string) => ReturnType<typeof loadPlanQuarantiningDuplicates> = (path) => loadPlanQuarantiningDuplicates(path),
+): Plan {
+  const { plan, quarantined } = load(planPath);
+  for (const q of quarantined) {
+    log("plan.duplicate_quarantined", { id: q.id, files: q.files, reason: q.reason });
+    if (q.reason !== "duplicate_id") continue;
+    const escalation: Escalation = {
+      class: "BLOCKED",
+      taskId: q.id,
+      summary: `task id ${q.id} is declared by ${q.files.length} plan files — the daemon quarantined it and keeps running`,
+      detail:
+        `The daemon held ${q.id} (and every task depending on it) out of its plan instead of exiting at boot. ` +
+        `Declared in:\n${q.files.map((f) => `- ${f}`).join("\n")}\n\nNothing can dispatch or credit ${q.id} until one declaration remains.`,
+      options: [{ label: "remove-duplicate", detail: "delete or renumber every declaration but one, in a plan-only PR" }],
+      recommendation: "remove-duplicate",
+      headDedup: "independent",
+    };
+    try {
+      log("plan.duplicate_escalated", { id: q.id, issue_url: raise(escalation) });
+    } catch (e) {
+      log("plan.duplicate_escalation_failed", { id: q.id, reason: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return plan;
+}
+
 /** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. Every
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
@@ -30532,6 +30568,8 @@ export async function daemonCommand(
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
   // default branch so the scheduled plan is current — a stale clone would drain an old plan.
   let plan: Plan;
+  const raiseDuplicate = (e: Escalation): string =>
+    escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -30541,7 +30579,7 @@ export async function daemonCommand(
       execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
-    plan = loadPlan(target.planPath);
+    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
   } else if (target.isSelf && !flagValue(rest, "--plan")) {
     // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
     // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
@@ -30554,7 +30592,7 @@ export async function daemonCommand(
     plan = synced.plan;
   } else {
     // An explicit --plan overrides the derived path — read it literally, no git sync.
-    plan = loadPlan(target.planPath);
+    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
   }
 
   // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
