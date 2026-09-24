@@ -849,6 +849,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -14184,6 +14185,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
   // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
   const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
+  // Operator ruling 2026-09-24: the cash-simple trial takes a capped share of the simplest work.
+  const cashTrial = decideCashTrial({
+    task,
+    taskClass,
+    config,
+    harnessCommits: implementCashTools !== undefined,
+    stateDir: dirname(ledgerPath),
+  });
+  if (cashTrial) log("cash_trial.decided", { arm: cashTrial.arm, reason: cashTrial.reason });
+  const cashTrialSpawn = cashTrialSpawnFields(cashTrial, implementCashTools, cashTrialPolicy(config).models);
 
   /**
    * The subscription probes are intentionally shell-backed, so a blocked auction cannot run
@@ -15096,6 +15107,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
           tools: implementTools === undefined ? undefined : [...implementTools],
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          ...(attemptMount === implementMount ? cashTrialSpawn : {}),
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
           // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
           // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
@@ -15361,6 +15373,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // still the SAME lane, so it must not regain unrestricted tools on resume.
           tools: implementTools === undefined ? undefined : [...implementTools],
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          ...cashTrialSpawn,
           // W1-T3696: the RESUMED turn must restate the SAME contract the initial spawn was given.
           // A shell-less worker told here to `git push` would spend its remaining turns failing at
           // a tool it does not have, which is the one place this lane cannot recover from.
@@ -15476,6 +15489,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         config: implementConfig,
         tools: implementTools === undefined ? undefined : [...implementTools],
         ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+        ...cashTrialSpawn,
       }),
     });
     commitCount = commitLineRecovery.commitCount;
