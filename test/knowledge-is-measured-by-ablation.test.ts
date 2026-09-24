@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { loadPolicy, policyPath } from "../src/lib/policy.js";
 import {
   estimateWipeTestFactorEffects,
+  readWipeTestAblationEvidence,
   recordWipeTestCadenceFire,
   scheduleWipeTestAblation,
   wipeTestFactorShares,
@@ -198,4 +199,29 @@ test("W1-T4092: the digest reports each factor's effect with its interval", () =
   assert.match(line!, /recon 2 pair\(s\): turns \+0\.00 \[-1\.96, 1\.96\]/);
   // rules: one pair is an anecdote — its effect is shown, its interval is named as not yet measurable.
   assert.match(line!, /rules 1 pair\(s\): turns \+5\.00, landed \+0\.00, cost \+0\.50 \(no interval below 2 pairs\)/);
+});
+
+test("W1-T4092: ablation evidence counts answered use and ignores torn ledger rows", () => {
+  const evidence = readWipeTestAblationEvidence("/state", (stateDir, pattern) => {
+    assert.equal(stateDir, "/state");
+    assert.equal(pattern.test('{"step":"learnings.used"}'), true);
+    return {
+      stateDir,
+      archiveFiles: [],
+      archiveCount: 1,
+      liveFileRead: true,
+      unread: [],
+      ok: true,
+      matches: [
+        JSON.stringify({ step: "learnings.used", injected_ids: ["learn-1"], used_ids: ["learn-1"] }),
+        JSON.stringify({ step: "learnings.used", injected_ids: ["learn-2"], used_ids: [] }),
+        '{"step":"wipetest.pair"',
+      ],
+    };
+  });
+
+  assert.equal(evidence.ok, true);
+  if (!evidence.ok) return;
+  assert.equal(evidence.pairs.length, 0, "a torn pair row is not treated as measured evidence");
+  assert.deepEqual(evidence.claimedUse, { learnings: 0.5 }, "both answered runs count in the claimed-use denominator");
 });
