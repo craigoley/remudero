@@ -1,0 +1,49 @@
+- id: W1-T4414
+  title: "TWO FILINGS REVIEWED AGAINST THE SAME BASE CAN BOTH MERGE ONE TASK ID — review checks only what the base declares, so a race between two open PRs slips through; require every NEW shard id to hold a reservation whose anchor names this PR's own head branch"
+  repo: remudero
+  depends_on: [W1-T4388]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "console fleet outage 2026-09-23 root cause"
+  plan_refs: ["W1-T4388", "W1-T4389", "W1-T4409", "W1-T3091"]
+  files:
+    - src/lib/task-id-reservation.ts
+    - src/lib/review.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-23: remudero-console #1700 and #1701 each filed a CONSOLE-T60 shard and were each reviewed
+    against a main that declared no CONSOLE-T60, so each passed. W1-T4389 (#6896, review refuses an id its BASE
+    already declares) cannot see this class: the collision exists only between two OPEN PRs, and the second merged
+    at 21:10Z minutes after the first. The duplicate crash-looped the console daemon from 21:14Z until the
+    operator merged the fold (#1706) at about 00:30Z. The only race-free arbiter is the reservation ref: pushing
+    refs/rmd-id/<id> is atomic, so exactly one writer holds each id. Its anchor records the holder, for example
+    `rmd-id holder branch=file%2Fstale-already-merged-latch pid=49049 host=Mac-mini ...`. Existence is not enough:
+    the loser of a race sees the winner's ref. OWNERSHIP is: the anchor's branch must be this PR's head.
+  design: |
+    task-id-reservation.ts exports reservationHolderBranch(anchorMessage) -> string | undefined (it parses the
+    anchor's `branch=` field, percent-decoded). In review (src/lib/review.ts, beside W1-T4389's
+    taskIdCollisions), for every task id the PR's diff ADDS to plan/ (any prefix, via W1-T4388's
+    parsePrefixedTaskId), read refs/rmd-id/<id> on the TARGET repo's origin. It fails when the ref is absent
+    ("id <id> is not reserved — mint it with rmd next-task-id --prefix") or when its holder branch differs
+    from the PR head ("id <id> is reserved by <branch>, not this PR — renumber"). EXEMPT: ids the base
+    already declares (edits, not filings); run-<ID> branches whose reservation was taken by the daemon's own
+    auto-triage filing lane, which the anchor records with source=automatic and the same branch rule; and
+    ids listed in a baseline file with reasons, for pre-allocator history. An unreachable origin is an
+    UNKNOWN that holds the verdict (never a pass), and the refusal fits the 140-char status cap.
+  acceptance:
+    - claim: "a pull request adding a shard whose id is reserved by another branch is refused and told to renumber"
+      proof: "unit test: a pull request adding a shard whose id is reserved by another branch is refused and told to renumber"
+    - claim: "a pull request adding a shard whose id is not reserved at all is refused with the mint command"
+      proof: "unit test: a pull request adding a shard whose id is not reserved at all is refused with the mint command"
+    - claim: "a shard id reserved by the pull request's own head branch passes"
+      proof: "unit test: a shard id reserved by the pull request's own head branch passes"
+    - claim: "review checks reservation ownership for added shard ids"
+      proof: 'grep: reservationHolderBranch( in src/lib/review.ts'
+  falsifier: |
+    CLOSE IF review already refuses a newly added shard id whose reservation anchor names a different branch.
