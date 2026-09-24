@@ -407,6 +407,7 @@
     "test/an-unrelated-filing-keeps-a-tasks-recon.test.ts": 907,
     "test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts": 0,
     "test/an-untracked-file-does-not-block-convergence.test.ts": 0,
+    "test/analytics-reads-the-headroom-the-daemon-measures.test.ts": 0,
     "test/analytics-route.test.ts": 1143,
     "test/api-client-base-url.test.ts": 238,
     "test/api-client-client.test.ts": 5624,
