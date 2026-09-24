@@ -14,6 +14,7 @@
 
 import type { LiveProviderAccounts } from "./analytics-live-metrics.js";
 import { fixedClock } from "./clock.js";
+import { loadMounts, mountsPath, type Mounts } from "./mounts.js";
 
 export const USAGE_PROJECTION_VERSION = "usage-v1";
 
@@ -556,6 +557,71 @@ function share<T extends { count: number }>(rows: T[], total: number): Array<T &
     .sort((left, right) => right.count - left.count);
 }
 
+function modelTotals(rows: UsageRoutingAggregate["rows"]): Array<{ provider: string; model: string; count: number }> {
+  const models = new Map<string, { provider: string; model: string; count: number }>();
+  for (const row of rows) {
+    const key = `${row.provider}\u0000${row.model}`;
+    const entry = models.get(key) ?? { provider: row.provider, model: row.model, count: 0 };
+    entry.count += row.count;
+    models.set(key, entry);
+  }
+  return [...models.values()];
+}
+
+function canonicalAggregate(aggregate: UsageRoutingAggregate, aliases: ReadonlyMap<string, string>): UsageRoutingAggregate {
+  const merged = new Map<string, UsageRoutingAggregate["rows"][number]>();
+  for (const row of aggregate.rows) {
+    const model = (row.provider === "claude" ? aliases.get(row.model) : undefined) ?? row.model;
+    const key = [row.provider, model, row.tier, row.rule].join("\u0000");
+    const entry = merged.get(key) ?? { ...row, model, count: 0 };
+    entry.count += row.count;
+    merged.set(key, entry);
+  }
+  const rows = [...merged.values()].sort((left, right) => right.count - left.count);
+  return { ...aggregate, byModel: share(modelTotals(rows), aggregate.total), rows };
+}
+
+/**
+ * Count a Claude alias row (`sonnet`, written when the worker was spawned with the alias) under the
+ * concrete id the mounts table resolves it to, so one model is one row in `byModel`.
+ */
+export function withCanonicalModels(projection: UsageProjection, aliases: ReadonlyMap<string, string>): UsageProjection {
+  if (aliases.size === 0) return projection;
+  const { last24h, last7d } = projection.routing.aggregates;
+  return {
+    ...projection,
+    routing: {
+      ...projection.routing,
+      aggregates: { last24h: canonicalAggregate(last24h, aliases), last7d: canonicalAggregate(last7d, aliases) },
+    },
+  };
+}
+
+/**
+ * Claude CLI aliases in `capabilities.claude` (a key with no hyphen that no candidate list names)
+ * mapped to the concrete id each alias starts at: the first candidate of its capability.
+ */
+export function claudeModelAliases(mounts: Mounts): Map<string, string> {
+  const candidates = mounts.capabilities?.claudeCandidates ?? {};
+  const concrete = new Set(Object.values(candidates).flat());
+  const aliases = new Map<string, string>();
+  for (const [model, capability] of Object.entries(mounts.capabilities?.claude ?? {})) {
+    const first = candidates[capability]?.[0];
+    if (!model.includes("-") && !concrete.has(model) && first) aliases.set(model, first);
+  }
+  return aliases;
+}
+
+/** {@link claudeModelAliases} of the table under `root`; empty when that table cannot be loaded. */
+export function claudeModelAliasesAt(root: string): Map<string, string> {
+  try {
+    return claudeModelAliases(loadMounts(mountsPath(root)));
+  } catch {
+    // An unreadable table only means alias rows stay under the id they were recorded with.
+    return new Map();
+  }
+}
+
 function aggregate(state: UsageTelemetryState, hours: number, asOfHour: number): UsageRoutingAggregate {
   const byKey = new Map<string, number>();
   let cashWhileSubscriptionHadRoom = 0;
@@ -574,18 +640,11 @@ function aggregate(state: UsageTelemetryState, hours: number, asOfHour: number):
     for (const row of rows) counts.set(row[field], (counts.get(row[field]) ?? 0) + row.count);
     return [...counts.entries()].map(([value, count]) => ({ [field]: value, count }) as { [P in K]: string } & { count: number });
   };
-  const models = new Map<string, { provider: string; model: string; count: number }>();
-  for (const row of rows) {
-    const key = `${row.provider}\u0000${row.model}`;
-    const entry = models.get(key) ?? { provider: row.provider, model: row.model, count: 0 };
-    entry.count += row.count;
-    models.set(key, entry);
-  }
   return {
     windowHours: hours,
     total,
     cashWhileSubscriptionHadRoom,
-    byModel: share([...models.values()], total),
+    byModel: share(modelTotals(rows), total),
     byTier: share(group("tier"), total),
     byRule: share(group("rule"), total),
     byProvider: share(group("provider"), total),
