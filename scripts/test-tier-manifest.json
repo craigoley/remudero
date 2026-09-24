@@ -1424,6 +1424,7 @@
     "test/scope-guard-review-direction.test.ts": 1249,
     "test/scripts-shared-lib.test.ts": 0,
     "test/secret-boundary.test.ts": 1648,
+    "test/security-scans-run-when-their-inputs-change.test.ts": 0,
     "test/self-path-proof-discrimination.test.ts": 1293,
     "test/self-sync-branch-guard.test.ts": 953,
     "test/self-sync-dirty-scope.test.ts": 786,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
@@ -23,12 +24,9 @@ import { parse as parseYaml } from "yaml";
 // ci-gate.yml, and this repo's own doctrine (ci.yml's header; test/a-shipped-detector-exits-one-
 // and-is-wired-to-nothing.test.ts; test/dependency-licence-policy.test.ts's own "carries NO
 // job-level `if:`" assertion) is that a REQUIRED job runs unconditionally — only a STEP inside it
-// may be conditioned. `osv-scanner-pr.yml`'s `scan-pr` job is deliberately left OUT of this gate
-// entirely: it is a `uses:` reusable-workflow caller, and a skipped caller of that shape registers
-// NO check-run at all under its nested name (ci-gate.yml's own synthwatch #102 warning) — gating
-// it here would time out ci-gate on every PR that doesn't touch a dependency, not merely save
-// cost. It is already diff-aware via the tool itself (its own file header), which is why the
-// falsifier below is scoped to `dependency-review.yml`'s two jobs, the ones this PR actually gates.
+// may be conditioned. The PR-time OSV job stays unconditional and REQUIRED: it must always
+// register its awaited check-run. W1-T4401 also hardens that scanner by keeping both checkouts
+// below source/ and result artifacts in a sibling results/ directory outside untrusted PR paths.
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOWS_DIR = join(ROOT, ".github", "workflows");
@@ -39,7 +37,7 @@ function loadRaw(file: string): string {
 
 function loadDoc(file: string): {
   on?: Record<string, unknown>;
-  jobs: Record<string, { name?: string; if?: unknown; steps?: Array<{ name?: string; id?: string; if?: unknown; run?: string }> }>;
+  jobs: Record<string, { name?: string; if?: unknown; uses?: string; steps?: Array<{ name?: string; id?: string; if?: unknown; run?: string; uses?: string; with?: Record<string, string>; [key: string]: unknown }> }>;
 } {
   return parseYaml(loadRaw(file));
 }
@@ -174,4 +172,55 @@ test("W1-T4401: Semgrep's pull_request trigger skips PLAN/DOCS diffs, and its sc
     /pull_request/,
     "the baseline ref must be conditioned on the pull_request event, so push/schedule stay full un-diffed sweeps",
   );
+});
+
+test("W1-T4401: the required OSV PR scan keeps comparison outputs outside the untrusted checkout", () => {
+  const job = loadDoc("osv-scanner-pr.yml").jobs["scan-pr"]!;
+  assert.equal(job.name, "scan-pr / osv-scan", "the native job must preserve ci-gate's awaited check-run name");
+  assert.equal(job.uses, undefined, "the scan must not delegate the checkout/output boundary to the vulnerable reusable workflow");
+  const steps = job.steps ?? [];
+  const checkouts = steps.filter((s) => s.uses?.startsWith("actions/checkout@"));
+  assert.equal(checkouts.length, 2, "compare the target and PR merge tree in controlled checkouts");
+  assert.equal(checkouts[0]?.with?.ref, "${{ github.event.pull_request.base.sha }}");
+  assert.equal(checkouts[1]?.with?.ref, "${{ github.sha }}");
+  assert.ok(checkouts.every((s) => s.with?.path === "source"), "untrusted tracked paths must remain below source/");
+
+  const oldScan = steps.find((s) => s.id === "scan-old");
+  const newScan = steps.find((s) => s.id === "scan-new");
+  assert.match(oldScan?.with?.["scan-args"] ?? "", /--output=results\/old-results\.json/);
+  assert.match(newScan?.with?.["scan-args"] ?? "", /--output=results\/new-results\.json/);
+  assert.match(oldScan?.with?.["scan-args"] ?? "", /\nsource$/);
+  assert.match(newScan?.with?.["scan-args"] ?? "", /\nsource$/);
+
+  const completeness = steps.find((s) => s.name === "Check that both scans produced results");
+  assert.ok(completeness?.run?.includes('[ ! -s "$result" ]'), "missing scan output must fail closed before comparison");
+  const reporter = steps.find((s) => s.uses?.includes("osv-reporter-action"));
+  assert.match(reporter?.with?.["scan-args"] ?? "", /--old=results\/old-results\.json/);
+  assert.match(reporter?.with?.["scan-args"] ?? "", /--new=results\/new-results\.json/);
+  assert.match(reporter?.with?.["scan-args"] ?? "", /--fail-on-vuln=true/);
+  assert.notEqual(reporter?.["continue-on-error"], true, "the final vulnerability comparison must remain blocking");
+});
+
+test("W1-T4401: a PR-controlled result-name symlink cannot overwrite the isolated baseline", () => {
+  const root = mkdtempSync(join(tmpdir(), "w1t4401-osv-symlink-"));
+  try {
+    const source = join(root, "source");
+    const results = join(root, "results");
+    mkdirSync(source);
+    mkdirSync(results);
+    const oldResult = join(results, "old-results.json");
+    const newResult = join(results, "new-results.json");
+    writeFileSync(oldResult, "baseline result\n");
+
+    // Reproduce the upstream exploit shape: a tracked symlink lives in the PR checkout and points
+    // at the baseline. Writing through that checkout path would destroy the comparison.
+    symlinkSync("../results/old-results.json", join(source, "new-results.json"));
+
+    // The hardened workflow writes to the sibling results/ directory, not through that symlink.
+    writeFileSync(newResult, "proposed result\n");
+    assert.equal(readFileSync(oldResult, "utf8"), "baseline result\n");
+    assert.equal(readFileSync(newResult, "utf8"), "proposed result\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
