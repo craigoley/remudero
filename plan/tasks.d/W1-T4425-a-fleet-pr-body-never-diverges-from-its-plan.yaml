@@ -1,0 +1,41 @@
+- id: W1-T4425
+  title: "THE FLEET'S OWN RUN PRS FAIL THEIR OWN ACCEPTANCE GATE — the worker writes an `## Acceptance` block whose proofs differ from the plan's, the gate refuses the divergence, and every build loses a fix round; rewrite the body from the plan before the harness's trailer push"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "follow-up audit 2026-09-24: #6888, #6929, #6931 each refused trailer-body-proof-divergence"
+  plan_refs: ["W1-T1012", "W1-T3739", "W1-T1060"]
+  files:
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-23/24: three fleet-built run PRs failed acceptance-author-gate with
+    `trailer-body-proof-divergence`: #6888 (W1-T4356), #6929 (W1-T4052) and #6931 (W1-T4384). Each worker wrote its own
+    `## Acceptance` block in the PR body, while the Remudero-Task trailer resolves criteria from the plan record,
+    and the two proof sets differ. The gate is right to refuse, because a body-only proof is never executed.
+    But the fleet authored the defect, and each PR then spends a fix-lane round and a CI cycle repairing its own
+    body. W1-T3739 already ships renderAcceptanceBlock (plan-pr-emitter.ts) so the two cannot disagree, but the
+    worker-opened PR path never uses it. The gate replays the OPENING event payload, so a body edit only counts
+    once a later event carries it. The harness already pushes one (W1-T1012's trailer-amend push after the worker
+    opens the PR).
+  design: |
+    In run-task's post-worker PR step, before W1-T1012's trailer-amend push: when the PR's head resolves a
+    Remudero-Task with plan criteria, read the PR body. If it carries an `## Acceptance` block whose proofs
+    differ from the plan's, rewrite the body with that block replaced by renderAcceptanceBlock(plan criteria),
+    keep the worker's prose, and make sure the body ends with the `Remudero-Task:` line. Then let the existing
+    push raise the event the gate reads. When no amend push is needed (the trailer is already on the tip), the
+    rewrite still happens and the body-repair path's existing re-trigger applies. Ledger
+    `pr.body_normalized` {pr, removed_proofs, rendered_proofs}. A body whose block already matches is untouched.
+  acceptance:
+    - claim: "a diverging run PR body is rewritten from its plan"
+      proof: "unit test: a diverging run PR body is rewritten from its plan"
+    - claim: "a run PR body that matches its plan is left alone"
+      proof: "unit test: a run PR body that matches its plan is left alone"
+  falsifier: |
+    CLOSE IF a fleet run PR can no longer be opened with an Acceptance block that diverges from its plan.

@@ -13,7 +13,8 @@
   plan_refs: ["W1-T4227", "W1-T4384", "W1-T4409"]
   files:
     - src/lib/fleet-liveness.ts
-    - src/lib/daemon.ts
+    - src/lib/instance-gateway.ts
+    - src/lib/serve.ts
   status: queued
   attempts: 0
   rationale: |
@@ -32,12 +33,23 @@
     the restart count and the boot error. A recovery closes nothing by itself but ledgers `fleet.instance_recovered`.
     The core daemon never watches itself here (the host heartbeat does). Thresholds are derived from each
     instance's own observed cadence and stated beside the constants.
+  amendment: |
+    2026-09-24, from the build agent's host recon (read-only): the core daemon CANNOT read the other instances'
+    ledgers. remudero-daemon mounts only rmd-state2 -> /home/node/Remudero, and a find under it sees exactly one
+    ledger.ndjson, its own. remudero-serve mounts /home/node/rmd-instances/{console,site} and their state, plus the
+    core's, and can read all three, and src/lib/instance-gateway.ts already resolves each instance's
+    InstanceStateRoot {instance, root, ledgerPath, planPath} from the registry. So evaluation moves to the gateway:
+    instance-gateway.ts exports checkInstanceLiveness(roots, deps), which calls evaluateFleetLiveness over every
+    registry instance except core, and serve.ts's existing minute timer calls it (one line, zero comment lines,
+    since serve.ts is over its comment ceiling). Escalation uses the gateway's fleet App identity, the same App
+    the daemons use for needs-human issues; the build confirms it can open and assign an issue before relying on it.
+    The core daemon itself stays covered by the per-host heartbeat, as before.
   acceptance:
     - claim: "a registered instance with a stale sweep and repeated boots is escalated once with its boot error"
       proof: "unit test: a registered instance with a stale sweep and repeated boots is escalated once with its boot error"
     - claim: "a healthy instance raises nothing"
       proof: "unit test: a healthy instance raises nothing"
-    - claim: "the core daemon evaluates fleet liveness every iteration"
-      proof: 'grep: evaluateFleetLiveness( in src/lib/daemon.ts'
+    - claim: "the gateway evaluates every instance's liveness"
+      proof: 'grep: evaluateFleetLiveness( in src/lib/instance-gateway.ts'
   falsifier: |
     CLOSE IF a daemon that stops sweeping is already escalated by another daemon without the operator asking.

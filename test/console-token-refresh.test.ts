@@ -363,6 +363,7 @@ interface ServeLauncherFixtureOptions {
   extraArgv?: string[];
   existingContainer?: boolean;
   operatorIdentityPresent?: boolean;
+  ingestTokenPresent?: boolean;
 }
 
 function runServeLauncherFixture(
@@ -410,6 +411,11 @@ function runServeLauncherFixture(
   if (options.operatorIdentityPresent) {
     mkdirSync(join(root, ".config", "remudero"), { recursive: true });
     writeFileSync(operatorIdentityPath, '{"issuer":"https://FAKE-OPERATOR-ISSUER.test"}');
+  }
+  const ingestTokenPath = join(root, ".config", "remudero", "incident-ingest-token");
+  if (options.ingestTokenPresent) {
+    mkdirSync(join(root, ".config", "remudero"), { recursive: true });
+    writeFileSync(ingestTokenPath, "FAKE-INGEST-TOKEN-VALUE-W1-T4412");
   }
 
   writeFileSync(
@@ -488,6 +494,7 @@ exit 1
     RMD_GITHUB_WEBHOOK_SECRET_PATH: options.webhookSecretPresent ? webhookSecretPath : "",
   };
   delete env.RMD_OPERATOR_IDENTITY_FILE;
+  delete env.RMD_INCIDENT_INGEST_TOKEN_PATH;
   delete env.GH_APP_ID;
   delete env.GH_APP_INSTALLATION_ID;
   delete env.GH_APP_PRIVATE_KEY_PATH;
@@ -529,6 +536,7 @@ exit 1
     webhookSecretPath,
     existingWebhookSecretPath,
     operatorIdentityPath,
+    ingestTokenPath,
     stateDir,
   };
 }
@@ -546,6 +554,23 @@ test("a host operator identity file is mounted read-only at a fixed path and nev
   assert.ok(!absent.capture.includes(dest), "no file, no mount");
   assert.ok(!absent.capture.includes("RMD_OPERATOR_IDENTITY_PATH"), "no file, no env");
   assert.match(absent.result.stderr, /no operator identity file/);
+});
+
+test("W1-T4412: a host incident ingest token file is mounted read-only and only its presence is reported", () => {
+  const dest = "/home/node/.rmd-incident-ingest-token";
+  const present = runServeLauncherFixture("direct", { ingestTokenPresent: true });
+  assert.equal(present.result.status, 0, present.result.stderr);
+  assert.ok(present.capture.includes(`${present.ingestTokenPath}:${dest}:ro`), present.capture);
+  assert.ok(present.capture.includes(`RMD_SERVE_INGEST_TOKEN_FILE=${dest}`), present.capture);
+  assert.match(present.result.stdout, /incident ingest token supplied/);
+  const printed = present.result.stdout + present.result.stderr + present.capture;
+  assert.ok(!printed.includes("FAKE-INGEST-TOKEN-VALUE"), "the token value is never printed or put in argv");
+  const absent = runServeLauncherFixture("direct");
+  assert.equal(absent.result.status, 0, absent.result.stderr);
+  assert.ok(!absent.capture.includes(dest), "no file, no mount");
+  assert.ok(!absent.capture.includes("RMD_SERVE_INGEST_TOKEN_FILE"), "no file, no env");
+  assert.match(absent.result.stdout, /incident ingest token absent/);
+  assert.match(absent.result.stderr, /no incident ingest token at/);
 });
 
 test("W1-T2778: a direct readable host App key becomes one read-only file mount and the launched env names that destination", () => {

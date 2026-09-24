@@ -144,11 +144,16 @@ import {
   type RefreshOptions,
 } from "./github-app.js";
 import {
+  acceptedWakeCount,
   createGitHubEventWakeHandler,
   createPersistentDeliveryDedupStore,
+  createWakeCounters,
   githubDeliveryDedupPath,
+  startWakeSummaryFlush,
   sweepWakeMarkerPath,
+  wakeSummaryRow,
   type GithubEventWakeSemanticMode,
+  type WakeCounters,
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
@@ -465,6 +470,7 @@ export interface ServeDeps {
     dedupCapacity?: number;
     semanticCheckMode?: GithubEventWakeSemanticMode;
     aggregateCheckNames?: readonly string[];
+    counters?: WakeCounters;
   };
 }
 
@@ -772,7 +778,7 @@ const CONSOLE_TIME_SERIES_SPECS: readonly ConsoleTimeSeriesSpec[] = [
   {
     id: "wake-volume",
     label: "wake volume",
-    value: (line) => (line.step === "github.wake.accepted" ? 1 : undefined),
+    value: acceptedWakeCount,
   },
   {
     id: "sweep-prs",
@@ -4187,6 +4193,7 @@ function assembleServeRoutes(
       ),
       semanticCheckMode: deps.githubEventWake?.semanticCheckMode,
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
+      counters: deps.githubEventWake?.counters,
       log: deps.log,
     }),
     buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
@@ -4281,12 +4288,19 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // {@link readAttention}.
   let lastReadAt: number | undefined;
   let drainTarget: Server | undefined;
+  const wakeCounters = createWakeCounters();
+  const stopWakeSummary = startWakeSummaryFlush({
+    counters: wakeCounters,
+    clock: systemClock,
+    write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
+  });
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
     beforeExit: () => {
       analyticsCache.stop();
       liveAnalyticsCache.stop();
+      stopWakeSummary();
     },
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
@@ -4310,6 +4324,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       ...deps,
       consoleSha,
       confirmNonces,
+      githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
@@ -4334,7 +4349,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // no idea which directory was searched, so the path is in the line.
     deps.log?.("serve.console_build_missing", { kind: consoleBuild.kind, root: consoleBuild.root, reason: consoleBuild.reason });
   }
-  const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV];
+  const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV] ?? readIngestTokenFile(process.env[INGEST_TOKEN_FILE_ENV], deps.log);
   const server = createService({
     tokens: deps.tokens,
     identity: deps.identity,
@@ -4379,6 +4394,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   drainTarget = server;
   server.on("close", staleExit.stop);
   server.on("close", prewarm.stop);
+  server.on("close", stopWakeSummary);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", liveAnalyticsCache.start);
@@ -4520,6 +4536,21 @@ export const CONTAINER_ALL_INTERFACES_HOST = "0.0.0.0";
  */
 export const CONTAINER_NETWORK_ENV = "RMD_SERVE_NETWORK";
 export const INGEST_TOKEN_ENV = "RMD_SERVE_INGEST_TOKEN";
+export const INGEST_TOKEN_FILE_ENV = "RMD_SERVE_INGEST_TOKEN_FILE";
+
+export function readIngestTokenFile(path: string | undefined, log?: ServeDeps["log"]): string | undefined {
+  if (!path) return undefined;
+  let token: string;
+  try {
+    token = readFileSync(path, "utf8").trim();
+  } catch (err) {
+    log?.("serve.ingest_token_refused", { file: path, reason: `unreadable: ${(err as NodeJS.ErrnoException).code ?? String(err)}` });
+    return undefined;
+  }
+  if (token) return token;
+  log?.("serve.ingest_token_refused", { file: path, reason: "empty" });
+  return undefined;
+}
 
 /** The only value {@link CONTAINER_NETWORK_ENV} accepts. See that constant's own doc. */
 export const CONTAINER_NETWORK_VALUE = "container";
