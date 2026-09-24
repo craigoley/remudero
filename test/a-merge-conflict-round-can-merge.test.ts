@@ -57,7 +57,7 @@ const CONFLICT_FILE = "conflict.txt";
  * really does disagree with `wt`'s own `HEAD`, so `git merge` on it produces a REAL conflict —
  * never a synthetic file with conflict markers typed in by the fixture.
  */
-function conflictedCheckout(kind: string): { upstream: GitRepo; wt: GitRepo } {
+function divergedConflictPair(kind: string): { upstream: GitRepo; wt: GitRepo } {
   const upstream = gitRepo({ kind: `${kind}-upstream`, seedCommit: true, branch: "main" });
   writeFileSync(join(upstream.dir, CONFLICT_FILE), "base line\n");
   upstream.git("add", "-A");
@@ -134,7 +134,7 @@ function issues(): IssueGateway {
 
 test("W1-T4458: the harness starts the merge a shell-less conflict round resolves", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4458-start-"));
-  const { wt } = conflictedCheckout("w1t4458-start");
+  const { wt } = divergedConflictPair("w1t4458-start");
   try {
     const before = wt.git("rev-parse", "HEAD");
 
@@ -242,7 +242,7 @@ test("W1-T4458: the fix rung's tools and prompt agree about who holds git", () =
 
 test("W1-T4458: a commit the worker made is pushed, not discarded", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4458-push-"));
-  const { wt } = conflictedCheckout("w1t4458-push");
+  const { wt } = divergedConflictPair("w1t4458-push");
   try {
     const startSha = wt.git("rev-parse", "HEAD");
     const spawnArgs: SpawnWorkerArgs[] = [];
