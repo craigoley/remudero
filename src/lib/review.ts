@@ -6312,6 +6312,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T3267: the compact Codex project-document generator's `--check` mode can refuse a PR
   // when AGENTS.md drifts from CLAUDE.md, so it is enforcement logic rather than generated content.
   "^scripts/generate-agents-md\\.mjs$",
+  "^scripts/list-rule-suites\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
