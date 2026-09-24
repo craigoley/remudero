@@ -406,6 +406,7 @@
   "src/lib/triage.ts": 169,
   "src/lib/tty.ts": 70,
   "src/lib/untrusted-envelope.ts": 69,
+  "src/lib/usage-telemetry.ts": 250,
   "src/lib/verdict-calibration.ts": 500,
   "src/lib/verify-human-judge.ts": 250,
   "src/lib/verify-human-release.ts": 39,

@@ -1751,6 +1751,7 @@
     "test/the-transport-paces-its-own-reads.test.ts": 0,
     "test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts": 0,
     "test/the-union-readers-scan-they-do-not-split.test.ts": 0,
+    "test/the-usage-projection-shows-burn-and-routing.test.ts": 0,
     "test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts": 1731,
     "test/the-verb-census-reaches-a-reader.test.ts": 59315,
     "test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts": 0,
