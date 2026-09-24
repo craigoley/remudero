@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 import {
   approveProposal,
@@ -42,7 +43,7 @@ const SKILL: SkillFilePayload = {
 };
 
 function tmp(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
+  return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
 }
 function ledgerPath(): string {
   return join(tmp("rmd-skill-ratify-"), "ledger.ndjson");
