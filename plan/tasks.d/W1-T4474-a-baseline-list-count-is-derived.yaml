@@ -1,0 +1,41 @@
+- id: W1-T4474
+  title: "W1-T2527'S CENSUS CANNOT SEE A COUNT OVER THE TEST'S OWN BASELINE LIST — BASELINE_COMMAND_NAMES.length pinned at 86 merged clean beside two PRs' additions and went red on main at 87 (#7005 + W1-T4096); widen the census to a literal count over a test-local baseline that is compared with a registry, and derive this one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: fix #7028 — a semantic merge skew with no conflict marker"
+  plan_refs: [W1-T2527]
+  files: [test/a-count-assertion-names-its-members.test.ts, test/help-renders-a-summary-not-a-paragraph.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: the literal count and the list length were:
+      631ba13 (#7022)   literal 85, entries 85
+      c90c190 (W1-T4096) literal 86, entries 86
+      6c84c4a (#7005)   literal 86, entries 87
+    #7005 added "routing-ab" on one list row. W1-T4096 had added "knowledge" and bumped the literal. Git merged both with no
+    marker. #7005's last CI (16:22Z) predated W1-T4096's merge (16:32Z); branch protection is strict=false, so it merged
+    green at 16:52Z. Fixed by hand in #7041.
+    OBSERVED: W1-T2527's census (a-count-assertion-names-its-members) targets a count over a MODULE-LEVEL table that the
+    file also enumerates. Here the counted list is the TEST's own BASELINE_COMMAND_NAMES, deepEqual'd against the
+    production COMMANDS, so the census never looks at it. The file's own comment calls the literal "the reviewed count".
+    But the list row already costs that considered edit, and the literal only adds a second place two authors can write
+    the same number.
+    MEASURED: over the last 60 merged PRs, 29 overlapped main's later changes at file level, almost all in hub files that
+    merge safely. Only this shape broke. So the remedy is at the assertion, not a branch-freshness rule or a merge queue.
+  design: |
+    (i) The census also flags a literal `.length`/`.size` assertion over a test-local list that the same file compares
+    with a registry through deepEqual/deepStrictEqual.
+    (ii) help-renders-a-summary-not-a-paragraph derives its count from the list (keeping the member deepEqual). Any other
+    offender the widened census finds is fixed the same way in this PR, or named in its body.
+  acceptance:
+    - claim: "a literal count over a test-local baseline list is named"
+      proof: 'grep: test("W1-T4474: a literal count over a test-local baseline list is named" in test/a-count-assertion-names-its-members.test.ts'
+  falsifier: |
+    Restore `BASELINE_COMMAND_NAMES.length, 87` and the widened census names that file.
