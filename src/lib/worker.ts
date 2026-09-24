@@ -1203,8 +1203,10 @@ export const IMPLEMENT_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit",
  * THE FALSIFIER NEEDS NO NEW CODE: `WorkerResult.permissionDenials` names a tool a worker asked for
  * and was refused. Widen this list from a denial that actually happened, never from a worry.
  */
+export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+
+/** W1-T4094: the in-process rule tool, added to a declared bound only when a spawn carries `ruleLookup`. */
 export const WORKER_RULE_TOOL_NAME = "mcp__knowledge__rule";
-export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", WORKER_RULE_TOOL_NAME];
 
 /** The tool's only checkout operations are reads; its ledger sink is supplied by the run. */
 export function createWorkerRuleTool(
@@ -2498,9 +2500,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
     if (args.tools) options.tools = args.tools;
     if (args.ruleLookup) {
-      if (args.tools === undefined || !args.tools.includes(WORKER_RULE_TOOL_NAME)) {
-        throw new Error(`rule lookup requires ${WORKER_RULE_TOOL_NAME} in the declared tool bound`);
-      }
+      if (args.tools === undefined) throw new Error("rule lookup requires a declared tool bound");
+      if (!args.tools.includes(WORKER_RULE_TOOL_NAME)) options.tools = [...args.tools, WORKER_RULE_TOOL_NAME];
       options.mcpServers = {
         knowledge: createSdkMcpServer({ name: "knowledge", tools: [createWorkerRuleTool(
           args.cwd,

@@ -2147,6 +2147,7 @@ import {
   resolveGenericRouteToolBound,
   harnessOwnsGitFor,
   IMPLEMENT_CASH_TOOLS,
+  IMPLEMENT_CLAUDE_TOOLS,
   WORKER_RULE_TOOL_NAME,
   implementToolBound,
   resolveDispatchLaneToolBound,
@@ -15028,13 +15029,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
     // block ran before W1-T86.
     const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
-    const learningHomes = {
-      projectDir: learningsDir,
-      userOverallDir: userOverallLearningsHome(config),
-      globalArtifactPath: globalArtifactPath(config),
-    };
     const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
-      homes: learningHomes,
+      homes: {
+        projectDir: learningsDir,
+        userOverallDir: userOverallLearningsHome(config),
+        globalArtifactPath: globalArtifactPath(config),
+      },
       taskFiles: task.files,
       selectionContext: {
         text: learningsSelectionText,
@@ -15044,10 +15044,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
-    const ruleLookup = implementTools?.includes(WORKER_RULE_TOOL_NAME)
+    // W1-T4094: only the Claude implement bound gets the rule tool; cash and review/manual keep theirs.
+    const ruleLookup = implementTools === IMPLEMENT_CLAUDE_TOOLS
       ? {
           onPulled: (id: string, status: "found" | "missing" | "error") => log("knowledge.pulled", { id, status }),
-          learningLookup: { homes: learningHomes, allowedIds: learningsResult.selectedIds },
+          learningLookup: {
+            homes: { projectDir: learningsDir, userOverallDir: userOverallLearningsHome(config), globalArtifactPath: globalArtifactPath(config) },
+            allowedIds: learningsResult.selectedIds,
+          },
         }
       : undefined;
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine

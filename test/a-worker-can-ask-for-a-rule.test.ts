@@ -9,6 +9,7 @@ import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { slugifyRuleId } from "../src/lib/doctrine-lifecycle.js";
 import { lookupWorkerRule, parseRuleHeadlines } from "../src/lib/learnings.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { wipeTestCommand } from "../src/run-task.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -20,7 +21,7 @@ import {
 } from "../src/lib/worker.js";
 
 function fixture(t: { after: (fn: () => void) => void }): string {
-  const root = mkdtempSync(join(tmpdir(), "rmd-worker-rule-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}worker-rule-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "doctrine"));
   mkdirSync(join(root, "learnings"));
