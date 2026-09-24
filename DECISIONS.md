@@ -3044,6 +3044,9 @@ risk:high rows in the mount table.
 
 ## 2026-09-24 — OPERATOR FOLLOW-UP: Luna is an economy candidate, not a balanced worker fallback
 
+**Chosen (RECOMMENDED, auto):** Place Sol-class candidates on the Codex balanced ladder while
+retaining Luna on economy and leaving the separate cash policy unchanged.
+
 The operator supplied an external model test showing Luna errors in structured, repeated calls and
 a missed failure in a multi-step chain. Those results are small samples from another harness, not
 Remudero failure rates. Official OpenAI guidance positions Luna for focused, high-volume work and
