@@ -150,6 +150,12 @@ test("W1-T4398: a coverage-lane flake is retried once and reported", () => {
   assert.notEqual(broken.status, 0);
   assert.match(broken.out, /^FLAKE-RETRY: retry ALSO failed — always broken$/m);
   assert.doesNotMatch(broken.out, /FLAKE-RETRY-RECOVERED/);
+  // A failure no file can be named for is not retried: repeating the whole instrumented run is
+  // exactly what the 2026-08-28 ruling removed, so pass one's own code stands.
+  const unnamed = runCoverageLane(dir, "no-such.test.mjs");
+  assert.notEqual(unnamed.status, 0);
+  assert.match(unnamed.out, /^FLAKE-RETRY-FILES: no failed test file could be named — the instrumented run is not repeated/m);
+  assert.doesNotMatch(unnamed.out, /uninstrumented —|retry ALSO failed/);
 
   // The real ci.yml step routes the instrumented run through the wrapper and stages its evidence.
   const step = runCoverageStep("# tests 1\nFLAKE-RETRY: first attempt failed — t\nFLAKE-RETRY-RECOVERED: a flake, not a pass — t\n");
