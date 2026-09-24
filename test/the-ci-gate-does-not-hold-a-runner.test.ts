@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { staleCiGateTransition } from "../src/lib/sweep.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -38,23 +39,19 @@ const ci = parseYaml(CI_TEXT) as Wf;
 const gate = parseYaml(GATE_TEXT) as Wf;
 const REQUIRED = JSON.parse(contractRun(GATE_TEXT).env.REQUIRED!) as string[];
 
-/** Runs the real runner against the real contract with a stub `gh` that answers every check-runs
- *  read with `runs`, and a stub clock so any wait would be instant. Returns the exit and gh call count. */
+/** Runs the real runner against the real contract with the shared gh shim answering every
+ *  check-runs read with `runs`, and a no-op sleep so any wait would be instant. Returns the exit
+ *  and how many times the check-runs API was read. */
 function runGate(runs: Array<{ name: string; status: string; conclusion: string | null }>) {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4400-`));
-  const bin = join(dir, "bin");
-  mkdirSync(bin);
   const page = JSON.stringify([{ check_runs: runs.map((r) => ({ ...r, started_at: "2026-09-24T00:00:00Z" })) }]);
-  writeFileSync(join(dir, "page.json"), page);
-  writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash\necho x >> "${dir}/gh-calls"\ncat "${dir}/page.json"\n`);
-  writeFileSync(join(bin, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
-  for (const f of ["gh", "sleep"]) chmodSync(join(bin, f), 0o755);
+  const shim = ghShim([{ when: "check-runs", stdout: page }], { kind: "w1t4400" });
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4400-bin-`));
+  writeFileSync(join(bin, "sleep"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   const r = spawnSync(process.execPath, [RUNNER], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_TOKEN: "t", REPO: "o/r", SHA: "abc", GRACE_WINDOW_SECONDS: "0", WAIT_CAP_SECONDS: "0" },
+    env: { ...process.env, PATH: `${shim.dir}:${bin}:${process.env.PATH}`, GH_TOKEN: "t", REPO: "o/r", SHA: "abc", GRACE_WINDOW_SECONDS: "0", WAIT_CAP_SECONDS: "0" },
   });
-  const calls = readFileSync(join(dir, "gh-calls"), "utf8").split("\n").filter(Boolean).length;
-  return { status: r.status, out: r.stdout + r.stderr, calls };
+  return { status: r.status, out: r.stdout + r.stderr, calls: shim.calls().length };
 }
 
 test("W1-T4400: ci-gate evaluates on completion events without a wait loop", () => {
