@@ -579,9 +579,28 @@ export function renderFixPrompt(opts: {
       ...constraintBlock,
       ...scopeBlock,
       `This PR's merge state is DIRTY — GitHub cannot compute a clean merge ref, so NO check even`,
-      `runs until the conflict is resolved; there is no review to react to either. Your target: MERGE`,
-      `origin/main into this SAME branch (${opts.branch}) — never rebase, never force-push — resolve`,
-      `the conflicting file(s) below, then push. The changed head re-judges through the normal gate.`,
+      `runs until the conflict is resolved; there is no review to react to either.`,
+      // W1-T4458: a shell-less round is told a few lines below (the harnessCommits footer) that
+      // it has NO SHELL — so it must never ALSO be told its target is to run `git merge` itself.
+      // The harness starts the merge BEFORE this worker is spawned (`startShellLessMergeConflictMerge`,
+      // run-task.ts): MERGE_HEAD is already set and the conflicting file(s) below already carry
+      // real conflict markers in the tree for a plain Read/Write/Edit resolve. A shell-bearing
+      // round (harnessCommits false) keeps the original instruction, unchanged: it runs the merge
+      // itself.
+      ...(opts.harnessCommits
+        ? [
+            `Your target: RESOLVE THE CONFLICT — the harness has already run \`git merge --no-commit\``,
+            `origin/main into this SAME branch (${opts.branch}) and left CONFLICT MARKERS`,
+            `(\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`) in the file(s) below. Edit those files to their`,
+            `correct resolved content. Do NOT run \`git merge\` yourself — you have no shell — and`,
+            `never rebase. The harness completes the merge commit once your edits land; the changed`,
+            `head then re-judges through the normal gate.`,
+          ]
+        : [
+            `Your target: MERGE origin/main into this SAME branch (${opts.branch}) — never rebase,`,
+            `never force-push — resolve the conflicting file(s) below, then push. The changed head`,
+            `re-judges through the normal gate.`,
+          ]),
       "",
       `MERGE DISCIPLINE: resolve toward the UNION of both sides ONLY where merge-base analysis shows`,
       `a PURE CONCURRENT ADDITION — both sides only ADDED content, neither deleted anything the other`,

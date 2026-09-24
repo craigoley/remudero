@@ -125,7 +125,6 @@
   "src/lib/feedback-docket.ts": 102,
   "src/lib/feedback-landing.ts": 301,
   "src/lib/feedback.ts": 225,
-  "src/lib/fix-fence.ts": 56,
   "src/lib/fleet-control.ts": 500,
   "src/lib/flight-judge.ts": 170,
   "src/lib/flight-signals.ts": 86,
@@ -248,6 +247,6 @@
   "src/lib/worker.ts": 1750,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 17024,
+  "src/run-task.ts": 17250,
   "src/spike.ts": 18
 }

@@ -66,3 +66,16 @@ export const FIX_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"
  * NOT A NARROWING: `FIX_WORKER_TOOLS` is unchanged and still what Claude gets.
  */
 export const FIX_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];
+
+/**
+ * W1-T4458 design (iii): the fix rung's PRIMARY surface — the `tools:` field every spawn
+ * actually gets — for a round the harness commits. `FIX_CASH_TOOLS` above is only the surface a
+ * BLOCKED AUCTION would divert a round to; a Claude round that stays on Claude was still handed
+ * `FIX_WORKER_TOOLS` unconditionally, `Bash` included, even while its own prompt said "you have
+ * no shell on this round" (renderFixPrompt's harnessCommits footer). MEASURED: a merge-conflict
+ * round in that state used the leftover `Bash` to merge and commit itself; the harness, reading
+ * what it believed was a clean tree, refused the commit and silently discarded it
+ * (`harnessCommitForShellLessWorker`'s "the worker changed nothing" branch). `FIX_WORKER_TOOLS`
+ * minus `Bash` — so the prompt and the tools agree, on every provider.
+ */
+export const FIX_WORKER_TOOLS_HARNESS_COMMITS: string[] = FIX_WORKER_TOOLS.filter((tool) => tool !== "Bash");
