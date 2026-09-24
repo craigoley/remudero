@@ -84,6 +84,8 @@ import {
   detachedActionInFlight,
   detachedSweepActionCount,
   drainDetachedSweepActions,
+  drainInFlightReviews,
+  inFlightReviewCount,
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
@@ -2396,19 +2398,30 @@ export async function runDaemon(
     // that settles lets the entrypoint replace this process and kill a useful worker. The caller stops
     // its interphase clock before the final pass, so nothing races in behind it (W1-T2865).
     const detachedAtFreshness = detachedSweepActionCount();
-    if (detachedAtFreshness > 0) {
+    // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
+    const reviewsAtFreshness = inFlightReviewCount();
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0) {
       const drainStartedAtMs = daemonClock.now();
-      log("daemon.freshness_drain.started", { detached_sweep_actions: detachedAtFreshness });
+      log("daemon.freshness_drain.started", {
+        detached_sweep_actions: detachedAtFreshness,
+        in_flight_reviews: reviewsAtFreshness,
+      });
       // W1-T4053 — REVIEWS KEEP FLOWING THROUGH THE DRAIN. With the clock stopped, 42 drains in three days
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
-      const drainReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "drain");
+      // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
+      const drainReviewClock =
+        detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain") : undefined;
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
+      let abandonedReviews: number;
       let reviewPasses = 0;
       try {
-        abandoned = await drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs });
+        [abandoned, abandonedReviews] = await Promise.all([
+          drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs }),
+          drainInFlightReviews({ boundMs: sweepWallClockBoundMs }),
+        ]);
       } finally {
-        reviewPasses = (await drainReviewClock.stop()).passes;
+        reviewPasses = drainReviewClock ? (await drainReviewClock.stop()).passes : 0;
       }
       for (const action of abandoned) {
         log("daemon.detached_action_abandoned", {
@@ -2422,6 +2435,8 @@ export async function runDaemon(
         detached_sweep_actions: detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
         abandoned_detached_sweep_actions: abandoned.length,
+        in_flight_reviews: reviewsAtFreshness,
+        abandoned_in_flight_reviews: abandonedReviews,
         review_passes: reviewPasses,
         duration_ms: Math.max(0, daemonClock.now() - drainStartedAtMs),
       });
