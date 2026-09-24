@@ -5774,12 +5774,16 @@ function materializeReviewerSnapshot(
     );
   }
 
+  // `rev-parse` ascends to the enclosing work tree but `git clone <dir>` does not, so a
+  // `sourceDir` below its top level (a Stryker sandbox under `.stryker-tmp-*/`) passed the HEAD
+  // check and then failed the clone. Both steps now name the same repository: the top level.
   let sourceHead: string;
+  let sourceRepo: string;
   try {
-    sourceHead = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], {
+    [sourceRepo, sourceHead] = execFileSync("git", ["-C", sourceDir, "rev-parse", "--show-toplevel", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    }).trim().split("\n");
   } catch {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -5797,7 +5801,7 @@ function materializeReviewerSnapshot(
 
   const cwd = join(reviewRoot, "checkout");
   try {
-    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceDir, cwd], {
+    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
     execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
