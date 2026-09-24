@@ -44,7 +44,7 @@
       proof: "unit test: the committed Codex ladder keeps Luna on economy work and out of every balanced chain"
     - claim: "a balanced worker missing GPT-6 Sol falls to GPT-5.6 Sol rather than Luna"
       proof: "unit test: without GPT-6 Sol on the account, balanced falls to older Sol and never to Luna"
-    - claim: "all Sonnet effort rows use Sol on Codex while the experiment stays restricted to high-effort GPT-6 Sol"
+    - claim: "all Sonnet effort rows use Sol on Codex while the experiment stays restricted to high effort"
       proof: "unit test: all sonnet efforts reach Sol on Codex while the high-effort A/B stays scoped"
   falsifier: |
     Restore a Luna candidate to any Codex balanced row and the first proof fails. Restore Luna
