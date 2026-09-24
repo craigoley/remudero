@@ -1033,7 +1033,7 @@ export interface BuildSweepEffectsDeps {
    *  wrapper around one network call, so without a seam the only way to cover it is to make a real
    *  one. Production supplies the entrypoint's GitHub body writer. */
   updatePrBodyImpl?: (prUrl: string, body: string) => Promise<void>;
-  repairMetadataImpl?: (pr: OpenPrView, checks: readonly string[]) => Promise<{ repaired: boolean; reason: string }>;
+  repairMetadataImpl?: (pr: OpenPrView, checks: readonly string[]) => Promise<MetadataRepairResult>;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
   depReviewCommandImpl?: (prArg: string, rest?: string[]) => Promise<number>;
@@ -7676,10 +7676,7 @@ export interface SweepDeps {
     repair: MissingTaskTrailerRepair,
   ) => boolean | void | Promise<boolean | void>;
   /** Repair title/body-only required reds through a pull-request metadata edit. */
-  repairMetadata?: (
-    pr: OpenPrView,
-    checks: readonly string[],
-  ) => { repaired: boolean; reason: string } | Promise<{ repaired: boolean; reason: string }>;
+  repairMetadata?: (pr: OpenPrView, checks: readonly string[]) => MetadataRepairResult | Promise<MetadataRepairResult>;
   /** Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
    *  {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses `escalate()`
    *  as the notification transport, carrying the same two resolutions as its options. */
@@ -8301,6 +8298,17 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
 }
 
 const METADATA_RED_CHECKS = new Set(["commitlint", "acceptance-author-gate", "proof-discrimination"]);
+
+/** `notMetadata`: the live title/body already pass, so the red is file-fixable and falls through to a worker. */
+export interface MetadataRepairResult { repaired: boolean; reason: string; notMetadata?: true }
+
+/** A prior pass at this head found this metadata-only red set NOT a metadata defect. */
+export function metadataRedRuledOut(lines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
+  const checks = JSON.stringify(metadataOnlyRed(pr));
+  return lines.some((line) =>
+    line.step === "sweep.disposed" && line.pr_number === pr.prNumber && line.head_sha === pr.headSha &&
+    line.metadata_repair_outcome === "not-metadata" && JSON.stringify(line.metadata_red_checks) === checks);
+}
 
 export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
   if (!isBlockedCi(pr) || pr.reviewState === "failure") return undefined;
@@ -9503,10 +9511,10 @@ export async function runSweep(
         // DISPATCHED, never that it succeeded. When the ledger shows that rung already ENDED
         // without landing a new head, treating it as "already done" would dedup this PR against a
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
-        const refusal = disposition === "blocked-fixable" && !metadataOnlyRed(pr)
-          ? sameHeadRedFixRefusal(ledgerLines, pr)
-          : undefined;
-        alreadyDone = disposition === "blocked-fixable" && metadataOnlyRed(pr)
+        const metadataRed = disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined &&
+          !metadataRedRuledOut(ledgerLines, pr);
+        const refusal = disposition === "blocked-fixable" && !metadataRed ? sameHeadRedFixRefusal(ledgerLines, pr) : undefined;
+        alreadyDone = metadataRed
           ? false
           : refusal !== undefined && !refusal.scopeAmendment
             ? true
@@ -9742,7 +9750,7 @@ export async function runSweep(
               }
               // W1-T4459: both dedup checks below read a PRIOR `sweep.disposed` row's extra fields
               // (see `sameHeadRedFixRefusal` for why no new ledger step).
-              const metadataChecks = metadataOnlyRed(pr);
+              const metadataChecks = metadataRedRuledOut(ledgerLines, pr) ? undefined : metadataOnlyRed(pr);
               if (metadataChecks) {
                 const priorRepair = ledgerLines.find((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -9753,21 +9761,23 @@ export async function runSweep(
                   standDownReason = `metadata red already ${priorRepair.metadata_repair_outcome} at this head and red set; awaiting a fresh edited-event verdict`;
                   break;
                 }
-                const result = deps.repairMetadata
+                const result: MetadataRepairResult = deps.repairMetadata
                   ? await deps.repairMetadata(pr, metadataChecks)
                   : { repaired: false, reason: "metadata repair effect is not wired" };
-                const outcome = result.repaired ? "repaired" : "escalated";
-                if (!result.repaired) {
-                  await deps.escalate(
-                    pr,
-                    `metadata-only required checks ${metadataChecks.join(", ")} need title/body repair: ${result.reason}`,
-                    renderClarificationQuestion(pr, result.reason, pr.strikeHistory ?? []),
-                  );
-                }
+                const outcome = result.repaired ? "repaired" : result.notMetadata ? "not-metadata" : "escalated";
                 extraDisposedFields = { metadata_red_checks: metadataChecks, metadata_repair_outcome: outcome };
-                acted = false;
-                standDownReason = `metadata-only red ${outcome}: ${result.reason}; no fix worker dispatched`;
-                break;
+                if (!result.notMetadata) {
+                  if (!result.repaired) {
+                    await deps.escalate(
+                      pr,
+                      `metadata-only required checks ${metadataChecks.join(", ")} need title/body repair: ${result.reason}`,
+                      renderClarificationQuestion(pr, result.reason, pr.strikeHistory ?? []),
+                    );
+                  }
+                  acted = false;
+                  standDownReason = `metadata-only red ${outcome}: ${result.reason}; no fix worker dispatched`;
+                  break;
+                }
               }
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
               if (refusedSameRed?.scopeAmendment) {
@@ -9778,7 +9788,7 @@ export async function runSweep(
                 if (!alreadyEscalated) {
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
                 }
-                extraDisposedFields = { scope_amendment_red_checks: redCheckNames(pr) };
+                extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
                 standDownReason = reason;
                 break;
@@ -10107,7 +10117,7 @@ export async function runSweep(
               }
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
               // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
-              extraDisposedFields = { red_checks: redCheckNames(pr) };
+              extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
               if (deps.detachFixWait) {
                 detachSweepAction(
                   fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)),

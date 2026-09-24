@@ -71,6 +71,36 @@ test("W1-T4459: a title or body red is repaired without a fix worker", async () 
   assert.deepEqual(mixed.repairs, [], "a failing review is another required red and must not be treated as metadata-only");
 });
 
+test("W1-T4459: a commitlint red whose title already passes still reaches the fix worker", async () => {
+  const h = harness();
+  const writes: Array<{ title?: string; body?: string }> = [];
+  let liveTitle = "fix(sweep): a title that already passes";
+  h.deps.dispatchFix = (pr) => {
+    h.dispatched.push(pr.headSha);
+    h.rows.push({ task_id: pr.taskId, step: "fix.dispatch", head_sha: pr.headSha });
+  };
+  h.deps.repairMetadata = (pr, checks) =>
+    repairPrMetadata(pr, checks, (_url, fields) => { writes.push(fields); }, () => ({ title: liveTitle, body: "b" }));
+  await runSweep([subject(["commitlint"])], h.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(h.dispatched, ["head-a"], "a red the title cannot explain falls through to the fix rung");
+  assert.deepEqual(h.escalations, []);
+  assert.deepEqual(writes, []);
+  const disposed = h.rows.filter((row) => row.step === "sweep.disposed");
+  assert.ok(disposed.every((row) => row.metadata_repair_outcome !== "escalated" && row.metadata_repair_outcome !== "repaired"));
+  assert.ok(disposed.some((row) => row.acted === true && row.metadata_repair_outcome === "not-metadata"));
+  await runSweep([subject(["commitlint"])], h.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(h.dispatched, ["head-a"], "the dispatched head dedups like any other fix");
+  assert.deepEqual(h.escalations, []);
+
+  const titleRed = harness();
+  liveTitle = "Broken title";
+  titleRed.deps.repairMetadata = h.deps.repairMetadata;
+  await runSweep([subject(["commitlint"])], titleRed.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(titleRed.dispatched, [], "a real title red is repaired, never dispatched");
+  assert.deepEqual(writes, [{ title: "fix(pr): broken title" }]);
+  assert.ok(titleRed.rows.some((row) => row.step === "sweep.disposed" && row.metadata_repair_outcome === "repaired"));
+});
+
 test("W1-T4459: a refused round is not re-dispatched at the same head and red", async () => {
   const h = harness();
   h.rows.push(
@@ -103,6 +133,11 @@ test("metadata repair writes a live title and body in one PR edit", async () => 
     () => ({ title: "Broken title", body: "A short summary." }),
   );
   assert.equal(result.repaired, true);
+  const bodyOnly: Array<{ title?: string; body?: string }> = [];
+  await repairPrMetadata(subject(), ["commitlint", "acceptance-author-gate"], (_url, fields) => { bodyOnly.push(fields); },
+    () => ({ title: "fix(pr): valid title", body: "A short summary." }));
+  assert.equal(bodyOnly[0].title, undefined, "a title that already passes is left alone while the body is repaired");
+  assert.match(bodyOnly[0].body ?? "", /Acceptance:/);
   assert.match(writes[0].title ?? "", /^fix\(pr\): broken title$/);
   assert.match(writes[0].body ?? "", /Acceptance:/);
   assert.deepEqual(prMetadataRestArgs(subject().prUrl, writes[0]), [
@@ -150,6 +185,7 @@ test("metadata repair refuses every edit it cannot derive safely, naming why", a
     [["commitlint"], { body: "b" }, /title is unavailable/],
     [["commitlint"], { title: "  " }, /title is unavailable/],
     [["commitlint"], { title: "fix(pr): already valid" }, /already satisfies commitlint/],
+    [["commitlint", "proof-discrimination"], { title: "fix(pr): valid", body: "## Acceptance\n\n- a claim | unit test: a proof\n" }, /no deterministic acceptance repair/],
     [["commitlint"], { title: "fix: ." }, /candidate PR title did not satisfy commitlint/],
     [["acceptance-author-gate"], { title: "fix(pr): valid" }, /body is unavailable/],
     [[], { title: "Broken title", body: "b" }, /no title or body edit was derived/],
