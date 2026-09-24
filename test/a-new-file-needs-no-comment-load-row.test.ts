@@ -19,6 +19,7 @@
 // test/comment-load-ratchet.test.ts already does -- the real module, no shadow copy.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
@@ -26,7 +27,7 @@ import { test } from "node:test";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "comment-load-ratchet.mjs");
 
-const { baselineRowRequired, isRedundantBaselineRow, evaluateBaselineCensus, CEILING_BUCKET_COMMENTS } =
+const { baselineRowRequired, isRedundantBaselineRow, evaluateBaselineCensus, evaluateCommentLoadRatchet, CEILING_BUCKET_COMMENTS } =
   (await import(pathToFileURL(SCRIPT).href)) as {
     baselineRowRequired: (comments: number) => boolean;
     isRedundantBaselineRow: (recorded: number) => boolean;
@@ -34,6 +35,10 @@ const { baselineRowRequired, isRedundantBaselineRow, evaluateBaselineCensus, CEI
       current: Record<string, number>,
       baseline: Record<string, number>,
     ) => { missing: string[]; redundant: string[]; ok: boolean };
+    evaluateCommentLoadRatchet: (
+      current: Record<string, number>,
+      baseline: Record<string, number>,
+    ) => { ok: boolean; violations: unknown[]; added: unknown[]; redundant: string[]; nextBaseline: Record<string, number> };
     CEILING_BUCKET_COMMENTS: number;
   };
 
@@ -64,6 +69,15 @@ test("W1-T4431: a new file under the default bucket needs no baseline row", () =
   const overDefault = evaluateBaselineCensus({ "src/big.ts": CEILING_BUCKET_COMMENTS + 1 }, {});
   assert.deepEqual(overDefault.missing, ["src/big.ts"]);
   assert.equal(overDefault.ok, false);
+
+  // THE GATE ITSELF, not only the predicates: the ratchet passes a rowless new file under the default
+  // and writes NOTHING for it, so adding a file never touches scripts/comment-load-baseline.json.
+  const ratchet = evaluateCommentLoadRatchet({ "src/brand-new.ts": 1 }, {});
+  assert.equal(ratchet.ok, true);
+  assert.deepEqual(ratchet.added, []);
+  assert.equal("src/brand-new.ts" in ratchet.nextBaseline, false, "a new file under the default records no row");
+  // An absent row is the DEFAULT ceiling, never "no ceiling": a rowless file above it is refused.
+  assert.equal(evaluateCommentLoadRatchet({ "src/big.ts": CEILING_BUCKET_COMMENTS + 1 }, {}).ok, false);
 });
 
 test("W1-T4431: a row equal to the default is refused as redundant", () => {
@@ -82,4 +96,13 @@ test("W1-T4431: a row equal to the default is refused as redundant", () => {
   // when its own value would coincidentally equal the default bucket.
   const withProse = evaluateBaselineCensus({}, { _comment: CEILING_BUCKET_COMMENTS });
   assert.deepEqual(withProse.redundant, []);
+
+  // THE GATE drops a default row rather than rewriting it, and the SHIPPED baseline carries none.
+  const dropped = evaluateCommentLoadRatchet({ "src/at-default.ts": 12 }, { "src/at-default.ts": CEILING_BUCKET_COMMENTS });
+  assert.deepEqual(dropped.redundant, ["src/at-default.ts"]);
+  assert.equal("src/at-default.ts" in dropped.nextBaseline, false);
+  const shipped = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/comment-load-baseline.json"), "utf8")) as Record<string, number>;
+  const atDefault = Object.entries(shipped).filter(([k, v]) => k !== "_comment" && isRedundantBaselineRow(v));
+  assert.deepEqual(atDefault, [], "the shipped baseline carries no row at the default bucket");
+  assert.ok(Object.keys(shipped).length > 100, "the census must see a real baseline, not an empty object");
 });

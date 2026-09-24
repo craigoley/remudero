@@ -264,29 +264,30 @@ export function evaluateCommentLoadRatchet(currentComments, baseline) {
   const nextBaseline = {};
   for (const path of Object.keys(currentComments).sort()) {
     const comments = currentComments[path];
-    const recorded = baseline[path];
-    if (recorded === undefined) {
-      // W1-T3022: a new file records its BUCKET, so two PRs adding the same file agree.
-      added.push({ path, comments });
-      nextBaseline[path] = ceilingForComments(comments);
-    } else if (comments > recorded) {
+    // W1-T4431: AN ABSENT ROW MEANS THE DEFAULT BUCKET, not "no ceiling". A file at or under it needs
+    // no row -- so a new file never touches the baseline -- and one over it with no row is refused like
+    // any other growth, naming the row to record. Rows AT the default are dropped as redundant below.
+    const recorded = baseline[path] ?? CEILING_BUCKET_COMMENTS;
+    if (comments > recorded) {
       // Unchanged: growth past the recorded ceiling is still refused, and the old ceiling is still
       // never advanced automatically. Only the value the refusal ASKS for is bucketed.
       violations.push({ path, comments, baseline: recorded, overage: comments - recorded });
-      nextBaseline[path] = recorded;
+      if (!isRedundantBaselineRow(recorded)) nextBaseline[path] = recorded;
     } else if (ceilingForComments(comments) < recorded) {
       // W1-T3022: lowered only by a WHOLE BUCKET. An exact-count shrink used to rewrite this entry
       // on any decrease, which is the same every-PR-edits-the-same-line churn the bucket removes.
       shrunk.push({ path, from: recorded, to: ceilingForComments(comments) });
-      nextBaseline[path] = ceilingForComments(comments);
-    } else {
+      if (baselineRowRequired(comments)) nextBaseline[path] = ceilingForComments(comments);
+    } else if (!isRedundantBaselineRow(recorded)) {
       nextBaseline[path] = recorded;
     }
   }
-  const removed = Object.keys(baseline)
-    .filter((path) => path !== "_comment" && !(path in nextBaseline))
-    .sort();
-  return { ok: violations.length === 0, violations, shrunk, added, removed, nextBaseline };
+  const rows = Object.keys(baseline).filter((path) => path !== "_comment" && !(path in nextBaseline));
+  const removed = rows.filter((path) => !(path in currentComments)).sort();
+  // W1-T4431: a measured file whose row was dropped because it says no more than "absent" does.
+  const shrunkPaths = new Set(shrunk.map((entry) => entry.path));
+  const redundant = rows.filter((path) => path in currentComments && !shrunkPaths.has(path)).sort();
+  return { ok: violations.length === 0, violations, shrunk, added, removed, redundant, nextBaseline };
 }
 
 /**
@@ -513,6 +514,7 @@ export function main(argv) {
       shrunk: verdict.shrunk,
       added: verdict.added,
       removed: verdict.removed,
+      redundant: verdict.redundant,
     }));
     return causedViolations.length === 0 && blocks.length === 0 ? 0 : 1;
   }
@@ -533,12 +535,14 @@ export function main(argv) {
       `against ${measured.totals.code} code lines (${pct.toFixed(1)}%); none over its ceiling, no added block over ${MAX_ADDED_BLOCK_LINES} lines.`,
   );
 
-  const drift = verdict.shrunk.length + verdict.added.length + verdict.removed.length + split.inherited.length;
+  const drift =
+    verdict.shrunk.length + verdict.added.length + verdict.removed.length + verdict.redundant.length + split.inherited.length;
   if (values.check && drift > 0) {
     console.error(`comment-load-ratchet: CHECK FAILED -- ${drift} baseline change(s) are required and ${baselineRelPath} was left byte-identical:`);
     for (const a of verdict.added) console.error(`  add    "${a.path}": ${a.comments},`);
     for (const s of verdict.shrunk) console.error(`  lower  "${s.path}": ${s.from} -> ${s.to}`);
     for (const path of verdict.removed) console.error(`  remove "${path}"`);
+    for (const path of verdict.redundant) console.error(`  remove "${path}" (at the default bucket, which an absent row already means)`);
     console.error(`  Re-run without --check to record these non-growth changes.`);
     return 1;
   }
@@ -556,6 +560,7 @@ export function main(argv) {
     for (const s of verdict.shrunk) console.log(`  ratcheting down: ${s.path} ${s.from} -> ${s.to}`);
     for (const a of verdict.added) console.log(`  recording new file: ${a.path} at ${a.comments}`);
     for (const path of verdict.removed) console.log(`  dropping entry for a file no longer tracked: ${path}`);
+    for (const path of verdict.redundant) console.log(`  dropping a redundant default-bucket entry: ${path}`);
     for (const v of split.inherited) console.log(`  recording base-inherited growth: ${v.path} ${v.baseline} -> ${v.comments}`);
     // `_comment` is prose the baseline carries for whoever opens it; it is not a path, so
     // `evaluateCommentLoadRatchet` never sees it and it must be re-attached here or a write drops it.
