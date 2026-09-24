@@ -244,6 +244,7 @@
     "test/a-review-materializes-the-exact-pr-head.test.ts": 2140,
     "test/a-review-runs-each-unique-proof-once.test.ts": 846,
     "test/a-review-worktree-stranded-by-a-kill-is-swept-later.test.ts": 0,
+    "test/a-reviewer-that-cannot-see-the-repo-posts-no-verdict.test.ts": 0,
     "test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts": 0,
     "test/a-root-owned-runtime-path-is-refused-at-boot.test.ts": 0,
     "test/a-router-that-never-explores-can-never-compare-its-own-arms.test.ts": 0,
