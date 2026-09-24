@@ -17,7 +17,9 @@ import {
   realArmDeps,
   type ArmDeps,
 } from "../src/lib/arm-auto-merge.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { armOutcomeArmed } from "../src/lib/sweep.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/5";
 
@@ -97,6 +99,16 @@ test("W1-T4405: auto-merge enqueues when a merge queue is configured", () => {
   const real = realArmDeps();
   assert.equal(real.mergeQueue?.("not a pr url"), false);
   assert.equal(real.mergeQueue?.("not a pr url"), false, "a second read is served from the per-PR cache");
+  // The real enqueue is `gh pr merge <url>` — no --squash (the queue owns the merge method), no --auto.
+  const shim = ghShim([], { kind: "w1t4405" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  try {
+    withLiveWritesAllowed(() => real.enqueue?.(PR));
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  assert.deepEqual(shim.calls(), [`pr merge ${PR}`]);
 });
 
 test("W1-T4405: a queued pull request reads as armed, not stuck", () => {
