@@ -1092,6 +1092,7 @@
     "test/next-task-id-reserve.test.ts": 6952,
     "test/no-circular-is-an-error.test.ts": 0,
     "test/no-consumer-resolves-a-base-from-the-local-main-ref.test.ts": 393,
+    "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": 0,
     "test/no-hand-rolled-fetch-check.test.ts": 534,
     "test/no-pr-does-not-halt-drain.test.ts": 1051,
     "test/no-pr-followups-harvested.test.ts": 2633,
