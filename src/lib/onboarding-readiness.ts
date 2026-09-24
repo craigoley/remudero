@@ -94,9 +94,9 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
       const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d+)/.exec(headers);
       const status = statusMatch ? Number(statusMatch[1]) : 200;
       const trimmed = body.trim();
-      const parsed = trimmed === "" ? undefined : safeJsonParse(trimmed);
-      if (trimmed !== "" && parsed === undefined) return undefined; // 2xx with an unparsable body — read failed.
-      return { status, body: parsed };
+      if (trimmed === "") return { status, body: undefined };
+      const parsed = parseJson(trimmed);
+      return parsed.ok ? { status, body: parsed.value } : undefined; // An unparsable body is a failed read.
     } catch (err) {
       // `gh` exits non-zero for every non-2xx response AND for a genuine transport failure; only
       // the former names its status in the error text (`gh: Not Found (HTTP 404)`) — a definitive
@@ -108,9 +108,8 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
   }
   return {
     listInstallationRepos: () => {
-      // First page only (100 repos) — a follow-up would add `--paginate` once an installation
-      // grows past it; see this module's header. `--paginate` is a GET-shaped flag, never a write.
-      const read = apiRead("installation/repositories");
+      // First page only, at GitHub's 100-repo maximum (the default page is 30).
+      const read = apiRead("installation/repositories?per_page=100");
       if (read === undefined || read.status !== 200) return undefined;
       const repositories = (read.body as { repositories?: unknown } | undefined)?.repositories;
       if (!Array.isArray(repositories)) return undefined;
@@ -124,11 +123,11 @@ export function onboardingReadinessGateway(execFileFn: (args: string[]) => strin
   };
 }
 
-function safeJsonParse(text: string): unknown {
+function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
   try {
-    return JSON.parse(text);
+    return { ok: true, value: JSON.parse(text) };
   } catch {
-    return undefined;
+    return { ok: false };
   }
 }
 
@@ -250,19 +249,15 @@ function decodeContentsText(read: OnboardingReadinessApiRead | undefined): strin
   if (read === undefined || read.status !== 200) return undefined;
   const body = read.body as { content?: unknown; encoding?: unknown } | null;
   if (typeof body?.content !== "string") return undefined;
-  try {
-    return Buffer.from(body.content, body.encoding === "base64" ? "base64" : "utf8").toString("utf8");
-  } catch {
-    return undefined;
-  }
+  return Buffer.from(body.content, body.encoding === "base64" ? "base64" : "utf8").toString("utf8");
 }
 
 function checkTestCommand(owner: string, repo: string, gateway: OnboardingReadinessGateway): OnboardingReadinessCheck {
   const pkg = gateway.getContents(owner, repo, "package.json");
   const pkgText = decodeContentsText(pkg);
   if (pkgText !== undefined) {
-    const parsed = safeJsonParse(pkgText) as { scripts?: { test?: unknown } } | undefined;
-    const testScript = parsed?.scripts?.test;
+    const parsed = parseJson(pkgText);
+    const testScript = parsed.ok ? (parsed.value as { scripts?: { test?: unknown } } | null)?.scripts?.test : undefined;
     if (typeof testScript === "string" && testScript.trim() && !/no test specified/i.test(testScript)) {
       return check("test-command", "pass", "package.json declares an npm test script", `npm test — ${testScript}`);
     }
@@ -289,9 +284,12 @@ function checkPlanLayout(owner: string, repo: string, gateway: OnboardingReadine
   return check("plan-layout", "pass", "plan/ directory present");
 }
 
-function checkAlreadyOnboarded(owner: string, repo: string, registryRepos: readonly string[]): OnboardingReadinessCheck {
+function checkAlreadyOnboarded(owner: string, repo: string, registry: OnboardingRegistryRead): OnboardingReadinessCheck {
   const target = `${owner}/${repo}`;
-  const already = registryRepos.some((r) => sameRepo(r, target));
+  if ("unreadable" in registry) {
+    return check("already-onboarded", "unknown", `the fleet registry could not be read (${registry.unreadable})`);
+  }
+  const already = registry.repos.some((r) => sameRepo(r, target));
   if (already) {
     return check("already-onboarded", "warn", `${target} is already onboarded in the fleet registry — do not create a second instance`, target);
   }
@@ -300,24 +298,21 @@ function checkAlreadyOnboarded(owner: string, repo: string, registryRepos: reado
 
 // ── The report ──────────────────────────────────────────────────────────────────────────────
 
-export interface OnboardingReadinessDeps {
-  /** Defaults to {@link onboardingReadinessGateway}'s real `gh api` reads. */
-  gateway?: OnboardingReadinessGateway;
-  /** `owner/name` of every LIVE repo already in the fleet's one registry (W1-T4227,
-   *  `parseInstanceRegistry(...).instances.filter(i => i.live).map(i => i.repo)`) — a plain local
-   *  comparison, never a GitHub read, so an unreadable registry is the caller's concern, not this
-   *  check's; an empty/absent list just reads as "not yet onboarded". */
-  registryRepos?: readonly string[];
-}
+/** The fleet's one registry (W1-T4227) as `already-onboarded` needs it: every LIVE repo's
+ *  `owner/name`, or the path-free reason it could not be read — which reads `unknown`, never a pass. */
+export type OnboardingRegistryRead = { repos: readonly string[] } | { unreadable: string };
 
 /**
  * `GET /v1/onboarding/readiness?repo=<owner/name>`'s answer: the eight checks above, each
  * independently `pass`/`warn`/`fail`/`unknown` with its own reason — never a single verdict that
  * hides which check said what.
  */
-export function onboardingReadiness(owner: string, repo: string, deps: OnboardingReadinessDeps = {}): OnboardingReadinessReport {
-  const gateway = deps.gateway ?? onboardingReadinessGateway();
-  const registryRepos = deps.registryRepos ?? [];
+export function onboardingReadiness(
+  owner: string,
+  repo: string,
+  registry: OnboardingRegistryRead,
+  gateway: OnboardingReadinessGateway = onboardingReadinessGateway(),
+): OnboardingReadinessReport {
   const { check: defaultBranchCheck, defaultBranch } = checkDefaultBranch(owner, repo, gateway);
   const checks: OnboardingReadinessCheck[] = [
     checkAppAccess(owner, repo, gateway),
@@ -327,7 +322,7 @@ export function onboardingReadiness(owner: string, repo: string, deps: Onboardin
     checkAgentInstructions(owner, repo, gateway),
     checkTestCommand(owner, repo, gateway),
     checkPlanLayout(owner, repo, gateway),
-    checkAlreadyOnboarded(owner, repo, registryRepos),
+    checkAlreadyOnboarded(owner, repo, registry),
   ];
   return { repo: `${owner}/${repo}`, checks };
 }
