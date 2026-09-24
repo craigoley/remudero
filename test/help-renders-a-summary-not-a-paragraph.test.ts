@@ -143,7 +143,7 @@ const BASELINE_COMMAND_NAMES = [
   "pr-owner",
   "reframe",
   "risk-judge-eval",
-  "rule", "relay", "replay", "replay-goldens", "restore", "resume", "retro", "review", "rule-efficacy", "run-task",
+  "rule", "relay", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
