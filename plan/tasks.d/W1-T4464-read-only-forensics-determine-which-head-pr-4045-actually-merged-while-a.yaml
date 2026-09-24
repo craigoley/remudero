@@ -79,7 +79,7 @@
     - claim: "any unowned code change is emitted only as a narrowly scoped successor filing in the audit; this diagnostic task edits no source"
       proof: "grep: SUCCESSOR FILING in docs/audits/pr-4045-stale-head-fix-race-2026-09.md"
     - claim: "the forensic artifact is discoverable through the generated documentation index"
-      proof: "grep: pr-4045-stale-head-fix-race-2026-09.md in docs/docs-index.json"
+      proof: "grep: pr-4045-stale-head-fix-race-2026-09\\.md in docs/docs-index.json"
   falsifier: |
     File no implementation successor if the timeline proves no stale merge occurred, or if the
     ruled-in mechanism is already fully owned by an existing task above. The diagnostic artifact
