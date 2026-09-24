@@ -166,7 +166,7 @@ const BASELINE_COMMAND_NAMES = [
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // ONE literal, deliberately: this is the reviewed count, and a verb joining the registry should
   // cost exactly one considered edit here beside its line above.
-  assert.equal(BASELINE_COMMAND_NAMES.length, 86);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 87);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
   // DERIVED from that list, not a second literal. Two copies of the same number meant a new verb
   // reddened this twice and reported "expected 71, got 72", which names nothing about what changed;
