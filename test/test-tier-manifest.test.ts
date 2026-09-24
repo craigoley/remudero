@@ -1,6 +1,10 @@
 // test/test-tier-manifest.test.ts — W1-T2904: the per-test-file duration ledger and its
-// fast/slow tiering refuses a test file it has never recorded, which is the acceptance this file
-// exists to prove ("a test file absent from the tier manifest is refused").
+// fast/slow tiering.
+//
+// W1-T4430 FLIPPED THE ACCEPTANCE THIS FILE ONCE PROVED: a test file absent from the manifest is
+// no longer refused (it defaults to the fast tier at duration 0, same as every other reader of
+// `manifest.files`); `--check` refuses only a GHOST row — one that names a file no longer on disk.
+// See test/a-new-test-file-needs-no-tier-row.test.ts for that acceptance's own coverage.
 //
 // scripts/test-tier-manifest.mjs is a plain .mjs file outside tsconfig's `include` (same
 // convention as test/test-with-retry.test.ts / test/coverage-ratchet.test.ts), so its pure
@@ -27,7 +31,7 @@ const SCRIPT = join(REPO_ROOT, "scripts", "test-tier-manifest.mjs");
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   DEFAULT_SLOW_THRESHOLD_MS: number;
   tierForDuration: (durationMs: number, thresholdMs: number) => "fast" | "slow";
-  findUntieredFiles: (testFiles: string[], manifest: { files: Record<string, number> }) => string[];
+  findGhostRows: (testFiles: string[], manifest: { files: Record<string, number> }) => string[];
   tierFiles: (
     testFiles: string[],
     manifest: { thresholdMs: number; files: Record<string, number> },
@@ -37,12 +41,6 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
     manifest: { thresholdMs: number; files: Record<string, number> },
     shardCount: number,
   ) => string[][];
-  inheritedUntieredFiles: (
-    missing: string[],
-    baseRef: string | undefined,
-    root: string,
-    spawn: (cmd: string, args: string[], opts?: unknown) => { status: number | null; stdout?: string },
-  ) => { inherited: string[]; blocking: string[] };
   mergeDurations: (
     manifest: { thresholdMs: number; files: Record<string, number> },
     measured: Record<string, number>,
@@ -65,10 +63,9 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
 const {
   DEFAULT_SLOW_THRESHOLD_MS,
   tierForDuration,
-  findUntieredFiles,
+  findGhostRows,
   tierFiles,
   balanceFilesByDuration,
-  inheritedUntieredFiles,
   mergeDurations,
   readDurationEvidence,
   loadManifest,
@@ -107,10 +104,13 @@ test("tierForDuration: below the threshold is fast, at or above it is slow", () 
   assert.equal(tierForDuration(57771, 5000), "slow");
 });
 
-test("findUntieredFiles: a file on disk the manifest has never heard of is missing -- a duration of 0 is NOT missing", () => {
-  const manifest = { thresholdMs: DEFAULT_SLOW_THRESHOLD_MS, files: { "test/a.test.ts": 0, "test/b.test.ts": 1234 } };
-  const missing = findUntieredFiles(["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"], manifest);
-  assert.deepEqual(missing, ["test/c.test.ts"], "only the file with NO entry at all is missing");
+test("findGhostRows: a manifest row naming a file NOT on disk is a ghost; an absent file is never one", () => {
+  const manifest = {
+    thresholdMs: DEFAULT_SLOW_THRESHOLD_MS,
+    files: { "test/a.test.ts": 0, "test/b.test.ts": 1234, "test/deleted.test.ts": 500 },
+  };
+  const ghosts = findGhostRows(["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"], manifest);
+  assert.deepEqual(ghosts, ["test/deleted.test.ts"], "only the row naming a file that is gone is a ghost");
 });
 
 test("tierFiles: buckets by the manifest's recorded duration against its own threshold", () => {
@@ -144,43 +144,6 @@ test("balanceFilesByDuration: unmeasured zero-duration files spread by count ins
   const files = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts", "test/d.test.ts"];
   const manifest = { thresholdMs: 5000, files: Object.fromEntries(files.map((file) => [file, 0])) };
   assert.deepEqual(balanceFilesByDuration(files, manifest, 2).map((shard) => shard.length), [2, 2]);
-});
-
-test("inherited untiered files from a moving base default fast without blocking; this PR's new file still blocks", () => {
-  const calls: string[] = [];
-  const result = inheritedUntieredFiles(
-    ["test/from-main.test.ts", "test/from-pr.test.ts"],
-    "origin/main",
-    "/repo",
-    (_cmd, args) => {
-      calls.push(args.join(" "));
-      return { status: 0, stdout: "test/from-main.test.ts\ntest/already-tiered.test.ts\n" };
-    },
-  );
-  assert.deepEqual(result, { inherited: ["test/from-main.test.ts"], blocking: ["test/from-pr.test.ts"] });
-  assert.deepEqual(calls, ["-C /repo ls-tree -r --name-only origin/main -- test"]);
-});
-
-test("an unreadable explicit base fails closed: every untiered file still blocks", () => {
-  const result = inheritedUntieredFiles(
-    ["test/unresolved.test.ts"],
-    "missing-ref",
-    "/repo",
-    () => ({ status: 128, stdout: "" }),
-  );
-  assert.deepEqual(result, { inherited: [], blocking: ["test/unresolved.test.ts"] });
-});
-
-test("without an explicit base, every untiered file blocks (author-time fixture and fail-closed control)", () => {
-  const result = inheritedUntieredFiles(
-    ["test/new.test.ts"],
-    undefined,
-    "/repo",
-    () => {
-      throw new Error("git must not run without an explicit base");
-    },
-  );
-  assert.deepEqual(result, { inherited: [], blocking: ["test/new.test.ts"] });
 });
 
 test("mergeDurations: overwrites/adds only the named entries, leaves every other recorded file untouched, never mutates its input", () => {
@@ -329,21 +292,31 @@ test("listTestFiles: a root with no test directory is an empty suite, while anot
   assert.throws(() => listTestFiles(root), /ENOTDIR/);
 });
 
-// ── the acceptance criterion itself: an untiered file is refused ───────────────────────────────
+// ── the W1-T4430 acceptance: a new test file needs no row, a GHOST row is what refuses ─────────
 
-test("W1-T2904 acceptance: --check REFUSES a test file absent from the tier manifest, naming it", () => {
+test("W1-T4430 acceptance: --check PASSES on a brand-new, untiered test file — no row was ever required", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "tiered.test.ts");
   writeFixtureTestFile(root, "brand-new.test.ts");
   writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/tiered.test.ts": 12 } });
 
   const result = runCli(["--check"], root);
-  assert.notEqual(result.status, 0, "an untiered file must refuse, not merely warn");
-  assert.match(result.stderr, /test\/brand-new\.test\.ts/, "the refusal must NAME the missing file");
-  assert.doesNotMatch(result.stderr, /test\/tiered\.test\.ts is not recorded/, "the already-tiered file must not be reported as missing");
+  assert.equal(result.status, 0, `an untiered file must never refuse: ${result.stderr}`);
+  assert.match(result.stdout, /OK/);
 });
 
-test("W1-T2904 acceptance, positive control: --check PASSES when every test file is recorded", () => {
+test("W1-T4430 acceptance: --check REFUSES a GHOST row — a manifest entry naming a file that no longer exists", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "tiered.test.ts");
+  writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/tiered.test.ts": 12, "test/deleted.test.ts": 900 } });
+
+  const result = runCli(["--check"], root);
+  assert.notEqual(result.status, 0, "a row naming a file that does not exist must refuse");
+  assert.match(result.stderr, /test\/deleted\.test\.ts/, "the refusal must NAME the ghost row");
+  assert.doesNotMatch(result.stderr, /test\/tiered\.test\.ts/, "the row that still names a real file must not be reported");
+});
+
+test("W1-T2904 acceptance, positive control: --check PASSES when every test file is recorded and no row is a ghost", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "tiered.test.ts");
   writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/tiered.test.ts": 12 } });
@@ -353,7 +326,7 @@ test("W1-T2904 acceptance, positive control: --check PASSES when every test file
   assert.match(result.stdout, /OK/);
 });
 
-test("--check --base reports inherited base movement but passes when this branch introduced no untiered file", () => {
+test("--check ignores --base entirely now — it neither spawns git nor changes the verdict", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "from-main.test.ts");
   let calls = 0;
@@ -364,7 +337,7 @@ test("--check --base reports inherited base movement but passes when this branch
     },
   });
   assert.equal(code, 0);
-  assert.equal(calls, 1, "one base-tree census handles every inherited file");
+  assert.equal(calls, 0, "W1-T4430: a ghost-row check never needs the base tree, so it must not spawn git");
 });
 
 test("--seed adds a placeholder duration of 0 for an untiered file, and never overwrites an already-recorded one", () => {
@@ -387,16 +360,22 @@ test("--seed adds a placeholder duration of 0 for an untiered file, and never ov
 
 // ── --run wiring: a pure unit test on `main`'s injectable spawn, not a real recursive `node --test` ──
 
-test("--run refuses when the manifest is missing any test file, without spawning anything", () => {
+test("W1-T4430: --run fast INCLUDES an untiered test file, rather than refusing to spawn at all", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "tiered.test.ts");
   writeFixtureTestFile(root, "brand-new.test.ts");
   writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/tiered.test.ts": 1 } });
 
-  let spawnCalls = 0;
-  const code = main(["--root", root, "--run", "fast"], { spawn: () => { spawnCalls += 1; return { status: 0 }; } });
-  assert.equal(code, 1);
-  assert.equal(spawnCalls, 0, "an untiered file must refuse before ever spawning the test runner");
+  let capturedArgs: string[] | undefined;
+  const code = main(["--root", root, "--run", "fast"], {
+    spawn: (_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return { status: 0 };
+    },
+  });
+  assert.equal(code, 0);
+  assert.ok(capturedArgs?.includes("test/tiered.test.ts"));
+  assert.ok(capturedArgs?.includes("test/brand-new.test.ts"), "an untiered file defaults into the fast tier, not a refusal");
 });
 
 test("--run rejects an unknown tier and a malformed shard before spawning tests", () => {
@@ -504,15 +483,14 @@ test("--select-all rejects a missing shard argument before it can select the who
   assert.equal(spawnCalls, 0);
 });
 
-test("--select-all refuses an untiered test instead of returning a partial coverage suite", () => {
+test("W1-T4430: --select-all INCLUDES an untiered test in the coverage suite, rather than refusing it", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "recorded.test.ts");
   writeFixtureTestFile(root, "untiered.test.ts");
   writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/recorded.test.ts": 100 } });
-  let spawnCalls = 0;
-  const code = main(["--root", root, "--select-all", "--shard", "1/1"], { spawn: () => { spawnCalls += 1; return { status: 0 }; } });
-  assert.equal(code, 1);
-  assert.equal(spawnCalls, 0);
+  const result = runCli(["--select-all", "--shard", "1/1"], root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split("\n").sort(), ["test/recorded.test.ts", "test/untiered.test.ts"]);
 });
 
 test("--run adds a second event reporter only when a duration output is requested", () => {

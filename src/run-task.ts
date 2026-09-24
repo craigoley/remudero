@@ -682,6 +682,9 @@ import {
   parseReopenedKeysCache,
   writeReopenedKeys,
   gitGrepAnchorTrue,
+  cachedAnchorGrep,
+  createAnchorGrepCache,
+  readOriginMainSha,
   inboxDraftPrompt,
   isDraftStale,
   isRatifiedInLedger,
@@ -40798,9 +40801,12 @@ export function buildInboxDraftHook(
     runId: string,
     log: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
+  grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
+  mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
 ): () => Promise<void> {
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
+  const anchorGrepCache = createAnchorGrepCache();
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -40860,11 +40866,12 @@ export function buildInboxDraftHook(
         const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
         const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
+        const sha = mainSha();
         draftReadiness = {
           plan,
           isMerged,
           depsUnobservable,
-          grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+          grepAnchorTrue: (a: EvidenceAnchor) => cachedAnchorGrep(anchorGrepCache, sha, a, grepAnchor),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
           isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
