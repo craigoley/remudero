@@ -535,6 +535,8 @@ export interface LedgerUnionRecordReadOptions extends LedgerUnionRawReadOptions 
   readLiveRecords?: (path: string) => Iterable<Record<string, unknown>>;
   onRecord?: (row: Record<string, unknown>) => void;
   satisfied?: (stepsSeen: ReadonlySet<string>) => boolean;
+  /** Receives the raw text of each unparseable row counted in `torn`, so a caller can judge what it lost. */
+  onTorn?: (raw: string) => void;
 }
 
 export interface LedgerUnionRecordRead extends Omit<LedgerUnionRawRead, "rawLines"> {
@@ -596,6 +598,7 @@ export function readLedgerUnionRecordsSync(
           } catch {
             // deliberate: a malformed row increments torn and the remaining corpus still parses.
             torn += 1;
+            opts.onTorn?.(line);
           }
         }
       }

@@ -336,6 +336,7 @@
     "test/action-results-bounds.test.ts": 0,
     "test/action-results-redaction.test.ts": 0,
     "test/action-results-route.test.ts": 0,
+    "test/action-results-torn-rows.test.ts": 0,
     "test/adaptive-lifetime-pressure-builds-its-own-shards.test.ts": 0,
     "test/adaptive-review-capacity.test.ts": 1874,
     "test/adaptive-review-widener-can-widen.test.ts": 0,
