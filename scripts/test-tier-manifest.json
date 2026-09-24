@@ -1161,6 +1161,7 @@
     "test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts": 455,
     "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 1247,
     "test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts": 328,
+    "test/the-terminal-can-decline-a-proposal.test.ts": 0,
     "test/the-top-of-tick-freshness-exit-precedes-every-dispatch.test.ts": 771,
     "test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts": 1731,
     "test/the-verb-census-reaches-a-reader.test.ts": 59315,
