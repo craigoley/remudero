@@ -109,6 +109,8 @@ import {
   parseDraftCache,
   parseDraftInFlightCache,
   parseProposalRegistry,
+  applyProposalVerdict,
+  type ProposalVerdictKind,
   pruneRatifiedProposals,
   refusalReason,
   updateProposalRegistry,
@@ -2063,6 +2065,28 @@ function validateDeclineProposal(body: unknown): { error: string } | DeclineProp
   return { proposalId: body.proposalId, reason: body.reason };
 }
 
+/** Both inbox verdict routes: classify live, let {@link applyProposalVerdict} decide and record, answer in HTTP. */
+function proposalVerdictResponse(
+  kind: ProposalVerdictKind,
+  deps: PanelGraphDeps,
+  input: DeclineProposalInput,
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
+  const { proposals, classifications } = classifyAllProposals(deps);
+  const found = {
+    exists: proposals.some((p) => p.id === input.proposalId),
+    classification: classifications.find((c) => c.proposalId === input.proposalId),
+  };
+  const origin = bearerTokenId(req);
+  const outcome = applyProposalVerdict(kind, input, found, (step, id, reason) => appendPanelLedger(deps.ledgerPath, step, id, origin, { reason }));
+  if (!outcome.ok) {
+    sendJson(res, outcome.status, { error: outcome.error, detail: outcome.detail });
+    return;
+  }
+  sendJson(res, 200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) });
+}
+
 /**
  * POST /v1/inbox/decline — write-scoped. The inbox's third verb (W1-T2604): the only prior way a
  * proposal left the registry was `rmd approve`, so a self-withdrawn or duplicate one had no path
@@ -2083,31 +2107,7 @@ export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
     // W1-T404: LOW — bookkeeping, trivially reversible in effect (a ledger annotation; no
     // plan/branch/PR is ever created for this route to have to undo).
     tier: "low",
-    handler: jsonAction(validateDeclineProposal, (input, req, res) => {
-      const { proposals, classifications } = classifyAllProposals(deps);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
-        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
-        return;
-      }
-      const classification = classifications.find((c) => c.proposalId === input.proposalId);
-      if (classification?.state === "ratified") {
-        sendJson(res, 409, {
-          error: "already_ratified",
-          detail: `${input.proposalId} is already RATIFIED — declining now cannot un-file the task it already produced`,
-        });
-        return;
-      }
-      if (classification?.state === "declined") {
-        sendJson(res, 409, {
-          error: "already_declined",
-          detail: `${input.proposalId} was already declined (${classification.declinedReason ?? "no reason recorded"})`,
-        });
-        return;
-      }
-      const origin = bearerTokenId(req);
-      appendPanelLedger(deps.ledgerPath, "panel.proposal_declined", input.proposalId, origin, { reason: input.reason });
-      sendJson(res, 200, { ok: true, proposalId: input.proposalId, declined: true });
-    }),
+    handler: jsonAction(validateDeclineProposal, (input, req, res) => proposalVerdictResponse("decline", deps, input, req, res)),
   };
 }
 
@@ -2120,31 +2120,7 @@ export function buildRestoreProposalRoute(deps: PanelGraphDeps): Route {
     path: "/v1/inbox/restore",
     scope: "write",
     tier: "low",
-    handler: jsonAction(validateDeclineProposal, (input, req, res) => {
-      const { proposals, classifications } = classifyAllProposals(deps);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
-        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
-        return;
-      }
-      const classification = classifications.find((c) => c.proposalId === input.proposalId);
-      if (classification?.state === "ratified") {
-        sendJson(res, 409, {
-          error: "already_ratified",
-          detail: `${input.proposalId} is already RATIFIED — restoring it cannot un-file the task it already produced`,
-        });
-        return;
-      }
-      if (classification?.state !== "declined") {
-        sendJson(res, 409, {
-          error: "not_declined",
-          detail: `${input.proposalId} is not declined (state: ${classification?.state ?? "unknown"}) — there is nothing to restore`,
-        });
-        return;
-      }
-      const origin = bearerTokenId(req);
-      appendPanelLedger(deps.ledgerPath, "panel.proposal_restored", input.proposalId, origin, { reason: input.reason });
-      sendJson(res, 200, { ok: true, proposalId: input.proposalId, restored: true });
-    }),
+    handler: jsonAction(validateDeclineProposal, (input, req, res) => proposalVerdictResponse("restore", deps, input, req, res)),
   };
 }
 
