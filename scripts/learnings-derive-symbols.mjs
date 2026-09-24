@@ -1,32 +1,21 @@
 #!/usr/bin/env node
-// scripts/learnings-derive-symbols.mjs
+// scripts/learnings-derive-symbols.mjs — Learnings SYMBOL DERIVATION (W1-T4093).
 //
-// Learnings SYMBOL DERIVATION (W1-T4093).
+// A glob alone cannot tell a task that touches ONE function of a 44,000-line file apart from one
+// that touches another -- every entry globbing that file matches equally, which is why 0 of the
+// shipped corpus's entries carried a `selectLearnings`-ranked `symbols:` from a derivation. This
+// closes that gap the way `scripts/learnings-assert-check.mjs` keeps an `assertion:` honest: it
+// derives, from each entry's OWN fact text via src/lib/knowledge-symbols.ts's `deriveFactSymbols`,
+// the code identifiers that fact actually names, checked against a fresh scan of the source tree
+// (`collectSourceSymbols`), and merges them into that entry's `symbols:` list.
 //
-// 0 of the shipped corpus's entries declared `symbols:`/`error_signatures:` from a derivation --
-// the handful that carry them today were hand-typed -- even though src/lib/learnings.ts's
-// `selectLearnings` ranks a symbol hit above a bare file-glob hit. A glob alone cannot tell a task
-// that touches ONE function of a 44,000-line file apart from one that touches another: every entry
-// globbing that file matches equally. This script closes that gap the same way
-// `scripts/learnings-assert-check.mjs` keeps an `assertion:` honest: it derives, from each entry's
-// OWN fact text, the code identifiers that fact actually names -- via
-// src/lib/knowledge-symbols.ts's `deriveFactSymbols`, checked against a fresh scan of the source
-// tree (`collectSourceSymbols`) -- and merges them into that entry's `symbols:` list.
+// The merge is ADDITIVE, never destructive of a human's own annotation: a declared symbol survives
+// UNLESS it is itself shaped like a derivable one (`looksDerivable`) that the tree no longer
+// recognizes (a renamed function) -- the same quarantine reasoning `assertion:` gets. A hand-added
+// acronym or error phrase is never derivation-shaped, so never a removal candidate either.
 //
-// The merge is ADDITIVE, never destructive of a human's own annotation: an existing `symbols:`
-// entry survives untouched UNLESS it is itself shaped like something this script could have
-// derived (camelCase/PascalCase/snake_case -- see `looksDerivable`) and the source tree no longer
-// recognizes it -- e.g. a renamed function. That one case is dropped: a symbol the tree can no
-// longer verify is worse than no symbol, the same reasoning that quarantines a failing
-// `assertion:`. A hand-added acronym or error phrase (`TAP`, `mkdtemp` is code-shaped and DOES get
-// re-checked; `line number` never was) is never a derivation candidate in the first place, so it
-// is never a candidate for removal either.
-//
-// Usage:
-//   node --import tsx scripts/learnings-derive-symbols.mjs [--dir learnings] [--src src] [--check]
-//
-// --check exits 1 and prints which shard(s) are stale, without writing anything -- the CI-safe
-// arm. Without --check it writes the merged `symbols:` back into each shard that changed.
+// Usage: node --import tsx scripts/learnings-derive-symbols.mjs [--dir learnings] [--src src] [--check]
+// --check exits 1 and prints which shard(s) are stale, writing nothing -- the CI-safe arm.
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
