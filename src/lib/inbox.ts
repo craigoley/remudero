@@ -2653,7 +2653,7 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
         if ((counts.get(proof) ?? 0) < 2 || !/^unit test: test\/[^\s]+\.test\.[cm]?[jt]s$/.test(proof)) continue;
         const criterionNode = acceptance.items[index];
         const proofNode = isMap(criterionNode) ? criterionNode.get("proof", true) : undefined;
-        if (!isScalar(proofNode) || !proofNode.range || !criterion.claim?.trim()) continue;
+        if (!isScalar(proofNode) || !proofNode.range || criterion.claim.trim().length === 0) continue;
         const claim = criterion.claim.trim();
         const title = (claimCounts.get(claim) ?? 0) > 1 ? `${claim} (${task.id} criterion ${index + 1})` : claim;
         edits.push({ start: proofNode.range[0], end: proofNode.range[1], text: JSON.stringify(`unit test: ${title}`) });

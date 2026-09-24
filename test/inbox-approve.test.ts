@@ -189,10 +189,17 @@ test("an approved draft below the sizing bar files at risk high with a declared 
   assert.equal(approval.prCalls(), 1);
   assert.match(approval.written[0], /^  risk: high$/m);
   assert.match(approval.written[0], /^  band_meaning: span$/m);
+
+  const withoutRisk = approveThroughShardWriter(fragment.replace("  risk: medium\n", ""));
+  assert.equal(withoutRisk.run().ok, true);
+  assert.match(withoutRisk.written[0], /^  risk: high$/m);
+  assert.match(withoutRisk.written[0], /^  band_meaning: span$/m);
 });
 
 test("an approved draft with any other lint violation is refused before a PR opens", () => {
   const fragment = [
+    "- id: W1-T901", "  title: valid sibling", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  files: [src/lib/inbox.ts]",
     "- id: W1-T902", "  title: invalid proof", "  repo: remudero", "  type: implement",
     "  origin: architect", "  files: [src/lib/inbox.ts]", "  acceptance:",
     '    - claim: "the action works"', '      proof: "some prose without a dialect"', "",
@@ -201,6 +208,13 @@ test("an approved draft with any other lint violation is refused before a PR ope
   assert.throws(() => approval.run(), /\[proof-dialect\]/);
   assert.equal(approval.prCalls(), 0);
   assert.deepEqual(approval.written, []);
+
+  const missingBand = approveThroughShardWriter([
+    "- id: W1-T903", "  title: high risk without meaning", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  risk: high", "  files: [src/lib/inbox.ts]", "",
+  ].join("\n"));
+  assert.throws(() => missingBand.run(), /\[sizing\].*band_meaning/);
+  assert.equal(missingBand.prCalls(), 0);
 });
 
 test("W1-T190 (acceptance 1): after approveProposal succeeds — the exact call `rmd approve` makes — a FRESH classification of the SAME proposal, off the SAME ledger, reports it as ratified, never READY again (the registry's own copy of the proposal is UNCHANGED here, exactly the 'write never happened' drift the P19 incident hit)", () => {
