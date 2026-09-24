@@ -2498,6 +2498,37 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   ),
 ];
 
+/** Minimum discovered rule-check files required to keep the fast lane from silently collapsing. */
+export const MIN_RULE_SUITE_COUNT = 20;
+
+/**
+ * Return the committed test files that form the quick rule-check population. The census roster
+ * contributes suites whose names do not advertise their shape; the filename convention catches
+ * every other census, ratchet, and baseline suite. `git ls-files` is intentional: preflight runs
+ * after the commit exists, so a newly added untracked suite cannot make its own population test
+ * pass before Git can see it.
+ */
+export function listRuleSuites(repoRoot: string): string[] {
+  const result = spawnSync("git", ["ls-files", "--", "test"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(`git ls-files -- test failed: ${result.stderr || result.error?.message || result.status}`);
+  }
+  const tracked = new Set(result.stdout.split(/\r?\n/).filter(Boolean));
+  const roster = new Set(CENSUS_POPULATION.map((member) => member.testFile));
+  const ruleName = /(?:census|ratchet|baseline)/i;
+  const suites = [...tracked]
+    .filter((path) => path.endsWith(".test.ts") && (roster.has(path) || ruleName.test(path.slice("test/".length))))
+    .sort();
+  if (suites.length < MIN_RULE_SUITE_COUNT) {
+    throw new Error(`rule-check population too small: found ${suites.length}, expected at least ${MIN_RULE_SUITE_COUNT}`);
+  }
+  return suites;
+}
+
 // W1-T2644: the roster is the population, re-exported under the name that task's acceptance
 // criterion names. An ALIAS, deliberately never a second array — a reader who greps either name
 // finds the SAME data. Why: docs/forensics/ci-parity.md (W1-T2644).
@@ -2694,6 +2725,8 @@ export interface FastGateStep {
   job: string;
   script: string;
   reason: string;
+  /** A small repository-local runner that is not a package.json npm script. */
+  runner?: "rule-checks";
   boundMs?: number;
   /** Retain bounded stdout on PASS. Only evidence-producing signals may opt in. */
   retainSuccessOutput?: boolean;
@@ -2721,6 +2754,13 @@ export interface FastGateStep {
 }
 
 export const FAST_GATE_STEPS: FastGateStep[] = [
+  {
+    job: "rule-checks",
+    script: "rule-checks:population",
+    runner: "rule-checks",
+    reason:
+      "same-class — the tree-derived census and ratchet suites run in the early CI job and local preflight, before coverage can hide a deterministic red",
+  },
   {
     job: "cli-reference",
     script: "cli-reference:check",
@@ -3245,10 +3285,21 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // refused on cost here: the threshold is derived from the population, which is not complete
   // until the last entry has run.
   const censusCosts = new Map<number, number>();
-  const steps = gateSteps.map(({ job, script, boundMs, retainSuccessOutput, skipWhenAbsent }, i) =>
+  const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) =>
     runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
+      }
+      if (runner === "rule-checks") {
+        return withoutNodeTestContext(() =>
+          shellOut(
+            spawn,
+            "node --import tsx scripts/list-rule-suites.mjs --run",
+            process.execPath,
+            ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"],
+            { cwd: repoRoot },
+          ),
+        );
       }
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };

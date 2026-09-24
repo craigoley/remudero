@@ -129,6 +129,7 @@ export const CLI_ONLY = {
       "ratify",
       "learnings",
       "bundle",
+      "knowledge",
       "rule",
       "init",
       "project",
