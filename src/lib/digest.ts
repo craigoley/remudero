@@ -18,10 +18,15 @@ import { flagAnomalousLedgerWriters, topLedgerWriters, type LedgerWriterFlag } f
 import type { LastSeenStore } from "./last-seen.js";
 import {
   decideMeasurementCadence,
+  estimateWipeTestFactorEffects,
   readMeasurementCadenceMarker,
   recordMeasurementCadenceFire,
+  wipeTestPairFromLedgerObject,
   type MeasurementCadenceDecision,
+  type WipeTestEffectEstimate,
+  type WipeTestFactorEffect,
 } from "./measurement-cadence.js";
+import type { WipeTestPair } from "./wipe-test.js";
 
 /**
  * The daily digest (W1-T8): interrupts collapse into one daily message (MASTER-PLAN §4) instead
@@ -424,6 +429,7 @@ export interface DigestSummary {
   learningUsefulness?: LearningUsefulness;
   learningOutcomes?: LearningOutcomeSummary;
   knowledgeMeasured?: KnowledgeMeasuredSummary;
+  wipeTestEffects?: WipeTestFactorEffect[];
   gateFireRates?: GateFireRateSummary;
   ledgerWriters?: LedgerWriterFlag[];
   /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
@@ -684,6 +690,29 @@ export function renderLearningOutcomes(s: LearningOutcomeSummary): string {
   );
 }
 
+export function summarizeWipeTestEffects(lines: readonly LedgerLine[]): WipeTestFactorEffect[] | undefined {
+  const pairs = lines.map(wipeTestPairFromLedgerObject).filter((p): p is WipeTestPair => p !== undefined);
+  return pairs.length === 0 ? undefined : estimateWipeTestFactorEffects(pairs);
+}
+
+function signed(n: number): string {
+  return `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
+}
+
+function renderEstimate(name: string, e: WipeTestEffectEstimate): string {
+  const interval = e.low !== null && e.high !== null ? ` [${e.low.toFixed(2)}, ${e.high.toFixed(2)}]` : "";
+  return `${name} ${signed(e.mean ?? 0)}${interval}`;
+}
+
+export function renderWipeTestEffects(effects: readonly WipeTestFactorEffect[]): string {
+  const one = (e: WipeTestFactorEffect): string => {
+    if (e.pairs === 0) return `${e.factor} 0 pair(s): not measured`;
+    const body = [renderEstimate("turns", e.turns), renderEstimate("landed", e.landed), renderEstimate("cost", e.cost)].join(", ");
+    return `${e.factor} ${e.pairs} pair(s): ${body}${e.turns.halfWidth === null ? " (no interval below 2 pairs)" : ""}`;
+  };
+  return `ablation (wipe-test): ${effects.map(one).join("; ")} (+ = the factor helps)`;
+}
+
 export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary {
   const since = collectSince(lines, sinceIso);
   const summary: DigestSummary = {
@@ -764,6 +793,8 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
   if (learningOutcomes) summary.learningOutcomes = learningOutcomes;
   const knowledgeMeasured = summarizeKnowledgeMeasured(since);
   if (knowledgeMeasured) summary.knowledgeMeasured = knowledgeMeasured;
+  const wipeTestEffects = summarizeWipeTestEffects(lines);
+  if (wipeTestEffects) summary.wipeTestEffects = wipeTestEffects;
   summary.gateFireRates = summarizeGateFireRates(since);
   return summary;
 }
@@ -843,6 +874,7 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     ...(s.learningUsefulness ? [renderLearningUsefulness(s.learningUsefulness)] : []),
     ...(s.learningOutcomes ? [renderLearningOutcomes(s.learningOutcomes)] : []),
     ...(s.knowledgeMeasured ? [renderKnowledgeMeasured(s.knowledgeMeasured)] : []),
+    ...(s.wipeTestEffects ? [renderWipeTestEffects(s.wipeTestEffects)] : []),
     ...(s.gateFireRates ? [renderGateFireRates(s.gateFireRates)] : []),
     ...(s.ledgerWriters?.length ? [renderLedgerWriters(s.ledgerWriters)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,

@@ -48,6 +48,7 @@ import {
   saveCreditStore,
   taskIdFromRunBranch,
   isGhRateLimitError,
+  TASK_ID_TRAILER_RE,
 } from "./status.js";
 import type { CreditBackfillReceipt, CreditStore } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
@@ -425,6 +426,30 @@ export function currentPlanIneligibilityReason(plan: Plan, task: Task, isMerged:
 /** The synthetic lane namespaces whose PR branches are created by the orchestrator itself. */
 function isSyntheticOrchestratorLaneId(taskId: string): boolean {
   return /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(taskId);
+}
+
+/**
+ * W1-T4465 design (i) — is `head` a branch the FLEET itself authored: a dispatched run's own
+ * `run-<taskId>-<epochMs>` for a REAL filed task (`taskIdFromRunBranch`'s capture shaped like
+ * {@link TASK_ID_TRAILER_RE}), or one of the orchestrator's own synthetic lanes (RETRO/TRIAGE/
+ * PLAN/APPROVE, {@link isSyntheticOrchestratorLaneId})?
+ *
+ * An operator's own `run-unfiled-*` session — the exact incident this task fixes, "4-7 of those
+ * open PRs were run-unfiled-* branches (operator sessions), which the fleet neither authored nor
+ * can throttle" — and any other non-fleet head (a human feature branch, dependabot, ...) both
+ * read `false`: the queue governor's ownership split (design (i)) counts them but never gates
+ * dispatch on them.
+ *
+ * `head === undefined` reads `true` (fail CLOSED, not open): an unresolvable head is a reading the
+ * WIP ceiling could not classify, not a confirmed-foreign one, and the ceiling's own asymmetry
+ * (never silently admit on an unreadable observation) means it must keep gating rather than
+ * silently stop counting toward the limit.
+ */
+export function isFleetOwnedRunBranch(head: string | undefined): boolean {
+  if (head === undefined) return true;
+  const owner = taskIdFromRunBranch(head);
+  if (owner === undefined) return false;
+  return isSyntheticOrchestratorLaneId(owner) || TASK_ID_TRAILER_RE.test(owner);
 }
 
 /**
@@ -3431,10 +3456,17 @@ export interface SweepPolicy {
   strikeCap: number;
   /** W1-T78: re-dispatch strike-cap policy once an operator answers a clarification question. */
   clarify: ClarifyPolicy;
-  /** W1-T121 QUEUE GOVERNOR — a WIP limit on DISPATCH ONLY: at or above this many open PRs, new
-   *  dispatch is deferred, while drainage is never gated. Consumer: {@link checkQueueGovernor}.
-   *  // Why: the 23-open-PR incident — docs/forensics/sweep.md. */
+  /** W1-T121 QUEUE GOVERNOR — a WIP limit on DISPATCH ONLY: at or above this many FLEET-OWNED open
+   *  PRs, new dispatch is deferred, while drainage is never gated. Consumer: {@link
+   *  checkQueueGovernor}. // Why: the 23-open-PR incident — docs/forensics/sweep.md. */
   wipLimit: number;
+  /** W1-T4465 — the TRAILING FLOW WINDOW (minutes) {@link checkQueueGovernor}'s tiered admission
+   *  (design (ii)) compares merges against opens over, once `wipLimit` is reached. POLICY DATA
+   *  (rule 2), beside `wipLimit` itself, never an inline constant in the predicate — a test
+   *  overrides just this field to flip a fixture's tier with zero code change. Defaults to the ONE
+   *  HOUR the incident itself was measured over: "the trailing hour had 11 merges against 8 opens
+   *  — the queue was DRAINING". */
+  queueGovernorFlowWindowMinutes: number;
   /** W1-T172 (P19) — concurrent dispatch LANES a drain pass may fill, bounded by {@link wipLimit}:
    *  the governor is the CEILING, lanes only raise the rate it fills. Sourced from
    *  `plan/policy.yaml`. // Why: this also bounded the REVIEW lane until W1-T1049 split it out, and
@@ -3646,6 +3678,10 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   strikeCap: POLICY_SWEEP.strikeCap,
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: POLICY_SWEEP.wipLimit,
+  // W1-T4465: a literal default beside `wipLimit`, exactly like `pendingCeilingMinutes`/
+  // `absentCeilingMinutes`/`reviewOrphanBackoffMinutes` below — a POLICY-OBJECT FIELD a test can
+  // override, never a constant folded into the predicate.
+  queueGovernorFlowWindowMinutes: 60,
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
   reviewLanes: REVIEW_POLICY.value,
   reviewLaneMin: REVIEW_POLICY.min,
@@ -11062,34 +11098,142 @@ export function renderSweepSummary(s: SweepSummary): string {
 // DESIGN: {@link checkQueueGovernor} is consulted ONLY on the NEW-task dispatch path, NEVER by
 // `runSweep`, which drains already-open PRs at ANY depth. // Why: docs/forensics/sweep.md.
 
-/** {@link checkQueueGovernor}'s verdict for one dispatch-path consultation. */
+/** W1-T4465 design (ii) — which of the three admission tiers a consultation fell into. */
+export type QueueGovernorTier = "under_limit" | "draining" | "growing";
+
+/** W1-T4465 design (i)/(ii) — the ownership and flow observation {@link checkQueueGovernor}
+ *  compares against `policy.wipLimit`, once the owned count reaches it. Every field is OPTIONAL
+ *  and defaults to 0 so every pre-W1-T4465 call in test/queue-governor.test.ts (a bare
+ *  `checkQueueGovernor(openPrCount, policy)`) keeps its exact prior always-defer-at-the-limit
+ *  answer — the falsifier's own words: "count every open PR and ignore the trailing merges". */
+export interface QueueGovernorFlow {
+  /** Open PRs the fleet did NOT author (design (i)) — counted and ledgered for transparency,
+   *  never gates dispatch. */
+  foreignOpenCount?: number;
+  /** Merges inside the trailing flow window (ledger `verdict.merged` rows, or a `verdict` row
+   *  itself carrying `verdict: "merged"`). See {@link deriveQueueGovernorTrailingFlow}. */
+  trailingMergedCount?: number;
+  /** New PRs opened inside the SAME trailing window (ledger `pr.opened` rows). */
+  trailingOpenedCount?: number;
+}
+
+/** {@link checkQueueGovernor}'s verdict for one dispatch-path consultation. Every W1-T4465 field is
+ *  OPTIONAL on this INTERFACE — `checkQueueGovernor` itself always sets every one of them — purely
+ *  so a hand-built fixture predating this task (`{ deferred: true, observedOpenCount: 23, wipLimit:
+ *  20 }`, three of them in test/queue-governor.test.ts's own dispatch-path suite) keeps
+ *  type-checking without adopting fields its scenario never needed. A reader of a REAL verdict
+ *  should treat an absent field the same way the fallbacks below do: `observedForeignCount` 0,
+ *  `tier` "growing" (the pre-W1-T4465 always-defer answer), `trailingMergedCount`/
+ *  `trailingOpenedCount` 0. */
 export interface QueueGovernorResult {
   /** true ⇒ the dispatch path MUST defer — do not open a new PR this pass. */
   deferred: boolean;
-  /** The open-PR count the decision was made against. */
+  /** The FLEET-OWNED open-PR count the decision was made against (design (i)) — an open PR the
+   *  fleet did not author never inflates this field. */
   observedOpenCount: number;
   /** The policy limit consulted (`policy.wipLimit`, carried for the ledger line). */
   wipLimit: number;
+  /** W1-T4465 — open PRs observed but NOT counted above because the fleet did not author them
+   *  (design (i)'s `observed_foreign_count`). 0 when the caller supplies no ownership split. */
+  observedForeignCount?: number;
+  /** W1-T4465 design (ii) — which tier this verdict fell into: `under_limit` (owned count below
+   *  `wipLimit`, unaffected by flow), `draining` (at/over the limit, trailing merges caught up
+   *  with or outran trailing opens — admits ONE lane rather than zero), or `growing` (at/over the
+   *  limit and not draining — defers exactly as before this task). */
+  tier?: QueueGovernorTier;
+  /** Merges observed in the trailing flow window. 0 when the caller supplies no flow observation. */
+  trailingMergedCount?: number;
+  /** Opens observed in the SAME trailing window. 0 when the caller supplies no flow observation. */
+  trailingOpenedCount?: number;
 }
 
-/** The queue governor's pure predicate: at or above `policy.wipLimit` open PRs, NEW dispatch is
- *  deferred; below it, dispatch proceeds. THRESHOLDS ARE POLICY DATA (rule 2) — that field is the
- *  ONLY thing that moves this decision. Never call this from `runSweep` or any of its deps; see
- *  the asymmetry note above. */
+/**
+ * The queue governor's pure predicate — extended by W1-T4465, design (i)/(ii), to ADMIT BY
+ * OWNERSHIP AND FLOW rather than a bare count:
+ *
+ *   (i) OWNERSHIP: `openPrCount` is the caller-supplied FLEET-OWNED count — never the total board
+ *       depth. A PR the fleet did not author (an operator's own `run-unfiled-*` session, a human
+ *       PR, ...) belongs in `flow.foreignOpenCount` instead, which this predicate carries into the
+ *       ledger line but never gates on.
+ *
+ *   (ii) FLOW, TIERED: below `policy.wipLimit`, dispatch proceeds exactly as before ("under_limit"
+ *       — flow is irrelevant). At or over it, `flow.trailingMergedCount`/`trailingOpenedCount`
+ *       (the ledger's own `verdict.merged`/`pr.opened` rows over `policy.queueGovernorFlowWindowMinutes`)
+ *       decide the tier: DRAINING (real trailing activity — at least one merge or open — with
+ *       merges catching up with or outrunning opens) admits ONE lane rather than zero; GROWING
+ *       (everything else, including no trailing activity at all) defers exactly as today. A caller
+ *       that omits `flow` entirely reads 0/0 for both, which is `growing` — the exact pre-W1-T4465
+ *       always-defer-at-the-limit answer, unchanged.
+ *
+ * THRESHOLDS ARE POLICY DATA (rule 2) — `wipLimit`/`queueGovernorFlowWindowMinutes` are the ONLY
+ * things that move this decision. Never call this from `runSweep` or any of its deps; see the
+ * asymmetry note above.
+ */
 export function checkQueueGovernor(
   openPrCount: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  flow: QueueGovernorFlow = {},
 ): QueueGovernorResult {
+  const observedForeignCount = flow.foreignOpenCount ?? 0;
+  const trailingMergedCount = flow.trailingMergedCount ?? 0;
+  const trailingOpenedCount = flow.trailingOpenedCount ?? 0;
+  if (openPrCount < policy.wipLimit) {
+    return {
+      deferred: false,
+      observedOpenCount: openPrCount,
+      wipLimit: policy.wipLimit,
+      observedForeignCount,
+      tier: "under_limit",
+      trailingMergedCount,
+      trailingOpenedCount,
+    };
+  }
+  // "Draining" needs REAL trailing activity (design ii): a silent window (0 merges, 0 opens — a
+  // freshly initialized state with no ledger history yet, or genuinely nothing happening) must
+  // NOT read as draining merely because 0 >= 0 is vacuously true. Requiring at least one of the
+  // two figures to be positive keeps that degenerate case in "growing" (still defers), while a
+  // real trailing merge with zero trailing opens (pure drainage) still correctly reads draining.
+  const draining = (trailingMergedCount > 0 || trailingOpenedCount > 0) && trailingMergedCount >= trailingOpenedCount;
   return {
-    deferred: openPrCount >= policy.wipLimit,
+    deferred: !draining,
     observedOpenCount: openPrCount,
     wipLimit: policy.wipLimit,
+    observedForeignCount,
+    tier: draining ? "draining" : "growing",
+    trailingMergedCount,
+    trailingOpenedCount,
   };
+}
+
+/** W1-T4465 design (ii) — the trailing flow {@link checkQueueGovernor}'s tiered admission compares:
+ *  merges (`verdict.merged` rows, or a `verdict` row itself carrying `verdict: "merged"` — the SAME
+ *  two-shape match `routeAdaptiveLifetimePressure`, run-task.ts, already uses) against opens
+ *  (`pr.opened` rows) inside the trailing `policy.queueGovernorFlowWindowMinutes` window ending at
+ *  `nowMs`. PURE over an already-read ledger array — never reads a file itself, mirroring every
+ *  other sweep.ts window derivation (e.g. {@link deriveWindowCostUsd}). */
+export function deriveQueueGovernorTrailingFlow(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  nowMs: number,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): { trailingMergedCount: number; trailingOpenedCount: number } {
+  const windowStartMs = nowMs - policy.queueGovernorFlowWindowMinutes * 60_000;
+  let trailingMergedCount = 0;
+  let trailingOpenedCount = 0;
+  for (const line of lines) {
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed > nowMs) continue;
+    if (line.step === "pr.opened") trailingOpenedCount++;
+    else if (line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")) trailingMergedCount++;
+  }
+  return { trailingMergedCount, trailingOpenedCount };
 }
 
 /** A throttled pass is NOT silent: the dispatch path calls this exactly when
  *  {@link checkQueueGovernor} defers, writing one ledger line carrying the observed open count — so
- *  a quiet daemon with nothing runnable stays distinguishable from a THROTTLED one. */
+ *  a quiet daemon with nothing runnable stays distinguishable from a THROTTLED one. W1-T4465 design
+ *  (iii): the row also carries the tier, the owned/foreign split and the trailing flow, so a held
+ *  daemon's own ledger says WHY it is held and which way the queue is moving. */
 export function logQueueGovernorDeferral(
   result: QueueGovernorResult,
   appendLine: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void,
@@ -11102,6 +11246,10 @@ export function logQueueGovernorDeferral(
     step: "dispatch_deferred_wip",
     observed_open_count: result.observedOpenCount,
     wip_limit: result.wipLimit,
+    observed_foreign_count: result.observedForeignCount ?? 0,
+    tier: result.tier ?? "growing",
+    trailing_merged_count: result.trailingMergedCount ?? 0,
+    trailing_opened_count: result.trailingOpenedCount ?? 0,
   });
 }
 

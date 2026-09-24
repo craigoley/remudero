@@ -570,6 +570,10 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "wipeTestCadence.enabled",
     "wipeTestCadence.minIntervalMinutes",
     "wipeTestCadence.maxPerDay",
+    // W1-T4092: the adaptive ablation share and the settled-interval width are net-new too — no
+    // prior literal ever sampled a factor by its measured uncertainty.
+    "wipeTestCadence.baseShare",
+    "wipeTestCadence.settledHalfWidthTurns",
     // W1-T943: `workerStall` joins them too — no prior literal ever measured a worker-quiet
     // threshold before this task's own filing verified plan/policy.yaml carried zero rows for it.
     "workerStall",
