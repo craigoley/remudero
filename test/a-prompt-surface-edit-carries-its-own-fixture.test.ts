@@ -129,6 +129,42 @@ test("W1-T3077: the same diff plus a fixture under test/fixtures/golden-verdicts
   });
 });
 
+const COMPACTION_SOURCE = (contract: string, helper: string) => `
+export function outputContractLines(taskId: string): string[] {
+  return ["${contract}", taskId];
+}
+
+export function unrelatedCompactionHelper(): string {
+  return "${helper}";
+}
+`;
+
+test("the implement output contract is a prompt surface: an outputContractLines edit with no golden fixture is refused, another compaction.ts function is not", () => {
+  withFixture((root) => {
+    write(root, "src/lib/compaction.ts", COMPACTION_SOURCE("old contract", "steady"));
+    commit(root, "base");
+
+    write(root, "src/lib/compaction.ts", COMPACTION_SOURCE("new contract", "steady"));
+    commit(root, "head");
+
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.surfaces, ["src/lib/compaction.ts:outputContractLines"]);
+  });
+
+  withFixture((root) => {
+    write(root, "src/lib/compaction.ts", COMPACTION_SOURCE("steady", "old value"));
+    commit(root, "base");
+
+    write(root, "src/lib/compaction.ts", COMPACTION_SOURCE("steady", "new value"));
+    commit(root, "head");
+
+    const result = mod.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.surfaces, []);
+  });
+});
+
 test("prompt surface gate: a learnings shard edit is refused unless the diff carries golden evidence", () => {
   withFixture((root) => {
     write(root, "learnings/testing.yaml", "- id: before\n  fact: old\n");
