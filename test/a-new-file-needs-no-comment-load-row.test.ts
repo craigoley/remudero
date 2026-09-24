@@ -41,7 +41,7 @@ test("W1-T4431: a new file under the default bucket needs no baseline row", () =
   // The falsifier this task names: a new file with a SINGLE comment line, absent from the
   // baseline entirely -- exactly the shape #6922 and #6925 were refused over.
   const current = { "src/brand-new.ts": 1 };
-  const baseline = {};
+  const baseline: Record<string, number> = {};
 
   // THE OLD RULE, restated as the falsifier itself: "require a row for every measured file" fails
   // this fixture immediately -- there is no row for "src/brand-new.ts".
