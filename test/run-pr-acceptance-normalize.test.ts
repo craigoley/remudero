@@ -67,7 +67,7 @@ const MATCHING_BODY = [
   "",
 ].join("\n");
 
-test("W1-T4425 acceptance 1: a diverging run PR body is rewritten from its plan", () => {
+test("a diverging run PR body is rewritten from its plan", () => {
   const r = recorder();
   const outcome = normalizeRunPrAcceptanceFromPlan(PR, TASK_ID, PLAN_CRITERIA, r.log, {
     fetchBody: () => DIVERGING_BODY,
@@ -106,7 +106,7 @@ test("W1-T4425 acceptance 1: a diverging run PR body is rewritten from its plan"
   assert.deepEqual(new Set(r.logged[0].extra?.rendered_proofs as string[]), planProofs, "rendered_proofs is the plan's own proof set");
 });
 
-test("W1-T4425 acceptance 2: a run PR body that matches its plan is left alone", () => {
+test("a run PR body that matches its plan is left alone", () => {
   const r = recorder();
   const outcome = normalizeRunPrAcceptanceFromPlan(PR, TASK_ID, PLAN_CRITERIA, r.log, {
     fetchBody: () => MATCHING_BODY,
