@@ -29924,20 +29924,14 @@ export function logDiskReclaimRung(
   let objectConsecutiveRefusals: number | undefined;
   let objectRefusingSinceIso: string | undefined;
   try {
-    // W1-T4022: `loadDefaultPolicy()` — resolved from THIS MODULE'S OWN install location
-    // (src/lib/policy.ts#installPolicyPath), never `config.root` — the SAME seam
-    // `runAdhocLaneReapRung` already uses above. The prior default, `loadPolicy(policyPath(
-    // config.root))`, read the DAEMON's `config.root`, which is not a plan-bearing checkout and
-    // has no `plan/policy.yaml` at all: that read THREW on every tick and was silently swallowed
-    // by the generic catch below, so this rung never once reached its reaper in production
-    // (measured: 0 `objects_declined` rows in four days).
+    // W1-T4022: `loadDefaultPolicy()` reads the install's own policy (the seam `runAdhocLaneReapRung`
+    // uses). The prior `loadPolicy(policyPath(config.root))` THREW every tick — the daemon root has no
+    // plan/policy.yaml — and the catch below swallowed it: 0 `objects_declined` rows in four days.
     let policyBlock: { enabled: boolean };
     try {
       policyBlock = deps.objectPolicy?.() ?? loadDefaultPolicy().values.objectReap;
     } catch (err) {
-      // Named and logged HERE, not folded silently into the generic "a sweep threw" catch below
-      // — a policy this rung cannot load is a different failure than a worktree it cannot list,
-      // and the note this task amends from asked for it logged rather than swallowed.
+      // Logged HERE: an unloadable policy is a different failure than the generic catch below.
       log("run.disk_reclaim.policy_error", { error: String((err as Error)?.message ?? err) });
       throw err;
     }
