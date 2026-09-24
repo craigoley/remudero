@@ -673,14 +673,14 @@ jobs:
     # matrix, mutation-ratchet's Stryker cache) stays its own job, untouched below. (iii)
     # `continue-on-error` means one step failing never skips the next — every step below always
     # runs and always reports.
-    #
+
     # WHY THIS JOB KEEPS THE `commitlint` KEY rather than a new one, e.g. `light-gates`: adding a
     # genuinely NEW ci.yml job key would force a matching new entry in src/lib/ci-parity.ts
     # (test/preflight-ci-parity.test.ts asserts ci.yml's job list against that table in both
     # directions), and Standing rule 25 refuses a single PR editing that table beside the workflow
     # it mirrors. Expanding an EXISTING job key in place — this one — registers nothing new, so
     # ci-parity.ts needs no edit at all.
-    #
+
     # The other 16 original job keys stay in this file too (see each below), under their ORIGINAL
     # names, permanently `if: false` rather than deleted or renamed — deleting one is the same
     # ci-parity.ts problem as above, and renaming one breaks a DIFFERENT invariant:
