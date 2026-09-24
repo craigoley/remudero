@@ -32,7 +32,8 @@ import {
 // W1-T2895: `BoardDeps` re-exported unchanged for every existing consumer of `board.js`'s own
 // `BoardDeps` — moving the DEFINITION to `status.ts`, never the public surface.
 export type { BoardDeps };
-import type { Route, SseRoute, SseSend } from "./service.js";
+import type { Route, SseRoute } from "./service.js";
+import { subscribeStatusStream } from "./status-stream-publisher.js";
 import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
@@ -1146,74 +1147,21 @@ export function buildRecentRoute(deps: BoardDeps): Route {
   };
 }
 
-/** Every distinct `task_id` named on a ledger line, in first-seen order. */
-function taskIdsOf(lines: Array<Record<string, unknown>>): string[] {
-  const seen = new Set<string>();
-  for (const line of lines) {
-    if (typeof line.task_id === "string") seen.add(line.task_id);
-  }
-  return [...seen];
-}
-
-/** GET /v1/status/stream — one `status` SSE event per task whose projection changes. Subscribing
- *  primes the line count to the current ledger length, so a client is never replayed history. */
+/** GET /v1/status/stream — one `status` SSE event per task whose projection changes, from ONE shared publisher. */
 export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): SseRoute {
   return {
     path: "/v1/status/stream",
     scope: "read",
-    subscribe: (send: SseSend) => {
-      // One persistent tail cursor for this connection's lifetime: an unchanged ledger between
-      // ticks costs one statSync, not a full re-read of the file.
-      const tail = createLedgerTailCache();
-      const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
-      const effectiveDeps: BoardDeps = { ...deps, readLedger };
-
-      // Enrich with live spend/turns (W1-T184), the same way computeBoardSnapshot does, off the
-      // same already-read lines: the client's ingestProjection overwrites the previously-known
-      // row on every SSE flip, so a payload with no spend fields would silently wipe whatever
-      // the last REST poll had shown.
-      // Why: the "tonight's burn was invisible" fixture this enrichment fixes —
-      // docs/forensics/board.md#buildstatusstream--live-spend-over-sse
-      const deriveForStream = (
-        task: Task,
-        lines: Array<Record<string, unknown>>,
-      ): StatusProjection & { liveSpendUsd?: number; liveTurns?: number } => {
-        const projection = deriveStatus(task, effectiveDeps);
-        if (!projection.phase) return projection;
-        const spend = liveRunSpend(lines, task.id);
-        return spend ? { ...projection, liveSpendUsd: spend.spendUsd, liveTurns: spend.turns } : projection;
-      };
-
-      // Prime lastSent with every task's current projection, not an empty map — otherwise the
-      // first ledger line touching a task would always look like a flip, even when it lands on
-      // the state the client already has.
-      const primingLines = readLedger(deps.ledgerPath);
-      let lastLineCount = primingLines.length;
-      const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveForStream(t, primingLines))]));
-
-      const tick = () => {
-        const lines = readLedger(deps.ledgerPath);
-        if (lines.length <= lastLineCount) return;
-        const newLines = lines.slice(lastLineCount);
-        lastLineCount = lines.length;
-
-        for (const taskId of taskIdsOf(newLines)) {
-          const task = deps.plan.byId.get(taskId);
-          if (!task) continue; // a ledger line for a task not (or no longer) in the plan.
-          // Re-derive off the FULL `lines` (not just `newLines`) — liveRunSpend needs the
-          // task's whole current run, and deriveStatus itself always re-reads the ledger too.
-          const projection = deriveForStream(task, lines);
-          const serialized = JSON.stringify(projection);
-          if (lastSent.get(taskId) === serialized) continue; // no actual flip (incl. spend) — don't spam.
-          lastSent.set(taskId, serialized);
-          send("status", projection);
-        }
-      };
-
-      const timer = setInterval(tick, pollMs);
-      return () => clearInterval(timer);
-    },
+    subscribe: (send, stream) => subscribeStatusStream(deps, pollMs, { send, stream }, streamedProjection),
   };
+}
+
+/** Live spend/turns ride along (W1-T184): the client overwrites its row on every event, so a payload without them would wipe what the last REST poll showed. */
+function streamedProjection(task: Task, deps: BoardDeps, lines: Array<Record<string, unknown>>): StatusProjection & { liveSpendUsd?: number; liveTurns?: number } {
+  const projection = deriveStatus(task, deps);
+  if (!projection.phase) return projection;
+  const spend = liveRunSpend(lines, task.id);
+  return spend ? { ...projection, liveSpendUsd: spend.spendUsd, liveTurns: spend.turns } : projection;
 }
 
 // ── FIND-layer sort comparators (W1-T157) ──────────────────────────────────────────────────

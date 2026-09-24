@@ -1536,6 +1536,7 @@
     "test/status-board.test.ts": 2457,
     "test/status-rest-transport.test.ts": 1089,
     "test/status-service-liveness.test.ts": 1208,
+    "test/status-stream-publisher.test.ts": 0,
     "test/status.escalation-opened-at.test.ts": 1042,
     "test/status.test.ts": 2587,
     "test/strict-probe.test.ts": 481,

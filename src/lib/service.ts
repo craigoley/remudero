@@ -100,8 +100,13 @@ export interface Route {
   selfAuthenticated?: boolean;
 }
 
-/** Push one SSE event to a subscribed client (`event:`/`data:` framing, owned by this module). */
-export type SseSend = (event: string, data: unknown) => void;
+/** Push one SSE event to a subscribed client (`id:`/`event:`/`data:` framing, owned by this module). */
+export type SseSend = (event: string, data: unknown, id?: string) => void;
+
+export interface SseStream {
+  lastEventId?: string;
+  comment(text: string): void;
+}
 
 /** One SSE stream: an exact GET `path` match gated by `scope`. */
 export interface SseRoute {
@@ -109,7 +114,7 @@ export interface SseRoute {
   scope: Scope;
   /** Called once per client connection, after the scope check passes. Must return an
    *  unsubscribe/cleanup function, invoked on disconnect — no subscription outlives the client. */
-  subscribe: (send: SseSend) => () => void;
+  subscribe: (send: SseSend, stream?: SseStream) => () => void;
 }
 
 /** The bearer tokens this surface accepts. `write` also satisfies `read`-scoped routes. */
@@ -1076,15 +1081,21 @@ function respondToRequestFailure(
 function openSse(req: IncomingMessage, res: ServerResponse, route: SseRoute, path: string, log: NonNullable<ServiceOptions["log"]>): void {
   res.writeHead(200, {
     "content-type": "text/event-stream",
-    "cache-control": "no-cache",
+    "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
+    "x-accel-buffering": "no",
   });
   // Prime the stream immediately so the client sees an open 200 before subscribe()'s first event.
-  res.write(":ok\n\n");
-  const send: SseSend = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  res.write(":ok\n\nretry: 3000\n\n");
+  const send: SseSend = (event, data, id) => {
+    res.write(`${id ? `id: ${id}\n` : ""}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
-  const unsubscribe = route.subscribe(send);
+  const lastEventId = req.headers["last-event-id"];
+  const stream: SseStream = {
+    lastEventId: typeof lastEventId === "string" && lastEventId ? lastEventId : undefined,
+    comment: (text) => void res.write(`: ${text}\n\n`),
+  };
+  const unsubscribe = route.subscribe(send, stream);
   log("service.sse.open", { path });
   req.on("close", () => {
     unsubscribe();
