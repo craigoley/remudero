@@ -1181,6 +1181,7 @@ export interface DecisionRecordParams {
   chosen: string;
   band: string;
   reason: string;
+  falsifier?: string;
   /** Defaults to `new Date().toISOString()` — injectable so a test can pin the timestamp. */
   ts?: string;
 }
@@ -1193,6 +1194,7 @@ export function decisionRecordContent(params: DecisionRecordParams): string {
     `## ${ts} — ${params.taskId} (${params.runId})\n` +
     `- Options: ${params.options.join(" | ")}\n` +
     `- Chosen (RECOMMENDED, auto): ${params.chosen}\n` +
+    (params.falsifier ? `- Wrong if: ${params.falsifier}\n` : "") +
     `- Risk: ${params.band} (${params.reason})\n` +
     `- Rollback: revert the PR.\n`
   );
