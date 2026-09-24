@@ -106,6 +106,9 @@ function fixRung(opts: { root?: string; runId?: string; answer?: string; edits?:
 test("W1-T4450: a fix round's regenerable baseline edit is committed", () => {
   assert.ok(Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, BASELINE), "the baseline is a registered regenerable artifact");
   const repo = gitRepo({ kind: "w1t4450", seedCommit: true });
+  // commitWorkerEdits commits with plain `git`, as production does; a CI runner has no global identity.
+  repo.git("config", "user.email", "fixture@example.invalid");
+  repo.git("config", "user.name", "fixture");
   mkdirSync(join(repo.dir, "scripts"));
   writeFileSync(join(repo.dir, BASELINE), "{}\n");
   writeFileSync(join(repo.dir, "scripts/other.json"), "{}\n");
