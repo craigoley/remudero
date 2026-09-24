@@ -85,6 +85,13 @@ test("census precheck: a hand-rolled fixture past the fixture-copy baseline is r
   );
 });
 
+test("census precheck: an EXISTING test file that gains a hand-rolled fixture is charged the growth, not the file", () => {
+  const base = { ...baselines, "test/one.test.ts": INIT_SITE };
+  const head = { ...base, "test/one.test.ts": INIT_SITE + INIT_SITE };
+  const found = evaluate(head, base);
+  assert.deepEqual(found.map((f) => f.split(" — ")[0]), ["fixture-copy: gitInitSites 2 > baseline 1"]);
+});
+
 test("census precheck: growth main already carries is not this branch's, but growing it further is", () => {
   // The base is already over its clock row. A branch that leaves the file alone must push; one that
   // adds another site on top must not.
