@@ -39,6 +39,7 @@ const { countCommentLines, evaluateBaselineCensus, evaluateCommentLoadRatchet, f
       shrunk: Array<{ path: string; from: number; to: number }>;
       added: Array<{ path: string; comments: number }>;
       removed: string[];
+      redundant: string[];
       nextBaseline: Record<string, number>;
     };
     findOversizedAddedBlocks: (
