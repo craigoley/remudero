@@ -1,0 +1,43 @@
+- id: W1-T4467
+  title: "THE COMMIT-LINE RE-ASK IS BLIND FOR A CODEX WRITER — codex exec resume cannot carry a writer's sandbox, so W1-T4450's 'resume the same session' starts a FRESH Codex session that sees only 'give me your COMMIT_MESSAGE line' and none of the work; give that ask the work's context, and let the harness derive the subject from the task record when the line is still absent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; verification of W1-T4450 on live code"
+  plan_refs: [W1-T4450, W1-T4052, W1-T3727]
+  files: [src/run-task.ts, test/a-writer-that-cannot-resume-still-names-its-commit.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (rmd ledger-grep fix.commit_line_, 2026-09-24): the W1-T4450 fix-lane re-ask fired 4 times after merging
+    (14:05Z unfiled, 15:04Z W1-T4096, 15:17Z unfiled, 16:02Z W1-T4436). Every answering session id is a Codex UUIDv7
+    (01a0d3…/01a0d4…) with cost_usd 0 and num_turns 0-1. W1-T4436's answer came back in 5 s with 0 turns and the round was
+    refused again for the missing line. Since boot 8f32d9f (14:42Z) the fix lane still logged 4 missing-line refusals and the
+    implement lane 8. The implement lane's resume on W1-T4458 (16:29Z) also ended no_pr.
+    OBSERVED: src/lib/worker-provider.ts (the codex argv builder) returns "exec resume" only for read-only and disposable-review
+    continuations; "a resumed writer must therefore start fresh through the ordinary contained path". So for a Codex writer the
+    one-line resume prompt is the whole context the answering session has.
+  design: |
+    (i) When the worker's provider cannot resume a writer, the commit-line ask carries the context itself: the task title,
+    `git diff --stat` of the uncommitted edits and the tail of the worker's own report, and asks for exactly one
+    COMMIT_MESSAGE line. A provider that can resume keeps today's one-line resume.
+    (ii) TIERED FALLBACK — AN OPERATOR-VISIBLE CHANGE TO DOCTRINE: if the answer still has no line, the harness composes the
+    subject from the task record instead of discarding the edits. Implement: "<type>(<first declared path's area>): <task
+    title's first clause>". Fix round: "fix: repair <first failing check> on #<pr>". The commit body says the subject was
+    harness-derived and names the reason. harnessCommitForShellLessWorker never invents anything the task record does not
+    say; every other refusal (no files, outside declared files, changed nothing) is unchanged.
+    (iii) A ledger field on the harness commit row distinguishes worker-authored, re-asked and harness-derived subjects, so
+    their merge rates can be compared.
+  acceptance:
+    - claim: "a writer that cannot resume is asked with the diff and its own report"
+      proof: 'grep: test("W1-T4467: a writer that cannot resume is asked with the diff and its own report" in test/a-writer-that-cannot-resume-still-names-its-commit.test.ts'
+    - claim: "a still-missing line commits under a subject derived from the task record"
+      proof: 'grep: test("W1-T4467: a still-missing line commits under a subject derived from the task record" in test/a-writer-that-cannot-resume-still-names-its-commit.test.ts'
+  falsifier: |
+    Send the bare resume prompt to a Codex writer and the first test finds the ask carrying no diff.

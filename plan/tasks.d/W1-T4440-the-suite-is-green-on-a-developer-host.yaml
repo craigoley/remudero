@@ -1,5 +1,5 @@
 - id: W1-T4440
-  title: "FIVE SUITES FAIL ON THE OPERATOR MAC ON A CLEAN MAIN — git-fixture-gc-hygiene, credential-reach-probe, a-gardener-pr-carries-a-conforming-identity, a-live-console-review-is-runnable and adhoc-lane-reap read host state, so every local run carries red noise a worker or operator must learn to ignore"
+  title: "SIX SUITES FAIL ON THE OPERATOR MAC ON A CLEAN MAIN — git-fixture-gc-hygiene, credential-reach-probe, a-gardener-pr-carries-a-conforming-identity, a-live-console-review-is-runnable, adhoc-lane-reap and the-scheduled-learning-rung-drafts-and-discards read host state, so every local run carries red noise a worker or operator must learn to ignore"
   repo: remudero
   depends_on: []
   type: implement
@@ -11,16 +11,20 @@
   band_meaning: span
   origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
   plan_refs: []
-  files: [test/git-fixture-gc-hygiene.test.ts, test/credential-reach-probe.test.ts, test/a-gardener-pr-carries-a-conforming-identity.test.ts, test/a-live-console-review-is-runnable.test.ts, test/adhoc-lane-reap.test.ts, test/the-suite-is-green-on-a-developer-host.test.ts]
+  files: [test/git-fixture-gc-hygiene.test.ts, test/credential-reach-probe.test.ts, test/a-gardener-pr-carries-a-conforming-identity.test.ts, test/a-live-console-review-is-runnable.test.ts, test/adhoc-lane-reap.test.ts, test/the-scheduled-learning-rung-drafts-and-discards.test.ts, test/the-suite-is-green-on-a-developer-host.test.ts]
   status: queued
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
     OBSERVED 2026-09-24: each of the five fails identically in a throwaway worktree of clean origin/main on the operator
     Mac, while CI is green, so they depend on host git config, credentials or services rather than on the code under test.
+    AMENDED 2026-09-24 (operator follow-up): the-scheduled-learning-rung-drafts-and-discards (W1-T3324) fails 5 tests on a
+    clean main with EACCES on /tmp/w1t3324-root/state/ledger.ndjson — a FIXED shared /tmp path another user or session owns,
+    where a per-run mkdtemp root belongs.
   design: |
     (i) For each, find the host dependency and either isolate it (fixture env, the shared git-repo helper's own identity
     and gc settings) or declare it as a host-capability fixture that skips with a named reason where the capability is absent.
+    A fixed shared /tmp path becomes a per-run temporary root.
     (ii) A census names every suite that reads host state without such a declaration.
   acceptance:
     - claim: "no suite reads host git or credential state without a declared capability"
