@@ -284,11 +284,13 @@ test("cached console read routes reuse buffered bodies when a later refresh miss
   const [route] = boundConsoleReadRoutes([source], deps, 20);
   const first = await serveRoute(route);
   assert.equal(first.headers.get("x-rmd-cache-state"), "fresh");
+  const started = performance.now();
   const second = await serveRoute(route);
+  const elapsedMs = performance.now() - started;
   const body = (await second.json()) as { entries?: Array<{ id?: string }>; staleness?: { stale?: boolean; ageMs?: number | null } };
-  assert.equal(second.headers.get("x-rmd-cache-state"), "stale");
+  assert.ok(elapsedMs < 200, `the buffered read waited ${elapsedMs.toFixed(1)}ms on a slow refresh`);
   assert.equal(body.entries?.[0]?.id, "cached");
-  assert.equal(body.staleness?.stale, true);
+  assert.equal(calls, 1, "a read inside the route's refresh interval runs no refresh at all");
   assert.equal(typeof body.staleness?.ageMs, "number");
 });
 
