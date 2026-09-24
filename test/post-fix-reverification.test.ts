@@ -103,7 +103,7 @@ function unrelatedRedPr(over: Partial<OpenPrView> = {}): OpenPrView {
     prUrl: "url/500",
     reviewState: "pending",
     checksState: "red",
-    ciFailures: [{ name: "commitlint", logTail: "header-max-length: 108 chars exceeds the 100 cap" }],
+    ciFailures: [{ name: "depcruise", logTail: "dependency rule violation in an unrelated pull request" }],
     ...over,
   });
 }
