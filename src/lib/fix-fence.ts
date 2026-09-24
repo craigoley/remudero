@@ -51,6 +51,10 @@ export function neutralizeFenceMarkers(text: string): string {
  */
 export const FIX_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
 
+export function fixWorkerTools(harnessCommits: boolean): string[] {
+  return harnessCommits ? FIX_WORKER_TOOLS.filter((tool) => tool !== "Bash") : [...FIX_WORKER_TOOLS];
+}
+
 /**
  * W1-T3727: the fix rung's surface when a NON-SUBSCRIPTION provider runs it.
  *

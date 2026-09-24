@@ -2232,7 +2232,7 @@ import {
   sweepStaleWorkerHomes,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
-import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
+import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, fixWorkerTools } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
   checkCliFreshness,
@@ -8967,8 +8967,9 @@ export async function runFixRung(opts: {
   proofDiscrimination?: ProofDiscriminationEvidence;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
-    /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
+    /** W1-T3868: test seam for the harness-owned commit decision. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
+    startHarnessMergeForConflict?: typeof startHarnessMergeForConflict;
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
     worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
     /**
@@ -9233,6 +9234,26 @@ export async function runFixRung(opts: {
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
+  let birthWorktreeSnapshot = opts.birthWorktreeSnapshot;
+  const harnessOwnsGitForRound = fixRoundGitOwnership(opts.config).harnessCommits;
+  if (opts.mergeConflict !== undefined && harnessOwnsGitForRound) {
+    const merge = (deps.startHarnessMergeForConflict ?? startHarnessMergeForConflict)(opts.worktreePath);
+    deps.log("fix.harness_merge_started", {
+      outcome: merge.outcome,
+      ...(merge.unresolvedPaths.length > 0 ? { unresolved_paths: merge.unresolvedPaths } : {}),
+    });
+    if (deps.captureWorktreeSnapshot) {
+      try {
+        const afterMerge = await deps.captureWorktreeSnapshot(opts.worktreePath);
+        if (afterMerge !== undefined) birthWorktreeSnapshot = afterMerge;
+      } catch (error) {
+        deps.log("fix.harness_merge_snapshot_failed", { error: String((error as Error)?.message ?? error) });
+      }
+    } else {
+      const afterMerge = captureWorktreeSnapshotViaGit(opts.worktreePath);
+      if (afterMerge !== undefined) birthWorktreeSnapshot = afterMerge;
+    }
+  }
   // W1-T3579: computed ONCE, from the live task this rung was dispatched against — never
   // recomputed per round (a task's own contract cannot change mid-rung; only a FRESH `runFixRung`
   // built by the next sweep, after a plan amendment, would ever see a different one). Threaded
@@ -9382,7 +9403,7 @@ export async function runFixRung(opts: {
         currentTreeSnapshot = undefined; // fail open — an unreadable capture never manufactures a stand-down
       }
     }
-    const registeredWorktrees = opts.birthWorktreeSnapshot && deps.readRegisteredWorktrees
+    const registeredWorktrees = birthWorktreeSnapshot && deps.readRegisteredWorktrees
         ? await Promise.resolve().then(deps.readRegisteredWorktrees).catch((_registryReadError: unknown): undefined => undefined)
         : undefined;
     const preStrikeStandDown = await fixRungStandDownReason(
@@ -9401,7 +9422,7 @@ export async function runFixRung(opts: {
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
       deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
-      opts.birthWorktreeSnapshot ? { round: strikes + retriggers + 1, branch: opts.branch, currentWorktreePath: opts.worktreePath, birthSnapshot: opts.birthWorktreeSnapshot, currentSnapshot: currentTreeSnapshot, registeredWorktrees } : undefined,
+      birthWorktreeSnapshot ? { round: strikes + retriggers + 1, branch: opts.branch, currentWorktreePath: opts.worktreePath, birthSnapshot: birthWorktreeSnapshot, currentSnapshot: currentTreeSnapshot, registeredWorktrees } : undefined,
       // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
       // key is the escalation the false-block escape below would file if this strike changed
       // nothing, assembled through the SAME `EscalationDedupKey` shape `escalate()` itself is
@@ -10401,7 +10422,7 @@ export async function runFixRung(opts: {
       // fix-and-push job actually needs (FIX_WORKER_TOOLS) so a
       // prompt-injection payload riding in that log can't reach the
       // network via WebFetch/WebSearch.
-      tools: FIX_WORKER_TOOLS,
+      tools: fixWorkerTools(fixHarnessOwnsGit),
       // W1-T3727: the surface a BLOCKED auction would divert this round to. Offered only when the
       // prompt above already said the harness commits — otherwise a retry hands a shell-less
       // worker a contract asking for `git push`.
@@ -36660,6 +36681,42 @@ export function pathIsUnderDeclaredSurface(path: string, declaredPaths: readonly
 
 export interface PublishAbandonedFixOwnerAheadDeps {
   runGit?: (args: string[]) => string;
+}
+
+export interface HarnessMergeStart {
+  readonly outcome: "clean" | "conflicted";
+  readonly unresolvedPaths: readonly string[];
+}
+
+export function startHarnessMergeForConflict(
+  worktreePath: string,
+  deps: PublishAbandonedFixOwnerAheadDeps = {},
+): HarnessMergeStart {
+  const runGit = deps.runGit ?? ((args: string[]) => String(execFileSync(
+    "git",
+    args,
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  )));
+  const mergeArgs = ["-C", worktreePath, "merge", "--no-commit", "origin/main"];
+  try {
+    runGit(mergeArgs);
+    return { outcome: "clean", unresolvedPaths: [] };
+  } catch (mergeError) {
+    const mergeDetail = String((mergeError as Error)?.message ?? mergeError);
+    let unresolvedOutput: string;
+    try {
+      const statusArgs = ["-C", worktreePath, "diff", "--name-only", "--diff-filter=U"];
+      unresolvedOutput = runGit(statusArgs);
+    } catch (stateError) {
+      throw new Error(
+        `harness merge failed and conflict state could not be read: merge=${mergeDetail}; ` +
+        `state=${String((stateError as Error)?.message ?? stateError)}`,
+      );
+    }
+    const unresolvedPaths = unresolvedOutput.split(/\r?\n/).map((path) => path.trim()).filter(Boolean);
+    if (unresolvedPaths.length > 0) return { outcome: "conflicted", unresolvedPaths };
+    throw new Error(`harness merge failed without unresolved paths: ${mergeDetail}`);
+  }
 }
 
 function remoteHeadShaFromLsRemote(raw: string, ref: string): string | null {
