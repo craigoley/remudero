@@ -279,3 +279,27 @@ test("a spliced staleness envelope parses to the same object a reparse would giv
     assert.equal(staleness.status, "fresh", raw);
   }
 });
+
+test("an invalidated buffer whose refresh misses the budget is served as stale", async () => {
+  const generation = createConsoleWriteGeneration();
+  let calls = 0;
+  const route: Route = {
+    method: "GET",
+    path: "/v1/recent",
+    scope: "read",
+    handler: async (_req, res) => {
+      calls += 1;
+      if (calls > 1) await new Promise((resolve) => setTimeout(resolve, 200));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(`{"entries":["v${calls}"]}`);
+    },
+  };
+  const cache = createConsoleSnapshotCache(route, { budgetMs: 20, fallbackBody, clock: manualClock(), generation, setTimer: () => {} });
+  await read(cache.handler, reqOf("/v1/recent"));
+  generation.bump();
+  const res = await read(cache.handler, reqOf("/v1/recent"));
+  assert.deepEqual(res.json().entries, ["v1"]);
+  assert.equal(res.json().staleness.stale, true);
+  assert.equal(res.json().staleness.status, "stale");
+  assert.equal(res.headers["x-rmd-cache-state"], "stale");
+});
