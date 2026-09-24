@@ -17605,22 +17605,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       target_owner: owner,
       target_repo: repo,
     });
-    await postStatusDep({
-      owner,
-      repo,
-      sha: view.headRefOid,
-      state: "failure",
-      description: `remudero-review: FAIL — ${subjectCheckout.reason}`,
-      taskId: taskId ?? `PR-${view.number}`,
-      evidence: "no_evidence",
-      ledgerPath,
-      runId,
-      prUrl: view.url,
-      reviewInputDigest: inputDigest,
-      reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      fetchLifecycle: () => fetchPrLifecycle(view.url),
-    });
-    console.error(`rmd review: REFUSED — ${subjectCheckout.message}`);
+    // W1-T4410: a refusal about THIS machine's checkout judges nothing about the PR, so no status is posted.
+    console.error(
+      `rmd review: REFUSED — ${subjectCheckout.message}. No status was posted on the PR; ` +
+        `run the review where ${owner}/${repo} is checked out (that repo's own daemon reviews it).`,
+    );
     return 1;
   }
   const subjectRepoDir = subjectCheckout.repoDir;
