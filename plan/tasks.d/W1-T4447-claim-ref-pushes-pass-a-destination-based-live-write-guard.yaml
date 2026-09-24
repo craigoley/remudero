@@ -1,0 +1,57 @@
+- id: W1-T4447
+  title: "CLAIM-REF PUSHES BYPASS THE LIVE-WRITE GUARD — gitRemoteRefReserver, gitTriageClaimReserver, gitDispatchClaimReserver and gitRepairClaimReserver push refs/rmd-id|rmd-triage|rmd-dispatch|rmd-repair to whatever origin their run targets and none consults live-write-guard, so a test run leaked refs/rmd-id/W1-T1000002 and W1-T1000003 onto the live origin; guard every claim-ref push by DESTINATION"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 console/daemon incident follow-up: the refs/rmd-pause/hold leak and stray fixture reservations on the live origin"
+  plan_refs: ["W1-T143"]
+  files:
+    - src/lib/live-write-guard.ts
+    - src/lib/task-id-reservation.ts
+    - src/lib/auto-triage.ts
+    - src/lib/dispatch-claim.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: `git ls-remote origin 'refs/rmd-id/W1-T100000*'` on the live repo returns
+    refs/rmd-id/W1-T1000002 (2e465efa) and refs/rmd-id/W1-T1000003 (3f5e60cf). Their anchors read "rmd-id
+    reservation 170677@b79658d95089 2026-08-19T15:15:4x", which are fixture-range ids leaked by a test run.
+    On the same day the same class of leak pushed refs/rmd-pause/hold from a worker worktree's test run and held
+    the fleet for about 4h. PR #6949 (open at filing) guards ONLY that pause push, through assertLiveWriteAllowed
+    in realSharedPauseGitDeps.run.
+    Read at main: gitRemoteRefReserver (src/lib/task-id-reservation.ts), gitTriageClaimReserver
+    (src/lib/auto-triage.ts), and gitDispatchClaimReserver / gitRepairClaimReserver (src/lib/dispatch-claim.ts)
+    each push a claim ref through their injected git run to the checkout's origin. None of these files imports
+    live-write-guard. A test that builds one against a checkout whose origin is the real GitHub remote
+    writes a durable, contested ref there, and a leaked reservation permanently burns its id.
+    ONE INVARIANT ACROSS FOUR FILES, which is why this is risk:high as Rule 19's SPAN: every claim-ref push
+    passes one destination-based guard, and a piecewise fix leaves the other reservers leaking.
+  design: |
+    (i) live-write-guard gains a DESTINATION-BASED check for a ref push. Under the test runner, and only when
+    the push's origin resolves to a NETWORK remote (a URL with a scheme or scp-style host, not a filesystem
+    path or file://), it throws LiveWriteBlockedError with boundary "git-push". A push to a bare TMPDIR origin,
+    which is how the reservation, triage, dispatch and repair suites prove their races, is still allowed, so
+    those suites keep working unchanged. LIVE_WRITE_OVERRIDE_ENV and withLiveWritesAllowed still apply.
+    (ii) The four reservers call it immediately before their push. They resolve the origin URL through the same
+    injected git run (`remote get-url origin`) so it stays testable.
+    (iii) OPERATOR STEP, NOT CODE: delete the two stray refs once this merges:
+    `git push origin :refs/rmd-id/W1-T1000002 :refs/rmd-id/W1-T1000003`. First confirm that no plan task holds
+    either id.
+    Out of scope: the pause push (#6949), and gh-API writes, which are already guarded.
+  acceptance:
+    - claim: "a claim-ref push to a network origin is refused under the test runner"
+      proof: "unit test: a claim-ref push to a network origin is refused under the test runner"
+    - claim: "the id reserver consults the live-write guard"
+      proof: "grep: live-write-guard in src/lib/task-id-reservation.ts"
+    - claim: "the triage claim reserver consults the live-write guard"
+      proof: "grep: live-write-guard in src/lib/auto-triage.ts"
+    - claim: "the dispatch and repair claim reservers consult the live-write guard"
+      proof: "grep: live-write-guard in src/lib/dispatch-claim.ts"
+  falsifier: |
+    CLOSE IF every claim-ref reserver on main already refuses a test-runner push to a network origin.
