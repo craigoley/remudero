@@ -575,7 +575,9 @@ test("W1-T191: runTask's DECISION_REQUEST branch calls the injectable recordDeci
       // shouldRecordDecision's medium-risk signal, so the record gate fires.
       return result({
         sessionId: "s-implement",
-        text: "DECISION_REQUEST\n- Add a schema migration column (RECOMMENDED)\n- Do nothing\n",
+        text:
+          "DECISION_REQUEST\n- Add a schema migration column (RECOMMENDED)\n- Do nothing\n" +
+          "FALSIFIER: the column already exists on origin/main\n",
       });
     }
     // The resumed implement call, after the decision is auto-chosen and (fake-)recorded.
@@ -623,6 +625,8 @@ test("W1-T191: runTask's DECISION_REQUEST branch calls the injectable recordDeci
     assert.equal(autochoose.recorded, true);
     assert.equal(autochoose.risk_band, "medium");
     assert.equal(autochoose.landed, true, "the fake recordDecision's landed:true must reach the ledger line");
+    assert.equal(call.params.falsifier, "the column already exists on origin/main");
+    assert.equal(autochoose.falsifier, "the column already exists on origin/main", "the worker's FALSIFIER reaches the ledger");
   } finally {
     dateNowSpy.mock.restore();
     process.env.PATH = savedPath;
@@ -686,6 +690,7 @@ test("W1-T191: runTask's DECISION_REQUEST branch never calls recordDecision for 
       .map((l) => JSON.parse(l));
     const autochoose = ledger.find((l) => l.step === "decision.autochoose");
     assert.ok(autochoose, "decision.autochoose must still fire even when ledger-only");
+    assert.equal(autochoose.falsifier, null, "no FALSIFIER line ledgers null, never a missing key");
     assert.equal(autochoose.recorded, false);
     assert.equal(autochoose.risk_band, "low");
     assert.equal(autochoose.landed, false);

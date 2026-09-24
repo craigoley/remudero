@@ -56,6 +56,7 @@
     "test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts": 0,
     "test/a-dead-containers-claim-does-not-outlive-it.test.ts": 0,
     "test/a-deadlock-the-harness-cannot-count.test.ts": 1938,
+    "test/a-decision-request-names-its-falsifier.test.ts": 0,
     "test/a-declared-budget-is-calibrated-against-observed-runs.test.ts": 0,
     "test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts": 1338,
     "test/a-declared-file-the-diff-never-touches-is-reported.test.ts": 0,

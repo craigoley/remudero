@@ -788,8 +788,9 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // W1-T4226 then added THIRTY-FIVE lines ahead of both (a `fetchPrBody` fake on each fix-rung
   // test that had been reading the PR body through the refused `gh`) and they moved by exactly
   // thirty-five, to :6151/:6212. The NINTH re-derivation; still the same two call sites.
-    "armIfVerdictPermits:test/run-task.test.ts:6151:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6212:ledgerLines",
+  // The DECISION_REQUEST falsifier assertions added FIVE ahead of both: :6156/:6217, the TENTH.
+    "armIfVerdictPermits:test/run-task.test.ts:6156:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6217:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(
