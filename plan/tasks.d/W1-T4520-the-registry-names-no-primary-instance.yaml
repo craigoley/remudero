@@ -1,4 +1,4 @@
-- id: W1-T4478
+- id: W1-T4520
   title: "THE INSTANCE REGISTRY NAMES NO PRIMARY — every instance runs its own deploy judge and restart pressure, so nothing can say which one decides a release: add a `primary: true` field that exactly one live instance carries, readable by the TS parser and both shell readers"
   repo: remudero
   depends_on: []
@@ -25,7 +25,7 @@
     Both shell readers REFUSE an unknown field (`project|github_repo|retired) : ;;` then `*) ... REFUSING`),
     so a new field must be added to both before any registry row carries it.
     Operator ruling 2026-09-24: core (`remudero-daemon`) is the primary. This is phase 1 of the release-tag
-    plan (W1-T4478..W1-T4482): it only makes the primary nameable. No deploy behavior changes.
+    plan (W1-T4520..W1-T4524): it only makes the primary nameable. No deploy behavior changes.
   design: |
     (i) `primary: true|false` is a known field in parseInstanceRegistry (instance-registry.ts), in
         daemonInstanceRows (deployer.ts), and in both shell readers' known-field lists.
@@ -37,8 +37,8 @@
     (iv) The tracked registry marks core `primary: true`. No other behavior changes in this task.
   acceptance:
     - claim: "exactly one live instance is primary, and zero or two is a named refusal"
-      proof: 'grep: test("W1-T4478: exactly one live instance is primary" in test/the-registry-names-one-primary-instance.test.ts'
+      proof: 'grep: test("W1-T4520: exactly one live instance is primary" in test/the-registry-names-one-primary-instance.test.ts'
     - claim: "a deployment resolves whether it is the primary through its state root"
-      proof: 'grep: test("W1-T4478: a deployment knows whether it is the primary" in test/the-registry-names-one-primary-instance.test.ts'
+      proof: 'grep: test("W1-T4520: a deployment knows whether it is the primary" in test/the-registry-names-one-primary-instance.test.ts'
     - claim: "the tracked registry names core as the primary"
       proof: 'grep: primary: true in .remudero/daemon-instances.yaml'
