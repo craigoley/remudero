@@ -902,7 +902,9 @@ import {
   releaseCiLearningCadenceFire,
   CI_LEARNING_WINDOW_DAYS,
   recordMeasurementCadenceFire,
+  readWipeTestAblationEvidence,
   recordWipeTestCadenceFire,
+  scheduleWipeTestAblation,
   renderVerbCensusDigestLine,
   priorVerifyHumanAgeBandKeys,
   runMeasurementCadenceReportAsync,
@@ -1140,9 +1142,7 @@ import {
   resolveWipeTestFactor,
   resolveWipeTestTarget,
   runWipeTestPair,
-  WIPE_TEST_PAIR_STEP,
   WIPE_TEST_SANDBOX_DEFAULT,
-  type WipeTestFactor,
   type WipeTestMergedState,
   type WipeTestPairSubject,
 } from "./lib/wipe-test.js";
@@ -26457,36 +26457,9 @@ export function buildBoardReviewDaemonHooks(deps: {
   return { checkBoardReview: check, runBoardReview: run };
 }
 
-const WIPE_TEST_PAIR_ROW_PATTERN = /"step":"wipetest\.pair"/;
-
-function priorWipeTestPairCount(stateDir: string, ledgerUnion: (stateDir: string, pattern: RegExp) => ReturnType<typeof resolveLedgerUnion>): {
-  ok: true;
-  count: number;
-} | { ok: false; reason: string } {
-  const union = ledgerUnion(stateDir, WIPE_TEST_PAIR_ROW_PATTERN);
-  if (!union.ok) {
-    const reason =
-      union.archiveCount === 0
-        ? `wipe-test cadence ledger union unreadable under ${union.stateDir}: no rotation corpus`
-        : `wipe-test cadence ledger union unreadable under ${union.stateDir}: ${union.unread.length} unreadable file(s)`;
-    return { ok: false, reason };
-  }
-  let count = 0;
-  for (const line of union.matches) {
-    try {
-      const row = JSON.parse(line) as { step?: unknown };
-      if (row.step === WIPE_TEST_PAIR_STEP) count++;
-    } catch {
-      // Torn or foreign line: the pre-filter found the step text, but an unparseable row is not a
-      // measured pair and must not advance the subject/factor rotation.
-    }
-  }
-  return { ok: true, count };
-}
-
-function chooseWipeTestFactor(seq: number): WipeTestFactor {
-  return seq % 2 === 1 ? "learnings" : "recon";
-}
+/** The risk every generated sandbox subject is written with (wipe-test.ts's
+ *  `renderGeneratedSubjectTask`); W1-T4092's scheduler refuses anything else. */
+const WIPE_TEST_SANDBOX_SUBJECT_RISK = "low" as const;
 
 export function buildWipeTestCadenceDaemonHooks(deps: {
   check?: () => WipeTestCadenceDecision;
@@ -26500,6 +26473,7 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
   execFileSyncFn?: typeof execFileSync;
   targetArgs?: string[];
   resolveMergedState?: (taskId: string, planPath: string, config: Config) => WipeTestMergedState;
+  draw?: () => number;
 } = {}): {
   checkWipeTestCadence: () => WipeTestCadenceDecision;
   runWipeTestCadence: (decision: Extract<WipeTestCadenceDecision, { fire: true }>) => Promise<WipeTestCadenceRunResult>;
@@ -26514,10 +26488,11 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
     (() => {
       const config = configFor();
       const policy: WipeTestCadencePolicy = policyFor().values.wipeTestCadence;
-      const paced = wipeTestCadenceCheck({ root: config.root, policy, now: deps.now?.() });
+      const now = clockFromDateFn(deps.now).date();
+      const paced = wipeTestCadenceCheck({ root: config.root, policy, now });
       if (!paced.fire) return paced;
 
-      const prior = priorWipeTestPairCount(join(config.root, "state"), ledgerUnion);
+      const prior = readWipeTestAblationEvidence(join(config.root, "state"), ledgerUnion);
       if (!prior.ok) return { fire: false, reason: prior.reason };
 
       const index = learningsIndexFor();
@@ -26525,7 +26500,7 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       const shards = Object.keys(index.files).sort();
       if (shards.length === 0) return { fire: false, reason: "wipe-test cadence learnings index has no shards" };
 
-      const seq = prior.count + 1;
+      const seq = prior.pairs.length + 1;
       const shard = shards[(seq - 1) % shards.length]!;
       let subject: WipeTestPairSubject;
       try {
@@ -26533,12 +26508,22 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       } catch (e) {
         return { fire: false, reason: String((e as Error)?.message ?? e) };
       }
+      const scheduled = scheduleWipeTestAblation({
+        root: config.root,
+        policy,
+        now,
+        candidate: { id: subject.id, risk: WIPE_TEST_SANDBOX_SUBJECT_RISK },
+        pairs: prior.pairs,
+        claimedUse: prior.claimedUse,
+        draw: deps.draw?.(),
+      });
+      if (!scheduled.fire) return scheduled;
       return {
         fire: true,
-        reason: paced.reason,
+        reason: scheduled.reason,
         seq,
         subject,
-        factor: chooseWipeTestFactor(seq),
+        factor: scheduled.factor,
       };
     });
   const run =
