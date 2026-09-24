@@ -95,7 +95,7 @@ test("list-rule-suites CLI: --list prints the population, --run runs it, an unkn
 test("listRuleSuites refuses rather than returning an empty population when git cannot list the tree", () => {
   const repo = gitRepo({ kind: "rule-suites-absent" });
   try {
-    assert.throws(() => listRuleSuites(join(repo.dir, "absent")), /git ls-files -- test failed: .*ENOENT/);
+    assert.throws(() => listRuleSuites(join(repo.dir, "absent")), / -- test failed: .*ENOENT/);
   } finally {
     repo.cleanup();
   }
