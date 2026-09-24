@@ -1,0 +1,31 @@
+- id: W1-T4461
+  title: "FIX WORKERS ARE HANDED 'Process completed with exit code 1' INSTEAD OF THE FAILING TESTS — fetchCiFailures prefers a check run's annotations, which for a test failure carry only the exit line, so at least 7 fix reports say the log told them nothing and they guessed; hand the worker the failing test names and their errors"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: medium
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
+  plan_refs: [W1-T4398]
+  files: [src/run-task.ts, test/a-fix-worker-sees-the-failing-tests.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the fix.done rows since 2026-09-23T15:59Z: 62 of 65 fix rounds ended commit_refused ($73.51). Reasons: 37 missing COMMIT_MESSAGE line and 9 regenerable-baseline edits refused (both W1-T4450), 12 'the worker changed nothing', 8 'the task declares no files'.
+    OBSERVED 2026-09-24: fix reports for W1-T4413, W1-T4416, W1-T4431, W1-T4404, W1-T4350 and #6807 say the log tail held only
+    "Process completed with exit code 1" and the runner-image notice. fetchCiFailures takes annotations first
+    (tailSource "annotations") and falls back to the log tail only when there are none.
+  design: |
+    (i) When a failing job's annotations name no test (only the exit line), read the job log and extract the TAP
+    `not ok N - <title>` lines with their error/expected/actual blocks and the FLAKE-RETRY lines (the shape W1-T4398's coverage
+    wrapper already prints), bounded per job. (ii) tailSource names which source was used; the prompt says so. (iii) The
+    annotation path is kept for checks whose annotations DO carry the finding (lint-style gates).
+  acceptance:
+    - claim: "a test failure''s fix prompt names the failing test and its error"
+      proof: 'grep: test("W1-T4461: a test failure''s fix prompt names the failing test and its error" in test/a-fix-worker-sees-the-failing-tests.test.ts'
+  falsifier: |
+    Keep annotations first and the test finds only the exit-code line in the prompt.

@@ -29,6 +29,8 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { appendLedger } from "../src/lib/ledger.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 
 const NOW = Date.parse("2026-08-05T13:00:00.000Z");
@@ -175,13 +177,16 @@ test("the heartbeat records dry-run passes as such, so a preview is not read as 
 });
 
 test("the heartbeat is emitted before any disposition, so it cannot depend on the loop making progress", async () => {
-  const order: string[] = [];
-  const { deps: d } = deps({ log: (step) => order.push(step) });
+  // `log` appends to the SAME ledger the disposition row lands in, as the daemon wires it, so file
+  // order is the real order — a real pass writes its disposition only as `sweep.disposed`.
+  const { deps: d } = deps();
+  d.log = (step, extra) => appendLedger(d.ledgerPath, { run_id: "SWEEP-HB-1", task_id: "DAEMON", step, ...extra });
   await runSweep([pr()], d, DEFAULT_SWEEP_POLICY);
+  const order = readLedgerLines(d.ledgerPath).map((l) => String(l.step));
   const first = order.indexOf("sweep.pass");
-  const firstDispose = order.findIndex((s) => s.startsWith("sweep.dispose"));
+  const firstDispose = order.indexOf("sweep.disposed");
   assert.equal(first, 0, "the heartbeat is the pass's first ledger word");
-  if (firstDispose >= 0) assert.ok(first < firstDispose, "and precedes every disposition");
+  assert.ok(firstDispose > first, `and precedes every disposition; saw ${JSON.stringify(order)}`);
 });
 
 /** Keeps the temp dirs from accumulating across the run. */
