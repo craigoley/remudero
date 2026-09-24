@@ -40,6 +40,14 @@ export const DESIGN_RECORD_GLOB_RE =
 
 export const DESIGN_TASK_CLASS = "design";
 
+/** Ruling 2026-09-24 (amended): risk:high for SIZE (`band_meaning: span`) is routine; its implement rides the mid tier. */
+export const SPAN_ROUTE_CLASS = "span";
+
+export const implementRouteClass = (task: { type: string; risk: string; band_meaning?: string }, taskClass: string): string =>
+  task.type === "implement" && taskClass !== DESIGN_TASK_CLASS && task.risk === "high" && task.band_meaning === "span"
+    ? SPAN_ROUTE_CLASS
+    : taskClass;
+
 function isPlanGlob(glob: string): boolean {
   return PLAN_GLOB_RE.test(glob);
 }
