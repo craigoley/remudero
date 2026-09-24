@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { clockFromIsoFn } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { defaultOpenFileCount } from "../src/lib/clone-reaper.js";
 import {
@@ -157,7 +158,7 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
     ...quietDeps,
     listWorktrees: () => ["/w/live"],
     streakPath,
-    now,
+    clock: clockFromIsoFn(now),
     runPrune: () => assert.fail("refused"),
   });
   assert.equal(r1.consecutiveRefusals, 1);
@@ -167,7 +168,7 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
     ...quietDeps,
     listWorktrees: () => ["/w/live"],
     streakPath,
-    now,
+    clock: clockFromIsoFn(now),
     runPrune: () => assert.fail("refused"),
   });
   assert.equal(r2.consecutiveRefusals, 2, "a SECOND refusal extends the streak, it does not restart it");
@@ -177,7 +178,7 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
   const r3 = reapGitObjects(busy.repoDir, "/i", {
     ...quietDeps,
     streakPath,
-    now,
+    clock: clockFromIsoFn(now),
     runPrune: () => {},
   });
   assert.equal(r3.consecutiveRefusals, 0);
@@ -185,6 +186,24 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
 
   // Persisted across what a daemon restart would look like — a fresh read of the same path.
   assert.deepEqual(readRefusalStreak(streakPath), { consecutiveRefusals: 0, refusingSinceIso: null });
+});
+
+test("W1-T4022: the default refusal timestamp uses the shared system clock", () => {
+  const streakPath = join(scratch(), "default-clock-streak.json");
+  const busy = { repoDir: repoWithGcLog().repoDir };
+  const result = reapGitObjects(busy.repoDir, "/i", {
+    ...quietDeps,
+    listWorktrees: () => ["/w/live"],
+    streakPath,
+    runPrune: () => assert.fail("refused"),
+  });
+
+  assert.equal(result.consecutiveRefusals, 1);
+  assert.match(result.refusingSinceIso ?? "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.deepEqual(readRefusalStreak(streakPath), {
+    consecutiveRefusals: 1,
+    refusingSinceIso: result.refusingSinceIso,
+  });
 });
 
 test("W1-T4022: below-the-floor never touches the refusal streak, a different condition entirely", () => {

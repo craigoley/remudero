@@ -19,6 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { type Clock, systemClock } from "./clock.js";
 
 /** How old an unreachable object must be before it is eligible. The SECOND of the two barriers:
  *  it is what makes a wrong quiet verdict survivable, so it is never omitted and never zero. */
@@ -52,7 +53,7 @@ export interface ObjectReapDeps {
    *  from a single busy tick across process restarts, not just within one. */
   streakPath?: string;
   /** Injectable clock for the streak's `refusingSinceIso` timestamp. */
-  now?: () => string;
+  clock?: Clock;
 }
 
 /** Persisted at {@link ObjectReapDeps.streakPath}: how many CONSECUTIVE REFUSALS the quiet
@@ -207,7 +208,7 @@ export function recordRefusalStreak(path: string, refused: boolean, nowIso: stri
  *  the shape it always did. */
 function withStreak(deps: ObjectReapDeps, refused: boolean, result: ObjectReapResult): ObjectReapResult {
   if (!deps.streakPath) return result;
-  const nowIso = (deps.now ?? (() => new Date().toISOString()))();
+  const nowIso = (deps.clock ?? systemClock).iso();
   const streak = recordRefusalStreak(deps.streakPath, refused, nowIso);
   return {
     ...result,
