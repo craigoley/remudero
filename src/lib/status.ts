@@ -2948,7 +2948,7 @@ export function latestIndependentFailureBlock(
   taskId: string,
   index?: LedgerIndex,
 ): boolean {
-  let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | undefined;
+  let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | "credit_refused" | undefined;
   let harnessRefusal = false;
   let retryPending = false;
   let retrySpent = false;
@@ -2979,7 +2979,9 @@ export function latestIndependentFailureBlock(
           ? "admission_refused"
           : line.verdict === "blocked_inflight"
             ? "inflight_deferral"
-            : "blocked";
+            : line.verdict === "task_already_merged"
+              ? "credit_refused" // W1-T4413: a refusal about credit, not a task failure
+              : "blocked";
     } else if (
       line.step === "dispatch.harness_commit_retry" &&
       line.original_refusal === "harness_commit_refused" &&
