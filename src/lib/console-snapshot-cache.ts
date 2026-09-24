@@ -13,7 +13,9 @@
  *   instead of holding the event loop for a fixed share of every interval.
  * - A completed write through serve bumps {@link ConsoleWriteGeneration}, so the next read of every
  *   cached route recomputes instead of showing the operator a snapshot from before their own action.
+ * - Every body carries a weak `ETag`; a matching `If-None-Match` answers 304 with no body.
  */
+import { createHash } from "node:crypto";
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { RECAP_ACK_HEADER } from "./board.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -51,6 +53,7 @@ export interface BufferedRouteResponse {
   headers: Record<string, string>;
   body: string;
   generatedAtMs: number;
+  etag?: string;
   /** The body parsed as a JSON object once, at refresh; a request then splices `staleness` in as text. */
   jsonObject?: boolean;
 }
@@ -132,8 +135,30 @@ export function sendStaleJson(res: ServerResponse, status: number, body: unknown
   res.end(withJsonStaleness(body, staleness));
 }
 
-function writeBufferedResponse(res: ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
-  const headers: Record<string, string> = { ...cached.headers, ...stalenessHeaders(staleness) };
+/** A weak validator: two bodies with the same bytes share it, whatever their staleness envelope says. */
+export function snapshotEtag(body: string): string {
+  return `W/"${createHash("sha1").update(body).digest("base64url")}"`;
+}
+
+/** RFC 9110 weak comparison of an `If-None-Match` list against one entity tag. */
+export function ifNoneMatchHits(header: string | string[] | undefined, etag: string | undefined): boolean {
+  if (!header || !etag) return false;
+  const opaque = etag.replace(/^W\//, "");
+  return (Array.isArray(header) ? header.join(",") : header)
+    .split(",")
+    .map((tag) => tag.trim())
+    .some((tag) => tag === "*" || tag.replace(/^W\//, "") === opaque);
+}
+
+function writeBufferedResponse(req: IncomingMessage, res: ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
+  const headers: Record<string, string> = { ...cached.headers, ...stalenessHeaders(staleness), ...(cached.etag ? { etag: cached.etag } : {}) };
+  if (cached.status === 200 && ifNoneMatchHits(req.headers?.["if-none-match"], cached.etag)) {
+    delete headers["content-type"];
+    delete headers["content-length"];
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
   let body = cached.body;
   if (cached.jsonObject) {
     body = `${body.slice(0, body.lastIndexOf("}"))}${/^\s*\{\s*\}\s*$/.test(body) ? "" : ","}"staleness":${JSON.stringify(staleness)}}`;
@@ -258,7 +283,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
       try {
         await route.handler(req, buffer as unknown as ServerResponse, { params: {} });
         const next = buffer.buffered(startedAt);
-        entry.cached = { ...next, jsonObject: isJsonObjectText(next) };
+        entry.cached = { ...next, etag: snapshotEtag(next.body), jsonObject: isJsonObjectText(next) };
         entry.generation = startedGeneration;
         entry.lastError = undefined;
       } catch (error) {
@@ -290,12 +315,12 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     clearTimeout(deadlineTimer);
     const cached = entry.cached;
     if (outcome === "ready" && cached && entry.generation === generation.current()) {
-      writeBufferedResponse(res, cached, stalenessOf(entry, cached));
+      writeBufferedResponse(req, res, cached, stalenessOf(entry, cached));
       return;
     }
     const staleness = { ...stalenessOf(entry, cached), status: cached ? ("stale" as const) : ("unavailable" as const), stale: true };
     if (cached) {
-      writeBufferedResponse(res, cached, staleness);
+      writeBufferedResponse(req, res, cached, staleness);
       return;
     }
     sendStaleJson(res, 200, options.fallbackBody(staleness), staleness);
@@ -313,7 +338,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
       return;
     }
     const due = clock.now() - cached.generatedAtMs >= periodOf(entry);
-    writeBufferedResponse(res, cached, { ...stalenessOf(entry, cached), refreshing: due || entry.refreshPromise !== undefined });
+    writeBufferedResponse(req, res, cached, { ...stalenessOf(entry, cached), refreshing: due || entry.refreshPromise !== undefined });
     if (due) defer(() => void refresh(entry, req));
     else keepWarm(entry);
   };
