@@ -1,40 +1,21 @@
 // lib/doctrine-lifecycle.ts — DOCTRINE THAT CAN CHANGE, AND A RULE THAT STOPS BEING PROSE (W1-T4097).
 //
-// THE GAP THIS CLOSES (i)+(ii). `test/fixtures/doctrine-pre-migration-W1-T3323.json` froze each of
-// the 56 pre-migration rules' headline VERBATIM plus the sha256 and byte length of its body — a
-// fixture whose own header already says "EDITING A ROW HERE IS A DELIBERATE ACT: it means a rule
-// body legitimately changed, and the diff should say why", but nothing MECHANICAL checked that a
-// reason was actually given. A rule that stopped being accurate (W1-T4099's diff-coverage carve-out
-// missing a one-line type alias) could only be fixed by quietly editing a frozen row and hoping
-// review noticed the comment. This module is that comment, made mechanical: freeze the rule's
-// IDENTITY (an id, {@link slugifyRuleId}) and its MEANING (a hash of the headline, which states
-// intent — {@link computeMeaningHash}) rather than its wording, so a body's bytes may be corrected
-// as long as the edit records WHY ({@link verifyDoctrineReword}) and the rule's own meaning did not
-// silently drift too.
+// THE GAP THIS CLOSES. `test/fixtures/doctrine-pre-migration-W1-T3323.json` froze each of the 56
+// pre-migration rules' headline and body VERBATIM, with a comment saying an edit "should say why"
+// but nothing MECHANICAL checking it. (i)+(ii): freeze the rule's IDENTITY ({@link slugifyRuleId})
+// and MEANING ({@link computeMeaningHash} of its headline) instead — a body's bytes may then be
+// corrected as long as the row records WHY ({@link verifyDoctrineReword}) and the meaning did not
+// silently drift too. (iv): {@link resolveCanonicalRuleId} is the alias table a merge (folding
+// investigation-discipline's (a)-(k) into one rule) writes once so every old id still resolves.
+// (iii): `rule-efficacy.ts`'s `escalateRepeatingRules` only ever DRAFTS a proposal for a human to
+// notice — this task's worked example (bound-fires-on-healthy-condition, effective 2026-08-06) kept
+// recurring past that. {@link risingRecurrenceRuleIds}/{@link draftInstrumentTaskProposal} are what
+// its new `promoteRecurringRules` calls when a rule's recurrence count RISES across two passes —
+// already flagged once, got worse anyway — still through the same reviewed registry, on its own
+// distinct id, never a raw `plan/` write (Law 5).
 //
-// (iv) A MERGED RULE KEEPS EVERY OLD ID RESOLVING. Investigation-discipline's (a)-(k) restate one
-// idea across eleven separate files; folding them into one rule with sub-cases must not orphan a
-// pointer some other doctrine body or an operator's memory still carries under an old id.
-// {@link resolveCanonicalRuleId} is the alias table a merge writes once and every future lookup
-// reads forever.
-//
-// (iii) A RULE THAT KEEPS FAILING BECOMES AN INSTRUMENT, AUTOMATICALLY. `rule-efficacy.ts`'s
-// `escalateRepeatingRules` only ever DRAFTS a proposal for a human to notice — the live table's
-// worked example (CLAUDE.md#investigation-discipline:bound-fires-on-healthy-condition, effective
-// 2026-08-06) is the rule this task was filed over: recurring, unenforced, the proposal sitting in
-// the inbox while the count kept climbing. `risingRecurrenceRuleIds` and
-// `draftInstrumentTaskProposal` are what `rule-efficacy.ts`'s `promoteRecurringRules` calls when a
-// rule's recurrence count keeps RISING across two rule-efficacy passes — i.e. it was already
-// flagged once and got WORSE regardless. It still drafts through the SAME reviewed proposal
-// registry `escalateRepeatingRules` uses, never a raw `plan/` write: Law 5 forbids laundering a
-// task straight out of a metric with no review, so what changes here is the URGENCY of the ask (a
-// second, stronger proposal naming the rule "kept getting worse after being flagged"), never who
-// reviews it.
-//
-// PURE THROUGHOUT: nothing here touches a filesystem or a registry. `rule-efficacy.ts` owns the one
-// sanctioned write (`updateProposalRegistry`, inbox.ts's W1-T240 single-writer helper) and calls
-// into these functions for the decision, exactly as `escalateRepeatingRules` already does for its
-// own half of the table.
+// PURE THROUGHOUT: nothing here touches a filesystem or a registry; `rule-efficacy.ts` owns the one
+// sanctioned write and calls into these functions for the decision.
 
 import { createHash } from "node:crypto";
 import type { EvidenceAnchor, Proposal } from "./inbox.js";
