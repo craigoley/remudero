@@ -24,6 +24,7 @@ import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 import type { Route } from "../src/lib/service.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const READ_TOKEN = "read-token";
 const WRITE_TOKEN = "write-token";
@@ -288,7 +289,7 @@ test("cached console read routes reuse buffered bodies when a later refresh miss
   const second = await serveRoute(route);
   const elapsedMs = performance.now() - started;
   const body = (await second.json()) as { entries?: Array<{ id?: string }>; staleness?: { stale?: boolean; ageMs?: number | null } };
-  assert.ok(elapsedMs < 200, `the buffered read waited ${elapsedMs.toFixed(1)}ms on a slow refresh`);
+  assertWallClockBound(elapsedMs, 200, `the buffered read waited ${elapsedMs.toFixed(1)}ms on a slow refresh`);
   assert.equal(body.entries?.[0]?.id, "cached");
   assert.equal(calls, 1, "a read inside the route's refresh interval runs no refresh at all");
   assert.equal(typeof body.staleness?.ageMs, "number");
