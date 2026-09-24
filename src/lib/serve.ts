@@ -3998,7 +3998,7 @@ function assembleServeRoutes(
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
     // cancellation; this route receives no ledger path or reader capability.
-    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics }),
+    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics, mountsRoot: deps.questionsRoot }),
     buildAuthScopeRoute(),
     // W1-T2409: the in-console write-grant "ask" — see buildConsoleWriteGrantRoute's own doc.
     buildConsoleWriteGrantRoute(deps.tokens),
