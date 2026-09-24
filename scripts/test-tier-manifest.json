@@ -94,6 +94,7 @@
     "test/a-fix-worker-is-pointed-at-its-predecessors-transcript.test.ts": 0,
     "test/a-fixed-main-re-runs-what-it-was-blocking.test.ts": 0,
     "test/a-followup-whose-pr-merged-can-finally-retire.test.ts": 0,
+    "test/a-freed-lane-refills-while-its-sibling-runs.test.ts": 0,
     "test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts": 0,
     "test/a-gardener-judges-its-own-actions.test.ts": 0,
     "test/a-gardener-pr-carries-a-conforming-identity.test.ts": 0,
