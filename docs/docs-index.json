@@ -626,6 +626,12 @@
       "grepHint": "Gate garden log"
     },
     {
+      "path": "docs/knowledge-garden-log.md",
+      "title": "Knowledge garden log",
+      "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",
+      "grepHint": "Knowledge garden log"
+    },
+    {
       "path": "docs/model-routing.md",
       "title": "Model routing and cost evidence",
       "summary": "",

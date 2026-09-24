@@ -16,6 +16,20 @@ export const AUTOMATED_RETRO_DECISION_ENV = "RMD_AUTOMATED_RETRO_DECISION";
 export const AUTOMATED_RETRO_HEAP_LIMIT_MB = 1792;
 export const AUTOMATED_RETRO_OUTPUT_TAIL_BYTES = 16 * 1024;
 
+export const RETRO_HANDOFF_EXIT_CODES = { 3: "ci_not_concluded", 4: "review_withheld" } as const;
+type RetroHandoffReason = (typeof RETRO_HANDOFF_EXIT_CODES)[keyof typeof RETRO_HANDOFF_EXIT_CODES];
+
+export function retroExitAfterPrOpened(ci: "green" | "red" | "timeout" | "freshness_handoff", reviewCode?: number): number {
+  if (ci === "red") return 1;
+  if (ci !== "green") return 3;
+  if (reviewCode === 2) return 4;
+  return reviewCode ?? 0;
+}
+
+function handoffReason(exitCode: number | null): RetroHandoffReason | undefined {
+  return exitCode === 3 || exitCode === 4 ? RETRO_HANDOFF_EXIT_CODES[exitCode] : undefined;
+}
+
 type FiredRetroDecision = Extract<RetroTriggerDecision, { fire: true }>;
 type RetroLog = (step: string, extra?: Record<string, unknown>) => void;
 
@@ -171,7 +185,7 @@ export async function runAutomatedRetroSubprocess(
     exitCode = terminal.code;
     signal = terminal.signal;
     if (spawnError) throw spawnError;
-    if (exitCode !== 0 || signal !== null) {
+    if ((exitCode !== 0 && handoffReason(exitCode) === undefined) || signal !== null) {
       throw new AutomatedRetroSubprocessError({ exitCode, signal, stdoutTail: stdout, stderrTail: stderr });
     }
   } catch (cause) {
@@ -215,7 +229,8 @@ export async function runAutomatedRetroSubprocess(
     duration_ms: durationMs,
     exit_code: exitCode,
     signal,
-    outcome: "success",
+    outcome: handoffReason(exitCode) === undefined ? "success" : "handed_off",
     failure_class: null,
+    ...(handoffReason(exitCode) === undefined ? {} : { handoff_reason: handoffReason(exitCode) }),
   });
 }

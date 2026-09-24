@@ -1033,6 +1033,7 @@ export interface BuildSweepEffectsDeps {
    *  wrapper around one network call, so without a seam the only way to cover it is to make a real
    *  one. Production supplies the entrypoint's GitHub body writer. */
   updatePrBodyImpl?: (prUrl: string, body: string) => Promise<void>;
+  repairMetadataImpl?: (pr: OpenPrView, checks: readonly string[]) => Promise<MetadataRepairResult>;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
   depReviewCommandImpl?: (prArg: string, rest?: string[]) => Promise<number>;
@@ -1331,6 +1332,7 @@ export const SWEEP_EFFECT_SURFACE = [
   // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
   // position is free — it is listed last because it is the newest, not because order matters.
   "repairMissingTaskTrailer",
+  "repairMetadata",
   "rebaseDirtyFleetBranch",
   // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
@@ -1372,6 +1374,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "selectAdaptiveReviewWidth"
   | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
+  | "repairMetadata"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -1839,6 +1842,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         refire_event: repair.refireEvent,
         rerun_failed_jobs: repair.rerunFailedJobs,
       });
+    },
+    repairMetadata: async (pr, checks) => {
+      if (!deps.repairMetadataImpl) return { repaired: false, reason: "metadata repair implementation is not wired" };
+      return deps.repairMetadataImpl(pr, checks);
     },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
@@ -5351,6 +5358,64 @@ export function lastBaseCausedTipFromLedger(lines: readonly Record<string, unkno
   return out;
 }
 
+/** One prior sweep's mergeability observation for an EXACT PR+head, and when the ledger row
+ *  carrying it was written — see {@link lastKnownMergeStateFromLedger}. */
+export interface KnownMergeState {
+  state: MergeState;
+  /** The ledger row's own `ts`, when present — carried into the inheriting pass's reason so a
+   *  flapping read is legible rather than a silent override (W1-T4470 design (iv)). */
+  observedAt?: string;
+}
+
+/**
+ * W1-T4470 — THE LAST KNOWN mergeability THIS EXACT HEAD disposed under, read from this module's
+ * OWN `sweep.disposed` rows. GitHub recomputes `mergeable_state` lazily, and a pass that catches it
+ * mid-recompute reads `unknown` — `OpenPrView.mergeState` is `undefined` (see
+ * `mergeStateFromRest`'s doc), which is NOT "no evidence": a PREVIOUS pass may have already proven
+ * this head `dirty`. Scoped pr_number+head_sha, deliberately NOT pr_number alone: a NEW push earns a
+ * NEW head with no history of its own, so mergeability must never carry across a head change. Reads
+ * `merge_state` alone, never `disposition`/`reason` prose — that field is written only when a pass's
+ * OWN effective mergeState (observed or itself inherited) was known, so hysteresis composes across
+ * any number of consecutive `unknown` reads on the SAME head rather than resetting after one.
+ */
+export function lastKnownMergeStateFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+  headSha: string,
+): KnownMergeState | undefined {
+  let out: KnownMergeState | undefined;
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed") continue;
+    if (line.pr_number !== prNumber) continue;
+    if (line.head_sha !== headSha) continue;
+    const state = line.merge_state;
+    if (state !== "clean" && state !== "dirty" && state !== "behind") continue;
+    // Ledger lines are append-ordered — the LAST match for this exact head is its most recent.
+    out = { state, ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}) };
+  }
+  return out;
+}
+
+/**
+ * W1-T4470 — APPLY THE HYSTERESIS ABOVE TO ONE PR VIEW. A `mergeState` this pass ACTUALLY OBSERVED
+ * is NEVER overridden — a fresh `dirty`/`clean`/`behind` read is always the truth, however it
+ * disagrees with history. Only a genuinely `undefined` read (GitHub had not computed mergeability
+ * this pass) may inherit, and only when a prior pass proved a state for this EXACT head. Returns the
+ * SAME `pr` object when nothing changes, so an unaffected PR costs nothing downstream. The returned
+ * `pr` is used for EVERYTHING the rest of this PR's reconciliation reads — disposition, the
+ * zero-check-run remedies, and the ledgered `sweep.disposed` row itself — so the inheritance is not
+ * a second opinion layered on top of the ordinary path, it IS this pass's mergeability fact.
+ */
+export function withInheritedMergeState(
+  pr: OpenPrView,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): { pr: OpenPrView; inherited?: KnownMergeState } {
+  if (pr.mergeState !== undefined) return { pr };
+  const inherited = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
+  if (!inherited) return { pr };
+  return { pr: { ...pr, mergeState: inherited.state }, inherited };
+}
+
 /** W1-T2620 — AT MOST ONE base-caused PR released per pass, oldest activity first. THE RELEASE
  *  CONDITION IS "main has moved since this PR last stood down", never "the cause is known". A PR
  *  with no prior record is NOT eligible: with no baseline nothing has advanced. Ordered by the SAME
@@ -7668,6 +7733,8 @@ export interface SweepDeps {
     pr: OpenPrView,
     repair: MissingTaskTrailerRepair,
   ) => boolean | void | Promise<boolean | void>;
+  /** Repair title/body-only required reds through a pull-request metadata edit. */
+  repairMetadata?: (pr: OpenPrView, checks: readonly string[]) => MetadataRepairResult | Promise<MetadataRepairResult>;
   /** Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
    *  {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses `escalate()`
    *  as the notification transport, carrying the same two resolutions as its options. */
@@ -8275,8 +8342,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
     } else if (line.step === "fix.commit_refused") {
-      // W1-T3868: the fix lane ran, but the harness refused to create a commit. The row is the
-      // positive outcome that releases the same-head claim for the next sweep pass.
+      // The rung ended without a commit. The outer sweep compares its attempted head and red
+      // set before deciding whether this stalled outcome may re-enter dispatch.
       stalled = true;
     } else if (line.step === "fix.review") {
       stalled = line.state !== "success";
@@ -8286,6 +8353,65 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
   return stalled || !dispatched;
+}
+
+const METADATA_RED_CHECKS = new Set(["commitlint", "acceptance-author-gate", "proof-discrimination"]);
+
+/** `notMetadata`: the live title/body already pass, so the red is file-fixable and falls through to a worker. */
+export interface MetadataRepairResult { repaired: boolean; reason: string; notMetadata?: true }
+
+/** A prior pass at this head found this metadata-only red set NOT a metadata defect. */
+export function metadataRedRuledOut(lines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
+  const checks = JSON.stringify(metadataOnlyRed(pr));
+  return lines.some((line) =>
+    line.step === "sweep.disposed" && line.pr_number === pr.prNumber && line.head_sha === pr.headSha &&
+    line.metadata_repair_outcome === "not-metadata" && JSON.stringify(line.metadata_red_checks) === checks);
+}
+
+export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
+  if (!isBlockedCi(pr) || pr.reviewState === "failure") return undefined;
+  const checks = redCheckNames(pr);
+  return checks.length > 0 && checks.every((name) => METADATA_RED_CHECKS.has(name)) ? checks : undefined;
+}
+
+/** Use the required-check rollup when available; ciFailures is the older producer's fallback. */
+export function redCheckNames(pr: OpenPrView): string[] {
+  const names = pr.redRequiredChecks?.length ? [...pr.redRequiredChecks] : pr.ciFailures?.map((failure) => failure.name) ?? [];
+  if (pr.reviewState === "failure") {
+    names.push(...pr.unmetCriteria.map((criterion) => `review:${criterion.claim}:${criterion.proof}`));
+  }
+  return [...new Set(names)].sort();
+}
+
+/** A refusal blocks only the exact attempted head and red set, never a newly observed defect.
+ *  W1-T4459: every marker this task reads rides an EXISTING decision-relevant row (`sweep.disposed`
+ *  via `extraDisposedFields`, `fix.commit_refused`), so none needs a new ledger-rotation census entry. */
+export function sameHeadRedFixRefusal(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView,
+): { reason: string; scopeAmendment?: string } | undefined {
+  const signature = JSON.stringify(redCheckNames(pr));
+  let attempt: Record<string, unknown> | undefined;
+  let refusal: { reason: string; scopeAmendment?: string } | undefined;
+  for (const line of lines) {
+    if (line.task_id !== pr.taskId || line.head_sha !== pr.headSha) continue;
+    if (
+      line.step === "sweep.disposed" &&
+      line.pr_number === pr.prNumber &&
+      line.disposition === "blocked-fixable" &&
+      line.acted === true &&
+      line.red_checks !== undefined
+    ) {
+      attempt = line;
+      refusal = undefined;
+    } else if (line.step === "fix.commit_refused" && attempt) {
+      refusal = {
+        reason: typeof line.reason === "string" ? line.reason : "fix commit refused",
+        ...(typeof line.scope_amendment_detail === "string" ? { scopeAmendment: line.scope_amendment_detail } : {}),
+      };
+    }
+  }
+  return attempt && JSON.stringify(attempt.red_checks) === signature ? refusal : undefined;
 }
 
 // ── W1-T905 — "repair the instance, FILE THE CLASS" ──────────────────────────────────────────
@@ -9193,6 +9319,9 @@ export async function runSweep(
     // every call site except the walk's "blocked-fixable" arm, and even there only when this pass
     // classified the PR base-caused AND a main tip was actually read.
     baseCausedMainTipSha: string | undefined = undefined,
+    // W1-T4459: dedup keys on this pass's row (see `sameHeadRedFixRefusal`); set only by the
+    // main walk's "blocked-fixable" arm.
+    extraDisposedFields: Record<string, unknown> | undefined = undefined,
   ): void {
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
@@ -9243,6 +9372,12 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        // W1-T4470 — the EFFECTIVE mergeability this exact head disposed under, observed this
+        // pass or inherited from a prior one (see `withInheritedMergeState`). Read back by
+        // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
+        // across any number of consecutive `unknown` reads on the SAME head rather than
+        // resetting the moment GitHub goes quiet again.
+        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState } : {}),
         ...(deduped ? { deduped: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
@@ -9266,6 +9401,7 @@ export async function runSweep(
         // ONLY when this pass classified the PR base-caused AND a main tip was read; see
         // {@link lastBaseCausedTipFromLedger} for the fold that reads it back next pass.
         ...(baseCausedMainTipSha !== undefined ? { main_tip_sha: baseCausedMainTipSha } : {}),
+        ...(extraDisposedFields ?? {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
       // W1-T905: mirrored in-memory with THIS PASS'S OWN `ts`, never re-read off disk. The real
@@ -9288,8 +9424,20 @@ export async function runSweep(
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
-    const pr = openPrs[prIndex];
+    // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
+    // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
+    // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
+    // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
+    // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
+    // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
+    const { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
     let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
+    if (inheritedMergeState) {
+      reason =
+        `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
+        `observed ${inheritedMergeState.observedAt ?? "at an undated prior pass"} for this exact head ` +
+        `${pr.headSha.slice(0, 7)} (W1-T4470)`;
+    }
     // W1-T4351 — a positively classified plan filing has no implementation surface: every ci-log
     // fix was refused "the task declares no files". Escalate naming the red instead (deduped per
     // head like every escalation), never a worker strike that cannot produce a commit.
@@ -9439,11 +9587,21 @@ export async function runSweep(
         // DISPATCHED, never that it succeeded. When the ledger shows that rung already ENDED
         // without landing a new head, treating it as "already done" would dedup this PR against a
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
-        alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
+        const metadataRed = disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined &&
+          !metadataRedRuledOut(ledgerLines, pr);
+        const refusal = disposition === "blocked-fixable" && !metadataRed ? sameHeadRedFixRefusal(ledgerLines, pr) : undefined;
+        alreadyDone = metadataRed
+          ? false
+          : refusal !== undefined && !refusal.scopeAmendment
+            ? true
+            : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
+          // W1-T4459: the refusal reason rides this pass's own `sweep.disposed` stand_down_reason.
           dedupStandDownReason =
-            `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
-            `before spending another strike`;
+            refusal
+              ? `fix refused at head ${pr.headSha.slice(0, 7)} with unchanged red checks: ${refusal.reason}`
+              : `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
+                `before spending another strike`;
         }
         break;
       }
@@ -9578,6 +9736,8 @@ export async function runSweep(
     // W1-T2620: set ONLY by the base-caused branch, when this pass classified the PR base-caused
     // AND a main tip was read; otherwise `undefined`, so no `main_tip_sha` field is written.
     let baseCausedMainTipSha: string | undefined;
+    // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
+    let extraDisposedFields: Record<string, unknown> | undefined;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
     // THIS PR's own line instead, so the loop always reaches the next PR.
@@ -9662,6 +9822,51 @@ export async function runSweep(
               if (missingTrailerRepair.handled) {
                 acted = false;
                 standDownReason = missingTrailerRepair.standDownReason;
+                break;
+              }
+              // W1-T4459: both dedup checks below read a PRIOR `sweep.disposed` row's extra fields
+              // (see `sameHeadRedFixRefusal` for why no new ledger step).
+              const metadataChecks = metadataRedRuledOut(ledgerLines, pr) ? undefined : metadataOnlyRed(pr);
+              if (metadataChecks) {
+                const priorRepair = ledgerLines.find((line) =>
+                  line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                  line.head_sha === pr.headSha && JSON.stringify(line.metadata_red_checks) === JSON.stringify(metadataChecks) &&
+                  (line.metadata_repair_outcome === "repaired" || line.metadata_repair_outcome === "escalated"));
+                if (priorRepair) {
+                  acted = false;
+                  standDownReason = `metadata red already ${priorRepair.metadata_repair_outcome} at this head and red set; awaiting a fresh edited-event verdict`;
+                  break;
+                }
+                const result: MetadataRepairResult = deps.repairMetadata
+                  ? await deps.repairMetadata(pr, metadataChecks)
+                  : { repaired: false, reason: "metadata repair effect is not wired" };
+                const outcome = result.repaired ? "repaired" : result.notMetadata ? "not-metadata" : "escalated";
+                extraDisposedFields = { metadata_red_checks: metadataChecks, metadata_repair_outcome: outcome };
+                if (!result.notMetadata) {
+                  if (!result.repaired) {
+                    await deps.escalate(
+                      pr,
+                      `metadata-only required checks ${metadataChecks.join(", ")} need title/body repair: ${result.reason}`,
+                      renderClarificationQuestion(pr, result.reason, pr.strikeHistory ?? []),
+                    );
+                  }
+                  acted = false;
+                  standDownReason = `metadata-only red ${outcome}: ${result.reason}; no fix worker dispatched`;
+                  break;
+                }
+              }
+              const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
+              if (refusedSameRed?.scopeAmendment) {
+                const reason = `fix report requests a scope amendment: ${refusedSameRed.scopeAmendment}`;
+                const alreadyEscalated = ledgerLines.some((line) =>
+                  line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                  line.head_sha === pr.headSha && JSON.stringify(line.scope_amendment_red_checks) === JSON.stringify(redCheckNames(pr)));
+                if (!alreadyEscalated) {
+                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                }
+                extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
+                acted = false;
+                standDownReason = reason;
                 break;
               }
               // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and
@@ -9987,6 +10192,8 @@ export async function runSweep(
                 break;
               }
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
+              // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
+              extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
               if (deps.detachFixWait) {
                 detachSweepAction(
                   fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)),
@@ -10483,6 +10690,7 @@ export async function runSweep(
       armOutcome,
       spent,
       baseCausedMainTipSha,
+      extraDisposedFields,
     );
   }
 
