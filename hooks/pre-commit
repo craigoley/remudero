@@ -2,9 +2,9 @@
 # hooks/pre-commit — refuse a commit that introduces a bare-prefix mkdtempSync callsite
 # (W1-T2773).
 #
-# Wired via `core.hooksPath hooks` (src/lib/worker.ts's worktreeAdd, W1-T137) — every worker
-# worktree and the operator's own checkout inherit this hook with no bootstrap, exactly the way
-# `hooks/commit-msg` and `hooks/deny-floor.sh` already do.
+# Wired via `core.hooksPath hooks`: worker.ts's worktreeAdd sets it per fleet worktree (W1-T137),
+# and .claude/hooks/session-start.sh sets it in a Claude Code web session. Any other clone needs
+# `git config core.hooksPath hooks` once, or this hook never runs there.
 #
 # HOW IT SCANS. `git diff --cached --name-only` lists everything about to land; any `.ts`/`.mjs`
 # under src/, scripts/, or test/ that ADDS a bare-prefix `mkdtempSync(join(tmpdir(), '<bare>'))`

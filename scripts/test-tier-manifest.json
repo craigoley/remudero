@@ -314,6 +314,7 @@
     "test/a-verify-human-shard-is-judged.test.ts": 0,
     "test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts": 1844,
     "test/a-wall-clock-bound-declares-itself.test.ts": 1057,
+    "test/a-web-session-turns-the-repo-git-hooks-on.test.ts": 0,
     "test/a-windowed-union-never-opens-an-archive-outside-it.test.ts": 250,
     "test/a-withdrawn-credit-never-latches-a-task-blocked.test.ts": 0,
     "test/a-withdrawn-record-sizing-warning.test.ts": 0,
