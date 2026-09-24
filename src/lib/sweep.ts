@@ -887,6 +887,8 @@ export function renderHeldReviewQueueBlocker(blocker: HeldReviewQueueBlocker): s
 }
 
 export interface BuildSweepEffectsDeps {
+  /** W1-T4415 — marks one draft PR ready for review; the entrypoint adapter supplies the write. */
+  readyDraftImpl?: (pr: OpenPrView) => void | Promise<void>;
   owner: string;
   repo: string;
   repoRoot?: string;
@@ -1242,6 +1244,8 @@ export const SWEEP_EFFECT_SURFACE = [
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
   // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
   "reviewerCodeStaleThisPass",
+  // W1-T4415: every open draft is marked ready for review (operator ruling 2026-09-24: no drafts).
+  "readyDraft",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1258,6 +1262,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
+  | "readyDraft"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
   | "requeueCheck"
@@ -1299,6 +1304,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     armImpl = armAutoMergeDetailed,
     armSessionPrsOverride,
     updateBranchImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updateBranchImpl"]>>("updateBranchImpl"),
+    readyDraftImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["readyDraftImpl"]>>("readyDraftImpl"),
     rebaseDirtyFleetBranchImpl,
     captureRepairFeedbackImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["captureRepairFeedbackImpl"]>>("captureRepairFeedbackImpl"),
     ghRunImpl = defaultSweepGhRun,
@@ -2773,6 +2779,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
     // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
+
+    readyDraft: (pr) => readyDraftImpl(pr),
 
     rebaseDirtyFleetBranch: (pr) =>
       rebaseDirtyFleetBranchImpl
@@ -7410,6 +7418,8 @@ export interface SweepDeps {
    *  GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads armed, and
    *  zero times once that bit reads false. SAFE WHEN NOT ARMED, so no extra probe is needed. */
   disarmAutoMerge?: (pr: OpenPrView, hold: AutomergeHold) => void | Promise<void>;
+  /** W1-T4415 — mark one open draft PR ready for review. Called for EVERY draft, whatever its checks. */
+  readyDraft?: (pr: OpenPrView) => void | Promise<void>;
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
@@ -8582,6 +8592,24 @@ function effectiveReviewWidth(
   }
 }
 
+/**
+ * W1-T4415 — mark one draft PR ready for review and ledger the outcome. A draft never reviews or
+ * merges, so it holds work exactly like a stuck PR (operator ruling 2026-09-24). A failed write is
+ * ledgered and retried on the next pass; this never closes or merges anything.
+ */
+export function readyDraftPullRequest(
+  pr: OpenPrView,
+  io: { markReady: (prNumber: number) => void; log: (step: string, extra?: Record<string, unknown>) => void },
+): void {
+  const row = { pr_number: pr.prNumber, head_sha: pr.headSha, head_ref: pr.headRefName };
+  try {
+    io.markReady(pr.prNumber);
+    io.log("sweep.draft_readied", row);
+  } catch (e) {
+    io.log("sweep.draft_ready_failed", { ...row, reason: e instanceof Error ? e.message : String(e) });
+  }
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -8594,6 +8622,9 @@ export async function runSweep(
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
   const log = deps.log ?? (() => {});
+  if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
+    for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
+  }
 
   // Dedup is keyed on the ledger, which persists across sweeps even when the input is
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds

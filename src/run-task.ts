@@ -1287,6 +1287,7 @@ import {
   persistVerifiedCredit,
   type RequiredContextsRead,} from "./lib/status.js";
 import {
+  readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
   decideRedBaseRefresh,
   failingSourceFilesFromCiFailures,
@@ -1658,6 +1659,23 @@ export function buildReviewerCodeFreshnessGate(
   };
 }
 
+/** W1-T4415 — the sweep's draft-readying effect: `gh pr ready` on one draft, ledgered by
+ *  {@link readyDraftPullRequest}. Marking ready is the whole write; it never merges or closes. */
+export function readyDraftViaGh(
+  owner: string,
+  repo: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: typeof ghExec = ghExec,
+): (pr: OpenPrView) => void {
+  return (pr) =>
+    readyDraftPullRequest(pr, {
+      markReady: (prNumber) => {
+        exec(["pr", "ready", String(prNumber), "--repo", `${owner}/${repo}`], { encoding: "utf8", stdio: "pipe" });
+      },
+      log,
+    });
+}
+
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -1680,6 +1698,7 @@ export function buildSweepEffects(
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
+  | "readyDraft"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
   | "requeueCheck"
@@ -2010,6 +2029,7 @@ export function buildSweepEffects(
     fixRebaseMergeFactsImpl: fixRebaseMergeFactsFromRest,
     redBaseRefreshFactsImpl: redBaseRefreshFactsFromRest,
     ghUpdateBranchImpl: ghUpdateBranch,
+    readyDraftImpl: readyDraftViaGh(deps.owner, deps.repo, deps.log),
     readFixRoundCommitsImpl: readFixRoundCommitsViaGit,
     runNpmScriptImpl: runNpmScriptViaSpawn,
     commitGeneratorOutputImpl: commitGeneratorOutputViaGit,
