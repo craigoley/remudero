@@ -2157,6 +2157,39 @@ export function startPrActionPump(
   };
 }
 
+/** W1-T4416: a lane pool. Each task runs on its own lane; a lane that settles while a sibling is still
+ *  in flight may take `refill`'s next task, appended to `tasks`. Resolves, never rejects, once every lane
+ *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was. */
+export function runLanePool<T extends { id: string }, R>(
+  tasks: T[],
+  run: (id: string) => Promise<R>,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined,
+): Promise<PromiseSettledResult<R>[]> {
+  const settled: PromiseSettledResult<R>[] = [];
+  const firstWave = tasks.map((t) => run(t.id));
+  let inFlight = 0;
+  return new Promise((resolve) => {
+    if (tasks.length === 0) resolve(settled);
+    const start = (i: number, lane: number, p: Promise<R>): void => {
+      inFlight++;
+      p.then(
+        (value): PromiseSettledResult<R> => ({ status: "fulfilled", value }),
+        (reason: unknown): PromiseSettledResult<R> => ({ status: "rejected", reason }),
+      ).then((outcome) => {
+        settled[i] = outcome;
+        inFlight--;
+        const next = inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
+        if (next) {
+          tasks.push(next);
+          start(tasks.length - 1, lane, (async () => run(next.id))());
+        }
+        if (inFlight === 0) resolve(settled);
+      });
+    };
+    firstWave.forEach((p, i) => start(i, i, p));
+  });
+}
+
 export async function runDaemon(
   plan: Plan,
   deps: DaemonDeps,
@@ -2631,6 +2664,21 @@ export async function runDaemon(
     return { ...hold, reason };
   };
 
+  // Shared by the top of tick and a lane refill (W1-T4416).
+  const reloadPlanBinding = (): void => {
+    if (!deps.reloadPlan) return;
+    try {
+      const fresh = deps.reloadPlan();
+      if (fresh) {
+        plan = fresh;
+        deps.onPlanReload?.(fresh);
+        log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
+      }
+    } catch (e) {
+      log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
@@ -2683,19 +2731,8 @@ export async function runDaemon(
     // landing on origin/main and the daemon next booting is 106 minutes (impl-FZ). Position is the safety argument:
     // after the stop check, so a halted fleet does no I/O, and before any dispatch decision reads the plan. A throw
     // is caught and ledgered, never fatal. Forensics: docs/forensics/daemon.md.
-    if (deps.reloadPlan) {
-      try {
-        const fresh = deps.reloadPlan();
-        if (fresh) {
-          plan = fresh;
-          deps.onPlanReload?.(fresh);
-          log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
-        }
-      } catch (e) {
-        log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
-      }
-    }
-    // One snapshot per dispatch batch (W1-T340; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
+    reloadPlanBinding();
+    // One snapshot per admission (W1-T340, W1-T4416; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
     // reload above, so code closing over the NAME reads whatever the most recent reload produced. That is invisible
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
     // silently re-judged against a blob it never saw. Reassignment rebinds the name and never mutates the object, so
@@ -4083,10 +4120,58 @@ export async function runDaemon(
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
 
-    // Concurrent dispatch, mirroring `runDrainLanes`: settle-all, never fail-fast, so a sibling lane's rejection can
-    // never abort another lane already in flight, and every lane's outcome is recorded before this tick decides
-    // anything. At one lane this settles on the same schedule a bare await inside a try/catch would (W1-T343).
-    const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
+    // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
+    // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
+    // that frees while a sibling runs refills from a FRESH read through the same gates; one lane never refills.
+    const snapshots = admitted.map(() => ({ plan: planForBatch, isMerged }));
+    const passIds = new Set(admitted.map((t) => t.id));
+    const inFlightTasks = new Set<Task>(admitted);
+    let refillClosed: string | undefined;
+    const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
+      inFlightTasks.delete(finished);
+      if (outcome.status === "rejected") refillClosed ??= "a lane rejected";
+      else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
+      const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const stopped = deps.checkStop?.();
+      const paused = deps.checkPause?.();
+      let reason =
+        refillClosed ??
+        (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
+        holdWorkerAdmission("lane-refill")?.reason ??
+        (stopped ? `stop: ${stopped}` : undefined) ??
+        (paused ? `pause: ${paused}` : undefined) ??
+        (deps.checkFreshness?.()?.stale ? "stale code" : undefined) ??
+        (governed ? `governor: ${governed.kind}` : undefined);
+      let next: Task | undefined;
+      if (reason === undefined) {
+        try {
+          reloadPlanBinding();
+          const snapshot = { plan, isMerged: deps.refreshMerged(plan) };
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
+            ...dispatchOpts,
+            dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...passIds]),
+          });
+          const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          next = fits.dispatch.find((t) => !inFlightTasks.has(t));
+          if (next) snapshots.push(snapshot);
+        } catch (e) {
+          reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
+        }
+      }
+      if (!next) {
+        log("dispatch.lane_refill_held", { lane, finished_task: finished.id, reason: reason ?? "no disjoint runnable task within the lane budget" });
+        return undefined;
+      }
+      passIds.add(next.id);
+      inFlightTasks.add(next);
+      log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
+      log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
+      attempted.push(next.id);
+      return next;
+    };
+    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane);
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.
@@ -4101,7 +4186,7 @@ export async function runDaemon(
     let fatalError: { taskId: string; message: string } | undefined;
     let spawnInfraSeenThisTick = false;
     let dispatchTransportSeenThisTick = false;
-    const toProcess: Array<{ task: Task; result: RunResult }> = [];
+    const toProcess: Array<{ task: Task; result: RunResult; snapshot: (typeof snapshots)[number] }> = [];
     for (let i = 0; i < admitted.length; i++) {
       const t = admitted[i];
       const outcome = settled[i];
@@ -4149,7 +4234,7 @@ export async function runDaemon(
       }
       const result = outcome.value;
       costUsd += result.costUsd;
-      toProcess.push({ task: t, result });
+      toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
 
     if (fatalError) {
@@ -4173,11 +4258,11 @@ export async function runDaemon(
     // Updated alongside block reasoning, never inside it — a pure additional observation over the same per-lane loop.
     // Lane order is the settlement order fixed above, so a batch is walked deterministically (W1-T2517).
     let apiWindowHoldMs = 0;
-    for (const { task, result } of toProcess) {
+    for (const { task, result, snapshot } of toProcess) {
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
-      const outcome = await processDispatchResult(planForBatch, task, result, isMerged);
+      const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged);
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
           blockedDetail ??= outcome.detail;

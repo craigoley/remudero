@@ -47,6 +47,22 @@ function seedPlanRepo(baselineTasksYaml: string): string {
 
 // ── parsePlanArgs ─────────────────────────────────────────────────────────────
 
+// A GRILL's actionable choices, as the GRILL CONTRACT asks the Architect to print them.
+const GRILL_CHOICE_LINES = [
+  "OPTION: daemon-only|W1-T90 means rmd daemon alone",
+  "OPTION: both|W1-T90 covers rmd daemon and rmd drain",
+  "RECOMMENDATION: daemon-only",
+  "FALSIFIER: rmd drain already reasons about a block in its own loop",
+];
+const GRILL_CHOICES = {
+  options: [
+    { label: "daemon-only", detail: "W1-T90 means rmd daemon alone" },
+    { label: "both", detail: "W1-T90 covers rmd daemon and rmd drain" },
+  ],
+  recommendation: "daemon-only",
+  falsifier: "rmd drain already reasons about a block in its own loop",
+};
+
 test("parsePlanArgs: --mode=clarify with no brief parses (clarify defaults to the whole plan)", () => {
   const parsed = parsePlanArgs(["--mode=clarify"]);
   assert.deepEqual(parsed, { mode: "clarify", brief: "" });
@@ -160,9 +176,32 @@ test("parsePlanVerdict: CLEAR", () => {
   assert.deepEqual(v, { kind: "clear", note: "already covered by W1-T27 / §5A" });
 });
 
+test("every plan mode tells the Architect to settle by lookup first and to GRILL only as a decision", () => {
+  for (const mode of ["create", "clarify", "expand"] as const) {
+    const prompt = planArchitectPrompt(mode, "W1-T90", `PLAN-${mode}-1`);
+    assert.match(prompt, /SETTLE BY LOOKUP FIRST/);
+    assert.match(prompt, /is this already filed or already decided\?/);
+    assert.match(prompt, /Settled by lookup: <question> -> <answer>/);
+    assert.match(prompt, /OPTION: <short label>\|/);
+    assert.match(prompt, /RECOMMENDATION: <the exact label/);
+    assert.match(prompt, /FALSIFIER: <the observation/);
+  }
+});
+
 test("parsePlanVerdict: GRILL", () => {
   const v = parsePlanVerdict("GRILL: onboard which repo — this one or a new one?");
-  assert.deepEqual(v, { kind: "grill", question: "onboard which repo — this one or a new one?" });
+  assert.deepEqual(v, {
+    kind: "grill",
+    question: "onboard which repo — this one or a new one?",
+    options: [],
+    recommendation: "",
+    falsifier: "",
+  });
+});
+
+test("parsePlanVerdict: a GRILL carries the Architect's own OPTION, RECOMMENDATION and FALSIFIER lines", () => {
+  const v = parsePlanVerdict([...GRILL_CHOICE_LINES, "GRILL: does W1-T90 mean rmd daemon or rmd drain?"].join("\n"));
+  assert.deepEqual(v, { kind: "grill", question: "does W1-T90 mean rmd daemon or rmd drain?", ...GRILL_CHOICES });
 });
 
 test("parsePlanVerdict: PROPOSED", () => {
@@ -249,8 +288,24 @@ test("decidePlanArchitect: CLEAR with no file changes ⇒ no_action", () => {
 });
 
 test("decidePlanArchitect: GRILL with no file changes ⇒ grill", () => {
-  const d = decidePlanArchitect({ verdict: { kind: "grill", question: "which repo?" }, changedFiles: [] });
-  assert.deepEqual(d, { action: "grill", detail: "which repo?" });
+  const d = decidePlanArchitect({ verdict: { kind: "grill", question: "which repo?", ...GRILL_CHOICES }, changedFiles: [] });
+  assert.deepEqual(d, { action: "grill", detail: "which repo?", ...GRILL_CHOICES });
+});
+
+test("decidePlanArchitect: a GRILL that is not an actionable decision is refused, naming what is missing", () => {
+  const bare = decidePlanArchitect({
+    verdict: { kind: "grill", question: "which repo?", options: [], recommendation: "", falsifier: "" },
+    changedFiles: [],
+  });
+  assert.equal(bare.action, "error");
+  assert.match((bare as { reason: string }).reason, /GRILL verdict carries 0 OPTION: line\(s\)/);
+
+  const stray = decidePlanArchitect({
+    verdict: { kind: "grill", question: "which repo?", ...GRILL_CHOICES, recommendation: "neither" },
+    changedFiles: [],
+  });
+  assert.equal(stray.action, "error");
+  assert.match((stray as { reason: string }).reason, /RECOMMENDATION \("neither"\) does not match any OPTION label/);
 });
 
 test("decidePlanArchitect: PROPOSED with plan file changes ⇒ propose", () => {
@@ -274,7 +329,7 @@ test("decidePlanArchitect: CLEAR but files WERE changed is an inconsistency ⇒ 
 });
 
 test("decidePlanArchitect: GRILL but files WERE changed is an inconsistency ⇒ error", () => {
-  const d = decidePlanArchitect({ verdict: { kind: "grill", question: "?" }, changedFiles: ["plan/tasks.yaml"] });
+  const d = decidePlanArchitect({ verdict: { kind: "grill", question: "?", ...GRILL_CHOICES }, changedFiles: ["plan/tasks.yaml"] });
   assert.equal(d.action, "error");
   assert.match((d as { reason: string }).reason, /GRILL but files were changed/);
 });
@@ -446,7 +501,7 @@ test("formatPlanVerdictLine: CLEAR", () => {
 
 test("formatPlanVerdictLine: GRILL names W1-T42 as the deferred delivery mechanism", () => {
   assert.equal(
-    formatPlanVerdictLine("clarify", { action: "grill", detail: "flag or config?" }),
+    formatPlanVerdictLine("clarify", { action: "grill", detail: "flag or config?", ...GRILL_CHOICES }),
     "--mode=clarify: GRILL — flag or config? (interactive/async delivery is W1-T42's job)",
   );
 });
@@ -570,6 +625,7 @@ test("REAL RUN: --mode=clarify on an ambiguous existing task yields grill questi
     "GROUND: grepped plan/tasks.yaml — W1-T90 says 'the daemon reasons about a block' but two",
     "commands could be meant.",
     "RESEARCH: not needed — this is a local ambiguity, not a platform-facts gap.",
+    ...GRILL_CHOICE_LINES,
     "GRILL: does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too?",
   ].join("\n");
 
@@ -589,6 +645,7 @@ test("REAL RUN: --mode=clarify on an ambiguous existing task yields grill questi
   assert.deepEqual(decision, {
     action: "grill",
     detail: "does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too?",
+    ...GRILL_CHOICES,
   });
   // The exact console line + ledger fields planCommand emits for a GRILL verdict — nothing is
   // committed/pushed/PR'd for this outcome (see decidePlanArchitect's file-touch cross-check);
@@ -681,16 +738,14 @@ test("REAL RUN: --mode=expand proposes a gap-filling task that cites a research 
 // it to the SAME async needs-human-issue transport triage's grill already uses (lib/escalate.ts),
 // via a new plan-lane-shaped builder (`buildPlanGrillEscalation`) rather than reusing
 // `buildGrillEscalation` directly — that builder is `FeedbackEntry`-shaped and its
-// options/recommendation come off `TriageDecision`'s grill arm, which `decideTriage` enforces
-// carries >= 2 real `OPTION:` lines; `decidePlanArchitect`'s grill arm carries only the bare
-// question (the Architect prompt asks for a single `GRILL: <question>` line, never
-// `OPTION:`/`RECOMMENDATION:`), so there is nothing of the Architect's own to carry over —
-// design point (ii)'s "minimal real pair" instead.
+// options/recommendation are the Architect's own GRILL CONTRACT lines, checked by
+// decidePlanArchitect through the same grillChoiceError triage uses.
 
-test("buildPlanGrillEscalation: builds a GRILL-class Escalation carrying the Architect's stated question, with a minimal real option pair", () => {
+test("buildPlanGrillEscalation: builds a GRILL-class Escalation carrying the Architect's question, its own options and recommendation, and the falsifier", () => {
   const decision: Extract<PlanDecision, { action: "grill" }> = {
     action: "grill",
     detail: "does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too?",
+    ...GRILL_CHOICES,
   };
   const e = buildPlanGrillEscalation({
     decision,
@@ -705,18 +760,14 @@ test("buildPlanGrillEscalation: builds a GRILL-class Escalation carrying the Arc
   assert.match(e.summary, /does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too\?/);
   assert.match(e.detail, /Brief: W1-T90/);
   assert.match(e.detail, /Open question: does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too\?/);
-  // decidePlanArchitect's grill arm carries no OPTION:/RECOMMENDATION: lines (unlike triage's),
-  // so this is the "minimal real pair" design point (ii) calls for, not a reuse of the
-  // Architect's own stated choices (it never states any).
-  assert.equal(e.options.length, 2);
-  assert.ok(
-    e.options.some((o) => o.label === e.recommendation),
-    "the recommendation names one of the two options — the same invariant escalate() enforces",
-  );
+  assert.deepEqual(e.options, GRILL_CHOICES.options);
+  assert.equal(e.recommendation, "daemon-only");
+  assert.match(e.detail, /That recommendation is wrong if: rmd drain already reasons about a block/);
+  assert.match(e.detail, /rerun `rmd plan --mode=clarify W1-T90`/);
 });
 
 test("buildPlanGrillEscalation: an omitted brief (clarify/expand's whole-plan default) still renders a real detail line, never a blank", () => {
-  const decision: Extract<PlanDecision, { action: "grill" }> = { action: "grill", detail: "which repo?" };
+  const decision: Extract<PlanDecision, { action: "grill" }> = { action: "grill", detail: "which repo?", ...GRILL_CHOICES };
   const e = buildPlanGrillEscalation({ decision, mode: "expand", brief: "", taskId: "PLAN-expand", runId: "PLAN-expand-1" });
   assert.match(e.detail, /Brief: \(none given/);
 });
@@ -874,7 +925,7 @@ test("GRILL WIRING (W1-T354): a GRILL verdict opens exactly one needs-human issu
     ghCallLogPath = ghCallLog;
     code = await withLiveWritesAllowed(() =>
       planCommand(["--mode=clarify", "W1-T90"], {
-        spawn: async () => grillWireFakeWorker(`GRILL: ${question}`),
+        spawn: async () => grillWireFakeWorker([...GRILL_CHOICE_LINES, `GRILL: ${question}`].join("\n")),
       }),
     );
   });

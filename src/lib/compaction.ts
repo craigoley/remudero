@@ -407,7 +407,8 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  the diff. One typed entry per line, its own one-line why included inline:",
     "  `research: <what, and why>` | `task: <what, and why>` | `action: <what, and why>`.",
     "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
-    "  (exactly two options, one marked RECOMMENDED, a reversibility note) and STOP.",
+    "  (exactly two options, one marked RECOMMENDED, a reversibility note, and a line",
+    "  `FALSIFIER: <what you would observe if RECOMMENDED is the wrong choice>`) and STOP.",
     // W1-T272: the output contract's third exit. Before this, a worker that correctly found
     // the task's acceptance ALREADY TRUE on origin/main had no PR-less exit that didn't halt
     // the drain (`no_pr` is the only PR-less verdict, and it stops the drain as anomalous) —
@@ -420,6 +421,10 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  `ALREADY_SATISFIED: <the PR number or url that already merged and satisfies this task>`.",
     `  That PR must actually be MERGED and its body must carry \`Remudero-Task: ${taskId}\` for`,
     "  THIS task, or the claim is refused and treated as if you had opened no PR at all.",
+    // The QUESTION contract parseQuestion (worker.ts) reads and run-task.ts logs without blocking.
+    "- A fact you cannot settle from the repo, and that is not worth a DECISION_REQUEST: look it up",
+    "  first; if it is still unknown, state it as three lines and proceed on the assumption —",
+    "  `QUESTION: <what you do not know>` `CURRENT_ASSUMPTION: <what you proceed on>` `IMPACT_IF_WRONG: low|med`.",
     ...(harnessCommits
       ? [
         "- Otherwise: just SAVE YOUR EDITS TO THE FILES. Do NOT run git or gh — you have no shell,",
