@@ -6290,6 +6290,7 @@ async function runReview(args: {
   const computed = judgeReview(criteria, {
     diff,
     report,
+    headRefName: args.headRefName,
     implementationReport: args.implementationReport,
     target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
@@ -6426,6 +6427,12 @@ async function runReview(args: {
   // overwrite an executed-evidence verdict with a weaker one, or write
   // against an already-merged/closed PR. See lib/review.ts's W1-T228 block
   // comment for the full design.
+  if (verdict.taskIdOwnershipWithheld) {
+    // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
+    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld });
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, codeFreshnessWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
   let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
   try {
     reviewerCodeFreshness = args.reviewerCodeFreshness?.();
@@ -22126,7 +22133,7 @@ function prefixedNextTaskIdCommand(rest: string[], deps: NextTaskIdReserveDeps):
       listing(["ls-remote", "--heads", "origin", `run-${prefix}-T*`]),
       listing(["ls-remote", "origin", `refs/rmd-id/${prefix}-T*`]),
     ];
-    const reserver = deps.reserver ?? gitRemoteRefReserver({ run: t.run, filingBranch: deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown" });
+    const reserver = deps.reserver ?? gitRemoteRefReserver({ run: t.run, filingBranch: flagValue(rest, "--branch") ?? deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown" });
     const held = reserveTaskIdRemote(nextPrefixedTaskIdStart(texts, prefix), reserver, { idFor: (n) => `${prefix}-T${n}` });
     console.log(`RESERVED ${held.taskId} on ${repo}'s origin (${held.ref}) after ${held.attempts} attempt(s)`);
     return 0;
@@ -22399,7 +22406,7 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -22535,7 +22542,8 @@ export async function nextTaskIdCommand(
     }
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
-    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run) });
+    // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
+    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch: flagValue(rest, "--branch") });
     // Decorate rather than modify: the decorator only OBSERVES each attempt, so a `taken` outcome
     // is reported instead of silently skipped.
     //
@@ -44081,9 +44089,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>]",
     summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder.",
   },
   {
     name: "emissions",
