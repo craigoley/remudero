@@ -3093,8 +3093,9 @@ $25 squeeze-day cash ceiling.
   reservation; the automatic router does not make such a reservation. The configured shared cash
   daily cap remains the authority; production must be configured at or below $25 for the stated
   total ceiling. A failed request with uncertain billing keeps its conservative reservation.
-- Deployment and billing are separate from source readiness. Keep this route off until Foundry
-  Opus is deployed, the endpoint/key are installed on the daemon, the Luna deployment answers a
+- Deployment and billing are separate from source readiness. Keep this route off until the Claude
+  Azure Marketplace offer is accepted, Foundry Opus is deployed, the endpoint/key are installed on
+  the daemon, the Luna deployment answers a
   probe, and the running daemon's boot/image SHA and shared allowance are verified.
 
 **Sources read 2026-09-24:** Microsoft Azure GPT-6 launch pricing;
