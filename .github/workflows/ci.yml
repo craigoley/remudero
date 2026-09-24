@@ -647,36 +647,22 @@ jobs:
     # W1-T4399 — ~17 one-minute gates (commitlint, leak-grep, learnings-budget-ratchet,
     # jscpd-gate, dashboard, claims, assertion-discrimination, lint-plan, depcruise,
     # containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate,
-    # task-id-existence, source-size, comment-load-ratchet, baseline-monotonic) used to be their
-    # own job each — its own checkout, its own `npm ci`, its own rounded-up-to-a-minute runner.
-    # Design: (i) they run here as STEPS with `continue-on-error: true`, sharing one checkout and
-    # one `npm ci`, then the final step reports each step's outcome as its OWN check run, under
-    # the exact name ci-gate.yml's REQUIRED list and branch protection already use (checks API) —
-    # so no required context disappears. (ii) A gate with its own heavy setup (coverage-ratchet's
-    # matrix, mutation-ratchet's Stryker cache) stays its own job, untouched below. (iii)
-    # `continue-on-error` means one step failing never skips the next — every step below always
-    # runs and always reports.
+    # task-id-existence, source-size, comment-load-ratchet, baseline-monotonic), each formerly its
+    # own job (own checkout/`npm ci`/rounded-up-to-a-minute runner), now run as STEPS here with
+    # `continue-on-error: true` sharing one checkout/`npm ci` — full forensics in
+    # docs/forensics/ci-yml.md. The final step reports each step's outcome as its own check run
+    # under the exact name ci-gate.yml's REQUIRED list uses (checks API), so no required context
+    # disappears; `continue-on-error` means one step failing never skips the next.
     #
-    # WHY THIS JOB KEEPS THE `commitlint` KEY rather than a new one, e.g. `light-gates`: adding a
-    # genuinely NEW ci.yml job key would force a matching new entry in src/lib/ci-parity.ts
-    # (test/preflight-ci-parity.test.ts asserts ci.yml's job list against that table in both
-    # directions), and Standing rule 25 refuses a single PR editing that table beside the workflow
-    # it mirrors. Expanding an EXISTING job key in place — this one — registers nothing new, so
-    # ci-parity.ts needs no edit at all.
+    # INVARIANT: this job KEEPS the `commitlint` key (not a new `light-gates` key) so
+    # src/lib/ci-parity.ts needs no matching edit — Standing rule 25 refuses a PR editing that
+    # table beside the workflow it mirrors. The other 16 superseded job keys stay registered under
+    # their ORIGINAL names, permanently `if: false` (never renamed/deleted — ci-parity.ts and
+    # test/every-pr-check-is-required-or-advisory.test.ts both derive from those names), so a
+    # skipped stub and this job's real, checks-API-posted result share one name on every PR;
+    # ci-gate.yml already resolves that duplicate by `started_at` (W1-T123).
     #
-    # The other 16 original job keys stay in this file too (see each below), under their ORIGINAL
-    # names, permanently `if: false` rather than deleted or renamed — deleting one is the same
-    # ci-parity.ts problem as above, and renaming one breaks a DIFFERENT invariant:
-    # test/every-pr-check-is-required-or-advisory.test.ts derives every REQUIRED/ADVISORY entry
-    # from a real job's `name:` and refuses one nothing derives. So THIS job's own check run is
-    # ALSO still named "commitlint" (unchanged), same as every other stub below reuses its own
-    # original name — meaning a skipped stub and this job's real, checks-API-posted result for
-    # that same gate share one name on every PR. ci-gate.yml's own read already groups check runs
-    # by name and keeps only the latest `started_at` (W1-T123, for the identical "a rerun leaves an
-    # earlier attempt behind" case), unmodified, which is what resolves that duplicate: this job
-    # needs real work first (checkout, `npm ci`, the gates themselves), so its post always lands
-    # later than a stub's near-instant skip. `if: false` never queues a runner, so a stub costs
-    # nothing at runtime.
+    # FALSIFIER: test/the-light-gates-share-one-runner.test.ts.
     name: commitlint
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
