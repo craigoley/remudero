@@ -7,35 +7,29 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 
 /**
- * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane.
+ * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
+ * daemon. TRAP this avoids (operator ruling 2026-09-23): that day the core daemon's single thread
+ * was starved by futile fix dispatches, and a watcher sharing that thread cannot see the stall it
+ * is meant to catch.
  *
- * Operator ruling 2026-09-23: the SRE runs in ITS OWN lane, not inside the core daemon. That day
- * the core daemon's single thread was starved by futile fix dispatches, and a watcher sharing that
- * thread cannot see the stall it is meant to catch. This module is that lane: a small, own-timer
- * loop (mirroring gardener.ts's and fleet-lane.ts's own timers) that reads incident evidence
- * (W1-T4383's `incident.event`/`incident.sampled` rows, W1-T4384's `incident.event` invariant
+ * A small, own-timer loop (mirroring gardener.ts's and fleet-lane.ts's own timers) that reads
+ * incident evidence (W1-T4383's `incident.event`/`incident.sampled` rows, W1-T4384's invariant
  * findings), dedupes against work the fleet already has open, gathers evidence, and files ONE
- * `incident#<fingerprint>` feedback entry a pass through {@link captureFeedback} — the existing
- * pipeline (feedback -> triage -> plan task -> fleet build) builds the rest.
+ * `incident#<fingerprint>` feedback entry through {@link captureFeedback} — the existing pipeline
+ * (feedback -> triage -> plan task -> fleet build) builds the rest.
  *
- * NEVER DISPATCHES A BUILD ITSELF. Filing feedback is its entire write surface; everything after
- * that — proposing, planning, building — is the ordinary fleet pipeline the way every other
- * machine-origin feedback (`alert#…`, `repair#…`) already flows through it.
+ * INVARIANT: never dispatches a build itself. Filing feedback is its entire write surface;
+ * everything after — proposing, planning, building — is the ordinary fleet pipeline every other
+ * machine-origin feedback (`alert#…`, `repair#…`) already flows through.
+ * PACED like fleet-lane.ts: never more filings in a day than the fleet merged in the last day.
+ * `sre-lane-decisions.json` tracks what it filed and when; `state/SRE_LANE_OFF` is its pause switch.
  *
- * PACED BY THE FLEET'S OWN MERGE RATE, exactly like fleet-lane.ts: never more filings in a day
- * than the fleet merged in the last day, so filing follows real throughput rather than a fixed cap.
- * Its own state file (`sre-lane-decisions.json`) tracks what it has filed and when; the ledger
- * rotates, this does not. `state/SRE_LANE_OFF` is its pause switch (the same PAUSE pattern
- * fleet-lane.ts's per-kind `FLEET_LANE_OFF-<kind>` uses, collapsed to one switch since this lane
- * has exactly one class of work).
+ * HONEST GAP, not papered over: {@link RegistryInstance} carries no `state_dir` yet, so `readEvents`
+ * below reads only this daemon's own ledger, not every registry instance's; `framesFor` has no live
+ * per-fingerprint frame store yet and is wired to `[]` in production ({@link suspectPullRequests} is
+ * fully proven here by unit test with injected frames instead).
  *
- * WHAT PRODUCTION WIRING (src/run-task.ts) CANNOT YET SUPPLY, HONESTLY: {@link RegistryInstance}
- * (instance-registry.ts) does not carry a `state_dir`, so `readEvents` below is wired to this
- * daemon's OWN ledger only, not every registry instance's — a follow-up, not a defect this module
- * can paper over. `framesFor` likewise has no live per-fingerprint frame store yet
- * (`incident-events.ts` deliberately never ledgers the raw frames it scrubs), so it is wired to
- * return `[]` in production until one exists; {@link suspectPullRequests} is fully proven here by
- * unit test with injected frames, ready the day a frame store lands.
+ * FALSIFIER: test/sre-lane.test.ts.
  */
 
 // ── evidence ──────────────────────────────────────────────────────────────────────────────────
