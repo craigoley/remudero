@@ -1,0 +1,51 @@
+- id: W1-T4455
+  title: "EACH /v1/status/stream SUBSCRIBER COSTS A FULL DERIVE AND ITS OWN LEDGER TAIL, AND A QUIET STREAM IS CUT BY CLOUDFLARE — buildStatusStream primes every plan task per connection, polls the ledger per connection and sends no heartbeat; fan one shared publisher out to every subscriber with a heartbeat and a resume id"
+  repo: remudero
+  depends_on: [W1-T4451]
+  priority: 3
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 console data-architecture design (console dropouts): layer E1 core half, sequence step 7"
+  plan_refs: ["W1-T4451", "W1-T4454"]
+  files:
+    - src/lib/status-stream-publisher.ts
+    - src/lib/board.ts
+  note: |
+    HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
+    `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
+    if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at main 6a04d2f18: buildStatusStream (src/lib/board.ts) creates a ledger tail cache and runs deriveStatus for
+    EVERY plan task inside subscribe(), then polls the ledger every pollMs, per connection. N viewers cost N tails and
+    each subscribe costs a full derive. No heartbeat comment frame is written, so Cloudflare's ~100 s idle timeout
+    cuts a quiet stream. The console never consumes the stream today (its /api/console/summary/stream relay was never
+    shipped; CONSOLE-T70 builds it), so the stream must be cheap before it gets real viewers.
+  design: |
+    A new src/lib/status-stream-publisher.ts exports subscribeStatusStream and holds ONE ledger tail and ONE lastSent map for the whole process, started
+    on the first subscriber and stopped when the last leaves. buildStatusStream's subscribe registers with it.
+    EXACT WIRE CONTRACT (CONSOLE-T70 pins it; keep it byte for byte):
+    - `event: status` with `data:` one task's StatusProjection JSON, the same payload as today (liveSpendUsd and
+      liveTurns included).
+    - every status event carries `id: <bootId>:<generation>`, where generation is a monotonic integer per publisher.
+    - a comment line `: hb` every 25 s on every open stream.
+    - a request carrying Last-Event-ID whose bootId differs, or whose generation is older than the retained window
+      (keep the last 500 events), first receives `event: resync` with `data: {"reason":"gap"}`. The client then
+      re-reads its summary once; a full snapshot is never streamed.
+    A new subscriber is never replayed history, exactly as today.
+  acceptance:
+    - claim: "two subscribers share one ledger tail"
+      proof: "unit test: two status stream subscribers share one ledger tail"
+    - claim: "a quiet stream sends a heartbeat comment within 30 seconds"
+      proof: "unit test: a quiet status stream sends a heartbeat within 30 seconds"
+    - claim: "a resume from outside the retained window receives a resync event"
+      proof: "unit test: a status stream resume past the retained window receives a resync event"
+    - claim: "the status stream route subscribes through the shared publisher"
+      proof: "grep: subscribeStatusStream( in src/lib/board.ts"
+  falsifier: |
+    CLOSE IF buildStatusStream on main already shares one ledger tail across subscribers and writes a heartbeat.

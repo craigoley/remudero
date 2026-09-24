@@ -1,0 +1,46 @@
+- id: W1-T4452
+  title: "/v1/feedback AND /v1/operator-activity ARE RECOMPUTED ON EVERY CONSOLE READ — the 344 KB feedback inbox takes ~2.7 s of synchronous listFeedback + reconcile + plan load per request and sits outside CONSOLE_CACHED_READ_PATHS; serve both from the console snapshot cache and answer an unchanged body with 304"
+  repo: remudero
+  depends_on: [W1-T4451]
+  priority: 1
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 console data-architecture design (console dropouts): layer C3, sequence step 2"
+  plan_refs: ["W1-T4451", "W1-T4444"]
+  files:
+    - src/lib/console-snapshot-cache.ts
+    - src/lib/serve.ts
+  note: |
+    HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
+    `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
+    if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at main 6a04d2f18: buildFeedbackInboxRoute (src/lib/panel-graph.ts, GET /v1/feedback) runs a
+    synchronous listFeedback, reconcileFeedbackEntries and a fresh plan load on every request, measured on
+    2026-09-15 at ~2.7 s of assembly for ~344 KB (comment in the console's getConsoleSummaryForTarget; not
+    re-measured). GET /v1/operator-activity is async since #6953 but also uncached. Neither path is in
+    CONSOLE_CACHED_READ_PATHS (src/lib/serve.ts), so every console summary read, including each 5 s poll,
+    pays the full compute on serve's one thread. W1-T4451 builds the cache and its refresh rule for the five
+    paths already cached; this task adds these two paths and the ETag / 304 answer, which W1-T4451 does not.
+  design: |
+    Add "/v1/feedback" and "/v1/operator-activity" to the cached-path set with their own minRefreshMs
+    (feedback 10 s, operator-activity 15 s) in the W1-T4451 cache. Only the GET routes are wrapped; POST
+    /v1/feedback stays uncached. Every cached body gets a strong ETag (a hash of the buffered body computed once per
+    refresh, never per request). A request whose If-None-Match equals it gets 304 with no body and the same
+    cache headers. Response bodies are otherwise byte-identical to today's. serve.ts: zero net comment lines.
+    W1-T4444 (queued) changes operator-activity's composition, not its caching; whichever lands second keeps both.
+  acceptance:
+    - claim: "a second feedback read within its refresh interval does not list feedback again"
+      proof: "unit test: a second feedback read within its refresh interval does not list feedback again"
+    - claim: "operator activity is answered from the snapshot cache"
+      proof: "unit test: operator activity is answered from the console snapshot cache"
+    - claim: "an unchanged cached body answers 304 to its own etag"
+      proof: "unit test: an unchanged cached body answers 304 to its own etag"
+  falsifier: |
+    CLOSE IF GET /v1/feedback on main is already served from a buffered cache without calling listFeedback per request.
