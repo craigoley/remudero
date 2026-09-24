@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
@@ -112,11 +112,37 @@ export function grepProofHolds(repoRoot: string, proof: string): boolean {
   }
 }
 
+/**
+ * The retirements that mean a task was ABANDONED — its work will never exist. `closed` is the other
+ * kind: the work was done by other means or a recorded ruling (W1-T3762, "shipped in #5999"; W1-T1260,
+ * "its deliverable is this entry"), so a task depending on it is satisfied, not stranded. #6885
+ * proposed retiring W1-T3958 because its dependency was `closed`, and was wrong.
+ */
+export const ABANDONED_RETIREMENTS: ReadonlySet<RetirementReason> = new Set<RetirementReason>(["retired", "withdrawn"]);
+
+/** Whether a `grep: <pattern> in <path>` proof matched in the tree at `ref`, read with the executor's
+ *  basic-regex, binary-as-text grep. `undefined` when it cannot be read there (not a grep proof, or git
+ *  failed on the ref) — never a guess either way. A path absent at `ref` did not match. */
+export function grepProofHeldAt(repoRoot: string, ref: string, proof: string): boolean | undefined {
+  const body = /^grep: (.+) in (\S+)$/.exec(proof.trim());
+  if (!body) return undefined;
+  const r = spawnSync("git", ["-C", repoRoot, "grep", "-q", "-G", "--text", "-e", body[1]!, ref, "--", body[2]!], { stdio: "ignore" });
+  return r.status === 0 ? true : r.status === 1 ? false : undefined;
+}
+
+/** The commit that filed the shard at `shardRel` — the newest commit that ADDED it — or undefined
+ *  when git cannot say (no history, not a repository). */
+export function filingRef(repoRoot: string, shardRel: string): string | undefined {
+  const r = spawnSync("git", ["-C", repoRoot, "log", "--diff-filter=A", "--format=%H", "--", shardRel], { encoding: "utf8" });
+  const sha = r.status === 0 ? r.stdout.split("\n")[0]!.trim() : "";
+  return sha === "" ? undefined : sha;
+}
+
 export function retirementCandidates(inv: PlanInventory, repoRoot: string): PlanGardenAction[] {
-  const retired = new Set(inv.all.filter((t) => t.retirement).map((t) => t.id));
+  const abandoned = new Set(inv.all.filter((t) => t.retirement && ABANDONED_RETIREMENTS.has(t.retirement)).map((t) => t.id));
   const out: PlanGardenAction[] = [];
   for (const t of inv.open) {
-    const gone = t.depends_on.filter((d) => retired.has(d));
+    const gone = t.depends_on.filter((d) => abandoned.has(d));
     if (gone.length > 0) {
       out.push({ class: "retire", target: t.id, retirement: "retired", reason: `It depends on ${gone.join(", ")}, which will never be built.` });
       continue;
@@ -125,9 +151,14 @@ export function retirementCandidates(inv: PlanInventory, repoRoot: string): Plan
     // work happened; only proofs about other files count, and there must be at least one.
     const own = inv.shards.get(t.id);
     const proofs = (t.acceptance ?? []).map((c) => c.proof).filter((p) => !own || !p.trim().endsWith(` in ${own}`));
-    if (proofs.length > 0 && proofs.every((p) => grepProofHolds(repoRoot, p))) {
-      out.push({ class: "retire", target: t.id, retirement: "closed", reason: "Every acceptance proof already holds on main." });
-    }
+    if (proofs.length === 0 || !proofs.every((p) => grepProofHolds(repoRoot, p))) continue;
+    // Nor is a proof that already held when the task was FILED: #6885 proposed closing W1-T3980 on
+    // greps of symbols that predated it. Some proof must have failed at the filing commit, read there;
+    // an unreadable filing commit or proof never closes a task.
+    const filed = own ? filingRef(repoRoot, own) : undefined;
+    const atFiling = filed ? proofs.map((p) => grepProofHeldAt(repoRoot, filed, p)) : [undefined];
+    if (atFiling.includes(undefined) || atFiling.every((held) => held)) continue;
+    out.push({ class: "retire", target: t.id, retirement: "closed", reason: "Every acceptance proof now holds on main, and did not when it was filed." });
   }
   return out;
 }

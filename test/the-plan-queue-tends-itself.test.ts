@@ -5,6 +5,7 @@
  * auto-merge; each class is judged by whether that PR merges.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,8 +17,11 @@ import { gardenStatePath, readGardenState, runGarden, startGarden, type GardenCh
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { loadPlan } from "../src/lib/plan.js";
 import {
+  ABANDONED_RETIREMENTS,
   applyPlanActions,
   duplicateTasks,
+  filingRef,
+  grepProofHeldAt,
   grepProofHolds,
   planGardenSpec,
   planInventory,
@@ -59,15 +63,22 @@ function shard(t: ShardSpec): string {
   ].join("\n");
 }
 
-/** A repo holding a plan: an empty monolith and one shard per task. */
-function planRepo(tasks: ShardSpec[]): string {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4111-`));
+/** A repo holding a plan: an empty monolith and one shard per task. By default a git repository in
+ *  which the tasks are FILED in one commit and `shipped-lesson` lands in a later one, so a proof on it
+ *  fails at filing and holds now; `{ git: false }` is a bare directory with no history to read. */
+function planRepo(tasks: ShardSpec[], opts: { git?: boolean } = {}): string {
+  const repo = opts.git === false ? undefined : gitRepo({ kind: "w1t4111" });
+  const root = repo?.dir ?? mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4111-`));
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(root, "learnings"));
   mkdirSync(join(root, "state"));
   writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
-  writeFileSync(join(root, "learnings", "ci-gate-lessons.yaml"), "shipped-lesson: yes\n");
+  writeFileSync(join(root, "learnings", "ci-gate-lessons.yaml"), "seed: yes\n");
   for (const t of tasks) writeFileSync(join(root, "plan", "tasks.d", `${t.id}-x.yaml`), shard(t));
+  repo?.git("add", "-A");
+  repo?.git("commit", "-q", "-m", "file the tasks");
+  writeFileSync(join(root, "learnings", "ci-gate-lessons.yaml"), "seed: yes\nshipped-lesson: yes\n");
+  repo?.git("commit", "-q", "-am", "ship the lesson");
   return root;
 }
 
@@ -289,6 +300,52 @@ test("a task whose proofs only grep its own shard is never proposed as already d
   ]);
   const actions = retirementCandidates(planInventory(root, join(root, "state")), root);
   assert.deepEqual(actions.map((a) => a.target), ["W1-T2"]);
+});
+
+test("a dependency closed because its work shipped is satisfied, never a reason to retire its dependents", () => {
+  // #6885 proposed retiring W1-T3958 because it "depends on W1-T3762, which will never be built" —
+  // W1-T3762 is `retirement: closed` because it SHIPPED (#5999). Only an abandoned dependency strands.
+  const root = planRepo([
+    { id: "W1-T1", title: "shipped by other means", status: "blocked", retirement: "closed" },
+    { id: "W1-T2", title: "waits on the shipped one", depends_on: ["W1-T1"] },
+    { id: "W1-T3", title: "abandoned", status: "blocked", retirement: "retired" },
+    { id: "W1-T4", title: "waits on the abandoned one", depends_on: ["W1-T3"] },
+    { id: "W1-T5", title: "withdrawn", status: "blocked", retirement: "withdrawn" },
+    { id: "W1-T6", title: "waits on the withdrawn one", depends_on: ["W1-T5"] },
+  ]);
+  const actions = retirementCandidates(planInventory(root, join(root, "state")), root);
+  assert.deepEqual(actions.map((a) => a.target).sort(), ["W1-T4", "W1-T6"]);
+  assert.deepEqual([...ABANDONED_RETIREMENTS].sort(), ["retired", "withdrawn"]);
+});
+
+test("a task whose proofs already held when it was filed is never proposed as closed", () => {
+  // #6885 proposed closing W1-T3980 because every proof held on main — they were greps of symbols that
+  // predated the task. W1-T2 is filed before `shipped-lesson` lands; W1-T1 is filed after it.
+  const root = planRepo([{ id: "W1-T2", title: "filed before the work", proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" }]);
+  writeFileSync(join(root, "plan", "tasks.d", "W1-T1-x.yaml"), shard({ id: "W1-T1", title: "filed after the work", proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" }));
+  execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", "add", "-A"]);
+  execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", "commit", "-q", "-m", "file W1-T1"]);
+  const actions = retirementCandidates(planInventory(root, join(root, "state")), root);
+  assert.deepEqual(actions.map((a) => [a.target, a.retirement]), [["W1-T2", "closed"]]);
+  // The filing commit is the one that ADDED the shard, and the proof is read in that tree.
+  const filed = filingRef(root, "plan/tasks.d/W1-T2-x.yaml")!;
+  assert.match(execFileSync("git", ["-C", root, "log", "-1", "--format=%s", filed], { encoding: "utf8" }), /^file the tasks/);
+  assert.equal(grepProofHeldAt(root, filed, "grep: shipped-lesson in learnings/ci-gate-lessons.yaml"), false);
+  assert.equal(grepProofHeldAt(root, "HEAD", "grep: shipped-lesson in learnings/ci-gate-lessons.yaml"), true);
+  assert.equal(grepProofHeldAt(root, filed, "grep: anything in learnings/not-yet-a-file.yaml"), false, "an absent path did not match");
+});
+
+test("an unreadable filing commit never closes a task", () => {
+  // No history to read: the proof holds on disk, but whether it held at filing is unknown, so no close.
+  const root = planRepo([{ id: "W1-T2", title: "really shipped", proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" }], { git: false });
+  assert.equal(grepProofHolds(root, "grep: shipped-lesson in learnings/ci-gate-lessons.yaml"), true);
+  assert.equal(filingRef(root, "plan/tasks.d/W1-T2-x.yaml"), undefined);
+  assert.deepEqual(retirementCandidates(planInventory(root, join(root, "state")), root), []);
+  // A ref git cannot read, and a proof that is not a grep, are unknown — never a guess either way.
+  const repo = planRepo([]);
+  assert.equal(grepProofHeldAt(repo, "no-such-ref", "grep: seed in learnings/ci-gate-lessons.yaml"), undefined);
+  assert.equal(grepProofHeldAt(repo, "HEAD", "unit test: something"), undefined);
+  assert.equal(filingRef(repo, "plan/tasks.d/never-filed.yaml"), undefined);
 });
 
 test("a garden PR opened ready for review is armed by the sweep once its review posts success", () => {
