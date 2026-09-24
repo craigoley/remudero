@@ -368,10 +368,7 @@ const CLASS_LABEL: Record<EscalationClass, string> = {
  *  QUESTION the operator must ANSWER. See {@link classifyAsk}. */
 export type AskType = "action" | "question";
 
-/** Beside the per-class label, alongside `needs-human` — the ask-type queue split. Exported
- *  (W1-T4471) so a reader of OPEN needs-question issues (lib/escalation-answers.ts) names the
- *  SAME label this file filters issues by at creation time, rather than a second hardcoded
- *  string that could silently drift from it. */
+/** Beside the per-class label, alongside `needs-human` — the ask-type queue split (read by escalation-answers.ts). */
 export const ASK_TYPE_LABEL: Record<AskType, string> = {
   action: "needs-action",
   question: "needs-question",
@@ -721,11 +718,8 @@ export function renderIssueBody(e: Escalation): string {
     "",
     "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
     "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
-    // W1-T4471: a needs-question issue used to say WHAT was being asked and never HOW to answer
-    // it. Only the QUESTION ask type gets this — an ACTION issue (MANUAL/an operator-only
-    // BLOCKED-or-HARD_STOP) is not answered in prose, it is performed. Repository-owner-only,
-    // never "anyone" — G-6 keeps this public repo's comment section unread by anything but the
-    // owner's own reply (lib/escalation-answers.ts).
+    // W1-T4471: how to answer — QUESTION issues only (an ACTION is performed, not answered);
+    // owner-only per G-6, see lib/escalation-answers.ts.
     ...(classifyAsk(e) === "question"
       ? [
           "",
@@ -833,11 +827,8 @@ export function escalationHeadSha(body: string | undefined): string | undefined 
   return HEAD_SHA_LINE_RE.exec(body ?? "")?.[1];
 }
 
-/** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471). Reads
- *  through the SAME {@link TASK_LINE_RE} {@link matchDuplicateEscalation} matches on — ONE
- *  parser, exactly like {@link escalationHeadSha} beside it. Exported so a reader of an
- *  already-open needs-question issue (lib/escalation-answers.ts) can recover which task a
- *  repository-owner reply steers without re-deriving the dedup key's own regex. */
+/** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471) — via the
+ *  SAME {@link TASK_LINE_RE} dedup matches on, so lib/escalation-answers.ts reuses one parser. */
 export function escalationTaskId(body: string | undefined): string | undefined {
   return TASK_LINE_RE.exec(body ?? "")?.[1];
 }

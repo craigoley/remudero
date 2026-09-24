@@ -32,8 +32,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import { ghExec } from "./github-transport.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { appendQuestionAnswer } from "./worker.js";
 import {
   ASK_TYPE_LABEL,
@@ -104,7 +105,8 @@ export function ghEscalationAnswerGateway(owner: string, repo: string): Escalati
       const raw = run(["api", `repos/${repoArg}/issues/${issueNumber}/comments?per_page=100`, "--paginate"]);
       const rows = splitConcatenatedJsonPages(raw).flatMap((chunk) => {
         const page = JSON.parse(chunk) as unknown;
-        return Array.isArray(page) ? (page as RestCommentRow[]) : [];
+        if (!Array.isArray(page)) throw new Error(`listComments: expected a JSON array page, got ${typeof page}`);
+        return page as RestCommentRow[];
       });
       return rows.map((r) => ({
         id: r.id,
@@ -169,56 +171,59 @@ function recordedQuestionStoreOrigins(root: string): Set<string> {
   return origins;
 }
 
-export interface ReadEscalationAnswersDeps {
-  /** The repo root `plan/questions.ndjson` is read from and written to. */
-  root: string;
-  ledgerPath: string;
-  runId: string;
-  issues: EscalationAnswerGateway;
-}
-
 export interface EscalationAnswerResult {
   /** New repository-owner replies landed in `plan/questions.ndjson` this pass. */
   accepted: number;
   /** Comments seen this pass whose author was not the repository owner (or was a bot) — counted,
    *  never read into a prompt. */
   ignored: number;
+  /** Reads that FAILED this pass (the issue list, or one issue's comments) — kept apart from
+   *  "nothing new", which is `accepted: 0` with this at 0. */
+  unreadable: number;
 }
 
 /**
  * Poll every OPEN needs-question issue for a NEW repository-owner reply, and land each accepted
  * one in `plan/questions.ndjson` — the exact store {@link "./worker.js".appendQuestionAnswer}
  * already writes, which `operatorVerdictEvidence` (lib/sweep.ts) already reads each sweep pass.
- * FAIL-SOFT throughout (an unreadable list, a single unreadable issue's comments, or a failed
- * reaction never abort the pass) — mirrors lib/issues-intake.ts's own per-repo/per-issue
- * tolerance, so one bad read degrades only its own slice, never the whole poll.
+ * A failed read degrades only its own slice (the whole list, or one issue) and is counted in
+ * `unreadable`; a failed reaction never un-lands an answer. `root` holds the question store.
  */
-export function readEscalationAnswers(deps: ReadEscalationAnswersDeps): EscalationAnswerResult {
+export function readEscalationAnswers(
+  root: string,
+  runId: string,
+  gateway: EscalationAnswerGateway,
+  deps: LedgerWriterDeps,
+  clock: Clock = systemClock,
+): EscalationAnswerResult {
+  const writeLedger = deps.writeLedger ?? appendLedger;
   let accepted = 0;
   let ignored = 0;
+  let unreadable = 0;
   let issues: OpenIssue[];
   try {
-    issues = deps.issues.listOpen(NEEDS_QUESTION_LABEL);
+    issues = gateway.listOpen(NEEDS_QUESTION_LABEL);
   } catch {
-    return { accepted, ignored }; // best-effort: a failed list read is "nothing new this pass"
+    return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
-  const recordedOrigins = recordedQuestionStoreOrigins(deps.root);
+  const recordedOrigins = recordedQuestionStoreOrigins(root);
   for (const issue of issues) {
     const taskId = escalationTaskId(issue.body);
     if (!taskId) continue; // an issue with no recoverable task referent steers nothing
     let comments: EscalationIssueComment[];
     try {
-      comments = deps.issues.listComments(issue.number);
+      comments = gateway.listComments(issue.number);
     } catch {
-      continue; // skip just this issue this pass
+      unreadable++; // counted, then just this issue is skipped this pass
+      continue;
     }
     for (const comment of comments) {
       const origin = `issue#${issue.number}:comment:${comment.id}`;
       if (recordedOrigins.has(origin)) continue; // design (ii): idempotent per comment id
       if (!isOwnerComment(comment)) {
         ignored++;
-        appendLedger(deps.ledgerPath, {
-          run_id: deps.runId,
+        writeLedger(deps.ledgerPath, {
+          run_id: runId,
           task_id: taskId,
           step: "escalation_answer.ignored",
           origin,
@@ -228,14 +233,14 @@ export function readEscalationAnswers(deps: ReadEscalationAnswersDeps): Escalati
       }
       const answer = answerTextFor(comment.body, issue.body ?? "");
       if (!answer) continue;
-      const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
-        ts: new Date().toISOString(),
+      const recordedToQuestionStore = appendQuestionAnswer(root, {
+        ts: clock.iso(),
         task: taskId,
         answer,
         origin,
       });
-      appendLedger(deps.ledgerPath, {
-        run_id: deps.runId,
+      writeLedger(deps.ledgerPath, {
+        run_id: runId,
         task_id: taskId,
         step: "panel.question_answered",
         answer,
@@ -246,11 +251,11 @@ export function readEscalationAnswers(deps: ReadEscalationAnswersDeps): Escalati
       accepted++;
       recordedOrigins.add(origin);
       try {
-        deps.issues.reactPlusOne(comment.id);
+        gateway.reactPlusOne(comment.id);
       } catch {
         // best-effort acknowledgement — a failed reaction never un-lands the answer.
       }
     }
   }
-  return { accepted, ignored };
+  return { accepted, ignored, unreadable };
 }

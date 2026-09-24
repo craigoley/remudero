@@ -28,6 +28,7 @@ import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
 import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
+import { systemClock, type Clock } from "./clock.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
@@ -60,6 +61,8 @@ export interface PanelActionDeps {
   /** Rules {@link buildEscalationReplyRoute} hands `interpretReply` to decide whether a reply is
    *  understood; unset runs its default, always "understood", so unconfigured behavior is unchanged. */
   interpretReplyDeps?: InterpretReplyDeps;
+  /** Stamps the question-store answer {@link buildEscalationReplyRoute} records; unset ⇒ `systemClock`. */
+  clock?: Clock;
 }
 
 /** Shared with lib/panel-graph.ts (W3-T6, the plan->task->PR graph + feedback/decision routes) -- one JSON-envelope writer for every panel route, never a second copy. */
@@ -562,13 +565,10 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
 
       const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId });
       const origin = bearerTokenId(req);
-      // W1-T4471: the SAME durable steering store the GitHub-comment reader
-      // (lib/escalation-answers.ts) and `/v1/questions/answer` write into — `operatorVerdictEvidence`
-      // (lib/sweep.ts) reads its `answer` lines each sweep pass. `input.taskId` is REQUIRED on this
-      // route (validateEscalationReply above), so this reply's thread always names a task; without
-      // this write, a console reply used to steer nothing the fix rung reads.
+      // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is
+      // required above, so the answer always names its task.
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
-        ts: new Date().toISOString(),
+        ts: (deps.clock ?? systemClock).iso(),
         task: input.taskId,
         answer: input.text,
         origin,
