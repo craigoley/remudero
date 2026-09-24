@@ -1,0 +1,44 @@
+- id: W1-T4465
+  title: "THE QUEUE GOVERNOR HELD ALL DISPATCH FOR 2.7 HOURS WHILE THE QUEUE WAS DRAINING — checkQueueGovernor defers every new task at wipLimit (10) open PRs, counting operator-session run-unfiled PRs the fleet does not own and ignoring whether merges outpace opens; admit by ownership and flow instead of a bare count"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement, no hard thresholds; dispatch-starvation investigation"
+  plan_refs: [W1-T121, W1-T321, W1-T3144]
+  files: [src/lib/sweep.ts, src/lib/daemon.ts, src/run-task.ts, test/the-queue-governor-admits-a-draining-queue.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: no run.start between 11:27Z and 15:55Z. Six daemon passes (12:14-14:56) each logged 1-4 idle ticks and
+    attempted nothing; every tick is a daemon.queue_governor row (rmd ledger-grep daemon.queue_governor) with
+    observed_open_count 10-16 against wip_limit 10. daemon.idle has no row since 2026-09-20, so the governor was the only hold.
+    OBSERVED from the GitHub PR list: 4-7 of those open PRs were run-unfiled-* branches (operator sessions), which the fleet
+    neither authored nor can throttle. At 13:22Z the trailing hour had 11 merges against 8 opens — the queue was DRAINING —
+    and dispatch was still held at zero lanes. A binary count cannot tell a draining queue from a growing one.
+    INFERRED: this is W1-T121's governor doing what it was built for (the 23-open-PR incident) with an input that now
+    includes other authors' work, and with no notion of flow. Little's law bounds WIP by throughput x cycle time; both are
+    already in the ledger (verdict.merged, pr.opened), so no new GitHub read is needed.
+  design: |
+    (i) OWNERSHIP: the governed count is the open PRs the FLEET owns (run-<taskId>-* and the RETRO/PLAN/APPROVE lanes).
+    run-unfiled-* and other non-fleet heads are counted and ledgered as observed_foreign_count but do not gate dispatch.
+    (ii) FLOW, TIERED: at or over wipLimit, compare the trailing window's merges against opens (ledger verdict.merged and
+    pr.opened rows). Draining (merges >= opens) admits ONE lane rather than zero; growing defers exactly as today. Under
+    wipLimit nothing changes. The window is policy data beside wipLimit, not an inline constant.
+    (iii) The daemon.queue_governor row carries the tier, the owned and foreign counts and the trailing merged/opened, so a
+    held daemon names why it is held and which way the queue is moving.
+    (iv) runSweep stays ungoverned (W1-T121's asymmetry is unchanged).
+  acceptance:
+    - claim: "an open pull request the fleet did not author does not hold dispatch"
+      proof: 'grep: test("W1-T4465: an open pull request the fleet did not author does not hold dispatch" in test/the-queue-governor-admits-a-draining-queue.test.ts'
+    - claim: "a queue over its limit that is draining admits one lane"
+      proof: 'grep: test("W1-T4465: a queue over its limit that is draining admits one lane" in test/the-queue-governor-admits-a-draining-queue.test.ts'
+    - claim: "a queue over its limit that is growing still defers"
+      proof: 'grep: test("W1-T4465: a queue over its limit that is growing still defers" in test/the-queue-governor-admits-a-draining-queue.test.ts'
+  falsifier: |
+    Count every open PR and ignore the trailing merges, and the draining-queue test finds zero lanes admitted.

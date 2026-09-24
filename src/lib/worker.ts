@@ -61,6 +61,7 @@ import {
   type ClaudeModelHealthState,
 } from "./claude-model-health.js";
 import { loadMounts, mountsPath, subscriptionOnlyModel, type CapabilityLadder } from "./mounts.js";
+import { routingExperimentFor } from "./routing-experiments.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -375,6 +376,8 @@ export interface RoutingDecision {
   rule: RoutingRule;
   /** The tier asked for (economy, balanced, frontier), so the rule reads against what was wanted. */
   capability?: CodexModelTier;
+  /** The live routing experiment this assignment belongs to (src/lib/routing-experiments.ts). */
+  ab?: string;
   considered: Array<{
     provider: WorkerProviderId;
     model?: string;
@@ -1473,9 +1476,14 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   for (const alternative of (input.alternatives ?? []).slice(0, 8)) {
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
+  const rule = routingRule(args, input);
+  const ab = rule === "headroom-auction"
+    ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
+    : undefined;
   return {
-    rule: routingRule(args, input),
+    rule,
     ...(input.capability ? { capability: input.capability } : {}),
+    ...(ab ? { ab } : {}),
     considered,
     headroomPercent,
   };

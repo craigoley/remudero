@@ -92,7 +92,7 @@ test("Spark stays in economy while balanced rows are Luna-first and frontier rem
   assert.deepEqual(CAPABILITIES.codex.balanced, {
     low: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
     medium: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
-    high: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
+    high: ["gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
   });
   assert.deepEqual(CAPABILITIES.codex.frontier, {
     low: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
