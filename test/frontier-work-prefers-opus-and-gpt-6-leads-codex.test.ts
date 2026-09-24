@@ -93,17 +93,19 @@ test("GPT-6 Luna leads every Codex row GPT-5.6 Luna led, and Terra is in no Code
       if (old >= 0) assert.ok(row.indexOf("gpt-6-luna") >= 0 && row.indexOf("gpt-6-luna") < old, `${capability}.${effort}`);
     }
   }
-  for (const effort of ["low", "medium", "high"]) {
+  for (const effort of ["low", "medium"]) {
     assert.equal(codex.balanced[effort][0], "gpt-6-luna");
-    assert.equal(codex.frontier[effort][0], "gpt-6-sol");
-    assert.equal(codex.balanced[effort].some((model) => model.includes("sol")), false, "no Sol in a balanced row");
+    assert.equal(codex.balanced[effort].some((model) => model.includes("sol")), false, "no Sol in a low or medium balanced row");
   }
+  // Operator ruling 2026-09-24: balanced.high is the Sol-vs-Sonnet A/B, with Luna directly behind Sol.
+  assert.deepEqual(codex.balanced.high.slice(0, 2), ["gpt-6-sol", "gpt-6-luna"]);
+  for (const effort of ["low", "medium", "high"]) assert.equal(codex.frontier[effort][0], "gpt-6-sol");
 });
 
 test("replayed against the live account, balanced and economy pick GPT-6 Luna and frontier picks Sol 6", () => {
   const table = ladder();
   for (const [model, effort, expected] of [
-    ["sonnet", "high", "gpt-6-luna"],
+    ["sonnet", "high", "gpt-6-sol"],
     ["sonnet", "medium", "gpt-6-luna"],
     ["haiku", "low", "gpt-6-luna"],
     ["claude-opus-5-5", "high", "gpt-6-sol"],
@@ -117,7 +119,7 @@ test("replayed against the live account, balanced and economy pick GPT-6 Luna an
 
 test("without GPT-6 Luna on the account, balanced falls to GPT-5.6 Luna and never to Terra", () => {
   const withoutSix = LIVE_MODELS.filter((model) => model.id !== "gpt-6-luna");
-  const picked = selectCodexModel(withoutSix, LIVE_LIMITS, {} as never, "sonnet", "high", ladder());
+  const picked = selectCodexModel(withoutSix, LIVE_LIMITS, {} as never, "sonnet", "medium", ladder());
   assert.equal(picked.model, "gpt-5.6-luna");
 });
 

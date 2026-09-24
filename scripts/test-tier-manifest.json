@@ -1032,6 +1032,7 @@
     "test/skill.test.ts": 1225,
     "test/skills-panel-registered.test.ts": 1472,
     "test/slug-branch-task-resolution.test.ts": 976,
+    "test/sol-and-sonnet-split-mid-tier-work-as-an-ab-test.test.ts": 0,
     "test/source-size-baseline-is-enforced.test.ts": 1029,
     "test/source-size-followup.test.ts": 1054,
     "test/source-size-suite-contract.test.ts": 334,

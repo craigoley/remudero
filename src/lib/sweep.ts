@@ -29,6 +29,7 @@ import { buildPlanPrBody, buildPlanPrCommitMessage, createPlanPrRest, probeExist
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
+  loadPlan,
   unmetDependencies,
   type AcceptanceCriterion,
   type MergedResolver,
@@ -302,13 +303,25 @@ export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSes
  * `body` closes it the SAME way `reviewCommand` already resolves criteria for a manual/plan PR —
  * `parseAcceptanceBlock` over the PR body's `## Acceptance` block — so a synthetic task carries
  * the SAME criteria a human `rmd review` run would find, instead of none.
+ *
+ * `files` FOR A SYNTHETIC TASK (W1-T4460): the ORIGINAL premise here — a synthetic task carries no
+ * `files:`, which costs nothing because `commitWorkerEdits` (run-task.ts) only ever refuses a
+ * change OUTSIDE a declared surface — is FALSE. `commitWorkerEdits` refuses OUTRIGHT, before
+ * looking at a single changed path, when `declaredPaths.length === 0`: "the task declares no
+ * files, so there is no surface to stage". Measured: #6807, #6804, #6803 ($9.55) and #6879 made
+ * real, valid edits on a no-task PR and had every one of them discarded this way — 8 of 65
+ * measured fix rounds. `changedPaths` is the PR's OWN footprint (its current `gh pr view --json
+ * files` list, read once by the caller alongside `body`/`headRefName` so this adds no second
+ * network read) — an edit that stays inside the PR's existing diff now has a surface to commit
+ * against, exactly the shape `pathIsUnderDeclaredSurface` already grants a plan task.
  */
 export function fixRungTaskFor(
   plan: Plan,
   pr: { prNumber: number; taskId?: string },
   body?: string,
   headRefName?: string,
-): { task: { id: string; title: string; risk: TaskRisk; acceptance: AcceptanceCriterion[]; budget_usd?: number }; synthetic: boolean } {
+  changedPaths?: readonly string[],
+): { task: { id: string; title: string; risk: TaskRisk; acceptance: AcceptanceCriterion[]; budget_usd?: number; files: string[] }; synthetic: boolean } {
   const found = pr.taskId ? plan.tasks.find((t) => t.id === pr.taskId) : undefined;
   if (found) return { task: found as never, synthetic: false };
   const branchTaskId = taskIdFromRunBranch(headRefName);
@@ -325,9 +338,56 @@ export function fixRungTaskFor(
       title: `PR #${pr.prNumber}`,
       risk: DEFAULT_RISK,
       acceptance: body ? parseAcceptanceBlock(body) : [],
+      files: changedPaths ? [...new Set(changedPaths)].sort() : [],
     },
     synthetic: true,
   };
+}
+
+/**
+ * W1-T4460 design note (ii): a PR's task id can be genuinely ABSENT from the plan SNAPSHOT this
+ * sweep loaded without being absent from the plan itself — the snapshot merely predates the shard
+ * that files it (#6916/W1-T4413: the shard landed via #6910 after this poll's `plan` was read), so
+ * a real task looked unfiled and `fixRungTaskFor` minted it a synthetic identity forever after,
+ * even once the plan caught up on the next poll's OWN read (this call never re-reads).
+ *
+ * Retried BLIND this would repeat the identical miss for every `PR-<n>`/orchestrator-lane id
+ * (`RETRO`/`TRIAGE-*`/`PLAN-*`/`APPROVE-*`), which are never plan tasks and never benefit from a
+ * reload — so the reload is attempted only when `pr.taskId` is set, absent from `plan`, AND does
+ * not already match one of those synthetic shapes. `reloadPlan` is optional and swallowed on
+ * failure (an unreadable plan on this one read is not this dispatch's problem to raise) so a
+ * caller that omits it, or whose reload throws, degrades to exactly today's `fixRungTaskFor`
+ * behaviour. `daemon.plan_reloaded` is the SAME step literal `runDaemon`'s own top-of-tick reload
+ * already logs (design note iv) — one meaning, two writers, not a second mechanism.
+ */
+export function fixRungTaskWithPlanReload(
+  plan: Plan,
+  pr: { prNumber: number; taskId?: string },
+  body: string | undefined,
+  headRefName: string | undefined,
+  changedPaths: readonly string[] | undefined,
+  reloadPlan: (() => Plan | undefined) | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { task: ReturnType<typeof fixRungTaskFor>["task"]; synthetic: boolean } {
+  const staleSnapshotMiss =
+    pr.taskId !== undefined &&
+    !plan.tasks.some((t) => t.id === pr.taskId) &&
+    !/^(?:PR-\d+|RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(pr.taskId);
+  if (staleSnapshotMiss && reloadPlan) {
+    let fresh: Plan | undefined;
+    try {
+      fresh = reloadPlan();
+    } catch {
+      // An unreadable plan on this ONE opportunistic re-read is not this dispatch's reason to
+      // throw — falling through to the stale `plan` below reproduces exactly today's behaviour.
+      fresh = undefined;
+    }
+    if (fresh) {
+      log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
+      return fixRungTaskFor(fresh, pr, body, headRefName, changedPaths);
+    }
+  }
+  return fixRungTaskFor(plan, pr, body, headRefName, changedPaths);
 }
 
 /**
@@ -954,6 +1014,11 @@ export interface BuildSweepEffectsDeps {
   dispatchFixPreflightStandDownImpl?: SweepRuntimeFn;
   ghLiveStateImpl?: SweepRuntimeFn;
   fixRungTaskForImpl?: typeof fixRungTaskFor;
+  /** W1-T4460 (design ii) — re-reads the plan ONCE for {@link fixRungTaskWithPlanReload} when a
+   *  fix dispatch's task id is missing from the snapshot `plan` (above) carries. Omitted in
+   *  production defaults to a real disk read of this repo's own `plan/tasks.yaml`; a test replaces
+   *  it to avoid touching the filesystem or to assert the miss/reload sequence directly. */
+  reloadPlanForFixImpl?: () => Plan | undefined;
   createFixRungWorktreeImpl?: SweepRuntimeFn;
   captureWorktreeSnapshotImpl?: SweepRuntimeFn;
   runFixRungImpl?: SweepRuntimeFn;
@@ -1328,6 +1393,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown = requiredSweepRuntime("dispatchFixPreflightStandDownImpl"),
     ghLiveStateImpl: ghLiveState = requiredSweepRuntime("ghLiveStateImpl"),
     fixRungTaskForImpl: fixRungTaskForForBuild = fixRungTaskFor,
+    reloadPlanForFixImpl,
     createFixRungWorktreeImpl: createFixRungWorktree = requiredSweepRuntime("createFixRungWorktreeImpl"),
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit = requiredSweepRuntime("captureWorktreeSnapshotImpl"),
     runFixRungImpl: runFixRung = requiredSweepRuntime("runFixRungImpl"),
@@ -1375,6 +1441,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
 
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
+  // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
+  // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
+  // reason to throw — `fixRungTaskWithPlanReload` already degrades to the stale `plan` on `undefined`).
+  const reloadPlanForFix: () => Plan | undefined =
+    reloadPlanForFixImpl ??
+    (() => {
+      try {
+        return loadPlan(join(repoDir, "plan", "tasks.yaml"));
+      } catch {
+        // A torn read, a missing checkout or a duplicate-id refusal on this ONE opportunistic
+        // re-read is never this dispatch's problem to raise — the caller degrades to its stale
+        // snapshot on `undefined`, exactly as if no reloader had been wired at all.
+        return undefined;
+      }
+    });
   const repoRoot = entrypointRepoRoot;
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
@@ -2183,17 +2264,30 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // `fixRungTaskFor` can resolve a synthetic (no-task) PR's acceptance
         // criteria from its `## Acceptance` block — see that function's doc for
         // why a hardcoded `[]` here made a `blocked_review` synthetic dispatch
-        // permanently unjudgeable.
-        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body"]) as {
+        // permanently unjudgeable. `files` rides the SAME call for the SAME reason
+        // (W1-T4460): the synthetic task's own commit surface.
+        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"]) as {
           headRefName?: string;
           headRefOid?: string;
           body?: string;
+          files?: { path: string }[];
         };
         const realBranch = headRef.headRefName;
+        const changedPaths = (headRef.files ?? []).map((f) => f.path);
         // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
         // log `sweep.fix.no_task` and return here, which is why seven agent-authored PRs were
         // classified fixable and then silently skipped every poll.
-        const { task, synthetic } = fixRungTaskFor(plan, pr, headRef.body, realBranch);
+        // W1-T4460: a stale plan snapshot is tried once more via a fresh read (fixRungTaskWithPlanReload)
+        // before a genuinely-filed task id is ever minted a synthetic identity — see that function's doc.
+        const { task, synthetic } = fixRungTaskWithPlanReload(
+          plan,
+          pr,
+          headRef.body,
+          realBranch,
+          changedPaths,
+          reloadPlanForFix,
+          log,
+        );
         if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
         if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
           // The guard above is UNCHANGED — this decides nothing, it only explains the decline

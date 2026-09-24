@@ -212,6 +212,42 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["recordRiskOverride"],
     outcomes: ["recorded"],
   },
+  {
+    // W1-T4460 — filed as part of "give the synthetic task the PR's own surface and reload the
+    // plan first": 8 of 65 measured fix rounds discarded real, valid edits as "the task declares
+    // no files" because this row's own `task_id` never carried a commit surface. Registered here
+    // per design note (iv) so the next diagnosis of that shape can decode it without re-reading
+    // `dispatchFix`'s source.
+    step: "sweep.fix.synthetic_task",
+    meaning:
+      "The fix rung is about to repair a PR whose task id was not found in the plan `dispatchFix` " +
+      "holds — an agent-authored PR with no `Remudero-Task:` trailer, a RETRO/TRIAGE/PLAN/APPROVE " +
+      "orchestrator lane, or (before W1-T4460) a genuinely filed task the sweep's own plan " +
+      "snapshot merely predates. `task_id` carries the identity minted for it — the PR's own " +
+      "trailer/lane id when one resolves, else the `PR-<n>` fallback `escalationTaskIdFor` mints. " +
+      "Unconditional whenever `fixRungTaskFor`/`fixRungTaskWithPlanReload` resolves `synthetic: " +
+      "true`, logged exactly once per dispatch, before the creditable-head guard is even checked.",
+    writer: ["buildSweepEffects"],
+    outcomes: ["synthetic"],
+  },
+  {
+    // W1-T4460 design note (iv) — the SAME literal `runDaemon`'s own top-of-tick `reloadPlanBinding`
+    // already logs (src/lib/daemon.ts), reused rather than reinvented for `fixRungTaskWithPlanReload`
+    // (src/lib/sweep.ts)'s narrower, dispatch-scoped re-read: ONE meaning ("a fresh plan was read
+    // and adopted for what follows"), TWO writers at two different cadences.
+    step: "daemon.plan_reloaded",
+    meaning:
+      "A fresh plan was read off disk and adopted. `runDaemon`'s `reloadPlanBinding` logs this " +
+      "unconditionally at the top of every tick (and on a lane refill) whenever `deps.reloadPlan` " +
+      "is wired and returns a plan; legitimately 0 rows in a deployment whose supervisor restarts " +
+      "the process on every plan change instead (test/daemon-plan-freshness.test.ts's own note). " +
+      "`fixRungTaskWithPlanReload` logs the identical literal, with the SAME `tasks` count field, " +
+      "the ONE time a fix dispatch's task id is missing from the sweep's own plan snapshot in a " +
+      "shape that is not already a known synthetic (lane/`PR-<n>`) id — closing the #6916/W1-T4413 " +
+      "stale-snapshot gap without a second, disagreeing step name for the same fact.",
+    writer: ["runDaemon", "fixRungTaskWithPlanReload"],
+    outcomes: ["reloaded"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
