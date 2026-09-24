@@ -1,0 +1,31 @@
+- id: W1-T4436
+  title: "THE FINAL CI RUN'S LONG POLE IS FOUR ~20-MINUTE COVERAGE SHARDS WHILE RUNNERS SIT IDLE — runner queueing is negligible, so doubling the ci and coverage shards roughly halves the slowest stage; make the shard count one value every consumer derives, and set it to 8"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: []
+  files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, scripts/coverage-merge-ratchet.mjs, test/the-test-shards-are-sized-by-wall-time.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    MEASURED: final-head CI p50 10 min, p75 25 min (the SOURCE coverage lane); job start delay p50 3 s, p90 41 s,
+    p99 6 min — runner capacity is not the constraint. The coverage aggregator and several tests hard-code four shards.
+  design: |
+    (i) One SHARD_COUNT, read by the matrix, test-tier-manifest's --shard, the coverage aggregator ("every shard
+    produced an artifact") and the suites that pin 4. (ii) Set it to 8 for both lanes. (iii) Measure p75 final-CI before and
+    after over the next 50 PRs and ledger it; revert to 4 if it does not fall.
+  acceptance:
+    - claim: "every shard consumer derives one shard count"
+      proof: 'grep: test("W1-T4436: every shard consumer derives one shard count" in test/the-test-shards-are-sized-by-wall-time.test.ts'
+    - claim: "the coverage aggregator requires exactly that many shard artifacts"
+      proof: 'grep: test("W1-T4436: the coverage aggregator requires exactly that many shard artifacts" in test/the-test-shards-are-sized-by-wall-time.test.ts'
+  falsifier: |
+    Leave the aggregator at four and the second test finds shards 5-8 ignored.

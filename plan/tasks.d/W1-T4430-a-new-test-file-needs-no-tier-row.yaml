@@ -1,0 +1,34 @@
+- id: W1-T4430
+  title: "THE TEST-TIER MANIFEST IS THE MOST CONFLICTED FILE IN THE REPO — the pre-commit hook seeds a duration-0 row for every new test, so any two PRs adding tests collide in one JSON file; an absent file must mean the fast tier, so a new test never touches the manifest"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: medium
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: [W1-T3311]
+  files: [scripts/test-tier-manifest.mjs, hooks/pre-commit, scripts/test-tier-manifest.json, test/a-new-test-file-needs-no-tier-row.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    MEASURED: scripts/test-tier-manifest.json is changed by 46 of 150 merged PRs (31%) and by 22 of the 50 PRs that had
+    origin/main merged into them mid-flight. PRs with main merged in took a median 86 min to merge against 27 min for the rest,
+    because each merge re-runs ~25 min of CI and strands the sha-bound review. A seeded row carries no information: it is
+    duration 0, which is exactly what an absent file would default to.
+  design: |
+    (i) test-tier-manifest treats an absent file as fast tier at duration 0; --check stops refusing untiered files and
+    refuses only a row that names a file that does not exist. (ii) The pre-commit hook stops seeding rows. (iii) Measured
+    durations still arrive through flake-retry-aggregate's reviewed proposal, which is the only writer of rows. (iv) Existing
+    duration-0 rows are removed in the same PR, so the file stops being a merge surface.
+  acceptance:
+    - claim: "a new test file is fast tier with no manifest row"
+      proof: 'grep: test("W1-T4430: a new test file is fast tier with no manifest row" in test/a-new-test-file-needs-no-tier-row.test.ts'
+    - claim: "the pre-commit hook no longer writes the manifest"
+      proof: 'grep: test("W1-T4430: the pre-commit hook no longer writes the manifest" in test/a-new-test-file-needs-no-tier-row.test.ts'
+  falsifier: |
+    Keep the seeding hook and the second test finds the manifest staged after committing a new test file.

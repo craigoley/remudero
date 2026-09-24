@@ -37,7 +37,7 @@ const tornDaemonRow = '{"ts":"2026-09-20T13:32:26.000Z","host":"h","actor":"daem
 const tornExternalRow = externalRow.slice(0, externalRow.indexOf('"external_effect":') + 30);
 const tornBeforeStep = externalRow.slice(0, externalRow.indexOf('"step"') - 1);
 
-function readRoute(files: { live: string; rotation?: string }): Record<string, unknown> {
+async function readRoute(files: { live: string; rotation?: string }): Promise<Record<string, unknown>> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}action-results-torn-`));
   try {
     const stateDir = join(root, "state");
@@ -45,19 +45,27 @@ function readRoute(files: { live: string; rotation?: string }): Record<string, u
     const livePath = join(stateDir, "ledger.ndjson");
     writeFileSync(livePath, files.live);
     if (files.rotation !== undefined) writeFileSync(join(stateDir, "ledger.2026-09-22T16-27-20-296Z.ndjson.gz"), gzipSync(files.rotation));
-    let status = 0;
-    let body = "";
-    const response = { writeHead(code: number) { status = code; }, end(value: string) { body = value; } } as never;
-    buildActionResultsRoute(livePath).handler({ url: "/v1/action-results" } as never, response, { params: {} });
-    assert.equal(status, 200);
-    return JSON.parse(body) as Record<string, unknown>;
+    // Read twice through one route: the second answer comes from its warm rotation memo, which must
+    // replay each rotation's torn lines exactly as the cold read classified them.
+    const route = buildActionResultsRoute(livePath);
+    const bodies: Array<Record<string, unknown>> = [];
+    for (let read = 0; read < 2; read++) {
+      let status = 0;
+      let body = "";
+      const response = { writeHead(code: number) { status = code; }, end(value: string) { body = value; } } as never;
+      await route.handler({ url: "/v1/action-results" } as never, response, { params: {} });
+      assert.equal(status, 200);
+      bodies.push({ ...(JSON.parse(body) as Record<string, unknown>), generatedAt: undefined });
+    }
+    assert.deepEqual(bodies[1], bodies[0], "a warm read answers exactly as the cold one did");
+    return bodies[0]!;
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-test("unit test: a torn row that cannot be an external-effect row no longer blanks the action-results projection", () => {
-  const envelope = readRoute({ live: `${externalRow}\n${tornDaemonRow}\n`, rotation: `${tornDaemonRow}\n` });
+test("unit test: a torn row that cannot be an external-effect row no longer blanks the action-results projection", async () => {
+  const envelope = await readRoute({ live: `${externalRow}\n${tornDaemonRow}\n`, rotation: `${tornDaemonRow}\n` });
   assert.equal(envelope.state, "verified");
   assert.equal((envelope.results as ExternalEffectResult[]).length, 1);
   assert.equal((envelope.results as ExternalEffectResult[])[0].originatingActionId, "action-1");
@@ -65,12 +73,12 @@ test("unit test: a torn row that cannot be an external-effect row no longer blan
   assert.equal(tornRowCouldBeExternalEffect(tornDaemonRow), false);
 });
 
-test("unit test: a torn row that could be an external-effect row still leaves the action-results projection unavailable", () => {
+test("unit test: a torn row that could be an external-effect row still leaves the action-results projection unavailable", async () => {
   for (const torn of [tornExternalRow, tornBeforeStep, `${tornDaemonRow}${tornBeforeStep}`]) {
     assert.equal(tornRowCouldBeExternalEffect(torn), true, torn);
   }
   for (const files of [{ live: `${externalRow}\n${tornExternalRow}\n` }, { live: `${externalRow}\n`, rotation: `${tornBeforeStep}\n` }]) {
-    const envelope = readRoute(files);
+    const envelope = await readRoute(files);
     assert.equal(envelope.state, "unavailable");
     assert.equal(envelope.reason, "ledger-partial");
   }

@@ -1,0 +1,32 @@
+- id: W1-T4438
+  title: "A GATE POSTED THROUGH THE CHECKS API CANNOT BE RE-RUN OR MINED BY THE SWEEP — GitHub rewrites a GITHUB_TOKEN check run's details_url to /runs/<id>, dropping the /job/<id> the sweep parses; carry the job in external_id and read it where details_url has none"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: [W1-T4399]
+  files: [src/lib/sweep.ts, src/run-task.ts, .github/workflows/ci.yml, test/a-posted-gate-check-stays-rerunnable.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    MEASURED 2026-09-24 on a throwaway probe branch: a check run created with GITHUB_TOKEN is attributed to
+    github-actions (app 15368) and keeps external_id (`job:<id>` survived), but its details_url is rewritten to
+    https://github.com/<repo>/runs/<checkRunId>. W1-T4399 (#6921) posts ~17 gates this way.
+  design: |
+    (i) The consolidated gates job posts external_id `job:<job.check_run_id>`. (ii) The sweep's job-id resolution and
+    the CI failure miner fall back to external_id when details_url carries no /job/<id>. (iii) The rollup reads that include
+    check runs request external_id.
+  acceptance:
+    - claim: "a posted gate''s job id is read from external_id"
+      proof: 'grep: test("W1-T4438: a posted gate''s job id is read from external_id" in test/a-posted-gate-check-stays-rerunnable.test.ts'
+    - claim: "a re-drive of a failed posted gate reruns its job"
+      proof: 'grep: test("W1-T4438: a re-drive of a failed posted gate reruns its job" in test/a-posted-gate-check-stays-rerunnable.test.ts'
+  falsifier: |
+    Parse details_url alone and the first test finds no job id for a posted gate.

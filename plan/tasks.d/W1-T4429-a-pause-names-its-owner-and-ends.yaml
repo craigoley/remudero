@@ -1,0 +1,37 @@
+- id: W1-T4429
+  title: "A FLEET PAUSE WITH NO OWNER STALLED EVERY PULL REQUEST FOR FOUR HOURS — refs/rmd-pause/hold records only a pid, so a hold whose setter died is indistinguishable from a deliberate one; a pause must name who set it, why and until when, escalate and lapse on its own tiers when its setter is gone, and never stop verdicts on work that is already finished"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: []
+  files: [src/lib/fleet-control.ts, src/lib/daemon.ts, test/a-pause-names-its-owner-and-ends.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    OBSERVED 2026-09-24: a hold set at 02:42:32Z by pid 2770992 in the daemon container (the pid was gone within minutes)
+    stood for four hours; 15 open PRs had green ci-gate and no remudero-review, some for 3+ hours, while the daemon logged
+    daemon.pause every tick. Nothing recorded who set it or why; clearing it needed an operator to guess it was abandoned.
+  design: |
+    (i) `rmd pause` requires a reason and records owner (session/host/pid), reason, set-at and an expiry (an explicit
+    --until, or a default derived from the reason class), in the ref's commit body and a ledgered pause.set row. (ii) TIERED,
+    self-healing, never one hard cutoff: when the setter is no longer alive the daemon ledgers pause.orphaned; past half the
+    expiry it opens a needs-human issue naming the owner and reason; at expiry it lapses the hold and ledgers pause.lapsed. A
+    hold declared --indefinite only escalates, never lapses. (iii) Reviews and verdict posting continue under a pause: a pause
+    stops dispatching NEW work, not judging finished work (coordinate with W1-T4053's drain fix).
+  acceptance:
+    - claim: "a pause records its owner, reason and expiry"
+      proof: 'grep: test("W1-T4429: a pause records its owner, reason and expiry" in test/a-pause-names-its-owner-and-ends.test.ts'
+    - claim: "an orphaned pause escalates and then lapses"
+      proof: 'grep: test("W1-T4429: an orphaned pause escalates and then lapses" in test/a-pause-names-its-owner-and-ends.test.ts'
+    - claim: "reviews continue while dispatch is paused"
+      proof: 'grep: test("W1-T4429: reviews continue while dispatch is paused" in test/a-pause-names-its-owner-and-ends.test.ts'
+  falsifier: |
+    Set a pause from a process that then exits and the second test finds the hold still standing past its expiry with no escalation.

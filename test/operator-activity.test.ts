@@ -14,7 +14,8 @@ import {
   type OperatorActivityEnvelope,
 } from "../src/lib/panel-graph.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
+import { readLedgerUnionBounded, type StatusProjection } from "../src/lib/status.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const PLAN_YAML = `
 - id: A
@@ -201,7 +202,7 @@ function responseCapture() {
   };
 }
 
-test("unit test: operator activity route reports unavailable, serves a projection, and fails closed on projection errors", () => {
+test("unit test: operator activity route reports unavailable, serves a projection, and fails closed on projection errors", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}operator-activity-route-`));
   const ledgerPath = join(root, "state", "ledger.ndjson");
   mkdirSync(join(root, "state"), { recursive: true });
@@ -209,7 +210,7 @@ test("unit test: operator activity route reports unavailable, serves a projectio
   const emptyPlan = () => ({ tasks: [], byId: new Map() }) as unknown as Plan;
   try {
     const missing = responseCapture();
-    buildOperatorActivityRoute(routeDeps(join(root, "missing.ndjson")), emptyPlan).handler(
+    await buildOperatorActivityRoute(routeDeps(join(root, "missing.ndjson")), emptyPlan).handler(
       {} as never,
       missing.response,
       { params: {} },
@@ -218,12 +219,12 @@ test("unit test: operator activity route reports unavailable, serves a projectio
     assert.equal(missing.json().state, "unavailable");
 
     const served = responseCapture();
-    buildOperatorActivityRoute(routeDeps(ledgerPath), emptyPlan).handler({} as never, served.response, { params: {} });
+    await buildOperatorActivityRoute(routeDeps(ledgerPath), emptyPlan).handler({} as never, served.response, { params: {} });
     assert.equal(served.status(), 200);
     assert.equal(served.json().state, "verified");
 
     const failed = responseCapture();
-    buildOperatorActivityRoute(routeDeps(ledgerPath), () => {
+    await buildOperatorActivityRoute(routeDeps(ledgerPath), () => {
       throw new Error("snapshot unavailable");
     }).handler({} as never, failed.response, { params: {} });
     assert.equal(failed.status(), 503);
@@ -231,5 +232,76 @@ test("unit test: operator activity route reports unavailable, serves a projectio
     assert.match(String(failed.json().detail), /snapshot unavailable/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function activityCorpus() {
+  const at = (second: number) => new Date(Date.UTC(2026, 8, 20, 10, 0, second)).toISOString();
+  const archive = (tag: string, count: number, offset: number) =>
+    Array.from({ length: count }, (_, i) => ({ step: i % 3 === 0 ? "worker.turns" : "run.start", task_id: `${tag}-${i % 7}`, ts: at(offset + Math.floor(i / 2)) }));
+  const noise = [{ step: "no.ts" }, { ts: at(999) }, { step: "bad.ts", ts: "not-a-time" }];
+  return writeLedger([...archive("live", 90, 250), ...noise], {
+    rotations: [
+      { at: "2026-09-20T10:05:00.000Z", rows: [...archive("gz", 320, 100), ...noise], gz: true },
+      { at: "2026-09-20T10:03:00.000Z", rows: archive("plain", 260, 0) },
+    ],
+  });
+}
+
+async function served(route: ReturnType<typeof buildOperatorActivityRoute>) {
+  const captured = responseCapture();
+  await route.handler({} as never, captured.response, { params: {} });
+  const { observedAt: _observedAt, ...rest } = captured.json();
+  return { status: captured.status(), body: rest };
+}
+
+test("unit test: operator activity from memoized rotations matches the whole-union projection", async () => {
+  const fx = activityCorpus();
+  const emptyPlan = () => ({ tasks: [], byId: new Map() }) as unknown as Plan;
+  const expected = () => {
+    const { observedAt: _observedAt, ...rest } = buildOperatorActivityProjection({ plan: emptyPlan(), projection: new Map(), ledgerLines: readLedgerUnionBounded(fx.path) }) as Record<string, unknown>;
+    return rest;
+  };
+  try {
+    const route = buildOperatorActivityRoute(routeDeps(fx.path), emptyPlan);
+    const cold = await served(route);
+    assert.equal(cold.status, 200);
+    assert.equal((cold.body.items as unknown[]).length, OPERATOR_ACTIVITY_MAX_ITEMS);
+    assert.deepEqual(cold.body, expected());
+    fx.append([{ step: "run.start", task_id: "late", ts: "2026-09-20T11:00:00.000Z" }]);
+    const warm = await served(route);
+    assert.deepEqual(warm.body, expected());
+    assert.equal((warm.body.items as Array<{ taskId?: string }>)[0]?.taskId, "late");
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test("unit test: operator activity yields the event loop while it loads rotations", async () => {
+  const fx = activityCorpus();
+  try {
+    const order: string[] = [];
+    const captured = responseCapture();
+    const response = { writeHead: (code: number) => { order.push("response"); (captured.response as { writeHead: (c: number) => void }).writeHead(code); }, end: (value: string) => (captured.response as { end: (v: string) => void }).end(value) } as never;
+    setImmediate(() => order.push("another request"));
+    await buildOperatorActivityRoute(routeDeps(fx.path), () => ({ tasks: [], byId: new Map() }) as unknown as Plan).handler({} as never, response, { params: {} });
+    assert.deepEqual(order, ["another request", "response"]);
+    assert.equal(captured.status(), 200);
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test("unit test: saturated operator activity never derives the plan projection", async () => {
+  const fx = activityCorpus();
+  try {
+    const refusing = new Proxy({}, { get: (_target, name) => (name === "readFailed" || name === "readFailureReason" ? undefined : () => { throw new Error("projectPlan ran"); }) }) as never;
+    const route = buildOperatorActivityRoute({ ...routeDeps(fx.path), statusGithub: refusing }, plan);
+    const answer = await served(route);
+    assert.equal(answer.status, 200);
+    assert.equal(answer.body.state, "verified");
+    assert.equal(answer.body.truncated, true);
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
   }
 });
