@@ -12,6 +12,7 @@ import {
   invariantFindingLedgerLine,
   LOOP_LAG_P99_BOUND_MS,
   LOOP_LAG_RULE_ID,
+  REPEATED_REFUSAL_RULE_ID,
   RUNTIME_LOOP_LAG_STEP,
   type IncidentInvariantRow,
 } from "../src/lib/incident-invariants.js";
@@ -159,4 +160,105 @@ test("event-loop lag is recorded as a ledger row", () => {
 
   // The pure shape agrees with what the real tick wrote, so the two never drift apart.
   assert.deepEqual(eventLoopLagLedgerLine(reading, NOW_MS), lagRow!.line);
+});
+
+test("the same refusal step and reason three times in both windows fires repeated-refusal, naming the worst", () => {
+  const step = "worktree.node_modules_refused";
+  const rows: IncidentInvariantRow[] = [
+    // Inserted FIRST and smaller, so the worst-so-far comparison must REPLACE it with the larger...
+    row(NOW_MS - 60_000, { step, reason: "lockfile-drift" }),
+    // ...the winner: four hits, all inside the 2.5-minute short window (and so the 30-minute long one).
+    ...[10_000, 30_000, 50_000, 70_000].map((ago) => row(NOW_MS - ago, { step, reason: "symlink" })),
+    // ...and inserted LAST and smaller again, so the comparison must also KEEP the current worst.
+    ...[20_000, 40_000].map((ago) => row(NOW_MS - ago, { step, reason: "disk-full" })),
+    // Not a refusal step, and a refusal with no reason: neither is ever counted.
+    ...[5_000, 15_000, 25_000].map((ago) => row(NOW_MS - ago, { step: "dispatch.settled_set", reason: "symlink" })),
+    ...[5_000, 15_000, 25_000].map((ago) => row(NOW_MS - ago, { step })),
+  ];
+
+  const refusal = evaluateIncidentInvariants(rows, NOW_MS).find((f) => f.ruleId === REPEATED_REFUSAL_RULE_ID);
+  assert.ok(refusal, "one step+reason refused 4 times across both windows must fire repeated-refusal");
+  assert.equal(refusal!.message, `${step} reason=symlink x4`);
+
+  // Two of a kind is under the bound: the same shape with the winner cut to two never fires.
+  const twice = rows.filter((r) => !(r.step === step && r.reason === "symlink")).concat(rows.slice(1, 3));
+  assert.ok(
+    !evaluateIncidentInvariants(twice, NOW_MS).some((f) => f.ruleId === REPEATED_REFUSAL_RULE_ID),
+    "no step+reason reaching 3 must not fire repeated-refusal",
+  );
+});
+
+/** Arms the REAL monitor over fakes and hands back its captured tick, writes and log events. */
+function armMonitor(overrides: {
+  readLedger: () => ReadonlyArray<IncidentInvariantRow>;
+  eventLoopLag: () => EventLoopLag | undefined;
+}) {
+  const written: Array<Record<string, unknown>> = [];
+  const logged: Array<{ event: string; fields: Record<string, unknown> | undefined }> = [];
+  let tick: (() => void) | undefined;
+  const stop = startIncidentInvariantsMonitor("/tmp/does-not-matter/ledger.ndjson", {
+    ...overrides,
+    writeLedger: (_path: string, line: Record<string, unknown>) => {
+      written.push(line);
+    },
+    clock: { now: () => NOW_MS, date: () => new Date(NOW_MS), iso: () => new Date(NOW_MS).toISOString() },
+    setInterval: ((cb: () => void) => {
+      tick = cb;
+      return { unref: () => {} } as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval,
+    clearInterval: (() => {}) as typeof clearInterval,
+    log: (event: string, fields?: Record<string, unknown>) => {
+      logged.push({ event, fields });
+    },
+  });
+  assert.ok(tick, "the monitor must arm its tick via the injected setInterval");
+  return { tick: tick!, stop, written, logged };
+}
+
+const SUSTAINED_LAG_ROWS = loopLagRowsEveryMinute(NOW_MS - 15 * 60_000, NOW_MS, LOOP_LAG_P99_BOUND_MS + 100);
+
+test("the gateway's minute tick appends an invariant incident.event for every firing rule", () => {
+  const { tick, stop, written, logged } = armMonitor({ readLedger: () => SUSTAINED_LAG_ROWS, eventLoopLag: () => undefined });
+  tick();
+  stop();
+
+  const incident = written.find((line) => line.step === "incident.event");
+  assert.ok(incident, "a rule that fires over the tailed ledger must be appended as an incident.event row");
+  assert.equal(incident!.kind, "invariant");
+  assert.equal(incident!.name, LOOP_LAG_RULE_ID);
+  assert.deepEqual(logged, [], "a clean tick logs no failure");
+  // No lag reading this minute: nothing but the finding is written.
+  assert.ok(!written.some((line) => line.step === RUNTIME_LOOP_LAG_STEP));
+});
+
+test("a lag monitor that throws is logged as loop_lag_failed and the evaluate half still runs", () => {
+  const { tick, stop, written, logged } = armMonitor({
+    readLedger: () => SUSTAINED_LAG_ROWS,
+    eventLoopLag: () => {
+      throw new Error("histogram gone");
+    },
+  });
+  tick();
+  stop();
+
+  assert.deepEqual(logged, [{ event: "serve.incident_invariants.loop_lag_failed", fields: { reason: "histogram gone" } }]);
+  assert.ok(
+    written.some((line) => line.step === "incident.event" && line.name === LOOP_LAG_RULE_ID),
+    "the lag half failing must not stop the evaluate half from ledgering its finding",
+  );
+});
+
+test("a ledger read that throws is logged as evaluate_failed and the lag row is still written", () => {
+  const reading: EventLoopLag = { p50Ms: 1, p99Ms: 2, maxMs: 3, windowMs: 60_000 };
+  const { tick, stop, written, logged } = armMonitor({
+    readLedger: () => {
+      throw new Error("ledger unreadable");
+    },
+    eventLoopLag: () => reading,
+  });
+  tick();
+  stop();
+
+  assert.deepEqual(logged, [{ event: "serve.incident_invariants.evaluate_failed", fields: { reason: "ledger unreadable" } }]);
+  assert.deepEqual(written, [eventLoopLagLedgerLine(reading, NOW_MS)], "the lag row lands even when the evaluate half fails");
 });
