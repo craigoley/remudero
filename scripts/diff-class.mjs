@@ -58,7 +58,18 @@ export const COVERAGE_CLASSES = Object.freeze({ ...CLASSES, TEST_ONLY: "TEST_ONL
  * swallow a `src/`-adjacent README a docs-only diff should not be classified around.
  */
 export function isDocsPath(path) {
-  return path.startsWith("docs/");
+  // W1-T4397: doctrine bodies and root-level markdown (CLAUDE.md, AGENTS.md, README.md, ...) are prose
+  // too; a diff of them is DOCS, and planReadingSuiteFiles adds the suites that read exactly those files.
+  return path.startsWith("docs/") || path.startsWith("doctrine/") || (!path.includes("/") && path.endsWith(".md"));
+}
+
+/** Whether `content` names one of the changed root-markdown or doctrine paths — the suites a DOCS diff
+ *  of those files can fail, and only those, so a plan-only diff does not pay for all of them. */
+export function readsChangedProse(content, changedFiles) {
+  const names = (changedFiles ?? []).filter((f) => !f.includes("/") && f.endsWith(".md"));
+  const esc = (n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (names.some((n) => new RegExp(`["'\`](?:\\.\\./)*${esc(n)}["'\`]`).test(content))) return true;
+  return (changedFiles ?? []).some((f) => f.startsWith("doctrine/")) && /["'`](?:\.\.\/)*doctrine(?:\/|["'`])/.test(content);
 }
 
 /** A test-only path is rooted under test/, never a similarly named source or docs path. */
@@ -185,14 +196,14 @@ export function namesPlanOrDocsPath(content) {
  * plan-only diff, and no other source-shape spelling separated the set either.
  */
 // Why: docs/forensics/diff-class.md#planreadingsuitefiles.
-export function planReadingSuiteFiles(root = REPO_ROOT) {
+export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
   const testDir = join(root, "test");
   const out = [];
   for (const entry of readdirSync(testDir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
     const abs = join(testDir, entry.name);
     const content = readFileSync(abs, "utf8");
-    if (namesPlanOrDocsPath(content)) {
+    if (namesPlanOrDocsPath(content) || readsChangedProse(content, changedFiles)) {
       out.push(relative(root, abs).split(sep).join("/"));
     }
   }
@@ -373,7 +384,9 @@ export function main(argv) {
   if (values["list-plan-reading-suites"]) {
     try {
       const root = values["plan-reading-root"] ?? REPO_ROOT;
-      for (const path of planReadingSuiteFiles(root)) console.log(path);
+      // W1-T4397: with --changed-files, also the suites that read a changed root-markdown or doctrine file.
+      const changed = values["changed-files"] ? readChangedFilesArg(values["changed-files"]) : [];
+      for (const path of planReadingSuiteFiles(root, changed)) console.log(path);
       process.exitCode = 0;
     } catch (err) {
       console.error(`diff-class: FAILED to enumerate the plan-reading suite set — ${err && err.message ? err.message : String(err)}`);

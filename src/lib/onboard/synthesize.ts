@@ -20,7 +20,7 @@ import { seedProjectLearningsHomeFiles } from "../learnings.js";
 /**
  * `rmd onboard <target-dir> --phase synthesize` — phase 4 (and last) of the four-phase
  * `rmd onboard` family (MASTER-PLAN ★P24(5)+(6), W1-T85). Ratifies the ENTIRE onboarding
- * as ONE draft PR: an Architect worker (the injected {@link SynthesizeDraftFn}) drafts the
+ * as ONE PR (never a draft): an Architect worker (the injected {@link SynthesizeDraftFn}) drafts the
  * target repo's constitution (`MASTER-PLAN.md`: mission, conventions AS FOUND), a
  * CHANGE-LEVEL `plan/tasks.yaml` seed from the ratified goals (progressive adoption, never
  * a big-bang respec), and `AGENTS.md` (the cross-tool convention) — fed the FULL set of
@@ -56,9 +56,9 @@ import { seedProjectLearningsHomeFiles } from "../learnings.js";
  * subsystem shards and an `index.json` — so the per-repo layer the worker injection already
  * reads (`projectLearningsHome`) has a directory to find. NOTHING under
  * `<target-dir>/plan/onboarding/` (phases 1-3's own artifacts are READ-ONLY inputs here, never
- * touched). Exactly ONE branch, ONE commit, ONE `gh pr create --draft` call — standing rule 15
+ * touched). Exactly ONE branch, ONE commit, ONE `gh pr create` call — standing rule 15
  * ("the Architect proposes, merges nothing"): this phase never opens more than one PR, and
- * never merges anything itself; the human's merge of the draft PR IS the ratification.
+ * never merges or arms anything itself; the human's merge of that PR (never a draft) IS the ratification.
  *
  * COMPOSITION (documented per this task's own design note): `rmd onboard` (this whole
  * four-phase family) produces the BRAIN — a ratified MASTER-PLAN.md/tasks.yaml/AGENTS.md.
@@ -299,7 +299,7 @@ export interface SynthesizeOpenPrOpts {
  *  for this call), hence a locally-declared default exec reusing only the {@link GhExec}
  *  TYPE. */
 export interface SynthesizeGhGateway {
-  /** Open exactly one draft PR; returns the PR URL (`gh pr create`'s own stdout, trimmed). */
+  /** Open exactly one PR, ready for review (never a draft); returns the PR URL (`gh pr create`'s own stdout, trimmed). */
   openPr(opts: SynthesizeOpenPrOpts): string;
 }
 
@@ -314,7 +314,6 @@ export function realSynthesizeGhGateway(opts: { exec?: GhExec } = {}): Synthesiz
         "create",
         "--repo",
         `${o.owner}/${o.repo}`,
-        "--draft",
         "--head",
         o.branch,
         "--title",
@@ -383,7 +382,7 @@ function renderPrBody(input: SynthesizeDraftInput, tasks: Task[]): string {
     "",
     `Tasks drafted: ${tasks.length} (${tasks.map((t) => t.id).join(", ") || "none"})`,
     "",
-    "**This is a DRAFT PR — nothing here auto-merges (Standing rule 15). Merging it IS the ratification.**",
+    "**Nothing here arms auto-merge (Standing rule 15). Merging it IS the ratification.**",
     "",
     "Composition: this PR is the BRAIN (mission, conventions, a change-level plan seed). `rmd project init`",
     "installs the BAR (the CI gate stack this plan is drained against); the daemon drains it.",
@@ -395,7 +394,7 @@ function renderPrBody(input: SynthesizeDraftInput, tasks: Task[]): string {
  * lint-plan-clean ({@link draftPlanUntilClean}), then — and ONLY then — check out
  * `onboard/<repo>-plan`, write the three drafted files (the ONLY writes this module ever
  * performs, and the ONLY ones under `<target-dir>` at all — never under
- * `<target-dir>/plan/onboarding/`), commit, push, and open EXACTLY ONE draft PR.
+ * `<target-dir>/plan/onboarding/`), commit, push, and open EXACTLY ONE PR (never a draft).
  */
 export async function runOnboardSynthesize(targetDir: string, deps: SynthesizeDeps): Promise<OnboardSynthesizeResult> {
   if (!deps.fs.existsSync(targetDir)) {
@@ -412,7 +411,7 @@ export async function runOnboardSynthesize(targetDir: string, deps: SynthesizeDe
   if (owner === "unknown" || repo === "unknown") {
     throw new SynthesizeError(
       `rmd onboard synthesize: target owner/repo is unresolved in ${inventoryPathFor(targetDir)} — re-run ` +
-        `\`rmd onboard ${targetDir} --phase inventory --owner <o> --repo <r>\` first (a draft PR needs a real repo to open against)`,
+        `\`rmd onboard ${targetDir} --phase inventory --owner <o> --repo <r>\` first (the PR needs a real repo to open against)`,
     );
   }
 
@@ -447,9 +446,9 @@ export async function runOnboardSynthesize(targetDir: string, deps: SynthesizeDe
   deps.git.exec(["commit", "-m", `onboard: draft MASTER-PLAN.md, plan/tasks.yaml, AGENTS.md (rmd onboard synthesize)`], targetDir);
   deps.git.exec(["push", "-u", "origin", branch], targetDir);
 
-  // EXACTLY one draft PR (acceptance criterion 3) — never auto-merged. W1-T2456: the citation here
+  // EXACTLY one PR (acceptance criterion 3) — never auto-merged. W1-T2456: the citation here
   // used to read "Standing rule 15", which is the acceptance-criteria goalpost rule and says nothing
-  // about merging; this lane simply opens a DRAFT and arms nothing.
+  // about merging; this lane opens a PR, never a draft (operator ruling 2026-09-24), and arms nothing.
   const prUrl = deps.gh.openPr({
     owner,
     repo,

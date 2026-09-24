@@ -212,10 +212,14 @@ test("DOCS_ONLY: every file is plan-scope-or-docs/, none of it a source path", (
   assert.equal(result.class, CLASSES.DOCS_ONLY);
 });
 
-test("isDocsPath: docs/ prefix only, never a bare .md match (README.md at repo root is NOT a docs path)", () => {
+test("isDocsPath: docs/, doctrine/ and root-level markdown only, never a nested .md under source (W1-T4397)", () => {
   assert.equal(isDocsPath("docs/foo.md"), true);
-  assert.equal(isDocsPath("README.md"), false);
+  // W1-T4397 widened this from docs/ only: root markdown and doctrine bodies are prose, and the suites
+  // that read them are added by planReadingSuiteFiles when they change.
+  assert.equal(isDocsPath("README.md"), true);
+  assert.equal(isDocsPath("doctrine/ci-and-merging/x.md"), true);
   assert.equal(isDocsPath("src/docs/foo.md"), false);
+  assert.equal(isDocsPath("package.json"), false);
 });
 
 // ── acceptance 5: the plan-reading suites are enumerated from the tree at build time, never ─────

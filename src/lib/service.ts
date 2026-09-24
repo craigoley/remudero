@@ -112,10 +112,11 @@ export interface SseRoute {
   subscribe: (send: SseSend) => () => void;
 }
 
-/** The two bearer tokens this surface accepts. `write` also satisfies `read`-scoped routes. */
+/** The bearer tokens this surface accepts. `write` also satisfies `read`-scoped routes. */
 export interface ServiceTokens {
   read: string;
   write: string;
+  ingest?: string;
 }
 
 /**
@@ -532,9 +533,8 @@ function bearerToken(req: IncomingMessage): string | undefined {
   return match?.[1];
 }
 
-/** The `?token=` query-param credential, read ONLY for a route with `allowQueryToken` (the HTML
- *  shell, reached by a browser navigation with no `Authorization` header). Never honored on an
- *  API/data route — it would leak via `Referer` and logs. */
+/** The `?token=` credential, read ONLY for a route with `allowQueryToken` (the HTML shell, a browser
+ *  navigation with no `Authorization` header) — never an API route, where it leaks via `Referer`/logs. */
 function queryToken(req: IncomingMessage): string | undefined {
   const raw = new URL(req.url ?? "/", "http://localhost").searchParams.get("token");
   return raw && raw.length > 0 ? raw : undefined;
@@ -592,6 +592,22 @@ function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
     // resolves to `"low"`, never higher — a deliberate, visible break (once enforcement is on)
     // from a single token that used to reach every write route. Defaulting this to `"high"`
     // would ship the change as a no-op that silently re-grants everything.
+    writeTier: "low",
+  };
+}
+
+/** W1-T4383: `tokens.ingest` grants write on ONE method+path and falls through everywhere else. */
+export function ingestTokenProvider(opts: { token: string; method: Method; path: string }): IdentityProvider {
+  return {
+    name: "ingest-token",
+    grant: (req) => {
+      const token = bearerToken(req);
+      if (!token || !safeEqual(token, opts.token)) return undefined;
+      const method = (req.method ?? "GET").toUpperCase();
+      const path = new URL(req.url ?? "/", "http://localhost").pathname;
+      if (method !== opts.method || path !== opts.path) return undefined;
+      return READ_WRITE;
+    },
     writeTier: "low",
   };
 }

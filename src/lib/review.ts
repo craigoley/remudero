@@ -13,7 +13,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk } from "./plan.js";
+import { loadPlanAtRef, readBlobsAtRef, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -24,6 +24,7 @@ import {
   GENERATED_LEDGER_CLASSES,
   isCompanionPath,
 } from "./companion-paths.js";
+import { taskIdCollisions, type TaskIdCollision, type TaskIdDeclaration } from "./task-id-reservation.js";
 
 /** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
  * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
@@ -554,6 +555,8 @@ export interface ReviewVerdict {
    *  unmarked entries never fire. Non-empty FORCES `state` to `"failure"`, and UNLIKE {@link unwiredAdvisories} it
    *  BLOCKS from day one. TRAP: #1302 appended a bare `## … RULING:` header in neither genre (#1303). */
   unprovenancedDecisionsEntries?: string[];
+  /** W1-T4389: ids this diff ADDS that `origin/main` declares in ANOTHER plan file; non-empty FORCES failure. */
+  taskIdCollisions?: TaskIdCollision[];
   /** Visible-pass-rate minus holdout-pass-rate over this verdict's criteria (W1-T166). A worker that can see, and so
    *  optimise toward, only the visible criteria should pass them at a higher rate than the holdout ones it never saw,
    *  so a large positive gap is the signal SpecBench names. `null` when not MEASURABLE, never forces `state`, and
@@ -3717,6 +3720,16 @@ export function judgeReview(
   // exemption — a genuine Architect plan-only correction is never this function's business to fail.
   const criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff);
 
+  const idDecls = taskIdDeclarationsInDiff(evidence.diff);
+  const idCollisions =
+    idDecls.added.length > 0 && evidence.headCheckoutDir
+      ? taskIdCollisions(
+          idDecls.added,
+          taskIdDeclarationsAtRef(evidence.headCheckoutDir, "origin/main"), // the TIP: #1699 merged after #1695 branched
+          idDecls.removed,
+        )
+      : [];
+
   // A pure comparison of two values already computed above — no new fetch, no new gateway (W1-T274). W1-T1100 design
   // (ii): a detector comparing the BODY's claims against the diff must REFUSE on a substitute rather than judge one
   // (#2395). W1-T1264: one call produces both the contradictions and the recognition count, withheld together —
@@ -3768,6 +3781,7 @@ export function judgeReview(
     unmetForState.length > 0 ||
     testTheater ||
     criteriaTampered ||
+    idCollisions.length > 0 ||
     changesetContradictions.length > 0 ||
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
@@ -3791,6 +3805,7 @@ export function judgeReview(
     floorUnmet.length > 0 ||
     testTheater ||
     criteriaTampered ||
+    idCollisions.length > 0 ||
     changesetContradictions.length > 0 ||
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
@@ -3858,6 +3873,7 @@ export function judgeReview(
           instrumentEntangled ? instrumentEntanglement : undefined,
           unprovenancedDecisionsEntries,
           refusalContradictions,
+          idCollisions,
         );
 
   return {
@@ -3885,6 +3901,7 @@ export function judgeReview(
       ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
       : undefined,
     unprovenancedDecisionsEntries,
+    taskIdCollisions: idCollisions,
     unwiredAdvisories,
     reachabilityScanned,
     rewardHackingGap,
@@ -4824,6 +4841,7 @@ export function failSummary(
   instrumentEntanglement?: { instrumentPaths: string[]; srcPaths: string[] },
   unprovenancedDecisionsEntries: string[] = [],
   refusalContradictions: RefusalContradiction[] = [],
+  idCollisions: TaskIdCollision[] = [], // W1-T4389: LAST so positional callers are unchanged
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
@@ -4832,6 +4850,17 @@ export function failSummary(
     // branch says the ONE actionable thing that fits, the PR SHAPE to change; the full two-part remedy rides
     // `checkSatisfiedByGuard`'s uncapped advisory `reason`. MEASURED: 133 characters. Five suites pin `Standing rule 15`.
     return `${FAIL_PREFIX}Standing rule 15: a criterion was added/edited beside non-plan files — file the shard in its own plan-only PR`;
+  }
+  if (idCollisions.length > 0) {
+    const { id, addedFile, baseFile } = idCollisions[0];
+    const more = idCollisions.length > 1 ? ` (+${idCollisions.length - 1} more)` : "";
+    const head = `${FAIL_PREFIX}task id ${id} reused, renumber the later one: `;
+    const each = Math.max(12, Math.floor((STATUS_DESC_MAX - head.length - " (base: )".length - more.length) / 2));
+    const clip = (f: string): string => {
+      const b = f.slice(f.lastIndexOf("/") + 1);
+      return b.length > each ? `${b.slice(0, each - 1)}…` : b;
+    };
+    return `${head}${clip(addedFile)} (base: ${clip(baseFile)})${more}`;
   }
   if (refusalContradictions.length > 0) {
     const first = refusalContradictions[0];
@@ -5759,6 +5788,45 @@ export function shardDeclaredFilesInDiff(diff: string): Set<string> {
     }
   }
   return declared;
+}
+
+export const TASK_ID_LINE_RE = /^-\s+id:\s*(\S+)\s*$/; // W1-T4389: a task header is column 0; an indented `- id:` is a nested item
+
+export function taskIdDeclarationsInDiff(diff: string): { added: TaskIdDeclaration[]; removed: TaskIdDeclaration[] } {
+  const added: TaskIdDeclaration[] = [];
+  const removed: TaskIdDeclaration[] = [];
+  for (const line of walkDiff(diff)) {
+    const m = line.kind !== "ctx" && SHARD_PATH_RE.test(line.file) ? line.text.match(TASK_ID_LINE_RE) : null;
+    if (m) (line.kind === "add" ? added : removed).push({ id: m[1], file: line.file });
+  }
+  return { added, removed };
+}
+
+export function taskIdDeclarationsAtRef(
+  repoDir: string,
+  ref: string,
+  runGit: GitBlobRunner = (args, stdin) =>
+    execFileSync("git", ["-C", repoDir, ...args], {
+      encoding: "utf8",
+      maxBuffer: 1 << 26,
+      input: stdin,
+      stdio: ["pipe", "pipe", "pipe"],
+    }),
+): TaskIdDeclaration[] {
+  let files: string[];
+  let texts: string[];
+  try {
+    files = runGit(["ls-tree", "-r", "--name-only", ref, "plan/"]).split("\n").filter((f) => SHARD_PATH_RE.test(f));
+    texts = readBlobsAtRef(runGit, ref, files);
+  } catch {
+    return []; // an unreadable ref declares NOTHING: a missed collision, never a fabricated one
+  }
+  return files.flatMap((file, i) =>
+    texts[i].split("\n").flatMap((l) => {
+      const m = l.match(TASK_ID_LINE_RE);
+      return m ? [{ id: m[1], file }] : [];
+    }),
+  );
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────

@@ -3,7 +3,7 @@
     "ci#1: if [ \"${{ matrix.shard }}\" != \"1\" ]; then": {
       "reason": "The one-shard-only preamble. Mutated to always-skip, the three non-first shards keep doing exactly what they already do and shard 1 merely stops running a step it alone runs; nothing in the workflow's shape changes, so no source-reading suite can see it. Covering it needs a harness that executes this step body per shard, which test/workflow-single-suite-run.test.ts's runBash could give it. UNCOVERED, not acceptable-forever."
     },
-    "test-slow#1: if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites > plan-reading-suites.txt; then": {
+    "test-slow#1: if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt > plan-reading-suites.txt; then": {
       "reason": "The fail-closed arm of the plan-reading enumeration: if the classifier cannot list its suites, the job stands down. Forcing it always-true makes test-slow always stand down. test/plan-reading-fast-lane-sharding.test.ts drives the classifier, not this step's shell, so nothing distinguishes it today."
     },
     "test-slow#1: if [ \"${{ steps.plan-reading.outputs.established }}\" = \"true\" ]; then": {

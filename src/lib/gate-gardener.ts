@@ -21,7 +21,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
  *     `removed`), or the learnings baseline's recorded measurement that no longer matches the corpus.
  *     Its `capChars` headroom is deliberate and never touched.
  *   - DEMOTE: a REQUIRED gate that never refused across at least as many pull requests as a typical
- *     gate, moved to ADVISORY with a GATE_RATIONALE — `review: "operator"`, so a person decides.
+ *     gate, moved to ADVISORY with a GATE_RATIONALE — a `review` class, judged by whether its PR merges.
  * TIGHTEN and REFRESH are judged by refusals repaired against refusals overridden across all gates.
  */
 
@@ -235,7 +235,7 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes): GardenSp
   return {
     name: "gate",
     classes: GATE_GARDEN_CLASSES,
-    review: { demote: "demoting a required gate stops it blocking merges, which is a person's call." },
+    review: { demote: "demoting a required gate stops it blocking merges, which is a judgement call." },
     cheapFingerprint: () => {
       const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
       const report = gateFireRatesPath(deps.stateDir);

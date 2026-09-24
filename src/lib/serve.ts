@@ -53,6 +53,7 @@ import {
   cloudflareAccessIdentityProvider,
   createCloudflareAccessKeyCache,
   createOperatorJwksCache,
+  ingestTokenProvider,
   operatorJwksUrl,
   operatorSessionIdentityProvider,
   type IdentityProvider,
@@ -62,6 +63,11 @@ import {
   type SseRoute,
   type WriteTier,
 } from "./service.js";
+import {
+  buildIncidentEventsRoute,
+  INCIDENT_INGEST_ROUTE_METHOD,
+  INCIDENT_INGEST_ROUTE_PATH,
+} from "./incident-events.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -4183,6 +4189,7 @@ function assembleServeRoutes(
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
       log: deps.log,
     }),
+    buildIncidentEventsRoute({ ledgerPath: deps.ledgerPath }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps);
   routes.push(
@@ -4327,17 +4334,20 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // no idea which directory was searched, so the path is in the line.
     deps.log?.("serve.console_build_missing", { kind: consoleBuild.kind, root: consoleBuild.root, reason: consoleBuild.reason });
   }
+  const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV];
   const server = createService({
     tokens: deps.tokens,
     identity: deps.identity,
-    // W1-T996: APPENDED through the seam, never by reordering `createService`'s built-in array —
-    // the token-first order is the pre-seam W1-T371 contract, and preserving it is what keeps
-    // every CLI caller unaffected. Empty unless BOTH Access config values are present.
+    // W1-T996: APPENDED through the seam, never by reordering `createService`'s built-in array (the
+    // W1-T371 token-first contract). Access is empty unless BOTH config values are present; W1-T4383's
+    // ingest grantor is absent unless an ingest token is, and reaches only the incident route.
     providers: accessIdentityProviders({
       teamDomain: deps.accessTeamDomain ?? accessConfig().accessTeamDomain,
       audience: deps.accessAudience ?? accessConfig().accessAudience,
       log: deps.log,
-    }),
+    }).concat(
+      ingestToken ? [ingestTokenProvider({ token: ingestToken, method: INCIDENT_INGEST_ROUTE_METHOD, path: INCIDENT_INGEST_ROUTE_PATH })] : [],
+    ),
     // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
     operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(loadConfig, { log: deps.log }), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
@@ -4509,6 +4519,7 @@ export const CONTAINER_ALL_INTERFACES_HOST = "0.0.0.0";
  * being permanently unreachable no matter how deliberately they were typed.
  */
 export const CONTAINER_NETWORK_ENV = "RMD_SERVE_NETWORK";
+export const INGEST_TOKEN_ENV = "RMD_SERVE_INGEST_TOKEN";
 
 /** The only value {@link CONTAINER_NETWORK_ENV} accepts. See that constant's own doc. */
 export const CONTAINER_NETWORK_VALUE = "container";
