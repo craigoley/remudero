@@ -502,11 +502,11 @@ routes:
     high:
       src:       { model: sonnet, effort: high,   max_turns: 40,   context_budget: 120000 }
       design:    { model: sonnet, effort: high,   max_turns: 40,   context_budget: 120000 }
-  # 2026-09-24 (operator ruling, amended): `design` work and risk:high work whose risk is DANGER take
-  # Opus on their FIRST attempt -- Claude Opus with headroom, Codex Sol below reserve, never cash or
-  # API key. A risk:high task whose band is SIZE (`band_meaning: span`) is large but routine: it routes
-  # as class `span` (implementRouteClass, src/lib/task-class.ts) onto the mid tier, where the
-  # Sonnet/Sol split applies. Repeated failures still step up to Opus via `step_up:`.
+  # 2026-09-24 (operator ruling, amended twice): Opus starts only `design` work and risk:high work
+  # that DECLARES danger (`band_meaning: blast-radius`) -- Claude Opus with headroom, Codex Sol below
+  # reserve, never cash or API key. Every other risk:high implement task (`span`, or no band at all)
+  # is routine: it routes as class `routine` (implementRouteClass, src/lib/task-class.ts) onto the mid
+  # tier, where the Sonnet/Sol split applies. Repeated failures still step up to Opus via `step_up:`.
   implement:
     low:
       src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
@@ -520,7 +520,7 @@ routes:
       design:    { model: opus,   effort: high,   max_turns: 400, context_budget: 160000 }
     high:
       src:       { model: opus,   effort: high,   max_turns: 400, context_budget: 200000 }
-      span:      { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
+      routine:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
       design:    { model: opus,   effort: high,   max_turns: 400, context_budget: 200000 }
   diagnose:
     low:

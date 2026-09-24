@@ -146,7 +146,7 @@ test("the retro Architect's turn budget, resolved from the real mounts.yaml, is 
 test("the spawn path derives the task's class and resolves its mount THROUGH resolveMountForClass, not the class-blind resolveMount", () => {
   assert.match(runTaskSrc, /import \{ deriveTaskClass, implementRouteClass \} from "\.\/lib\/task-class\.js";/);
   assert.match(runTaskSrc, /const taskClass = deriveTaskClass\(task\)/);
-  // Ruling 2026-09-24: the implement route splits a high-risk span task onto the mid tier.
+  // Ruling 2026-09-24: the implement route sends high-risk work without a declared danger band to the mid tier.
   assert.match(runTaskSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, implementRouteClass\(task, taskClass\)\)/);
 });
 

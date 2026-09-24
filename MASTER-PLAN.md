@@ -6007,7 +6007,7 @@ absolute — an economy install may run Haiku workers under a Sonnet Architect a
 model-tier ordering table is config-maintained since the lineup shifts. **Amended 2026-09-24
 (operator ruling, DECISIONS.md):** a risk:high or `design`-class worker route may ride the frontier
 as a PEER of the Architect and judge, never above; implement starts on Opus only for design work and
-danger-risk work (a `band_meaning: span` task stays on the mid tier); frontier runs only on a subscription.
+risk:high work declaring `band_meaning: blast-radius`, all else stays mid-tier; frontier runs only on a subscription.
 
 **Routing is knowledge — golden-calibrated.** mounts.yaml changes ship as PRs behind the golden
 suite like every other knowledge change. The flywheel proposes DOWNGRADES when a cheaper mount
