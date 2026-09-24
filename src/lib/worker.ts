@@ -60,7 +60,7 @@ import {
   type ClaudeModelHealthSource,
   type ClaudeModelHealthState,
 } from "./claude-model-health.js";
-import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
+import { loadMounts, mountsPath, subscriptionOnlyModel, type CapabilityLadder } from "./mounts.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -1908,6 +1908,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     : routingPolicy.routableProviders.filter((provider) => provider !== "cash");
   const capabilities = resolveWorkerCapabilities(args.cwd);
   const requestedCapability = args.model && capabilities ? codexCapabilityForRequestedModel(capabilities, args.model) : undefined;
+  const subscriptionOnly = subscriptionOnlyModel(capabilities, args.model);
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
     : undefined;
@@ -2022,7 +2023,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
-      if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
+      if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly) {
+        // Ruling 2026-09-24: frontier work waits for a subscription rather than paying cash or API.
+        console.error(JSON.stringify({ event: "worker.provider.subscription_only_hold", requested_model: args.model }));
+      } else if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
         // The surface the DIVERTED spawn would actually run, which is what eligibility must be
         // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
         // serveable cash equivalent, and admit one whose equivalent was never declared.
@@ -2231,6 +2235,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
   }
   if (args.mountProvider === "cash") {
+    if (subscriptionOnly) throw new SubscriptionOnlyRefusedError(args.model!);
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
@@ -2337,6 +2342,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // Shell isolation, resolved from config and never hardcoded, so a worker sources no operator rc. HOME is redirected
     // above, so CLAUDE_CODE_SHELL's Bash-tool snapshot resolves to the scratch HOME's empty rc whatever the operator's
     // dotfiles contain. ZDOTDIR covers any direct zsh (W1-T1C).
+    const frontierClaudeSpawn = subscriptionOnlyModel(capabilities, claudeHealthRoute?.routedModel ?? args.model ?? workerModel(config));
     const childEnv = buildWorkerEnv(args.env ?? {}, process.env, {
       zdotdir: workerZdotdir(config),
       shell: workerShell(config),
@@ -2345,7 +2351,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // Overflow valve: pass the operator's ANTHROPIC_API_KEY through to bill on API credits ONLY when `config.overflow ===
       // "api_key"`, which validateConfig refuses without a paired dailyCapUsd — so an uncapped api run cannot even be
       // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
-      allowApiKey: config.overflow === "api_key",
+      allowApiKey: config.overflow === "api_key" && frontierClaudeSpawn === false,
     });
     // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent `args.secretBoundary` (see its doc).
     // Applied by MUTATING `childEnv` in place rather than rebinding it: W1-T2800's own structural falsifier
@@ -3440,6 +3446,20 @@ export type NodeModulesLinkOutcome =
 /** Thrown by `worktreeAdd`, only when its caller opts in, instead of linking a SAME-package tree whose install inputs differ
  * from the worktree's (W1-T4193). `reasonClass` is the `blocked_toolchain` tag daemon.ts's `isSpawnInfraBlocked` defers
  * WITHOUT a strike: every daemon installs its install root before a freshness restart, so the mismatch clears. */
+/** A subscription-only (frontier) model was pinned or forced onto cash; it waits for a subscription instead. */
+export class SubscriptionOnlyRefusedError extends RmdError {
+  readonly reasonClass = "blocked_toolchain" as const;
+  constructor(readonly requestedModel: string) {
+    super(
+      "usage",
+      GENERIC_EXIT_CODE,
+      `'${requestedModel}' is subscription-only (operator ruling 2026-09-24): it never runs on cash or API credits`,
+      { requestedModel },
+    );
+    this.name = "SubscriptionOnlyRefusedError";
+  }
+}
+
 export class WorktreeNodeModulesRefusedError extends RmdError {
   readonly reasonClass = "blocked_toolchain" as const;
   constructor(

@@ -724,6 +724,11 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
 
+      - name: rule-checks population (tree-derived census and ratchet suites, without coverage)
+        id: rule-checks
+        continue-on-error: true
+        run: node --import tsx scripts/list-rule-suites.mjs --run
+
       - name: commitlint (the PR title — read LIVE via `gh pr view`, not the opened-event payload snapshot)
         id: commitlint
         continue-on-error: true
@@ -879,6 +884,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTCOME_RULE_CHECKS: ${{ steps.rule-checks.outcome }}
           OUTCOME_COMMITLINT: ${{ steps.commitlint.outcome }}
           OUTCOME_LEAK_GREP: ${{ steps.leak-grep.outcome }}
           OUTCOME_LEARNINGS_BUDGET_RATCHET: ${{ steps.learnings-budget-ratchet.outcome }}
@@ -928,7 +934,7 @@ jobs:
               >/dev/null
             echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*)"
           }
-          report "commitlint" "${OUTCOME_COMMITLINT}"
+          report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"
           report "leak-grep" "${OUTCOME_LEAK_GREP}"
           report "learnings-budget-ratchet" "${OUTCOME_LEARNINGS_BUDGET_RATCHET}" "${OUTCOME_CLAUDE_MD_BUDGET_RATCHET}"
           report "jscpd-gate" "${OUTCOME_JSCPD_GATE}"
