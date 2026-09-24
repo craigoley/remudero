@@ -12,7 +12,9 @@
   origin: "oper#flow-research-2026-09-22"
   plan_refs: [W1-T3696, W1-T3573]
   files: [src/run-task.ts, test/a-missing-commit-line-is-asked-for-not-discarded.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4052 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 FROM THE LEDGER UNION (`rmd ledger-grep '"step":"implement\.harness_commit'`), rows
