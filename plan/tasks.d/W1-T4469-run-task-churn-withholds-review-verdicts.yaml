@@ -1,0 +1,56 @@
+- id: W1-T4469
+  title: "ANY EDIT TO src/run-task.ts WITHHOLDS EVERY REVIEW VERDICT — REVIEW_MATERIAL_ADVANCE_PATHS lists the whole 45k-line file because runReview lives in it, so 17 of 23 withheld verdicts in a day were caused by run-task.ts hunks nowhere near the review path"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 core review-throughput session (item D)"
+  plan_refs: ["W1-T3735", "W1-T228", "W1-T3618", "W1-T2964"]
+  files:
+    - src/lib/self-sync.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    WHAT ALREADY EXISTS, CHECKED FIRST. "Materially behind" is decided today by reviewAdvanceIsMaterial
+    (src/lib/self-sync.ts, W1-T3735). It intersects `git diff --name-only <reviewer code sha>..<origin/main>` with
+    REVIEW_MATERIAL_ADVANCE_PATHS (review.ts, run-task.ts, plan.ts, task-linter.ts, package.json,
+    package-lock.json), and an immaterial advance already posts the computed verdict. So skipping the re-review when
+    the diff avoids reviewer paths is ALREADY on main. What remains is how coarse one entry is.
+    MEASURED 2026-09-24 on the core daemon's ledger union for the 24 h ending 16:48Z: 23 `review.post_refused` rows
+    read "reviewer code <sha> is materially behind origin/main <sha>". Taking each pair's diff against that list,
+    17 of the 23 (74%) had src/run-task.ts as the ONLY review-material path, while the other 6 also touched review.ts,
+    plan.ts or package.json. run-task.ts holds the CLI, the daemon wiring and the sweep hooks as well as runReview.
+    Each withheld verdict costs a full re-review on the next process: PR 6993 was judged twice (14:46 and 15:00),
+    ~5 min each, and both verdicts were withheld for run-task.ts advances.
+  design: |
+    (i) In src/lib/self-sync.ts add REVIEW_PATH_SYMBOLS_IN_RUN_TASK: the top-level declarations in src/run-task.ts on
+    the review path (at least runReview, reviewCommand, and the trailer and criteria resolution they call). The
+    implementer derives the list from the call graph and states it in the PR.
+    (ii) A classifier `runTaskAdvanceTouchesReviewPath(git, codeSha, originMainSha)`. It reads
+    `git diff -U0 <codeSha>..<originMainSha> -- src/run-task.ts` hunk headers, and computes each listed symbol's
+    line span in BOTH versions (`git show <sha>:src/run-task.ts`, then a scan for the top-level declaration start
+    through the next top-level declaration). It returns true when any hunk's old or new range overlaps a span.
+    (iii) reviewAdvanceIsMaterial's callers (checkReviewerCodeFreshness and checkGuardedReviewerCodeFreshness) treat
+    src/run-task.ts as material only when that classifier says so. Every other path in
+    REVIEW_MATERIAL_ADVANCE_PATHS keeps its whole-file meaning.
+    (iv) STILL FAILS TOWARD REFUSING: an unreadable diff, an unreadable blob, a listed symbol that cannot be found
+    in either version, or an unparseable hunk header all count as material. Narrowing WHICH lines count must never
+    narrow what "I cannot tell" means (the W1-T3735 contract).
+  acceptance:
+    - claim: "a run-task.ts advance whose hunks avoid every review-path symbol does not withhold a verdict"
+      proof: "unit test: a run-task hunk outside the review path is not material"
+    - claim: "a run-task.ts hunk inside runReview still withholds the verdict"
+      proof: "unit test: a run-task hunk inside runReview is material"
+    - claim: "a review-path symbol missing from either version counts as material"
+      proof: "unit test: a missing review path symbol reads as material"
+    - claim: "an unreadable run-task diff counts as material"
+      proof: "unit test: an unreadable run-task hunk diff reads as material"
+  falsifier: |
+    CLOSE IF src/run-task.ts no longer holds the review call path (runReview and reviewCommand moved to their own
+    module and REVIEW_MATERIAL_ADVANCE_PATHS lists that module instead), or if a week of core ledger shows
+    run-task.ts-only advances causing under 10% of materially-behind refusals.

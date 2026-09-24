@@ -143,7 +143,7 @@ const BASELINE_COMMAND_NAMES = [
   "pr-owner",
   "reframe",
   "risk-judge-eval",
-  "rule", "relay", "replay", "replay-goldens", "restore", "resume", "retro", "review", "rule-efficacy", "run-task",
+  "rule", "relay", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
@@ -164,14 +164,22 @@ const BASELINE_COMMAND_NAMES = [
 // `decline` and `restore` — the terminal's route to the console's inbox decline and its reversal,
 // through the same applyProposalVerdict the serve routes use — join the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
-  // ONE literal, deliberately: this is the reviewed count, and a verb joining the registry should
-  // cost exactly one considered edit here beside its line above.
-  assert.equal(BASELINE_COMMAND_NAMES.length, 86);
+  // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
+  // literal rides with it: two PRs each adding a verb raise the same number from the same base, git
+  // merges the identical edits silently, and main goes red with neither PR at fault (#7022 and #7005
+  // both wrote 86, fixed by #7041). Names added side by side conflict visibly instead.
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
   // DERIVED from that list, not a second literal. Two copies of the same number meant a new verb
   // reddened this twice and reported "expected 71, got 72", which names nothing about what changed;
   // the deepEqual above is what actually says WHICH name moved.
   assert.equal(COMMANDS.length, BASELINE_COMMAND_NAMES.length);
+});
+
+test("the command inventory carries no count literal that two verb-adding PRs could both bump", () => {
+  // Built by concatenation so this test's own text is not a match for the shape it refuses.
+  const countLiteral = new RegExp("BASELINE_COMMAND_NAMES" + "\\.length\\s*,\\s*\\d+");
+  const text = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  assert.doesNotMatch(text, countLiteral, "the list above is the reviewed edit; a stored count only adds a silent merge race");
 });
 
 // ── Regression control: this test file is where a re-widened top-level listing would show up ──
