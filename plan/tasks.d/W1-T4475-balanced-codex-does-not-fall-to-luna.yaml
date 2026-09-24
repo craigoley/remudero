@@ -1,0 +1,46 @@
+- id: W1-T4475
+  title: "Keep Luna on the economy ladder and remove it from balanced Codex worker chains"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator request 2026-09-24: research an external Opus 5.5, Sol, and Luna agent test and update the smart router"
+  plan_refs: ["W1-T3762", "2026-09-24 model-tiering operator ruling"]
+  files:
+    - .remudero/mounts.yaml
+    - DECISIONS.md
+    - docs/model-routing.md
+  status: queued
+  attempts: 0
+  rationale: |
+    The current table maps Sonnet-class requests to Codex Luna at balanced low and medium effort,
+    and falls from Sol to Luna in balanced high. Effort is not a bound on worker turns: these
+    mounts include recon, implementation, review, and fix chains. The operator supplied a small
+    external test in which Luna returned malformed structured output and missed a failed step in
+    a chain. It is a risk signal, not a measured Remudero failure rate. Official OpenAI guidance
+    positions Luna for focused high-volume work and Sol for coding and agentic workflows.
+    Remudero uses subscriptions for this auction, so API list prices cannot prove fleet savings.
+  design: |
+    (i) Codex balanced low, medium, and high offer Sol-class candidates, with no Luna fallback.
+    Economy rows retain Luna and frontier retains the existing Claude Opus preference.
+    (ii) Preserve the balanced-high Sol-versus-Sonnet A/B tag and its 2026-10-08 revisit;
+    lower-effort balanced assignments do not join it.
+    (iii) Document the external evidence limits, list-price versus subscription distinction,
+    and a telemetry-based rollback condition. Do not change cash routes, Astra approvals, or
+    the subscription-only frontier rule.
+  acceptance:
+    - claim: "the committed Codex ladder keeps Luna in economy and never offers it as a balanced worker fallback"
+      proof: "unit test: the committed Codex ladder keeps Luna on economy work and out of every balanced chain"
+    - claim: "a balanced worker missing GPT-6 Sol falls to GPT-5.6 Sol rather than Luna"
+      proof: "unit test: without GPT-6 Sol on the account, balanced falls to older Sol and never to Luna"
+    - claim: "all Sonnet effort rows use Sol on Codex while the experiment stays restricted to high effort"
+      proof: "unit test: all sonnet efforts reach Sol on Codex while the high-effort A/B stays scoped"
+  falsifier: |
+    Restore a Luna candidate to any Codex balanced row and the first proof fails. Restore Luna
+    after Sol in the medium row and the second proof fails when GPT-6 Sol is unavailable. Tag
+    lower-effort balanced assignments as part of the A/B and the third proof fails.
