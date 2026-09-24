@@ -170,3 +170,56 @@ test("falsifier: the pre-change ghGateway degrades the SAME task to indeterminat
     "and it got there by constructing a search argv the batched gateway never builds",
   );
 });
+
+test("the daemon merged-status projection reads no changed files for a prose-named uncredited build", async () => {
+  // Boot profile 2026-09-24 (pid 525578): refreshMerged spent 78.6 s in uncreditedBuildWarning's changed-files
+  // reads, a report the daemon never reads.
+  const home = mkdtempSync(join(tmpdir(), "rmd-daemon-gw-files-"));
+  const oldHome = process.env.HOME;
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(
+    planPath,
+    "- id: W1-T2379\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  status: queued\n  attempts: 0\n",
+  );
+  const prose = JSON.stringify([
+    {
+      number: 3095,
+      url: "https://api.github.com/repos/o/r/pulls/3095",
+      html_url: "https://github.com/o/r/pull/3095",
+      state: "closed",
+      merged: true,
+      head: { ref: "fix/light-pass-tick", sha: "deadbee" },
+      body: "Builds W1-T2379, option (a) of its design.",
+      title: "fix(sweep): stop the light-pass tick waiting",
+      updated_at: "2026-07-24T00:00:00Z",
+      auto_merge: null,
+    },
+  ]);
+  const argvLog: string[][] = [];
+  process.env.HOME = home;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--dry-run"], {
+      githubFactory: (owner, repo) =>
+        buildBatchedGithub(owner, repo, {
+          exec: (args: string[]) => {
+            argvLog.push(args);
+            const url = args[1] ?? "";
+            if (args.some((a) => a.includes("/files"))) return "src/lib/sweep.ts\n";
+            if (url.includes("state=closed") && /[?&]page=1(&|$)/.test(url)) return prose;
+            return "[]";
+          },
+        }),
+    });
+    assert.equal(code, 0, "--dry-run previews and returns clean");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+  assert.ok(argvLog.some((a) => (a[1] ?? "").includes("state=closed")), "the projection really read the merged batch");
+  assert.equal(argvLog.filter((a) => a.some((x) => x.includes("/files"))).length, 0, "and spent no changed-files read on it");
+});

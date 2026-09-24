@@ -31033,7 +31033,7 @@ export async function daemonCommand(
     boardOpenPrCount.reset();
     const proj = projectPlan(
       planOverride,
-      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
+      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe, skipUncreditedBuildWarning: true },
       statusPath,
     );
     lastProj = proj;
@@ -35335,6 +35335,7 @@ export function buildCreditCandidates(
     mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
     readLedger,
     skipTasklessEscalations: true,
+    skipUncreditedBuildWarning: true,
   };
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
