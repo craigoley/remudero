@@ -904,7 +904,9 @@ test("GET /v1/feedback and GET /v1/trace (assembled server): the plan graph is r
   await withServeServer(depsFor(root, planOf([task({ id: "A" })])), async (base) => {
     const inbox = await get(base, "/v1/feedback", READ_TOKEN);
     assert.equal(inbox.status, 200);
-    assert.deepEqual(await inbox.json(), { entries: [] });
+    const inboxBody = (await inbox.json()) as { entries: unknown[]; staleness?: { status?: string } };
+    assert.deepEqual(inboxBody.entries, []);
+    assert.equal(inboxBody.staleness?.status, "fresh", "the feedback inbox is a cached console read that says how fresh it is");
 
     const trace = await get(base, "/v1/trace?id=A", READ_TOKEN);
     assert.equal(trace.status, 200);

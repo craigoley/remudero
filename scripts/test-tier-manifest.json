@@ -625,6 +625,7 @@
     "test/console-shell-coverage-is-vacuous.test.ts": 8621,
     "test/console-shell-unknowns.test.ts": 1543,
     "test/console-snapshot-cache.test.ts": 0,
+    "test/console-snapshot-revalidation.test.ts": 0,
     "test/console-stopped-counts.test.ts": 1207,
     "test/console-token-refresh.test.ts": 1290,
     "test/console-url.test.ts": 1416,

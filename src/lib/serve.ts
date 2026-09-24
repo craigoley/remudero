@@ -97,7 +97,7 @@ import {
   type IssueCloser,
   type PanelActionDeps,
 } from "./panel-actions.js";
-import { buildPanelGraphRoutes, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { buildPanelGraphRoutes, inboxThreadStorePath, OPERATOR_ACTIVITY_CONTRACT_VERSION, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildRepoDashboardRoute } from "./repo-dashboard-route.js";
@@ -958,7 +958,7 @@ export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
-const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos"]);
+const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos", "/v1/feedback", "/v1/operator-activity"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
   "writeFileSync",
@@ -1090,6 +1090,17 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
       return { ready: [], drafting: [], notReady: [], staleness };
     case "/v1/daemon-health":
       return { pollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs ?? DEFAULT_POLL_MS, staleness };
+    case "/v1/feedback":
+      return { entries: [], staleness };
+    case "/v1/operator-activity":
+      return {
+        version: OPERATOR_ACTIVITY_CONTRACT_VERSION,
+        state: "not-collected",
+        source: "rmd:/v1/operator-activity",
+        observedAt: fixedClock(nowMs).iso(),
+        reason: "not-yet-collected",
+        staleness,
+      };
     default:
       return { staleness };
   }
