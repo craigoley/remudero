@@ -394,11 +394,13 @@ export interface DeriveDeps {
    *  contract: `undefined` falls back per-task, `null` skips the rung so W1-T119 defers rather than
    *  this rung inventing an absence. */
   openHeadBranches?: (taskId: string) => PrRef[] | null;
-  /** W1-T3144: observe the size of the complete open-board batch {@link projectPlan} already reads.
-   * `undefined` means the batch read failed; omission means the caller does not need the count.
+  /** W1-T3144: observe the complete open-board batch {@link projectPlan} already reads.
+   * `undefined` means the batch read failed; omission means the caller does not need it.
    * This is a callback rather than a second gateway accessor call so dispatch admission cannot add
-   * another GitHub request or drift onto a different snapshot. */
-  observeOpenPrCount?: (count: number | undefined) => void;
+   * another GitHub request or drift onto a different snapshot. W1-T4465: carries the full `PrRef[]`
+   * rather than a bare count, so the queue governor's ownership split (design (i)) can classify
+   * each `headRefName` off the SAME single fetch — never a second `listOpenHeadBranches()` call. */
+  observeOpenPrCount?: (openPrs: readonly PrRef[] | undefined) => void;
   /** LIVENESS BOUND (W1-T179): milliseconds of ledger silence a dispatched, unresolved run tolerates
    *  before it is no longer "running" absent an open PR. Injectable so a test can assert the boundary
    *  without a real wait. */
@@ -3502,9 +3504,11 @@ export function projectPlan(
   const allOpen = effectiveDeps.github.listOpenHeadBranches?.();
   if (allOpen !== undefined) {
     // W1-T3144: one board read, two consumers. Dispatch's WIP governor needs every open PR, while
-    // the projection below intentionally indexes only plan tasks. Hand the already-fetched count
+    // the projection below intentionally indexes only plan tasks. Hand the already-fetched batch
     // outward before grouping; never reconstruct board depth from the smaller task-indexed Map.
-    effectiveDeps.observeOpenPrCount?.(allOpen === null ? undefined : allOpen.length);
+    // W1-T4465: the FULL rows, not merely their count, so the governor's ownership split (design
+    // (i)) can read each PR's `headRefName` off this SAME fetch.
+    effectiveDeps.observeOpenPrCount?.(allOpen === null ? undefined : allOpen);
     let openByTask: Map<string, PrRef[]> | null = null;
     if (allOpen !== null) {
       openByTask = new Map<string, PrRef[]>();

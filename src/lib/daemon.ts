@@ -2166,6 +2166,13 @@ export async function runDaemon(
         tick,
         observed_open_count: verdict.result.observedOpenCount,
         wip_limit: verdict.result.wipLimit,
+        // W1-T4465 design (iii): the owned/foreign split, the tier, and the trailing flow this
+        // verdict was decided against, so a held daemon's own ledger names WHY it is held and
+        // which way the queue is moving — never just a bare count-vs-limit pair.
+        observed_foreign_count: verdict.result.observedForeignCount,
+        tier: verdict.result.tier,
+        trailing_merged_count: verdict.result.trailingMergedCount,
+        trailing_opened_count: verdict.result.trailingOpenedCount,
         poll_interval_ms: pollIntervalMs,
       });
     } else if (verdict.kind === "memory") {
