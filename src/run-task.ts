@@ -42116,18 +42116,19 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
-export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], deps: { config?: Config } = {}): number {
-  const config = deps.config ?? loadConfig();
+export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = resolveOwnerRepo();
-  return proposalVerdictCommand(kind, rest, {
-    find: (id) => {
+  return proposalVerdictCommand(
+    kind,
+    rest,
+    (id) => {
       const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config, true);
       return { exists: proposal !== undefined, classification };
     },
-    record: (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),
-  });
+    (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),
+  );
 }
 
 export async function approveCommand(

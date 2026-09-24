@@ -21,13 +21,17 @@ function run(kind: "decline" | "restore", rest: string[], found: Found) {
   const recorded: Array<[string, string, string]> = [];
   const out: string[] = [];
   const err: string[] = [];
-  const code = proposalVerdictCommand(kind, rest, {
-    find: () => found,
-    record: (step, id, reason) => recorded.push([step, id, reason]),
-    out: (l) => out.push(l),
-    err: (l) => err.push(l),
-  });
-  return { code, recorded, out: out.join("\n"), err: err.join("\n") };
+  const savedLog = console.log;
+  const savedError = console.error;
+  console.log = (line: unknown) => void out.push(String(line));
+  console.error = (line: unknown) => void err.push(String(line));
+  try {
+    const code = proposalVerdictCommand(kind, rest, () => found, (step, id, reason) => recorded.push([step, id, reason]));
+    return { code, recorded, out: out.join("\n"), err: err.join("\n") };
+  } finally {
+    console.log = savedLog;
+    console.error = savedError;
+  }
 }
 
 const notReady: Found = { exists: true, classification: { proposalId: "P1", state: "not_ready", reasons: [] } as InboxClassification };
@@ -98,17 +102,17 @@ test("rmd decline and rmd restore, end to end: a real registry, the live classif
         .map((l) => JSON.parse(l) as Record<string, unknown>)
         .filter((l) => l.task_id === "skill-draft:legacy-1");
 
-    assert.equal(proposalVerdictCliCommand("decline", ["skill-draft:legacy-1", "--reason", "legacy duplicate"], { config }), 0);
+    assert.equal(proposalVerdictCliCommand("decline", ["skill-draft:legacy-1", "--reason", "legacy duplicate"], config), 0);
     assert.deepEqual(
       rows().map((l) => [l.step, l.origin, l.reason]),
       [["panel.proposal_declined", "rmd-cli", "legacy duplicate"]],
     );
     // The second decline must SEE the first: only a classification with the ledger's declines applied refuses it.
-    assert.equal(proposalVerdictCliCommand("decline", ["skill-draft:legacy-1", "--reason", "again"], { config }), 1);
+    assert.equal(proposalVerdictCliCommand("decline", ["skill-draft:legacy-1", "--reason", "again"], config), 1);
     assert.match(errors.join("\n"), /was already declined \(legacy duplicate\)/);
-    assert.equal(proposalVerdictCliCommand("restore", ["skill-draft:legacy-1", "--reason", "wrong call"], { config }), 0);
-    assert.equal(proposalVerdictCliCommand("restore", ["skill-draft:legacy-1", "--reason", "twice"], { config }), 1);
-    assert.equal(proposalVerdictCliCommand("decline", ["no-such-proposal", "--reason", "r"], { config }), 1);
+    assert.equal(proposalVerdictCliCommand("restore", ["skill-draft:legacy-1", "--reason", "wrong call"], config), 0);
+    assert.equal(proposalVerdictCliCommand("restore", ["skill-draft:legacy-1", "--reason", "twice"], config), 1);
+    assert.equal(proposalVerdictCliCommand("decline", ["no-such-proposal", "--reason", "r"], config), 1);
     assert.deepEqual(
       rows().map((l) => l.step),
       ["panel.proposal_declined", "panel.proposal_restored"],

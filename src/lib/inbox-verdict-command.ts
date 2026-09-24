@@ -8,37 +8,34 @@
 import { flagValue, unknownArgError } from "./cli-args.js";
 import { applyProposalVerdict, type InboxClassification, type ProposalVerdictKind } from "./inbox.js";
 
-export interface ProposalVerdictCommandDeps {
-  /** Classify one proposal live, as `rmd approve` would, with the ledger's declines applied. */
-  find: (proposalId: string) => { exists: boolean; classification?: InboxClassification };
-  /** Append the verdict's ledger row. */
-  record: (step: string, proposalId: string, reason: string) => void;
-  out?: (line: string) => void;
-  err?: (line: string) => void;
-}
-
 export const PROPOSAL_VERDICT_SYNTAX: Record<ProposalVerdictKind, string> = {
   decline: 'rmd decline <proposalId> --reason "<text>"',
   restore: 'rmd restore <proposalId> --reason "<text>"',
 };
 
-/** Exit 0 recorded, 1 refused (unknown, ratified, or already in the asked-for state), 2 a usage error. */
-export function proposalVerdictCommand(kind: ProposalVerdictKind, rest: string[], deps: ProposalVerdictCommandDeps): number {
-  const out = deps.out ?? ((line: string) => console.log(line));
-  const err = deps.err ?? ((line: string) => console.error(line));
+/**
+ * Exit 0 recorded, 1 refused (unknown, ratified, or already in the asked-for state), 2 a usage error. `find` classifies
+ * one proposal live, as `rmd approve` would, with the ledger's declines applied; `record` appends the verdict's row.
+ */
+export function proposalVerdictCommand(
+  kind: ProposalVerdictKind,
+  rest: string[],
+  find: (proposalId: string) => { exists: boolean; classification?: InboxClassification },
+  record: (step: string, proposalId: string, reason: string) => void,
+): number {
   const proposalId = rest[0];
   const reason = flagValue(rest, "--reason");
   const badArg = proposalId?.startsWith("--") ? `rmd ${kind}: <proposalId> must come first` : unknownArgError(kind, rest.slice(1), ["--reason"]);
-  if (!proposalId || badArg || !reason?.trim()) {
-    err(`${badArg ?? `rmd ${kind}: a proposal id and a non-empty --reason are required`} — usage: ${PROPOSAL_VERDICT_SYNTAX[kind]}`);
+  if (!proposalId || badArg || reason === undefined || reason.trim() === "") {
+    console.error(`${badArg ?? `rmd ${kind}: a proposal id and a non-empty --reason are required`} — usage: ${PROPOSAL_VERDICT_SYNTAX[kind]}`);
     return 2;
   }
-  const outcome = applyProposalVerdict(kind, { proposalId, reason }, deps.find(proposalId), deps.record);
+  const outcome = applyProposalVerdict(kind, { proposalId, reason }, find(proposalId), record);
   if (!outcome.ok) {
-    err(`rmd ${kind}: ${outcome.detail}`);
+    console.error(`rmd ${kind}: ${outcome.detail}`);
     return 1;
   }
-  out(
+  console.log(
     kind === "decline"
       ? `rmd decline: ${proposalId} DECLINED — take it back with ${PROPOSAL_VERDICT_SYNTAX.restore.replace("<proposalId>", proposalId)}`
       : `rmd restore: ${proposalId} RESTORED — it is back in the inbox and classifies as it would have before the decline`,
