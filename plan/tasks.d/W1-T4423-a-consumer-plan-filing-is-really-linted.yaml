@@ -12,7 +12,7 @@
   plan_refs: ["W1-T205", "W1-T3702"]
   files:
     - src/lib/review.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: remudero-site #133 filed PORTAL-T27 with two lint-plan violations (Rule 19 sizing at

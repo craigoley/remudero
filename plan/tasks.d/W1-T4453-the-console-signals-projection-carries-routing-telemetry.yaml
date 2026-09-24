@@ -12,7 +12,7 @@
   plan_refs: ["W1-T3762", "W1-T4062", "W1-T4024"]
   files:
     - src/lib/analytics-route.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at main 6a04d2f18: AnalyticsSnapshot.routingTelemetry (RoutingTelemetrySnapshot, src/lib/analytics-route.ts)
