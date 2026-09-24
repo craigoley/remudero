@@ -28,6 +28,8 @@ import { proofQueueAudit, type ProofQueueAuditOffender, type ProofQueueAuditOpts
 import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes, EMISSIONS_ALLOWLIST } from "./emissions.js";
 import {
   aggregateWipeTestPairs,
+  computeWipeTestDelta,
+  WIPE_TEST_FACTORS,
   WIPE_TEST_PAIRING_FLOOR,
   WIPE_TEST_PAIR_STEP,
   wipeTestPairFactor,
@@ -38,10 +40,11 @@ import {
   type WipeTestRunResult,
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
-import { loadPlan, loadPlanFromYaml, type Task } from "./plan.js";
+import { loadPlan, loadPlanFromYaml, type Task, type TaskRisk } from "./plan.js";
 import { fixedClock } from "./clock.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
+import { seededRandom, seedOf } from "./knowledge-value.js";
 import type { CiLessonRecurrenceObservation } from "./ci-lesson-recurrence.js";
 export { judgeCiLessonEfficacy, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
 export type { CiLessonEfficacy } from "./ci-lesson-recurrence.js";
@@ -268,6 +271,11 @@ export interface WipeTestCadencePolicy {
   enabled: boolean;
   minIntervalMinutes: number;
   maxPerDay: number;
+  /** W1-T4092: the share of pacing slots ablated for a factor at its neutral weight — see
+   *  {@link wipeTestFactorShares}. */
+  baseShare: number;
+  /** W1-T4092: a factor's turns interval half-width at or under which it counts as settled. */
+  settledHalfWidthTurns: number;
 }
 
 /** Wipe-test's OWN fire marker. A short interval here must never throttle measurement, digest,
@@ -1918,7 +1926,7 @@ function wipeTestVerdictOrRefused(value: unknown): WipeTestRunResult["verdict"] 
 }
 
 function wipeTestFactorFromRow(value: unknown): WipeTestFactor {
-  return value === "recon" ? "recon" : "learnings";
+  return value === "recon" || value === "rules" ? value : "learnings";
 }
 
 function wipeTestPairFromLedgerRow(line: string): WipeTestPair | undefined {
@@ -1929,7 +1937,11 @@ function wipeTestPairFromLedgerRow(line: string): WipeTestPair | undefined {
     return undefined; // torn or foreign line — never takes the whole ledger read down
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const row = parsed as Record<string, unknown>;
+  return wipeTestPairFromLedgerObject(parsed as Record<string, unknown>);
+}
+
+/** One already-parsed `wipetest.pair` ledger row as a pair (the digest reads parsed lines). */
+export function wipeTestPairFromLedgerObject(row: Record<string, unknown>): WipeTestPair | undefined {
   if (row.step !== WIPE_TEST_PAIR_STEP || typeof row.task_id !== "string") return undefined;
   const factor = wipeTestFactorFromRow(row.factor);
   return {
@@ -1962,7 +1974,7 @@ export function runWipeTestCadenceReport(opts: {
 }): WipeTestCadenceReportResult {
   const union = (opts.ledgerUnion ?? resolveLedgerUnion)(opts.stateDir, WIPE_TEST_PAIR_PATTERN);
   const pairs = union.ok ? union.matches.map(wipeTestPairFromLedgerRow).filter((p): p is WipeTestPair => p !== undefined) : [];
-  const factors: WipeTestFactor[] = ["learnings", "recon"];
+  const factors = WIPE_TEST_FACTORS;
   return {
     factors: factors.map((factor) => {
       const sameFactor = pairs.filter((pair) => wipeTestPairFactor(pair) === factor);
@@ -2000,6 +2012,191 @@ export function runWipeTestCadenceReport(opts: {
       };
     }),
   };
+}
+
+// ── W1-T4092: ablation runs continuously, sampled where it is least settled ─────────────────────
+// Off by default, the pair core above had produced one `wipetest.pair` row by 2026-09-22, so every
+// usefulness signal was a worker's own claim (W1-T4090). The rung now runs by default at a SHARE, not
+// a count: each pacing slot (one `minIntervalMinutes` window) is ablated with the chosen factor's
+// share, drawn once per slot so every daemon tick inside it agrees. A factor's share doubles while its
+// effect interval is wide, halves once it is narrow, and doubles again when the measured sign
+// disagrees with the claimed use. Only a `risk: low` subject is ever eligible.
+
+/** Pairs a factor needs before a narrow interval may call it settled — two identical pairs have zero
+ *  spread, which is luck rather than evidence. */
+export const WIPE_TEST_SETTLED_MIN_PAIRS = 5;
+/** A claimed-use share at or above this reads as "workers say this factor helps". */
+const WIPE_TEST_CLAIMED_USE_THRESHOLD = 0.5;
+const Z_95 = 1.96;
+const LANDED_VERDICTS: ReadonlySet<string> = new Set(["merged", "awaiting_merge"]);
+
+/** One metric's mean and 95% normal interval; `mean` is null with no pairs, the interval below two. */
+export interface WipeTestEffectEstimate {
+  mean: number | null;
+  low: number | null;
+  high: number | null;
+  halfWidth: number | null;
+}
+
+/** Per factor, every metric signed so POSITIVE means the factor helps (masking it hurt). */
+export interface WipeTestFactorEffect {
+  factor: WipeTestFactor;
+  pairs: number;
+  /** Arm A landed minus arm B landed (merged or awaiting_merge), per pair. */
+  landed: WipeTestEffectEstimate;
+  /** Arm B turns minus arm A turns. */
+  turns: WipeTestEffectEstimate;
+  /** Arm B cost minus arm A cost, USD. */
+  cost: WipeTestEffectEstimate;
+}
+
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
+
+function estimateMean(xs: readonly number[]): WipeTestEffectEstimate {
+  if (xs.length === 0) return { mean: null, low: null, high: null, halfWidth: null };
+  const n = xs.length;
+  const mean = xs.reduce((s, x) => s + x, 0) / n;
+  if (n < 2) return { mean: round3(mean), low: null, high: null, halfWidth: null };
+  const variance = xs.reduce((s, x) => s + (x - mean) ** 2, 0) / (n - 1);
+  const halfWidth = Z_95 * Math.sqrt(variance / n);
+  return { mean: round3(mean), low: round3(mean - halfWidth), high: round3(mean + halfWidth), halfWidth: round3(halfWidth) };
+}
+
+/** Each factor's effect on landing, turns and cost with its interval — one entry per factor, always. */
+export function estimateWipeTestFactorEffects(pairs: readonly WipeTestPair[]): WipeTestFactorEffect[] {
+  return WIPE_TEST_FACTORS.map((factor) => {
+    const deltas = pairs.filter((p) => wipeTestPairFactor(p) === factor).map(computeWipeTestDelta);
+    return {
+      factor,
+      pairs: deltas.length,
+      landed: estimateMean(deltas.map((d) => Number(LANDED_VERDICTS.has(d.verdictA)) - Number(LANDED_VERDICTS.has(d.verdictB)))),
+      turns: estimateMean(deltas.map((d) => d.turnsDelta)),
+      cost: estimateMean(deltas.map((d) => d.costDelta)),
+    };
+  });
+}
+
+/** Share of answering implement workers that said they used at least one injected learning
+ *  (W1-T4090's `learnings.used`). Silent reports and runs offered nothing are not counted. Only
+ *  learnings has a claimed-use signal today; recon and rules read `null`. */
+export function wipeTestClaimedUse(rows: Iterable<Record<string, unknown>>): Partial<Record<WipeTestFactor, number | null>> {
+  let answered = 0;
+  let used = 0;
+  for (const row of rows) {
+    if (row.step !== "learnings.used" || row.silent === true) continue;
+    if (!Array.isArray(row.injected_ids) || row.injected_ids.length === 0) continue;
+    answered++;
+    if (Array.isArray(row.used_ids) && row.used_ids.length > 0) used++;
+  }
+  return { learnings: answered === 0 ? null : used / answered };
+}
+
+export interface WipeTestFactorShare {
+  factor: WipeTestFactor;
+  pairs: number;
+  /** Probability a pacing slot that picks this factor is ablated. */
+  share: number;
+  uncertain: boolean;
+  disagrees: boolean;
+  claimedUse: number | null;
+}
+
+/** The adaptive share per factor: `baseShare` ×2 while uncertain (no interval, under
+ *  {@link WIPE_TEST_SETTLED_MIN_PAIRS}, or a turns half-width over `settledHalfWidthTurns`), ×½ once
+ *  settled, and ×2 again when the measured turns sign disagrees with the claimed use. Capped at 1. */
+export function wipeTestFactorShares(opts: {
+  effects: readonly WipeTestFactorEffect[];
+  claimedUse: Partial<Record<WipeTestFactor, number | null>>;
+  baseShare: number;
+  settledHalfWidthTurns: number;
+}): WipeTestFactorShare[] {
+  return opts.effects.map((e) => {
+    const halfWidth = e.turns.halfWidth;
+    const uncertain = halfWidth === null || e.pairs < WIPE_TEST_SETTLED_MIN_PAIRS || halfWidth > opts.settledHalfWidthTurns;
+    const claimedUse = opts.claimedUse[e.factor] ?? null;
+    const disagrees =
+      claimedUse !== null && e.turns.mean !== null && claimedUse >= WIPE_TEST_CLAIMED_USE_THRESHOLD !== e.turns.mean > 0;
+    const multiplier = (uncertain ? 2 : 0.5) * (disagrees ? 2 : 1);
+    return { factor: e.factor, pairs: e.pairs, share: Math.min(1, opts.baseShare * multiplier), uncertain, disagrees, claimedUse };
+  });
+}
+
+/** One draw per pacing slot, seeded by the slot index, so every tick inside a slot sees the same draw. */
+export function wipeTestSlotDraw(now: Date, minIntervalMinutes: number): number {
+  const slot = Math.floor(now.getTime() / (Math.max(1, minIntervalMinutes) * 60_000));
+  return seededRandom(seedOf(`wipetest.slot:${slot}`))();
+}
+
+export interface WipeTestAblationCandidate {
+  id: string;
+  risk: TaskRisk;
+}
+
+export type WipeTestAblationSchedule =
+  | { fire: false; reason: string }
+  | { fire: true; reason: string; factor: WipeTestFactor; share: number; draw: number; shares: WipeTestFactorShare[] };
+
+/** The rung's decision: pacing bounds, then the low-risk gate, then the factor furthest behind its
+ *  share (fewest pairs per unit of share; ties in {@link WIPE_TEST_FACTORS} order), ablated only if
+ *  this slot's draw falls under that factor's share. */
+export function scheduleWipeTestAblation(opts: {
+  root: string;
+  policy: WipeTestCadencePolicy;
+  now?: Date;
+  candidate: WipeTestAblationCandidate;
+  pairs: readonly WipeTestPair[];
+  claimedUse?: Partial<Record<WipeTestFactor, number | null>>;
+  /** Override the per-slot draw in [0, 1). */
+  draw?: number;
+}): WipeTestAblationSchedule {
+  const now = opts.now ?? new Date();
+  const paced = wipeTestCadenceCheck({ root: opts.root, policy: opts.policy, now });
+  if (!paced.fire) return paced;
+  if (opts.candidate.risk !== "low") {
+    return { fire: false, reason: `${opts.candidate.id} is risk: ${opts.candidate.risk} — only a low-risk task is ever ablated` };
+  }
+  const shares = wipeTestFactorShares({
+    effects: estimateWipeTestFactorEffects(opts.pairs),
+    claimedUse: opts.claimedUse ?? {},
+    baseShare: opts.policy.baseShare,
+    settledHalfWidthTurns: opts.policy.settledHalfWidthTurns,
+  });
+  const eligible = shares.filter((s) => s.share > 0);
+  if (eligible.length === 0) return { fire: false, reason: "every factor's ablation share is 0" };
+  const behind = eligible.reduce((best, s) => ((s.pairs + 1) / s.share < (best.pairs + 1) / best.share ? s : best));
+  const draw = opts.draw ?? wipeTestSlotDraw(now, opts.policy.minIntervalMinutes);
+  const why = `${behind.factor} share ${behind.share.toFixed(3)} (${behind.pairs} pair(s)${behind.uncertain ? ", uncertain" : ", settled"}${behind.disagrees ? ", disagrees with claimed use" : ""})`;
+  if (draw >= behind.share) return { fire: false, reason: `slot draw ${draw.toFixed(3)} ≥ ${why} — this slot runs unablated` };
+  return { fire: true, reason: `${paced.reason}; ${why}`, factor: behind.factor, share: behind.share, draw, shares };
+}
+
+const WIPE_TEST_EVIDENCE_PATTERN = /"step":"(?:wipetest\.pair|learnings\.used)"/;
+
+/** Every measured pair plus the claimed-use shares, from one ledger-union read. */
+export function readWipeTestAblationEvidence(
+  stateDir: string,
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult = resolveLedgerUnion,
+):
+  | { ok: true; pairs: WipeTestPair[]; claimedUse: Partial<Record<WipeTestFactor, number | null>> }
+  | { ok: false; reason: string } {
+  const union = ledgerUnion(stateDir, WIPE_TEST_EVIDENCE_PATTERN);
+  if (!union.ok) {
+    const why = union.archiveCount === 0 ? "no rotation corpus" : `${union.unread.length} unreadable file(s)`;
+    return { ok: false, reason: `wipe-test cadence ledger union unreadable under ${union.stateDir}: ${why}` };
+  }
+  const rows: Record<string, unknown>[] = [];
+  for (const line of union.matches) {
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
+    } catch (e) {
+      void e; // a torn line is not a measured pair; it must not advance the rotation
+    }
+  }
+  const pairs = rows.map(wipeTestPairFromLedgerObject).filter((p): p is WipeTestPair => p !== undefined);
+  return { ok: true, pairs, claimedUse: wipeTestClaimedUse(rows) };
 }
 
 // ── W1-T4243: the knowledge-measurement rung ─────────────────────────────────────────────────
