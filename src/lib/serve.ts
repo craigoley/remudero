@@ -171,6 +171,17 @@ import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
+import {
+  createConsoleSnapshotCache,
+  createConsoleWriteGeneration,
+  invalidateSnapshotsOnWrite,
+  prewarmReadRoutes,
+  RouteResponseBuffer,
+  sendStaleJson,
+  type ConsoleResponseStaleness,
+  type ConsoleSnapshotCacheOptions,
+} from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
 import {
   DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
@@ -238,6 +249,7 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
   /** W1-T3176 — the built console's directory. OMITTED means this daemon serves the string shell
    *  only: no mount is installed, no build is looked for, and nothing is reported. Set, it is
    *  verified at startup and the result is both logged and printed in the banner. */
@@ -939,17 +951,6 @@ export function renderConsoleTimeSeriesHtml(snapshot: ConsoleTimeSeriesSnapshot)
   return `<section id="time-series" class="daemon-health time-series-panel" aria-label="Time series">${header}${cards}</section>`;
 }
 
-export interface ConsoleResponseStaleness {
-  /** The response's own data-status, distinct from the transport/cache headers. */
-  status: "fresh" | "stale" | "unavailable";
-  stale: boolean;
-  ageMs: number | null;
-  generatedAt: string | null;
-  refreshing: boolean;
-  budgetMs: number;
-  reason?: string;
-}
-
 export interface ConsoleBlockingRequestPathViolation {
   route: string;
   symbol: string;
@@ -960,7 +961,6 @@ export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
-const CONSOLE_STALENESS_FIELD = "staleness";
 const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
@@ -972,35 +972,6 @@ const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "openSync",
   "mkdirSync",
 ] as const;
-
-function responseStaleness(nowMs: number, generatedAtMs: number | undefined, refreshing: boolean, budgetMs: number, reason?: string): ConsoleResponseStaleness {
-  const stale = generatedAtMs === undefined || nowMs - generatedAtMs > budgetMs;
-  return {
-    status: generatedAtMs === undefined ? "unavailable" : stale ? "stale" : "fresh",
-    stale,
-    ageMs: generatedAtMs === undefined ? null : Math.max(0, nowMs - generatedAtMs),
-    generatedAt: generatedAtMs === undefined ? null : fixedClock(generatedAtMs).iso(),
-    refreshing,
-    budgetMs,
-    ...(reason ? { reason } : {}),
-  };
-}
-
-function withJsonStaleness(body: unknown, staleness: ConsoleResponseStaleness): string {
-  if (body && typeof body === "object" && !Array.isArray(body)) {
-    return JSON.stringify({ ...(body as Record<string, unknown>), [CONSOLE_STALENESS_FIELD]: staleness });
-  }
-  return JSON.stringify({ value: body, [CONSOLE_STALENESS_FIELD]: staleness });
-}
-
-function sendStaleJson(res: import("node:http").ServerResponse, status: number, body: unknown, staleness: ConsoleResponseStaleness): void {
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "x-rmd-cache-state": staleness.stale ? "stale" : "fresh",
-    "x-rmd-cache-age-ms": staleness.ageMs === null ? "unknown" : String(staleness.ageMs),
-  });
-  res.end(withJsonStaleness(body, staleness));
-}
 
 export interface ConsoleStatusTaskProjection {
   complete: boolean;
@@ -1147,70 +1118,6 @@ export function projectConsoleStatusRoute(route: Route, modelApprovals?: readonl
   };
 }
 
-interface BufferedRouteResponse {
-  status: number;
-  headers: Record<string, string>;
-  body: string;
-  generatedAtMs: number;
-}
-
-class RouteResponseBuffer {
-  statusCode = 200;
-  headersSent = false;
-  private headers: Record<string, string> = {};
-  private chunks: string[] = [];
-
-  writeHead(status: number, headers?: import("node:http").OutgoingHttpHeaders): this {
-    this.statusCode = status;
-    this.headersSent = true;
-    for (const [key, value] of Object.entries(headers ?? {})) {
-      if (value === undefined) continue;
-      this.headers[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
-    }
-    return this;
-  }
-
-  setHeader(name: string, value: number | string | readonly string[]): this {
-    this.headers[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
-    return this;
-  }
-
-  end(chunk?: unknown): this {
-    if (chunk !== undefined) this.chunks.push(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
-    this.headersSent = true;
-    return this;
-  }
-
-  write(chunk: unknown): boolean {
-    this.chunks.push(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
-    return true;
-  }
-
-  buffered(generatedAtMs: number): BufferedRouteResponse {
-    return { status: this.statusCode, headers: { ...this.headers }, body: this.chunks.join(""), generatedAtMs };
-  }
-}
-
-function writeBufferedResponse(res: import("node:http").ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
-  const headers: Record<string, string> = {
-    ...cached.headers,
-    "x-rmd-cache-state": staleness.stale ? "stale" : "fresh",
-    "x-rmd-cache-age-ms": staleness.ageMs === null ? "unknown" : String(staleness.ageMs),
-  };
-  const contentType = headers["content-type"] ?? "";
-  let body = cached.body;
-  if (/application\/json/i.test(contentType)) {
-    try {
-      body = withJsonStaleness(JSON.parse(cached.body), staleness);
-    } catch {
-      // Malformed cached JSON keeps its original body; the cache headers still carry staleness.
-      body = cached.body;
-    }
-  }
-  res.writeHead(cached.status, headers);
-  res.end(body);
-}
-
 export function consoleBlockingRequestPathViolations(routes: readonly Route[]): ConsoleBlockingRequestPathViolation[] {
   const violations: ConsoleBlockingRequestPathViolation[] = [];
   for (const route of routes) {
@@ -1224,82 +1131,23 @@ export function consoleBlockingRequestPathViolations(routes: readonly Route[]): 
   return violations;
 }
 
-export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS): Route {
+export function boundConsoleReadRoute(
+  route: Route,
+  deps: ServeDeps,
+  budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS,
+  options: Omit<ConsoleSnapshotCacheOptions, "budgetMs" | "fallbackBody"> = {},
+): Route {
   if (route.method !== "GET" || route.scope !== "read" || !CONSOLE_CACHED_READ_PATHS.has(route.path)) return route;
-  let cached: BufferedRouteResponse | undefined;
-  let refreshing = false;
-  let refreshPromise: Promise<void> | undefined;
-  let lastError: string | undefined;
-
-  const refresh = (req: import("node:http").IncomingMessage): Promise<void> => {
-    if (refreshPromise) return refreshPromise;
-    refreshing = true;
-    const startedAt = systemClock.now();
-    const buffer = new RouteResponseBuffer();
-    refreshPromise = (async () => {
-      try {
-        await route.handler(req, buffer as unknown as import("node:http").ServerResponse, { params: {} });
-        cached = buffer.buffered(startedAt);
-        lastError = undefined;
-      } catch (error) {
-        const reason = String((error as Error)?.message ?? error);
-        lastError = reason;
-      } finally {
-        refreshing = false;
-        refreshPromise = undefined;
-      }
-    })();
-    return refreshPromise;
-  };
-
-  return {
-    ...route,
-    handler: async (req, res) => {
-      // W1-T3925: THE DEADLINE IS ARMED BEFORE `refresh(req)` IS CALLED, never after. Calling an
-      // async function runs its body SYNCHRONOUSLY up to its first internal `await` — so a
-      // `route.handler` that is itself synchronous (or synchronous for a long stretch, e.g. a
-      // cold read with no cache to serve, or an event-loop-blocking scan) runs to completion, or
-      // to its first yield, entirely inside this call to `refresh(req)`, before returning control
-      // here at all. Registering the fallback `setTimeout` AFTER that call would silently start
-      // counting budgetMs from AFTER the expensive work already finished, adding the two
-      // durations together instead of racing them. Arming it first keeps the deadline pinned to
-      // this request's actual arrival time, so a same-turn expensive read can only ever cost the
-      // client its own duration, never that duration PLUS another full budget window on top.
-      // W1-T3925 round 2: the deadline `setTimeout` handle is captured and cleared the instant the
-      // race settles — win or lose — rather than left to fire on its own `budgetMs` later. An
-      // uncleared handle stays a live libuv timer for up to `budgetMs` after this handler has
-      // already returned a response, which is a real (if small) open handle every request leaks;
-      // clearing it here is a strict cleanup with no effect on which branch of the race wins.
-      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<"budget">((resolve) => {
-        deadlineTimer = setTimeout(() => resolve("budget"), budgetMs);
-      });
-      const refreshDone = refresh(req);
-      const outcome = await Promise.race([refreshDone.then(() => "ready" as const), deadline]);
-      clearTimeout(deadlineTimer);
-      if (outcome === "ready" && cached) {
-        writeBufferedResponse(res, cached, responseStaleness(systemClock.now(), cached.generatedAtMs, refreshing, budgetMs, lastError));
-        return;
-      }
-      // Reaching this branch means the live refresh missed its response budget. Even a cache entry
-      // generated exactly one budget window ago is therefore a stale fallback for this response;
-      // deriving only from age made the boundary millisecond nondeterministically report `fresh`.
-      const staleness = {
-        ...responseStaleness(systemClock.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError),
-        status: cached ? ("stale" as const) : ("unavailable" as const),
-        stale: true,
-      };
-      if (cached) {
-        writeBufferedResponse(res, cached, staleness);
-        return;
-      }
-      sendStaleJson(res, 200, fallbackBodyForCachedRead(route.path, deps, staleness), staleness);
-    },
-  };
+  const fallbackBody = (staleness: ConsoleResponseStaleness) => fallbackBodyForCachedRead(route.path, deps, staleness);
+  return { ...route, handler: createConsoleSnapshotCache(route, { ...options, budgetMs, fallbackBody }).handler };
 }
 
 export function boundConsoleReadRoutes(routes: readonly Route[], deps: ServeDeps, budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS): Route[] {
-  return routes.map((route) => boundConsoleReadRoute(route, deps, budgetMs));
+  const generation = createConsoleWriteGeneration();
+  const snapshots = deps.consoleSnapshots;
+  const store = snapshots && createConsoleSnapshotStore({ dir: snapshots.dir, codeRev: deps.consoleSha ?? CONSOLE_SHA_UNKNOWN, log: deps.log });
+  if (snapshots?.prewarmPaths) void prewarmReadRoutes(routes, snapshots.prewarmPaths, deps.log);
+  return routes.map((route) => invalidateSnapshotsOnWrite(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }), generation));
 }
 
 /**
@@ -4227,7 +4075,7 @@ function assembleServeRoutes(
       issues: deps.issues,
       controlStatus: deps.controlStatus,
       log: deps.log,
-      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board }),
+      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board, consoleSnapshots: undefined }),
       ...deps.instances,
     }),
   );

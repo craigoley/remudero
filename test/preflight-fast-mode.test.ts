@@ -41,7 +41,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 // ── acceptance 1: the fast mode runs the curated npm-script gates and reports each ──────────
 // step's own pass/fail ───────────────────────────────────────────────────────────────────────
 
-test("FAST_GATE_STEPS: the curated list is exactly the twelve deterministic npm-script gates, including W1-T2734's source-size signal, the comment-load ratchet, W1-T3702's diff-scoped lint-plan and the plan-shaped self-path-proof ratchet, plus the six census entries (four from W1-T2478, W1-T2695's authority-census, and W1-T2898's ledger-literal-census)", () => {
+test("FAST_GATE_STEPS: the curated list names thirteen fast gates, including W1-T4433's tree-derived rule runner, plus the six measured census entries", () => {
   const scripts = FAST_GATE_STEPS.map((s) => s.script).sort();
   assert.deepEqual(scripts, [
     "api-client:check",
@@ -60,6 +60,7 @@ test("FAST_GATE_STEPS: the curated list is exactly the twelve deterministic npm-
     "learnings-budget-ratchet",
     "lint-plan:fast",
     "no-hand-rolled-fetch:check",
+    "rule-checks:population",
     "source-size-signal",
     "worker-branch-shape:check",
   ]);
@@ -73,15 +74,20 @@ test("FAST_GATE_STEPS: every entry states WHICH of the two curation reasons admi
   assert.deepEqual(requiredCore.sort(), ["claims", "cli-reference"], "the required core is exactly cli-reference and claims, both demonstrated on #1352");
 });
 
-test("runPreflightFast: runs `npm run --silent <script>` for every FAST_GATE_STEPS entry, and nothing else", () => {
+test("runPreflightFast: runs each curated npm gate and the tree-derived rule-check runner, and nothing else", () => {
   const { spawn, calls } = recordingSpawn();
   runPreflightFast(REPO_ROOT, { spawn, packageJsonText: REAL_PACKAGE_JSON });
 
   assert.equal(calls.length, FAST_GATE_STEPS.length, "exactly one spawn per curated step, no extras");
-  for (const { script } of FAST_GATE_STEPS) {
+  for (const { script, runner } of FAST_GATE_STEPS) {
+    if (runner === "rule-checks") continue;
     const call = calls.find((c) => c.file === "npm" && c.args.join(" ") === `run --silent ${script}`);
     assert.ok(call, `expected an \`npm run --silent ${script}\` call`);
   }
+  assert.ok(
+    calls.some(({ file, args }) => file.endsWith("node") && args.join(" ").includes("scripts/list-rule-suites.mjs --run")),
+    "the rule-check step invokes the same tree-derived runner as CI",
+  );
 });
 
 test("runPreflightFast: every step's detail names itself in both directions (PASS/FAIL), never legible only as a missing success line", () => {

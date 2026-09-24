@@ -863,6 +863,51 @@ export function ledgerProposalVerdicts(ledgerLines: { step?: unknown; task_id?: 
   return { isRatified: (id) => ratified.has(id), isDeclined: (id) => declined.get(id), ratified, declined };
 }
 
+/** An operator's decline, or its reversal — the two verdicts that record a row and file nothing. */
+export type ProposalVerdictKind = "decline" | "restore";
+
+/** Why a decline or restore was refused, in the HTTP status the serve route answers with. */
+export type ProposalVerdictOutcome = { ok: true } | { ok: false; status: 404 | 409; error: string; detail: string };
+
+/**
+ * THE ONE DECISION behind `POST /v1/inbox/decline`, `POST /v1/inbox/restore`, `rmd decline` and `rmd restore`. Each
+ * caller classifies the proposal its own way and hands the result here, so the refusals and the ledger row cannot
+ * drift between the console and the terminal. `record` writes the row and is called only when nothing refused.
+ */
+export function applyProposalVerdict(
+  kind: ProposalVerdictKind,
+  input: { proposalId: string; reason: string },
+  found: { exists: boolean; classification?: InboxClassification },
+  record: (step: string, proposalId: string, reason: string) => void,
+): ProposalVerdictOutcome {
+  const { proposalId } = input;
+  if (!found.exists) return { ok: false, status: 404, error: "not_found", detail: `no active proposal "${proposalId}"` };
+  const state = found.classification?.state;
+  if (state === "ratified") {
+    const act = kind === "decline" ? "declining now" : "restoring it";
+    return {
+      ok: false,
+      status: 409,
+      error: "already_ratified",
+      detail: `${proposalId} is already RATIFIED — ${act} cannot un-file the task it already produced`,
+    };
+  }
+  if (kind === "decline" && state === "declined") {
+    const why = found.classification?.declinedReason ?? "no reason recorded";
+    return { ok: false, status: 409, error: "already_declined", detail: `${proposalId} was already declined (${why})` };
+  }
+  if (kind === "restore" && state !== "declined") {
+    return {
+      ok: false,
+      status: 409,
+      error: "not_declined",
+      detail: `${proposalId} is not declined (state: ${state ?? "unknown"}) — there is nothing to restore`,
+    };
+  }
+  record(kind === "decline" ? "panel.proposal_declined" : "panel.proposal_restored", proposalId, input.reason);
+  return { ok: true };
+}
+
 /**
  * THE ONE PLACE an approve run's `run_id` becomes a GIT REF NAME (and a worktree directory name). Sanitising happens
  * HERE and NEVER on the proposal id, which is a registry key and a `task_id` on every ledger row the proposal wrote,
