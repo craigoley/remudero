@@ -721,8 +721,7 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   // `dailyCapUsd` honest. Raise it only when a long-context rate has been read AND priced.
   "gpt-5.6-luna": { totalTokens: 128_000, readAt: "2026-09-16" },
   "gpt-5.6-terra": { totalTokens: 128_000, readAt: "2026-09-16" },
-  // Azure lists a 1.05M combined window but only 922K input. This selector has one limit,
-  // so use the lower input bound and leave room for its 8K completion ceiling.
+  // Azure's 922K input limit is lower than the combined window; reserve 8K for output.
   "gpt-6-luna": { totalTokens: 922_000, readAt: "2026-09-24" },
 };
 
@@ -2222,9 +2221,7 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // TERRA IS 10x LUNA ON BOTH AXES. It exists for the frontier band alone; nothing else may lead
   // with it. Sol ($5.00/$30.00) is deliberately NOT here -- 2.5x terra for the same band.
   "gpt-5.6-terra": { inputUsdPerMillion: 2.0, outputUsdPerMillion: 12.0, readAt: "2026-09-16" },
-  // Microsoft Foundry Global Standard, 2026-09-24. Above 272K input, the entire request uses
-  // long-context rates. The reservation uses request bytes as a token ceiling, so it can choose
-  // the dearer tier early without ever under-reserving a short-context request.
+  // Foundry Global Standard, 2026-09-24; requests above 272K input use long-context rates.
   "gpt-6-luna": {
     inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5,
     longContext: { thresholdInputTokens: 272_000, inputUsdPerMillion: 0.2, outputUsdPerMillion: 0.75 },
@@ -2238,7 +2235,7 @@ export const FOUNDRY_OPUS_PRICE: OpenWeightPrice = {
   reservationInputUsdPerMillion: 8, readAt: "2026-09-24",
 };
 
-/** Operator's additional UTC-day Opus limit inside the shared cash allowance. */
+/** PRIMARY CONTROL: the UTC-day Opus limit inside the shared cash allowance. */
 export const FOUNDRY_OPUS_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const;
 
 /**
@@ -2317,7 +2314,6 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   // measured 2026-09-16 -- the same refusal nano gives, so the field is omitted rather than sent.
   "gpt-5.6-luna": null,
   "gpt-5.6-terra": null,
-  // Reasoning models accept the default temperature; do not assert an unprobed explicit value.
   "gpt-6-luna": null,
 };
 
@@ -3338,7 +3334,6 @@ function openWeightResult(input: {
   };
 }
 
-/** The Foundry Claude endpoint is a distinct Messages API, never an OpenAI deployment URL. */
 function foundryOpusEndpoint(env: NodeJS.ProcessEnv): string {
   const raw = env[FOUNDRY_CLAUDE_ENDPOINT_ENV];
   if (!raw) throw new Error(`cash Opus requires ${FOUNDRY_CLAUDE_ENDPOINT_ENV}`);
@@ -3353,8 +3348,7 @@ function foundryOpusUsageUsd(usage: {
   input_tokens: number; output_tokens: number;
   cache_read_input_tokens?: number; cache_creation_input_tokens?: number;
 }): number {
-  // Charge every reported cache write at the dearer 1h rate. No cache_control is requested by
-  // this adapter today, but a future caller cannot silently make the allowance undercount it.
+  // Price cache writes at the dearer 1h rate so a later cache_control cannot undercount.
   return (usage.input_tokens * 4 + (usage.cache_read_input_tokens ?? 0) * 0.2 +
     (usage.cache_creation_input_tokens ?? 0) * 8 + usage.output_tokens * 20) / 1_000_000;
 }
@@ -3363,7 +3357,6 @@ function validFoundryTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** Emergency-only Foundry Claude transport. Each Messages turn uses the shared cash allowance. */
 export async function spawnFoundryOpusWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
@@ -3493,8 +3486,7 @@ export async function spawnFoundryOpusWorker(
         try {
           result = executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
         } catch (error) {
-          // A failed tool invalidates this chain. Stop with a visible failed result rather than
-          // asking the model to turn an error-shaped tool response into a success claim.
+          // A failed tool invalidates this chain; never turn its error into success.
           throw new Error(`cash Opus tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
