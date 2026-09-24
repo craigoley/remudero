@@ -243,7 +243,7 @@ test("W1-T4414: a withheld ownership verdict posts no terminal review status", a
       arm: () => "no-task-id",
       disarm: () => "not-armed",
     });
-    assert.match(verdict.codeFreshnessWithheld ?? "", /CONSOLE-T60 reservation unreadable \(UNKNOWN\)/);
+    assert.match(verdict.verdictWithheld ?? "", /CONSOLE-T60 reservation unreadable \(UNKNOWN\)/);
     assert.ok(steps.includes("review.post_refused"));
     assert.ok(!steps.includes("review.posted"), "an unread reservation must not publish a terminal status");
     assert.ok(!gh.calls().some((c) => c.includes("statuses/")), "no commit status was written");
