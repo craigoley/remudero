@@ -208,7 +208,11 @@ test("W1-T2428: SOURCE reaches both coverage setup commands rather than silently
     /scripts\/test-tier-manifest\.mjs --select-all --shard 1\/4 --base HEAD\^1/,
     "a SOURCE diff must select its complete duration-balanced coverage shard before running it",
   );
-  assert.match(coverage.calls, /\/node --enable-source-maps --experimental-test-coverage/, "a SOURCE diff must invoke the coverage test runner");
+  assert.match(
+    coverage.calls,
+    /\/node scripts\/test-with-retry\.mjs --coverage-first-pass coverage\/raw node --enable-source-maps --experimental-test-coverage/,
+    "a SOURCE diff must invoke the coverage test runner (through W1-T4398's retry wrapper)",
+  );
 });
 
 test("W1-T3207: the workflow names the lost second-harness signal", () => {

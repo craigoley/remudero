@@ -380,7 +380,7 @@ jobs:
   flake-retry-aggregate:
     name: flake-retry-aggregate
     runs-on: ubuntu-latest
-    needs: [ci, test-slow]
+    needs: [ci, test-slow, coverage-ratchet] # W1-T4398: the coverage lane retries too
     if: ${{ always() }}
     timeout-minutes: 10
     steps:
@@ -838,9 +838,8 @@ jobs:
         # looks git-diff line numbers up directly in the DA: map and silently hits an unrelated
         # line, which blocked fully tested new code as uncovered.
         #
-        # W1-T255 IS NO LONGER IN FORCE HERE, and this block asserted the opposite until 2026-08-28:
-        # the retry is gone from this job and stays in `ci`. Read the wrapper's rationale there.
-        # Why: the two operator rulings of 2026-08-28 — docs/forensics/ci-yml.md.
+        # W1-T255's WHOLE-SUITE retry is gone from this job (the operator rulings of 2026-08-28 —
+        # docs/forensics/ci-yml.md); W1-T4398's failed-file, uninstrumented retry replaces it.
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
@@ -858,19 +857,18 @@ jobs:
           # disables git's background gc for every spawned git) was simply absent from the
           # coverage run. Any test asserting on that environment passes in `ci` and fails here,
           # which is exactly how this was found.
-          # ── OPERATOR RULING 1 (2026-08-28): NO FLAKE RETRY IN THIS JOB. ───────────────────
-          # `scripts/test-with-retry.mjs` is GONE from this invocation and STAYS in the `ci` job,
-          # which is faster and where a second pass fits inside its own bound. Here it re-ran the
-          # WHOLE suite on any pass-1 failure, and the second pass usually could not finish: of the
+          # ── OPERATOR RULING 1 (2026-08-28): NO WHOLE-SUITE RETRY IN THIS JOB. ────────────
+          # W1-T4398 narrows it: the retry below re-runs only the failed files. The ruling's case was
+          # the whole-suite form, which re-ran EVERYTHING on any pass-1 failure, and the second pass
+          # usually could not finish: of the
           # SIX two-pass `coverage-ratchet` runs on record, one completed red (2176s), ONE
           # COMPLETED GREEN (2159s), and FOUR were cancelled at 2355-2361s against the 2340s bound.
           # A cancellation names no test, so the retry converted a `failure` that named the failing
           # assertion into a `cancelled` that named nothing.
           #
-          # WHAT THIS GIVES UP, STATED RATHER THAN BURIED: that ONE green in six was a real rescue.
-          # Removing the retry means a genuine flake in this job now reports red on the first pass
-          # instead of being papered over. The `ci` job still retries, so a flake that reproduces
-          # in both harnesses is still caught there; a flake unique to instrumentation is not.
+          # WHAT THE NARROW RETRY GIVES UP: a failure that happens ONLY under instrumentation passes
+          # its uninstrumented retry, so it reads as a recovered flake. It is never silent — the
+          # step prints FLAKE-RETRY-RECOVERED and flake-retry-aggregate counts it.
           #
           # ── OPERATOR RULING 2 (W1-T3207, 2026-09-08): THIS IS THE TEST VERDICT NOW. ────────
           # The suite runs once per PR, under instrumentation, because coverage cannot be rebuilt
@@ -898,13 +896,21 @@ jobs:
           mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
           mkdir -p coverage/raw
           set +e
-          NODE_V8_COVERAGE=coverage/raw node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
+          # W1-T4398: one bounded retry of the FAILED FILES, uninstrumented — never the whole suite,
+          # which is what ruling 1 above removed. Pass one alone gets NODE_V8_COVERAGE and writes the
+          # lcov, so the coverage figures are pass one's; a pass on retry is reported as a flake.
+          node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw \
+            node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination=stderr \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
-            --test --import tsx --import ./test/setup/tmp-hygiene.ts "${COVERAGE_TEST_FILES[@]}"
-          TEST_EXIT=$?
+            --test --import tsx --import ./test/setup/tmp-hygiene.ts "${COVERAGE_TEST_FILES[@]}" \
+            2>&1 | tee "${RUNNER_TEMP}/coverage-test-output.log"
+          TEST_EXIT="${PIPESTATUS[0]}"
           set -e
+          FLAKE_RETRY_DIR="${RUNNER_TEMP}/flake-retry"
+          mkdir -p "$FLAKE_RETRY_DIR"
+          grep -E '^FLAKE-RETRY' "${RUNNER_TEMP}/coverage-test-output.log" > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log"
           if [ "$TEST_EXIT" -ne 0 ]; then
             echo "coverage-ratchet: the instrumented suite exited ${TEST_EXIT}. W1-T3207 makes this the surviving test harness; lcov/raw coverage are still checked before the shard fails."
             echo "- coverage-ratchet: instrumented suite exited **${TEST_EXIT}** — W1-T3207 makes this the surviving test harness; lcov/raw coverage were still checked before failing the shard." >> "$GITHUB_STEP_SUMMARY"
@@ -949,6 +955,16 @@ jobs:
           path: coverage-artifact
           retention-days: 1
           if-no-files-found: error
+      - name: Upload this coverage shard's flake-retry evidence (W1-T4398 — read by flake-retry-aggregate)
+        # No YAML conditional (the #729 discipline above), so this runs only when the shard is
+        # green — which is exactly when a recovered flake would otherwise leave no record. A red
+        # shard names its failing test in its own log.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flake-retry-shard-coverage-${{ matrix.shard }}
+          path: ${{ runner.temp }}/flake-retry
+          retention-days: 1
+          if-no-files-found: ignore
 
   coverage-ratchet-required:
     name: coverage-ratchet

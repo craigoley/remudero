@@ -52,8 +52,8 @@ test("W1-T3302: the slow harness writes evidence, uploads it, and the proposal c
   assert.equal(download?.with?.pattern, "test-duration-*");
   assert.deepEqual(
     WORKFLOW.jobs["flake-retry-aggregate"].needs,
-    ["ci", "test-slow"],
-    "the collector must wait for slow evidence before downloading artifacts",
+    ["ci", "test-slow", "coverage-ratchet"],
+    "the collector must wait for slow and coverage-lane evidence before downloading artifacts",
   );
 });
 
