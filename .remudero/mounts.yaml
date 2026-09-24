@@ -185,6 +185,14 @@ capabilities:
   # - frontier leads with gpt-6-sol, but `provider_preference` below sends frontier work to Claude
   #   (Opus 5.5) whenever Claude has headroom, so this row is reached only when Claude is blocked.
   # gpt-6-astra is deliberately NOT routed: no operator ruling places it yet.
+  #
+  # 2026-09-24 (operator ruling, DECISIONS.md): SOL vs SONNET IS AN A/B. `balanced.high` -- every
+  # sonnet/high mount (medium-risk implement, fix, diagnose, reviewer) -- leads with gpt-6-sol, so the
+  # headroom auction splits that work between Claude Sonnet and Codex Sol independently of the task.
+  # Each such assignment carries routing.decision.ab "sol-vs-sonnet"; `rmd routing-ab` compares the
+  # arms. Same list price ($2/$10 per 1M); Artificial Analysis index 47.5 vs 38.2; no shared coding
+  # benchmark and no in-house Sol implement record, hence a test rather than a switch. REVISIT
+  # 2026-10-08. This supersedes the "no Sol in balanced" line above for the high row only.
   codex:
     economy:
       low:    [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
@@ -193,7 +201,7 @@ capabilities:
     balanced:
       low:    [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
       medium: [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
-      high:   [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
+      high:   [gpt-6-sol, gpt-6-luna, gpt-5.6-luna, gpt-5.5]
     frontier:
       low:    [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
       medium: [gpt-6-sol, gpt-5.6-sol, gpt-5.5]

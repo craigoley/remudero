@@ -142,7 +142,7 @@ const BASELINE_COMMAND_NAMES = [
   "pr-owner",
   "reframe",
   "risk-judge-eval",
-  "rule", "relay", "replay", "replay-goldens", "resume", "retro", "review", "rule-efficacy", "run-task",
+  "rule", "relay", "replay", "replay-goldens", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
@@ -161,7 +161,7 @@ const BASELINE_COMMAND_NAMES = [
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // ONE literal, deliberately: this is the reviewed count, and a verb joining the registry should
   // cost exactly one considered edit here beside its line above.
-  assert.equal(BASELINE_COMMAND_NAMES.length, 83);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 84);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
   // DERIVED from that list, not a second literal. Two copies of the same number meant a new verb
   // reddened this twice and reported "expected 71, got 72", which names nothing about what changed;

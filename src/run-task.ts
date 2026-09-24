@@ -848,6 +848,7 @@ import {
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
+import { routingAbCommand } from "./lib/routing-experiments.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -44555,6 +44556,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "routing-ab",
+    syntax: "rmd routing-ab [--json]",
+    summary: "Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.",
+    detail: "Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive and the live ledger, takes each worker.assignment row whose routing.decision.ab names a live experiment (src/lib/routing-experiments.ts), and reports per arm: tasks, merges, merge rate, fix dispatches per task, median worker minutes, mean tokens and mean notional cost. A task is counted under the arm of its first tagged assignment; tasks that landed in both arms are counted separately. An arm below the experiment's minimum task count is reported as an insufficient sample, never a verdict, and the revisit date is flagged once due. READ-ONLY: writes no ledger line and no state file.",
+  },
+  {
     name: "ledger-compact",
     syntax: "rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]",
     summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
@@ -45477,6 +45484,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => checkProofCommand(rest)],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],

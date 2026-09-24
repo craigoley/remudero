@@ -34,6 +34,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd ledger-compact [--older-than <days> | --older-than-hours <hours>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
@@ -300,6 +301,16 @@ rmd ledger-grep <pattern>
 ```
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
+
+### `rmd routing-ab`
+
+Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
+
+```
+rmd routing-ab [--json]
+```
+
+Operator ruling 2026-09-24: reads the deduplicated union of every ledger archive and the live ledger, takes each worker.assignment row whose routing.decision.ab names a live experiment (src/lib/routing-experiments.ts), and reports per arm: tasks, merges, merge rate, fix dispatches per task, median worker minutes, mean tokens and mean notional cost. A task is counted under the arm of its first tagged assignment; tasks that landed in both arms are counted separately. An arm below the experiment's minimum task count is reported as an insufficient sample, never a verdict, and the revisit date is flagged once due. READ-ONLY: writes no ledger line and no state file.
 
 ### `rmd ledger-compact`
 
