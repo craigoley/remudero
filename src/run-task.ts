@@ -10328,7 +10328,7 @@ export async function runFixRung(opts: {
           // through to a review-shaped mode despite `noReviewYet` being true, the
           // exact regression `runFixRung`'s own "fetchCiFailures is optional" test
           // (below) locks against.
-          { ciFailures: currentCiFailures ?? [], constraint: opts.constraint }
+          { ciFailures: ciFailurePromptEvidence(currentCiFailures ?? []), constraint: opts.constraint }
         : // W1-T2236: `gateFailuresNow` — computed above, alongside the guard this evidence
           // shape already passed — is this round's structured gate-failure remedy (undefined for
           // a ci-log/merge-conflict round, which never reaches this branch anyway). Carried
@@ -33929,6 +33929,23 @@ export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string)
 
 export function extractCiFailureRegion(log: string, tailLines: number): string {
   const lines = log.split("\n");
+  const kept = new Set<number>();
+  let inTapFailure = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*not ok \d+ - /.test(line)) inTapFailure = true;
+    if (inTapFailure) kept.add(index);
+    if (inTapFailure && /^\s*\.\.\.\s*$/.test(line)) inTapFailure = false;
+    if (/FLAKE-RETRY(?:-RECOVERED)?\s*:/.test(line)) kept.add(index);
+  }
+  if (kept.size > 0) {
+    return [...kept]
+      .sort((a, b) => a - b)
+      .slice(-Math.max(1, tailLines))
+      .map((index) => lines[index])
+      .join("\n")
+      .trim();
+  }
   const failingTestsAt = lines.findIndex((line) => /(?:✖|✕|✗|x)\s+failing tests:/i.test(line.trim()));
   if (failingTestsAt >= 0) {
     const summaryAt = lines.findIndex(
@@ -33939,6 +33956,14 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
     return lines.slice(failingTestsAt, Math.min(end, failingTestsAt + tailLines)).join("\n").trim();
   }
   return lines.slice(-tailLines).join("\n").trim();
+}
+
+export function ciFailurePromptEvidence(failures: readonly CiFailure[]): CiFailure[] {
+  return failures.map((failure) =>
+    failure.tailSource
+      ? { ...failure, logTail: `failure detail source: ${failure.tailSource}\n${failure.logTail}` }
+      : { ...failure },
+  );
 }
 
 function retainGeneratorRemediesForRegion(fullLog: string, region: string): string {
