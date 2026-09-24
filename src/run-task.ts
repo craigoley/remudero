@@ -374,6 +374,7 @@ import {
   type HeadroomPolicy,
   type IntakeRungDecision,
   type IntakeRungRunResult,
+  type LightPassScope,
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
@@ -938,6 +939,8 @@ import {
   assertRunnable,
   loadPlan,
   loadPlanQuarantiningDuplicates,
+  mergePlanBlobsQuarantiningDuplicates,
+  type QuarantinedTask,
   selectTask,
   visibleCriteria,
   type AcceptanceCriterion,
@@ -1290,6 +1293,7 @@ import {
   persistVerifiedCredit,
   type RequiredContextsRead,} from "./lib/status.js";
 import {
+  readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
   decideRedBaseRefresh,
   failingSourceFilesFromCiFailures,
@@ -1303,6 +1307,7 @@ import {
   cancelledRequiredCheckNames,
   withoutDownstreamGateFailure,
   checksStateFromRollup,
+  checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
@@ -1661,6 +1666,23 @@ export function buildReviewerCodeFreshnessGate(
   };
 }
 
+/** W1-T4415 — the sweep's draft-readying effect: `gh pr ready` on one draft, ledgered by
+ *  {@link readyDraftPullRequest}. Marking ready is the whole write; it never merges or closes. */
+export function readyDraftViaGh(
+  owner: string,
+  repo: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: typeof ghExec = ghExec,
+): (pr: OpenPrView) => void {
+  return (pr) =>
+    readyDraftPullRequest(pr, {
+      markReady: (prNumber) => {
+        exec(["pr", "ready", String(prNumber), "--repo", `${owner}/${repo}`], { encoding: "utf8", stdio: "pipe" });
+      },
+      log,
+    });
+}
+
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -1683,6 +1705,7 @@ export function buildSweepEffects(
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
+  | "readyDraft"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
   | "requeueCheck"
@@ -2013,6 +2036,7 @@ export function buildSweepEffects(
     fixRebaseMergeFactsImpl: fixRebaseMergeFactsFromRest,
     redBaseRefreshFactsImpl: redBaseRefreshFactsFromRest,
     ghUpdateBranchImpl: ghUpdateBranch,
+    readyDraftImpl: readyDraftViaGh(deps.owner, deps.repo, deps.log),
     readFixRoundCommitsImpl: readFixRoundCommitsViaGit,
     runNpmScriptImpl: runNpmScriptViaSpawn,
     commitGeneratorOutputImpl: commitGeneratorOutputViaGit,
@@ -3214,7 +3238,7 @@ export interface SyncedPlan {
 export function syncPlanFromOrigin(
   repoDir: string,
   relPath: string,
-  opts: { allowStale?: boolean } = {},
+  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void } = {},
 ): SyncedPlan {
   let staleDispatch = false;
   try {
@@ -3255,10 +3279,14 @@ export function syncPlanFromOrigin(
   // round trip produced; only the LABEL in an error message changes, from a temp path nobody
   // could look up to the `origin/main:<path>` the bytes actually came from.
   const shards = readOriginShardsAtRef(repoDir, dirname(relPath));
-  const plan = mergePlanBlobs([
+  const blobs = [
     { label: `origin/main:${relPath}`, text: blob },
     ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
-  ]);
+  ];
+  if (!opts.quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
+  // W1-T4421: the core daemon's boot degrades on a duplicate id instead of exiting.
+  const { plan, quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs);
+  opts.quarantine(quarantined);
   return { plan, staleDispatch };
 }
 
@@ -3373,6 +3401,7 @@ export function syncPlanOrRefuse(
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
+    quarantine?: (quarantined: QuarantinedTask[]) => void;
   },
 ): SyncedPlan | { error: string } {
   const repoDir = dirname(dirname(planPath));
@@ -3380,7 +3409,7 @@ export function syncPlanOrRefuse(
   try {
     const synced = opts.planSnapshot
       ? opts.planSnapshot({ allowStale: opts.allowStale })
-      : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale });
+      : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale, quarantine: opts.quarantine });
     if (synced.staleDispatch) {
       opts.log("git.stale_dispatch", { stale_dispatch: true });
       opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
@@ -5774,12 +5803,16 @@ function materializeReviewerSnapshot(
     );
   }
 
+  // `rev-parse` ascends to the enclosing work tree but `git clone <dir>` does not, so a
+  // `sourceDir` below its top level (a Stryker sandbox under `.stryker-tmp-*/`) passed the HEAD
+  // check and then failed the clone. Both steps now name the same repository: the top level.
   let sourceHead: string;
+  let sourceRepo: string;
   try {
-    sourceHead = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], {
+    [sourceRepo, sourceHead] = execFileSync("git", ["-C", sourceDir, "rev-parse", "--show-toplevel", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    }).trim().split("\n");
   } catch {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -5797,7 +5830,7 @@ function materializeReviewerSnapshot(
 
   const cwd = join(reviewRoot, "checkout");
   try {
-    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceDir, cwd], {
+    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
     execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
@@ -6283,6 +6316,7 @@ async function runReview(args: {
   const computed = judgeReview(criteria, {
     diff,
     report,
+    headRefName: args.headRefName,
     implementationReport: args.implementationReport,
     target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
@@ -6419,6 +6453,12 @@ async function runReview(args: {
   // overwrite an executed-evidence verdict with a weaker one, or write
   // against an already-merged/closed PR. See lib/review.ts's W1-T228 block
   // comment for the full design.
+  if (verdict.taskIdOwnershipWithheld) {
+    // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
+    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld });
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, codeFreshnessWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
   let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
   try {
     reviewerCodeFreshness = args.reviewerCodeFreshness?.();
@@ -15345,6 +15385,38 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say,
       onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
     });
+
+    // W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED. `resumeForMissingCommitLine`
+    // owns its own precondition (called unconditionally, exactly like the helper above) — it no-ops
+    // for every refusal EXCEPT the exact missing-line one, and only when the worktree still holds
+    // uncommitted changes. The resumed reply asks the SAME session for nothing but the line, and the
+    // recommit runs through the unchanged `harnessCommitForShellLessWorker`, so no other refusal path
+    // changes shape.
+    const commitLineRecovery = await resumeForMissingCommitLine({
+      commitCount,
+      refusalReason: harnessCommitRefusalState.reason,
+      report: fullText(impl),
+      worktreePath,
+      declaredPaths: task.files ?? [],
+      log,
+      say,
+      resume: commitLineResume(spawn, account, {
+        cwd: worktreePath,
+        permissionMode: "bypassPermissions",
+        settingsFile,
+        resumeSessionId: impl.sessionId,
+        model: implementMount.model,
+        mountProvider: implementMount.provider,
+        effort: implementMount.effort,
+        maxTurns: implementMount.maxTurns,
+        maxBudgetUsd: budgetUsd,
+        config: implementConfig,
+        tools: implementTools === undefined ? undefined : [...implementTools],
+        ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+      }),
+    });
+    commitCount = commitLineRecovery.commitCount;
+    harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
     const harnessCommitRefusalReason = harnessCommitRefusalState.reason;
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && commitCount === 0;
 
@@ -17605,22 +17677,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       target_owner: owner,
       target_repo: repo,
     });
-    await postStatusDep({
-      owner,
-      repo,
-      sha: view.headRefOid,
-      state: "failure",
-      description: `remudero-review: FAIL — ${subjectCheckout.reason}`,
-      taskId: taskId ?? `PR-${view.number}`,
-      evidence: "no_evidence",
-      ledgerPath,
-      runId,
-      prUrl: view.url,
-      reviewInputDigest: inputDigest,
-      reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      fetchLifecycle: () => fetchPrLifecycle(view.url),
-    });
-    console.error(`rmd review: REFUSED — ${subjectCheckout.message}`);
+    // W1-T4410: a refusal about THIS machine's checkout judges nothing about the PR, so no status is posted.
+    console.error(
+      `rmd review: REFUSED — ${subjectCheckout.message}. No status was posted on the PR; ` +
+        `run the review where ${owner}/${repo} is checked out (that repo's own daemon reviews it).`,
+    );
     return 1;
   }
   const subjectRepoDir = subjectCheckout.repoDir;
@@ -22119,7 +22180,7 @@ function prefixedNextTaskIdCommand(rest: string[], deps: NextTaskIdReserveDeps):
       listing(["ls-remote", "--heads", "origin", `run-${prefix}-T*`]),
       listing(["ls-remote", "origin", `refs/rmd-id/${prefix}-T*`]),
     ];
-    const reserver = deps.reserver ?? gitRemoteRefReserver({ run: t.run, filingBranch: deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown" });
+    const reserver = deps.reserver ?? gitRemoteRefReserver({ run: t.run, filingBranch: flagValue(rest, "--branch") ?? deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown" });
     const held = reserveTaskIdRemote(nextPrefixedTaskIdStart(texts, prefix), reserver, { idFor: (n) => `${prefix}-T${n}` });
     console.log(`RESERVED ${held.taskId} on ${repo}'s origin (${held.ref}) after ${held.attempts} attempt(s)`);
     return 0;
@@ -22392,7 +22453,7 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -22528,7 +22589,8 @@ export async function nextTaskIdCommand(
     }
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
-    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run) });
+    // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
+    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch: flagValue(rest, "--branch") });
     // Decorate rather than modify: the decorator only OBSERVES each attempt, so a `taken` outcome
     // is reported instead of silently skipped.
     //
@@ -30262,25 +30324,19 @@ export function plainInboxWriter(
   }
 }
 
-/**
- * W1-T4409 — the daemon's boot-time plan read. A task id declared by two plan files is quarantined
- * (with every task that depends on it) instead of thrown, ledgered, and escalated to a human ONCE per
- * duplicated id (escalate's own open-issue dedup covers later boots). Everything else still throws.
- */
-export function loadDaemonPlan(
-  planPath: string,
+/** W1-T4409/W1-T4421 — ledger every quarantined task and escalate each duplicated id once (escalate dedups). */
+export function reportQuarantined(
+  quarantined: QuarantinedTask[],
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
-  load: (path: string) => ReturnType<typeof loadPlanQuarantiningDuplicates> = (path) => loadPlanQuarantiningDuplicates(path),
-): Plan {
-  const { plan, quarantined } = load(planPath);
+): void {
   for (const q of quarantined) {
     log("plan.duplicate_quarantined", { id: q.id, files: q.files, reason: q.reason });
     if (q.reason !== "duplicate_id") continue;
     const escalation: Escalation = {
       class: "BLOCKED",
       taskId: q.id,
-      summary: `task id ${q.id} is declared by ${q.files.length} plan files — the daemon quarantined it and keeps running`,
+      summary: `task id ${q.id} is declared more than once (${q.files.length} file(s)) — the daemon quarantined it and keeps running`,
       detail:
         `The daemon held ${q.id} (and every task depending on it) out of its plan instead of exiting at boot. ` +
         `Declared in:\n${q.files.map((f) => `- ${f}`).join("\n")}\n\nNothing can dispatch or credit ${q.id} until one declaration remains.`,
@@ -30294,6 +30350,21 @@ export function loadDaemonPlan(
       log("plan.duplicate_escalation_failed", { id: q.id, reason: e instanceof Error ? e.message : String(e) });
     }
   }
+}
+
+/**
+ * W1-T4409 — the daemon's boot-time plan read. A task id declared by two plan files is quarantined
+ * (with every task that depends on it) instead of thrown, ledgered, and escalated to a human ONCE per
+ * duplicated id (escalate's own open-issue dedup covers later boots). Everything else still throws.
+ */
+export function loadDaemonPlan(
+  planPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  raise: (escalation: Escalation) => string,
+  load: (path: string) => ReturnType<typeof loadPlanQuarantiningDuplicates> = (path) => loadPlanQuarantiningDuplicates(path),
+): Plan {
+  const { plan, quarantined } = load(planPath);
+  reportQuarantined(quarantined, log, raise);
   return plan;
 }
 
@@ -30587,6 +30658,7 @@ export async function daemonCommand(
       allowStale,
       log,
       say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
+      quarantine: (quarantined) => reportQuarantined(quarantined, log, raiseDuplicate),
     });
     if ("error" in synced) return 1;
     plan = synced.plan;
@@ -34503,6 +34575,8 @@ export function buildOpenPrViews(
       reviewPendingOwnerDead,
       reviewVerdictPostedAt,
       checksState,
+      // W1-T4054: the pending check's own start, so a push, comment or label never resets the age.
+      checksPendingSince: checksPendingSinceFromRollup(pr.statusCheckRollup, requiredContexts),
       unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
       // `unmetCriteria` above is attributable to a plan task. The synthetic key can populate it
@@ -36032,6 +36106,11 @@ function lastCommitRefusalPromptLines(
   ];
 }
 
+/** W1-T4052: the exact reason `harnessCommitForShellLessWorker` names when the worker's report
+ *  carries no anchored COMMIT_MESSAGE line. Shared with `resumeForMissingCommitLine` below so the
+ *  two functions can never drift on what "the missing-line refusal" means. */
+const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -36054,7 +36133,7 @@ export function harnessCommitForShellLessWorker(
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined) {
-    const reason = "no anchored COMMIT_MESSAGE line in the report";
+    const reason = MISSING_COMMIT_MESSAGE_REASON;
     input.log("implement.harness_commit_refused", { reason });
     input.onRefusal?.(reason, []);
     return input.commitCount;
@@ -36078,6 +36157,138 @@ export function harnessCommitForShellLessWorker(
 export function createHarnessCommitRefusalRecorder(state: { reason?: string }): (reason: string) => void {
   return (reason) => {
     state.reason = reason;
+  };
+}
+
+/** W1-T4052: is there ANYTHING uncommitted in this worktree — declared surface or not? Checked
+ *  ahead of the resume decision because the missing-line refusal returns before
+ *  `harnessCommitForShellLessWorker` ever reads git status, so "changed nothing" and "forgot the
+ *  line" are otherwise indistinguishable from the refusal reason alone. */
+export function worktreeHasUncommittedChanges(worktreePath: string): boolean {
+  const raw = execFileSync(
+    "git",
+    ["-C", worktreePath, "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  return workerChangedPaths(raw).length > 0;
+}
+
+/**
+ * W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED.
+ *
+ * 188 harness-commit refusals across 82 runs and 112 tasks (since 2026-09-17) carried this exact
+ * reason: the worker did the work, saved it to the worktree, and one REPORT line was absent — the
+ * single largest way a shell-less implement run ended with nothing. The refusal itself stays
+ * correct: `harnessCommitForShellLessWorker` above still refuses to invent a subject, unchanged.
+ * But the run that DID the work is still addressable — the implement lane already resumes the SAME
+ * worker session for a DECISION_REQUEST follow-up (`implement.resumed`, W1-T3573/W1-T3696); this
+ * reuses that mechanism ONCE, asking for nothing but the missing line.
+ *
+ * OWNS ITS OWN PRECONDITION, called unconditionally like its sibling above: it no-ops unless the
+ * refusal was EXACTLY the missing-line reason (every other refusal — no files declared, outside the
+ * declared surface, changed nothing — is left untouched) AND the worktree actually holds
+ * uncommitted changes (a worker that changed nothing is left to that refusal rather than resumed to
+ * relearn it). ONE resume: a second report still lacking the line is refused with a reason naming
+ * that the resume was tried, never looped and never a synthesized subject — the resumed text is
+ * merely APPENDED to the original report and handed back through the unchanged
+ * `harnessCommitForShellLessWorker`, so every other refusal it can produce still applies.
+ */
+export async function resumeForMissingCommitLine(
+  input: {
+    commitCount: number;
+    refusalReason: string | undefined;
+    report: string;
+    worktreePath: string;
+    declaredPaths: readonly string[];
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+    /** Resume the worker's OWN session once with the ask-for-the-line prompt. A required
+     *  collaborator the implement lane wires, like `log`/`say` — not an optional seam. */
+    resume: () => Promise<{
+      text: string;
+      costUsd?: number;
+      sessionId?: string;
+      numTurns?: number;
+      subtype?: string;
+    }>;
+  },
+  // The SAME seam `harnessCommitForShellLessWorker` takes, forwarded to it unchanged: the retried
+  // commit is that helper's, so its `commit`/`ahead` fakes are the only seams this recovery needs.
+  deps: Parameters<typeof harnessCommitForShellLessWorker>[1] = {},
+): Promise<{ commitCount: number; refusalReason: string | undefined; report: string; resumed: boolean }> {
+  const noop = {
+    commitCount: input.commitCount,
+    refusalReason: input.refusalReason,
+    report: input.report,
+    resumed: false as const,
+  };
+  if (input.refusalReason !== MISSING_COMMIT_MESSAGE_REASON || input.commitCount !== 0) return noop;
+  if (!worktreeHasUncommittedChanges(input.worktreePath)) return noop;
+
+  input.log("implement.commit_line_requested", {});
+  input.say("no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
+  const resumed = await input.resume();
+  input.log("implement.resumed", {
+    ...(resumed.sessionId ? { session_id: resumed.sessionId } : {}),
+    cost_usd: resumed.costUsd,
+    ...(resumed.numTurns !== undefined ? { num_turns: resumed.numTurns } : {}),
+    ...(resumed.subtype !== undefined ? { subtype: resumed.subtype } : {}),
+    reason: "missing_commit_line",
+  });
+
+  // APPENDED, never replacing the original report — the original REPORT content (follow-ups,
+  // learnings-used, the worker's own narrative) survives; only the anchored COMMIT_MESSAGE line
+  // the resumed reply carries is new, and `parseReport`'s own "last one wins" rule picks it up.
+  const combinedReport = `${input.report}\n${resumed.text}`;
+  if (parseReport(combinedReport)?.commitMessage === undefined) {
+    const reason = `${MISSING_COMMIT_MESSAGE_REASON} (asked the worker's own session once; still absent)`;
+    input.log("implement.harness_commit_refused", { reason });
+    return { commitCount: input.commitCount, refusalReason: reason, report: combinedReport, resumed: true };
+  }
+
+  const refusalState: { reason?: string } = {};
+  const commitCount = harnessCommitForShellLessWorker(
+    {
+      harnessOwnsGit: true,
+      commitCount: input.commitCount,
+      report: combinedReport,
+      worktreePath: input.worktreePath,
+      declaredPaths: input.declaredPaths,
+      log: input.log,
+      say: input.say,
+      onRefusal: createHarnessCommitRefusalRecorder(refusalState),
+    },
+    deps,
+  );
+  return { commitCount, refusalReason: refusalState.reason, report: combinedReport, resumed: true };
+}
+
+/** W1-T4052: the ONLY thing the missing-line resume asks the worker's own session for. */
+export const COMMIT_LINE_RESUME_PROMPT =
+  "Your last REPORT carried no anchored COMMIT_MESSAGE line, so the harness could not " +
+  "commit your edits — they are still saved in the worktree. Make NO further edits and " +
+  "run NO git or gh commands. Reply with ONLY a REPORT whose last line is exactly " +
+  "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
+  "subject, at most 100 characters).";
+
+/** W1-T4052: build `resumeForMissingCommitLine`'s `resume` from the implement lane's own `spawn`
+ *  and `account`. `spawnArgs` is the original spawn's mount (it names `resumeSessionId`); the
+ *  prompt is always {@link COMMIT_LINE_RESUME_PROMPT}, and the resumed turn is accounted like any
+ *  other so its cost rides the run's budget. */
+export function commitLineResume(
+  spawn: typeof spawnWorker,
+  account: (r: WorkerResult) => WorkerResult,
+  spawnArgs: Omit<SpawnWorkerArgs, "prompt">,
+): () => Promise<{ text: string; costUsd: number; sessionId: string; numTurns: number; subtype: string }> {
+  return async () => {
+    const resumed = account(await spawn({ ...spawnArgs, prompt: COMMIT_LINE_RESUME_PROMPT }));
+    return {
+      text: workerTranscript(resumed),
+      costUsd: resumed.costUsd,
+      sessionId: resumed.sessionId,
+      numTurns: resumed.numTurns,
+      subtype: resumed.subtype,
+    };
   };
 }
 
@@ -37884,7 +38095,7 @@ export function buildSweepLightHook(
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
   planAccessor?: () => Plan,
-): () => Promise<void> {
+): (scope?: LightPassScope) => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
   const isMerged = legacyResequenceShape
@@ -37895,7 +38106,10 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  return async () => {
+  return async (scope) => {
+    // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
+    // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
+    const reviewOnly = scope?.reviewOnly === true;
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         planFilingFileCache,
@@ -37916,7 +38130,7 @@ export function buildSweepLightHook(
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
-      const fixRungAllowed = fixRungAllowedBesideInFlight(
+      const fixRungAllowed = !reviewOnly && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       );
@@ -37928,7 +38142,7 @@ export function buildSweepLightHook(
       // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
       // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
       // batch below, gated by `fixRungAllowed` exactly as before this task.
-      const requeueOnlyPrs = openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+      const requeueOnlyPrs = reviewOnly ? [] : openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
       const restPrs = requeueOnlyPrNumbers.size === 0 ? openPrs : openPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
       const passes: Array<Promise<unknown>> = [
@@ -38188,6 +38402,7 @@ export async function fixCommand(
     reviewState,
     reviewVerdictPostedAt,
     checksState,
+    checksPendingSince: checksPendingSinceFromRollup(raw.statusCheckRollup, requiredContexts),
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
     // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
     // reads it via the SAME sweep.ts row 7.
@@ -44064,9 +44279,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>]",
     summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder.",
   },
   {
     name: "emissions",

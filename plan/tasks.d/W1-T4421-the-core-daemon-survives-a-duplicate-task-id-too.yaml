@@ -14,7 +14,7 @@
   files:
     - src/lib/plan.ts
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4409 (#6915) routes daemonCommand's consumer-repo and --plan loads through loadPlanQuarantiningDuplicates. The
