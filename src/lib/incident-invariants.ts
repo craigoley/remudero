@@ -19,9 +19,10 @@ import type { LedgerLine } from "./ledger.js";
  * fails the short one the instant it clears, so a blip never files — only a SUSTAINED condition,
  * present at BOTH time scales at once, does.
  *
- * PURE BY DESIGN: {@link evaluateIncidentInvariants} takes rows and `nowMs` and returns findings;
- * it never reads a clock, a file, or the network. The gateway's minute timer (serve.ts) is the
- * one impure caller — it tails the ledger, calls this function, and ledgers what it returns.
+ * PURE BY DESIGN: {@link evaluateIncidentInvariants} reads no clock, file or network. Its one impure
+ * caller, serve.ts's startIncidentInvariantsMonitor, is a minute tick that ledgers `runtime.loop_lag`
+ * then each finding over the tailed ledger — armed with NO client gate (a stall nobody watches is the
+ * target), logging and swallowing each half's throw so one bad read never silences a later minute.
  *
  * FALSIFIER: test/incident-invariants.test.ts.
  */
