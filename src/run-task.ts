@@ -374,6 +374,7 @@ import {
   type HeadroomPolicy,
   type IntakeRungDecision,
   type IntakeRungRunResult,
+  type LightPassScope,
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
@@ -37880,7 +37881,7 @@ export function buildSweepLightHook(
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
   planAccessor?: () => Plan,
-): () => Promise<void> {
+): (scope?: LightPassScope) => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
   const isMerged = legacyResequenceShape
@@ -37891,7 +37892,10 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  return async () => {
+  return async (scope) => {
+    // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
+    // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
+    const reviewOnly = scope?.reviewOnly === true;
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         planFilingFileCache,
@@ -37912,7 +37916,7 @@ export function buildSweepLightHook(
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
-      const fixRungAllowed = fixRungAllowedBesideInFlight(
+      const fixRungAllowed = !reviewOnly && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       );
@@ -37924,7 +37928,7 @@ export function buildSweepLightHook(
       // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
       // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
       // batch below, gated by `fixRungAllowed` exactly as before this task.
-      const requeueOnlyPrs = openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+      const requeueOnlyPrs = reviewOnly ? [] : openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
       const restPrs = requeueOnlyPrNumbers.size === 0 ? openPrs : openPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
       const passes: Array<Promise<unknown>> = [
