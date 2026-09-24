@@ -1,0 +1,34 @@
+- id: W1-T4453
+  title: "THE CONSOLE SAYS ROUTING-V1 IS NOT DEPLOYED WHILE THE DAEMON COMPUTES IT — routingTelemetry is only on the unversioned /v1/analytics body, and the console reads console-v1 and console-signals-v1, neither of which carries it; add the routing-v1 summary to the console-signals-v1 projection"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "2026-09-24 provider-routing research: console analytics showed 'routing-v1 has not been deployed to an allowlisted daemon'"
+  plan_refs: ["W1-T3762", "W1-T4062", "W1-T4024"]
+  files:
+    - src/lib/analytics-route.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at main 6a04d2f18: AnalyticsSnapshot.routingTelemetry (RoutingTelemetrySnapshot, src/lib/analytics-route.ts)
+    is computed from worker.assignment rows joined to verdicts by selection_assignment_id. Routing is live on core:
+    the rotated core ledger holds 697 worker.assignment rows, newest 2026-09-24T11:26Z. The console (lib/rmd-control.ts
+    fetchAnalyticsProjection) requests ?projectionVersion=console-v1 and then console-signals-v1.
+    buildConsoleSignalsProjection returns only {version, asOf, timeSeries, queue, provider, spend}, so routingTelemetry
+    never reaches the console, and its routing panel reads "unavailable". Only an unversioned /v1/analytics call
+    returns routingTelemetry, and that body is too large for the console to pull.
+  design: |
+    ConsoleSignalsProjection gains `routingTelemetry: RoutingTelemetrySnapshot`, the SAME object the full snapshot
+    serves as `base.routingTelemetry` (no new computation, no new ledger read). The field is additive: the version
+    string stays "console-signals-v1", and every existing field is unchanged. The console passes it through in
+    CONSOLE-T72, which pins this exact field name.
+  acceptance:
+    - claim: "the console signals projection carries the routing telemetry snapshot"
+      proof: "unit test: the console signals projection carries the routing telemetry snapshot"
+  falsifier: |
+    CLOSE IF buildConsoleSignalsProjection on main already returns routingTelemetry.

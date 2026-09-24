@@ -1,0 +1,36 @@
+- id: W1-T4460
+  title: "A FIX ROUND FOR A PR WITH NO PLAN RECORD HAS NOTHING IT MAY COMMIT — fixRungTaskFor builds a synthetic task with no files, so real edits (one round $9.55, 253 turns) are discarded as 'the task declares no files', and a stale plan snapshot makes a real task look unfiled; give the synthetic task the PR's own surface and reload the plan first"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
+  plan_refs: [W1-T4351]
+  files: [src/lib/sweep.ts, src/lib/ledger-steps.ts, test/a-synthetic-fix-task-has-a-surface.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the fix.done rows since 2026-09-23T15:59Z: 62 of 65 fix rounds ended commit_refused ($73.51). Reasons: 37 missing COMMIT_MESSAGE line and 9 regenerable-baseline edits refused (both W1-T4450), 12 'the worker changed nothing', 8 'the task declares no files'.
+    OBSERVED: #6807, #6804, #6803 ($9.55) and #6879 (lint-plan reds) made real edits with valid COMMIT_MESSAGE lines,
+    discarded as "the task declares no files"; #6836 (unfiled) and #6905 (RETRO) staged merges that were discarded; #6916
+    (W1-T4413) went synthetic because the sweep's plan snapshot predated the shard's filing (#6910). W1-T4351's gate
+    (sweep.ts, isBlockedCi) covers plan filings at a red, not merge conflicts or stale snapshots. sweep.fix.synthetic_task and
+    daemon.plan_reloaded have zero rows in the live ledger, so these causes were invisible.
+  design: |
+    (i) fixRungTaskFor gives a synthetic task the PR's own changed paths as its surface (for RETRO / PLAN / APPROVE / unfiled
+    PRs), so an edit inside the PR's footprint commits. (ii) When a PR's task id is not in the plan snapshot, the plan is
+    re-read once before falling back to a synthetic task. (iii) The W1-T4351 no-dispatch gate also covers a merge conflict on a
+    synthetic task with no derivable surface. (iv) The two step names above reach the ledger (register them where the step
+    allowlist requires it) so the next diagnosis can see them.
+  acceptance:
+    - claim: "a synthetic fix task commits inside the pull request''s own paths"
+      proof: 'grep: test("W1-T4460: a synthetic fix task commits inside the pull request''s own paths" in test/a-synthetic-fix-task-has-a-surface.test.ts'
+    - claim: "a task missing from a stale snapshot is found by a plan reload"
+      proof: 'grep: test("W1-T4460: a task missing from a stale snapshot is found by a plan reload" in test/a-synthetic-fix-task-has-a-surface.test.ts'
+  falsifier: |
+    Keep the synthetic task's files empty and the first test finds the edit refused as having no surface.

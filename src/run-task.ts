@@ -153,6 +153,7 @@ import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
+import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -691,6 +692,7 @@ import {
   parseProposalRegistry,
   parseSupersedesExpr,
   approveRunBranch,
+  approvedSkillRelPath,
   priorApproveRunBranch,
   pruneRatifiedProposals,
   proposalsNeedingDraft,
@@ -719,6 +721,7 @@ import {
   type ReframeResult,
   type SkillLifecycleAction,
   writeRatificationShards,
+  writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import {
   buildFeedbackDocket,
@@ -1047,7 +1050,13 @@ import {
   emissionsReport,
   EMISSIONS_ALLOWLIST,
 } from "./lib/emissions.js";
-import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
+import {
+  cloneReapRoots,
+  defaultOpenFileCount,
+  reapStaleClones,
+  tallyDispositions,
+  type CloneReapSummary,
+} from "./lib/clone-reaper.js";
 import { reapGitObjects } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
@@ -1400,6 +1409,7 @@ import {
   uncreditableHeadReason,
   creditSubjectIsImplementation,
   planOnlyRunBranchReceipts,
+  REGENERABLE_ARTIFACT_GENERATORS,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -8952,6 +8962,8 @@ export async function runFixRung(opts: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
+    /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
+    worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
     /**
      * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
      * for, or the bare verdict every pre-existing stub already returns. Read it through
@@ -10398,6 +10410,7 @@ export async function runFixRung(opts: {
     };
 
     const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
+    const fixRoundStartedAtMs = systemClock.now();
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's own elapsed milliseconds on the SUCCESS path — the same field
     // `fix.spawn_abandoned` already carries on the failure path (below), folded into
@@ -10467,19 +10480,48 @@ export async function runFixRung(opts: {
     // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
-    const harnessCommitCount = (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
-      harnessOwnsGit: fixHarnessOwnsGit,
-      commitCount: 0,
-      report: workerTranscript(fixResult),
-      worktreePath: opts.worktreePath,
-      declaredPaths: opts.task.files ?? [],
-      log: deps.log,
-      say: deps.say,
-      onRefusal: (reason, undeclared = []) => {
-        harnessCommitRefusalReason = reason;
-        harnessCommitUndeclared = undeclared;
-      },
-    });
+    const harnessCommit = (report: string) =>
+      (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
+        harnessOwnsGit: fixHarnessOwnsGit,
+        commitCount: 0,
+        report,
+        worktreePath: opts.worktreePath,
+        declaredPaths: opts.task.files ?? [],
+        log: deps.log,
+        say: deps.say,
+        onRefusal: (reason, undeclared = []) => {
+          harnessCommitRefusalReason = reason;
+          harnessCommitUndeclared = undeclared;
+        },
+      });
+    let harnessCommitCount = harnessCommit(workerTranscript(fixResult));
+    // W1-T4450: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR ONCE HERE TOO, exactly as implement does
+    // (W1-T4052): same session, one ask, the same refusal if the line is still absent. 37 fix rounds in
+    // one day did their work and lost it to this one line. Only a round that left edits is asked.
+    if (
+      harnessCommitCount === 0 &&
+      harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON &&
+      (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath)
+    ) {
+      deps.log("fix.commit_line_requested", { strike: attempt, round });
+      deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
+      const asked = await spawnFixWorkerBounded(
+        deps,
+        { ...fixArgs, prompt: COMMIT_LINE_RESUME_PROMPT, resumeSessionId: fixResult.sessionId },
+        { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
+      );
+      const answer = asked.kind === "spawned" ? deps.account(asked.result) : undefined;
+      deps.log("fix.commit_line_answered", {
+        strike: attempt,
+        outcome: asked.kind,
+        ...(answer ? { session_id: answer.sessionId, cost_usd: answer.costUsd, num_turns: answer.numTurns } : {}),
+      });
+      if (answer) {
+        harnessCommitRefusalReason = undefined;
+        harnessCommitUndeclared = [];
+        harnessCommitCount = harnessCommit(`${workerTranscript(fixResult)}\n${workerTranscript(answer)}`);
+      }
+    }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
@@ -10610,7 +10652,9 @@ export async function runFixRung(opts: {
         root: opts.config.root,
         taskId: opts.taskId,
         runId: opts.runId,
-        rung: `fix-${attempt}`,
+        // W1-T4450: the round's own start time rides the name, so a second fix invocation in the same
+        // daemon run no longer overwrites this round's transcript (every one used to be `fix-1`).
+        rung: `fix-${attempt}-${fixRoundStartedAtMs}`,
         text: workerTranscript(fixResult),
         model: opts.mount.model,
         verdict: fixResult.subtype,
@@ -29860,6 +29904,12 @@ export function logDiskReclaimRung(
     objectInflightDir?: () => string;
     objectPolicy?: () => { enabled: boolean };
     ratifications?: Ratifications;
+    /** W1-T4022: the real `lsof`-backed probe (src/lib/clone-reaper.ts) — a test can still inject
+     *  its own; production leaves this unset and gets {@link defaultOpenFileCount}, never the
+     *  fail-closed `() => 1` object-reaper.ts falls back to when NOTHING supplies a counter. */
+    objectOpenFileCount?: (dir: string) => number;
+    /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
+    objectStreakPath?: () => string;
   } = {},
 ): {
   tempDirsRemoved: number;
@@ -29909,19 +29959,40 @@ export function logDiskReclaimRung(
   let objectsPruned = 0;
   let objectsWouldPrune = 0;
   let objectRefusal: string | undefined;
+  let objectConsecutiveRefusals: number | undefined;
+  let objectRefusingSinceIso: string | undefined;
   try {
-    const readPolicy = deps.objectPolicy ?? (() => loadPolicy(policyPath(config.root)).values.objectReap);
-    const policyBlock = readPolicy();
+    // W1-T4022: `loadDefaultPolicy()` reads the install's own policy (the seam `runAdhocLaneReapRung`
+    // uses). The prior `loadPolicy(policyPath(config.root))` THREW every tick — the daemon root has no
+    // plan/policy.yaml — and the catch below swallowed it: 0 `objects_declined` rows in four days.
+    let policyBlock: { enabled: boolean };
+    try {
+      policyBlock = deps.objectPolicy?.() ?? loadDefaultPolicy().values.objectReap;
+    } catch (err) {
+      // Logged HERE: an unloadable policy is a different failure than the generic catch below.
+      log("run.disk_reclaim.policy_error", { error: String((err as Error)?.message ?? err) });
+      throw err;
+    }
     const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
     const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
     if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
     const enabled = pin.fire && policyBlock.enabled;
     const repoDir = (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))();
     const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
-    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, { dryRun: !enabled });
+    const streakPath = (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))();
+    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, {
+      dryRun: !enabled,
+      // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
+      // falls back to when nothing supplies a counter — production wired nothing before this, so
+      // the open-handle refusal fired unconditionally and the other two conditions were moot.
+      openFileCount: deps.objectOpenFileCount ?? defaultOpenFileCount,
+      streakPath,
+    });
     objectsPruned = r.pruned;
     objectsWouldPrune = r.wouldPrune ?? 0;
     objectRefusal = r.refusedBecause;
+    objectConsecutiveRefusals = r.consecutiveRefusals;
+    objectRefusingSinceIso = r.refusingSinceIso;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other three sweeps
   }
@@ -29939,8 +30010,15 @@ export function logDiskReclaimRung(
   }
   // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
   // that decides whether arming this rung is worth anything at all, and it is unreadable unless
-  // the declines are ledgered too.
-  if (objectRefusal !== undefined) log("run.disk_reclaim.objects_declined", { reason: objectRefusal });
+  // the declines are ledgered too. W1-T4022 adds the CONSECUTIVE REFUSAL streak and when it began,
+  // so a single busy tick and a three-week-long block stop reading as the same one-line fact.
+  if (objectRefusal !== undefined) {
+    log("run.disk_reclaim.objects_declined", {
+      reason: objectRefusal,
+      consecutive_refusals: objectConsecutiveRefusals,
+      refusing_since: objectRefusingSinceIso,
+    });
+  }
 
   return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
 }
@@ -31659,6 +31737,26 @@ export async function daemonCommand(
                     },
                   };
                 },
+                // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
+                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
+                // registry instance" has no selector yet -- `RegistryInstance` carries no role or
+                // state_dir a daemon can identify itself by -- so `RMD_SRE_LANE=1` is a safe-default-
+                // OFF opt-in an operator sets on the ONE instance meant to run it until one exists.
+                // The starter is inert until called, so it is built on every start and dropped
+                // unless opted in.
+                ...[
+                  startSreLane(
+                    daemonSreLaneInput({
+                      stateDir: join(config.root, "state"),
+                      root: repoRoot,
+                      ledgerPath,
+                      owner: self.owner,
+                      repo: self.repo,
+                      mergedLastDay: () => mergedInLastDay(repoRoot),
+                      log,
+                    }),
+                  ),
+                ].filter(() => process.env.RMD_SRE_LANE === "1"),
               ],
             }
           : {}),
@@ -33081,6 +33179,7 @@ export async function serveCommand(
     log,
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
+    prewarmLeadMs: DEFAULT_BOARD_POLL_TTL_MS,
     snapshotCache: serveBoardSnapshot,
     // A merged PR's file list survives the restart on disk, and a miss never blocks the first snapshot.
     changedFilesCache: createChangedFilesCache(config.root, self.owner, self.repo, { log }),
@@ -36147,6 +36246,8 @@ export interface WorkerEditCommit {
   readonly sha?: string;
   /** Paths the worker changed that its task did NOT declare. Reported, never staged. */
   readonly undeclared: readonly string[];
+  /** W1-T4450: registered regenerable artifacts staged although undeclared (see commitWorkerEdits). */
+  readonly regenerable?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
 }
@@ -36195,15 +36296,27 @@ export function commitWorkerEdits(
   const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
   if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
 
-  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths));
-  const undeclared = changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths));
+  // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
+  // it as the remedy) is staged although undeclared. The fix prompt and the scope guard already grant
+  // that exception (W1-T3015); refusing it here meant the one edit a failing census asks for could
+  // never land — 9 fix rounds in one day were refused this way.
+  const regenerable = changed.filter(
+    (path) => !pathIsUnderDeclaredSurface(path, declaredPaths) && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path),
+  );
+  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) || regenerable.includes(path));
+  const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
   }
 
   runGit(["add", "-A", "--", ...declared]);
   runGit(["commit", "-m", message]);
-  return { committed: true, sha: runGit(["rev-parse", "HEAD"]).trim(), undeclared };
+  return {
+    committed: true,
+    sha: runGit(["rev-parse", "HEAD"]).trim(),
+    undeclared,
+    ...(regenerable.length > 0 ? { regenerable } : {}),
+  };
 }
 
 /**
@@ -36328,6 +36441,9 @@ function lastCommitRefusalPromptLines(
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
 
+/** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
+export const REFUSED_REPORT_TAIL_CHARS = 800;
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -36351,7 +36467,9 @@ export function harnessCommitForShellLessWorker(
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined) {
     const reason = MISSING_COMMIT_MESSAGE_REASON;
-    input.log("implement.harness_commit_refused", { reason });
+    // W1-T4450: the tail of the report that was parsed, so the next diagnosis has evidence instead
+    // of a transcript a later round overwrote.
+    input.log("implement.harness_commit_refused", { reason, report_tail: input.report.slice(-REFUSED_REPORT_TAIL_CHARS) });
     input.onRefusal?.(reason, []);
     return input.commitCount;
   }
@@ -36359,6 +36477,7 @@ export function harnessCommitForShellLessWorker(
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
+    ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
   });
@@ -41198,6 +41317,32 @@ export function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction,
   ].join("\n");
 }
 
+/** W1-T4338: the commit that writes an approved skill draft. Carries NO `Remudero-Task:` trailer — it files a skill,
+ *  it implements no task. */
+export function skillFileApproveCommitMessage(proposalId: string, relPath: string): string {
+  return [
+    "chore(skill): add approved skill via rmd approve",
+    "",
+    `Proposal ${proposalId} staged a skill-workshop draft; the operator's one-bit approve writes it.`,
+    `This commit adds exactly ${relPath}, verbatim from the staged draft.`,
+  ].join("\n");
+}
+
+/** W1-T4338: the PR body for an approved skill draft — an executable Acceptance proof on the file this PR adds. */
+export function skillFileApprovePrBody(proposalId: string, name: string, relPath: string): string {
+  const filedPaths = [relPath];
+  return buildPlanPrBody({
+    intro: [
+      `Proposal ${proposalId} adds approved skill \`${name}\`.`,
+      "",
+      "The operator's one-bit approve initiated this PR. The gate still reviews it; nothing",
+      "auto-merges without that review.",
+    ].join("\n"),
+    criteria: [{ claim: `${relPath} is the approved skill draft ${name}`, proof: `grep: name: ${name} in ${relPath}` }],
+    changedFiles: filedPaths,
+  });
+}
+
 export function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: string): string {
   return [
     `Proposal ${proposalId} retires approved skill \`${action.skillName}\`.`,
@@ -42070,6 +42215,19 @@ export async function approveCommand(
     }
     return repoDir;
   };
+  // A fresh, locked worktree on this run's branch at origin/main — shared by the two skill paths (W1-T4338's write,
+  // the lifecycle retirement), which write under .claude/skills/ rather than filing plan shards.
+  const freshSkillApproveWorktree = (): { branch: string; path: string } => {
+    const dir = ensureRepoDir();
+    const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+    const branch = approveRunBranch(runId);
+    // Set before worktreeAdd, so a failed add still leaves the path for the approve catch's cleanup.
+    const path = (worktreePath = join(worktreesDir(config), branch));
+    worktreeAdd(dir, path, branch, "origin/main", { log });
+    writeRunLock(path, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    return { branch, path };
+  };
   const gateway: RatifyGateway = deps.gateway ?? {
     // W1-T903 design (iii): evidence (ledger) + a real remote read — never guessed. A cheap
     // ledger-only miss (the overwhelming majority of approve calls: no prior run at all) never
@@ -42228,7 +42386,27 @@ export async function approveCommand(
       gitPushRunBranch(worktreePath);
       return branch;
     },
+    // W1-T4338: the skill-draft twin of createRatificationBranch — one SKILL.md, verbatim, on a fresh branch.
+    writeSkillFile(id, skillFile) {
+      const { branch, path } = freshSkillApproveWorktree();
+      const relPath = writeApprovedSkillFile(path, skillFile, { mkdirSync, writeFileSync }, join);
+      log("approve.skill_written", { proposal_id: id, path: relPath });
+      execFileSync("git", ["-C", path, "add", "--", relPath], { stdio: "inherit" });
+      execFileSync("git", ["-C", path, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
+      gitPushRunBranch(path);
+      return branch;
+    },
     openPlanPr(branch, id) {
+      const skillRelPath = classification.skillFile ? approvedSkillRelPath(classification.skillFile.name) : null;
+      if (classification.skillFile && skillRelPath) {
+        assertLiveWriteAllowed("gh-pr-create", `opening a skill PR against ${owner}/${repo}`);
+        return createPlanPrRest(ghJson, owner, repo, {
+          title: `chore(skill): add approved skill ${classification.skillFile.name} via rmd approve`,
+          body: skillFileApprovePrBody(id, classification.skillFile.name, skillRelPath),
+          head: branch,
+          base: "main",
+        }).prUrl;
+      }
       const intro = [
         classification.draft?.stampLine ?? "",
         "",
@@ -42265,18 +42443,12 @@ export async function approveCommand(
   };
 
   const createSkillLifecycleBranch = (action: SkillLifecycleAction): string => {
-    const dir = ensureRepoDir();
-    const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-    const branch = approveRunBranch(runId);
-    worktreePath = join(worktreesDir(config), branch);
-    worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
-    const removed = applySkillLifecycleRemoval(worktreePath, action);
+    const { branch, path } = freshSkillApproveWorktree();
+    const removed = applySkillLifecycleRemoval(path, action);
     if (!removed.ok) throw new Error(`rmd approve: refusing lifecycle action for ${proposalId} — ${removed.reason}`);
-    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", action.skillPath], { stdio: "inherit" });
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", skillLifecycleApproveCommitMessage(action, proposalId)], { stdio: "inherit" });
-    gitPushRunBranch(worktreePath);
+    execFileSync("git", ["-C", path, "add", "-A", "--", action.skillPath], { stdio: "inherit" });
+    execFileSync("git", ["-C", path, "commit", "-m", skillLifecycleApproveCommitMessage(action, proposalId)], { stdio: "inherit" });
+    gitPushRunBranch(path);
     return branch;
   };
 

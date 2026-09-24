@@ -362,6 +362,24 @@ function tightestRemaining(capacity: ProviderCapacity): number {
   return Math.min(...windows.map((window) => 100 - window.usedPercent));
 }
 
+/** One subscription as the auction saw it: whether it could take work, why not, and its headroom. */
+export interface ProviderEligibility {
+  eligible: boolean;
+  reason?: "unreadable" | "below-reserve";
+  /** Tightest remaining window percentage; `null` when nothing readable was reported. */
+  headroomPercent: number | null;
+}
+
+/** The auction's own admission test, exported so a decision record states it rather than re-deriving it. */
+export function providerEligibility(capacity: ProviderCapacity, reservePercent: number): ProviderEligibility {
+  const remaining = tightestRemaining(capacity);
+  const headroomPercent = Number.isFinite(remaining) ? remaining : null;
+  if (!capacity.readable || capacity.windows.length === 0) return { eligible: false, reason: "unreadable", headroomPercent };
+  const ceiling = 100 - reservePercent;
+  const admitted = capacity.windows.every((window) => validCapacityWindow(window) && window.usedPercent < ceiling);
+  return admitted ? { eligible: true, headroomPercent } : { eligible: false, reason: "below-reserve", headroomPercent };
+}
+
 const GOLDEN_RATIO_CONJUGATE = (Math.sqrt(5) - 1) / 2;
 
 function deterministicAllocationPoint(tieBreaker: number): number {
@@ -378,18 +396,8 @@ export function selectWorkerProvider(
   reservePercent = 5,
   tieBreaker = 0,
 ): ProviderSelection {
-  const ceiling = 100 - reservePercent;
   const eligible = capacities
-    .filter(
-      (capacity) =>
-        capacity.readable &&
-        capacity.windows.length > 0 &&
-        capacity.windows.every(
-          (window) =>
-            validCapacityWindow(window) &&
-            window.usedPercent < ceiling,
-        ),
-    )
+    .filter((capacity) => providerEligibility(capacity, reservePercent).eligible)
     .map((capacity) => {
       const tightestRemainingPercent = tightestRemaining(capacity);
       return {

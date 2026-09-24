@@ -80,6 +80,15 @@ import {
 } from "./operator-agent.js";
 import { verdictCalibrationReport } from "./verdict-calibration.js";
 import { adaptLiveAnalyticsMetrics, emptyLiveAnalyticsMetrics, type LiveAnalyticsMetrics } from "./analytics-live-metrics.js";
+import {
+  accumulateUsageLine,
+  buildUsageProjection,
+  USAGE_PROJECTION_VERSION,
+  usageTelemetryState,
+  withLiveProviderWindows,
+  type UsageProjection,
+  type UsageTelemetryState,
+} from "./usage-telemetry.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -313,6 +322,7 @@ export interface AnalyticsSnapshot {
   timeSeries: LedgerTimeSeries[];
   /** W1-T4024 — money, in dollars, never mixed with subscription utilisation. */
   spend: { cash: CashSpendSnapshot };
+  usage?: UsageProjection;
   /** Outcome and work-category dimensions built from terminal run evidence. */
   dimensions: AnalyticsBreakdownDimension[];
   /** Flat rows for console drilldown views, derived from the same bounded dimensions. */
@@ -555,6 +565,7 @@ interface AnalyticsAccumulator {
    *  undefined` above, so this adds no new pass over the corpus. */
   tokensTotal: CacheHitTokens & { output: number };
   routingTelemetry: RoutingTelemetryAccumulator;
+  usage: UsageTelemetryState;
   /** Sanitized rows retained only for the four operator-agent evidence adapters. */
   operatorAgentRows: {
     proof: OperatorAgentProofLedgerRow[];
@@ -649,6 +660,7 @@ type AnalyticsCheckpointState = {
     days: Array<[string, CheckpointHistoryBucket]>;
     starts: Array<[string, number]>;
   };
+  usage?: UsageTelemetryState;
   breakdowns: {
     starts: string[];
     terminals: Array<[string, { verdict?: string; success?: boolean }]>;
@@ -738,6 +750,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     workerDurationsMeasured: false,
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     routingTelemetry: routingTelemetryAccumulator(),
+    usage: usageTelemetryState(),
     operatorAgentRows: { proof: [], decisions: [], capacity: [], memory: [] },
     historicalSeries: createHistoricalSeriesAccumulator(),
     breakdowns: createAnalyticsBreakdownAccumulator(),
@@ -1276,6 +1289,7 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   // own bounded, join-aware accumulator because an assignment is a policy fact and a terminal
   // row is an outcome fact; neither may be inferred from the other.
   accumulateRoutingTelemetryLine(acc.routingTelemetry, line);
+  accumulateUsageLine(acc.usage, line);
 
   if (line.step === "cli.invoked") {
     acc.invocationsMeasured = true;
@@ -1397,6 +1411,7 @@ function snapshotFromAccumulator(
       rows: acc.operatorAgentRows.memory.map((row) => ({ ...row })),
     },
   };
+  attachUsageProjection(out, acc.usage);
   Object.defineProperty(out, "operatorAgentMemory", {
     value: out.operatorAgentMemory,
     enumerable: false,
@@ -1405,6 +1420,13 @@ function snapshotFromAccumulator(
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   return out;
+}
+
+function attachUsageProjection(snapshot: AnalyticsSnapshot, state: UsageTelemetryState | undefined): AnalyticsSnapshot {
+  if (state === undefined) return snapshot;
+  const usage = buildUsageProjection(state, snapshot.asOf, snapshot.spend?.cash);
+  Object.defineProperty(snapshot, "usage", { value: usage, enumerable: false, writable: false });
+  return snapshot;
 }
 
 /**
@@ -1526,6 +1548,7 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       days: [...acc.checkpointHistory.days.entries()].map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]),
       starts: [...acc.checkpointHistory.starts.entries()],
     },
+    usage: JSON.parse(JSON.stringify(acc.usage)) as UsageTelemetryState,
     breakdowns: {
       starts: [...acc.checkpointBreakdowns.starts],
       terminals: [...acc.checkpointBreakdowns.terminals.entries()].map(([key, value]) => [key, { ...value }]),
@@ -1572,6 +1595,7 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   };
   acc.checkpointHistory.days = new Map(state.history.days.map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]));
   acc.checkpointHistory.starts = new Map(state.history.starts);
+  acc.usage = JSON.parse(JSON.stringify(state.usage ?? usageTelemetryState())) as UsageTelemetryState;
   acc.checkpointBreakdowns.starts = new Set(state.breakdowns.starts);
   acc.checkpointBreakdowns.terminals = new Map(state.breakdowns.terminals.map(([key, value]) => [key, { ...value }]));
   acc.checkpointBreakdowns.startsWithoutRunId = state.breakdowns.startsWithoutRunId;
@@ -1637,7 +1661,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshotReadResult> {
   const currentSource = checkpointSource(stateDir);
-  const canResume = priorCheckpoint !== undefined && currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
+  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.usage !== undefined && currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
   let acc: AnalyticsAccumulator;
   let resumeCheckpoint: AnalyticsCheckpoint | undefined;
   let resumeSource: AnalyticsCheckpointSource | undefined;
@@ -1912,7 +1936,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(checkpoint.snapshot);
+  let value = checkpoint === undefined ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;
@@ -2053,6 +2077,10 @@ export function buildAnalyticsRoute(deps: {
       // refresh; say so explicitly rather than let the field vanish from the payload.
       if (requestedVersion === CONSOLE_SIGNALS_PROJECTION_VERSION) {
         sendJson(res, 200, buildConsoleSignalsProjection(base, live));
+        return;
+      }
+      if (requestedVersion === USAGE_PROJECTION_VERSION) {
+        sendJson(res, 200, withLiveProviderWindows(base.usage ?? buildUsageProjection(usageTelemetryState(), null), live.provider.accounts));
         return;
       }
       const spend = base.spend ?? { cash: notCollectedCashSpend("snapshot predates cash collection; awaiting first refresh") };
