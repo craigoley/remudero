@@ -294,13 +294,18 @@ test("W1-T3141 criterion 3: the SHIPPED ratchet, run where origin/main does not 
 
 test("W1-T3141 criterion 4: the source-size job checks out deeply enough for origin/main, with exactly one checkout step", () => {
   // PARSED, NOT GREPPED — the job's own comments mention `fetch-depth` and a text scan reads them.
+  //
+  // W1-T4399: source-size now runs as a STEP of the consolidated `commitlint` job (one shared
+  // checkout for ~17 gates) rather than its own job — its own ci.yml job key stays registered
+  // but permanently skipped (if: false), so the checkout this criterion cares about is read off
+  // the job that actually runs source-size now.
   const ci = parseYaml(readFileSync(CI_YML, "utf8")) as {
     jobs: Record<
       string,
       { steps: Array<{ uses?: string; with?: Record<string, unknown> }> }
     >;
   };
-  const job = ci.jobs["source-size"];
+  const job = ci.jobs["commitlint"];
   assert.ok(job, "the job key must exist");
 
   const checkouts = job.steps.filter((s) =>

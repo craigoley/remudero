@@ -207,11 +207,15 @@ test("W1-T3655: ci.yml's push-to-main lane actually invokes the census, strictly
   // Sanity: comment-load-ratchet's own PR-side step must stay untouched -- W1-T1033's job-level
   // guard there stays exactly PR-only (test/fast-lane-classifier.test.ts pins the literal string),
   // so the ONLY route for the census to see a push is the one this test reads.
-  const ratchetJob = doc.jobs["comment-load-ratchet"];
+  //
+  // W1-T4399: comment-load-ratchet's real PR-side work now runs as a step of the `commitlint`
+  // job (its own ci.yml job key stays registered but permanently skipped, if: false), so the
+  // PR-only guard is read off `commitlint` instead.
+  const ratchetJob = doc.jobs["commitlint"];
   assert.equal(
     ratchetJob?.if,
     "github.event_name == 'pull_request'",
-    "comment-load-ratchet must stay PR-only -- the census reaches main through `ci`, not by relaxing this job",
+    "commitlint (comment-load-ratchet's new home) must stay PR-only -- the census reaches main through `ci`, not by relaxing this job",
   );
 });
 

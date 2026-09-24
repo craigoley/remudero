@@ -152,10 +152,12 @@ test("W1-T3060 criterion 3: every rewritten site is still unreachable on a push"
   // would slip through a check that only looked for one.
   const raw = readFileSync(CI_YAML, "utf8");
   const doc = parseYaml(raw) as { jobs: Record<string, { if?: string; steps?: Array<{ run?: string; env?: Record<string, string> }> }> };
-  const rewritten = Object.entries(doc.jobs).filter(([, job]) =>
-    (job.steps ?? []).some((s) => (s.run ?? "").includes("HEAD^1") || (s.env ?? {}).BASE_SHA === "HEAD^1"),
-  );
-  assert.ok(rewritten.length >= 5, `sanity: the rewritten jobs must be findable, got ${rewritten.length}`);
+  const readsParent = (s: { run?: string; env?: Record<string, string> }) => (s.run ?? "").includes("HEAD^1") || (s.env ?? {}).BASE_SHA === "HEAD^1";
+  const rewritten = Object.entries(doc.jobs).filter(([, job]) => (job.steps ?? []).some(readsParent));
+  // The sanity floor counts STEPS, not jobs: W1-T4399 folded several light gates into one job, so
+  // the job count fell while every rewritten site is still here and still checked below.
+  const sites = rewritten.reduce((n, [, job]) => n + (job.steps ?? []).filter(readsParent).length, 0);
+  assert.ok(sites >= 5, `sanity: the rewritten sites must be findable, got ${sites}`);
   for (const [id, job] of rewritten) {
     const prOnly = job.if === "github.event_name == 'pull_request'";
     const shellGuarded = (job.steps ?? []).some(
