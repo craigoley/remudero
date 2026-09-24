@@ -26,9 +26,10 @@ const BASELINE = join(REPO_ROOT, "scripts", "comment-load-baseline.json");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import would be a TS7016. A dynamic
 // specifier is not statically resolved, so this loads the REAL module with no shadow copy.
-const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks, listMeasuredFiles, main, readBaseline, splitBaseInheritedViolations, MAX_ADDED_BLOCK_LINES } =
+const { countCommentLines, evaluateBaselineCensus, evaluateCommentLoadRatchet, findOversizedAddedBlocks, listMeasuredFiles, main, readBaseline, splitBaseInheritedViolations, MAX_ADDED_BLOCK_LINES } =
   (await import(pathToFileURL(SCRIPT).href)) as {
     countCommentLines: (text: string, path: string) => { comments: number; code: number };
+    evaluateBaselineCensus: (current: Record<string, number>, baseline: Record<string, number>) => { missing: string[]; redundant: string[]; ok: boolean };
     evaluateCommentLoadRatchet: (
       current: Record<string, number>,
       baseline: Record<string, number>,
@@ -38,6 +39,7 @@ const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks,
       shrunk: Array<{ path: string; from: number; to: number }>;
       added: Array<{ path: string; comments: number }>;
       removed: string[];
+      redundant: string[];
       nextBaseline: Record<string, number>;
     };
     findOversizedAddedBlocks: (
@@ -122,7 +124,7 @@ test("the tokenizer counts every comment shape, ignores blank lines, and never c
 
 // ── the baseline half ────────────────────────────────────────────────────────────────────────
 
-test("evaluate: growth violates, a WHOLE-BUCKET shrink ratchets down, a new file records its bucket, a gone file is dropped", () => {
+test("evaluate: growth violates, a WHOLE-BUCKET shrink ratchets down, a new file under the default records nothing, a gone file is dropped", () => {
   // W1-T3022: values chosen to cross bucket boundaries, because a shrink INSIDE one bucket no
   // longer rewrites the entry — that churn is the conflict this task removes. The next test pins
   // the inside-a-bucket case directly.
@@ -133,26 +135,31 @@ test("evaluate: growth violates, a WHOLE-BUCKET shrink ratchets down, a new file
   assert.equal(verdict.ok, false);
   assert.deepEqual(verdict.violations, [{ path: "src/grew.ts", comments: 300, baseline: 250, overage: 50 }]);
   assert.deepEqual(verdict.shrunk, [{ path: "src/shrank.ts", from: 900, to: 250 }], "900 -> 250 crosses whole buckets");
-  assert.deepEqual(verdict.added, [{ path: "src/new.ts", comments: 5 }]);
+  // W1-T4431: an absent row MEANS the default bucket, so a new file under it records nothing (no
+  // merge surface) and rows AT the default are dropped as redundant, never rewritten.
+  assert.deepEqual(verdict.added, []);
   assert.deepEqual(verdict.removed, ["src/gone.ts"]);
-  // A grown file's ceiling is NEVER advanced by the run that found the growth.
-  assert.equal(verdict.nextBaseline["src/grew.ts"], 250);
-  assert.equal(verdict.nextBaseline["src/shrank.ts"], 250);
-  assert.equal(verdict.nextBaseline["src/new.ts"], 250, "a new file records its BUCKET, so two PRs adding it agree");
+  assert.deepEqual(verdict.redundant, ["src/grew.ts", "src/same.ts"]);
+  // A grown file's ceiling is NEVER advanced by the run that found the growth: its effective ceiling
+  // stays the default, which absence already records.
+  assert.equal(verdict.nextBaseline["src/grew.ts"], undefined);
+  assert.equal(verdict.nextBaseline["src/shrank.ts"], undefined, "900 -> the default bucket: the row is no longer needed");
+  assert.equal(verdict.nextBaseline["src/new.ts"], undefined, "a new file under the default needs no row");
+  assert.equal(verdict.nextBaseline["src/same.ts"], undefined);
 });
 
 test("W1-T3022: a shrink INSIDE one bucket leaves the entry untouched — the every-PR-edits-this-line churn", () => {
-  const verdict = evaluateCommentLoadRatchet({ "src/a.ts": 100 }, { "src/a.ts": 250 });
+  const verdict = evaluateCommentLoadRatchet({ "src/a.ts": 600 }, { "src/a.ts": 750 });
   assert.equal(verdict.ok, true);
-  assert.deepEqual(verdict.shrunk, [], "100 and 250 are the same bucket — nothing to rewrite");
-  assert.equal(verdict.nextBaseline["src/a.ts"], 250);
+  assert.deepEqual(verdict.shrunk, [], "600 and 750 are the same bucket — nothing to rewrite");
+  assert.equal(verdict.nextBaseline["src/a.ts"], 750);
 });
 
 test("W1-T3022: two concurrent growths of one file record the SAME value — the conflict, removed", () => {
   // The measured shape: main 16427, four PRs at 16432 / 16468 / 16493 / 16434, all conflicting on
-  // this one key. Every one of them records 16500.
+  // this one key. Every one of them, shrinking whole buckets below a 17000 row, records 16500.
   const written = [16427, 16432, 16468, 16493, 16434].map(
-    (c) => evaluateCommentLoadRatchet({ "src/run-task.ts": c }, {}).nextBaseline["src/run-task.ts"],
+    (c) => evaluateCommentLoadRatchet({ "src/run-task.ts": c }, { "src/run-task.ts": 17000 }).nextBaseline["src/run-task.ts"],
   );
   assert.deepEqual(written, [16500, 16500, 16500, 16500, 16500], "identical values do not conflict in a text merge");
 });
@@ -178,7 +185,8 @@ test("CLI: a file that shrank BY A WHOLE BUCKET has its ceiling REWRITTEN DOWN i
     const res = run(root);
     assert.equal(res.status, 0, res.stdout + res.stderr);
     const written = JSON.parse(readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8"));
-    assert.equal(written["src/a.ts"], 250, "the gain must be held at the BUCKET, not left at the old ceiling of 600");
+    // W1-T4431: one comment line is the default bucket, so the row goes; absence now holds the gain.
+    assert.equal(written["src/a.ts"], undefined, "the gain must be held at the default BUCKET, not left at the old ceiling of 600");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -454,12 +462,18 @@ test("CLI: growth main landed while the PR was open passes and is recorded; grow
 // ── the shipped tree ─────────────────────────────────────────────────────────────────────────
 
 test("CENSUS: the shipped baseline covers every measured file, and no other", () => {
+  // W1-T4431: "covers" now means every measured file ABOVE the default bucket carries a row, no row
+  // sits AT the default (an absent row already means it), and no row names an unmeasured file.
   const measured = listMeasuredFiles(REPO_ROOT);
-  const recorded = Object.keys(JSON.parse(readFileSync(BASELINE, "utf8"))).filter((k) => k !== "_comment");
-  assert.deepEqual(recorded.sort(), measured, "every measured file carries a recorded ceiling, and nothing else does");
-  // POSITIVE CONTROL on the path set itself: the assertion above compares the baseline against the
-  // SAME function that built it, so a root silently dropped from MEASURED_ROOTS would agree with a
-  // baseline missing it. One representative tracked file per root, named here, is what refuses that.
+  const baseline = JSON.parse(readFileSync(BASELINE, "utf8")) as Record<string, number>;
+  const counts = Object.fromEntries(measured.map((f) => [f, countCommentLines(readFileSync(join(REPO_ROOT, f), "utf8"), f).comments]));
+  const census = evaluateBaselineCensus(counts, baseline);
+  assert.deepEqual(census.missing, [], "every measured file above the default bucket carries a recorded ceiling");
+  assert.deepEqual(census.redundant, [], "no row sits at the default bucket, which an absent row already means");
+  const recorded = Object.keys(baseline).filter((k) => k !== "_comment");
+  assert.deepEqual(recorded.filter((f) => !measured.includes(f)), [], "no row names a file the census does not measure");
+  // POSITIVE CONTROL on the path set itself: a root silently dropped from MEASURED_ROOTS would agree
+  // with a baseline missing it. One representative tracked file per root, named here, refuses that.
   for (const representative of [
     "src/run-task.ts",
     "scripts/check.mjs",
@@ -468,8 +482,9 @@ test("CENSUS: the shipped baseline covers every measured file, and no other", ()
     "bin/rmd",
     "hooks/pre-commit",
   ]) {
-    assert.ok(recorded.includes(representative), `${representative} must carry a recorded ceiling`);
+    assert.ok(measured.includes(representative), `${representative} must be measured`);
   }
+  assert.ok(recorded.includes("src/run-task.ts"), "a file far above the default bucket must carry a row");
   assert.ok(measured.length > 100, `sanity: the measured set must be a real corpus; saw ${measured.length}`);
 });
 

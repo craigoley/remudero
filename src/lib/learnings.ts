@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deriveFactSymbols } from "./knowledge-symbols.js";
 import { learningValue, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
@@ -1637,6 +1638,7 @@ export interface LearningsSelectionContext {
   seed?: number;
   /** W1-T4241: re-select under this many derived seeds and report each entry's selected share. */
   propensityDraws?: number;
+  knownSymbols?: ReadonlySet<string> | readonly string[]; // W1-T4093: mines each fact via deriveFactSymbols
 }
 
 /** W1-T4241: re-selections per propensity; 1/64 resolution separates contested from deterministic. */
@@ -1710,12 +1712,34 @@ export interface LearningMatchCounts {
   error: number;
 }
 
-function matchCounts(entry: LearningEntry, taskFiles: string[], haystack: string): LearningMatchCounts {
+function effectiveSymbols(entry: LearningEntry, knownSymbols: LearningsSelectionContext["knownSymbols"]): string[] | undefined {
+  if (!knownSymbols) return entry.symbols;
+  const derived = deriveFactSymbols(entry.fact, knownSymbols);
+  if (derived.length === 0) return entry.symbols;
+  return [...new Set([...(entry.symbols ?? []), ...derived])];
+}
+
+function matchCounts(
+  entry: LearningEntry,
+  taskFiles: string[],
+  haystack: string,
+  knownSymbols: LearningsSelectionContext["knownSymbols"],
+): LearningMatchCounts {
   return {
     file: matchCount(entry, taskFiles),
-    symbol: symbolHitCount(entry.symbols, haystack),
+    symbol: symbolHitCount(effectiveSymbols(entry, knownSymbols), haystack),
     error: errorHitCount(entry.errorSignatures, haystack),
   };
+}
+
+// W1-T4093 FILL BY STRENGTH (see selectLearnings): weights mirror error>symbol>file precedence.
+const ERROR_MATCH_WEIGHT = 3;
+const SYMBOL_MATCH_WEIGHT = 2;
+const FILE_MATCH_WEIGHT = 1;
+const MATCH_STRENGTH_FRACTION = 0.25;
+
+function matchStrength(counts: LearningMatchCounts): number {
+  return counts.error * ERROR_MATCH_WEIGHT + counts.symbol * SYMBOL_MATCH_WEIGHT + counts.file * FILE_MATCH_WEIGHT;
 }
 
 /** Pure lookup: which shard filenames in `index` could hold an entry matching the task? A shard is
@@ -1765,8 +1789,8 @@ export function loadLearningsForTaskFiles(
  * A candidate is an entry whose file globs, symbols, or error signatures match the task. Empty or
  * absent `taskFiles` is NOT repo-wide: without a path, only a symbol or error hit admits an entry.
  * Ordering, highest first: error hits, symbol hits, file match count, layer precedence
- * (P32/W1-T145), most-recently-cited, id. Then fill to `budgetChars`; the remainder is `dropped`
- * for logging.
+ * (P32/W1-T145), most-recently-cited, id. Then FILLS BY STRENGTH ({@link MATCH_STRENGTH_FRACTION},
+ * W1-T4093) up to `budgetChars` (a backstop cut on top); the remainder is `dropped` for logging.
  */
 export function selectLearnings<T extends LearningEntry>(
   entries: T[],
@@ -1779,10 +1803,11 @@ export function selectLearnings<T extends LearningEntry>(
   const haystack = selectionHaystack(context);
   const usage = context?.usage;
   const matched = active
-    .map((entry) => ({ entry, counts: matchCounts(entry, files, haystack) }))
+    .map((entry) => ({ entry, counts: matchCounts(entry, files, haystack, context?.knownSymbols) }))
     .filter((r) => r.counts.file > 0 || r.counts.symbol > 0 || r.counts.error > 0)
     // W1-T4091: one posterior draw per entry, taken in a fixed (id) order so the seed reproduces it.
     .sort((a, b) => (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0));
+  const bestStrength = matched.reduce((best, r) => Math.max(best, matchStrength(r.counts)), 0);
 
   const selectWith = (seed: number): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts } => {
     const rng = usage ? seededRandom(seed) : undefined;
@@ -1806,6 +1831,10 @@ export function selectLearnings<T extends LearningEntry>(
     const matchedBy: LearningMatchCounts = { file: 0, symbol: 0, error: 0 };
     let used = 0;
     for (const { entry, counts } of ranked) {
+      if (selected.length > 0 && bestStrength > 0 && matchStrength(counts) < bestStrength * MATCH_STRENGTH_FRACTION) {
+        dropped.push(entry);
+        continue;
+      }
       const cost = entryBudgetWeight(entry) + 1; // +1 for the joining "\n"
       if (used + cost > budgetChars && selected.length > 0) {
         dropped.push(entry);
