@@ -28,7 +28,9 @@ import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus
  * rotates, this does not. `state/SRE_LANE_OFF` is its pause switch (the same PAUSE pattern
  * fleet-lane.ts's per-kind `FLEET_LANE_OFF-<kind>` uses, collapsed to one switch since this lane
  * has exactly one class of work).
- *
+ */
+
+/**
  * WHAT PRODUCTION WIRING (src/run-task.ts) CANNOT YET SUPPLY, HONESTLY: {@link RegistryInstance}
  * (instance-registry.ts) does not carry a `state_dir`, so `readEvents` below is wired to this
  * daemon's OWN ledger only, not every registry instance's — a follow-up, not a defect this module
