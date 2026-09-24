@@ -30,7 +30,7 @@ const recordingPostStatus = (posted: Posted[]) =>
     return { posted: true };
   }) as never;
 
-async function reviewWithoutCheckout(posted: Posted[]): Promise<number> {
+async function reviewAgainstAbsentTarget(posted: Posted[]): Promise<number> {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t4410-missing-"));
   try {
     return await reviewCommand("8", ["--repo", "acme/portal"], {
@@ -46,7 +46,7 @@ async function reviewWithoutCheckout(posted: Posted[]): Promise<number> {
 
 test("a review whose target repo has no managed checkout posts no commit status and exits non-zero", async () => {
   const posted: Posted[] = [];
-  const code = await reviewWithoutCheckout(posted);
+  const code = await reviewAgainstAbsentTarget(posted);
   assert.equal(code, 1);
   assert.deepEqual(posted, [], "a refusal about the reviewer's machine never marks the PR");
 });
@@ -57,7 +57,7 @@ test("the refusal tells the operator where to run the review instead", async () 
   const original = console.error;
   console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
   try {
-    await reviewWithoutCheckout(posted);
+    await reviewAgainstAbsentTarget(posted);
   } finally {
     console.error = original;
   }
