@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
 
@@ -530,6 +531,30 @@ export function writeAtomic(
     } catch {
       // preserve the original error
     }
+    throw error;
+  }
+}
+
+/**
+ * {@link writeAtomic}'s same stage-then-rename, over fs/promises: the fsync runs on the libuv pool,
+ * so a slow disk (Docker Desktop's bind mount measured 1.1-1.8 s per fsync) costs the caller's
+ * await, never the event loop every other request shares. A failed stage is removed and the
+ * original error propagates.
+ */
+export async function writeAtomicAsync(path: string, content: string | Buffer, opts: { mode?: number; tmpTag?: string } = {}): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tmpPath = `${path}.${opts.tmpTag ?? "tmp"}-${process.pid}-${randomUUID()}`;
+  try {
+    const handle = await open(tmpPath, "w", opts.mode);
+    try {
+      await handle.writeFile(content);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmpPath, path);
+  } catch (error) {
+    await rm(tmpPath, { force: true });
     throw error;
   }
 }
