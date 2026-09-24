@@ -41159,6 +41159,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
+      isDeclined: (id) => declinedReasonInLedger(ledgerLinesForRatify, id),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -41212,7 +41213,6 @@ function loadProposalForRatify(
   owner: string,
   repo: string,
   config: Config,
-  withDeclines = false,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -41237,7 +41237,7 @@ function loadProposalForRatify(
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    ...(withDeclines ? { isDeclined: (id: string) => declinedReasonInLedger(ledgerLines, id) } : {}),
+    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -41277,6 +41277,7 @@ function loadProposalsForRatify(
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
@@ -42134,7 +42135,7 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
     kind,
     rest,
     (id) => {
-      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config, true);
+      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),
