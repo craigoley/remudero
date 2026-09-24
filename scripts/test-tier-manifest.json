@@ -1393,6 +1393,7 @@
     "test/rmd-down-up.test.ts": 1195,
     "test/root-level-markdown-census.test.ts": 0,
     "test/rotation-compresses-what-the-reader-already-decompresses.test.ts": 351,
+    "test/rotation-headroom-follows-the-measured-write-rate.test.ts": 0,
     "test/route-registration.test.ts": 1866,
     "test/route-scope-matrix.test.ts": 2229,
     "test/route-wiring.test.ts": 1264,

@@ -410,6 +410,21 @@ export function flagAnomalousLedgerWriters(
  *  Why: the ledger measured at intake (docs/forensics/ledger.md#ledger_rotation_ceiling_bytes). */
 export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
 
+/** W1-T4393 — rotation sheds the core to `ceiling - rate * this`, so the next is about an hour away.
+ *  Derivation: MEASURED 2026-09-23, the 0.9 target rotated every ~4 min, rewriting ~4 MB each (~1.4 GB
+ *  a day); an hour is ~24 rewrites a day, and delta archives (#6876) already hold every row it sheds. */
+export const LEDGER_ROTATION_HEADROOM_MS = 60 * 60_000;
+/** Weight of the newest measurement in the smoothed append rate (older ones halve per rotation). */
+export const LEDGER_APPEND_RATE_SMOOTHING = 0.5;
+export const LEDGER_UNMEASURED_SHED_FRACTION = 0.9;
+
+/** Shed target: the ceiling minus the headroom (floor 0), or W1-T244's 0.9 with no measured rate. */
+export function ledgerShedTargetBytes(ceilingBytes: number, appendBytesPerHour: number | undefined): number {
+  if (appendBytesPerHour === undefined) return Math.floor(ceilingBytes * LEDGER_UNMEASURED_SHED_FRACTION);
+  const headroom = appendBytesPerHour * (LEDGER_ROTATION_HEADROOM_MS / 3_600_000);
+  return Math.max(0, Math.floor(ceilingBytes - headroom));
+}
+
 /** W1-T4100 — THE SMOOTHING WINDOW. 369 archives in a day (READ 2026-09-23, ~13/hour) is what a
  *  size-only ceiling does under bursty write volume: every append that crosses `ceilingBytes`
  *  rotates again immediately, so a burst of writes multiplies into a burst of archives — each one
@@ -1010,20 +1025,21 @@ function sha256Hex(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-/** Leading bytes of `snapshot` already archived: the recorded length when the snapshot still starts
- *  with exactly those bytes, else 0 — a missing, corrupt or mismatched sidecar archives the whole
- *  snapshot. Content-addressed, so a stale sidecar can cost duplication and never a row. */
-function archivedPrefixBytes(ledgerPath: string, snapshot: Buffer): number {
-  let carried: { bytes?: unknown; sha256?: unknown } | null;
+/** Leading bytes of `snapshot` already archived, `known` only when the sidecar matches (else 0, and
+ *  the whole snapshot is archived: duplication, never loss), plus the rate its rotation recorded. */
+function carriedPrefix(ledgerPath: string, snapshot: Buffer): { bytes: number; known: boolean; bytesPerHour?: number } {
+  let carried: { bytes?: unknown; sha256?: unknown; append_bytes_per_hour?: unknown } | null;
   try {
     carried = JSON.parse(readFileSync(ledgerCarriedPrefixPath(ledgerPath), "utf8")) as typeof carried;
   } catch {
     // deliberate: no readable sidecar means nothing is known to be archived — archive it all.
-    return 0;
+    return { bytes: 0, known: false };
   }
   const bytes = carried?.bytes;
-  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > snapshot.length) return 0;
-  return sha256Hex(snapshot.subarray(0, bytes)) === carried?.sha256 ? bytes : 0;
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > snapshot.length) return { bytes: 0, known: false };
+  if (sha256Hex(snapshot.subarray(0, bytes)) !== carried?.sha256) return { bytes: 0, known: false };
+  const rate = carried?.append_bytes_per_hour;
+  return { bytes, known: true, bytesPerHour: typeof rate === "number" && Number.isFinite(rate) && rate >= 0 ? rate : undefined };
 }
 
 /** What the rotation lock records about its holder — the SAME `{pid, host, startedAt}` shape
@@ -1239,6 +1255,8 @@ export interface LedgerRotationResult {
    *  (see {@link HEALTH_STEP_RETENTION_WINDOW_MS}/{@link RENDER_STEP_RETENTION_WINDOW_MS}), plus
    *  anything appended after the snapshot (see doc below). */
   retainedLineCount?: number;
+  appendBytesPerHour?: number;
+  targetBytes?: number;
 }
 
 /**
@@ -1469,11 +1487,19 @@ function rotateLedgerLocked(
   const dir = dirname(path);
   const lastArchiveMs = reconcileArchiveStamps(dir, archiveFsDeps);
   let requestedMs = now ? now().getTime() : systemClock.now();
+  const sinceLastMs = lastArchiveMs === undefined ? 0 : requestedMs - lastArchiveMs;
   if (lastArchiveMs !== undefined && requestedMs <= lastArchiveMs) requestedMs = lastArchiveMs + 1;
   // DELTA ARCHIVING: the carried prefix is the core the previous rotation wrote back, already
-  // archived, so only what follows it goes to a new archive. Re-copying it made adjacent archives
-  // share 99.3% of rows (fleet host, 2026-09-23). An empty delta writes no archive at all.
-  const delta = snapshotBytes.subarray(archivedPrefixBytes(path, snapshotBytes));
+  // archived, so only what follows it goes to a new archive (an empty delta writes none); re-copying
+  // it shared 99.3% of rows (2026-09-23). The delta is also the bytes appended since that rotation.
+  const carried = carriedPrefix(path, snapshotBytes);
+  const delta = snapshotBytes.subarray(carried.bytes);
+  const measuredPerHour = carried.known && sinceLastMs > 0 ? (delta.length * 3_600_000) / sinceLastMs : undefined;
+  const appendBytesPerHour =
+    measuredPerHour === undefined || carried.bytesPerHour === undefined
+      ? measuredPerHour
+      : LEDGER_APPEND_RATE_SMOOTHING * measuredPerHour + (1 - LEDGER_APPEND_RATE_SMOOTHING) * carried.bytesPerHour;
+  const targetBytes = ledgerShedTargetBytes(ceilingBytes, appendBytesPerHour);
   const plainArchivePath = datedArchivePath(path, new Date(requestedMs));
   // The landed archive's own mtime is the clock `now` cannot corrupt (see healIfAheadOfOwnMtime).
   const archivePath =
@@ -1628,30 +1654,26 @@ function rotateLedgerLocked(
   let keptLines = keptCandidates.map((p) => p.raw);
   let keptBytes = keptLines.length > 0 ? Buffer.byteLength(keptLines.join("\n") + "\n", "utf8") : 0;
 
-  // ── THE CONVERGENCE INVARIANT (W1-T244). Even after every bound above the retained core can
-  // still exceed the ceiling. Post-rotation the live ledger MUST be strictly below it, or rotation
-  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest, and leave one
-  // pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
-  // core once exceeded the ceiling live (docs/forensics/ledger.md#rotateledger). ───────────────
+  // ── THE CONVERGENCE INVARIANT (W1-T244): post-rotation the live ledger is STRICTLY below the
+  // ceiling, or rotation cannot terminate. Shed the OLDEST retained lines by `ts` to the target and
+  // leave one pointer line naming the archive; a measured rate (W1-T4393) sheds even under the
+  // ceiling. Falsifier: test/ledger-rotation-convergence.test.ts (docs/forensics/ledger.md#rotateledger).
   let shedCount = 0;
-  if (keptBytes + tailBytes >= ceilingBytes) {
-    // Reserve room for the pointer line itself — sized against a worst-case shed_count
-    // (6 digits) so the one estimate covers any real run without re-measuring per victim.
-    const pointerBytes = Buffer.byteLength(
-      JSON.stringify({
-        ts: nowIso,
-        run_id: "ledger-rotation",
-        task_id: "_ledger",
-        step: "ledger.rotation_shed",
-        shed_count: 999999,
-        archive_path: archivePath,
-      }) + "\n",
-      "utf8",
-    );
-    // Shed to a TARGET below the ceiling rather than to its edge, so the converged ledger has real
-    // headroom — otherwise the very next append could put it straight back over. The invariant is
-    // strictly enforced either way; this makes "converged" durable rather than a hair's-width pass.
-    const targetBytes = Math.floor(ceilingBytes * 0.9);
+  const rateFields =
+    appendBytesPerHour === undefined ? {} : { append_bytes_per_hour: Math.round(appendBytesPerHour), target_bytes: targetBytes };
+  const pointerRow = (count: number): string =>
+    JSON.stringify({
+      ts: nowIso,
+      run_id: "ledger-rotation",
+      task_id: "_ledger",
+      step: "ledger.rotation_shed",
+      shed_count: count,
+      archive_path: archivePath,
+      ...rateFields,
+    }) + "\n";
+  if (keptBytes + tailBytes >= (appendBytesPerHour === undefined ? ceilingBytes : targetBytes)) {
+    // Reserve room for the pointer line, sized for a worst-case 6-digit shed_count.
+    const pointerBytes = Buffer.byteLength(pointerRow(999999), "utf8");
     const byAge = [...keptCandidates].sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
     const stillKept = new Set(byAge);
     for (const victim of byAge) {
@@ -1669,15 +1691,7 @@ function rotateLedgerLocked(
   let pointerContent = "";
   if (shedCount > 0) {
     archivedLineCount += shedCount;
-    pointerContent =
-      JSON.stringify({
-        ts: nowIso,
-        run_id: "ledger-rotation",
-        task_id: "_ledger",
-        step: "ledger.rotation_shed",
-        shed_count: shedCount,
-        archive_path: archivePath,
-      }) + "\n";
+    pointerContent = pointerRow(shedCount);
   }
 
   const newLiveContent = coreContent + pointerContent + tail;
@@ -1696,13 +1710,18 @@ function rotateLedgerLocked(
     return { rotated: false };
   }
   const coreBytes = Buffer.from(coreContent, "utf8");
-  writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({ bytes: coreBytes.length, sha256: sha256Hex(coreBytes) }));
+  writeFileAtomic(
+    ledgerCarriedPrefixPath(path),
+    JSON.stringify({ bytes: coreBytes.length, sha256: sha256Hex(coreBytes), append_bytes_per_hour: appendBytesPerHour }),
+  );
 
   return {
     rotated: true,
     archivePath,
     archivedLineCount,
     retainedLineCount: keptLines.length + (pointerContent ? 1 : 0),
+    appendBytesPerHour,
+    targetBytes,
   };
 }
 
