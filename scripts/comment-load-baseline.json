@@ -198,6 +198,7 @@
   "src/lib/console-shell-client.ts": 1500,
   "src/lib/console-shell-script.ts": 250,
   "src/lib/console-snapshot-cache.ts": 250,
+  "src/lib/console-snapshot-store.ts": 250,
   "src/lib/console-url.ts": 88,
   "src/lib/containment.ts": 570,
   "src/lib/context-controls.ts": 250,

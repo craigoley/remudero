@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { RECAP_ACK_HEADER } from "./board.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import type { ConsoleSnapshotStore } from "./console-snapshot-store.js";
 import { bearerTokenId } from "./panel-actions.js";
 import type { Route } from "./service.js";
 
@@ -47,6 +48,8 @@ const DEFAULT_MIN_REFRESH_MS = 2_000;
 export const CONSOLE_SNAPSHOT_VIEWER_IDLE_MS = 60_000;
 export const COMPUTE_DUTY_DIVISOR = 10;
 const MAX_ENTRIES_PER_ROUTE = 16;
+/** A changed snapshot is written to the store at most this often per entry. */
+export const CONSOLE_SNAPSHOT_PERSIST_MIN_MS = 30_000;
 
 export interface BufferedRouteResponse {
   status: number;
@@ -222,24 +225,31 @@ export interface ConsoleSnapshotCacheOptions {
   defer?: (run: () => void) => void;
   /** Arms the keep-warm refresh. Default an unref'd `setTimeout`. */
   setTimer?: (run: () => void, ms: number) => void;
+  /** Restores this route's snapshots at creation and persists each changed one, so a restart answers warm. */
+  store?: ConsoleSnapshotStore;
 }
 
 interface SnapshotEntry {
+  key: string;
   cached?: BufferedRouteResponse;
   generation: number;
   refreshPromise?: Promise<void>;
   lastError?: string;
   lastReadAtMs: number;
-  lastReq: IncomingMessage;
+  lastReq?: IncomingMessage;
   computeMs: number;
   warmArmed: boolean;
+  /** Set on an entry restored from the store: the code revision that computed it, until a refresh replaces it. */
+  restoredFrom?: string;
+  persistedEtag?: string;
+  persistedAtMs?: number;
 }
 
 function defaultSetTimer(run: () => void, ms: number): void {
   setTimeout(run, ms).unref();
 }
 
-export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapshotCacheOptions): { handler: Route["handler"] } {
+export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapshotCacheOptions): { handler: Route["handler"]; restored: Promise<void> } {
   const clock = options.clock ?? systemClock;
   const generation = options.generation ?? createConsoleWriteGeneration();
   const minRefreshMs = options.minRefreshMs ?? CONSOLE_SNAPSHOT_MIN_REFRESH_MS[route.path] ?? DEFAULT_MIN_REFRESH_MS;
@@ -255,7 +265,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     const key = `${req.headers ? bearerTokenId(req) : "unknown"} ${req.url ?? route.path}`;
     let entry = entries.get(key);
     if (!entry) {
-      entry = { generation: -1, lastReadAtMs: clock.now(), lastReq: req, computeMs: 0, warmArmed: false };
+      entry = { key, generation: -1, lastReadAtMs: clock.now(), lastReq: req, computeMs: 0, warmArmed: false };
       entries.set(key, entry);
       if (entries.size > MAX_ENTRIES_PER_ROUTE) {
         const oldest = [...entries.entries()].sort((a, b) => a[1].lastReadAtMs - b[1].lastReadAtMs)[0];
@@ -265,12 +275,28 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     return entry;
   };
 
+  const persist = (entry: SnapshotEntry): void => {
+    const cached = entry.cached;
+    if (!options.store || !cached || cached.etag === entry.persistedEtag) return;
+    if (entry.persistedAtMs !== undefined && clock.now() - entry.persistedAtMs < CONSOLE_SNAPSHOT_PERSIST_MIN_MS) return;
+    entry.persistedEtag = cached.etag;
+    entry.persistedAtMs = clock.now();
+    void options.store.save(route.path, entry.key, cached);
+  };
+
+  const restored = options.store?.restore(route.path).then((snapshots) => {
+    for (const { key, cached, codeRev } of snapshots) {
+      if (entries.has(key)) continue;
+      entries.set(key, { key, cached, generation: generation.current(), lastReadAtMs: 0, computeMs: 0, warmArmed: false, restoredFrom: codeRev, persistedEtag: cached.etag });
+    }
+  });
+
   const keepWarm = (entry: SnapshotEntry): void => {
     if (minRefreshMs <= 0 || entry.warmArmed || !viewed(entry)) return;
     entry.warmArmed = true;
     setTimer(() => {
       entry.warmArmed = false;
-      if (viewed(entry)) void refresh(entry, entry.lastReq);
+      if (viewed(entry) && entry.lastReq) void refresh(entry, entry.lastReq);
     }, periodOf(entry));
   };
 
@@ -286,6 +312,8 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
         entry.cached = { ...next, etag: snapshotEtag(next.body), jsonObject: isJsonObjectText(next) };
         entry.generation = startedGeneration;
         entry.lastError = undefined;
+        entry.restoredFrom = undefined;
+        persist(entry);
       } catch (error) {
         const reason = String((error as Error)?.message ?? error);
         entry.lastError = reason;
@@ -301,7 +329,9 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   /** Fresh means within the period this entry refreshes on; a failed last refresh is never fresh. */
   const stalenessOf = (entry: SnapshotEntry, cached: BufferedRouteResponse | undefined): ConsoleResponseStaleness => {
     const staleness = responseStaleness(clock.now(), cached?.generatedAtMs, entry.refreshPromise !== undefined, budgetMs, periodOf(entry) + budgetMs, entry.lastError);
-    return entry.lastError !== undefined && cached ? { ...staleness, status: "stale", stale: true } : staleness;
+    if (entry.lastError !== undefined && cached) return { ...staleness, status: "stale", stale: true };
+    if (entry.restoredFrom !== undefined) return { ...staleness, status: "stale", stale: true, reason: `restored from before a serve restart (code ${entry.restoredFrom})` };
+    return staleness;
   };
 
   /** No usable buffer: race the live read against the budget, armed BEFORE the read starts (W1-T3925). */
@@ -327,8 +357,9 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   };
 
   const handler: Route["handler"] = async (req, res) => {
+    if (restored) await restored;
     const entry = entryFor(req);
-    const wasViewed = viewed(entry);
+    const wasViewed = viewed(entry) || entry.restoredFrom !== undefined;
     entry.lastReadAtMs = clock.now();
     entry.lastReq = req;
     const cached = entry.cached;
@@ -343,5 +374,25 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     else keepWarm(entry);
   };
 
-  return { handler };
+  return { handler, restored: restored ?? Promise.resolve() };
+}
+
+/** Runs each named GET route once, in order, off the request path, so its memos are warm before the first reader. */
+export function prewarmReadRoutes(routes: readonly Route[], paths: readonly string[], log?: (step: string, extra: Record<string, unknown>) => void): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(async () => {
+      for (const path of paths) {
+        const route = routes.find((r) => r.method === "GET" && r.path === path);
+        if (!route) continue;
+        const startedAt = performance.now();
+        try {
+          await route.handler({ method: "GET", url: path, headers: {} } as IncomingMessage, new RouteResponseBuffer() as unknown as ServerResponse, { params: {} });
+          log?.("serve.boot_prewarm", { path, ms: Math.round(performance.now() - startedAt) });
+        } catch (error) {
+          log?.("serve.boot_prewarm_failed", { path, reason: String((error as Error)?.message ?? error) });
+        }
+      }
+      resolve();
+    });
+  });
 }

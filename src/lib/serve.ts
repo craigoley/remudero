@@ -171,10 +171,12 @@ import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
   createConsoleSnapshotCache,
   createConsoleWriteGeneration,
   invalidateSnapshotsOnWrite,
+  prewarmReadRoutes,
   RouteResponseBuffer,
   sendStaleJson,
   type ConsoleResponseStaleness,
@@ -247,6 +249,7 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
   /** W1-T3176 — the built console's directory. OMITTED means this daemon serves the string shell
    *  only: no mount is installed, no build is looked for, and nothing is reported. Set, it is
    *  verified at startup and the result is both logged and printed in the banner. */
@@ -1152,7 +1155,10 @@ export function boundConsoleReadRoute(
 
 export function boundConsoleReadRoutes(routes: readonly Route[], deps: ServeDeps, budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS): Route[] {
   const generation = createConsoleWriteGeneration();
-  return routes.map((route) => invalidateSnapshotsOnWrite(boundConsoleReadRoute(route, deps, budgetMs, { generation }), generation));
+  const snapshots = deps.consoleSnapshots;
+  const store = snapshots && createConsoleSnapshotStore({ dir: snapshots.dir, codeRev: deps.consoleSha ?? CONSOLE_SHA_UNKNOWN, log: deps.log });
+  if (snapshots?.prewarmPaths) void prewarmReadRoutes(routes, snapshots.prewarmPaths, deps.log);
+  return routes.map((route) => invalidateSnapshotsOnWrite(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }), generation));
 }
 
 /**
@@ -4080,7 +4086,7 @@ function assembleServeRoutes(
       issues: deps.issues,
       controlStatus: deps.controlStatus,
       log: deps.log,
-      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board }),
+      bound: (reads, board) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), { ...deps, board, consoleSnapshots: undefined }),
       ...deps.instances,
     }),
   );
