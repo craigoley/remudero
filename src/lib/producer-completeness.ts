@@ -193,11 +193,6 @@ export function producerAssignedKeys(src: string, required: readonly string[]): 
  * means wiring it.
  */
 export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
-  checksPendingSince:
-    "declared by W1-T176 for a pending-age basis; no producer derives the first-pending timestamp. " +
-    "The stale-pending rows fail toward the pre-existing behaviour, so the cost is a missing " +
-    "escalation detail rather than a wrong action. Fixed FORWARD by #1041's bounding; the FIELD is " +
-    "still unwired.",
   // isPlanFiling WIRED by W1-T2439: buildOpenPrViews (run-task.ts) now assigns it from
   // `isPlanOnlyFilingPr`, the predicate that was already implemented beside it and never called —
   // removed here per this file's own "removing a field from this list means wiring it" rule. The

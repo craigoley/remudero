@@ -1307,6 +1307,7 @@ import {
   cancelledRequiredCheckNames,
   withoutDownstreamGateFailure,
   checksStateFromRollup,
+  checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
@@ -34570,6 +34571,8 @@ export function buildOpenPrViews(
       reviewPendingOwnerDead,
       reviewVerdictPostedAt,
       checksState,
+      // W1-T4054: the pending check's own start, so a push, comment or label never resets the age.
+      checksPendingSince: checksPendingSinceFromRollup(pr.statusCheckRollup, requiredContexts),
       unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
       // `unmetCriteria` above is attributable to a plan task. The synthetic key can populate it
@@ -38395,6 +38398,7 @@ export async function fixCommand(
     reviewState,
     reviewVerdictPostedAt,
     checksState,
+    checksPendingSince: checksPendingSinceFromRollup(raw.statusCheckRollup, requiredContexts),
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
     // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
     // reads it via the SAME sweep.ts row 7.
