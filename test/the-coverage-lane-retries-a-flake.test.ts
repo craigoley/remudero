@@ -66,7 +66,10 @@ test("flaky on its first run", () => {
 /** Runs the real wrapper the way ci.yml's coverage step does, minus tsx and the repo harness. */
 function runCoverageLane(dir: string, testFile: string, outerRaw?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.NODE_V8_COVERAGE;
+  // `delete env.NODE_V8_COVERAGE` would be a no-op here: node force-injects the variable into
+  // every spawned child regardless of the env option, so blanking it with `= undefined` is the
+  // only form that actually starves the nested runner of the parent's coverage session.
+  env.NODE_V8_COVERAGE = undefined;
   // Stands in for an enclosing coverage run's NODE_V8_COVERAGE, which the wrapper inherits when
   // this very suite runs in the coverage lane.
   if (outerRaw) env.NODE_V8_COVERAGE = outerRaw;
