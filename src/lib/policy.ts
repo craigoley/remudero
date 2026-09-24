@@ -174,12 +174,15 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
-  /** W1-T2659's wipe-test cadence rung — DEFAULTS OFF because one fire spends two worker
-   *  dispatches against the sandbox target. Its marker is independent from every other cadence. */
+  /** W1-T2659's wipe-test cadence rung, ON since W1-T4092: each pacing slot is ablated with an
+   *  adaptive per-factor share of `baseShare` (measurement-cadence.ts's `wipeTestFactorShares`), so
+   *  one fire's two sandbox dispatches are a low, bounded rate. Its marker is independent. */
   wipeTestCadence: {
     enabled: boolean;
     minIntervalMinutes: number;
     maxPerDay: number;
+    baseShare: number;
+    settledHalfWidthTurns: number;
   };
   headroom: {
     curve: PolicyHeadroomRung[];
@@ -334,6 +337,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "wipeTestCadence.enabled": "net-new",
   "wipeTestCadence.minIntervalMinutes": "net-new",
   "wipeTestCadence.maxPerDay": "net-new",
+  "wipeTestCadence.baseShare": "net-new",
+  "wipeTestCadence.settledHalfWidthTurns": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -839,16 +844,18 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("ciLearningCadence.maxPerDay", ciLearningRaw.maxPerDay, origin),
       }
     : { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 };
-  // W1-T2659's wipe-test cadence spends by dispatching the pair core twice, so absent defaults
-  // disabled like CI-learning rather than enabled like the read-only report rows.
+  // W1-T2659's wipe-test cadence spends by dispatching the pair core twice. W1-T4092 bounds that
+  // spend with an adaptive share per slot, so an absent row is ON at the shipped low rate.
   const wipeTestRaw = raw.wipeTestCadence as Record<string, unknown> | undefined;
   const wipeTestCadence = wipeTestRaw
     ? {
         enabled: booleanField("wipeTestCadence.enabled", wipeTestRaw.enabled, origin),
         minIntervalMinutes: numberField("wipeTestCadence.minIntervalMinutes", wipeTestRaw.minIntervalMinutes, origin, bounds),
         maxPerDay: numberField("wipeTestCadence.maxPerDay", wipeTestRaw.maxPerDay, origin),
+        baseShare: numberField("wipeTestCadence.baseShare", wipeTestRaw.baseShare, origin, bounds),
+        settledHalfWidthTurns: numberField("wipeTestCadence.settledHalfWidthTurns", wipeTestRaw.settledHalfWidthTurns, origin, bounds),
       }
-    : { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 };
+    : { enabled: true, minIntervalMinutes: 120, maxPerDay: 12, baseShare: 0.05, settledHalfWidthTurns: 2 };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 

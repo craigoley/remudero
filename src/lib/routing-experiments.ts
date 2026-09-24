@@ -28,7 +28,7 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     capability: "balanced",
     effort: "high",
     arms: { claude: "sonnet", codex: "sol" },
-    codexModel: /^gpt-[0-9.]+-sol$/,
+    codexModel: /^gpt-6-sol$/,
     startedOn: "2026-09-24",
     revisitOn: "2026-10-08",
     // W1-T3570's admission bar for a cash lane, reused so both trials read against one standard.

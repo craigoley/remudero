@@ -376,7 +376,14 @@ const OPEN_GITHUB: GitHub = {
 };
 
 /** A complete open-board snapshot whose branches deliberately cannot be attributed to the one
- * plan task. The WIP ceiling governs the board, not only PRs that current main can map to a shard. */
+ * plan task. The WIP ceiling governs the board, not only PRs that current main can map to a shard.
+ *
+ * W1-T4465: each head is still a real dispatched run's OWN branch (`run-W1-T9<n>-<epochMs>`) — a
+ * fleet task whose shard merely is not on main yet, the exact W1-T3144 scenario this fixture
+ * exists to prove — so it stays FLEET-OWNED under the ownership split (design (i)) and this
+ * suite's pre-existing "every one of these still gates" assertions hold unchanged. A branch the
+ * fleet genuinely did not author (an operator's `run-unfiled-*` session) is covered separately by
+ * test/the-queue-governor-admits-a-draining-queue.test.ts. */
 function boardWithUnplannedOpenPrs(count: number, onList?: () => void): GitHub {
   return {
     ...OPEN_GITHUB,
@@ -386,7 +393,7 @@ function boardWithUnplannedOpenPrs(count: number, onList?: () => void): GitHub {
         number: 10_000 + i,
         url: `https://github.com/o/r/pull/${10_000 + i}`,
         state: "OPEN",
-        headRefName: `fix/unplanned-${i}`,
+        headRefName: `run-W1-T9${i}-1721400000000`,
       }));
     },
   };

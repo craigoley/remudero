@@ -25,10 +25,26 @@
 // approval own the proposal's fate from there (auto-filing a task from a metric would be the
 // laundering shape Law 5 forbids).
 //
+// W1-T4097 — AND WHEN THAT PROPOSAL SITS UNNOTICED WHILE THE COUNT KEEPS CLIMBING.
+// `bound-fires-on-healthy-condition` (effective 2026-08-06) is the worked example this task was
+// filed over: `escalateRepeatingRules` drafted its ONE proposal and the recurrence count kept
+// rising anyway, pass over pass, unenforced. {@link promoteRecurringRules} is the SECOND,
+// stronger ask for exactly that shape — a rule whose recurrence count keeps RISING across two
+// rule-efficacy passes (lib/doctrine-lifecycle.ts's {@link risingRecurrenceRuleIds}) — drafted
+// through the SAME registry, on its OWN distinct id ({@link instrumentTaskProposalId}), so a
+// declined or still-open plain escalation is never silently overwritten. Still a proposal, never
+// a raw `plan/` write: Law 5 governs this one exactly as it governs `escalateRepeatingRules`.
+//
 // HOST-SIDE, NOT A CI GATE: the ledger lives on the daemon host; nothing in CI can read it.
 
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
+import {
+  draftInstrumentTaskProposal,
+  instrumentTaskProposalId,
+  risingRecurrenceRuleIds,
+  type RuleRecurrenceSnapshot,
+} from "./doctrine-lifecycle.js";
 
 // ── The signature table ─────────────────────────────────────────────────────────────────────
 
@@ -404,6 +420,61 @@ export function escalateRepeatingRules(
         });
       }
       return additions.length > 0 ? [...current, ...additions] : null;
+    },
+    opts,
+  );
+}
+
+// ── W1-T4097: promote a rule whose recurrences keep RISING to an instrument-task proposal ──────
+
+/** One report's REPEATING rules, in {@link RuleRecurrenceSnapshot} shape — {@link
+ *  risingRecurrenceRuleIds}'s own input, so `promoteRecurringRules` never hand-rolls the
+ *  comparison a second way. */
+function repeatingSnapshots(report: RuleEfficacyReport): RuleRecurrenceSnapshot[] {
+  return report.rules
+    .filter((r): r is RuleVerdict & { status: "REPEATING" } => r.status === "REPEATING")
+    .map((r) => ({ ruleId: r.ruleId, recurrenceCount: r.recurrences.length }));
+}
+
+/**
+ * Draft ONE instrument-task proposal per rule whose recurrence count kept RISING between
+ * `previous` and `current` (design iii). `previous` is the LAST rule-efficacy pass a caller has a
+ * report for; `undefined` means no prior pass exists yet, so nothing can be said to be "rising"
+ * and this returns `null` without ever touching the registry — mirrors {@link
+ * escalateRepeatingRules}'s own "nothing to draft, no disk write" contract.
+ *
+ * DISTINCT FROM {@link escalateRepeatingRules}: that one proposes on the FIRST crossing of the
+ * threshold; this one proposes AGAIN, more urgently, when a rule that already crossed it keeps
+ * getting worse anyway. The two proposals can both be open for the same rule at once, at
+ * different ids ({@link ruleEfficacyProposalId} vs {@link instrumentTaskProposalId} from
+ * lib/doctrine-lifecycle.ts), because the second is evidence the first was not enough — never a
+ * silent upgrade of the first proposal's own id.
+ */
+export function promoteRecurringRules(
+  previous: RuleEfficacyReport | undefined,
+  current: RuleEfficacyReport,
+  registryPath: string,
+  opts?: UpdateProposalRegistryOpts,
+): Proposal[] | null {
+  if (!previous) return null; // nothing to compare against yet — not an error, just no verdict
+  const prevSnapshots = repeatingSnapshots(previous);
+  const risingIds = new Set(risingRecurrenceRuleIds(prevSnapshots, repeatingSnapshots(current), RULE_EFFICACY_ESCALATION_THRESHOLD));
+  if (risingIds.size === 0) return null;
+
+  const priorCountByRuleId = new Map(prevSnapshots.map((s) => [s.ruleId, s.recurrenceCount]));
+
+  return updateProposalRegistry(
+    registryPath,
+    (currentProposals) => {
+      const existingIds = new Set(currentProposals.map((p) => p.id));
+      const additions: Proposal[] = [];
+      for (const rule of current.rules) {
+        if (!risingIds.has(rule.ruleId)) continue;
+        const id = instrumentTaskProposalId(rule.ruleId);
+        if (existingIds.has(id)) continue; // already open — idempotent, never re-drafted
+        additions.push(draftInstrumentTaskProposal(rule, priorCountByRuleId.get(rule.ruleId) ?? 0));
+      }
+      return additions.length > 0 ? [...currentProposals, ...additions] : null;
     },
     opts,
   );

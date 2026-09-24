@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; follow-up found in the fix lane"
   plan_refs: [W1-T4052, W1-T3015, W1-T4207, W1-T3079]
   files: [src/run-task.ts, test/a-fix-round-that-did-the-work-lands-it.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24 over the fix.done rows since 2026-09-23T15:59Z: 65 fix rounds, 62 ended commit_refused

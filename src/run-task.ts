@@ -902,7 +902,9 @@ import {
   releaseCiLearningCadenceFire,
   CI_LEARNING_WINDOW_DAYS,
   recordMeasurementCadenceFire,
+  readWipeTestAblationEvidence,
   recordWipeTestCadenceFire,
+  scheduleWipeTestAblation,
   renderVerbCensusDigestLine,
   priorVerifyHumanAgeBandKeys,
   runMeasurementCadenceReportAsync,
@@ -1140,9 +1142,7 @@ import {
   resolveWipeTestFactor,
   resolveWipeTestTarget,
   runWipeTestPair,
-  WIPE_TEST_PAIR_STEP,
   WIPE_TEST_SANDBOX_DEFAULT,
-  type WipeTestFactor,
   type WipeTestMergedState,
   type WipeTestPairSubject,
 } from "./lib/wipe-test.js";
@@ -1323,6 +1323,8 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
+  deriveQueueGovernorTrailingFlow,
+  isFleetOwnedRunBranch,
   cancelledRequiredCheckNames,
   withoutDownstreamGateFailure,
   checksStateFromRollup,
@@ -10555,13 +10557,14 @@ export async function runFixRung(opts: {
     // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
-    const harnessCommit = (report: string) =>
+    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit"> = {}) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         report,
         worktreePath: opts.worktreePath,
         declaredPaths: opts.task.files ?? [],
+        ...options,
         log: deps.log,
         say: deps.say,
         onRefusal: (reason, undeclared = []) => {
@@ -10582,7 +10585,18 @@ export async function runFixRung(opts: {
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
       const asked = await spawnFixWorkerBounded(
         deps,
-        { ...fixArgs, prompt: COMMIT_LINE_RESUME_PROMPT, resumeSessionId: fixResult.sessionId },
+        {
+          ...fixArgs,
+          prompt: missingCommitLinePrompt({
+            provider: fixResult.provider ?? fixArgs.mountProvider,
+            tools: fixArgs.tools,
+            title: opts.task.title,
+            report: workerTranscript(fixResult),
+            worktreePath: opts.worktreePath,
+            declaredPaths: opts.task.files ?? [],
+          }),
+          resumeSessionId: fixResult.sessionId,
+        },
         { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
       );
       const answer = asked.kind === "spawned" ? deps.account(asked.result) : undefined;
@@ -10594,7 +10608,16 @@ export async function runFixRung(opts: {
       if (answer) {
         harnessCommitRefusalReason = undefined;
         harnessCommitUndeclared = [];
-        harnessCommitCount = harnessCommit(`${workerTranscript(fixResult)}\n${workerTranscript(answer)}`);
+        const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
+        const check = priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason;
+        const derivedCommit = writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools)
+          && parseReport(answeredReport)?.commitMessage === undefined
+          ? derivedFixCommit(check, opts.prUrl)
+          : undefined;
+        harnessCommitCount = harnessCommit(answeredReport, {
+          subjectSource: derivedCommit ? "harness-derived" : "re-asked",
+          derivedCommit,
+        });
       }
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
@@ -15561,9 +15584,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // turning that into a pull request would change a long-standing verdict rather than enable a
     // new lane.
     //
-    // THE MESSAGE IS THE WORKER'S, AND ONLY EVER DATA. It arrives as an anchored REPORT line and
-    // travels into an argv array; the harness never runs a command the worker composed. No message,
-    // no commit — an invented subject would attribute work to a run that never asked for it.
+    // The first attempt uses the worker's anchored subject. A non-resumable writer that still omits
+    // it after one contextual re-ask may use the task-record fallback below.
     // CALLED UNCONDITIONALLY, and it owns its own precondition. Guarding here instead would put the
     // decision on lines no test can reach without driving this entire dispatch — which is what
     // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
@@ -15583,13 +15605,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED. `resumeForMissingCommitLine`
     // owns its own precondition (called unconditionally, exactly like the helper above) — it no-ops
     // for every refusal EXCEPT the exact missing-line one, and only when the worktree still holds
-    // uncommitted changes. The resumed reply asks the SAME session for nothing but the line, and the
-    // recommit runs through the unchanged `harnessCommitForShellLessWorker`, so no other refusal path
-    // changes shape.
+    // uncommitted changes. A Codex writer gets its own diff and report because its resumed spawn
+    // starts fresh. A still-missing line may use the task record, through the same commit guard.
     const commitLineRecovery = await resumeForMissingCommitLine({
       commitCount,
       refusalReason: harnessCommitRefusalState.reason,
       report: fullText(impl),
+      task: writerCannotResume(impl.provider ?? implementMount.provider, implementTools) ? task : undefined,
       worktreePath,
       declaredPaths: task.files ?? [],
       log,
@@ -15608,7 +15630,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         tools: implementTools === undefined ? undefined : [...implementTools],
         ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
         ...cashTrialSpawn,
-      }),
+      }, { provider: impl.provider ?? implementMount.provider, title: task.title, report: fullText(impl), declaredPaths: task.files ?? [] }),
     });
     commitCount = commitLineRecovery.commitCount;
     harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
@@ -26521,36 +26543,9 @@ export function buildBoardReviewDaemonHooks(deps: {
   return { checkBoardReview: check, runBoardReview: run };
 }
 
-const WIPE_TEST_PAIR_ROW_PATTERN = /"step":"wipetest\.pair"/;
-
-function priorWipeTestPairCount(stateDir: string, ledgerUnion: (stateDir: string, pattern: RegExp) => ReturnType<typeof resolveLedgerUnion>): {
-  ok: true;
-  count: number;
-} | { ok: false; reason: string } {
-  const union = ledgerUnion(stateDir, WIPE_TEST_PAIR_ROW_PATTERN);
-  if (!union.ok) {
-    const reason =
-      union.archiveCount === 0
-        ? `wipe-test cadence ledger union unreadable under ${union.stateDir}: no rotation corpus`
-        : `wipe-test cadence ledger union unreadable under ${union.stateDir}: ${union.unread.length} unreadable file(s)`;
-    return { ok: false, reason };
-  }
-  let count = 0;
-  for (const line of union.matches) {
-    try {
-      const row = JSON.parse(line) as { step?: unknown };
-      if (row.step === WIPE_TEST_PAIR_STEP) count++;
-    } catch {
-      // Torn or foreign line: the pre-filter found the step text, but an unparseable row is not a
-      // measured pair and must not advance the subject/factor rotation.
-    }
-  }
-  return { ok: true, count };
-}
-
-function chooseWipeTestFactor(seq: number): WipeTestFactor {
-  return seq % 2 === 1 ? "learnings" : "recon";
-}
+/** The risk every generated sandbox subject is written with (wipe-test.ts's
+ *  `renderGeneratedSubjectTask`); W1-T4092's scheduler refuses anything else. */
+const WIPE_TEST_SANDBOX_SUBJECT_RISK = "low" as const;
 
 export function buildWipeTestCadenceDaemonHooks(deps: {
   check?: () => WipeTestCadenceDecision;
@@ -26564,6 +26559,7 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
   execFileSyncFn?: typeof execFileSync;
   targetArgs?: string[];
   resolveMergedState?: (taskId: string, planPath: string, config: Config) => WipeTestMergedState;
+  draw?: () => number;
 } = {}): {
   checkWipeTestCadence: () => WipeTestCadenceDecision;
   runWipeTestCadence: (decision: Extract<WipeTestCadenceDecision, { fire: true }>) => Promise<WipeTestCadenceRunResult>;
@@ -26578,10 +26574,11 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
     (() => {
       const config = configFor();
       const policy: WipeTestCadencePolicy = policyFor().values.wipeTestCadence;
-      const paced = wipeTestCadenceCheck({ root: config.root, policy, now: deps.now?.() });
+      const now = clockFromDateFn(deps.now).date();
+      const paced = wipeTestCadenceCheck({ root: config.root, policy, now });
       if (!paced.fire) return paced;
 
-      const prior = priorWipeTestPairCount(join(config.root, "state"), ledgerUnion);
+      const prior = readWipeTestAblationEvidence(join(config.root, "state"), ledgerUnion);
       if (!prior.ok) return { fire: false, reason: prior.reason };
 
       const index = learningsIndexFor();
@@ -26589,7 +26586,7 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       const shards = Object.keys(index.files).sort();
       if (shards.length === 0) return { fire: false, reason: "wipe-test cadence learnings index has no shards" };
 
-      const seq = prior.count + 1;
+      const seq = prior.pairs.length + 1;
       const shard = shards[(seq - 1) % shards.length]!;
       let subject: WipeTestPairSubject;
       try {
@@ -26597,12 +26594,22 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       } catch (e) {
         return { fire: false, reason: String((e as Error)?.message ?? e) };
       }
+      const scheduled = scheduleWipeTestAblation({
+        root: config.root,
+        policy,
+        now,
+        candidate: { id: subject.id, risk: WIPE_TEST_SANDBOX_SUBJECT_RISK },
+        pairs: prior.pairs,
+        claimedUse: prior.claimedUse,
+        draw: deps.draw?.(),
+      });
+      if (!scheduled.fire) return scheduled;
       return {
         fire: true,
-        reason: paced.reason,
+        reason: scheduled.reason,
         seq,
         subject,
-        factor: chooseWipeTestFactor(seq),
+        factor: scheduled.factor,
       };
     });
   const run =
@@ -28916,10 +28923,16 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * 23-open-PR incident) is a pure predicate that was built, tested (test/queue-governor.test.ts),
  * and never invoked from any dispatch path; this supplies that call site for `drainCommand`'s and
  * `daemonCommand`'s `DrainDeps`/`DaemonDeps.checkQueueGovernor` fields (drain.ts/daemon.ts).
- * Mirrors {@link costGovernorGateFor} immediately above: `openPrCount` is a caller-supplied
+ * Mirrors {@link costGovernorGateFor} immediately above: `openPrOwnership` is a caller-supplied
  * closure over the COMPLETE open-board batch already read by `projectPlan`, rather than a second
- * GitHub request or a ledger read. The governor therefore sees PRs whose task shard is not yet on
- * main while drain and daemon retain one coherent observation per projection (W1-T3144).
+ * GitHub request. The governor therefore sees PRs whose task shard is not yet on main while drain
+ * and daemon retain one coherent observation per projection (W1-T3144).
+ *
+ * W1-T4465 (design (i)/(ii)): `openPrOwnership` returns the FLEET-OWNED/foreign split rather than
+ * a bare count (see {@link createOpenPrCountObservation}'s `readOwnership`), and this closure reads
+ * the ledger's trailing `verdict.merged`/`pr.opened` flow ({@link deriveQueueGovernorTrailingFlow})
+ * ONE extra time per consultation — the SAME per-consultation ledger read `costGovernorGateFor`
+ * already pays above, never a second GitHub request.
  *
  * A deferred consultation LEDGERS ITSELF (`logQueueGovernorDeferral`, sweep.ts) before returning,
  * so drain.ts/daemon.ts never need `ledgerPath`/`runId`/`appendLedger` just to report it — the
@@ -28933,13 +28946,20 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * for why drainage of already-open PRs must never be gated by WIP.
  */
 function queueGovernorGateFor(
-  openPrCount: () => number,
+  openPrOwnership: () => { owned: number; foreign: number },
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  now: () => number = Date.now,
 ): () => QueueGovernorResult | undefined {
   return () => {
-    const result = checkQueueGovernor(openPrCount(), policy);
+    const { owned, foreign } = openPrOwnership();
+    const flow = deriveQueueGovernorTrailingFlow(readLedgerLines(ledgerPath), now(), policy);
+    const result = checkQueueGovernor(owned, policy, {
+      foreignOpenCount: foreign,
+      trailingMergedCount: flow.trailingMergedCount,
+      trailingOpenedCount: flow.trailingOpenedCount,
+    });
     if (!result.deferred) return undefined;
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
@@ -28949,27 +28969,46 @@ function queueGovernorGateFor(
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection
  * fallback; a batch method that ran and failed throws so W1-T342's existing governor wrapper fails
- * admission closed. One helper serves drain and daemon so their queue definitions cannot drift. */
+ * admission closed. One helper serves drain and daemon so their queue definitions cannot drift.
+ *
+ * W1-T4465: `observe` now carries the FULL `PrRef[]` batch (status.ts), not merely its length, so
+ * `readOwnership` below can classify each `headRefName` for the queue governor's ownership split
+ * (design (i)) off this SAME single fetch. `read` is UNCHANGED in signature and behaviour — still a
+ * bare total count — because it also backs `DrainDeps.openPrCount`/`DaemonDeps.openPrCount`, the
+ * W1-T172 lane-dispatch-budget input, which has no ownership concept and must not gain one here. */
 function createOpenPrCountObservation(): {
   reset: () => void;
-  observe: (count: number | undefined) => void;
+  observe: (openPrs: readonly PrRef[] | undefined) => void;
   read: (projectionCount: () => number) => number;
+  readOwnership: (projectionCount: () => number) => { owned: number; foreign: number };
 } {
   let observed = false;
-  let count: number | undefined;
+  let openPrs: readonly PrRef[] | undefined;
   return {
     reset: () => {
       observed = false;
-      count = undefined;
+      openPrs = undefined;
     },
     observe: (next) => {
       observed = true;
-      count = next;
+      openPrs = next;
     },
     read: (projectionCount) => {
       if (!observed) return projectionCount();
-      if (count === undefined) throw new Error("open PR board count is unreadable");
-      return count;
+      if (openPrs === undefined) throw new Error("open PR board count is unreadable");
+      return openPrs.length;
+    },
+    // W1-T4465 design (i): a gateway without the batch method (the historical projection
+    // fallback, `!observed`) carries no per-PR head refs at all — every one of those PRs is
+    // counted OWNED, the SAME fail-closed direction {@link isFleetOwnedRunBranch} takes for a
+    // single unresolvable head, so an ownership signal this reader cannot see never silently
+    // stops gating. A batch method that ran and failed still throws, unchanged from `read` above.
+    readOwnership: (projectionCount) => {
+      if (!observed) return { owned: projectionCount(), foreign: 0 };
+      if (openPrs === undefined) throw new Error("open PR board count is unreadable");
+      let owned = 0;
+      for (const pr of openPrs) if (isFleetOwnedRunBranch(pr.headRefName)) owned++;
+      return { owned, foreign: openPrs.length - owned };
     },
   };
 }
@@ -29498,6 +29537,12 @@ async function drainCommand(
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
+  const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -29682,9 +29727,10 @@ async function drainCommand(
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
         checkCostGovernor: costGovernorGateFor(ledgerPath, runId, deps.now),
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
-        // 23-open-PR incident): the SAME `openPrCount` closure the W1-T172 lanes budget already
-        // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
+        // 23-open-PR incident): the SAME batch the W1-T172 lanes budget's `openPrCount` closure
+        // already reads (below), split by ownership (W1-T4465 design (i)) — never a second
+        // GitHub read path — see queueGovernorGateFor's doc.
+        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
@@ -31149,6 +31195,12 @@ export async function daemonCommand(
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
+  const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -31639,9 +31691,9 @@ export async function daemonCommand(
         // override (only a test does).
         reloadDailyCostCeilingUsd: dailyCostCeilingReloader(),
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
-        // 23-open-PR incident): the SAME `openPrCount` closure just defined above, never a second
-        // GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
+        // 23-open-PR incident): the SAME batch `openPrCount` reads just above, split by ownership
+        // (W1-T4465 design (i)) — never a second GitHub read path — see queueGovernorGateFor's doc.
+        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
@@ -36612,6 +36664,8 @@ export function harnessCommitForShellLessWorker(
     report: string;
     worktreePath: string;
     declaredPaths: readonly string[];
+    subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
+    derivedCommit?: { subject: string; reason: string };
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
@@ -36624,7 +36678,7 @@ export function harnessCommitForShellLessWorker(
   const commit = deps.commit ?? commitWorkerEdits;
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
-  if (asked === undefined) {
+  if (asked === undefined && input.derivedCommit === undefined) {
     const reason = MISSING_COMMIT_MESSAGE_REASON;
     // W1-T4450: the tail of the report that was parsed, so the next diagnosis has evidence instead
     // of a transcript a later round overwrote.
@@ -36632,10 +36686,13 @@ export function harnessCommitForShellLessWorker(
     input.onRefusal?.(reason, []);
     return input.commitCount;
   }
-  const committed = commit(input.worktreePath, input.declaredPaths, asked);
+  const message = asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`;
+  const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
+  const committed = commit(input.worktreePath, input.declaredPaths, message);
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
+    subject_source: subjectSource,
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
@@ -36673,26 +36730,25 @@ export function worktreeHasUncommittedChanges(worktreePath: string): boolean {
  *
  * 188 harness-commit refusals across 82 runs and 112 tasks (since 2026-09-17) carried this exact
  * reason: the worker did the work, saved it to the worktree, and one REPORT line was absent — the
- * single largest way a shell-less implement run ended with nothing. The refusal itself stays
- * correct: `harnessCommitForShellLessWorker` above still refuses to invent a subject, unchanged.
+ * single largest way a shell-less implement run ended with nothing. The first refusal stays in
+ * place; a bounded task-record fallback applies after the one re-ask.
  * But the run that DID the work is still addressable — the implement lane already resumes the SAME
  * worker session for a DECISION_REQUEST follow-up (`implement.resumed`, W1-T3573/W1-T3696); this
- * reuses that mechanism ONCE, asking for nothing but the missing line.
+ * reuses that mechanism ONCE, asking for the missing line and work context when needed.
  *
  * OWNS ITS OWN PRECONDITION, called unconditionally like its sibling above: it no-ops unless the
  * refusal was EXACTLY the missing-line reason (every other refusal — no files declared, outside the
  * declared surface, changed nothing — is left untouched) AND the worktree actually holds
  * uncommitted changes (a worker that changed nothing is left to that refusal rather than resumed to
- * relearn it). ONE resume: a second report still lacking the line is refused with a reason naming
- * that the resume was tried, never looped and never a synthesized subject — the resumed text is
- * merely APPENDED to the original report and handed back through the unchanged
- * `harnessCommitForShellLessWorker`, so every other refusal it can produce still applies.
+ * relearn it). ONE resume: a second report still lacking the line is refused when there is no
+ * task-record fallback; otherwise that fallback passes through the same commit and scope guards.
  */
 export async function resumeForMissingCommitLine(
   input: {
     commitCount: number;
     refusalReason: string | undefined;
     report: string;
+    task?: Pick<Task, "id" | "title" | "type">;
     worktreePath: string;
     declaredPaths: readonly string[];
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -36735,7 +36791,10 @@ export async function resumeForMissingCommitLine(
   // learnings-used, the worker's own narrative) survives; only the anchored COMMIT_MESSAGE line
   // the resumed reply carries is new, and `parseReport`'s own "last one wins" rule picks it up.
   const combinedReport = `${input.report}\n${resumed.text}`;
-  if (parseReport(combinedReport)?.commitMessage === undefined) {
+  const derivedCommit = parseReport(combinedReport)?.commitMessage === undefined && input.task
+    ? derivedImplementCommit(input.task, input.declaredPaths)
+    : undefined;
+  if (parseReport(combinedReport)?.commitMessage === undefined && derivedCommit === undefined) {
     const reason = `${MISSING_COMMIT_MESSAGE_REASON} (asked the worker's own session once; still absent)`;
     input.log("implement.harness_commit_refused", { reason });
     return { commitCount: input.commitCount, refusalReason: reason, report: combinedReport, resumed: true };
@@ -36749,6 +36808,8 @@ export async function resumeForMissingCommitLine(
       report: combinedReport,
       worktreePath: input.worktreePath,
       declaredPaths: input.declaredPaths,
+      subjectSource: derivedCommit ? "harness-derived" : "re-asked",
+      derivedCommit,
       log: input.log,
       say: input.say,
       onRefusal: createHarnessCommitRefusalRecorder(refusalState),
@@ -36766,17 +36827,72 @@ export const COMMIT_LINE_RESUME_PROMPT =
   "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
   "subject, at most 100 characters).";
 
-/** W1-T4052: build `resumeForMissingCommitLine`'s `resume` from the implement lane's own `spawn`
- *  and `account`. `spawnArgs` is the original spawn's mount (it names `resumeSessionId`); the
- *  prompt is always {@link COMMIT_LINE_RESUME_PROMPT}, and the resumed turn is accounted like any
- *  other so its cost rides the run's budget. */
+/** Codex's write-capable `exec resume` starts a fresh session; cash workers also have no session
+ * continuation. The result's provider is authoritative when an auction chose the mount. */
+function writerCannotResume(provider: WorkerResult["provider"], tools?: readonly string[]): boolean {
+  const readOnly = Array.isArray(tools) && !tools.some((tool) =>
+    ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  return !readOnly && (provider === "codex" || provider === "cash");
+}
+
+export function missingCommitLinePrompt(input: {
+  provider?: WorkerResult["provider"];
+  tools?: readonly string[];
+  title: string;
+  report: string;
+  worktreePath: string;
+  declaredPaths?: readonly string[];
+}): string {
+  if (!writerCannotResume(input.provider, input.tools)) return COMMIT_LINE_RESUME_PROMPT;
+  const diffStat = execFileSync("git", ["-C", input.worktreePath, "diff", "HEAD", "--stat"], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  const untracked = execFileSync("git", ["-C", input.worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  }).split("\0").filter((path) => path && (input.declaredPaths === undefined ||
+    input.declaredPaths.some((declared) => pathIsUnderDeclaredSurface(path, [declared])))).join("\n");
+  return `Task: ${input.title}\n\n` +
+    `git diff --stat (HEAD):\n${diffStat || "(no tracked changes)"}\n` +
+    `Untracked files:\n${untracked.slice(0, 1200) || "(none)"}\n\n` +
+    `Tail of your previous report:\n${input.report.slice(-REFUSED_REPORT_TAIL_CHARS)}\n\n` +
+    COMMIT_LINE_RESUME_PROMPT;
+}
+
+function derivedImplementCommit(task: Pick<Task, "id" | "title" | "type">, paths: readonly string[]): { subject: string; reason: string } | undefined {
+  if (task.type !== "implement" || !task.title.trim() || !paths[0]) return undefined;
+  const parts = paths[0].split("/");
+  const area = (parts.length > 1 ? parts[parts.length - 2] : parts[0].replace(/\.[^.]+$/, ""))
+    .toLowerCase().replace(/[^a-z0-9-]/g, "");
+  if (!area || area.length > 60) return undefined;
+  const clause = task.title.split(/\s+[—–-]\s+|[;:.!?]\s+/)[0].trim().toLowerCase().replace(/\s+/g, " ");
+  const prefix = `feat(${area}): `;
+  const subject = prefix + Array.from(clause).slice(0, 100 - prefix.length).join("").trimEnd().replace(/[^\p{L}\p{N}]$/u, "");
+  if (subject === prefix) return undefined;
+  return { subject, reason: `no COMMIT_MESSAGE after one re-ask; ${task.id} title and ${paths[0]}` };
+}
+
+function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
+  const pr = prUrl.match(/\/pull\/(\d+)(?:\/|$)/)?.[1];
+  if (check === undefined || check.trim().length === 0 || pr === undefined) return undefined;
+  const prefix = "fix: repair ";
+  const suffix = ` on #${pr}`;
+  if (prefix.length + suffix.length >= 100) return undefined;
+  const name = Array.from(check.trim().toLowerCase().replace(/\s+/g, " "))
+    .slice(0, 100 - prefix.length - suffix.length).join("").trimEnd();
+  return { subject: `${prefix}${name}${suffix}`, reason: `no COMMIT_MESSAGE after one re-ask; failing check ${check} on #${pr}` };
+}
+
+/** Build the re-ask from the implement lane's own spawn and account. The original mount and
+ *  session id stay in place; a non-resumable writer also receives its own work context. */
 export function commitLineResume(
   spawn: typeof spawnWorker,
   account: (r: WorkerResult) => WorkerResult,
   spawnArgs: Omit<SpawnWorkerArgs, "prompt">,
+  context?: { provider?: WorkerResult["provider"]; title: string; report: string; declaredPaths?: readonly string[] },
 ): () => Promise<{ text: string; costUsd: number; sessionId: string; numTurns: number; subtype: string }> {
   return async () => {
-    const resumed = account(await spawn({ ...spawnArgs, prompt: COMMIT_LINE_RESUME_PROMPT }));
+    const prompt = context ? missingCommitLinePrompt({ ...context, tools: spawnArgs.tools, worktreePath: spawnArgs.cwd }) : COMMIT_LINE_RESUME_PROMPT;
+    const resumed = account(await spawn({ ...spawnArgs, prompt }));
     return {
       text: workerTranscript(resumed),
       costUsd: resumed.costUsd,
