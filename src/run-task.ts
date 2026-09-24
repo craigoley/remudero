@@ -41202,7 +41202,6 @@ function loadProposalForRatify(
   owner: string,
   repo: string,
   config: Config,
-  // `rmd decline`/`rmd restore` need the ledger's declines applied; `rmd approve`'s own reading is left as it was.
   withDeclines = false,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -42117,8 +42116,6 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
-/** `rmd decline` / `rmd restore`: the same live classification `rmd approve` makes, with the ledger's declines
- *  applied, and the same ledger row the serve routes append. */
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], deps: { config?: Config } = {}): number {
   const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
