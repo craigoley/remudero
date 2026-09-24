@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -26,6 +25,7 @@ import {
 } from "../src/lib/sweep.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { CriterionVerdict } from "../src/lib/review.js";
 
@@ -372,12 +372,9 @@ test("W1-T3390: the real git default never writes to a repository that encloses 
   // MEASURED 2026-09-23: with TMPDIR inside a checkout, the test above let git walk up from its
   // "plain directory" and commit twice onto the operator's local branch. Rebuild that shape on
   // purpose: the fixture root inside an outer repository that must come out untouched.
-  const outer = mkdtempSync(join(tmpdir(), "rmd-plan-repair-outer-"));
-  const who = { GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
-  const outerGit = (...args: string[]): string =>
-    execFileSync("git", ["-C", outer, ...args], { encoding: "utf8", env: { ...process.env, ...who } }).trim();
-  outerGit("init", "--quiet");
-  outerGit("commit", "--quiet", "--allow-empty", "-m", "outer");
+  const enclosing = gitRepo({ kind: "plan-repair-outer" });
+  const outer = enclosing.dir;
+  const outerGit = (...args: string[]): string => enclosing.git(...args).trim();
   const before = outerGit("rev-parse", "HEAD");
   const repoDir = join(outer, "repo");
   mkdirSync(join(repoDir, "plan", "tasks.d"), { recursive: true });

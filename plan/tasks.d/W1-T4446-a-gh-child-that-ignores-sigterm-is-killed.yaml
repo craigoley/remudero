@@ -1,0 +1,35 @@
+- id: W1-T4446
+  title: "A `gh` CHILD CAN OUTLIVE ITS 60 s TIMEOUT — github-transport runs gh through execFile/execFileSync with `timeout` and the default SIGTERM only, and gh handles SIGTERM, so a wedged call never dies; escalate to SIGKILL after a short grace"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: low
+  origin: "2026-09-24 console/daemon incident follow-up: a gh child outlived its 60 s timeout"
+  plan_refs: []
+  files:
+    - src/lib/github-transport.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: a gh child outlived DEFAULT_GH_CALL_TIMEOUT_MS (60 s). The primary cause was the
+    daemon's blocked event loop (fixed in #6954), because a Node timeout cannot fire while the loop is
+    blocked. But the transport has a second, independent gap. ghJson/ghExec (execFileSync) and ghJsonAsync
+    (promisified execFile) pass only `timeout`, so Node sends the default killSignal SIGTERM once and never
+    escalates. gh is a Go program that handles SIGTERM, so a gh child wedged on a network read can survive the
+    signal and hold its slot, its single-flight entry in asyncReadInFlight, and the caller's await. Elsewhere,
+    review.ts and worker.ts already set killSignal: "SIGKILL" for children that must die.
+  design: |
+    For the async path: on timeout send SIGTERM, then SIGKILL after a short grace if the child has not exited,
+    and reject with the timeout error either way, so asyncReadInFlight is released. For the sync path, where
+    execFileSync cannot escalate: set killSignal "SIGKILL" and name the choice. Export the grace as a constant.
+    Ledger or stderr the escalation once per call (`gh.kill_escalated`) so the frequency is measurable. Out of
+    scope: the timeout's value, pacing, and non-gh children.
+  acceptance:
+    - claim: "a gh child that ignores SIGTERM receives SIGKILL after the timeout grace"
+      proof: "unit test: a gh child that ignores SIGTERM receives SIGKILL after the timeout grace"
+  falsifier: |
+    CLOSE IF github-transport already escalates a timed-out gh child to SIGKILL.
