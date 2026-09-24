@@ -2,7 +2,6 @@
   title: "A HOST OR TUNNEL OUTAGE BLANKS THE CONSOLE BECAUSE THE CONSOLE CAN ONLY PULL — push each changed status and recent snapshot, HMAC-signed, to the console's ingest route so it can keep showing the last snapshot, labelled stale, while the gateway is unreachable (optional; take on if outages continue after the pull fixes)"
   repo: remudero
   depends_on: [W1-T4451]
-  priority: 3
   type: implement
   verify: human
   principles: {tdd: strict}
@@ -18,7 +17,9 @@
     HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
     `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
     if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
-  status: queued
+  status: blocked
+  retirement: retired
+  # RETIRED 2026-09-24 by operator ruling: unnecessary. Host and tunnel outages did not cause the console dropouts; serve event-loop stalls did, and #6988, #6993, #7023, #7024 and #7025 fixed them. The build hold in `note:` is moot.
   attempts: 0
   rationale: |
     Every console read is a pull through the Cloudflare tunnel to serve. When the host or tunnel is down, the console
