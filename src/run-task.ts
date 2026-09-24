@@ -26469,7 +26469,7 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
     (() => {
       const config = configFor();
       const policy: WipeTestCadencePolicy = policyFor().values.wipeTestCadence;
-      const now = deps.now?.() ?? new Date();
+      const now = clockFromDateFn(deps.now).date();
       const paced = wipeTestCadenceCheck({ root: config.root, policy, now });
       if (!paced.fire) return paced;
 

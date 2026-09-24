@@ -41,7 +41,7 @@ import {
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlan, loadPlanFromYaml, type Task, type TaskRisk } from "./plan.js";
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -2151,7 +2151,7 @@ export function scheduleWipeTestAblation(opts: {
   /** Override the per-slot draw in [0, 1). */
   draw?: number;
 }): WipeTestAblationSchedule {
-  const now = opts.now ?? new Date();
+  const now = opts.now ?? systemClock.date();
   const paced = wipeTestCadenceCheck({ root: opts.root, policy: opts.policy, now });
   if (!paced.fire) return paced;
   if (opts.candidate.risk !== "low") {
