@@ -167,6 +167,61 @@ export function ceilingForComments(comments) {
 }
 
 /**
+ * W1-T4431 -- AN ABSENT ROW ALREADY MEANS {@link CEILING_BUCKET_COMMENTS}. `evaluateCommentLoadRatchet`
+ * proved that on the RUNTIME side long before this task (an absent path is measured, never refused,
+ * and recorded at its own bucket); this predicate states the same fact as the CENSUS's own rule: a
+ * row is only INFORMATION when it says something an absent row would not, i.e. when the file's own
+ * bucket sits above the default. A brand-new file under the default needs no row -- there is nothing
+ * for one to say that "absent" does not already say.
+ *
+ * @param {number} comments a file's measured comment-line count
+ * @returns {boolean} whether scripts/comment-load-baseline.json must carry a row for it
+ */
+export function baselineRowRequired(comments) {
+  return ceilingForComments(comments) > CEILING_BUCKET_COMMENTS;
+}
+
+/**
+ * W1-T4431 -- THE MIRROR of {@link baselineRowRequired}: a row recorded at EXACTLY the default
+ * bucket carries no information an absent row would not, so it is REDUNDANT, not merely harmless --
+ * every PR that happens to touch a neighbouring line re-diffs it for nothing. Kept as its own
+ * one-line predicate, rather than folded into a bigger scan, so a fixture can pin it in isolation.
+ *
+ * @param {number} recorded a baseline row's own recorded ceiling
+ * @returns {boolean} whether that recorded value is redundant with "absent"
+ */
+export function isRedundantBaselineRow(recorded) {
+  return recorded === CEILING_BUCKET_COMMENTS;
+}
+
+/**
+ * W1-T4431 -- THE CENSUS RULE ITSELF, restated against the two predicates above: "every measured
+ * file above the default bucket carries a row, and no row sits at the default" -- replacing the
+ * older, stricter "every measured file carries a row, and nothing else does" that made a brand-new
+ * file's default-bucket row a shared merge surface (17 of the last 150 merged PRs touched this
+ * ledger; OBSERVED on #6922 and #6925, a new file needing a row whose value WAS the default). Pure:
+ * `missing` names a path that needs a row and has none, `redundant` names a recorded row that is
+ * exactly the default and so needs none. `baseline`'s own `_comment` prose key is skipped -- it is
+ * not a path.
+ *
+ * NOT wired into `main`'s exit code here -- the shipped baseline still carries rows recorded under
+ * the old, stricter rule, and this predicate is the mechanism a follow-up adopts to retire them; see
+ * this task's own PR body for that boundary.
+ *
+ * @param {Record<string, number>} currentComments this run's measured comment counts, by path
+ * @param {Record<string, number>} baseline the baseline object, as {@link readBaseline} returns it
+ */
+export function evaluateBaselineCensus(currentComments, baseline) {
+  const missing = Object.keys(currentComments)
+    .filter((path) => baseline[path] === undefined && baselineRowRequired(currentComments[path]))
+    .sort();
+  const redundant = Object.keys(baseline)
+    .filter((path) => path !== "_comment" && isRedundantBaselineRow(baseline[path]))
+    .sort();
+  return { missing, redundant, ok: missing.length === 0 && redundant.length === 0 };
+}
+
+/**
  * Pure verdict over one run's measured counts.
  *
  *   - absent from baseline      -> ADDED; recorded at today's count.

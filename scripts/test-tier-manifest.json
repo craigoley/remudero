@@ -156,6 +156,7 @@
     "test/a-new-census-gate-cannot-ship-itself.test.ts": 800,
     "test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts": 1089,
     "test/a-new-export-in-an-old-module-needs-a-caller.test.ts": 0,
+    "test/a-new-file-needs-no-comment-load-row.test.ts": 0,
     "test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts": 169,
     "test/a-new-task-id-must-be-reserved-by-its-own-branch.test.ts": 0,
     "test/a-new-test-file-tiers-itself.test.ts": 0,
