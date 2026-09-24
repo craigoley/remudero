@@ -23,6 +23,7 @@
  * decomposition step that lifts those shared REST readings into their own lib module could then
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
+import { systemClock } from "./clock.js";
 import { execFileSync } from "node:child_process";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
@@ -322,6 +323,12 @@ export interface ArmDeps {
   /** W1-T1280 — OPTIONAL. Blocks the calling thread for `ms` between the bounded re-reads
    *  {@link readMergeFacts} above drives. */
   sleepSync?: (ms: number) => void;
+  /** W1-T4405 — OPTIONAL. True when the PR's base branch requires a merge queue. Absent (or
+   *  false) keeps every pre-queue path byte-for-byte. */
+  mergeQueue?: (prUrl: string) => boolean;
+  /** W1-T4405 — OPTIONAL. `gh pr merge <url>`: on a queue branch this ENQUEUES the PR (the queue
+   *  owns the merge method), where the REST merge endpoint would be refused as a queue bypass. */
+  enqueue?: (prUrl: string) => void;
   say: (msg: string) => void;
 }
 
@@ -374,8 +381,51 @@ export function realArmDeps(
       if (ms <= 0) return;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
     },
+    // Cached per PR for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST
+    // reads per attempt would spend the core budget on a setting that changes almost never.
+    mergeQueue: (prUrl) => {
+      const now = systemClock.now();
+      const hit = mergeQueueReads.get(prUrl);
+      if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
+      const value = baseBranchRequiresMergeQueue(prUrl);
+      mergeQueueReads.set(prUrl, { at: now, value });
+      return value;
+    },
+    enqueue: (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
+      ghExec(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
+    },
     say: (msg) => console.log(msg),
   };
+}
+
+const mergeQueueReads = new Map<string, { at: number; value: boolean }>();
+/** How long one PR's merge-queue reading is reused. A queue turned on mid-window reaches an
+ *  already-read PR at most this late, and the REST merge it would try is refused by GitHub. */
+export const MERGE_QUEUE_READ_TTL_MS = 10 * 60_000;
+
+/** W1-T4405 — does `prUrl`'s base branch require a merge queue? Read over REST (the PR's base ref,
+ *  then the rules GitHub applies to that branch, which include rulesets). A read that fails answers
+ *  FALSE: that keeps the pre-queue path, and GitHub itself refuses a REST merge that would bypass a
+ *  real queue, whereas a wrong TRUE would send a plain `gh pr merge` to an unqueued branch. */
+export function baseBranchRequiresMergeQueue(prUrl: string, fetch: GhApiFetcher = ghJson): boolean {
+  const target = parsePrUrl(prUrl);
+  if (!target) return false;
+  try {
+    const pr = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as { base?: { ref?: string } };
+    const branch = pr?.base?.ref;
+    if (!branch) return false;
+    const rules = fetch(["api", `repos/${target.owner}/${target.repo}/rules/branches/${encodeURIComponent(branch)}`]);
+    return Array.isArray(rules) && rules.some((rule) => (rule as { type?: unknown })?.type === "merge_queue");
+  } catch {
+    // unreadable ⇒ the pre-queue path, which GitHub's own queue enforcement keeps safe (see above)
+    return false;
+  }
+}
+
+/** W1-T4405 — GitHub's refusal when the PR is ALREADY in the queue: it is armed, not stuck. */
+export function armFailureIsAlreadyQueued(stderrText: string): boolean {
+  return /already (?:queued|in (?:the )?merge queue)|already enqueued/i.test(stderrText);
 }
 
 /** Terminal outcome of one arm attempt — returned so tests assert the branch taken. */
@@ -639,7 +689,7 @@ export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync">>,
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync" | "mergeQueue" | "enqueue">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -671,6 +721,7 @@ export function attemptArm(
       return { outcome: "hold-refused" };
     }
   }
+  if (deps.mergeQueue?.(prUrl)) return attemptQueueArm(prUrl, deps);
   try {
     deps.armAuto(prUrl);
     return { outcome: "armed" };
@@ -780,6 +831,47 @@ export function attemptArm(
       return { outcome: "arm-error-ignored", error: msg, rateLimit: quota };
     }
     deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
+    return { outcome: "arm-error-ignored", error: msg };
+  }
+}
+
+/**
+ * W1-T4405 — THE MERGE-QUEUE PATH. On a queue branch, auto-merge IS how a PR enters the queue, so
+ * a successful arm, an "already queued" refusal and an explicit enqueue all read as `armed` — a
+ * queued PR is armed, not stuck. What never happens here is {@link ArmDeps.mergeDirect}: the REST
+ * merge endpoint bypasses the queue, so every fallback that would reach it (clean status, the quota
+ * fallback) enqueues instead, or reports the failure and leaves the PR for the next pass.
+ */
+function attemptQueueArm(
+  prUrl: string,
+  deps: Pick<ArmDeps, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "enqueue">>,
+): ArmAttemptResult {
+  try {
+    deps.armAuto(prUrl);
+    deps.say(`automerge.queued (W1-T4405): auto-merge armed on a merge-queue branch — the queue merges it: ${prUrl}`);
+    return { outcome: "armed" };
+  } catch (e) {
+    const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
+    if (armFailureIsAlreadyQueued(msg)) {
+      deps.say(`automerge.queued (W1-T4405): already in the merge queue — armed, not stuck: ${prUrl}`);
+      return { outcome: "armed" };
+    }
+    if (armFailureAction(msg) === "direct-merge" && deps.enqueue) {
+      try {
+        deps.enqueue(prUrl);
+        deps.say(`automerge.enqueued (W1-T4405): already green — added to the merge queue, never merged around it: ${prUrl}`);
+        return { outcome: "armed" };
+      } catch (e2) {
+        const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
+        if (armFailureIsAlreadyQueued(msg2) || deps.isMerged?.(prUrl)) {
+          deps.say(`automerge.enqueued (W1-T4405): the queue already holds or merged it: ${prUrl}`);
+          return { outcome: "armed" };
+        }
+        deps.say(`automerge.enqueue_failed (W1-T4405): ${msg2} — ${prUrl}`);
+        return { outcome: "arm-error-ignored", error: msg2 };
+      }
+    }
+    deps.say(`automerge.arm_error_ignored (W1-T4405, merge queue — no direct merge): ${msg} — ${prUrl}`);
     return { outcome: "arm-error-ignored", error: msg };
   }
 }

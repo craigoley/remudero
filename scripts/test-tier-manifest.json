@@ -425,6 +425,7 @@
     "test/audit-is-preregistered-as-cli-only.test.ts": 0,
     "test/authority-ratchet.test.ts": 405,
     "test/authority-table.test.ts": 1326,
+    "test/auto-merge-enters-the-merge-queue.test.ts": 0,
     "test/auto-triage-daily-cap.test.ts": 1248,
     "test/auto-triage-policy-seam.test.ts": 949,
     "test/auto-triage-rung.test.ts": 1541,
