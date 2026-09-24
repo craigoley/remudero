@@ -621,6 +621,8 @@ async function defaultAdoptionShipDateAsync(checkoutDir: string, file: string, n
     const { stdout } = await execFileAsync("git", adoptionShipDateArgs(file, needle), { cwd: checkoutDir, encoding: "utf8", maxBuffer: 1 << 24 });
     return oldestAdoptionShipDate(stdout);
   } catch {
+    // "unknown" IS the reason-carrying value here: the finding stands, only its date is unread —
+    // the same answer defaultAdoptionShipDate gives, so the report stays byte-identical.
     return "unknown";
   }
 }

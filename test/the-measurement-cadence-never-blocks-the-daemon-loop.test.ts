@@ -10,7 +10,9 @@ import { test } from "node:test";
 import {
   runMeasurementCadenceReport,
   runMeasurementCadenceReportAsync,
+  type AdoptionFinding,
   type MeasurementCadenceReportOpts,
+  type MeasurementCadenceRunResult,
 } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -25,6 +27,11 @@ function writeFiles(root: string): void {
     mkdirSync(dirname(join(root, rel)), { recursive: true });
     writeFileSync(join(root, rel), text, "utf8");
   }
+}
+
+function findingsOf(result: MeasurementCadenceRunResult): AdoptionFinding[] {
+  assert.ok(result.adoptionReport, "the cadence must attach an adoption report");
+  return result.adoptionReport.findings;
 }
 
 function reportOpts(root: string): MeasurementCadenceReportOpts {
@@ -55,7 +62,7 @@ test("the measurement cadence lets a timer fire while its ship-date lookups are 
     return r;
   });
   assert.deepEqual(order, ["timer", "report"], "a timer scheduled before the run must fire before it resolves");
-  const findings = result.adoptionReport.findings.filter((f) => f.shape !== "gate-no-subject");
+  const findings = findingsOf(result).filter((f) => f.shape !== "gate-no-subject");
   assert.ok(findings.length >= 3, `expected the fixture's three unadopted mechanisms, saw ${findings.length}`);
   assert.equal(lookups, findings.length, "one async lookup per finding, none left to the sync resolver");
   for (const f of findings) assert.equal(f.shippedAt, "2026-01-02T00:00:00Z", `${f.mechanism} kept the async date`);
@@ -66,8 +73,8 @@ test("the off-loop ship-date lookup reports exactly the dates the in-loop one do
   writeFiles(repo.dir);
   repo.git("add", "src", "scripts");
   repo.git("commit", "--quiet", "-m", "ship the lonely mechanisms", "--date", "2026-03-04T05:06:07+00:00");
-  const inLoop = runMeasurementCadenceReport(reportOpts(repo.dir)).adoptionReport.findings;
-  const offLoop = (await runMeasurementCadenceReportAsync(reportOpts(repo.dir))).adoptionReport.findings;
+  const inLoop = findingsOf(runMeasurementCadenceReport(reportOpts(repo.dir)));
+  const offLoop = findingsOf(await runMeasurementCadenceReportAsync(reportOpts(repo.dir)));
   assert.deepEqual(offLoop, inLoop);
   const dated = offLoop.filter((f) => Date.parse(f.shippedAt) === Date.parse("2026-03-04T05:06:07Z"));
   assert.ok(dated.length >= 3, `expected every fixture finding dated from git, saw ${dated.length}`);
@@ -76,7 +83,7 @@ test("the off-loop ship-date lookup reports exactly the dates the in-loop one do
 test("the off-loop ship-date lookup reads unknown where git history is unreadable", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cadence-offloop-nogit-`));
   writeFiles(root);
-  const findings = (await runMeasurementCadenceReportAsync(reportOpts(root))).adoptionReport.findings.filter(
+  const findings = findingsOf(await runMeasurementCadenceReportAsync(reportOpts(root))).filter(
     (f) => f.shape !== "gate-no-subject",
   );
   assert.ok(findings.length >= 3, `expected the fixture's three unadopted mechanisms, saw ${findings.length}`);
