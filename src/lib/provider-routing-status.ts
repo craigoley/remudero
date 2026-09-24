@@ -415,10 +415,28 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   };
 }
 
-/** Write one fixed, mode-0600 snapshot atomically. Throws so callers can record a bounded failure. */
+/** The record on disk when it holds a probed reading (`selected` or `blocked`) with its provider windows. */
+function probedRecord(target: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
+    return parsed.state === "selected" || parsed.state === "blocked" ? parsed : undefined;
+  } catch {
+    // Absent, unreadable or malformed holds no reading worth keeping, so the not-probed write lands.
+    return undefined;
+  }
+}
+
+/** Write one fixed, mode-0600 snapshot atomically. Throws so callers can record a bounded failure.
+ *  W1-T4445: a `not-probed` write (a pinned Claude spawn) never replaces a probed reading. It refreshes
+ *  only the policy and model health on it; the reading keeps its own instant and the reader ages it. */
 export function writeProviderRoutingStatus(root: string, input: ProviderRoutingWriteInput): void {
   const target = providerRoutingStatusPath(root);
-  const payload = `${JSON.stringify(projectWrite(input))}\n`;
+  const projected = projectWrite(input);
+  const kept = input.state === "not-probed" ? probedRecord(target) : undefined;
+  const record = kept
+    ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
+    : projected;
+  const payload = `${JSON.stringify(record)}\n`;
   if (Buffer.byteLength(payload) > MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES) {
     throw new Error("provider routing snapshot exceeds its fixed size bound");
   }

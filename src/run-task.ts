@@ -153,6 +153,7 @@ import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
+import { daemonSreLaneInput, startSreLane } from "./lib/sre-lane.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -31659,6 +31660,26 @@ export async function daemonCommand(
                     },
                   };
                 },
+                // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
+                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
+                // registry instance" has no selector yet -- `RegistryInstance` carries no role or
+                // state_dir a daemon can identify itself by -- so `RMD_SRE_LANE=1` is a safe-default-
+                // OFF opt-in an operator sets on the ONE instance meant to run it until one exists.
+                // The starter is inert until called, so it is built on every start and dropped
+                // unless opted in.
+                ...[
+                  startSreLane(
+                    daemonSreLaneInput({
+                      stateDir: join(config.root, "state"),
+                      root: repoRoot,
+                      ledgerPath,
+                      owner: self.owner,
+                      repo: self.repo,
+                      mergedLastDay: () => mergedInLastDay(repoRoot),
+                      log,
+                    }),
+                  ),
+                ].filter(() => process.env.RMD_SRE_LANE === "1"),
               ],
             }
           : {}),

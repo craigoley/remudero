@@ -25,6 +25,8 @@
     (ii) It ranks causes by minutes lost and, for the costliest cause without an open task, drafts a plan task (operator-
     reviewed draft, like the other gardeners) naming the measurement. (iii) It writes a weekly trend row so an improvement is
     visible as the metric moving.
+    (iv) Fix-lane waste is a first-class cause: fix rounds by refusal reason (fix.commit_refused / fix.done subtypes) and
+    their cost, so a class like 2026-09-24's 62-of-65 refused rounds is ranked and drafted without a human study.
   acceptance:
     - claim: "the gardener prices each cause in PR minutes"
       proof: 'grep: test("W1-T4435: the gardener prices each cause in PR minutes" in test/the-ci-friction-gardener-files-its-own-fixes.test.ts'
