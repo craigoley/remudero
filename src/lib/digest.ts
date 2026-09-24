@@ -429,8 +429,6 @@ export interface DigestSummary {
   learningUsefulness?: LearningUsefulness;
   learningOutcomes?: LearningOutcomeSummary;
   knowledgeMeasured?: KnowledgeMeasuredSummary;
-  /** W1-T4092: each ablation factor's effect, interval and pair count, folded over every line read;
-   *  absent when no `wipetest.pair` row was read. */
   wipeTestEffects?: WipeTestFactorEffect[];
   gateFireRates?: GateFireRateSummary;
   ledgerWriters?: LedgerWriterFlag[];
@@ -692,7 +690,6 @@ export function renderLearningOutcomes(s: LearningOutcomeSummary): string {
   );
 }
 
-/** W1-T4092 — per-factor ablation effects over every `wipetest.pair` row in `lines`, or undefined. */
 export function summarizeWipeTestEffects(lines: readonly LedgerLine[]): WipeTestFactorEffect[] | undefined {
   const pairs = lines.map(wipeTestPairFromLedgerObject).filter((p): p is WipeTestPair => p !== undefined);
   return pairs.length === 0 ? undefined : estimateWipeTestFactorEffects(pairs);
@@ -707,8 +704,6 @@ function renderEstimate(name: string, e: WipeTestEffectEstimate): string {
   return `${name} ${signed(e.mean ?? 0)}${interval}`;
 }
 
-/** One line: per factor its pair count and turns/landed/cost effect with the 95% interval; positive
- *  means masking the factor hurt, so the factor helps. */
 export function renderWipeTestEffects(effects: readonly WipeTestFactorEffect[]): string {
   const one = (e: WipeTestFactorEffect): string => {
     if (e.pairs === 0) return `${e.factor} 0 pair(s): not measured`;

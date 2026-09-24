@@ -26454,7 +26454,6 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
   execFileSyncFn?: typeof execFileSync;
   targetArgs?: string[];
   resolveMergedState?: (taskId: string, planPath: string, config: Config) => WipeTestMergedState;
-  /** W1-T4092: override the per-slot share draw in [0, 1). */
   draw?: () => number;
 } = {}): {
   checkWipeTestCadence: () => WipeTestCadenceDecision;
@@ -26490,7 +26489,6 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       } catch (e) {
         return { fire: false, reason: String((e as Error)?.message ?? e) };
       }
-      // W1-T4092: the factor and whether this slot is ablated at all come from the adaptive share.
       const scheduled = scheduleWipeTestAblation({
         root: config.root,
         policy,
