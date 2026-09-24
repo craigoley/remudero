@@ -28,6 +28,7 @@ import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
 import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
+import { systemClock, type Clock } from "./clock.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
@@ -60,6 +61,8 @@ export interface PanelActionDeps {
   /** Rules {@link buildEscalationReplyRoute} hands `interpretReply` to decide whether a reply is
    *  understood; unset runs its default, always "understood", so unconfigured behavior is unchanged. */
   interpretReplyDeps?: InterpretReplyDeps;
+  /** Stamps the question-store answer {@link buildEscalationReplyRoute} records; unset ⇒ `systemClock`. */
+  clock?: Clock;
 }
 
 /** Shared with lib/panel-graph.ts (W3-T6, the plan->task->PR graph + feedback/decision routes) -- one JSON-envelope writer for every panel route, never a second copy. */
@@ -500,11 +503,13 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
   };
 }
 
-/** POST /v1/escalation/reply (W1-T2496) — a human answering an ESCALATION in prose. Derives the
- *  same {@link ThreadIdentity} escalate.ts keys this by; a thread with no prior message, or an
- *  unset `threadStorePath`, refuses (400) rather than filing unattached feedback.
- *  CONTROL INVARIANT — a reply is an input, never a command: only appends the thread, captures
- *  feedback and ledgers — never `deps.issues`, dispatch, or a ratify gateway.
+/** POST /v1/escalation/reply (W1-T2496, W1-T4471) — a human answering an ESCALATION in prose.
+ *  Derives the same {@link ThreadIdentity} escalate.ts keys this by; a thread with no prior
+ *  message, or an unset `threadStorePath`, refuses (400) rather than filing unattached feedback.
+ *  CONTROL INVARIANT — a reply is an input, never a command: appends the thread, captures
+ *  feedback, records into `plan/questions.ndjson` (the SAME store the GitHub-comment reader,
+ *  lib/escalation-answers.ts, and `/v1/questions/answer` write) and ledgers — never `deps.issues`,
+ *  dispatch, or a ratify gateway.
  *  Falsifier: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts.
  *  Why: docs/forensics/panel-actions.md#buildescalationreplyroute */
 export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
@@ -560,10 +565,20 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
 
       const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId });
       const origin = bearerTokenId(req);
+      // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is
+      // required above, so the answer always names its task.
+      const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
+        ts: (deps.clock ?? systemClock).iso(),
+        task: input.taskId,
+        answer: input.text,
+        origin,
+      });
       ledgerPanelAction(deps, "panel.escalation_replied", input.taskId, origin, {
         thread_id: threadId,
         feedback_id: entry.id,
         interpretation: interpretation.status,
+        flows_to: "plan/questions.ndjson",
+        recorded_to_question_store: recordedToQuestionStore,
       });
       sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation });
     }),
