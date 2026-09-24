@@ -42,5 +42,7 @@
       proof: "unit test: operator activity is answered from the console snapshot cache"
     - claim: "an unchanged cached body answers 304 to its own etag"
       proof: "unit test: an unchanged cached body answers 304 to its own etag"
+    - claim: "serve builds its cached console reads through the snapshot cache"
+      proof: "grep: createConsoleSnapshotCache( in src/lib/serve.ts"
   falsifier: |
     CLOSE IF GET /v1/feedback on main is already served from a buffered cache without calling listFeedback per request.

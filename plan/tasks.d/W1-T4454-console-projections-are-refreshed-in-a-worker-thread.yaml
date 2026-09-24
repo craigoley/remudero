@@ -44,5 +44,7 @@
       proof: "unit test: cached console paths refresh in the background only while a viewer is present"
     - claim: "the snapshot cache starts the projection worker"
       proof: "grep: startConsoleProjectionWorker( in src/lib/console-snapshot-cache.ts"
+    - claim: "serve builds its cached console reads through the snapshot cache"
+      proof: "grep: createConsoleSnapshotCache( in src/lib/serve.ts"
   falsifier: |
     CLOSE IF serve on main already computes the feedback projection in a worker thread.
