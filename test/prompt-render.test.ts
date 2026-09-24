@@ -94,9 +94,11 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // W1-T4330 re-baselined diagnose: its contract now leads with REPRODUCTION and adds FALSIFIER
   // (test/a-diagnose-report-names-a-red-capable-reproduction.test.ts pins the new text itself).
   assert.equal(sha256(diagnose), "ab2e0942887144a79c234d86a5b65ef390d05babe7c116bb4f8bd3fa5bf0fa49");
+  // Re-baselined implement: its contract now teaches the QUESTION / CURRENT_ASSUMPTION lines
+  // (test/a-worker-is-taught-the-question-contract.test.ts pins the new text itself).
   // Re-baselined implement: its DECISION_REQUEST now asks for a FALSIFIER line
   // (test/a-decision-request-names-its-falsifier.test.ts pins the new text itself).
-  assert.equal(sha256(implement), "5e19f2f2b1b78d640c232c5d113f1115ffd06821a37e87fefc7b60ac0e84d012");
+  assert.equal(sha256(implement), "ebd6e18fd9907882d048984a6df3cb36f6788ce9d06d7b7dc7a525dfe40e02fd");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {
