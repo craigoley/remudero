@@ -114,6 +114,40 @@ test("W1-T4466 FALSIFIER: any OTHER 422 (unrelated to an existing PR) still thro
   assert.equal(lookupCalled, false, "no head lookup is even attempted for a 422 that does not name an existing PR");
 });
 
+test("W1-T4466: an unreadable or malformed adoption lookup preserves the original create rejection", () => {
+  const built = {
+    command: "gh" as const,
+    args: ["api", "--method", "POST", "repos/craigoley/remudero/pulls"],
+    options: { cwd: "/tmp", encoding: "utf8" as const },
+  };
+  const rejection = alreadyExistsRejection("craigoley", "remudero", "run-W1-T4384-1");
+  const lookupFailure = new Error("head lookup could not be read");
+  const cases: Array<[string, () => string]> = [
+    ["failed head lookup", () => { throw lookupFailure; }],
+    ["malformed head-lookup JSON", () => "not-json"],
+  ];
+
+  for (const [label, lookup] of cases) {
+    let calls = 0;
+    assert.throws(
+      () => runGhPrCreate(
+        built,
+        "run-W1-T4384-1",
+        () => {},
+        () => {},
+        () => {
+          calls += 1;
+          if (calls === 1) throw rejection;
+          return lookup();
+        },
+      ),
+      (err: unknown) => err === rejection,
+      label,
+    );
+    assert.equal(calls, 2, `${label}: one create and one adoption lookup, with no retry`);
+  }
+});
+
 // ── acceptance 2: a failed check-runs READ ends its lane, never the whole pass ──────────────────
 
 function twoTaskPlan() {
