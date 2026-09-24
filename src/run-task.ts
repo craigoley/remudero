@@ -14229,7 +14229,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
   // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
   const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
-  // Operator ruling 2026-09-24: the cash-simple trial takes a capped share of the simplest work.
   const cashTrial = decideCashTrial({
     task,
     taskClass,
