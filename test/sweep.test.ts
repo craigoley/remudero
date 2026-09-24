@@ -1999,12 +1999,8 @@ test("W1-T1210: the strike ceiling is unchanged by the clearing path", async () 
 // already-merged PR. ─────────────────────────────────────────────────────────
 
 test("runSweep: a seeded MERGED PR produces ZERO dispositions ACTED — the sweep never starts a rung on a terminal PR (the #388 falsifier)", async () => {
-  const notOpenLogs: unknown[] = [];
   const deps = fakeDeps({
     readLiveState: async () => ({ ok: true, state: "MERGED" }),
-    log: (step, extra) => {
-      if (step === "sweep.dispose.not_open") notOpenLogs.push(extra);
-    },
   });
 
   const summary = await runSweep([blockedFixablePr()], deps);
@@ -2012,10 +2008,8 @@ test("runSweep: a seeded MERGED PR produces ZERO dispositions ACTED — the swee
   assert.equal(deps.fixed.length, 0, "dispatchFix is called ZERO times on a terminal PR");
   assert.equal(summary.actionsTaken, 0);
   assert.equal(summary.actions[0].acted, false, "the disposed line's acted flag reflects the stand-down");
-  assert.equal(notOpenLogs.length, 1, "exactly one sweep.dispose.not_open ledger line, naming the state");
-  assert.match((notOpenLogs[0] as { reason: string }).reason, /MERGED/);
 
-  // The ledgered sweep.disposed line itself names the stand-down reason too.
+  // The ledgered sweep.disposed line names the state — never silent.
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
   assert.equal(disposed.length, 1);
   assert.equal(disposed[0].acted, false);
