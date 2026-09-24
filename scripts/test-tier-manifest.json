@@ -1702,6 +1702,7 @@
     "test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts": 454,
     "test/the-scheduled-learning-rung-drafts-and-discards.test.ts": 0,
     "test/the-served-model-is-not-the-model-that-was-requested.test.ts": 665,
+    "test/the-slow-tier-runs-on-main.test.ts": 0,
     "test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts": 455,
     "test/the-strike-regime-of-an-unjudged-round.test.ts": 0,
     "test/the-supervisor-names-the-daemon-it-is-restarting.test.ts": 0,
