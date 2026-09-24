@@ -1432,6 +1432,7 @@
     "test/run-branch-claim-is-unenforced.test.ts": 855,
     "test/run-branch-eligibility-check-instrument-surface-exclusion.test.ts": 0,
     "test/run-branch-pr-state.test.ts": 1291,
+    "test/run-pr-acceptance-normalize.test.ts": 0,
     "test/run-review-evidence-target.test.ts": 0,
     "test/run-review-holdout-integration.test.ts": 1429,
     "test/run-task-body-takes-an-explicit-context.test.ts": 0,
