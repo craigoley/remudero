@@ -1,0 +1,41 @@
+- id: W1-T4417
+  title: "A RUN THAT COSTS 24 TIMES ITS CLASS MEDIAN IS LEDGERED EIGHT TIMES AND ACTED ON NEVER — route cost and duration anomalies into the SRE gardener's incident ingest, and report a run that is running long while it still runs"
+  repo: remudero
+  depends_on: [W1-T4383]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "follow-up audit 2026-09-24 (operator: improve automated flow and self-improvement)"
+  plan_refs: ["W1-T931", "W1-T4383", "W1-T4385"]
+  files:
+    - src/lib/cost-anomaly.ts
+    - src/lib/sweep.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24: W1-T4399's run cost $24.95 against a src-class median of $1.03 (multiplier 8 threshold,
+    38 samples) and its worker ran 1h36m. The daemon wrote 8 identical `cost.anomaly` rows and nothing else
+    happened. cost-anomaly.ts states it "REPORTS; IT NEVER ACTS" (W1-T931 design note v), which is right for that
+    module: stopping a worker on a statistic is unsafe. But the finding reaches no one. The SRE gardener's
+    ingest (W1-T4383, merged) is exactly where a finding should go to be triaged.
+  design: |
+    (i) Each NEW cost.anomaly finding (the existing dedup by run id holds, so no more 8x rows) also posts one incident
+    event {source:"daemon", kind:"anomaly", name:"cost.anomaly:<task_class>", message:<task, cost, median, multiplier>}
+    through the W1-T4383 ingest's in-process writer, so the fingerprint groups by class, not by task.
+    (ii) While a run is in flight, the sweep compares its elapsed time to its class's median duration from the same
+    corpus. Past the anomaly multiplier it ledgers ONE `run.running_long` {task, elapsed_ms, median_ms} per run and
+    posts the same kind of event. Nothing stops a worker; the gardener and its governor decide.
+    WIRING: cost-anomaly.ts exports costAnomalyIncidentEvent(finding), which sweep.ts calls where it records anomalies.
+  acceptance:
+    - claim: "a new cost anomaly posts one incident event grouped by task class"
+      proof: "unit test: a new cost anomaly posts one incident event grouped by task class"
+    - claim: "a run past its class duration band is reported once while it still runs"
+      proof: "unit test: a run past its class duration band is reported once while it still runs"
+    - claim: "the sweep turns cost anomalies into incident events"
+      proof: 'grep: costAnomalyIncidentEvent( in src/lib/sweep.ts'
+  falsifier: |
+    CLOSE IF cost and duration anomalies already reach the incident ingest.
