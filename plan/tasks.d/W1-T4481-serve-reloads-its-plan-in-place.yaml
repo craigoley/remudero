@@ -1,0 +1,91 @@
+- id: W1-T4481
+  title: "SERVE STILL RESTARTS FOR EVERY PLAN-ONLY MERGE BECAUSE IT READS ITS PLAN ONCE — serveCommand's `loadPlan(planPath)` feeds boardDeps.plan for the process's life, so W1-T4463 has to keep plan/ restart-relevant; reload the plan in place on a plan-only advance and stop restarting for it"
+  repo: remudero
+  depends_on: ["W1-T4463"]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 console data-architecture gateway build: W1-T4463 follow-up (plan-only merges still restart serve)"
+  plan_refs: ["W1-T4463", "W1-T4229", "W1-T3972", "W1-T4409", "W1-T4421", "W1-T2229"]
+  files:
+    - src/lib/serve-plan-reload.ts
+    - src/lib/serve-restart-relevance.ts
+    - src/lib/serve.ts
+    - src/lib/board.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the last 24 h of main: of 139 merges, W1-T4463 (#7076, run-W1-T4463-1790286341114)
+    alone avoids 14 serve restarts (10%). Also skipping the plan-only merges would avoid 57 of 139 (41%). Serve
+    restarts about every 10 to 20 minutes. Each restart empties its in-memory caches, and the reads after it
+    are cold: a probe 5 minutes after a restart took 5.1 s for the console's request set, against under 650 ms
+    in steady state.
+    WHY W1-T4463 CANNOT SKIP plan/. serveCommand (src/run-task.ts) runs `const plan = loadPlan(planPath)` once
+    and puts it in `boardDeps.plan`. Every board route, buildPanelGraphRoutes' `() => deps.board.plan` accessor,
+    buildStatusRoute, buildRecentRoute and buildTaskCardRoute read that one object for the process's life. So
+    W1-T4463's SERVE_ONLY_RESTART_PATHS (src/lib/serve-restart-relevance.ts) lists "plan/", and its own comment
+    says skipping it waits on serve reloading its plan.
+    ALREADY ON MAIN, CHECKED FIRST. The daemon reloads its plan in process (planReloader, W1-T3972, via
+    loadPlanAtRef at origin/main), and its boot and sync reads quarantine duplicate ids (loadDaemonPlan and
+    loadPlanQuarantiningDuplicates, W1-T4409; syncPlanFromOrigin's `quarantine` option with
+    mergePlanBlobsQuarantiningDuplicates, W1-T4421). Serve has none of this. Its boot read is a plain loadPlan,
+    which throws on a duplicate id.
+  design: |
+    (i) WHAT COUNTS AS RELOADABLE. A new src/lib/serve-plan-reload.ts exports SERVE_PLAN_RELOADABLE_PATHS
+    (plan/tasks.yaml and plan/tasks.d/). An advance is "plan-only" when every changed path is under one of
+    them. Every other plan/ path stays restart-relevant. plan/policy.yaml is one: serveCommand reads it once
+    through loadPolicy(policyPath(repoRoot)) for githubEventWakePolicy. The implementer may add another plan/
+    path to the list only after showing serve reads that file per request, and must name the reader beside the
+    entry. Unreadable, empty and mixed diffs keep W1-T4463's fail-toward-restarting contract.
+    (ii) THE READ. `reloadServePlan(repoDir, ref)` reads the plan AT THE SHA THE DIFF WAS TAKEN AGAINST, from
+    committed objects: the monolith blob, then `git ls-tree` and ONE `git cat-file --batch` over plan/tasks.d/,
+    the same listing readOriginShardsAtRef and loadPlanAtRef use. It must use async execFile, never
+    execFileSync, because serve's event loop never waits on git (the W1-T4463 changedPathsSince rule). It must
+    never read the working tree: on the checkoutBehind path serve's HEAD does not move, so the working tree
+    still holds the boot plan. Merge the blobs with mergePlanBlobsQuarantiningDuplicates, so a duplicated id and
+    its dependents are held out and ledgered (`serve.plan_quarantined`, with the ids and files) and are never
+    thrown. Every other plan error still fails the reload.
+    (iii) THE SWAP. The swap is atomic. The new Plan is fully parsed and validated before anything changes. It
+    is then installed with one assignment to the `plan` field of the ONE BoardDeps object that serveCommand
+    hands to buildReadyServeServer. A request sees the old plan or the new plan, never a mix. Any plan-derived
+    memo must also be dropped or re-keyed: board.ts createBoardSnapshotCache holds a snapshot keyed only on the
+    ledger decisionKey and prQueueIndexKey, plus a projectionByTask memo. After a swap, no request may get a
+    row built from the old plan. Ledger `serve.plan_reloaded` with the ref, the task count and the elapsed ms.
+    (iv) A FAILED READ KEEPS THE OLD PLAN. A git error, a parse error or a validation error leaves the previous
+    plan serving and ledgers `serve.plan_reload_failed` with the ref and the reason. The ref is not recorded as
+    loaded, so the next check retries. A failed reload does NOT turn into a restart: a restarted serve would
+    read the same bad plan at boot.
+    (v) THE GATE. W1-T4463's two restart paths are gateStaleCodeExit's `movedRelevantly` (HEAD moved) and
+    assessGatewayCheckout's `restartDue` (origin/main ahead of HEAD). Change both so that a plan-only diff
+    reloads the plan instead of restarting. Remove "plan/" from SERVE_ONLY_RESTART_PATHS and add back only the
+    plan/ paths that are not reloadable. A diff that mixes a plan path with any other restart-relevant path
+    restarts exactly as before. The STALE banner (renderConsoleCodeStalenessHtml) keeps reporting the raw sha
+    difference.
+    OUT OF SCOPE, report instead: serve's boot read is still the throwing loadPlan. Moving it to
+    loadPlanQuarantiningDuplicates is a separate task. panelGraph's per-request plan/tasks.yaml read uses the
+    working tree. Add zero net comment lines to src/lib/serve.ts, which is over its comment ceiling. Add no new
+    `interface XxxDeps`; put new fields on StaleCodeExitDeps and the existing option types.
+  acceptance:
+    - claim: "a merge that touches only plan task files does not make serve restart"
+      proof: "unit test: a plan-only merge does not make serve restart"
+    - claim: "a plan-only advance swaps the board's plan to the one at the advanced sha"
+      proof: "unit test: a plan-only advance swaps the served plan in place"
+    - claim: "the board serves no row from the old plan after the swap"
+      proof: "unit test: the board snapshot drops rows from the replaced plan"
+    - claim: "a reload that cannot read or parse the plan leaves the old plan serving and ledgers the failure"
+      proof: "unit test: a failed plan reload keeps the old plan serving"
+    - claim: "a duplicated id in the reloaded plan is quarantined not thrown"
+      proof: "unit test: a duplicate id in a reloaded serve plan is quarantined"
+    - claim: "a merge that touches plan policy or mixes plan with src still makes serve restart"
+      proof: "unit test: a plan merge that also touches src still restarts serve"
+    - claim: "serve wires the in-place reload"
+      proof: "grep: reloadServePlan( in src/lib/serve.ts"
+  falsifier: |
+    CLOSE IF serve on main already swaps boardDeps.plan when origin/main advances with only plan/tasks.yaml or
+    plan/tasks.d/ changes, or if a 24 h count of serve.start rows shows plan-only merges no longer followed by a
+    serve restart.
