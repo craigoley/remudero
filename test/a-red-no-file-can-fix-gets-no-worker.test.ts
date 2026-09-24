@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import type { Config } from "../src/lib/config.js";
+import type { Plan } from "../src/lib/plan.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { prMetadataRestArgs, repairPrMetadata, scopeAmendmentFromFixReport } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 function subject(checks: string[] = ["commitlint"], headSha = "head-a"): OpenPrView {
   return {
@@ -140,4 +143,68 @@ test("a refused report requesting an out-of-scope file routes to a scope amendme
   assert.match(h.escalations[0], /scope amendment.*src\/lib\/needed.ts/);
   await runSweep([subject(["ci"])], h.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(h.escalations.length, 1);
+});
+
+test("metadata repair refuses every edit it cannot derive safely, naming why", async () => {
+  const cases: Array<[string[], { title?: string; body?: string }, RegExp]> = [
+    [["commitlint"], { body: "b" }, /title is unavailable/],
+    [["commitlint"], { title: "  " }, /title is unavailable/],
+    [["commitlint"], { title: "fix(pr): already valid" }, /already satisfies commitlint/],
+    [["commitlint"], { title: "fix: ." }, /candidate PR title did not satisfy commitlint/],
+    [["acceptance-author-gate"], { title: "fix(pr): valid" }, /body is unavailable/],
+    [[], { title: "Broken title", body: "b" }, /no title or body edit was derived/],
+  ];
+  for (const [checks, live, reason] of cases) {
+    let writes = 0;
+    const result = await repairPrMetadata(subject(checks), checks, () => { writes++; }, () => live);
+    assert.equal(result.repaired, false, JSON.stringify(live));
+    assert.match(result.reason, reason);
+    assert.equal(writes, 0, "a refused repair must never write metadata");
+  }
+});
+
+test("metadata repair's default seams read and write the live PR through the real gh", async () => {
+  const shim = ghShim(
+    [{ when: "pulls/4459", stdout: JSON.stringify({ title: "Broken title", body: "b" }) }],
+    { kind: "metadata-repair-gh" },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  try {
+    const result = await repairPrMetadata(subject(), ["commitlint"]);
+    assert.equal(result.repaired, true);
+    const calls = shim.calls();
+    assert.equal(calls.length, 2);
+    assert.match(calls[0], /^api repos\/acme\/remudero\/pulls\/4459/);
+    assert.equal(calls[1], "api -X PATCH repos/acme/remudero/pulls/4459 -f title=fix(pr): broken title");
+    await assert.rejects(() => repairPrMetadata({ prUrl: "not a pr url" }, ["commitlint"]), /cannot resolve PR URL/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test("the sweep's metadata-repair effect reports an unwired implementation instead of editing", async () => {
+  const base = {
+    owner: "acme",
+    repo: "remudero",
+    config: { root: "/nonexistent" } as Config,
+    ledgerPath: "/nonexistent/ledger.ndjson",
+    runId: "SWEEP-W1-T4459-effects",
+    plan: { tasks: [], byId: new Map() } as unknown as Plan,
+    log: () => {},
+  };
+  const unwired = buildSweepEffects(base).repairMetadata;
+  assert.ok(unwired, "the builder must always expose the effect");
+  assert.deepEqual(await unwired(subject(), ["commitlint"]), {
+    repaired: false,
+    reason: "metadata repair implementation is not wired",
+  });
+  const seen: string[][] = [];
+  const wired = buildSweepEffects({
+    ...base,
+    repairMetadataImpl: async (_pr, checks) => { seen.push([...checks]); return { repaired: true, reason: "edited title" }; },
+  }).repairMetadata;
+  assert.ok(wired);
+  assert.deepEqual(await wired(subject(), ["commitlint"]), { repaired: true, reason: "edited title" });
+  assert.deepEqual(seen, [["commitlint"]]);
 });
