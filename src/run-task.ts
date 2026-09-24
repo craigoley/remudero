@@ -1600,8 +1600,8 @@ export function buildFreshTreeReviewRunner(
   };
 }
 
-/** W1-T4055 — the most of one fresh-tree failure a ledger row carries. The child's fatal error lands
- *  at the END of its stderr, so the bound keeps the tail, unlike `capStderrExcerpt`, which keeps the head. */
+/** W1-T4055 — PRIMARY CONTROL on how much of one fresh-tree failure a ledger row carries. The child's
+ *  fatal error lands at the END of its stderr, so this keeps the tail, unlike `capStderrExcerpt`. */
 export const FRESH_TREE_FAILURE_MAX_CHARS = 2_000;
 
 /** How much of a running child's stderr is held in memory to take that tail from. */
