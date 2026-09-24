@@ -18,7 +18,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
-import { updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import type { Task } from "./plan.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
@@ -294,7 +294,19 @@ export function procedureKeyFor(candidate: Pick<ProceduralCandidateLike, "shapeK
  * wearing seven operator decisions.
  */
 export function skillDraftProposalId(procedureKey: string): string {
-  return `skill-draft:${procedureKey}`;
+  return `${SKILL_DRAFT_ID_PREFIX}${procedureKey}`;
+}
+
+/** The operator-facing text of a staged skill draft: the SKILL.md, whether a worker can reach it, and what approval writes. */
+function skillDraftSummary(draft: SkillDraft, reachability: { reachable: boolean; reason: string }): string {
+  const reachabilityLine = reachability.reachable
+    ? `Reachable: ${reachability.reason}`
+    : `NOT reachable by a worker today: ${reachability.reason}`;
+  return (
+    `${draft.markdown}\n\n---\n\n${reachabilityLine}\n\n` +
+    `Approving this proposal drafts a plan PR that writes '.claude/skills/${draft.name}/SKILL.md' — ` +
+    `nothing writes under .claude/skills/ outside that PR.`
+  );
 }
 
 /** One {@link stageSkillDraft} call's outcome. `refused` means the scanner rejected the draft and
@@ -303,6 +315,8 @@ export interface StageSkillDraftResult {
   refused: boolean;
   staged: boolean;
   alreadyStaged: boolean;
+  /** An entry staged before W1-T4338 had no skill file; this call added it (and refreshed its summary). */
+  backfilled?: boolean;
   reason?: string;
 }
 
@@ -327,28 +341,34 @@ export function stageSkillDraft(
   const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
   let alreadyStaged = false;
+  let backfilled = false;
   updateProposalRegistry(
     registryPath,
     (current) => {
       staged = false;
       alreadyStaged = false;
-      if (current.some((p) => p.id === id)) {
+      backfilled = false;
+      const existing = current.findIndex((p) => p.id === id);
+      const skillFile = { name: draft.name, markdown: draft.markdown };
+      if (existing >= 0) {
         alreadyStaged = true;
-        return null; // already staged — never a duplicate write
+        if (current[existing].skillFile) return null; // already staged with its file — never a duplicate write
+        // Staged before W1-T4338: give it the file approval now writes, or it can only ever be declined.
+        backfilled = true;
+        return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
       }
-      const reachabilityLine = reachability.reachable
-        ? `Reachable: ${reachability.reason}`
-        : `NOT reachable by a worker today: ${reachability.reason}`;
-      const summary =
-        `${draft.markdown}\n\n---\n\n${reachabilityLine}\n\n` +
-        `Approving this proposal drafts a plan PR that writes '.claude/skills/${draft.name}/SKILL.md' — ` +
-        `nothing writes under .claude/skills/ outside that PR.`;
       staged = true;
-      return [...current, { id, summary, evidenceAnchors: [], skillFile: { name: draft.name, markdown: draft.markdown } }];
+      return [...current, { id, summary: skillDraftSummary(draft, reachability), evidenceAnchors: [], skillFile }];
     },
     opts,
   );
-  return { refused: false, staged, alreadyStaged, reason: alreadyStaged ? "already staged" : undefined };
+  return {
+    refused: false,
+    staged,
+    alreadyStaged,
+    ...(backfilled ? { backfilled: true } : {}),
+    reason: backfilled ? "already staged; skill file backfilled" : alreadyStaged ? "already staged" : undefined,
+  };
 }
 
 // ── W1-T3101: a staged skill reaches the worker prompt ────────────────────────────────────────
@@ -874,7 +894,7 @@ export function stageSkillDrafts(
   for (const draft of drafts) {
     try {
       const r = stageOne(registryPath, draft, allowlist, reachability);
-      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, refused: r.refused, reason: r.reason });
+      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refused: r.refused, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
     }
