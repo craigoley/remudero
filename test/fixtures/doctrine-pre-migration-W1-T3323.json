@@ -1,290 +1,402 @@
 {
-  "_comment": "W1-T3323 MIGRATION AUDIT, not a live baseline. Frozen from CLAUDE.md at 888b2ffa1 -- the commit BEFORE the bodies moved to doctrine/. Each row is one rule as it stood pre-migration: its headline verbatim, and the sha256 plus byte length of its body. test/the-doctrine-index-points-at-every-body.test.ts re-derives both from the LIVE index+store and requires an exact match, which is what proves the move was a MOVE and not a rewrite. A digest, not the prose itself, because a second copy of 34KB of doctrine in the tree would answer every `git grep` for a rule phrase twice and quietly break the several suites that count those hits. EDITING A ROW HERE IS A DELIBERATE ACT: it means a rule body legitimately changed, and the diff should say why.",
+  "_comment": "W1-T3323 MIGRATION AUDIT, not a live baseline. Frozen from CLAUDE.md at 888b2ffa1 -- the commit BEFORE the bodies moved to doctrine/. Each row is one rule as it stood pre-migration: its headline verbatim, and the sha256 plus byte length of its body. test/the-doctrine-index-points-at-every-body.test.ts re-derives both from the LIVE index+store, which is what proves the move was a MOVE and not a rewrite. A digest, not the prose itself, because a second copy of 34KB of doctrine in the tree would answer every `git grep` for a rule phrase twice and quietly break the several suites that count those hits. W1-T4097: each row now also freezes `id` (src/lib/doctrine-lifecycle.ts's slugifyRuleId) and `meaningHash` (computeMeaningHash of the headline) -- the rule's IDENTITY and MEANING, not its wording. A body's bytes MAY drift from `bodySha256` when the row also carries a non-empty `refrozenReason` and `meaningHash` still matches the row's own headline (verifyDoctrineReword); EDITING A ROW WITH NO REASON RECORDED is refused mechanically, not just by this comment.",
   "frozenAt": "2026-09-10",
   "frozenFromSha": "888b2ffa1f3881a8f4fcffa11023acc9b3c7b893",
   "sourceBytes": 43685,
   "rules": [
     {
+      "id": "run-the-shipped-local-gate-before-your-first-push-not-every-comm",
       "headline": "Run the shipped local gate before your FIRST push, not every commit.",
       "bodyBytes": 443,
-      "bodySha256": "af199dceedf71a621fdaa18299bee727eac289769684c03ca9e936f504fc39eb"
+      "bodySha256": "af199dceedf71a621fdaa18299bee727eac289769684c03ca9e936f504fc39eb",
+      "meaningHash": "c9ae788061994c6ad2433256c80ed612f683474edfe5e492c7ecdacf1343e6b0"
     },
     {
-      "headline": "A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST\n  is not one either \u2014 `node --test` given a ghost path returns a green count, silently. `ls` first.",
+      "id": "a-test-run-with-no-tests-summary-is-not-a-result-and-a-summary-o",
+      "headline": "A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST\n  is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.",
       "bodyBytes": 856,
-      "bodySha256": "d0a8e10c3d78e54cf16b2dafef55b356d4aef5c6079cb12f5941b11df106c572"
+      "bodySha256": "d0a8e10c3d78e54cf16b2dafef55b356d4aef5c6079cb12f5941b11df106c572",
+      "meaningHash": "f4c160c136c2ed21a1ab145d2779d8b8789b6a3b02e096d8fcb4d87548aa5a95"
     },
     {
-      "headline": "THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN \u2014 check GITHUB'S STORED BODY with\n  `rmd check-acceptance`, never your local file.",
+      "id": "the-block-must-parse-before-any-proof-in-it-can-run-check-github",
+      "headline": "THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN — check GITHUB'S STORED BODY with\n  `rmd check-acceptance`, never your local file.",
       "bodyBytes": 2733,
-      "bodySha256": "837d429fa20235653eca95949bc93584333ad8c70806e7f286eca7e6948feae7"
+      "bodySha256": "837d429fa20235653eca95949bc93584333ad8c70806e7f286eca7e6948feae7",
+      "meaningHash": "29d0a12a83c96f6caa7e701510d2eb441e9e1d2ebafe0e30b3792380f8184b7e"
     },
     {
-      "headline": "EVERY proof needs a dialect prefix \u2014 `unit test:` or `grep:`. A bare title is PROSE and never\n  executes.",
+      "id": "every-proof-needs-a-dialect-prefix-unit-test-or-grep-a-bare-titl",
+      "headline": "EVERY proof needs a dialect prefix — `unit test:` or `grep:`. A bare title is PROSE and never\n  executes.",
       "bodyBytes": 1513,
-      "bodySha256": "ed1189140a83c60481315cc09ae268ce06e9beb10a79fcf2a2e68d4e7dbe22f6"
+      "bodySha256": "ed1189140a83c60481315cc09ae268ce06e9beb10a79fcf2a2e68d4e7dbe22f6",
+      "meaningHash": "f067c0ac8dc0cdc5e6584ba0b7d3d5540e7d1f706a21bfb18a53d493ddd07294"
     },
     {
-      "headline": "A `unit test:` title is matched as a LITERAL substring after escaping \u2014 the OPPOSITE of a\n  `grep:` pattern, which is a BASIC REGEX.",
+      "id": "a-unit-test-title-is-matched-as-a-literal-substring-after-escapi",
+      "headline": "A `unit test:` title is matched as a LITERAL substring after escaping — the OPPOSITE of a\n  `grep:` pattern, which is a BASIC REGEX.",
       "bodyBytes": 740,
-      "bodySha256": "662fdb5bc23489ba6620a0bfa5b7db08caeebc002ce1888915b361b6903c7600"
+      "bodySha256": "662fdb5bc23489ba6620a0bfa5b7db08caeebc002ce1888915b361b6903c7600",
+      "meaningHash": "4d71cbb166189357d276609c6a592d88e5ea7ae14f5790ee60447498383235a0"
     },
     {
-      "headline": "Require a verbatim `grep -rlF -- '<substring>' test/` hit \u2014 a passing scoped test run is NOT\n  evidence the proof resolves.",
+      "id": "require-a-verbatim-grep-rlf-substring-test-hit-a-passing-scoped",
+      "headline": "Require a verbatim `grep -rlF -- '<substring>' test/` hit — a passing scoped test run is NOT\n  evidence the proof resolves.",
       "bodyBytes": 321,
-      "bodySha256": "884e67e5fa2b85ea83e8effcd508ba167d940d20fb21a600d4826767da2d76fc"
+      "bodySha256": "884e67e5fa2b85ea83e8effcd508ba167d940d20fb21a600d4826767da2d76fc",
+      "meaningHash": "d0b7885e638a4c7af16f473d42130aedd69b9091b445d5d7f59962382b43e6d2"
     },
     {
-      "headline": "Verify a `grep:` proof with the executor's REAL invocation \u2014 `grep -arn -- '<pattern>' <path>` \u2014\n  never with `grep -F`.",
+      "id": "verify-a-grep-proof-with-the-executor-s-real-invocation-grep-arn",
+      "headline": "Verify a `grep:` proof with the executor's REAL invocation — `grep -arn -- '<pattern>' <path>` —\n  never with `grep -F`.",
       "bodyBytes": 1186,
-      "bodySha256": "d36317e19037eed881a796ffaf8d69b35a0868711d8248748c7e0eb92ce06144"
+      "bodySha256": "d36317e19037eed881a796ffaf8d69b35a0868711d8248748c7e0eb92ce06144",
+      "meaningHash": "6f2db22908152d8a54fdf5433cfb0e0def75b776e383cf5c45f3d08c2640e42a"
     },
     {
-      "headline": "A `grep:` proof must match text on ONE PHYSICAL LINE \u2014 a YAML block scalar wraps, and the\n  pattern then reads 0 at head with no error.",
+      "id": "a-grep-proof-must-match-text-on-one-physical-line-a-yaml-block-s",
+      "headline": "A `grep:` proof must match text on ONE PHYSICAL LINE — a YAML block scalar wraps, and the\n  pattern then reads 0 at head with no error.",
       "bodyBytes": 388,
-      "bodySha256": "4ef0b4bee9cac4a93fef6548870e7129ba04b60273f2dd5620612723cae1f580"
+      "bodySha256": "4ef0b4bee9cac4a93fef6548870e7129ba04b60273f2dd5620612723cae1f580",
+      "meaningHash": "6bfeeb0865d7ac176950d956797f14800d18894be24e6196e096432b350ed158"
     },
     {
-      "headline": "A new `.ts` file's `DA:<line>,0` on a doc comment or `interface` body is EXEMPT \u2014 never reorder\n  a file to dodge it.",
+      "id": "a-new-ts-file-s-da-line-0-on-a-doc-comment-or-interface-body-is",
+      "headline": "A new `.ts` file's `DA:<line>,0` on a doc comment or `interface` body is EXEMPT — never reorder\n  a file to dodge it.",
       "bodyBytes": 2004,
       "bodySha256": "95a5c5fa92de171907e199f3ccd69b33b15eda948bd0d59eb042901edfa6b53a",
+      "meaningHash": "c5bfb49a68fa6c822f39ee30291fbf973d0a20779e34db10acf50acc32cc1187",
       "refrozenAt": "2026-09-23",
       "refrozenReason": "W1-T4099: the carve-out missed one-line type aliases (#6677 blocked on `export type Owner = \"a\" | \"b\";`); the body now names the hole and its fix. Earlier refreeze (2026-09-11): RENAMED AND REWRITTEN because the gate it described stopped behaving that way. The old form told authors to sandwich type-only declarations between covered functions, citing #777. W1-T171 later added computeTypeOnlyRanges to diff-coverage, which exempts every interface member line by brace context, and isNonExecutableLine already exempted leading doc comments. MEASURED 2026-09-11 on src/lib/ledger-compaction-rung.ts: all five head-placed interface member lines read DA:...,0 in the lcov AND return typeOnly=true from the live function. Obeying the stale form cost a reordering that was reverted in the same branch. This is the one legitimate reason to touch a frozen row: the rule changed, not the migration."
     },
     {
-      "headline": "When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are\n  unreachable \u2014 write one test that really shells out, and one per catch arm.",
+      "id": "when-every-test-injects-a-fake-the-seam-s-default-implementation",
+      "headline": "When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are\n  unreachable — write one test that really shells out, and one per catch arm.",
       "bodyBytes": 516,
-      "bodySha256": "477c44d8ecee72d2952f5a5534894cb17d2012d2f881f7c431450067c898fc79"
+      "bodySha256": "477c44d8ecee72d2952f5a5534894cb17d2012d2f881f7c431450067c898fc79",
+      "meaningHash": "cf1740b5bc587f5a65087e4c756b85fc85d827dbde61f6ffaa9fc4d272b072ab"
     },
     {
-      "headline": "Before trusting `diff-coverage: OK`, prove the lcov INSTRUMENTS the changed files \u2014\n  `grep -c '^SF:<path>$' <lcov>` must be non-zero for every source file in the diff.",
+      "id": "before-trusting-diff-coverage-ok-prove-the-lcov-instruments-the",
+      "headline": "Before trusting `diff-coverage: OK`, prove the lcov INSTRUMENTS the changed files —\n  `grep -c '^SF:<path>$' <lcov>` must be non-zero for every source file in the diff.",
       "bodyBytes": 364,
-      "bodySha256": "dfcb4ad717a047952861df099301e342256e6b068e274aa8f7d07637086e7131"
+      "bodySha256": "dfcb4ad717a047952861df099301e342256e6b068e274aa8f7d07637086e7131",
+      "meaningHash": "caa34a04a8fc1027d5b28112810e6fbf3d1460d24dae17355c11eebc146a9b0b"
     },
     {
-      "headline": "Build the lcov and the diff from the SAME tree \u2014 commit before measuring \u2014 AND NAME THE SHA in\n  what you report.",
+      "id": "build-the-lcov-and-the-diff-from-the-same-tree-commit-before-mea",
+      "headline": "Build the lcov and the diff from the SAME tree — commit before measuring — AND NAME THE SHA in\n  what you report.",
       "bodyBytes": 618,
-      "bodySha256": "b8310774c40e4c0d6f1f3db0705d4253379e731e29d8080a90a14c2c1b71688c"
+      "bodySha256": "b8310774c40e4c0d6f1f3db0705d4253379e731e29d8080a90a14c2c1b71688c",
+      "meaningHash": "98d11c41ca1cd62c66a1b9fa01751af58ed8c35c11f052e7c55e28b663dfd18c"
     },
     {
-      "headline": "`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the\n  gate \u2014 measure MAIN's coverage of that region before assuming the PR caused it.",
+      "id": "diff-coverage-flags-added-lines-so-restructuring-an-untested-reg",
+      "headline": "`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the\n  gate — measure MAIN's coverage of that region before assuming the PR caused it.",
       "bodyBytes": 188,
-      "bodySha256": "627bbc5ba2ec68c2b37c827bd5fcac050cec8769afa2a87259d0ad3f21aa7054"
+      "bodySha256": "627bbc5ba2ec68c2b37c827bd5fcac050cec8769afa2a87259d0ad3f21aa7054",
+      "meaningHash": "f874cf15692955fe3178a99ba83eaf7b96483b20a942c7b73eff8cd4af07c9a0"
     },
     {
-      "headline": "A deps object supplying SOME fakes leaves every other seam on its REAL default \u2014 so relaxing a\n  guard can make a previously-dead default FIRE, in a file the diff never touched.",
+      "id": "a-deps-object-supplying-some-fakes-leaves-every-other-seam-on-it",
+      "headline": "A deps object supplying SOME fakes leaves every other seam on its REAL default — so relaxing a\n  guard can make a previously-dead default FIRE, in a file the diff never touched.",
       "bodyBytes": 428,
-      "bodySha256": "94d75005b76f2d3ad6a90eafc36d81cc0c5d77b4e6f18b67f5268e2e8610d417"
+      "bodySha256": "94d75005b76f2d3ad6a90eafc36d81cc0c5d77b4e6f18b67f5268e2e8610d417",
+      "meaningHash": "a921e333de17e61ba18dccd3b8972c4fbd0e99af9068ebb6a02431c34ecef557"
     },
     {
-      "headline": "Verify a new falsifier by DELETING the fix and re-running \u2014 `# fail N` removed vs `# fail 0`\n  restored is the evidence it is load-bearing.",
+      "id": "verify-a-new-falsifier-by-deleting-the-fix-and-re-running-fail-n",
+      "headline": "Verify a new falsifier by DELETING the fix and re-running — `# fail N` removed vs `# fail 0`\n  restored is the evidence it is load-bearing.",
       "bodyBytes": 94,
-      "bodySha256": "605246ea8936795197c2b2f90ac72f63505e7b35534046a2dad693c2b56ce654"
+      "bodySha256": "605246ea8936795197c2b2f90ac72f63505e7b35534046a2dad693c2b56ce654",
+      "meaningHash": "57da7b6c8a02848341217f0d08f84cf8af00b9fc8784cefc4ec9c783213ed8d0"
     },
     {
-      "headline": "ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK \u2014 a whole-file replace hits another\n  file's identical line number and returns a FALSE `OK`.",
+      "id": "zero-a-da-value-inside-the-target-s-own-sf-block-a-whole-file-re",
+      "headline": "ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another\n  file's identical line number and returns a FALSE `OK`.",
       "bodyBytes": 395,
-      "bodySha256": "4f5c7bcc8722a527ab0e5d4b199b3ce98ede6fa257072d46e0a070fa7503cbaf"
+      "bodySha256": "4f5c7bcc8722a527ab0e5d4b199b3ce98ede6fa257072d46e0a070fa7503cbaf",
+      "meaningHash": "d8e6aa56acc92c5c44ccf6ed7c9426765317876de1a85dc8221fcd33bbd737dd"
     },
     {
-      "headline": "Derive \"which tasks are merged\" from the `Remudero-Task:` trailer on merged PRs \u2014 never from\n  ledger verdict lines.",
+      "id": "derive-which-tasks-are-merged-from-the-remudero-task-trailer-on",
+      "headline": "Derive \"which tasks are merged\" from the `Remudero-Task:` trailer on merged PRs — never from\n  ledger verdict lines.",
       "bodyBytes": 411,
-      "bodySha256": "29936114be119f18071d86e851f20111c9a66e9ed4aa28cefc40d188fcbc5739"
+      "bodySha256": "29936114be119f18071d86e851f20111c9a66e9ed4aa28cefc40d188fcbc5739",
+      "meaningHash": "2dd285b49ac44b3faab7798b1c91720a7cd98c73750079611cb7f35fca3ba895"
     },
     {
+      "id": "and-a-trailer-only-set-under-credits-because-the-branch-name-is",
       "headline": "AND A TRAILER-ONLY SET UNDER-CREDITS, because the BRANCH NAME is a second, independent credit\n  path.",
       "bodyBytes": 394,
-      "bodySha256": "526d706dee10b0d3bba352512339c3b31583e0d4fbf9846aae463c140e264b06"
+      "bodySha256": "526d706dee10b0d3bba352512339c3b31583e0d4fbf9846aae463c140e264b06",
+      "meaningHash": "a9e6c25372d25a7bab9924f7d9a0ae00d63cf1c9a40aaa1669b9e71dfaeab84e"
     },
     {
-      "headline": "THE TWO SCOPE-TIME CHECKS, AS COMMANDS \u2014 RUN BOTH BEFORE BUILDING A FILED TASK.",
+      "id": "the-two-scope-time-checks-as-commands-run-both-before-building-a",
+      "headline": "THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.",
       "bodyBytes": 905,
-      "bodySha256": "8ca6341f882d10b9717f9e29d135d2f4151b5398b03b23ebdb2e0e33315581bb"
+      "bodySha256": "8ca6341f882d10b9717f9e29d135d2f4151b5398b03b23ebdb2e0e33315581bb",
+      "meaningHash": "75d7f977f35044ffafa5e048502051202a2c282c39aa2fb7c5765ede1935693c"
     },
     {
-      "headline": "Sweep the SUBJECT over open PR heads, not only `origin/main` \u2014 the id half already does.",
+      "id": "sweep-the-subject-over-open-pr-heads-not-only-origin-main-the-id",
+      "headline": "Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.",
       "bodyBytes": 551,
-      "bodySha256": "17891498af898b8761ce42cff9e8114bbbcf9f39a8eec92bbe64dcf2e6b859ef"
+      "bodySha256": "17891498af898b8761ce42cff9e8114bbbcf9f39a8eec92bbe64dcf2e6b859ef",
+      "meaningHash": "19dbc373344d46b74e7795d79e773d0b0959e33ba7169e5f08c38ae113b5bbe5"
     },
     {
+      "id": "name-a-session-branch-run-taskid-epochms-when-building-a-filed-t",
       "headline": "NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.",
       "bodyBytes": 689,
-      "bodySha256": "592eb4bdc20091163ddaa47ccd3c043c316da099941c09827986f927cf39293e"
+      "bodySha256": "592eb4bdc20091163ddaa47ccd3c043c316da099941c09827986f927cf39293e",
+      "meaningHash": "c0357a842aa128b5a6815554035e656744ba45286eddfe11f1e86c585d666f34"
     },
     {
-      "headline": "Before believing \"task X is next\", confirm the frontier with the repo's own selector \u2014\n  `runnableCandidates(plan, isMerged, n)` \u2014 not the task a brief or retro names",
+      "id": "before-believing-task-x-is-next-confirm-the-frontier-with-the-re",
+      "headline": "Before believing \"task X is next\", confirm the frontier with the repo's own selector —\n  `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names",
       "bodyBytes": 1120,
-      "bodySha256": "5d0c32bc4c98b7679b89b87e5716dd629fdab3602ecbe01bffcd0b066c17d28a"
+      "bodySha256": "5d0c32bc4c98b7679b89b87e5716dd629fdab3602ecbe01bffcd0b066c17d28a",
+      "meaningHash": "ad15893ca23aba06140500493dbd13cd6a8b59be84bf3f2065b3c3826c7a237e"
     },
     {
-      "headline": "A contested reservation is never deleted and an unfiled one is never free \u2014 the\n  LOSER of a race renumbers.",
+      "id": "a-contested-reservation-is-never-deleted-and-an-unfiled-one-is-n",
+      "headline": "A contested reservation is never deleted and an unfiled one is never free — the\n  LOSER of a race renumbers.",
       "bodyBytes": 417,
-      "bodySha256": "9721b49ce3b56af987ea3db77f452aee691da157da0237177462a7c7161803e5"
+      "bodySha256": "9721b49ce3b56af987ea3db77f452aee691da157da0237177462a7c7161803e5",
+      "meaningHash": "7270bb9550cfe218c9001127b3bdcf11c7612fbccf1018d1cb5bc55c261b9e82"
     },
     {
-      "headline": "`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along \u2014\n  the record ALONE passes at `verify: auto`.",
+      "id": "rule15-filing-refuses-a-plan-record-in-files-only-when-an-out-of",
+      "headline": "`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —\n  the record ALONE passes at `verify: auto`.",
       "bodyBytes": 579,
-      "bodySha256": "4e20520cf5aa8131f3b4d0a5783a17476c35ec935dd536a774cf298163a0ab5f"
+      "bodySha256": "4e20520cf5aa8131f3b4d0a5783a17476c35ec935dd536a774cf298163a0ab5f",
+      "meaningHash": "c7f7344f13a83adcf50f6ce14a1291f65033e414b3704440b11b8a1f9828e82c"
     },
     {
-      "headline": "A shard's `status:` field is not a completion signal \u2014 it stays `queued` on tasks that\n  shipped.",
+      "id": "a-shard-s-status-field-is-not-a-completion-signal-it-stays-queue",
+      "headline": "A shard's `status:` field is not a completion signal — it stays `queued` on tasks that\n  shipped.",
       "bodyBytes": 688,
-      "bodySha256": "46d1a61c888ea9250ee55b45c631305b88d9bf06e722b440ed5999ce1bfaa22a"
+      "bodySha256": "46d1a61c888ea9250ee55b45c631305b88d9bf06e722b440ed5999ce1bfaa22a",
+      "meaningHash": "9adac615138c70c7115d4bdabfe833f62db7fe1d4d0ff902e9381a95fa0264e0"
     },
     {
-      "headline": "Decoding rule citations \u2014 where each family canonically lives.",
+      "id": "decoding-rule-citations-where-each-family-canonically-lives",
+      "headline": "Decoding rule citations — where each family canonically lives.",
       "bodyBytes": 997,
-      "bodySha256": "45a0794595470c81a900f675f8f96d66bc797c10f285bd6175781b00398ad375"
+      "bodySha256": "45a0794595470c81a900f675f8f96d66bc797c10f285bd6175781b00398ad375",
+      "meaningHash": "555200df32f8ad3b66d558a530dd3dd63cae1609e0cb11d9fa8ba10bcdcc9bc3"
     },
     {
-      "headline": "Do NOT push a fresh sha to clear a stale-red `ci-gate` \u2014 it self-clears.",
+      "id": "do-not-push-a-fresh-sha-to-clear-a-stale-red-ci-gate-it-self-cle",
+      "headline": "Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.",
       "bodyBytes": 494,
-      "bodySha256": "ee54bd9504ebfef4e93ee756f7a46465683623e0fb714b3fde3f8cf29280244f"
+      "bodySha256": "ee54bd9504ebfef4e93ee756f7a46465683623e0fb714b3fde3f8cf29280244f",
+      "meaningHash": "4b5b8fc585336052885231e0afde9fb2a9145827688dce8e1fd3a0d8f3271c31"
     },
     {
-      "headline": "CADENCE IS THE BUDGET, NOT INTENT \u2014 a sparse check-in is fine, a poll is not. NOW ENFORCED:",
+      "id": "cadence-is-the-budget-not-intent-a-sparse-check-in-is-fine-a-pol",
+      "headline": "CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:",
       "bodyBytes": 556,
-      "bodySha256": "7fb7163639f5dca7abbc31f60bc4ee1db464af9d6482d7e60b69257d1cc382ba"
+      "bodySha256": "7fb7163639f5dca7abbc31f60bc4ee1db464af9d6482d7e60b69257d1cc382ba",
+      "meaningHash": "990ffacba902a7f72998d0812d46ac392d60985bedfbffed31e647ba8442c94b"
     },
     {
+      "id": "gh-pr-create-may-die-on-api-quota-git-push-is-unaffected",
       "headline": "`gh pr create` may die on API quota; git push is unaffected.",
       "bodyBytes": 396,
-      "bodySha256": "e3fc96ded6b4c077e135538d9041d3ff2c4153d8a508f730299021b8326bf001"
+      "bodySha256": "e3fc96ded6b4c077e135538d9041d3ff2c4153d8a508f730299021b8326bf001",
+      "meaningHash": "76bb504352258ef9c676422a42908589cdafa9b24bf07ba1f2bf75d057d9bc4a"
     },
     {
-      "headline": "A CONFLICTING PR registers ZERO check runs. `total: 0` reads as \"still queued\" but means\n  `mergeable_state: dirty` \u2014 check mergeability before waiting on CI.",
+      "id": "a-conflicting-pr-registers-zero-check-runs-total-0-reads-as-stil",
+      "headline": "A CONFLICTING PR registers ZERO check runs. `total: 0` reads as \"still queued\" but means\n  `mergeable_state: dirty` — check mergeability before waiting on CI.",
       "bodyBytes": 87,
-      "bodySha256": "c5aea1bc9e8ea27a669756840edf1aaae31f973a3a285ff6c6d41af706efd6ac"
+      "bodySha256": "c5aea1bc9e8ea27a669756840edf1aaae31f973a3a285ff6c6d41af706efd6ac",
+      "meaningHash": "58c1d55acbe6375296ee5bbd05d87a2141932d8413a2dc091855eae48bde6874"
     },
     {
+      "id": "when-two-prs-append-tests-to-the-same-file-s-tail-the-conflict-r",
       "headline": "When two PRs append tests to the same file's TAIL, the conflict region can cut just before a\n  SHARED closing `});`",
       "bodyBytes": 253,
-      "bodySha256": "bb1052bebeca943cbd46523b6649e22dc7d57c2fc8eacc6608b81ed836b31fc4"
+      "bodySha256": "bb1052bebeca943cbd46523b6649e22dc7d57c2fc8eacc6608b81ed836b31fc4",
+      "meaningHash": "fd06f7649d02e53ef3199068a81013733cc80b5714a9cc4493e7fae43018e8bd"
     },
     {
-      "headline": "A corrected PR title is observed by a RE-RUN, not only by a new sha \u2014 but `edited` still fires\n  nothing.",
+      "id": "a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a-new-s",
+      "headline": "A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires\n  nothing.",
       "bodyBytes": 464,
-      "bodySha256": "3080a61b44c941060c3e88ab82bf7f49eaf12c38968adc2a2b76035a4ab5609c"
+      "bodySha256": "3080a61b44c941060c3e88ab82bf7f49eaf12c38968adc2a2b76035a4ab5609c",
+      "meaningHash": "aeb0ea2c1d97544a9784d6eb94915fb7ee7fe9697a16e495f2a618f1aaebb936"
     },
     {
-      "headline": "A merge to a BAKED path ships nothing until an operator triggers an image rebuild \u2014 know which\n  half of your diff you are in before you call a merge \"shipped.\"",
+      "id": "a-merge-to-a-baked-path-ships-nothing-until-an-operator-triggers",
+      "headline": "A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which\n  half of your diff you are in before you call a merge \"shipped.\"",
       "bodyBytes": 1995,
-      "bodySha256": "e32d3c6cbfa326d522903c92a74ef6b026247f7380e4864544d37e5c8f6f72aa"
+      "bodySha256": "e32d3c6cbfa326d522903c92a74ef6b026247f7380e4864544d37e5c8f6f72aa",
+      "meaningHash": "f235cc1f4681b8b5c60db9bf804d021a88bb0a248cfa5b44bc4dfac7d0cb1105"
     },
     {
+      "id": "the-rotations-come-in-two-forms-and-every-glob-that-names-only-o",
       "headline": "The rotations come in TWO FORMS and every glob that names only one answers SILENTLY WRONG. The\n  union is three patterns, never two:",
       "bodyBytes": 275,
-      "bodySha256": "fa07a09df3f4bfe677a9805ce6ad2669065b817bdc7ee593e8a62c89e2afa5f3"
+      "bodySha256": "fa07a09df3f4bfe677a9805ce6ad2669065b817bdc7ee593e8a62c89e2afa5f3",
+      "meaningHash": "77d31c606417460c246fec87e3baac59c63493b3f21ae0e85956375360948876"
     },
     {
+      "id": "the-control-must-prove-each-form-was-read-and-a-raw-cross-archiv",
       "headline": "THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT",
       "bodyBytes": 381,
-      "bodySha256": "5544e8b18ee4e71a53c6bbc3b287a4aca59a2d50313f4e2ae2aa169c0e985845"
+      "bodySha256": "5544e8b18ee4e71a53c6bbc3b287a4aca59a2d50313f4e2ae2aa169c0e985845",
+      "meaningHash": "24f26cadc1134776297182f1fc5739890825b046ee2949db75b43709e335b83d"
     },
     {
+      "id": "and-the-archives-are-not-cumulative-snapshots",
       "headline": "And the archives are NOT cumulative snapshots.",
       "bodyBytes": 484,
-      "bodySha256": "8e202dbd4e2ad0e6e8b585d8ad0bbb6ca723f25fcbd4c351089ac1c1edff4c4f"
+      "bodySha256": "8e202dbd4e2ad0e6e8b585d8ad0bbb6ca723f25fcbd4c351089ac1c1edff4c4f",
+      "meaningHash": "d368f2a3e100794a24fee14d0749623957e3669634172b1919986efc82f8858f"
     },
     {
+      "id": "a-ledger-line-must-carry-the-reason-from-the-decision-that-produ",
       "headline": "A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.",
       "bodyBytes": 390,
-      "bodySha256": "669c77f5193631d030c5316e0dbd3ef3b41932593c18f24b715403d5c3ce5f06"
+      "bodySha256": "669c77f5193631d030c5316e0dbd3ef3b41932593c18f24b715403d5c3ce5f06",
+      "meaningHash": "10274fd12c2ed8a18dd39cb6134eb50730f849d45e4b38021c1a82aabf348d8b"
     },
     {
-      "headline": "On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` \u2014\n  exclude the wrapper by the RELATIVE path, never the absolute one.",
+      "id": "on-a-zero-match-node-test-test-name-pattern-still-emits-ok-1-rel",
+      "headline": "On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —\n  exclude the wrapper by the RELATIVE path, never the absolute one.",
       "bodyBytes": 382,
-      "bodySha256": "c2b2305ed0fd093932fbf58cd3100261b55fb42d370a02d11a18d9f989fb882a"
+      "bodySha256": "c2b2305ed0fd093932fbf58cd3100261b55fb42d370a02d11a18d9f989fb882a",
+      "meaningHash": "fd14d7ce640403fff889b2a505d2c85d204252ea932ca780b177dd15137c91bf"
     },
     {
+      "id": "a-fixture-shelling-git-plumbing-fails-on-every-ci-runner-and-pas",
       "headline": "A fixture shelling git PLUMBING fails on every CI runner and passes on every dev machine, so it\n  reads as flaky when it is deterministic.",
       "bodyBytes": 511,
-      "bodySha256": "045ee3489ed6ba8f9a2cf291e7cfb1bc833c058283f8654fbc0e2fe6cee7359c"
+      "bodySha256": "045ee3489ed6ba8f9a2cf291e7cfb1bc833c058283f8654fbc0e2fe6cee7359c",
+      "meaningHash": "144cb2c944a91b15b1687856940418a7d5df52f5cb15f3ec3281da1bf7549fcc"
     },
     {
+      "id": "when-a-gate-reads-the-ledger-for-a-record-the-same-function-writ",
       "headline": "When a gate reads the ledger for a record the SAME function writes, check the WRITE ORDER before\n  believing the gate's stated reason.",
       "bodyBytes": 533,
-      "bodySha256": "ec90413671003cb14b6c8f25f371b7f4166144ccf9fca6fe8c7f90c692976bac"
+      "bodySha256": "ec90413671003cb14b6c8f25f371b7f4166144ccf9fca6fe8c7f90c692976bac",
+      "meaningHash": "1dc32932d39784d340084d8fb481427aa719ec0aa1339c8491de66ff11f82668"
     },
     {
+      "id": "rmd-drain-dry-run-is-neither-side-effect-free-nor-able-to-see-yo",
       "headline": "`rmd drain --dry-run` is neither side-effect-free nor able to see your branch.",
       "bodyBytes": 523,
-      "bodySha256": "f66cd038b565e1b70e15363531109cbd5b200c83bbf47ac68ef84c44009dbd05"
+      "bodySha256": "f66cd038b565e1b70e15363531109cbd5b200c83bbf47ac68ef84c44009dbd05",
+      "meaningHash": "db0842ba3edf2dd2d7c91e339f4e5fcc0f1bf1c499420b77bf088b9d3d0c5035"
     },
     {
-      "headline": "A bound that fires on a HEALTHY condition is this repo's recurring defect \u2014 before tuning the\n  number, check the population it is meant to separate has ever been observed.",
+      "id": "a-bound-that-fires-on-a-healthy-condition-is-this-repo-s-recurri",
+      "headline": "A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the\n  number, check the population it is meant to separate has ever been observed.",
       "bodyBytes": 249,
-      "bodySha256": "ac16b8a6e9bb8af9156d8953ec4af0e62b06fd5321e2a6c5ad64cf9f6ef38ba6"
+      "bodySha256": "ac16b8a6e9bb8af9156d8953ec4af0e62b06fd5321e2a6c5ad64cf9f6ef38ba6",
+      "meaningHash": "27cab88891a3eaba07d0aab1f9c22183a04ca36c03cc4f32527efec058d9f527"
     },
     {
+      "id": "a-zero-is-not-a-measurement-until-a-positive-control-proves-the",
       "headline": "A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS.\n  RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON.",
       "bodyBytes": 890,
-      "bodySha256": "a7db980cbff0a49dcf01ce4ebd81a99e4db174b04d8d3d4bbe8c7fa288464a3a"
+      "bodySha256": "a7db980cbff0a49dcf01ce4ebd81a99e4db174b04d8d3d4bbe8c7fa288464a3a",
+      "meaningHash": "04cb8864f227f47784afb0d791b7e21c5277e9d6ddc570d495fe6b7fd6ff0ce4"
     },
     {
+      "id": "a-a-posix-regex-engine-here-silently-drops-s-b-instead-of-errori",
       "headline": "(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\\s`/`\\b` INSTEAD OF ERRORING, AND TWO DIFFERENT\n  TOOLS DO IT.",
       "bodyBytes": 1236,
-      "bodySha256": "77ffc083593054192484b201edc45e8b7c803b2d58352b4b3b511009eb4d0a88"
+      "bodySha256": "77ffc083593054192484b201edc45e8b7c803b2d58352b4b3b511009eb4d0a88",
+      "meaningHash": "0b89dfc1bf936a7a9f75eeb6a1e9c2bc75893244cbc95402f4071ec01087404b"
     },
     {
-      "headline": "(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file\n  holding ONE NUL byte is skipped entirely \u2014 no output, exit 1, indistinguishable from real\n  absence.",
+      "id": "b-the-grep-in-this-harness-is-a-ugrep-wrapper-with-i-ignore-bina",
+      "headline": "(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file\n  holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real\n  absence.",
       "bodyBytes": 580,
-      "bodySha256": "3f12f299af3eed9f85b3e44fa566785e7448b3baa85eab0e1840b08bb597e199"
+      "bodySha256": "3f12f299af3eed9f85b3e44fa566785e7448b3baa85eab0e1840b08bb597e199",
+      "meaningHash": "94c837062f9767b5632efab3a8ee6a9975572a01dbcc27fdae7fa08f41eacae1"
     },
     {
+      "id": "c-a-glob-that-names-one-file-form-answers-from-the-other-without",
       "headline": "(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.",
       "bodyBytes": 253,
-      "bodySha256": "0ba4ab2aa0ef9f8926713983090883631507e170ba5c64dd814f24f45cc5d1e4"
+      "bodySha256": "0ba4ab2aa0ef9f8926713983090883631507e170ba5c64dd814f24f45cc5d1e4",
+      "meaningHash": "29b3d558e403ffadcd8095607b1786f4ec344e63b8d9d566f264f17d980aac3d"
     },
     {
+      "id": "d-a-query-can-answer-the-wrong-question-with-a-perfectly-good-ze",
       "headline": "(d) A QUERY CAN ANSWER THE WRONG QUESTION WITH A PERFECTLY GOOD ZERO, AND NO POSITIVE CONTROL\n  SAVES YOU.",
       "bodyBytes": 950,
-      "bodySha256": "ff148ce0b25727b8060dd1ff7ffa164eeb46bee3e811e8b17c1d75249af71d9f"
+      "bodySha256": "ff148ce0b25727b8060dd1ff7ffa164eeb46bee3e811e8b17c1d75249af71d9f",
+      "meaningHash": "5e6b81e34e0837a45a871fca66381019ba4638c0e7c2db7e6ca5c75c13bb855a"
     },
     {
-      "headline": "(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE\n  \u2014 AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.",
+      "id": "e-a-control-proves-the-query-can-see-its-corpus-it-does-not-prov",
+      "headline": "(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE\n  — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.",
       "bodyBytes": 1000,
-      "bodySha256": "62da56fa13e0e76e886babf0458c401b421c666a6be4227a91180bc51b336096"
+      "bodySha256": "62da56fa13e0e76e886babf0458c401b421c666a6be4227a91180bc51b336096",
+      "meaningHash": "64a20eceaaf4faa331115bafd63851fcdd4598114ce83f981c1abcee220e2e88"
     },
     {
-      "headline": "(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS \u2014 `ls` COUNTS A DIRECTORY AS ONE\n  ENTRY.",
+      "id": "f-the-two-sides-of-a-comparison-must-count-the-same-units-ls-cou",
+      "headline": "(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE\n  ENTRY.",
       "bodyBytes": 999,
-      "bodySha256": "2b1c91bc999595388e1f5fa950c6628ad98004a904f892cc29719c77d101e6ec"
+      "bodySha256": "2b1c91bc999595388e1f5fa950c6628ad98004a904f892cc29719c77d101e6ec",
+      "meaningHash": "9cb80c30810d2d0ce7bec7e25d313856e1d0daf64872d04ec1eb74e3f5464e8d"
     },
     {
-      "headline": "(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION\n  \u2014 AN EXISTING CONNECTION IS NOT EVIDENCE.",
+      "id": "g-a-change-that-removes-an-access-path-must-prove-the-replacemen",
+      "headline": "(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION\n  — AN EXISTING CONNECTION IS NOT EVIDENCE.",
       "bodyBytes": 425,
-      "bodySha256": "85dd9534ee42fb19757af4c047835946e644a96fa179d706cf14dac867a226f5"
+      "bodySha256": "85dd9534ee42fb19757af4c047835946e644a96fa179d706cf14dac867a226f5",
+      "meaningHash": "466baf771a3b995d8d64aabf98332046c4d91d816d0794ec3ade65593a0779c0"
     },
     {
-      "headline": "(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both\n  moved \u2014 run it against `origin/main`'s blobs and report the behind-count.",
+      "id": "h-a-gate-run-from-a-checkout-that-is-behind-answers-about-a-file",
+      "headline": "(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both\n  moved — run it against `origin/main`'s blobs and report the behind-count.",
       "bodyBytes": 574,
-      "bodySha256": "ef8440dfb8b9f817323d36844b766f72ba354fcbbdaf438b6766356c09be3af5"
+      "bodySha256": "ef8440dfb8b9f817323d36844b766f72ba354fcbbdaf438b6766356c09be3af5",
+      "meaningHash": "87dac8f770e7b1c72326e9177652c3fb9a37ca188dc423df4c6376d6cad0fb03"
     },
     {
+      "id": "i-a-positive-control-proves-the-query-can-see-its-corpus-it-does",
       "headline": "(i) A POSITIVE CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS COVERS THE\n  WINDOW.",
       "bodyBytes": 517,
-      "bodySha256": "83692e045d0a8211ba6609b428f5a75df6a1752b95f6294f0ff1ce71553f7c76"
+      "bodySha256": "83692e045d0a8211ba6609b428f5a75df6a1752b95f6294f0ff1ce71553f7c76",
+      "meaningHash": "854c494031dbcc4b0d4a5714a4908f3c70f299ca0df51036869b8366d4a9a607"
     },
     {
+      "id": "j-a-census-test-names-none-of-your-symbols-so-the-caller-sweep-a",
       "headline": "(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT",
       "bodyBytes": 386,
-      "bodySha256": "6cced9cea801e2a36cfecb60fd11fc908abe244eb50b84ebf19092cdaf7eea5c"
+      "bodySha256": "6cced9cea801e2a36cfecb60fd11fc908abe244eb50b84ebf19092cdaf7eea5c",
+      "meaningHash": "066aac733d2c0bd745d840d07110cf6cf04d0fb9c07247368d1ebca56bd20e16"
     },
     {
+      "id": "k-a-rule-21-protocol-run-passing-basetask-alone-reports-three-in",
       "headline": "(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.",
       "bodyBytes": 391,
-      "bodySha256": "c54408b28b8e0607828b0107a08157cbd4b2c374951e8773fdd5825cb87b1195"
+      "bodySha256": "c54408b28b8e0607828b0107a08157cbd4b2c374951e8773fdd5825cb87b1195",
+      "meaningHash": "7bed1fa9f4556f5a724314edeb333fe7843ae0bf5c664fbce6a6755377b8d895"
     },
     {
-      "headline": "Read re-entrancy from `process.env`, not an injected `env` argument \u2014 a spawn writes a child's\n  environment and cannot reach a parameter.",
+      "id": "read-re-entrancy-from-process-env-not-an-injected-env-argument-a",
+      "headline": "Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's\n  environment and cannot reach a parameter.",
       "bodyBytes": 97,
-      "bodySha256": "613ff22dcfeba9c77ea2c90c546b5ca658ccdc40ab324787d5b3aa62d99aeb23"
+      "bodySha256": "613ff22dcfeba9c77ea2c90c546b5ca658ccdc40ab324787d5b3aa62d99aeb23",
+      "meaningHash": "24a914f70f1f5a41ae753d299341dac7e7d58b9dccf4c4d4c6d739aab941783a"
     },
     {
+      "id": "a-fixed-date-constant-compared-against-rows-stamped-at-real-time",
       "headline": "A fixed date constant compared against rows stamped at REAL time is a time bomb; the signature\n  is a red beginning at a clock boundary with no diff involved.",
       "bodyBytes": 193,
-      "bodySha256": "88cfe7f1da2c1eb8fcb47674a9a3322e9cf1c03cad05a3dea8fee97090404302"
+      "bodySha256": "88cfe7f1da2c1eb8fcb47674a9a3322e9cf1c03cad05a3dea8fee97090404302",
+      "meaningHash": "50eda68cd19ed6d6422ea69e364e2e5275d1ded00580b838bef6c9510781c699"
     }
   ]
 }
