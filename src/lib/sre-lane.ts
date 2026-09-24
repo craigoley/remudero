@@ -1,0 +1,372 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { systemClock, type Clock } from "./clock.js";
+import { writeAtomic } from "./fs-race-safe.js";
+import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+
+/**
+ * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane.
+ *
+ * Operator ruling 2026-09-23: the SRE runs in ITS OWN lane, not inside the core daemon. That day
+ * the core daemon's single thread was starved by futile fix dispatches, and a watcher sharing that
+ * thread cannot see the stall it is meant to catch. This module is that lane: a small, own-timer
+ * loop (mirroring gardener.ts's and fleet-lane.ts's own timers) that reads incident evidence
+ * (W1-T4383's `incident.event`/`incident.sampled` rows, W1-T4384's `incident.event` invariant
+ * findings), dedupes against work the fleet already has open, gathers evidence, and files ONE
+ * `incident#<fingerprint>` feedback entry a pass through {@link captureFeedback} — the existing
+ * pipeline (feedback -> triage -> plan task -> fleet build) builds the rest.
+ *
+ * NEVER DISPATCHES A BUILD ITSELF. Filing feedback is its entire write surface; everything after
+ * that — proposing, planning, building — is the ordinary fleet pipeline the way every other
+ * machine-origin feedback (`alert#…`, `repair#…`) already flows through it.
+ *
+ * PACED BY THE FLEET'S OWN MERGE RATE, exactly like fleet-lane.ts: never more filings in a day
+ * than the fleet merged in the last day, so filing follows real throughput rather than a fixed cap.
+ * Its own state file (`sre-lane-decisions.json`) tracks what it has filed and when; the ledger
+ * rotates, this does not. `state/SRE_LANE_OFF` is its pause switch (the same PAUSE pattern
+ * fleet-lane.ts's per-kind `FLEET_LANE_OFF-<kind>` uses, collapsed to one switch since this lane
+ * has exactly one class of work).
+ *
+ * WHAT PRODUCTION WIRING (src/run-task.ts) CANNOT YET SUPPLY, HONESTLY: {@link RegistryInstance}
+ * (instance-registry.ts) does not carry a `state_dir`, so `readEvents` below is wired to this
+ * daemon's OWN ledger only, not every registry instance's — a follow-up, not a defect this module
+ * can paper over. `framesFor` likewise has no live per-fingerprint frame store yet
+ * (`incident-events.ts` deliberately never ledgers the raw frames it scrubs), so it is wired to
+ * return `[]` in production until one exists; {@link suspectPullRequests} is fully proven here by
+ * unit test with injected frames, ready the day a frame store lands.
+ */
+
+// ── evidence ──────────────────────────────────────────────────────────────────────────────────
+
+/** One `incident.event`/`incident.sampled` ledger row (incident-events.ts, incident-invariants.ts)
+ *  as this lane reads it — read-only, across whichever instance ledger(s) `readEvents` covers. */
+export interface IncidentLedgerEvent {
+  fingerprint: string;
+  /** Epoch ms — the ledger's own `ts` field, already parsed. */
+  ts: number;
+  kind: string;
+  name: string;
+  message?: string;
+  route?: string;
+  sha?: string;
+  /** Which registry instance this row came from — surfaced in the filed evidence. */
+  instance: string;
+}
+
+/** One `incident.event`/`incident.sampled` ledger row (loosely typed like the rest of this repo's
+ *  ledger readers: any object, since a torn or foreign line must never throw mid-scan) reduced to
+ *  an {@link IncidentLedgerEvent} — `undefined` for a row missing `fingerprint`, `ts` or `kind`/
+ *  `name`, which a live ledger's OWN rotation and unrelated steps make routine, not exceptional. */
+export function incidentEventFromLedgerRow(row: Record<string, unknown>, instance: string): IncidentLedgerEvent | undefined {
+  const fingerprint = row.fingerprint;
+  const kind = row.kind;
+  const name = row.name;
+  const tsRaw = row.ts;
+  if (typeof fingerprint !== "string" || typeof kind !== "string" || typeof name !== "string" || typeof tsRaw !== "string") {
+    return undefined;
+  }
+  const ts = Date.parse(tsRaw);
+  if (!Number.isFinite(ts)) return undefined;
+  const message = typeof row.message === "string" ? row.message : undefined;
+  const route = typeof row.route === "string" ? row.route : undefined;
+  const sha = typeof row.sha === "string" ? row.sha : undefined;
+  return { fingerprint, ts, kind, name, message, route, sha, instance };
+}
+
+/** One reported in-app frame — mirrors {@link import("./incident-events.js").IncidentEventFrame}
+ *  without importing it, since this lane's own frame source is independent of the ingest route's
+ *  wire shape (see the module doc's "what production wiring cannot yet supply"). */
+export interface IncidentFrameLike {
+  file: string;
+  fn: string;
+}
+
+/** One merged pull request and the files its commit touched — {@link suspectPullRequests}'s input. */
+export interface MergedPrFiles {
+  url: string;
+  files: string[];
+}
+
+/** Every incident.event/incident.sampled row for one fingerprint, reduced to the evidence the
+ *  design names: sample events, first/last seen, count, burn rate, deploy sha(s), instances. */
+export interface IncidentEvidence {
+  fingerprint: string;
+  kind: string;
+  name: string;
+  /** Up to 3 distinct scrubbed sample messages, oldest first — "" when no row carried a message. */
+  sampleMessages: string[];
+  firstSeenMs: number;
+  lastSeenMs: number;
+  count: number;
+  /** Events per hour over the observed span (a single event reads as 1 event/hour, not infinite). */
+  burnPerHour: number;
+  deployShas: string[];
+  instances: string[];
+}
+
+const HOUR_MS = 60 * 60_000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Group `events` by fingerprint and reduce each group to its {@link IncidentEvidence}. Pure. */
+export function aggregateIncidents(events: readonly IncidentLedgerEvent[]): IncidentEvidence[] {
+  const byFingerprint = new Map<string, IncidentLedgerEvent[]>();
+  for (const event of events) {
+    const list = byFingerprint.get(event.fingerprint);
+    if (list) list.push(event);
+    else byFingerprint.set(event.fingerprint, [event]);
+  }
+  const out: IncidentEvidence[] = [];
+  for (const [fingerprint, rows] of byFingerprint) {
+    const sorted = [...rows].sort((a, b) => a.ts - b.ts);
+    const firstSeenMs = sorted[0].ts;
+    const lastSeenMs = sorted[sorted.length - 1].ts;
+    const spanHours = Math.max(1, (lastSeenMs - firstSeenMs) / HOUR_MS);
+    const deployShas = [...new Set(sorted.map((e) => e.sha).filter((s): s is string => !!s))];
+    const instances = [...new Set(sorted.map((e) => e.instance))];
+    const sampleMessages = [...new Set(sorted.map((e) => e.message).filter((m): m is string => !!m))].slice(0, 3);
+    out.push({
+      fingerprint,
+      kind: sorted[0].kind,
+      name: sorted[0].name,
+      sampleMessages,
+      firstSeenMs,
+      lastSeenMs,
+      count: sorted.length,
+      burnPerHour: sorted.length / spanHours,
+      deployShas,
+      instances,
+    });
+  }
+  return out;
+}
+
+/** The worst-burning fingerprint among `evidence` for which `isOpen` says no work is already
+ *  open — `undefined` when every fingerprint already has open work, or there is none. Pure. */
+export function worstOpenIncident(
+  evidence: readonly IncidentEvidence[],
+  isOpen: (fingerprint: string) => boolean,
+): IncidentEvidence | undefined {
+  return evidence
+    .filter((e) => !isOpen(e.fingerprint))
+    .sort((a, b) => b.burnPerHour - a.burnPerHour)[0];
+}
+
+// ── dedupe against open work ─────────────────────────────────────────────────────────────────
+
+/** The `FeedbackOrigin` this lane files under — new machine-origin shape (feedback.ts's own union
+ *  is grown to accept it), one per fingerprint, never invented text. */
+export function incidentFeedbackOrigin(fingerprint: string): FeedbackOrigin {
+  return `incident#${fingerprint}` as FeedbackOrigin;
+}
+
+/** A `rejected` feedback entry is a closed, considered-and-declined decision — the only status
+ *  that does NOT count as "already open" for this fingerprint. Every other status (including
+ *  `accepted`, once a task exists) still means the fleet already has this incident in hand. */
+const CLOSED_FEEDBACK_STATUS: FeedbackStatus = "rejected";
+
+/** Every `incident#<fingerprint>` origin this repo has open feedback for right now — a read over
+ *  {@link listFeedback}, the same store {@link captureFeedback} writes into. */
+export function openIncidentFeedbackOrigins(root: string): Set<string> {
+  const origins = new Set<string>();
+  for (const entry of listFeedback(root)) {
+    if (typeof entry.origin === "string" && entry.origin.startsWith("incident#") && entry.status !== CLOSED_FEEDBACK_STATUS) {
+      origins.add(entry.origin);
+    }
+  }
+  return origins;
+}
+
+/** True when `fingerprint` already has open feedback (this repo's own store) or an open plan task
+ *  (`hasOpenTask`, injected — the plan-side half of the same check) — the never-file-twice guard
+ *  the design names. */
+export function fingerprintAlreadyOpen(
+  fingerprint: string,
+  openFeedbackOrigins: ReadonlySet<string>,
+  hasOpenTask: (fingerprint: string) => boolean,
+): boolean {
+  return openFeedbackOrigins.has(incidentFeedbackOrigin(fingerprint)) || hasOpenTask(fingerprint);
+}
+
+// ── suspect commits ──────────────────────────────────────────────────────────────────────────
+
+/** Merged PRs (each with the files its commit touched) filtered to the ones that touched a file
+ *  named in the incident's own in-app frames — the design's "suspect commits". Pure: intersects
+ *  two sets, nothing more; `mergedPrs`/`frameFiles` are read by the caller. */
+export function suspectPullRequests(mergedPrs: readonly MergedPrFiles[], frameFiles: readonly string[]): string[] {
+  const frames = new Set(frameFiles);
+  if (frames.size === 0) return [];
+  return mergedPrs.filter((pr) => pr.files.some((f) => frames.has(f))).map((pr) => pr.url);
+}
+
+/** Real merged-PR-with-files reader: every first-parent commit merged to `origin/main` since
+ *  `sinceSha` (exclusive) — or, with no known deploy sha, the last 24 hours — resolved to its own
+ *  PR url via this repo's own squash-merge convention (a subject ending `(#NNNN)`) and the files
+ *  that commit touched. A commit whose subject carries no PR number names no suspect — this repo's
+ *  squash-merge titles always do, so that is a torn/foreign commit, not evidence to guess from. */
+export function mergedPrsSince(
+  repoDir: string,
+  owner: string,
+  repo: string,
+  sinceSha: string | undefined,
+  run: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8" }),
+): MergedPrFiles[] {
+  try {
+    const logArgs = sinceSha
+      ? ["-C", repoDir, "log", `${sinceSha}..origin/main`, "--first-parent", "--format=%H\u0001%s"]
+      : ["-C", repoDir, "log", "origin/main", "--first-parent", "--since=24 hours ago", "--format=%H\u0001%s"];
+    const lines = run(logArgs).split("\n").filter(Boolean);
+    const out: MergedPrFiles[] = [];
+    for (const line of lines) {
+      const [sha, subject] = line.split("\u0001");
+      const match = sha && subject ? /\(#(\d+)\)\s*$/.exec(subject) : null;
+      if (!match) continue;
+      const files = run(["-C", repoDir, "show", "--name-only", "--format=", sha]).split("\n").filter(Boolean);
+      out.push({ url: `https://github.com/${owner}/${repo}/pull/${match[1]}`, files });
+    }
+    return out;
+  } catch {
+    // deliberate: an unreadable merge window names no suspects — never a guessed one.
+    return [];
+  }
+}
+
+// ── pace ─────────────────────────────────────────────────────────────────────────────────────
+
+/** How many more incidents this lane may file this pass — never more than the fleet merged in the
+ *  last day, minus what this lane already filed today. Mirrors fleet-lane.ts's own pacing
+ *  arithmetic exactly, kept as its own function so the two lanes never share a state file. */
+export function sreLaneRoom(mergedLastDay: number, filedToday: number): number {
+  return Math.max(0, mergedLastDay - filedToday);
+}
+
+// ── state ────────────────────────────────────────────────────────────────────────────────────
+
+export type SreLaneStore = Record<string, { ts: string }>;
+
+export function sreLaneStorePath(stateDir: string): string {
+  return join(stateDir, "sre-lane-decisions.json");
+}
+
+export function sreLaneOffPath(stateDir: string): string {
+  return join(stateDir, "SRE_LANE_OFF");
+}
+
+export function readSreLaneStore(stateDir: string): SreLaneStore {
+  const path = sreLaneStorePath(stateDir);
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as SreLaneStore;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    // deliberate: an unreadable store restarts empty for pacing purposes only — the feedback-origin
+    // dedupe above is the durable guard against a re-file, so nothing unsafe follows from this.
+    return {};
+  }
+}
+
+// ── the feedback body ────────────────────────────────────────────────────────────────────────
+
+function incidentFeedbackRaw(evidence: IncidentEvidence, suspectPrs: readonly string[]): string {
+  const lines = [
+    `Incident ${evidence.fingerprint.slice(0, 12)}: ${evidence.kind} ${evidence.name}`,
+    `First seen: ${new Date(evidence.firstSeenMs).toISOString()}`,
+    `Last seen: ${new Date(evidence.lastSeenMs).toISOString()}`,
+    `Count: ${evidence.count}, burn: ${evidence.burnPerHour.toFixed(2)}/hr`,
+    `Deploy sha(s): ${evidence.deployShas.length ? evidence.deployShas.join(", ") : "unknown"}`,
+    `Instance(s): ${evidence.instances.join(", ")}`,
+    "Sample events:",
+    ...(evidence.sampleMessages.length ? evidence.sampleMessages.map((m) => `  - ${m}`) : ["  (no message sampled)"]),
+    "Suspect commits (merged pull requests touching the incident's in-app frames):",
+    ...(suspectPrs.length ? suspectPrs.map((p) => `  - ${p}`) : ["  (none found)"]),
+  ];
+  return lines.join("\n");
+}
+
+// ── one pass ─────────────────────────────────────────────────────────────────────────────────
+
+export interface SreLaneDeps {
+  stateDir: string;
+  /** Repo root — where {@link captureFeedback}/{@link listFeedback} read and write. */
+  root: string;
+  /** Every incident.event/incident.sampled row this pass should consider, read-only. */
+  readEvents: () => IncidentLedgerEvent[];
+  /** True when a plan task already exists for this fingerprint (the plan-side dedupe half). */
+  hasOpenTask: (fingerprint: string) => boolean;
+  /** The in-app frames captured for a fingerprint's recent samples, for suspect-commit matching. */
+  framesFor: (fingerprint: string) => IncidentFrameLike[];
+  /** Merged PRs (with files) since a deploy sha — `undefined` sha reads the last 24 hours. */
+  mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[];
+  /** How many PRs the fleet merged in the last 24 hours — the pace this lane files at. */
+  mergedLastDay: () => number;
+  clock?: Clock;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+export interface SreLanePass {
+  /** The fingerprint filed this pass, if any. */
+  filed?: string;
+  /** How many more this pass could have filed under the pace, after this pass's own filing. */
+  room: number;
+}
+
+/** One pass: aggregate evidence, skip fingerprints with open feedback or an open task, file the
+ *  worst-burning survivor at the fleet's own pace. Never files more than one fingerprint a pass —
+ *  the same one-at-a-time discipline fleet-lane.ts's `triageFleetLane` uses, and for the same
+ *  reason: a burst of concurrent filers racing the same checkout is worse than a slower lane. */
+export function runSreLanePass(deps: SreLaneDeps): SreLanePass {
+  if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
+  const now = (deps.clock ?? systemClock).now();
+  const store = readSreLaneStore(deps.stateDir);
+  const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
+  const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
+  const room = sreLaneRoom(deps.mergedLastDay(), filedToday);
+  if (room <= 0) return { room };
+
+  const openOrigins = openIncidentFeedbackOrigins(deps.root);
+  const evidence = aggregateIncidents(deps.readEvents());
+  const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
+  if (!worst) return { room };
+
+  const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
+  const suspectPrs = suspectPullRequests(deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
+  captureFeedback(deps.root, {
+    raw: incidentFeedbackRaw(worst, suspectPrs),
+    origin: incidentFeedbackOrigin(worst.fingerprint),
+    id: `incident-${worst.fingerprint.slice(0, 16)}`,
+  });
+  store[worst.fingerprint] = { ts: new Date(now).toISOString() };
+  writeAtomic(sreLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
+  deps.log("sre_lane.filed", {
+    fingerprint: worst.fingerprint,
+    count: worst.count,
+    burn_per_hour: worst.burnPerHour,
+    suspect_prs: suspectPrs.length,
+  });
+  return { filed: worst.fingerprint, room: room - 1 };
+}
+
+/** Run {@link runSreLanePass} on its own timer, never two at once — mirrors gardener.ts's and
+ *  fleet-lane.ts's own tick wrappers exactly. Returns a `(pollIntervalMs) => {stop}` starter, the
+ *  exact shape `src/run-task.ts`'s daemon `gardens` array already takes every other lane as. */
+export function startSreLane(deps: SreLaneDeps): (pollIntervalMs: number) => { stop: () => void } {
+  return (pollIntervalMs: number) => {
+    let running = false;
+    const tick = () => {
+      if (running) return;
+      running = true;
+      try {
+        runSreLanePass(deps);
+      } catch (e) {
+        deps.log("sre_lane.failed", { error: String((e as Error)?.message ?? e) });
+      } finally {
+        running = false;
+      }
+    };
+    tick();
+    const timer = setInterval(tick, pollIntervalMs);
+    timer.unref?.();
+    return { stop: () => clearInterval(timer) };
+  };
+}

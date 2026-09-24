@@ -153,6 +153,7 @@ import { gardenPrState, type GardenWorkspace } from "./lib/knowledge-gardener.js
 import { startGarden, type GardenCheckout } from "./lib/gardener.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
+import { incidentEventFromLedgerRow, mergedPrsSince as sreLaneMergedPrsSince, startSreLane } from "./lib/sre-lane.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -31571,6 +31572,39 @@ export async function daemonCommand(
                     },
                   };
                 },
+                // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
+                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
+                // registry instance" (the task's design) has no selector yet -- instance-registry.ts's
+                // `RegistryInstance` carries no per-instance role or state_dir a daemon can read to
+                // identify itself as "the" SRE instance -- so this is an explicit, safe-default-OFF
+                // opt-in an operator sets on the ONE instance meant to run it, standing in for that
+                // selector until it exists (sre-lane.ts's module doc names the gap; a follow-up owns
+                // building it). `readEvents`/`hasOpenTask`/`framesFor` are likewise honestly reduced
+                // to what this checkout alone can answer today -- see the same doc.
+                ...(process.env.RMD_SRE_LANE === "1"
+                  ? [
+                      startSreLane({
+                        stateDir: join(config.root, "state"),
+                        root: repoRoot,
+                        readEvents: () =>
+                          readLedgerLines(ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
+                            .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
+                            .map((row) => incidentEventFromLedgerRow(row, self.repo))
+                            .filter((event): event is NonNullable<typeof event> => event !== undefined),
+                        // No live plan read is wired here yet -- the feedback-origin dedupe
+                        // (sre-lane.ts's own `openIncidentFeedbackOrigins`) already covers this
+                        // pipeline's actual task-creation path, since every task it can produce
+                        // carries the matching `incident#<fingerprint>` feedback origin first.
+                        hasOpenTask: () => false,
+                        // No live per-fingerprint frame store exists yet (incident-events.ts never
+                        // ledgers the raw frames it scrubs) -- see sre-lane.ts's module doc.
+                        framesFor: () => [],
+                        mergedPrsSince: (sinceSha) => sreLaneMergedPrsSince(repoRoot, self.owner, self.repo, sinceSha),
+                        mergedLastDay: () => mergedInLastDay(repoRoot),
+                        log,
+                      }),
+                    ]
+                  : []),
               ],
             }
           : {}),
