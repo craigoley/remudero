@@ -68,6 +68,10 @@ ee-open.json
 # directory, which is why the `.claude/*` form above exists. Operator-local state (transcripts,
 # session caches) stays ignored exactly as before: this un-ignores one generated tree, not `.claude/`.
 !.claude/skills/
+# The THIRD exception, same mechanism: .claude/hooks/session-start.sh is the SessionStart hook
+# .claude/settings.json registers. Ignored, it never reaches a fresh clone and the registration
+# points at nothing — MEASURED: its first PR passed locally and failed in CI on the missing file.
+!.claude/hooks/
 *.log
 
 # W1-T421: mutated module copies written by test/helpers/mutant-module.ts. They live under test/

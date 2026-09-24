@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -54,4 +54,8 @@ test(".claude/settings.json registers the session-start hook", () => {
     entry.hooks.map((h) => h.command),
   );
   assert.deepEqual(commands, ["bash $CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh"]);
+  // .gitignore excludes .claude/* by default; an ignored script never reaches a clone, and the
+  // registration above would point at nothing.
+  const ignored = spawnSync("git", ["check-ignore", "-q", ".claude/hooks/session-start.sh"], { cwd: REPO_ROOT });
+  assert.equal(ignored.status, 1, ".claude/hooks/session-start.sh must not be git-ignored");
 });
