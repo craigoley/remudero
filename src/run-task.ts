@@ -36374,7 +36374,7 @@ export function commitWorkerEdits(
 /** True when `worktreePath` is mid-merge right now — the one fact both
  *  {@link startShellLessMergeConflictMerge}'s own idempotency guard and its no-conflict-vs-real-
  *  failure branch need from git. */
-function mergeHeadPresent(runGit: (args: string[]) => string): boolean {
+function mergeHeadPresent(runGit: GitRunner): boolean {
   try {
     runGit(["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
     return true;
@@ -36405,12 +36405,9 @@ function mergeHeadPresent(runGit: (args: string[]) => string): boolean {
  */
 export function startShellLessMergeConflictMerge(
   worktreePath: string,
-  deps: { runGit?: (args: string[]) => string } = {},
+  runGit: GitRunner = (args) =>
+    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
 ): { started: boolean; reason?: string } {
-  const runGit =
-    deps.runGit ??
-    ((args: string[]) =>
-      execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   if (mergeHeadPresent(runGit)) return { started: true };
   try {
     runGit(["merge", "--no-commit", "--no-ff", "origin/main"]);

@@ -210,6 +210,23 @@ test("W1-T4458: a real conflict that never happened is refused, never invented",
   }
 });
 
+test("W1-T4458: a failed merge setup without MERGE_HEAD reports its real cause", () => {
+  const calls: string[][] = [];
+  const result = startShellLessMergeConflictMerge("unused-worktree", (args) => {
+    calls.push(args);
+    if (args[0] === "rev-parse") throw new Error("MERGE_HEAD absent");
+    throw new Error("origin/main was not fetched");
+  });
+
+  assert.equal(result.started, false);
+  assert.match(result.reason ?? "", /origin\/main was not fetched/);
+  assert.deepEqual(calls, [
+    ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+    ["merge", "--no-commit", "--no-ff", "origin/main"],
+    ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+  ]);
+});
+
 test("W1-T4458: the fix rung's tools and prompt agree about who holds git", () => {
   // (iii) Bash is dropped from the PRIMARY surface, not only the auction-divert `cashTools`.
   assert.ok(FIX_WORKER_TOOLS.includes("Bash"), "sanity: the shell-bearing surface really carries Bash");
