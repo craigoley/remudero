@@ -97,8 +97,9 @@ const DISPATCH_SETTLED_SET_STEP = "dispatch.settled_set";
  *  ledger. */
 const QUEUE_PRIORITY_SNAPSHOT_STEP = "queue.priority_snapshot";
 
-/** W1-T4102's own bound: "a bare 401 took 1-20s" was already the incident; 500ms p99 is well
- *  inside "fine" and well outside "the event loop is fine." */
+// PRIMARY CONTROL: the loop-lag rule's own bad/good line. W1-T4102's own bound: "a bare 401 took
+// 1-20s" was already the incident; 500ms p99 is well inside "fine" and well outside "the event
+// loop is fine."
 export const LOOP_LAG_P99_BOUND_MS = 500;
 
 const MERGE_READY_STEP = "queue.merge_ready";
