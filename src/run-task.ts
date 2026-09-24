@@ -584,7 +584,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
+import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
   buildReadyServeServer,
@@ -45519,14 +45519,14 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "decline",
-    syntax: PROPOSAL_VERDICT_SYNTAX.decline,
+    syntax: 'rmd decline <proposalId> --reason "<text>"',
     summary: "Decline an inbox proposal, recording why; reversible with rmd restore.",
     detail:
       "the terminal's route to the console's decline (POST /v1/inbox/decline, W1-T2604): re-classifies the proposal live, refuses one that is unknown, already RATIFIED, or already declined, and otherwise appends one panel.proposal_declined ledger row carrying the reason verbatim. Files nothing and opens no branch; the proposal stays in the registry and classifies as declined until restored. Exit 0 recorded, 1 refused, 2 a usage error",
   },
   {
     name: "restore",
-    syntax: PROPOSAL_VERDICT_SYNTAX.restore,
+    syntax: 'rmd restore <proposalId> --reason "<text>"',
     summary: "Take back a decline, so the proposal returns to the inbox.",
     detail:
       "the reversal of rmd decline and the terminal's route to POST /v1/inbox/restore (W1-T3407): refuses a proposal that is unknown, already RATIFIED, or not declined, and otherwise appends one panel.proposal_restored ledger row carrying the reason. Exit 0 recorded, 1 refused, 2 a usage error",
