@@ -11,7 +11,20 @@
   band_meaning: span
   origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
   plan_refs: []
-  files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, scripts/coverage-merge-ratchet.mjs, test/the-test-shards-are-sized-by-wall-time.test.ts]
+  files:
+    - .github/workflows/ci.yml
+    - .github/workflows/ci-gate.yml
+    - scripts/test-tier-manifest.mjs
+    - scripts/coverage-merge-ratchet.mjs
+    - test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts
+    - test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts
+    - test/a-test-only-change-runs-its-own-tests.test.ts
+    - test/ci-sharding.test.ts
+    - test/plan-reading-fast-lane-sharding.test.ts
+    - test/push-ci-on-main.test.ts
+    - test/test-with-retry.test.ts
+    - test/the-test-shards-are-sized-by-wall-time.test.ts
+    - test/workflow-single-suite-run.test.ts
   status: queued
   attempts: 0
   rationale: |

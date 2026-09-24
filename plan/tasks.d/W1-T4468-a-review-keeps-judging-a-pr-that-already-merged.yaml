@@ -1,0 +1,54 @@
+- id: W1-T4468
+  title: "A REVIEW KEEPS JUDGING A PR THAT ALREADY MERGED — runReview ignores postReviewPending's refusal when the PR lifecycle is merged or closed, and goes on to the diff, the reviewer and the proofs, so a review started from a stale sweep snapshot spends a review lane on a verdict it can never post"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 core review-throughput session (item C)"
+  plan_refs: ["W1-T913", "W1-T522", "W1-T3618"]
+  files:
+    - src/run-task.ts
+    - src/lib/review.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 on the core daemon's ledger union for the 24 h ending 16:48Z: 36 `review.post_refused` rows
+    read "PR is already merged". They came from 13 review runs, and 11 of those runs STARTED 9-259 s after their PR
+    had merged on origin/main (merge time taken from the squash commit's committer date). The sweep admitted them
+    from an open-PR snapshot that was already stale.
+    The lifecycle is already read once at start: the first `postReviewPending` goes through
+    postReviewStatusGuarded, fetches the PR lifecycle and refuses in about 2 s. runReview (src/run-task.ts) does not
+    act on that refusal. It only catches a throw, so the review keeps going through `gh pr diff`, the
+    decision claim, reviewer materialization and proof execution, and only the terminal post refuses again. Runs
+    review-PR6937-1790232371857 (428 s), review-PR7000-1790254128052 (429 s, including a reviewer spawn and a
+    worker_orphan_killed) and review-PR6843-1790189620236 (128 s) each kept judging for minutes after their first
+    "already merged" refusal. The 11 runs held review lanes for 1173 s in total.
+  design: |
+    (i) postReviewPending (src/lib/review.ts) already returns `{ posted: false, reason }`. Give that result a
+    machine-readable `lifecycle: "merged" | "closed"` field when the guard refused because of a closed
+    lifecycle, taken from the same fetchLifecycle read. Do not parse the reason text.
+    (ii) runReview (src/run-task.ts): when the pending post comes back refused with a closed lifecycle, return a
+    stood-down result straight away. Ledger it as `review.stood_down` with `reason: "pr_<lifecycle>"`, and do not
+    fetch the diff, claim the decision, spawn the reviewer or execute any proof. Every other pending refusal (the
+    idempotent already-pending claim, a terminal verdict already posted) and a thrown pending post keep today's
+    behaviour.
+    (iii) Do not add a second lifecycle read before admission: the pending post is already the first effect a review
+    takes, so honouring its answer covers the measured case without another REST call per review.
+    src/run-task.ts is large; add no new module-level comment blocks.
+  acceptance:
+    - claim: "a review whose pending post is refused because the PR merged stops before it fetches the diff or spawns the reviewer"
+      proof: "unit test: a review stops when its pending post finds the pr merged"
+    - claim: "a review whose pending post is refused because the PR closed stops the same way"
+      proof: "unit test: a review stops when its pending post finds the pr closed"
+    - claim: "an already-pending refusal still lets the review run"
+      proof: "unit test: an already pending refusal does not stop the review"
+    - claim: "the stop is ledgered with the lifecycle that caused it"
+      proof: "unit test: the stood down row names the merged lifecycle"
+  falsifier: |
+    CLOSE IF runReview on main already returns before `gh pr diff` when postReviewPending reports a merged or closed
+    lifecycle, or if the core ledger shows no review run continuing past an "already merged" refusal over a week.

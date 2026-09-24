@@ -1,5 +1,5 @@
-// W1-T3191: plan/docs changes already pay for four CI matrix runners. This suite proves the
-// conservative plan-reading candidate set is divided across all four by the same duration ledger
+// W1-T3191: plan/docs changes already pay for CI matrix runners. This suite proves the
+// conservative plan-reading candidate set is divided across all of them by the same duration ledger
 // as source CI, without turning an unreadable candidate set into an empty green run.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -14,8 +14,13 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "test-tier-manifest.mjs");
 const workflow = parse(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as {
-  jobs: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+  jobs: Record<string, {
+    strategy?: { matrix?: { shard?: number[] } };
+    steps?: Array<{ name?: string; run?: string }>;
+  }>;
 };
+const CI_SHARD_COUNT = workflow.jobs.ci?.strategy?.matrix?.shard?.length ?? 0;
+assert.ok(CI_SHARD_COUNT > 0, "ci.yml must declare at least one shard");
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   selectPlanReadingShard: (
     candidateText: string,
@@ -188,16 +193,19 @@ test("the candidate runner spawns exactly its selected shard and never spawns af
   assert.match(selected[0] ?? "", /^test\/.*\.test\.ts$/);
 });
 
-test("the workflow uses all four paid shards, names fallback telemetry, and preserves source CI", () => {
+test("the workflow uses every paid shard, names fallback telemetry, and preserves source CI", () => {
   const ci = (workflow.jobs.ci.steps ?? []).map((step) => step.run ?? "").join("\n");
   assert.doesNotMatch(ci, /matrix\.shard \}\}" != "1"[\s\S]{0,200}shard 1 owns the plan\/docs-reading set/);
-  assert.match(ci, /--select-candidates plan-reading-suites\.txt --shard \$\{\{ matrix\.shard \}\}\/4/);
-  assert.match(ci, /RETRY_SCRIPT="scripts\/test-with-retry\.mjs"[\s\S]*--run-candidates plan-reading-suites\.txt --shard \$\{\{ matrix\.shard \}\}\/4/);
+  assert.match(ci, new RegExp(String.raw`--select-candidates plan-reading-suites\.txt --shard \$\{\{ matrix\.shard \}\}\/${CI_SHARD_COUNT}`));
+  assert.match(
+    ci,
+    new RegExp(String.raw`RETRY_SCRIPT="scripts\/test-with-retry\.mjs"[\s\S]*--run-candidates plan-reading-suites\.txt --shard \$\{\{ matrix\.shard \}\}\/${CI_SHARD_COUNT}`),
+  );
   assert.match(ci, /plan-reading shard summary/);
   assert.match(ci, /fallback=source/);
   assert.match(
     ci,
-    /test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/4 --base "\$TIER_BASE"/,
+    new RegExp(String.raw`test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/${CI_SHARD_COUNT} --base "\$TIER_BASE"`),
     "source PRs keep W1-T2904's duration-balanced fast-tier path",
   );
 });
@@ -217,7 +225,7 @@ test("coverage validates the tier manifest before Playwright or an instrumented 
 test("the required slow job suppresses duplicate plan-reading execution only after exact validation", () => {
   const slow = (workflow.jobs["test-slow"].steps ?? []).map((step) => step.run ?? "").join("\n");
   assert.match(slow, /diff-class\.mjs --changed-files/);
-  assert.match(slow, /--select-candidates plan-reading-suites\.txt --shard 1\/4/);
+  assert.match(slow, new RegExp(`--select-candidates plan-reading-suites\\.txt --shard 1/${CI_SHARD_COUNT}`));
   assert.match(slow, /plan-reading matrix established/);
   assert.match(slow, /npm run --silent test:slow/);
 });
@@ -237,10 +245,10 @@ test("the current conservative candidate set is complete, on disk, and fills eve
   const currentSet = current.split("\n");
   assert.ok(currentSet.length >= 257, "the filing measured 257; base growth may only increase the conservative set");
   const assigned: string[] = [];
-  for (let index = 1; index <= 4; index += 1) {
-    const shardFiles = selectPlanReadingShard(current, allTests, currentManifest, { index, count: 4 }).files;
+  for (let index = 1; index <= CI_SHARD_COUNT; index += 1) {
+    const shardFiles = selectPlanReadingShard(current, allTests, currentManifest, { index, count: CI_SHARD_COUNT }).files;
     assert.ok(shardFiles.length > 0);
     assigned.push(...shardFiles);
   }
-  assert.deepEqual(assigned.sort(), [...currentSet].sort(), "the four shards cover the whole candidate set exactly once");
+  assert.deepEqual(assigned.sort(), [...currentSet].sort(), "all CI shards cover the whole candidate set exactly once");
 });

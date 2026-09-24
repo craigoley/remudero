@@ -1,0 +1,72 @@
+- id: W1-T4476
+  title: "EVERY DAEMON BOOT RE-JUDGES EVERY REMOTE BRANCH ON THE EVENT LOOP — the branch-reap rung keeps its fingerprint in memory, so each restart is a first pass, and reapBranchesCommand spends ~50 s of blocking execs (a gh read, a merge-base and a git grep per branch) re-deriving facts it already had"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 core daemon CPU-profile session (follow-up to #7011, #7016, #7017)"
+  plan_refs: ["W1-T4075", "W1-T448", "W1-T2246", "W1-T3020"]
+  files:
+    - src/lib/branch-reaper.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 in a live CPU profile of the core daemon (the one that led to #7011, #7016 and #7017): the
+    automatic branch-reap rung took about 50 s of event-loop time, and only at boot. W1-T4075 saw the same thing on
+    2026-09-22: a 70 s sweep-phase `daemon.loop_lag` was a first-pass branch reap (96 branches, 40.1 s) plus the
+    draft hook.
+    WHY IT IS ONLY AT BOOT. runAutomaticBranchReapRung (src/run-task.ts) keeps its AutomaticBranchReapState
+    (lastRunAtMs, lastBranchFingerprint) in a closure built by buildSweepHook. After a restart that state is empty,
+    so decideAutomaticBranchReap (src/lib/branch-reaper.ts) returns "first-pass" and the whole classifier runs
+    again, even when the branch set and the six-hour bound would both have said "unchanged".
+    WHY IT COSTS SO MUCH. reapBranchesCommand builds each branch's facts with synchronous execs through the rung's
+    execFileSync adapter: `perHeadPrState` (one `gh api .../pulls?head=` read for every branch the bulk
+    `state=all` walk did not see), `git merge-base --is-ancestor`, and `git grep -l -F -- <name>`. Then it runs
+    `git rev-parse` for each deletable branch and `git log -1 --format=%ct` for each one the active-branch screen
+    ages. That is O(branches) blocking spawns on the loop's own thread.
+    ALREADY ON MAIN, CHECKED FIRST. Deletes are already batched: pruneDeletableBranches issues one
+    `git push origin --delete` per chunk of 25 refs. Batching deletes is not this task. The cost is the judging.
+    W1-T4075 (queued, unbuilt) would move the tick's reads to a worker thread, but its list of consumers does not
+    include the branch reaper, and the reaper's delete must stay on the main thread anyway. This task is compatible
+    with it and does not wait for it.
+  design: |
+    (i) PERSIST THE CADENCE STATE. Keep AutomaticBranchReapState per repository in a small JSON file under
+    `<config.root>/state/` and load it when the rung is built, so a restart with the same branch fingerprint inside
+    the interval reads "unchanged" and does not reclassify. An unreadable or malformed file means "no state", which
+    gives today's first pass. It never means "skip".
+    (ii) BATCH THE LOCAL GIT READS. Build the per-branch facts with a constant number of git calls instead of one or
+    more per branch. `git for-each-ref refs/remotes/origin` gives every tip sha and committer time, for the manifest
+    shas and the screen's tip ages. One ancestry read against origin/main (for example `git branch -r --merged
+    origin/main`, or `merge-base --independent`) gives tipInMain. One `git grep` over every name gives namedInSource.
+    The facts must be IDENTICAL to today's per-branch reads, including `tipInMain: "unknown"` for a ref this
+    checkout cannot resolve, and a name that only appears inside a longer name's match.
+    (iii) CACHE ONLY TERMINAL PR VERDICTS. Persist a map of (branch name, tip sha) to a per-head PR state of
+    "merged", the one state GitHub cannot take back, and skip `perHeadPrState` for a hit. Never cache "open",
+    "closed" or "none": a closed PR can be reopened, and "none" can gain a PR. A new tip sha misses the cache.
+    (iv) A CACHED VERDICT NEVER DELETES ON ITS OWN. The prune still re-reads the open heads right before it deletes
+    (withholdActiveBranches, W1-T3020) and still refuses the prune when that read fails. A branch whose PR was
+    reopened is held by that fresh read whatever the cache says.
+    (v) `rmd reap-branches` from the CLI prints the same report as before. Only the number of spawns changes.
+    Add no new `interface XxxDeps`. Put the new fields on the existing opts types.
+  acceptance:
+    - claim: "a daemon restart with an unchanged branch set and an unexpired interval does not rerun the classifier"
+      proof: "unit test: a restart with an unchanged branch set does not rerun the branch reap"
+    - claim: "an unreadable persisted reap state gives a first pass, not a skip"
+      proof: "unit test: an unreadable branch reap state fires a first pass"
+    - claim: "the local facts for every branch come from a fixed number of git calls whatever the branch count"
+      proof: "unit test: the branch reap reads local facts in a fixed number of git calls"
+    - claim: "the batched facts equal today's per-branch facts on the same repository"
+      proof: "unit test: batched branch facts equal the per-branch facts"
+    - claim: "a cached merged verdict skips the per-head pull request read"
+      proof: "unit test: a cached merged verdict skips the per-head pull request read"
+    - claim: "a branch whose pull request was reopened after a cached verdict is not deleted"
+      proof: "unit test: a reopened pull request head survives a cached verdict"
+  falsifier: |
+    CLOSE IF the core daemon's first sweep after a restart shows no `branch_reap.sweep.started` row with reason
+    "first-pass" for a week of restarts, or if a boot-time CPU profile puts less than 5 s in reapBranchesCommand.

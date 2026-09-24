@@ -21,8 +21,13 @@ import { ghAnswering, pathWith } from "./helpers/gh-stub.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const workflow = parse(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as {
-  jobs: Record<string, { steps: Array<{ run?: string; env?: Record<string, string> }> }>;
+  jobs: Record<string, {
+    strategy?: { matrix?: { shard?: number[] } };
+    steps: Array<{ run?: string; env?: Record<string, string> }>;
+  }>;
 };
+const CI_SHARD_COUNT = workflow.jobs.ci?.strategy?.matrix?.shard?.length ?? 0;
+assert.ok(CI_SHARD_COUNT > 0, "ci.yml must declare at least one shard");
 
 /** The `run:` body of the collapse step in one of the two required-check jobs, read as DATA. */
 function collapseScript(job: string): string {
@@ -133,7 +138,7 @@ test("W1-T3014 (falsifier): the SUCCESS path is byte-identical per job", () => {
   // coverage-ratchet-required printed nothing and still prints nothing.
   const ci = collapse("ci-required", "success");
   assert.equal(ci.status, 0);
-  assert.equal(ci.out, "ci: all four test shards succeeded.\n");
+  assert.equal(ci.out, "ci: all eight test shards succeeded.\n");
 
   const cov = collapse("coverage-ratchet-required", "success");
   assert.equal(cov.status, 0);

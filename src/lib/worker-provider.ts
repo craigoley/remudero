@@ -815,6 +815,8 @@ export interface OpenWeightSelectionOptions {
   modelApprovals?: ModelApproval[];
   /** W1-T4079 readiness seam; defaults to {@link openWeightDeploymentReady}. */
   ready?: (deployment: string) => boolean;
+  /** Restricts the row to these deployments, keeping row order (the cash trial's model list). */
+  only?: readonly string[];
 }
 
 /**
@@ -844,7 +846,8 @@ export function selectOpenWeightModel(
   options: OpenWeightSelectionOptions = {},
 ): OpenWeightModelSelection {
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
-  const configured = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
+  const rowCandidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
+  const configured = options.only ? rowCandidates.filter((candidate) => options.only!.includes(candidate)) : rowCandidates;
   // Cash and subscription are separate billing lanes. A normal cash request keeps the measured
   // OSS/nano order, but a cash request reached only after a blocked subscription auction may use
   // Luna first. The context gate still wins: a squeeze never routes an oversized prompt to Luna.

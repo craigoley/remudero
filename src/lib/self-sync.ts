@@ -534,9 +534,13 @@ export interface ReviewerCodeFreshnessOptions {
   git?: GitRunner;
 }
 
+function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRunner {
+  const options = { encoding: "utf8", stdio: "pipe", maxBuffer: 256 * 1024 * 1024 } as const; // run-task.ts > 1 MiB
+  return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options));
+}
+
 function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFreshnessOptions): ReviewerCodeFreshness {
-  const git =
-    deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe" }));
+  const git = reviewerGit(repoDir, deps);
   try {
     git(["fetch", "--quiet", "origin"]);
   } catch (error) {
@@ -561,7 +565,7 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
   } catch (error) {
     return { status: "unreadable", reason: `could not inspect reviewer code advance: ${String(error)}` };
   }
-  if (reviewAdvanceIsMaterial(changedPaths)) {
+  if (reviewAdvanceIsMaterialAt(changedPaths, git, codeSha, originMainSha)) {
     return { status: "stale", codeSha, originMainSha, changedPaths };
   }
   return { status: "fresh", codeSha, originMainSha, advance: "immaterial" };
@@ -569,25 +573,16 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
 
 /**
  * W1-T3735: what an advance must touch before a REVIEWER's computed verdict stops being trustworthy.
- *
- * NARROWER THAN {@link MATERIAL_ADVANCE_PATHS} ON PURPOSE — the two answer different questions.
- * That list asks "would a restart load a different module graph?", for which "any `src/` change" is
- * right. This asks "could main's advance have changed this VERDICT?", and a change to, say,
- * `src/lib/cash-actuals.ts` provably could not: nothing on the review path loads it.
- *
- * THE CONFLATION COST EVERYTHING. Measured on the live fleet 2026-09-17, `review.post_refused` held
- * 200 rows, every one `attempted_state: "success"` and `evidence: "executed"` — the daemon computed
- * a PASS and discarded it, because main touches `src/` in 23 of any 60 commits while these paths
- * take 9. Nothing could post a verdict, so nothing merged.
- *
- * STILL FAILS TOWARD REFUSING: empty, blank and unreadable are all material. Narrowing WHICH paths
- * count must never narrow what "I cannot tell" means.
+ * NARROWER THAN {@link MATERIAL_ADVANCE_PATHS} ON PURPOSE: that list asks "would a restart load a
+ * different module graph?"; this asks "could main's advance have changed this VERDICT?". Reusing the
+ * restart list withheld all 200 computed verdicts on 2026-09-17, so nothing merged.
+ * STILL FAILS TOWARD REFUSING: empty, blank and unreadable are all material.
  * FALSIFIER: test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts.
  */
 export const REVIEW_MATERIAL_ADVANCE_PATHS = [
   // the verdict itself: rubric, keyword floor, proof parsing and execution
   "src/lib/review.ts",
-  // runReview's own call path, and where criteria are resolved from a trailer
+  // runReview's call path; a reviewer only counts the hunks REVIEW_PATH_SYMBOLS_IN_RUN_TASK reaches
   "src/run-task.ts",
   // criteria come from the plan; a loader change can change what is judged
   "src/lib/plan.ts",
@@ -610,6 +605,203 @@ export function reviewAdvanceIsMaterial(changedPaths: readonly string[] | undefi
   });
 }
 
+/** W1-T4469: the ROOTS of run-task.ts's review path. Everything they reference is walked, so a new
+ *  helper they call needs no entry. Whole-file matching withheld 17 of 23 verdicts in a day. */
+export const REVIEW_PATH_SYMBOLS_IN_RUN_TASK = [
+  "runReview",
+  "reviewCommand",
+  "buildFreshTreeReviewRunner",
+  "spawnRmdReviewForFreshTree",
+] as const;
+
+const RUN_TASK_PATH = "src/run-task.ts";
+const DECLARATION = String.raw`^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:const\s+enum|function\*?|class|interface|type|enum|const|let|var)`;
+const UNIT_START = new RegExp(String.raw`(?:${DECLARATION}|^import|^export\s*[{*])(?=[\s{*(]|$)`);
+const UNIT_NAME = new RegExp(String.raw`${DECLARATION}\s*([A-Za-z_$][\w$]*)`);
+const WORD = /[A-Za-z_$][\w$]*/y;
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield", "await"]);
+
+interface TopLevelUnit { start: number; end: number; names: string[] | undefined; refs: Set<string>; imports: boolean }
+
+function skipQuoted(text: string, from: number, quote: string): number {
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === "\\") i++;
+    else if (text[i] === quote) return i + 1;
+    else if (text[i] === "\n") return -1;
+  }
+  return -1;
+}
+
+function skipRegex(text: string, from: number): number {
+  let inClass = false;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") i++;
+    else if (c === "\n") return -1;
+    else if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (c === "/" && !inClass) return i + 1;
+  }
+  return -1;
+}
+
+function unitNames(text: string): string[] | undefined {
+  if (/^export\s*(?:type\s*)?[{*]/.test(text)) return [];
+  if (/^import\s*["']/.test(text)) return [];
+  if (text.startsWith("import")) {
+    const clause = /^import\s+([^;"'`]*?)\s+from\s*["']/.exec(text.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, ""));
+    return clause ? (clause[1].match(/[A-Za-z_$][\w$]*/g) ?? []).filter((w) => w !== "type" && w !== "as") : undefined;
+  }
+  const named = UNIT_NAME.exec(text);
+  return named ? [named[1]] : undefined;
+}
+
+/** A unit runs from a column-0 declaration met in code at depth 0 to the next; refs are the words its
+ *  code names, less comments, string text and `.property`. `undefined`: the scan could not finish. */
+function topLevelUnits(source: string): TopLevelUnit[] | undefined {
+  const units: TopLevelUnit[] = [];
+  const templateDepths: number[] = [];
+  let refs = new Set<string>();
+  let depth = 0;
+  let line = 1;
+  let i = 0;
+  let regexAllowed = true;
+  let afterDot = false;
+  const moveTo = (to: number): boolean => {
+    for (let k = i; k < to; k++) if (source[k] === "\n") line++;
+    i = to;
+    return to >= 0;
+  };
+  const resumeTemplate = (): boolean => {
+    for (let k = i; k < source.length; k++) {
+      if (source[k] === "\\") {
+        k++;
+      } else if (source[k] === "`" || (source[k] === "$" && source[k + 1] === "{")) {
+        regexAllowed = source[k] !== "`";
+        if (regexAllowed) templateDepths.push(depth++);
+        return moveTo(k + (regexAllowed ? 2 : 1));
+      }
+    }
+    return false;
+  };
+  const lineStart = () => {
+    const text = source.slice(i, i + 32_000);
+    if (depth !== 0 || !UNIT_START.test(text.split("\n", 1)[0])) return;
+    if (units.length > 0) units[units.length - 1].end = line - 1;
+    refs = new Set<string>();
+    units.push({ start: line, end: 0, names: unitNames(text), refs, imports: text.startsWith("import") });
+  };
+  lineStart();
+  while (i < source.length) {
+    const c = source[i];
+    if (c === "\n") { moveTo(i + 1); lineStart(); continue; }
+    if (c === " " || c === "\t" || c === "\r") { i++; continue; }
+    if (c === "/" && source[i + 1] === "/") { const nl = source.indexOf("\n", i); i = nl < 0 ? source.length : nl; continue; }
+    if (c === "/" && source[i + 1] === "*") { const close = source.indexOf("*/", i + 2); if (!moveTo(close < 0 ? -1 : close + 2)) return undefined; continue; }
+    if (/[A-Za-z_$]/.test(c)) {
+      WORD.lastIndex = i;
+      const word = WORD.exec(source)![0];
+      if (!afterDot) refs.add(word);
+      i += word.length;
+      regexAllowed = REGEX_AFTER_WORD.has(word);
+      afterDot = false;
+      continue;
+    }
+    afterDot = c === "." && !source.startsWith("...", i);
+    if (c === "`" || (c === "}" && templateDepths.at(-1) === depth - 1)) {
+      if (c === "}") depth = templateDepths.pop()!;
+      i++;
+      if (!resumeTemplate()) return undefined;
+      continue;
+    }
+    if (c === "'" || c === '"' || (c === "/" && regexAllowed)) {
+      if (!moveTo(c === "/" ? skipRegex(source, i + 1) : skipQuoted(source, i + 1, c))) return undefined;
+    } else {
+      depth += "([{".includes(c) ? 1 : ")]}".includes(c) ? -1 : 0;
+      i += source.startsWith("...", i) ? 3 : 1;
+    }
+    regexAllowed = !/[\w$)\]}'"/]/.test(c);
+  }
+  if (depth !== 0 || templateDepths.length > 0) return undefined;
+  if (units.length > 0) units[units.length - 1].end = line;
+  return units;
+}
+
+export function reviewPathSpans(source: string): { spans: Array<[number, number]> } | { unreadable: string } {
+  const units = topLevelUnits(source);
+  if (!units) return { unreadable: "could not scan it to its end" };
+  const unnamed = units.find((unit) => !unit.names);
+  if (unnamed) return { unreadable: `could not name the top-level declaration at line ${unnamed.start}` };
+  const byName = new Map<string, TopLevelUnit[]>();
+  for (const unit of units) for (const name of unit.names!) byName.set(name, [...(byName.get(name) ?? []), unit]);
+  const missing = REVIEW_PATH_SYMBOLS_IN_RUN_TASK.find((root) => !byName.has(root));
+  if (missing) return { unreadable: `review path symbol ${missing} not found` };
+  const reached = new Set<TopLevelUnit>();
+  const queue = REVIEW_PATH_SYMBOLS_IN_RUN_TASK.flatMap((root) => byName.get(root)!);
+  for (let unit = queue.pop(); unit; unit = queue.pop()) {
+    if (reached.has(unit)) continue;
+    reached.add(unit);
+    if (!unit.imports) for (const ref of unit.refs) queue.push(...(byName.get(ref) ?? []));
+  }
+  // An import line counts if reached code uses a name it binds, or it binds none (the specifier).
+  const used = new Set([...reached].flatMap((unit) => (unit.imports ? [] : [...unit.refs])));
+  const lines = source.split("\n");
+  return {
+    spans: [...reached].flatMap((unit): Array<[number, number]> => {
+      if (!unit.imports) return [[unit.start, unit.end]];
+      return lines.slice(unit.start - 1, unit.end).flatMap((text, k): Array<[number, number]> => {
+        const bound = text.replace(/(["'`]).*?\1/g, "").match(/[A-Za-z_$][\w$]*/g) ?? [];
+        const names = bound.filter((word) => !["import", "type", "as", "from"].includes(word));
+        return names.length === 0 || names.some((name) => used.has(name)) ? [[unit.start + k, unit.start + k]] : [];
+      });
+    }),
+  };
+}
+
+/** True when a hunk's old or new range meets a reached span of that version. STILL FAILS TOWARD
+ *  REFUSING: an unreadable diff, blob or declaration, a missing root, a bad hunk header all say true. */
+export function runTaskAdvanceTouchesReviewPath(
+  git: GitRunner,
+  codeSha: string,
+  originMainSha: string,
+): { touchesReviewPath: boolean; reason: string } {
+  let diff: string;
+  let sides: Array<{ spans: Array<[number, number]> } | { unreadable: string }>;
+  try {
+    diff = git(["diff", "-U0", `${codeSha}..${originMainSha}`, "--", RUN_TASK_PATH]);
+    sides = [codeSha, originMainSha].map((sha) => reviewPathSpans(git(["show", `${sha}:${RUN_TASK_PATH}`])));
+  } catch (error) {
+    return { touchesReviewPath: true, reason: `could not read the ${RUN_TASK_PATH} advance: ${String(error)}` };
+  }
+  const blind = sides.find((side) => "unreadable" in side) as { unreadable: string } | undefined;
+  if (blind) return { touchesReviewPath: true, reason: blind.unreadable };
+  const [oldSpans, newSpans] = sides.map((side) => (side as { spans: Array<[number, number]> }).spans);
+  const headers = diff.split("\n").filter((line) => line.startsWith("@@"));
+  if (headers.length === 0) return { touchesReviewPath: true, reason: `no ${RUN_TASK_PATH} hunks to classify` };
+  const meets = (spans: Array<[number, number]>, start: number, count: number) =>
+    count > 0 && spans.some(([from, to]) => start <= to && start + count - 1 >= from);
+  for (const header of headers) {
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(header);
+    if (!hunk) return { touchesReviewPath: true, reason: `unparseable hunk header: ${header}` };
+    const [oldStart, oldCount, newStart, newCount] = [hunk[1], hunk[2] ?? "1", hunk[3], hunk[4] ?? "1"].map(Number);
+    if (meets(oldSpans, oldStart, oldCount) || meets(newSpans, newStart, newCount)) {
+      return { touchesReviewPath: true, reason: `hunk ${header} meets the review path` };
+    }
+  }
+  return { touchesReviewPath: false, reason: `${headers.length} ${RUN_TASK_PATH} hunk(s) avoid the review path` };
+}
+
+function reviewAdvanceIsMaterialAt(
+  changedPaths: readonly string[] | undefined,
+  git: GitRunner,
+  codeSha: string,
+  originMainSha: string,
+): boolean {
+  if (!reviewAdvanceIsMaterial(changedPaths)) return false;
+  if (changedPaths!.some((path) => path.trim() !== RUN_TASK_PATH && reviewAdvanceIsMaterial([path]))) return true;
+  return runTaskAdvanceTouchesReviewPath(git, codeSha, originMainSha).touchesReviewPath;
+}
+
 export function checkReviewerCodeFreshness(
   repoDir: string,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
@@ -624,7 +816,7 @@ export function checkReviewerCodeFreshness(
 
   if (service.behind) {
     const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
-    if (reviewAdvanceIsMaterial(changedPaths)) {
+    if (reviewAdvanceIsMaterialAt(changedPaths, reviewerGit(repoDir, deps), oldSha, newSha)) {
       return { status: "stale", codeSha: oldSha, originMainSha: newSha, changedPaths, diffUnreadable };
     }
     return { status: "fresh", codeSha: oldSha, originMainSha: newSha, advance: "immaterial" };
