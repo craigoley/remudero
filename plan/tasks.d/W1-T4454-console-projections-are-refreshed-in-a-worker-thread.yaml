@@ -14,6 +14,7 @@
   files:
     - src/lib/console-projection-worker.ts
     - src/lib/console-snapshot-cache.ts
+    - src/lib/serve.ts
   note: |
     HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
     `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
@@ -33,7 +34,7 @@
     cache. On worker spawn failure or crash it falls back to the synchronous build and logs a reason-carrying
     ledger line, exactly as status.ts does. (2) Background refresh: while gatePrewarmOnClients.noteRead has seen a
     reader within the last minute, each cached path refreshes on its own minRefreshMs cadence off the request path;
-    with no viewer nothing runs (the W1-T154 quota rule). Out of scope: watchInstanceLiveness and
+    with no viewer nothing runs (the W1-T154 quota rule). serve.ts: zero net comment lines. Out of scope: watchInstanceLiveness and
     fleet-liveness.ts; another agent is fixing that stall now.
   acceptance:
     - claim: "a feedback projection runs off the main thread"
