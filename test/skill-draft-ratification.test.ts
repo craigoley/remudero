@@ -101,12 +101,12 @@ test("a proposal carrying a skillFile payload routes approval to writeSkillFile 
 
 test("writeSkillFile writes the exact path .claude skills <name> SKILL.md with the drafted markdown verbatim", () => {
   const root = tmp("rmd-skill-write-");
-  const relPath = writeApprovedSkillFile(root, SKILL, { mkdirSync, writeFileSync }, join);
+  const relPath = writeApprovedSkillFile(root, SKILL, { mkdirSync, writeFileSync, existsSync }, join);
 
   assert.equal(relPath, ".claude/skills/implement-clean-single-strike/SKILL.md");
   assert.equal(readFileSync(join(root, relPath), "utf8"), SKILL.markdown, "byte for byte, never re-rendered");
   assert.throws(
-    () => writeApprovedSkillFile(root, { name: "../escape", markdown: "x" }, { mkdirSync, writeFileSync }, join),
+    () => writeApprovedSkillFile(root, { name: "../escape", markdown: "x" }, { mkdirSync, writeFileSync, existsSync }, join),
     /not a single safe path segment/,
   );
   assert.equal(approvedSkillRelPath("a/b"), null);
@@ -260,4 +260,15 @@ test("rmd approve pushes the staged skill draft's SKILL.md verbatim on its own b
     bare.cleanup();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("approving a skill whose SKILL.md is already approved refuses to overwrite it and leaves the approved file untouched", () => {
+  const root = tmp("rmd-skill-no-overwrite-");
+  const fs = { mkdirSync, writeFileSync, existsSync };
+  const relPath = writeApprovedSkillFile(root, SKILL, fs, join);
+  assert.throws(
+    () => writeApprovedSkillFile(root, { name: SKILL.name, markdown: "replacement" }, fs, join),
+    /refusing to overwrite the approved skill at \.claude\/skills\/implement-clean-single-strike\/SKILL\.md/,
+  );
+  assert.equal(readFileSync(join(root, relPath), "utf8"), SKILL.markdown);
 });
