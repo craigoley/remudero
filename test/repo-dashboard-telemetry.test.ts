@@ -273,7 +273,7 @@ test("a failed ledger read after a good one serves the last result stale with it
     },
     readPlan: () => plan(task("A-1", "alpha")),
   });
-  const bound = boundConsoleReadRoute(route, {} as ServeDeps, 0);
+  const bound = boundConsoleReadRoute(route, {} as ServeDeps, 0, { minRefreshMs: 0, clock });
   const server = createService({ tokens: { read: READ_TOKEN, write: "unused-write-token" }, routes: [bound] });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;

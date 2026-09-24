@@ -28,152 +28,36 @@
  * definition is a reviewable diff, not a silent redefinition of what "the same" means.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import {
+  FIXTURE_COPY_CENSUS_FILENAME,
+  FIXTURE_COPY_SIGNATURES,
+  countFixtureCopies as countFixtureCopiesFromRoot,
+  fixtureCopyViolations,
+  // @ts-ignore the executable .mjs module has no declaration file.
+} from "../scripts/fixture-copy-census.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "fixture-copy-baseline.json");
 
-/** Every signature this census tracks, in the fixed order the baseline JSON's keys must match
- *  exactly (see the "no key drift" test below). */
-export const FIXTURE_COPY_SIGNATURES = [
-  "gitInitSites",
-  "gitInitFiles",
-  "repoBuilderFunctionNames",
-  "fakeGithubBuilderNames",
-  "fakeGithubBuilderFiles",
-  "ghPathShimFiles",
-  "ledgerHelperNames",
-] as const;
+/** The counter and its signatures live in scripts/fixture-copy-census.mjs, so hooks/pre-push can
+ *  ask this census's question without starting a test runner; this suite pins what they count. */
+export { FIXTURE_COPY_SIGNATURES };
 
 export type FixtureCopySignature = (typeof FIXTURE_COPY_SIGNATURES)[number];
 export type FixtureCopyCounts = Record<FixtureCopySignature, number>;
 
-/** This file's own basename — see the exclusion comment inside {@link countFixtureCopies}. */
-const FIXTURE_COPY_CENSUS_FILENAME = "fixture-copy-census.test.ts";
-
-/** A raw `git init` call site — the first positional argument to a git-wrapper call is the
- *  literal `"init"`, e.g. `["init", "--quiet", ...]` or `g("init", "-q", ...)`. Deliberately NOT
- *  a bare `/"init"/` match: that also hits `subtype: "init"` (an unrelated event-type literal)
- *  and CLI help text listing `"init"` as a subcommand name — both false positives this pattern
- *  excludes by requiring `"init"` to sit immediately after `(` or `[`. */
-const GIT_INIT_SITE_RE = /[([]\s*["']init["']/g;
-
-/** A builder function/const declaration whose name contains one of `word`'s alternatives — either
- *  `function name(` or `const name = (...) =>` (an arrow function; a plain `const x = "foo"` or
- *  `const x = otherFn()` is NOT a builder and does not match). Shared by the repo/GitHub/ledger
- *  signatures below, which differ only in `word`. */
-function builderDeclarationRe(word: string): RegExp {
-  return new RegExp(
-    `function\\s+([a-zA-Z]*(?:${word})[A-Za-z]*)\\s*\\(` + `|const\\s+([a-zA-Z]*(?:${word})[A-Za-z]*)\\s*(?::[^=\\n]+)?=\\s*\\([^)]*\\)\\s*(?::[^=\\n]+)?=>`,
-    "g",
-  );
-}
-
-/** A `gh` PATH shim: a file that writes something literally named `"gh"` (via `writeFileSync`
- *  or `chmod`), and separately mentions `PATH` — the two-part signature every hand-rolled shim
- *  in this suite shares (write the executable, then prepend its dir onto `PATH`). Neither half
- *  alone is enough: `writeFileSync` alone is any fixture writer, and `PATH` alone is any file
- *  that happens to mention an env var by that name. */
-function isGhPathShimFile(text: string): boolean {
-  return /["']gh["']/.test(text) && /(chmod|writeFileSync)/.test(text) && /PATH/.test(text);
-}
-
-/**
- * Scan every direct `*.test.ts` file under `<root>/test` (NEVER a subdirectory — matching the
- * audit's own `test/*.test.ts` glob, so `test/helpers/*.ts` — this census's own fixtures
- * included — and `test/setup/*.ts` are never counted) and return the seven signature counts.
- * Pure: reads files, computes, returns — no writes, no baseline comparison (that is the caller's
- * job, so the falsifier tests below can drive this over a throwaway fixture tree with no
- * real-baseline coupling at all).
- */
-export function countFixtureCopies(root: string): FixtureCopyCounts {
-  const testDir = join(root, "test");
-  let entries: string[];
-  try {
-    entries = readdirSync(testDir, { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name.endsWith(".test.ts"))
-      // THIS FILE'S OWN NAME is always excluded. Its falsifier tests below necessarily embed
-      // literal example text for every signature this census tracks (a fake `["init"` call site,
-      // a `function fakeGithubOne(` declaration, a `writeFileSync(..., "gh", ...)` shim write) —
-      // real duplication those examples are NOT. Scanning them in would bake permanent, untouchable
-      // weight into every signature that no migration could ever shrink, and would make an
-      // unrelated wording edit to this file's own tests silently move the ratchet. A synthetic
-      // `fixtureTree()` fixture is a DIFFERENT `root` entirely (a throwaway mkdtemp tree), so this
-      // exclusion never hides one of ITS files — only ever this real file, from a real scan.
-      .filter((e) => e.name !== FIXTURE_COPY_CENSUS_FILENAME)
-      .map((e) => e.name);
-  } catch {
-    entries = []; // no test/ dir at all (a minimal falsifier fixture) — every count is zero
-  }
-
-  let gitInitSites = 0;
-  let gitInitFiles = 0;
-  const repoBuilderNames = new Set<string>();
-  const fakeGithubBuilderNames = new Set<string>();
-  const fakeGithubBuilderFiles = new Set<string>();
-  const ledgerHelperNames = new Set<string>();
-  let ghPathShimFiles = 0;
-
-  for (const name of entries) {
-    const text = readFileSync(join(testDir, name), "utf8");
-
-    const initMatches = text.match(GIT_INIT_SITE_RE);
-    if (initMatches && initMatches.length > 0) {
-      gitInitSites += initMatches.length;
-      gitInitFiles += 1;
-    }
-
-    let m: RegExpExecArray | null;
-    // `Repo(?!rt)`: MEASURED across 1411 test files, the bare `Repo` alternative counted five
-    // REPORT builders — parseReport, runFixtureReport, runReport, shardLintReport and
-    // workerResultWithReport — none of which builds a repository, and two of which blocked a PR
-    // apiece (#5069, #5071) on an overage they did not cause. The negative lookahead drops exactly
-    // those five and keeps all 42 genuine `Repo`-bearing builders, `Repository` spellings included;
-    // the baseline below falls 70 -> 67 in the same commit so the ratchet tightens rather than
-    // inheriting a looser ceiling.
-    const repoRe = builderDeclarationRe("Repo(?!rt)|Checkout|Clone|Worktree|Bare");
-    while ((m = repoRe.exec(text))) repoBuilderNames.add((m[1] ?? m[2])!);
-
-    const ghRe = builderDeclarationRe("[Gg]it[Hh]ub");
-    let sawGh = false;
-    while ((m = ghRe.exec(text))) {
-      fakeGithubBuilderNames.add((m[1] ?? m[2])!);
-      sawGh = true;
-    }
-    if (sawGh) fakeGithubBuilderFiles.add(name);
-
-    const ledgerRe = builderDeclarationRe("[Ll]edger");
-    while ((m = ledgerRe.exec(text))) ledgerHelperNames.add((m[1] ?? m[2])!);
-
-    if (isGhPathShimFile(text)) ghPathShimFiles += 1;
-  }
-
-  return {
-    gitInitSites,
-    gitInitFiles,
-    repoBuilderFunctionNames: repoBuilderNames.size,
-    fakeGithubBuilderNames: fakeGithubBuilderNames.size,
-    fakeGithubBuilderFiles: fakeGithubBuilderFiles.size,
-    ghPathShimFiles,
-    ledgerHelperNames: ledgerHelperNames.size,
-  };
-}
+const countFixtureCopies = (root: string): FixtureCopyCounts => countFixtureCopiesFromRoot(root) as FixtureCopyCounts;
 
 function readBaseline(): FixtureCopyCounts {
   return JSON.parse(readFileSync(BASELINE_PATH, "utf8")) as FixtureCopyCounts;
 }
 
-/** Every signature whose live count exceeds its baseline, rendered `"<signature>: N > baseline
- *  M (+D over)"` — empty when the census is clean. */
-function violations(live: FixtureCopyCounts, baseline: FixtureCopyCounts): string[] {
-  return FIXTURE_COPY_SIGNATURES.filter((sig) => live[sig] > (baseline[sig] ?? 0)).map(
-    (sig) => `${sig}: ${live[sig]} > baseline ${baseline[sig] ?? 0} (+${live[sig] - (baseline[sig] ?? 0)} over)`,
-  );
-}
+const violations = (live: FixtureCopyCounts, baseline: FixtureCopyCounts): string[] => fixtureCopyViolations(live, baseline);
 
 // ── acceptance: "the per-signature copy counts are recorded and cannot grow" ────────────────────
 

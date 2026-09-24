@@ -100,8 +100,8 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
  * `gh pr view` read in ci.yml rather than a stale opened-event snapshot. Verified against
  * ci.yml (job `commitlint`, step "the PR title — read LIVE via `gh pr view`"): the only
  * base..head mention left in that file is the comment explaining the relocation. A
- * malformed TITLE still blocks the merge exactly like a failing test — there is no husky,
- * no `core.hooksPath`, no `commit-msg` hook, so nothing local catches it first, and the
+ * malformed TITLE still blocks the merge exactly like a failing test — hooks/commit-msg lints
+ * commits, never the PR title, so nothing local catches it first, and the
  * W1-T76 fix rung has no move for a CI-check failure and escalates a SPEC question instead
  * (#304, #306, #406, #427/#428). Because GitHub's `COMMIT_OR_PR_TITLE` squash title falls
  * back to a lone commit's own subject when a PR has exactly ONE commit, the rules below
