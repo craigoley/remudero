@@ -673,7 +673,7 @@ jobs:
     # matrix, mutation-ratchet's Stryker cache) stays its own job, untouched below. (iii)
     # `continue-on-error` means one step failing never skips the next — every step below always
     # runs and always reports.
-    #
+    name: commitlint
     # WHY THIS JOB KEEPS THE `commitlint` KEY rather than a new one, e.g. `light-gates`: adding a
     # genuinely NEW ci.yml job key would force a matching new entry in src/lib/ci-parity.ts
     # (test/preflight-ci-parity.test.ts asserts ci.yml's job list against that table in both
@@ -694,7 +694,6 @@ jobs:
     # needs real work first (checkout, `npm ci`, the gates themselves), so its post always lands
     # later than a stub's near-instant skip. `if: false` never queues a runner, so a stub costs
     # nothing at runtime.
-    name: commitlint
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
     timeout-minutes: 15
