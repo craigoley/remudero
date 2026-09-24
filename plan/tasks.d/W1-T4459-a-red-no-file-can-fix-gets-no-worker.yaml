@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
   plan_refs: [W1-T4351, W1-T3868]
-  files: [src/lib/sweep.ts, src/run-task.ts, test/a-red-no-file-can-fix-gets-no-worker.test.ts]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-red-no-file-can-fix-gets-no-worker.test.ts, test/post-fix-reverification.test.ts, test/sweep-blocked-routing.test.ts]
   status: queued
   attempts: 0
   rationale: |
