@@ -194,6 +194,7 @@ import {
   type RegistryDrift,
 } from "./instance-registry.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
+import { onboardingReadiness, type OnboardingReadinessGateway } from "./onboarding-readiness.js";
 import {
   buildProviderAuthRoutes,
   ProviderAuthSessionStore,
@@ -450,6 +451,15 @@ export interface ServeDeps {
     hostRegistryPath?: string;
     clock?: Clock;
     /** Async on purpose: a console read route never blocks the event loop (W1-T3192's census). */
+    readText?: (path: string) => Promise<string>;
+  };
+  /** W1-T4264: `GET /v1/onboarding/readiness`'s inputs. `repoRegistryPath`/`readText` default
+   *  to the SAME registry `registry` (above) already reads — one registry, one path, never a
+   *  second resolution of `.remudero/daemon-instances.yaml`. */
+  onboardingReadiness?: {
+    /** Defaults to {@link onboardingReadinessGateway}'s real `gh api` reads. */
+    gateway?: OnboardingReadinessGateway;
+    repoRegistryPath?: string;
     readText?: (path: string) => Promise<string>;
   };
   instances?: InstanceGatewayOptions;
@@ -3109,6 +3119,54 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     },
   };
 }
+/** `owner/name`, the exact shape {@link parseInstanceRegistry}'s own `github_repo`/`repo` fields
+ *  require — deliberately the SAME grammar so a repo this route is asked about and a repo the
+ *  registry already tracks can be compared without either side normalizing the other. */
+const ONBOARDING_READINESS_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+export type OnboardingReadinessRouteInput = NonNullable<ServeDeps["onboardingReadiness"]> & { repoRegistryPath: string };
+
+/**
+ * W1-T4264 — `GET /v1/onboarding/readiness?repo=<owner/name>`: is this candidate repo ready to
+ * onboard, read purely through the Fleet GitHub App's API (see `onboarding-readiness.ts`'s own
+ * doc for the eight checks and their unknown-never-passes discipline). `scope: "read"`,
+ * header-only auth like every other `/v1/*` data route (never `allowQueryToken` — see
+ * `buildPeekRoute`'s doc on why that flag stays reserved for the static shell alone).
+ *
+ * `already-onboarded` reads the SAME repo registry `GET /v1/registry` answers from
+ * ({@link parseInstanceRegistry} over `deps.repoRegistryPath}) — an unreadable/malformed
+ * registry is a BEST-EFFORT note here (the readiness answer for every OTHER check still ships),
+ * never a 503: this route's job is the candidate repo, not the registry's own health, which
+ * `GET /v1/registry` already reports.
+ */
+export function buildOnboardingReadinessRoute(deps: OnboardingReadinessRouteInput): Route {
+  const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
+  const gateway = deps.gateway;
+  return {
+    method: "GET",
+    path: "/v1/onboarding/readiness",
+    scope: "read",
+    handler: async (req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const repoParam = url.searchParams.get("repo");
+      if (!repoParam || !ONBOARDING_READINESS_REPO.test(repoParam)) {
+        sendJson(res, 400, { error: "invalid_request", detail: "?repo=<owner/name> is required" });
+        return;
+      }
+      const [owner, name] = repoParam.split("/");
+      let registryRepos: string[] = [];
+      try {
+        const registry = parseInstanceRegistry(await readText(deps.repoRegistryPath));
+        registryRepos = registry.instances.filter((i) => i.live).map((i) => i.repo);
+      } catch {
+        // Best-effort — see this function's own doc. The candidate repo's other seven checks
+        // still ship; `already-onboarded` reads "not yet onboarded" rather than blocking.
+      }
+      const report = onboardingReadiness(owner, name, { gateway, registryRepos });
+      sendJson(res, 200, report);
+    },
+  };
+}
 /**
  * The "github credential" glance chip's inner text — rendered SERVER-SIDE, the same
  * "no client-script risk" discipline the sibling "console build" chip already follows (see that
@@ -4016,6 +4074,13 @@ function assembleServeRoutes(
     buildRegistryRoute({
       ...deps.registry,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+    }),
+    // W1-T4264: candidate-repo onboarding readiness, read-only — see buildOnboardingReadinessRoute's
+    // own doc. `repoRegistryPath` defaults to the SAME registry path buildRegistryRoute (above)
+    // resolves — one registry, never a second `daemon-instances.yaml` resolution.
+    buildOnboardingReadinessRoute({
+      ...deps.onboardingReadiness,
+      repoRegistryPath: deps.onboardingReadiness?.repoRegistryPath ?? deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
     }),
     // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
     // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to
