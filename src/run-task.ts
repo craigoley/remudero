@@ -1466,8 +1466,9 @@ export type FreshTreeReviewSeams = {
    *  detached tree that helper already cuts for proof execution, just at the BASE revision instead
    *  of the PR head. One helper, two revisions — not a new hole in the census. */
   addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
-  /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code. */
-  spawnReview: (worktree: string, args: string[]) => Promise<number>;
+  /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
+   *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
+  spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void) => Promise<number>;
   /**
    * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
    * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
@@ -1564,9 +1565,14 @@ function prepareFreshReviewerWorktree(repoDir: string, worktreePath: string): bo
 export function buildFreshTreeReviewRunner(
   repoDir: string,
   deps: FreshTreeReviewSeams,
-): (prArg: string, rest: string[], freshness: { originMainSha: string }) => Promise<number | undefined> {
+): (
+  prArg: string,
+  rest: string[],
+  freshness: { originMainSha: string },
+  onFailure?: (failure: string) => void,
+) => Promise<number | undefined> {
   const prepared = new Map<string, string>();
-  return async (prArg, rest, freshness) => {
+  return async (prArg, rest, freshness, onFailure) => {
     const sha = freshness.originMainSha;
     try {
       let worktree = prepared.get(sha);
@@ -1588,27 +1594,63 @@ export function buildFreshTreeReviewRunner(
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
-      return await deps.spawnReview(worktree, [prArg, ...rest]);
+      return await deps.spawnReview(worktree, [prArg, ...rest], onFailure);
     } catch (err) {
       // Never a verdict (see the doc above): swallow the failure, but carry WHY so a reader of
       // stderr — not just the caller's silent `undefined` — can tell a fetch/worktree/spawn
-      // refusal from the ordinary "no runner wired" case.
+      // refusal from the ordinary "no runner wired" case. W1-T4055: and so can the ledger.
       process.stderr.write(`buildFreshTreeReviewRunner: falling back to the ordinary skip: ${String(err)}\n`);
+      onFailure?.(freshTreeFailureText(String(err)));
       return undefined;
     }
   };
 }
 
-export function spawnRmdReviewForFreshTree(worktree: string, args: string[]): Promise<number> {
+/** W1-T4055 — PRIMARY CONTROL on how much of one fresh-tree failure a ledger row carries. The child's
+ *  fatal error lands at the END of its stderr, so this keeps the tail, unlike `capStderrExcerpt`. */
+export const FRESH_TREE_FAILURE_MAX_CHARS = 2_000;
+
+/** How much of a running child's stderr is held in memory to take that tail from. */
+const FRESH_TREE_STDERR_HOLD_CHARS = 64 * 1024;
+
+/** A fresh-tree failure as a ledger field: credentials scrubbed BEFORE the cut, so a token sliced in
+ *  half at the boundary cannot leak a fragment (the `fallbackPushEvidence` order), then the tail kept
+ *  within {@link FRESH_TREE_FAILURE_MAX_CHARS}, and a cut never silent. */
+export function freshTreeFailureText(text: string): string {
+  const scrubbed = scrubGitCredentialText(text).trim();
+  if (scrubbed === "") return "no stderr";
+  if (scrubbed.length <= FRESH_TREE_FAILURE_MAX_CHARS) return scrubbed;
+  // Sized with the WHOLE length, which has at least as many digits as the count it will report, so
+  // the marker can only over-reserve and the result never exceeds the bound.
+  const kept = FRESH_TREE_FAILURE_MAX_CHARS - `…[${scrubbed.length} earlier chars cut] `.length;
+  return `…[${scrubbed.length - kept} earlier chars cut] ${scrubbed.slice(-kept)}`;
+}
+
+export function spawnRmdReviewForFreshTree(
+  worktree: string,
+  args: string[],
+  onFailure?: (failure: string) => void,
+): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const child = spawn(join(worktree, "bin", "rmd"), ["review", ...args], {
       cwd: worktree,
-      stdio: "inherit",
+      // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
+      stdio: ["inherit", "inherit", "pipe"],
       // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
       env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
     });
+    let held = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      process.stderr.write(chunk);
+      held = (held + chunk.toString("utf8")).slice(-FRESH_TREE_STDERR_HOLD_CHARS);
+    });
     child.on("error", reject);
-    child.on("exit", (code: number | null) => resolve(code ?? 1));
+    // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      const exitCode = code ?? 1;
+      if (exitCode !== 0) onFailure?.(signal && !held.trim() ? `killed by ${signal}` : freshTreeFailureText(held));
+      resolve(exitCode);
+    });
   });
 }
 
@@ -1619,11 +1661,12 @@ export function buildReviewerCodeFreshnessGate(
   /** W1-T3723 — runs `rmd review` from a fresh worktree instead of skipping a stale-code PR; see
    *  {@link buildFreshTreeReviewRunner} for why the daemon's own checkout never moves. Returns
    *  `undefined` when it could not run at all, so the caller falls back to the original skip and
-   *  W1-T3691's recurrence ladder stays the floor. */
+   *  W1-T3691's recurrence ladder stays the floor. W1-T4055: `onFailure` receives WHY, bounded. */
   reviewFromFreshTree?: (
     prArg: string,
     rest: string[],
     freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
+    onFailure?: (failure: string) => void,
   ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
@@ -1647,14 +1690,19 @@ export function buildReviewerCodeFreshnessGate(
         // multi-instance host then refused. A review does not need this process's modules — it
         // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
         if (reviewFromFreshTree) {
-          return reviewFromFreshTree(prArg, rest, freshness).then((code) => {
+          // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
+          // nothing but an exit code ledgered; the cause is what the next fix needs.
+          let failure: string | undefined;
+          return reviewFromFreshTree(prArg, rest, freshness, (why) => { failure = why; }).then((code) => {
             if (code !== undefined) {
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code });
+              const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
+              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ...why });
               return code;
             }
             // COULD NOT RUN — fall through to the original skip rather than judging with stale
             // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
-            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable" });
+            const reason = failure ?? "no reason reported";
+            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
             return 0;
           });
         }
