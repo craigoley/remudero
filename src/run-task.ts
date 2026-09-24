@@ -1200,6 +1200,7 @@ import {
   type CriterionRefusal,
   type ProofExecutor,
   type ReviewVerdict,
+  type PlanLintOutcome,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
 } from "./lib/review.js";
@@ -6032,6 +6033,8 @@ async function runReview(args: {
    * names — "when every test injects a fake, each catch arm is unreachable — write one per arm".
    */
   judgeRubricFn?: typeof judgeRubric;
+  /** W1-T4423: the plan-only lint seam; absent runs the real {@link lintPlanForReview}. */
+  lintPlanForReviewFn?: typeof lintPlanForReview;
   /**
    * W1-T322: task ids currently OPEN in the loaded plan — see {@link
    * "./lib/review.js".ReviewEvidence.openTaskIds}'s doc. Optional (fail-closed default: `undefined`,
@@ -6280,9 +6283,12 @@ async function runReview(args: {
   // execution to the PR HEAD (never the operator's working checkout) — so the
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
+  // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
+  const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
   const computed = judgeReview(criteria, {
     diff,
     report,
+    planLint,
     implementationReport: args.implementationReport,
     target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
@@ -23444,6 +23450,83 @@ export function lintScopeMergeBase(
     );
     return baseRef;
   }
+}
+
+/**
+ * W1-T4423 — THE LINT A PLAN-ONLY PASS NAMES, RUN BY THE REVIEW ITSELF. A consumer repo's CI has no lint-plan job,
+ * so remudero-site #133 merged PORTAL-T27 with two violations under a status claiming lint-plan had gated it. This
+ * runs `lint-plan:fast`'s selection, {@link lintPlanCommand} offline over the tasks the PR changed against its merge
+ * base, on the TARGET repo's plan at the PR head. In-process: the body has no `await`, so every line it prints is
+ * written before the console is restored, and a missing summary line reads as "could not run", never as clean.
+ */
+export async function lintPlanForReview(
+  headCheckoutDir: string | undefined,
+  git: (cwd: string, args: string[]) => string = (cwd, args) =>
+    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 }),
+  lint: typeof lintPlanCommand = lintPlanCommand,
+): Promise<PlanLintOutcome> {
+  if (!headCheckoutDir) return { ran: false, reason: "no PR-head checkout" };
+  try {
+    // A stale origin/main moves the merge base back and widens the changed-task scope onto other filings.
+    git(headCheckoutDir, ["fetch", "--quiet", "--no-tags", "origin", "main"]);
+  } catch (e) {
+    console.error(`### lint-plan for review: origin/main not refreshed (${String((e as Error).message).split("\n")[0]})`);
+  }
+  let mergeBase: string;
+  try {
+    mergeBase = git(headCheckoutDir, ["merge-base", "origin/main", "HEAD"]).trim();
+  } catch (e) {
+    return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
+  }
+  const lines: string[] = [];
+  const saved = { log: console.log, error: console.error, warn: console.warn };
+  const capture = (...parts: unknown[]): void => void lines.push(parts.map(String).join(" "));
+  let pending: Promise<number>;
+  console.log = console.error = console.warn = capture;
+  try {
+    pending = lint(["--plan", join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase], {
+      offline: true,
+      repoRoot: headCheckoutDir,
+    });
+  } finally {
+    Object.assign(console, saved);
+  }
+  let code: number;
+  try {
+    code = await pending;
+  } catch (e) {
+    return { ran: false, reason: `lint-plan threw: ${String((e as Error).message).split("\n")[0]}` };
+  }
+  return planLintOutcomeFromOutput(code, lines, mergeBase, existsSync(join(headCheckoutDir, "plan", "tasks.d")));
+}
+
+/** W1-T4423: read {@link lintPlanCommand}'s printed report back into violations. `monolith-filing` is dropped for a
+ *  repo that keeps no `plan/tasks.d/`: the shard convention is core's, and such a repo can only file in the monolith. */
+export function planLintOutcomeFromOutput(code: number, lines: string[], mergeBase: string, hasShardDir: boolean): PlanLintOutcome {
+  const summary = lines.map((l) => /rmd lint-plan: (\d+) task\(s\) checked/.exec(l)).find((m) => m !== null);
+  if (code === 2 || !summary) {
+    const said = lines.find((l) => l.startsWith("### rmd lint-plan:")) ?? `lint-plan exited ${code} with no summary`;
+    return { ran: false, reason: said.replace(/^### rmd lint-plan: /, "") };
+  }
+  const violations: string[] = [];
+  let taskId = "";
+  for (const line of lines) {
+    const header = /^✗ (\S+): \d+ violation\(s\)/.exec(line);
+    const row = /^ {4}\[([^\]]+)\] (.*)$/.exec(line);
+    if (header) taskId = header[1];
+    else if (line.startsWith("✗ ")) violations.push(line.slice(2)); // plan/policy.yaml, which names no task
+    else if (row) violations.push(`${taskId} [${row[1]}] ${row[2]}`);
+  }
+  const kept = hasShardDir ? violations : violations.filter((v) => !v.includes(" [monolith-filing] "));
+  if (code === 1 && violations.length === 0) kept.push("lint-plan exited 1 with no violation it could name");
+  const dropped = violations.length - kept.length;
+  return {
+    ran: true,
+    label: `lint-plan changed-task pass (offline) vs merge base ${mergeBase.slice(0, 12)}`,
+    checked: Number(summary[1]),
+    violations: kept,
+    ...(dropped > 0 ? { skipped: `${dropped} monolith-filing skipped, no plan/tasks.d` } : {}),
+  };
 }
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {

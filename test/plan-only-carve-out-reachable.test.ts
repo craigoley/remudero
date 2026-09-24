@@ -30,6 +30,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { judgeReview } from "../src/lib/review.js";
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 /** A minimal, well-formed plan-shard diff — the exact shape every #2707-sibling PR carried:
  *  ONE file, entirely under `plan/tasks.d/`, adding a task shard. Never touches src/test/etc. */
 function planShardDiff(taskId = "W1-T999"): string {
@@ -68,7 +71,7 @@ test("acceptance 1 — a plan-only diff reaches its plan-only verdict even when 
   writeFileSync(join(dir, "test", "already-exists.test.ts"), "// pre-existing test on the PR head\n");
   const criteria = [{ claim: "W1-T999 filed as a well-formed plan task shard", proof: "unit test: test/already-exists.test.ts" }];
   const report = "Filed W1-T999. unit test: test/already-exists.test.ts";
-  const verdict = judgeReview(criteria, {
+  const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report,
     headCheckoutDir: dir,
@@ -95,7 +98,7 @@ test("acceptance 2 — a semantic downgrade alone does not fail a diff that touc
     { claim: "the pinned key set is compared to the live schema's members in both directions", proof: "unit test: test/settings.test.ts" },
   ];
   const report = "Filed W1-T999. unit test: test/settings.test.ts";
-  const verdict = judgeReview(criteria, {
+  const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report,
     headCheckoutDir: dir,
@@ -122,7 +125,7 @@ test("acceptance 3 — a diff touching one path outside plan scope keeps the ful
   writeFileSync(join(dir, "test", "settings.test.ts"), "// pre-existing test on the PR head\n");
   const criteria = [{ claim: "a real code change is proven", proof: "unit test: test/settings.test.ts" }];
   const report = "unit test: test/settings.test.ts";
-  const verdict = judgeReview(criteria, {
+  const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT,
     diff: planShardPlusCodeDiff(),
     report,
     headCheckoutDir: dir,
@@ -146,7 +149,7 @@ test("acceptance 4 — the deterministic floor still decides the filing and a fa
   writeFileSync(join(dir, "test", "settings.test.ts"), "// pre-existing test on the PR head\n");
   const criteria = [{ claim: "a genuine defect in the filed shard", proof: "unit test: test/settings.test.ts" }];
   const report = "unit test: test/settings.test.ts";
-  const verdict = judgeReview(criteria, {
+  const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report,
     headCheckoutDir: dir,
@@ -177,7 +180,7 @@ test("acceptance 5 — a code diff is judged exactly as it is today", () => {
   const report = "unit test: test/settings.test.ts";
   // Semantically downgraded, exactly like acceptance 2/3 — the ONLY variable across all five
   // tests in this file is the diff's own shape (plan-only vs. not).
-  const verdict = judgeReview(criteria, {
+  const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT,
     diff: codeDiff,
     report,
     headCheckoutDir: dir,

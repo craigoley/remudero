@@ -23,6 +23,9 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 // W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): "the instrument
 // is right" and "the code is right" are two independently falsifiable claims;
 // a PR shipping both proves neither, because the code's own falsifiers were
@@ -149,7 +152,7 @@ test("W1-T297 criterion 1 (ADVISORY): an instrument path beside a src/ path is D
   // Standing rule 25 was withdrawn from `state` deliberately. What it still owes is EVIDENCE:
   // the fact, the instrument paths and the product paths beside them, so a reviewer can act on
   // it. Detection is unchanged; only the refusal is gone.
-  const v = judgeReview(SIMPLE_CRITERIA, { diff: ENTANGLED_DIFF, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: ENTANGLED_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, true, "the entanglement is still DETECTED");
   assert.deepEqual(v.instrumentEntanglementPaths?.instrumentPaths, ["scripts/coverage-ratchet.mjs"]);
   assert.deepEqual(v.instrumentEntanglementPaths?.srcPaths, ["src/lib/widget.ts"]);
@@ -159,7 +162,7 @@ test("W1-T297 criterion 1 (ADVISORY): an instrument path beside a src/ path is D
 test("W1-T297 criterion 2 (ADVISORY): entanglement binds NEITHER state nor floorState — an otherwise-correct PR is not stranded by it", () => {
   // THE FALSIFIER FOR THE WITHDRAWAL ITSELF. Re-adding `instrumentEntangled ||` to either rollup
   // in judgeReview turns this red, so the advisory cannot silently become a gate again.
-  const v = judgeReview(SIMPLE_CRITERIA, { diff: ENTANGLED_DIFF, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: ENTANGLED_DIFF, report: SIMPLE_REPORT });
   assert.ok(v.criteria.every((c) => c.met), "the criteria themselves are met — entanglement is the only thing in play");
   assert.equal(v.instrumentEntangled, true);
   assert.equal(v.state, "success", "rule 25 no longer refuses");
@@ -174,32 +177,32 @@ test("W1-T297 criterion 2 (ADVISORY): entanglement binds NEITHER state nor floor
 // ── Criterion 3: THE FALSE-POSITIVE FALSIFIERS ──────────────────────────────
 
 test("W1-T297 criterion 3: an instrument-only PR (instrument + its own test/ falsifier + docs) PASSES", () => {
-  const v = judgeReview(SIMPLE_CRITERIA, { diff: INSTRUMENT_ONLY_DIFF, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: INSTRUMENT_ONLY_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, false);
   assert.equal(v.state, "success", v.summary);
 });
 
 test("W1-T297 criterion 3 (the carve-out most likely to be got wrong): instrument + its OWN test/ fixture, no docs, no src/ product file — the test/ half never counts as product", () => {
-  const v = judgeReview(SIMPLE_CRITERIA, { diff: INSTRUMENT_PLUS_TEST_ONLY_DIFF, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: INSTRUMENT_PLUS_TEST_ONLY_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, false);
   assert.equal(v.state, "success", v.summary);
 });
 
 test("W1-T297 criterion 3: a src-only PR PASSES", () => {
-  const v = judgeReview(SIMPLE_CRITERIA, { diff: SRC_ONLY_DIFF, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: SRC_ONLY_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, false);
   assert.equal(v.state, "success", v.summary);
 });
 
 test("W1-T297 criterion 3: a plan-only PR PASSES", () => {
-  const v = judgeReview(SIMPLE_CRITERIA, { diff: PLAN_ONLY_DIFF, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: PLAN_ONLY_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, false);
   assert.equal(v.planOnly, true);
   assert.equal(v.state, "success", v.summary);
 });
 
 test("W1-T297 criterion 3: a docs-only PR PASSES", () => {
-  const v = judgeReview(SIMPLE_CRITERIA, { diff: DOCS_ONLY_DIFF, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: DOCS_ONLY_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, false);
   assert.equal(v.state, "success", v.summary);
 });
@@ -259,7 +262,7 @@ diff --git a/test/knowledge-budget-derivation.test.ts b/test/knowledge-budget-de
 +  assert.equal(DEFAULT_KNOWLEDGE_BUDGET_CHARS, 8148);
 +});
 `.trim();
-  const v = judgeReview(SIMPLE_CRITERIA, { diff, report: SIMPLE_REPORT });
+  const v = judgeReview(SIMPLE_CRITERIA, { planLint: CLEAN_PLAN_LINT, diff, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, false, v.summary);
   assert.equal(v.state, "success", v.summary);
 });

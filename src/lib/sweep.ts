@@ -168,6 +168,8 @@ export function discriminateReviewReuse(
     execProof: input.execProof,
     taskDeclaredFiles: input.taskDeclaredFiles,
   });
+  // W1-T4423: a plan-only verdict rests on a lint-plan run this reuse path does not repeat.
+  if (computed.planOnly) return { ok: false, reason: "a plan-only verdict needs a full review to re-run lint-plan" };
 
   const unreadable = computed.criteria.find(
     (criterion) =>

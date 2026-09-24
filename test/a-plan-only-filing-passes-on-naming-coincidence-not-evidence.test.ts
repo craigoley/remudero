@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { judgeCriterion, judgeReview } from "../src/lib/review.js";
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 // W1-T2713 — the floor for a plan-only filing used to compare a proof loaded from the task
 // shard with independently-written PR-body prose. That made a filename's accidental vocabulary
 // overlap decide the only binding lane. These tests pin the boundary: on a criterion resolved
@@ -38,7 +41,7 @@ function planShardDiff(): string {
 test("criteria resolved from a shard do not depend on an opaque test filename echoing PR prose", () => {
   // The body shares NOTHING with `test/xylophone-zebra.test.ts` and everything with the claim.
   // Under the pre-W1-T2713 floor this failed on filename vocabulary alone (#3665's shape).
-  const verdict = judgeReview([CRITERION], {
+  const verdict = judgeReview([CRITERION], { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report:
       "The account-visible choices this filing describes are constrained by whichever routing " +
@@ -54,7 +57,7 @@ test("criteria resolved from a shard do not depend on an opaque test filename ec
 });
 
 test("R-15 — the SAME criterion and the SAME opaque path fail when the body engages neither", () => {
-  const verdict = judgeReview([CRITERION], {
+  const verdict = judgeReview([CRITERION], { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report: "File the account-model policy task separately from implementation.",
     taskDeclaredFiles: ["src/lib/example.ts", "test/xylophone-zebra.test.ts"],
@@ -71,7 +74,7 @@ test("R-15 — the SAME criterion and the SAME opaque path fail when the body en
 });
 
 test("the same text remains unsubstantiated when criteria came from the body or the diff implements code", () => {
-  const fromBody = judgeReview([CRITERION], {
+  const fromBody = judgeReview([CRITERION], { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report: "File the account-model policy task separately from implementation.",
   });
@@ -79,7 +82,7 @@ test("the same text remains unsubstantiated when criteria came from the body or 
   assert.equal(fromBody.state, "failure", "no resolved shard means the body remains the floor source");
   assert.match(fromBody.criteria[0].reason, /report does not substantiate/);
 
-  const implementation = judgeReview([CRITERION], {
+  const implementation = judgeReview([CRITERION], { planLint: CLEAN_PLAN_LINT,
     diff:
       planShardDiff() +
       "\n" +

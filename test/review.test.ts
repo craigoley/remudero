@@ -2329,6 +2329,9 @@ test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/tri
 // retro/triage/plan/approve/dep-review commands that already bypass the gate
 // by construction.
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 // Touches ONLY plan/tasks.yaml.
 const PLAN_ONLY_DIFF = `
 diff --git a/plan/tasks.yaml b/plan/tasks.yaml
@@ -2352,7 +2355,7 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
 `.trim();
 
 test("W1-T205 THE OPERATOR'S FALSIFIER: a plan-only PR with zero executed proofs still arms auto-merge, so the raised floor does not stall the plan lane", () => {
-  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
   assert.equal(v.planOnly, true);
   assert.equal(v.capped, true); // structurally capped: zero proofs executed, permanently
   assert.equal(v.state, "success");
@@ -2381,9 +2384,9 @@ test("W1-T205 acceptance criterion 3: a non-tdd:strict CODE PR (not plan-only) w
 });
 
 test("W1-T205 acceptance criterion 4: a plan-only PR's passing verdict reads as deterministically gated, never as proof-executed, so the status never overstates what was checked", () => {
-  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
   assert.equal(v.state, "success");
-  assert.match(v.summary, /gated deterministically/i);
+  assert.match(v.summary, /lint-plan ran on its changed tasks/i);
   assert.doesNotMatch(v.summary, /substantiated/i);
   assert.doesNotMatch(v.summary, /CAPPED/);
 });
@@ -2396,7 +2399,7 @@ test("W1-T205: an empty diff is NOT plan-only — fails closed rather than treat
 test("W1-T205: resolveAutoMergeArm never misattributes a plan-only arm to an override, even when one happens to be supplied alongside it", () => {
   const logged: unknown[] = [];
   const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
-  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
+  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
   const decision = resolveAutoMergeArm(v, false, { by: "craig", reason: "just in case" }, log);
   assert.equal(decision.arm, true);
   assert.match(decision.reason, /plan-only/i);
@@ -3247,7 +3250,7 @@ diff --git a/plan/tasks.d/W1-T9999-a-filed-task.yaml b/plan/tasks.d/W1-T9999-a-f
 `.trim();
 
 function planOnlyCappedVerdict() {
-  return judgeReview(CRITERIA, { diff: PLAN_ONLY_SHARD_DIFF, report: RESPONSIVE_REPORT });
+  return judgeReview(CRITERIA, { diff: PLAN_ONLY_SHARD_DIFF, report: RESPONSIVE_REPORT, planLint: CLEAN_PLAN_LINT });
 }
 
 test("W1-T1085: a plan-only capped verdict is never told it is uncertified", () => {
