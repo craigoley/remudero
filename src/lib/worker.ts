@@ -373,6 +373,8 @@ export type RoutingRule =
 
 export interface RoutingDecision {
   rule: RoutingRule;
+  /** The tier asked for (economy, balanced, frontier), so the rule reads against what was wanted. */
+  capability?: CodexModelTier;
   considered: Array<{
     provider: WorkerProviderId;
     model?: string;
@@ -1401,6 +1403,8 @@ export function workerSelectionAssignment(
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
     /** Further models the provider's own ladder held in reserve (the cash walk's alternatives). */
     alternatives?: readonly string[];
+    /** The capability tier the requested model resolves to; absent when no model was requested. */
+    capability?: CodexModelTier;
   },
 ): WorkerSelectionAssignment {
   const selected = input.capacity;
@@ -1469,7 +1473,12 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   for (const alternative of (input.alternatives ?? []).slice(0, 8)) {
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
-  return { rule: routingRule(args, input), considered, headroomPercent };
+  return {
+    rule: routingRule(args, input),
+    ...(input.capability ? { capability: input.capability } : {}),
+    considered,
+    headroomPercent,
+  };
 }
 
 /** Emit the assignment to the caller's durable ledger sink. A sink failure is visible but never
@@ -1898,6 +1907,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     ? [args.mountProvider]
     : routingPolicy.routableProviders.filter((provider) => provider !== "cash");
   const capabilities = resolveWorkerCapabilities(args.cwd);
+  const requestedCapability = args.model && capabilities ? codexCapabilityForRequestedModel(capabilities, args.model) : undefined;
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
     : undefined;
@@ -1993,7 +2003,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     try {
       const auction = policyForCapability(
         routingPolicy,
-        args.model && capabilities ? codexCapabilityForRequestedModel(capabilities, args.model) : undefined,
+        requestedCapability,
         capabilities?.providerPreference,
       );
       routedCapabilityPreference = auction.capabilityPreference;
@@ -2128,6 +2138,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         selection,
         preferenceBypass,
         capabilityPreference: routedCapabilityPreference,
+        capability: requestedCapability,
       });
       let measurement: ProviderWindowMeasurement | undefined;
       try {
@@ -2207,6 +2218,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       mode: "mount-affinity",
       selectionPath: "mount-affinity",
       policy: routingPolicy,
+      capability: requestedCapability,
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
@@ -2248,6 +2260,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       selectionPath: "mount-affinity",
       policy: routingPolicy,
       alternatives: openWeight.alternatives,
+      capability: openWeight.capability,
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
@@ -2461,6 +2474,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       selection: routedClaudeSelection,
       preferenceBypass: routedClaudePreferenceBypass,
       capabilityPreference: routedCapabilityPreference,
+      capability: requestedCapability,
     });
 
     try {

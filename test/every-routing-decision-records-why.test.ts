@@ -78,6 +78,11 @@ test("each auction branch names its own rule", () => {
   assert.equal(record({ mode: "mount-affinity", selectionPath: "mount-affinity" }).routing.decision?.rule, "mount-affinity");
 });
 
+test("the decision names the capability tier that was requested", () => {
+  assert.equal(record({ capability: "frontier" }).routing.decision?.capability, "frontier");
+  assert.equal("capability" in (record({}).routing.decision ?? {}), false, "no requested model means no invented tier");
+});
+
 test("a pinned lane with no capacity reading still names the provider it was pinned to", () => {
   const row = record({ provider: "cash", model: "gpt-oss-120b", mode: "mount-affinity", selectionPath: "mount-affinity", alternatives: ["gpt-5-nano"] });
   assert.deepEqual(row.routing.decision, {
@@ -160,6 +165,7 @@ test("a blocked auction diverted to cash records cash-fallback with the readings
     assert.equal(run.cashSpawns, 1);
     const decision = run.assignments.at(-1)?.routing.decision;
     assert.equal(decision?.rule, "cash-fallback");
+    assert.equal(decision?.capability, "balanced", "a sonnet request is balanced work on every provider");
     assert.deepEqual(decision?.headroomPercent, { claude: 1, codex: null });
     assert.deepEqual(
       decision?.considered
@@ -186,8 +192,51 @@ test("a blocked auction billed to API credits records overflow-fallback", async 
     assert.equal(run.cashSpawns, 0, "an unbounded surface is never handed to cash");
     const decision = run.assignments.at(-1)?.routing.decision;
     assert.equal(decision?.rule, "overflow-fallback");
+    assert.equal(decision?.capability, "balanced");
     assert.deepEqual(decision?.headroomPercent, { claude: 1, codex: null });
     assert.equal(decision?.considered.find((entry) => entry.selected)?.provider, "claude");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function codexResult(): WorkerResult {
+  return { provider: "codex", text: "done", isError: false, subtype: "success", model: "gpt-6-luna" } as unknown as WorkerResult;
+}
+
+test("a Codex spawn records the tier on both the auction and the pinned path", async () => {
+  const root = fixtureRoot("rmd-decision-codex-");
+  try {
+    for (const mountProvider of [undefined, "codex" as const]) {
+      const assignments: WorkerSelectionAssignment[] = [];
+      await spawnWorker({
+        cwd: root,
+        permissionMode: "bypassPermissions" as const,
+        settingsFile: join(REPO_ROOT, "settings", "worker.json"),
+        prompt: "work",
+        model: "sonnet",
+        effort: "high",
+        ...(mountProvider ? { mountProvider } : {}),
+        config: {
+          claudeBin: "/unused",
+          root,
+          workerProviders: { enabled: ["claude", "codex"], codexBin: "/unused/codex", reservePercent: 5, capacityCacheMs: 60_000 },
+        } as never,
+        providerRouting: {
+          readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
+          readClaude: async () => capacity("claude", 97),
+          readCodex: async () => capacity("codex", 20, "gpt-6-luna"),
+          spawnCodex: async () => codexResult() as never,
+          writeStatus: () => {},
+          now: () => NOW,
+        },
+        onSelectionAssignment: (assignment) => assignments.push(assignment),
+      } as SpawnWorkerArgs);
+      const decision = assignments.at(-1)?.routing.decision;
+      assert.equal(decision?.capability, "balanced", String(mountProvider));
+      assert.equal(decision?.rule, mountProvider ? "mount-affinity" : "headroom-auction");
+      if (!mountProvider) assert.deepEqual(decision?.headroomPercent, { claude: 3, codex: 80 });
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
