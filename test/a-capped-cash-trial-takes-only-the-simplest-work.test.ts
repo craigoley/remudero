@@ -141,9 +141,14 @@ test("the trial reads its window from the real ledger union", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-cash-trial-state-"));
   try {
     const failing = Array.from({ length: 5 }, (_, i) => [tagged(`f${i}`, `x${i}`, "cash"), verdict(`f${i}`, false)]).flat();
-    writeFileSync(join(stateDir, "ledger.ndjson"), [...failing.map((row) => JSON.stringify(row)), "{torn"].join("\n") + "\n");
+    // "{torn" never reaches JSON.parse at all: the grep pattern filters it out before that. The
+    // second line below does match the pattern ("cash-simple" appears in it) but is not valid
+    // JSON, so it exercises the torn-line catch in windowedRows without crashing or counting as
+    // a row.
+    const lines = [...failing.map((row) => JSON.stringify(row)), "{torn", "cash-simple but not json {"];
+    writeFileSync(join(stateDir, "ledger.ndjson"), lines.join("\n") + "\n");
     const decision = decideCashTrial({ task: docsTask, taskClass: "docs", config: config(), harnessCommits: true, stateDir });
-    assert.equal(decision?.arm, "held", "five failed cash runs on disk stop the trial");
+    assert.equal(decision?.arm, "held", "five failed cash runs on disk stop the trial, unaffected by the torn lines");
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
