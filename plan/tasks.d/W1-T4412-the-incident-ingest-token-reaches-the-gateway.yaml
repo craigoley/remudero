@@ -14,7 +14,7 @@
   files:
     - deploy/serve-container.sh
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24 on the fleet host: W1-T4383's ingest-only grantor is created only when an ingest token is
