@@ -1,0 +1,54 @@
+- id: W1-T4471
+  title: "AN OPERATOR'S ANSWER TO AN ESCALATION REACHES NOTHING THAT ACTS ON IT — a reply on the GitHub issue is never read, the console's /v1/escalation/reply files feedback but never writes the question store the fix rung reads, and the issue never says how to answer; read the repository owner's reply, land every reply in the one store the fix rung reads, and tell the operator how"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: 'address the needs-human issue and let me know how I can answer' (#7033)"
+  plan_refs: [W1-T78, W1-T435, W1-T2496, W1-T2696, W1-T57]
+  files: [src/lib/escalation-answers.ts, src/lib/escalate.ts, src/lib/panel-actions.ts, src/run-task.ts, test/an-operator-reply-reaches-the-fix-rung.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24:
+    - The fix rung's operator steering (operatorVerdictEvidence, sweep.ts) reads exactly two sources: an operator_feedback
+      ledger row with a note, and an `answer` line in plan/questions.ndjson. The only writer of the latter is
+      POST /v1/questions/answer (panel-actions.ts, appendQuestionAnswer).
+    - POST /v1/escalation/reply (W1-T2496) appends the thread, captures a plan/feedback entry and ledgers
+      panel.escalation_replied, but writes neither source. So a console reply to an escalation never steers the next fix
+      round.
+    - Nothing in src/ reads comments on remudero's own issues; issues-intake.ts covers managed repos only (G-6).
+    - Issue #7033 (BLOCKED, needs-question) listed options and a recommendation but no way to answer. W1-T2696's signed
+      answer links go only to MANUAL/HARD_STOP pings. They must never go into an issue on this PUBLIC repo, because a
+      signed link is authority for whoever can read it.
+  design: |
+    (i) A new module, escalation-answers.ts, reads comments on OPEN needs-question issues the fleet opened. It accepts only
+    comments whose author_association is OWNER and whose author is not a bot. Every other comment is counted, ledgered as
+    ignored, and never read into a prompt. This keeps G-6's standing decision: the public's issue content stays off.
+    (ii) An accepted reply lands in the SAME sink /v1/questions/answer writes (appendQuestionAnswer plus a
+    panel.question_answered row, origin issue#<n>:comment:<id>), idempotent per comment id. A reply whose first word is one
+    of the issue's option labels selects that option; otherwise the whole text is the constraint for
+    re-dispatch-with-constraint. An answer is an INPUT, never a command (W1-T2496's invariant).
+    (iii) /v1/escalation/reply also writes that store when its thread names a task, so a console reply and a GitHub reply
+    steer the fix rung identically.
+    (iv) The fleet acknowledges an accepted reply with a +1 reaction on the comment. No comment is posted.
+    (v) Every needs-question issue body (escalate.ts) ends with how to answer: reply on the issue (repository owner only) or
+    in the console.
+    (vi) Wire the sweep to call the reader each pass. Subscribing the repository webhook to issue_comment, for an immediate
+    wake, is an operator step named in the PR body, not a code change.
+  acceptance:
+    - claim: "the repository owner's reply on an escalation lands in the question store"
+      proof: 'grep: test("W1-T4471: the repository owner''s reply on an escalation lands in the question store" in test/an-operator-reply-reaches-the-fix-rung.test.ts'
+    - claim: "a reply from anyone but the repository owner is ignored"
+      proof: 'grep: test("W1-T4471: a reply from anyone but the repository owner is ignored" in test/an-operator-reply-reaches-the-fix-rung.test.ts'
+    - claim: "a console escalation reply steers the fix rung"
+      proof: 'grep: test("W1-T4471: a console escalation reply steers the fix rung" in test/an-operator-reply-reaches-the-fix-rung.test.ts'
+    - claim: "the reader is called from the sweep"
+      proof: 'grep: readEscalationAnswers( in src/run-task.ts'
+  falsifier: |
+    Drop the author_association check and the second test finds a public commenter's text in the question store.

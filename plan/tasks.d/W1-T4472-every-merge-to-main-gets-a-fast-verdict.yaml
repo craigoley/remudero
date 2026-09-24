@@ -1,0 +1,40 @@
+- id: W1-T4472
+  title: "MAIN'S OWN CI REPORTED A RED 50 MINUTES AFTER IT LANDED AND 19 MINUTES AFTER IT WAS FIXED — push runs on main share one concurrency group, so 25 of 40 are superseded while pending and each survivor takes about 40 minutes; give every merge a fast tripwire over the suites its own diff affects, run on the merged tree and never superseded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: automated flow and self-improvement — main-red detection latency"
+  plan_refs: [W1-T4396, W1-T4439, W1-T4462, W1-T4056]
+  files: [.github/workflows/main-tripwire.yml, src/lib/main-health-rung.ts, test/every-merge-to-main-gets-a-fast-verdict.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24 (the actions/runs API, ci.yml push runs on main since 09:00Z): 40 runs; 25 cancelled, 11 success,
+    3 failure, 1 in progress. ci.yml groups main pushes as ci-refs/heads/main with cancel-in-progress false, so GitHub keeps
+    one running and one pending run and supersedes the rest. The cancellations are GitHub's pending-run replacement, not
+    cancel-in-progress. Surviving runs take about 37-41 minutes.
+    #7005 merged a semantic merge skew (a command added beside another PR's count bump) at 16:52:30Z. Main's CI concluded
+    that red at 17:42Z on run 1d919748a. The fix (#7041) had already merged at 17:23Z, after a PR's CI (#7028) found the
+    red. Meanwhile main-health read "undetermined" because the newest head's required checks were always pending.
+  design: |
+    (i) A new workflow on push to main, grouped PER COMMIT SHA (never superseded), runs select-affected-suites over the
+    pushed range (github.event.before..github.sha) on the MERGED tree. It always includes test files the range touched.
+    It falls back to the fast tier when the selector asks for a full run. It posts a non-required check, main-tripwire.
+    (ii) main-health treats a RED tripwire on the newest head as a red main at once, with the failing suites named. A green
+    tripwire is not evidence of green; the full required run still decides that.
+    (iii) Each tripwire verdict, and the full run's later verdict on the same range, is written where W1-T4462's selector
+    learning reads its evidence. A red the full run finds that the tripwire missed is a labelled selector miss.
+    (iv) The per-merge cost is the affected suites only. The full serial run on main is unchanged.
+  acceptance:
+    - claim: "the tripwire groups by commit and never supersedes a merge"
+      proof: 'grep: test("W1-T4472: the tripwire groups by commit and never supersedes a merge" in test/every-merge-to-main-gets-a-fast-verdict.test.ts'
+    - claim: "a red tripwire on the newest head reads main red"
+      proof: 'grep: test("W1-T4472: a red tripwire on the newest head reads main red" in test/every-merge-to-main-gets-a-fast-verdict.test.ts'
+  falsifier: |
+    Group the tripwire by ref and the first test finds a second push superseding the first commit's run.

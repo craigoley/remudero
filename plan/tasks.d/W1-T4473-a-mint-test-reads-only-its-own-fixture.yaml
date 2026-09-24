@@ -1,0 +1,38 @@
+- id: W1-T4473
+  title: "SIX MINT SUITES READ THE REAL CHECKOUT'S PLAN AND THE REAL ORIGIN — nextTaskIdCommand defaults repoRoot and --plan to the working tree, so a test that asserts exit 0 fails on any PR whose branch is behind a task filing on main ('DEGRADED: local-plan … behind origin's'); give each suite its own plan and census the rest"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: fix #7028 — a red it did not cause"
+  plan_refs: [W1-T4414, W1-T3091]
+  files: [src/run-task.ts, test/a-new-task-id-must-be-reserved-by-its-own-branch.test.ts, test/next-task-id-reserve.test.ts, test/next-task-id-prefix.test.ts, test/owner-self-scoped-verbs-unchanged.test.ts, test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts, test/a-reservation-names-its-holder.test.ts, test/a-mint-test-reads-only-its-own-fixture.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-24: "W1-T4414: a default-family mint with --branch records that branch too" failed twice (first
+    attempt and retry) on #7028's head 5ba4378, passed on main, and passed again after update-branch.
+    Reproduced locally on 5ba4378: the command printed "W1-T4468 (max 4467 across tasks.yaml 280, shards 4463, … remote
+    plan 4467) — DEGRADED: local-plan (this checkout's plan half is 4 id(s) behind origin's …)" and returned 1
+    (nextTaskIdCommand: `return mint.degraded.length ? 1 : 0`). #7035 (W1-T4465..4467) merged one minute after #7028's
+    push, which put the branch 4 ids behind.
+    OBSERVED: planPath defaults to join(repoRoot, "plan", "tasks.yaml") and no dep injects repoRoot. Of 13 test files
+    that call nextTaskIdCommand, 6 pass no --plan (grep over test/).
+  design: |
+    (i) NextTaskIdReserveDeps gains repoRoot. Each of the six suites points --plan or repoRoot at its own fixture
+    clone, whose plan carries the ids the test expects.
+    (ii) A census fails when a test calls nextTaskIdCommand with neither --plan nor deps.repoRoot, so a seventh suite
+    cannot reintroduce the read.
+    (iii) Positive control: the W1-T4414 case passes when run from a checkout whose plan is behind origin.
+  acceptance:
+    - claim: "no mint suite calls the command without its own plan"
+      proof: 'grep: test("W1-T4473: no mint suite calls the command without its own plan" in test/a-mint-test-reads-only-its-own-fixture.test.ts'
+    - claim: "a default-family mint passes from a checkout behind origin"
+      proof: 'grep: test("W1-T4473: a default-family mint passes from a checkout behind origin" in test/a-mint-test-reads-only-its-own-fixture.test.ts'
+  falsifier: |
+    Remove --plan from one suite and the census names that file.

@@ -1,0 +1,45 @@
+- id: W1-T4470
+  title: "ONE 'UNKNOWN' MERGEABILITY READ OVERRIDES TWENTY 'DIRTY' ONES — GitHub recomputes mergeability lazily, and on those passes a conflicted PR (which registers ZERO check runs) falls through to the check-count rules: it waits, re-pushes a pointless retrigger commit, and escalates a needs-human 'checks none' question; an unknown read must inherit the head's last known state"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: fix #7028 and address needs-human #7033 — automated flow, no stuck PRs"
+  plan_refs: [W1-T78, W1-T106, W1-T1117]
+  files: [src/lib/sweep.ts, test/a-conflicted-pr-is-never-escalated-as-checkless.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (rmd ledger-grep RETRO-1790262688710, 2026-09-24): PR #7028 was disposed "conflicted (mergeState dirty)" on
+    20+ sweep passes from 15:39Z to 16:26Z, on heads 9515168 and f2ffec0. Interleaved with them, passes that read
+    mergeable=unknown took the check-count branch instead:
+    - 15:47 "wait — zero check runs … < 10m".
+    - 15:57 and 16:16 "blocked-ambiguous — checks none, review none — escalating". The 16:16 pass opened needs-human
+      issue #7033, asking the operator to choose between re-dispatch and revise-spec on a PR that only needed its
+      conflict resolved.
+    - 16:00 sweep.absent_repush, which minted a retrigger commit (f2ffec0) onto a PR that was still conflicted.
+    CLAUDE.md already records the underlying fact: "A CONFLICTING PR registers ZERO check runs." The disposition reads
+    each pass in isolation, so a transient unknown erases what the previous pass knew.
+  design: |
+    (i) HYSTERESIS: an `unknown` mergeability read for a head inherits the last KNOWN mergeability for that same head
+    (the sweep's own prior disposition for the PR and sha). It is never treated as "no evidence" while a known state
+    exists.
+    (ii) The zero-check-run rules — the not-yet-scheduled wait, absent_repush and the "checks none" blocked-ambiguous
+    escalation — require a KNOWN, non-dirty mergeability for the head. A head whose last known state is dirty is disposed
+    conflicted.
+    (iii) With no known state for the head, re-read the PR once in the same pass (a GET on the pull request makes GitHub
+    compute mergeability) before disposing. Still unknown → wait, never escalate.
+    (iv) Ledger the inheritance (the disposition row names the inherited state and when it was observed), so a flapping
+    read is visible.
+  acceptance:
+    - claim: "an unknown read on a head last seen dirty is disposed conflicted"
+      proof: 'grep: test("W1-T4470: an unknown read on a head last seen dirty is disposed conflicted" in test/a-conflicted-pr-is-never-escalated-as-checkless.test.ts'
+    - claim: "a head last seen dirty is never re-pushed or escalated for zero check runs"
+      proof: 'grep: test("W1-T4470: a head last seen dirty is never re-pushed or escalated for zero check runs" in test/a-conflicted-pr-is-never-escalated-as-checkless.test.ts'
+  falsifier: |
+    Dispose each pass from its own read alone and the first test finds a dirty-then-unknown head disposed blocked-ambiguous.
