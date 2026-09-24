@@ -27,10 +27,11 @@
     where it exists), and exit non-zero. If a pending status was already posted on this head by the same run,
     withdraw it to the status that preceded it rather than leaving it pending. Any refusal about the
     reviewer's environment takes the same path. A refusal about the PR itself still posts FAIL as today.
+  amendment: "2026-09-24: criterion 2 (\"a refusal about the pull request itself still posts a failure\") was a guard on runReview's own verdict posting, which this task does not touch and which reviewCommand cannot observe; replaced by the refusal naming where to run the review."
   acceptance:
     - claim: "a review whose target repo has no managed checkout posts no commit status and exits non-zero"
       proof: "unit test: a review whose target repo has no managed checkout posts no commit status and exits non-zero"
-    - claim: "a refusal about the pull request itself still posts a failure"
-      proof: "unit test: a refusal about the pull request itself still posts a failure"
+    - claim: "the refusal tells the operator where to run the review instead"
+      proof: "unit test: the refusal tells the operator where to run the review instead"
   falsifier: |
     CLOSE IF a review refused for a missing managed checkout already leaves the PR's commit statuses untouched.
