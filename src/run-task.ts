@@ -1323,6 +1323,8 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
+  deriveQueueGovernorTrailingFlow,
+  isFleetOwnedRunBranch,
   cancelledRequiredCheckNames,
   withoutDownstreamGateFailure,
   checksStateFromRollup,
@@ -28837,10 +28839,16 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * 23-open-PR incident) is a pure predicate that was built, tested (test/queue-governor.test.ts),
  * and never invoked from any dispatch path; this supplies that call site for `drainCommand`'s and
  * `daemonCommand`'s `DrainDeps`/`DaemonDeps.checkQueueGovernor` fields (drain.ts/daemon.ts).
- * Mirrors {@link costGovernorGateFor} immediately above: `openPrCount` is a caller-supplied
+ * Mirrors {@link costGovernorGateFor} immediately above: `openPrOwnership` is a caller-supplied
  * closure over the COMPLETE open-board batch already read by `projectPlan`, rather than a second
- * GitHub request or a ledger read. The governor therefore sees PRs whose task shard is not yet on
- * main while drain and daemon retain one coherent observation per projection (W1-T3144).
+ * GitHub request. The governor therefore sees PRs whose task shard is not yet on main while drain
+ * and daemon retain one coherent observation per projection (W1-T3144).
+ *
+ * W1-T4465 (design (i)/(ii)): `openPrOwnership` returns the FLEET-OWNED/foreign split rather than
+ * a bare count (see {@link createOpenPrCountObservation}'s `readOwnership`), and this closure reads
+ * the ledger's trailing `verdict.merged`/`pr.opened` flow ({@link deriveQueueGovernorTrailingFlow})
+ * ONE extra time per consultation — the SAME per-consultation ledger read `costGovernorGateFor`
+ * already pays above, never a second GitHub request.
  *
  * A deferred consultation LEDGERS ITSELF (`logQueueGovernorDeferral`, sweep.ts) before returning,
  * so drain.ts/daemon.ts never need `ledgerPath`/`runId`/`appendLedger` just to report it — the
@@ -28854,13 +28862,20 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * for why drainage of already-open PRs must never be gated by WIP.
  */
 function queueGovernorGateFor(
-  openPrCount: () => number,
+  openPrOwnership: () => { owned: number; foreign: number },
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  now: () => number = Date.now,
 ): () => QueueGovernorResult | undefined {
   return () => {
-    const result = checkQueueGovernor(openPrCount(), policy);
+    const { owned, foreign } = openPrOwnership();
+    const flow = deriveQueueGovernorTrailingFlow(readLedgerLines(ledgerPath), now(), policy);
+    const result = checkQueueGovernor(owned, policy, {
+      foreignOpenCount: foreign,
+      trailingMergedCount: flow.trailingMergedCount,
+      trailingOpenedCount: flow.trailingOpenedCount,
+    });
     if (!result.deferred) return undefined;
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
@@ -28870,27 +28885,46 @@ function queueGovernorGateFor(
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection
  * fallback; a batch method that ran and failed throws so W1-T342's existing governor wrapper fails
- * admission closed. One helper serves drain and daemon so their queue definitions cannot drift. */
+ * admission closed. One helper serves drain and daemon so their queue definitions cannot drift.
+ *
+ * W1-T4465: `observe` now carries the FULL `PrRef[]` batch (status.ts), not merely its length, so
+ * `readOwnership` below can classify each `headRefName` for the queue governor's ownership split
+ * (design (i)) off this SAME single fetch. `read` is UNCHANGED in signature and behaviour — still a
+ * bare total count — because it also backs `DrainDeps.openPrCount`/`DaemonDeps.openPrCount`, the
+ * W1-T172 lane-dispatch-budget input, which has no ownership concept and must not gain one here. */
 function createOpenPrCountObservation(): {
   reset: () => void;
-  observe: (count: number | undefined) => void;
+  observe: (openPrs: readonly PrRef[] | undefined) => void;
   read: (projectionCount: () => number) => number;
+  readOwnership: (projectionCount: () => number) => { owned: number; foreign: number };
 } {
   let observed = false;
-  let count: number | undefined;
+  let openPrs: readonly PrRef[] | undefined;
   return {
     reset: () => {
       observed = false;
-      count = undefined;
+      openPrs = undefined;
     },
     observe: (next) => {
       observed = true;
-      count = next;
+      openPrs = next;
     },
     read: (projectionCount) => {
       if (!observed) return projectionCount();
-      if (count === undefined) throw new Error("open PR board count is unreadable");
-      return count;
+      if (openPrs === undefined) throw new Error("open PR board count is unreadable");
+      return openPrs.length;
+    },
+    // W1-T4465 design (i): a gateway without the batch method (the historical projection
+    // fallback, `!observed`) carries no per-PR head refs at all — every one of those PRs is
+    // counted OWNED, the SAME fail-closed direction {@link isFleetOwnedRunBranch} takes for a
+    // single unresolvable head, so an ownership signal this reader cannot see never silently
+    // stops gating. A batch method that ran and failed still throws, unchanged from `read` above.
+    readOwnership: (projectionCount) => {
+      if (!observed) return { owned: projectionCount(), foreign: 0 };
+      if (openPrs === undefined) throw new Error("open PR board count is unreadable");
+      let owned = 0;
+      for (const pr of openPrs) if (isFleetOwnedRunBranch(pr.headRefName)) owned++;
+      return { owned, foreign: openPrs.length - owned };
     },
   };
 }
@@ -29419,6 +29453,12 @@ async function drainCommand(
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
+  const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -29603,9 +29643,10 @@ async function drainCommand(
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
         checkCostGovernor: costGovernorGateFor(ledgerPath, runId, deps.now),
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
-        // 23-open-PR incident): the SAME `openPrCount` closure the W1-T172 lanes budget already
-        // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
+        // 23-open-PR incident): the SAME batch the W1-T172 lanes budget's `openPrCount` closure
+        // already reads (below), split by ownership (W1-T4465 design (i)) — never a second
+        // GitHub read path — see queueGovernorGateFor's doc.
+        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
@@ -31070,6 +31111,12 @@ export async function daemonCommand(
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
+  const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -31560,9 +31607,9 @@ export async function daemonCommand(
         // override (only a test does).
         reloadDailyCostCeilingUsd: dailyCostCeilingReloader(),
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
-        // 23-open-PR incident): the SAME `openPrCount` closure just defined above, never a second
-        // GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
+        // 23-open-PR incident): the SAME batch `openPrCount` reads just above, split by ownership
+        // (W1-T4465 design (i)) — never a second GitHub read path — see queueGovernorGateFor's doc.
+        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
