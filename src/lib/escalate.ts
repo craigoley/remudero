@@ -368,8 +368,11 @@ const CLASS_LABEL: Record<EscalationClass, string> = {
  *  QUESTION the operator must ANSWER. See {@link classifyAsk}. */
 export type AskType = "action" | "question";
 
-/** Beside the per-class label, alongside `needs-human` — the ask-type queue split. */
-const ASK_TYPE_LABEL: Record<AskType, string> = {
+/** Beside the per-class label, alongside `needs-human` — the ask-type queue split. Exported
+ *  (W1-T4471) so a reader of OPEN needs-question issues (lib/escalation-answers.ts) names the
+ *  SAME label this file filters issues by at creation time, rather than a second hardcoded
+ *  string that could silently drift from it. */
+export const ASK_TYPE_LABEL: Record<AskType, string> = {
   action: "needs-action",
   question: "needs-question",
 };
@@ -718,6 +721,19 @@ export function renderIssueBody(e: Escalation): string {
     "",
     "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
     "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+    // W1-T4471: a needs-question issue used to say WHAT was being asked and never HOW to answer
+    // it. Only the QUESTION ask type gets this — an ACTION issue (MANUAL/an operator-only
+    // BLOCKED-or-HARD_STOP) is not answered in prose, it is performed. Repository-owner-only,
+    // never "anyone" — G-6 keeps this public repo's comment section unread by anything but the
+    // owner's own reply (lib/escalation-answers.ts).
+    ...(classifyAsk(e) === "question"
+      ? [
+          "",
+          "**To answer:** reply on this issue (repository owner only — every other reply is",
+          "counted and ignored) or reply in the console's escalation panel. Either lands in the",
+          "same place the next fix round reads.",
+        ]
+      : []),
   ].filter((l): l is string => l !== undefined);
   return lines.join("\n");
 }
@@ -815,6 +831,15 @@ export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
  *  {@link matchesOptionalDimension} is permissive on an absent dimension, the wrong polarity there. */
 export function escalationHeadSha(body: string | undefined): string | undefined {
   return HEAD_SHA_LINE_RE.exec(body ?? "")?.[1];
+}
+
+/** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471). Reads
+ *  through the SAME {@link TASK_LINE_RE} {@link matchDuplicateEscalation} matches on — ONE
+ *  parser, exactly like {@link escalationHeadSha} beside it. Exported so a reader of an
+ *  already-open needs-question issue (lib/escalation-answers.ts) can recover which task a
+ *  repository-owner reply steers without re-deriving the dedup key's own regex. */
+export function escalationTaskId(body: string | undefined): string | undefined {
+  return TASK_LINE_RE.exec(body ?? "")?.[1];
 }
 
 /** The `**Contract:** <revision>` an already-open issue's body carries, or `undefined` (W1-T3579).

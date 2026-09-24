@@ -381,7 +381,9 @@ test("W1-T313 criterion 2: renderIssueBody puts the decision summary ABOVE the r
   assert.ok(headlineIdx >= 0 && headlineIdx < detailIdx, "the summary sits above the raw detail");
 
   // Without a decisionSummary, the body is EXACTLY what it was before this task (no drift),
-  // aside from the `**Host:**` line W1-T972 now writes unconditionally on every issue.
+  // aside from the `**Host:**` line W1-T972 now writes unconditionally on every issue, and the
+  // `**To answer:**` trailer W1-T4471 now writes on every QUESTION-type issue (this fixture's
+  // options name no operator-only act, so it classifies "question" — see classifyAsk).
   assert.equal(
     withoutSummary,
     [
@@ -400,6 +402,10 @@ test("W1-T313 criterion 2: renderIssueBody puts the decision summary ABOVE the r
       "",
       "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
       "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+      "",
+      "**To answer:** reply on this issue (repository owner only — every other reply is",
+      "counted and ignored) or reply in the console's escalation panel. Either lands in the",
+      "same place the next fix round reads.",
     ].join("\n"),
   );
 });

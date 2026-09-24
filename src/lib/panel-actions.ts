@@ -500,11 +500,13 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
   };
 }
 
-/** POST /v1/escalation/reply (W1-T2496) — a human answering an ESCALATION in prose. Derives the
- *  same {@link ThreadIdentity} escalate.ts keys this by; a thread with no prior message, or an
- *  unset `threadStorePath`, refuses (400) rather than filing unattached feedback.
- *  CONTROL INVARIANT — a reply is an input, never a command: only appends the thread, captures
- *  feedback and ledgers — never `deps.issues`, dispatch, or a ratify gateway.
+/** POST /v1/escalation/reply (W1-T2496, W1-T4471) — a human answering an ESCALATION in prose.
+ *  Derives the same {@link ThreadIdentity} escalate.ts keys this by; a thread with no prior
+ *  message, or an unset `threadStorePath`, refuses (400) rather than filing unattached feedback.
+ *  CONTROL INVARIANT — a reply is an input, never a command: appends the thread, captures
+ *  feedback, records into `plan/questions.ndjson` (the SAME store the GitHub-comment reader,
+ *  lib/escalation-answers.ts, and `/v1/questions/answer` write) and ledgers — never `deps.issues`,
+ *  dispatch, or a ratify gateway.
  *  Falsifier: test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts.
  *  Why: docs/forensics/panel-actions.md#buildescalationreplyroute */
 export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
@@ -560,10 +562,23 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
 
       const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId });
       const origin = bearerTokenId(req);
+      // W1-T4471: the SAME durable steering store the GitHub-comment reader
+      // (lib/escalation-answers.ts) and `/v1/questions/answer` write into — `operatorVerdictEvidence`
+      // (lib/sweep.ts) reads its `answer` lines each sweep pass. `input.taskId` is REQUIRED on this
+      // route (validateEscalationReply above), so this reply's thread always names a task; without
+      // this write, a console reply used to steer nothing the fix rung reads.
+      const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
+        ts: new Date().toISOString(),
+        task: input.taskId,
+        answer: input.text,
+        origin,
+      });
       ledgerPanelAction(deps, "panel.escalation_replied", input.taskId, origin, {
         thread_id: threadId,
         feedback_id: entry.id,
         interpretation: interpretation.status,
+        flows_to: "plan/questions.ndjson",
+        recorded_to_question_store: recordedToQuestionStore,
       });
       sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation });
     }),

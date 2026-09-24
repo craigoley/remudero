@@ -513,6 +513,7 @@ import {
   type AlertLaneAlert,
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
@@ -31896,6 +31897,9 @@ export async function daemonCommand(
           undefined,
           targetCheckoutRoot,
           () => activePlanRef.current,
+          // W1-T4471: the ONE real (non-test) wiring point for the repository-owner-reply reader
+          // — see buildSweepHook's own doc for why every other caller/fixture omits this.
+          ghEscalationAnswerGateway(target.owner, target.repo),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -38160,6 +38164,13 @@ export function buildSweepHook(
   // origin by accident.
   targetCheckoutRoot?: string,
   planAccessor?: () => Plan,
+  // W1-T4471: the repository-owner-reply reader's OWN gateway. Optional and trailing, like every
+  // other seam above: omitted (every existing caller/fixture) skips the rung entirely rather than
+  // defaulting to a real `gh` gateway — a real gateway built unconditionally here would spawn a
+  // live `gh api` read from inside every test that drives this closure, exactly the class of
+  // accidental-live-network-call this file's other seams (`github`, `pacer`) exist to prevent.
+  // The daemon's own composition root is the only caller that threads the real one through.
+  escalationAnswerGateway?: EscalationAnswerGateway,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -38215,6 +38226,20 @@ export function buildSweepHook(
       await mainHealthRung?.();
     } catch (e) {
       log("main.health.error", { error: String((e as Error)?.message ?? e) });
+    }
+    // W1-T4471: read the repository owner's reply on every OPEN needs-question issue BEFORE this
+    // pass builds its open-PR views below — an accepted reply lands in `plan/questions.ndjson`
+    // (the exact store `buildOpenPrViews` re-reads for `operatorVerdictEvidence`), so a reply
+    // typed on GitHub this same tick steers this same tick's fix-rung disposition, not the next
+    // one. Best-effort by the SAME contract as `mainHealthRung` above: a failed poll never blocks
+    // the sweep pass it precedes. No gateway supplied (every existing test fixture) ⇒ skipped
+    // entirely, never a real `gh` read — see this parameter's own doc, above.
+    if (escalationAnswerGateway) {
+      try {
+        readEscalationAnswers({ root: repoRoot, ledgerPath, runId, issues: escalationAnswerGateway });
+      } catch (e) {
+        log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
+      }
     }
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick

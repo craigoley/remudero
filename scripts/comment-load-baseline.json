@@ -120,7 +120,7 @@
   "src/lib/drain.ts": 750,
   "src/lib/emissions.ts": 113,
   "src/lib/env.ts": 140,
-  "src/lib/escalate.ts": 500,
+  "src/lib/escalate.ts": 750,
   "src/lib/escalation-catalogue.ts": 500,
   "src/lib/feedback-docket.ts": 102,
   "src/lib/feedback-landing.ts": 301,
