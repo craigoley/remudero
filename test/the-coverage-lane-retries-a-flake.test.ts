@@ -66,12 +66,14 @@ test("flaky on its first run", () => {
 /** Runs the real wrapper the way ci.yml's coverage step does, minus tsx and the repo harness. */
 function runCoverageLane(dir: string, testFile: string, outerRaw?: string) {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.NODE_V8_COVERAGE;
-  // Stands in for an enclosing coverage run's NODE_V8_COVERAGE, which the wrapper inherits when
-  // this very suite runs in the coverage lane.
+  // BLANKED, never deleted: Node re-injects a deleted NODE_V8_COVERAGE into the child. `outerRaw`
+  // stands in for an enclosing coverage run's directory, which the wrapper inherits when this very
+  // suite runs in the coverage lane. NODE_TEST_CONTEXT must be DELETED — even an empty one makes
+  // the nested node --test skip its files as a recursive run.
+  env.NODE_V8_COVERAGE = "";
   if (outerRaw) env.NODE_V8_COVERAGE = outerRaw;
+  delete env.NODE_TEST_CONTEXT;
   delete env.GITHUB_STEP_SUMMARY;
-  delete env.NODE_TEST_CONTEXT; // set inside node --test; it would turn the nested run into a v8-protocol child
   delete env.TEST_RETRY;
   delete env.TEST_RETRY_BUDGET_SECONDS;
   const r = spawnSync(
