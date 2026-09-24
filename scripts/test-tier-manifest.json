@@ -92,6 +92,7 @@
     "test/a-fired-retro-must-not-hold-the-dispatch-rung.test.ts": 1403,
     "test/a-fired-triage-must-not-hold-the-dispatch-rung.test.ts": 1126,
     "test/a-fix-keeps-running-after-its-pr-moved-on.test.ts": 0,
+    "test/a-fix-round-that-did-the-work-lands-it.test.ts": 0,
     "test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts": 0,
     "test/a-fix-worker-is-pointed-at-its-predecessors-transcript.test.ts": 0,
     "test/a-fixed-main-re-runs-what-it-was-blocking.test.ts": 0,

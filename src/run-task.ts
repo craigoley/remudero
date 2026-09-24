@@ -1400,6 +1400,7 @@ import {
   uncreditableHeadReason,
   creditSubjectIsImplementation,
   planOnlyRunBranchReceipts,
+  REGENERABLE_ARTIFACT_GENERATORS,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -8952,6 +8953,8 @@ export async function runFixRung(opts: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
+    /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
+    worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
     /**
      * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
      * for, or the bare verdict every pre-existing stub already returns. Read it through
@@ -10398,6 +10401,7 @@ export async function runFixRung(opts: {
     };
 
     const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
+    const fixRoundStartedAtMs = systemClock.now();
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's own elapsed milliseconds on the SUCCESS path — the same field
     // `fix.spawn_abandoned` already carries on the failure path (below), folded into
@@ -10467,19 +10471,48 @@ export async function runFixRung(opts: {
     // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
-    const harnessCommitCount = (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
-      harnessOwnsGit: fixHarnessOwnsGit,
-      commitCount: 0,
-      report: workerTranscript(fixResult),
-      worktreePath: opts.worktreePath,
-      declaredPaths: opts.task.files ?? [],
-      log: deps.log,
-      say: deps.say,
-      onRefusal: (reason, undeclared = []) => {
-        harnessCommitRefusalReason = reason;
-        harnessCommitUndeclared = undeclared;
-      },
-    });
+    const harnessCommit = (report: string) =>
+      (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
+        harnessOwnsGit: fixHarnessOwnsGit,
+        commitCount: 0,
+        report,
+        worktreePath: opts.worktreePath,
+        declaredPaths: opts.task.files ?? [],
+        log: deps.log,
+        say: deps.say,
+        onRefusal: (reason, undeclared = []) => {
+          harnessCommitRefusalReason = reason;
+          harnessCommitUndeclared = undeclared;
+        },
+      });
+    let harnessCommitCount = harnessCommit(workerTranscript(fixResult));
+    // W1-T4450: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR ONCE HERE TOO, exactly as implement does
+    // (W1-T4052): same session, one ask, the same refusal if the line is still absent. 37 fix rounds in
+    // one day did their work and lost it to this one line. Only a round that left edits is asked.
+    if (
+      harnessCommitCount === 0 &&
+      harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON &&
+      (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath)
+    ) {
+      deps.log("fix.commit_line_requested", { strike: attempt, round });
+      deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
+      const asked = await spawnFixWorkerBounded(
+        deps,
+        { ...fixArgs, prompt: COMMIT_LINE_RESUME_PROMPT, resumeSessionId: fixResult.sessionId },
+        { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
+      );
+      const answer = asked.kind === "spawned" ? deps.account(asked.result) : undefined;
+      deps.log("fix.commit_line_answered", {
+        strike: attempt,
+        outcome: asked.kind,
+        ...(answer ? { session_id: answer.sessionId, cost_usd: answer.costUsd, num_turns: answer.numTurns } : {}),
+      });
+      if (answer) {
+        harnessCommitRefusalReason = undefined;
+        harnessCommitUndeclared = [];
+        harnessCommitCount = harnessCommit(`${workerTranscript(fixResult)}\n${workerTranscript(answer)}`);
+      }
+    }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
@@ -10610,7 +10643,9 @@ export async function runFixRung(opts: {
         root: opts.config.root,
         taskId: opts.taskId,
         runId: opts.runId,
-        rung: `fix-${attempt}`,
+        // W1-T4450: the round's own start time rides the name, so a second fix invocation in the same
+        // daemon run no longer overwrites this round's transcript (every one used to be `fix-1`).
+        rung: `fix-${attempt}-${fixRoundStartedAtMs}`,
         text: workerTranscript(fixResult),
         model: opts.mount.model,
         verdict: fixResult.subtype,
@@ -36147,6 +36182,8 @@ export interface WorkerEditCommit {
   readonly sha?: string;
   /** Paths the worker changed that its task did NOT declare. Reported, never staged. */
   readonly undeclared: readonly string[];
+  /** W1-T4450: registered regenerable artifacts staged although undeclared (see commitWorkerEdits). */
+  readonly regenerable?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
 }
@@ -36195,15 +36232,27 @@ export function commitWorkerEdits(
   const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
   if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
 
-  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths));
-  const undeclared = changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths));
+  // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
+  // it as the remedy) is staged although undeclared. The fix prompt and the scope guard already grant
+  // that exception (W1-T3015); refusing it here meant the one edit a failing census asks for could
+  // never land — 9 fix rounds in one day were refused this way.
+  const regenerable = changed.filter(
+    (path) => !pathIsUnderDeclaredSurface(path, declaredPaths) && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path),
+  );
+  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) || regenerable.includes(path));
+  const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
   }
 
   runGit(["add", "-A", "--", ...declared]);
   runGit(["commit", "-m", message]);
-  return { committed: true, sha: runGit(["rev-parse", "HEAD"]).trim(), undeclared };
+  return {
+    committed: true,
+    sha: runGit(["rev-parse", "HEAD"]).trim(),
+    undeclared,
+    ...(regenerable.length > 0 ? { regenerable } : {}),
+  };
 }
 
 /**
@@ -36328,6 +36377,9 @@ function lastCommitRefusalPromptLines(
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
 
+/** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
+export const REFUSED_REPORT_TAIL_CHARS = 800;
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -36351,7 +36403,9 @@ export function harnessCommitForShellLessWorker(
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined) {
     const reason = MISSING_COMMIT_MESSAGE_REASON;
-    input.log("implement.harness_commit_refused", { reason });
+    // W1-T4450: the tail of the report that was parsed, so the next diagnosis has evidence instead
+    // of a transcript a later round overwrote.
+    input.log("implement.harness_commit_refused", { reason, report_tail: input.report.slice(-REFUSED_REPORT_TAIL_CHARS) });
     input.onRefusal?.(reason, []);
     return input.commitCount;
   }
@@ -36359,6 +36413,7 @@ export function harnessCommitForShellLessWorker(
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
+    ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
   });
