@@ -140,6 +140,7 @@
     "test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts": 1255,
     "test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts": 0,
     "test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts": 0,
+    "test/a-missing-commit-line-is-asked-for-not-discarded.test.ts": 0,
     "test/a-missing-console-build-fails-loudly.test.ts": 0,
     "test/a-missing-trailer-is-repairable-from-the-branch.test.ts": 0,
     "test/a-mixed-plan-and-source-diff-is-refused-before-push.test.ts": 837,

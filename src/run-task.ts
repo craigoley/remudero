@@ -15344,6 +15344,59 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say,
       onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
     });
+
+    // W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED. `resumeForMissingCommitLine`
+    // owns its own precondition (called unconditionally, exactly like the helper above) — it no-ops
+    // for every refusal EXCEPT the exact missing-line one, and only when the worktree still holds
+    // uncommitted changes. The resumed reply asks the SAME session for nothing but the line, and the
+    // recommit runs through the unchanged `harnessCommitForShellLessWorker`, so no other refusal path
+    // changes shape.
+    const commitLineRecovery = await resumeForMissingCommitLine(
+      {
+        commitCount,
+        refusalReason: harnessCommitRefusalState.reason,
+        report: fullText(impl),
+        worktreePath,
+        declaredPaths: task.files ?? [],
+        log,
+        say,
+      },
+      {
+        resume: async () => {
+          const resumedImpl = account(
+            await spawn({
+              cwd: worktreePath,
+              permissionMode: "bypassPermissions",
+              settingsFile,
+              resumeSessionId: impl.sessionId,
+              model: implementMount.model,
+              mountProvider: implementMount.provider,
+              effort: implementMount.effort,
+              maxTurns: implementMount.maxTurns,
+              maxBudgetUsd: budgetUsd,
+              config: implementConfig,
+              tools: implementTools === undefined ? undefined : [...implementTools],
+              ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+              prompt:
+                "Your last REPORT carried no anchored COMMIT_MESSAGE line, so the harness could not " +
+                "commit your edits — they are still saved in the worktree. Make NO further edits and " +
+                "run NO git or gh commands. Reply with ONLY a REPORT whose last line is exactly " +
+                "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
+                "subject, at most 100 characters).",
+            }),
+          );
+          return {
+            text: workerTranscript(resumedImpl),
+            costUsd: resumedImpl.costUsd,
+            sessionId: resumedImpl.sessionId,
+            numTurns: resumedImpl.numTurns,
+            subtype: resumedImpl.subtype,
+          };
+        },
+      },
+    );
+    commitCount = commitLineRecovery.commitCount;
+    harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
     const harnessCommitRefusalReason = harnessCommitRefusalState.reason;
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && commitCount === 0;
 
@@ -35990,6 +36043,11 @@ function lastCommitRefusalPromptLines(
   ];
 }
 
+/** W1-T4052: the exact reason `harnessCommitForShellLessWorker` names when the worker's report
+ *  carries no anchored COMMIT_MESSAGE line. Shared with `resumeForMissingCommitLine` below so the
+ *  two functions can never drift on what "the missing-line refusal" means. */
+const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -36012,7 +36070,7 @@ export function harnessCommitForShellLessWorker(
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined) {
-    const reason = "no anchored COMMIT_MESSAGE line in the report";
+    const reason = MISSING_COMMIT_MESSAGE_REASON;
     input.log("implement.harness_commit_refused", { reason });
     input.onRefusal?.(reason, []);
     return input.commitCount;
@@ -36037,6 +36095,113 @@ export function createHarnessCommitRefusalRecorder(state: { reason?: string }): 
   return (reason) => {
     state.reason = reason;
   };
+}
+
+/** W1-T4052: is there ANYTHING uncommitted in this worktree — declared surface or not? Checked
+ *  ahead of the resume decision because the missing-line refusal returns before
+ *  `harnessCommitForShellLessWorker` ever reads git status, so "changed nothing" and "forgot the
+ *  line" are otherwise indistinguishable from the refusal reason alone. */
+export function worktreeHasUncommittedChanges(
+  worktreePath: string,
+  deps: { runGit?: (args: string[]) => string } = {},
+): boolean {
+  const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
+    "git",
+    ["-C", worktreePath, ...args],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ));
+  return workerChangedPaths(runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL])).length > 0;
+}
+
+/**
+ * W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED.
+ *
+ * 188 harness-commit refusals across 82 runs and 112 tasks (since 2026-09-17) carried this exact
+ * reason: the worker did the work, saved it to the worktree, and one REPORT line was absent — the
+ * single largest way a shell-less implement run ended with nothing. The refusal itself stays
+ * correct: `harnessCommitForShellLessWorker` above still refuses to invent a subject, unchanged.
+ * But the run that DID the work is still addressable — the implement lane already resumes the SAME
+ * worker session for a DECISION_REQUEST follow-up (`implement.resumed`, W1-T3573/W1-T3696); this
+ * reuses that mechanism ONCE, asking for nothing but the missing line.
+ *
+ * OWNS ITS OWN PRECONDITION, called unconditionally like its sibling above: it no-ops unless the
+ * refusal was EXACTLY the missing-line reason (every other refusal — no files declared, outside the
+ * declared surface, changed nothing — is left untouched) AND the worktree actually holds
+ * uncommitted changes (a worker that changed nothing is left to that refusal rather than resumed to
+ * relearn it). ONE resume: a second report still lacking the line is refused with a reason naming
+ * that the resume was tried, never looped and never a synthesized subject — the resumed text is
+ * merely APPENDED to the original report and handed back through the unchanged
+ * `harnessCommitForShellLessWorker`, so every other refusal it can produce still applies.
+ */
+export async function resumeForMissingCommitLine(
+  input: {
+    commitCount: number;
+    refusalReason: string | undefined;
+    report: string;
+    worktreePath: string;
+    declaredPaths: readonly string[];
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+  },
+  deps: {
+    resume: () => Promise<{
+      text: string;
+      costUsd?: number;
+      sessionId?: string;
+      numTurns?: number;
+      subtype?: string;
+    }>;
+    hasChanges?: (worktreePath: string) => boolean;
+    commit?: typeof commitWorkerEdits;
+    ahead?: (worktreePath: string, base: string) => number;
+  },
+): Promise<{ commitCount: number; refusalReason: string | undefined; report: string; resumed: boolean }> {
+  const noop = {
+    commitCount: input.commitCount,
+    refusalReason: input.refusalReason,
+    report: input.report,
+    resumed: false as const,
+  };
+  if (input.refusalReason !== MISSING_COMMIT_MESSAGE_REASON || input.commitCount !== 0) return noop;
+  const hasChanges = deps.hasChanges ?? ((worktreePath: string) => worktreeHasUncommittedChanges(worktreePath));
+  if (!hasChanges(input.worktreePath)) return noop;
+
+  input.log("implement.commit_line_requested", {});
+  input.say("no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
+  const resumed = await deps.resume();
+  input.log("implement.resumed", {
+    ...(resumed.sessionId ? { session_id: resumed.sessionId } : {}),
+    cost_usd: resumed.costUsd,
+    ...(resumed.numTurns !== undefined ? { num_turns: resumed.numTurns } : {}),
+    ...(resumed.subtype !== undefined ? { subtype: resumed.subtype } : {}),
+    reason: "missing_commit_line",
+  });
+
+  // APPENDED, never replacing the original report — the original REPORT content (follow-ups,
+  // learnings-used, the worker's own narrative) survives; only the anchored COMMIT_MESSAGE line
+  // the resumed reply carries is new, and `parseReport`'s own "last one wins" rule picks it up.
+  const combinedReport = `${input.report}\n${resumed.text}`;
+  if (parseReport(combinedReport)?.commitMessage === undefined) {
+    const reason = `${MISSING_COMMIT_MESSAGE_REASON} (asked the worker's own session once; still absent)`;
+    input.log("implement.harness_commit_refused", { reason });
+    return { commitCount: input.commitCount, refusalReason: reason, report: combinedReport, resumed: true };
+  }
+
+  const refusalState: { reason?: string } = {};
+  const commitCount = harnessCommitForShellLessWorker(
+    {
+      harnessOwnsGit: true,
+      commitCount: input.commitCount,
+      report: combinedReport,
+      worktreePath: input.worktreePath,
+      declaredPaths: input.declaredPaths,
+      log: input.log,
+      say: input.say,
+      onRefusal: createHarnessCommitRefusalRecorder(refusalState),
+    },
+    { commit: deps.commit, ahead: deps.ahead },
+  );
+  return { commitCount, refusalReason: refusalState.reason, report: combinedReport, resumed: true };
 }
 
 /** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is
