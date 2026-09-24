@@ -12,7 +12,7 @@ import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo } from "./ledger-union.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
@@ -877,6 +877,8 @@ export function readLedgerUnionBounded(
     readdirSync?: (dir: string) => string[];
     gunzipSync?: (buf: Buffer) => Buffer;
     readFileBuffer?: (p: string) => Buffer;
+    /** A memoizing rotation reader, e.g. {@link createLedgerRotationMemo}'s pass; omitted ⇒ every rotation is parsed. */
+    rotationRecords?: LedgerRotationHook;
   } = {},
 ): LedgerLines {
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
@@ -892,10 +894,24 @@ export function readLedgerUnionBounded(
       dedupe: false,
       readLiveRecords: () => live,
       satisfied: opts.satisfied,
+      rotationRecords: opts.rotationRecords,
     },
     statusLedgerUnionFsDeps(ledgerFs, opts),
   );
   return withReadMeta(read.rows, (live.torn ?? 0) + read.torn, live.present);
+}
+
+/** {@link readLedgerUnionBounded} through a rotation memo: a request re-parses only the live file, and a rotation
+ *  the memo lacks is loaded off the event loop before the union is read again. */
+export async function readLedgerUnionMemoized(path: string, memo: LedgerRotationMemo): Promise<LedgerLines> {
+  let pass = memo.pass();
+  let read = readLedgerUnionBounded(path, { rotationRecords: pass.rotationRecords });
+  while (!pass.complete()) {
+    await memo.load(pass.missing());
+    pass = memo.pass();
+    read = readLedgerUnionBounded(path, { rotationRecords: pass.rotationRecords });
+  }
+  return read;
 }
 
 /**
