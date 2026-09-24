@@ -142,6 +142,23 @@ fi
 # WHEN a small subset runs, never WHETHER any of them do. `rmd census-membership` keeps its verb
 # and its purpose as a report an author can run by hand.
 
+# BEGIN census precheck — the census QUESTIONS, without the runner W1-T3225 removed.
+# Three suites (clock-signature, comment-load, fixture-copy) cost a CI round each in one session,
+# because a census names none of a caller's symbols. scripts/census-precheck.mjs imports each one's
+# own counter, reads files and spawns only read-only git. It blocks only growth this branch causes
+# against origin/main's merge base; a census main already fails is not this push's to answer for.
+if [ -f scripts/census-precheck.mjs ]; then
+  node scripts/census-precheck.mjs --base origin/main
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: census-precheck could not measure — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/census-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+# END census precheck
 
 # W1-T3388 — BEGIN head-identity admission (ADVISORY)
 # MEASURED 2026-09-16: head-identity-gate is a REQUIRED check that no local route ran, so two PRs
