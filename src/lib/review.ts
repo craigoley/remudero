@@ -6213,6 +6213,10 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "The gate is the rule and is tracked on INSTRUMENT_SURFACE above; this file is what it measures, " +
     "the same shape as openapi/daemon.yaml directly above.",
   "plan/claims.yaml": "claim DATA the claims gate validates, not the checker's rule logic",
+  "scripts/select-affected-suites.mjs":
+    "W1-T4404's affected-suite selector in SHADOW: it prints what it WOULD run and exits 0 whatever it finds, after the " +
+    "full suite has run, so no edit to it can change what a CI gate measures. Promote it to INSTRUMENT_SURFACE when " +
+    "W1-T4406 lets a selection skip suites.",
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
   "package-lock.json": "a dependency lockfile, not gate logic",

@@ -911,6 +911,13 @@ jobs:
           FLAKE_RETRY_DIR="${RUNNER_TEMP}/flake-retry"
           mkdir -p "$FLAKE_RETRY_DIR"
           grep -E '^FLAKE-RETRY' "${RUNNER_TEMP}/coverage-test-output.log" > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/coverage-shard-${{ matrix.shard }}.log"
+          # W1-T4404: the affected-suite selector in SHADOW. It records what it WOULD have run and, for
+          # each file that really failed above, whether each selection had it. It runs after the
+          # full suite, never changes what ran, and never changes this step's verdict.
+          git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
+          node --import tsx scripts/select-affected-suites.mjs --changed-files changed-files.txt \
+            --diff "${RUNNER_TEMP}/affected.diff" --failed-from "${RUNNER_TEMP}/coverage-test-output.log" \
+            || echo "W1-T4404: the shadow selector itself failed; nothing depends on it."
           if [ "$TEST_EXIT" -ne 0 ]; then
             echo "coverage-ratchet: the instrumented suite exited ${TEST_EXIT}. W1-T3207 makes this the surviving test harness; lcov/raw coverage are still checked before the shard fails."
             echo "- coverage-ratchet: instrumented suite exited **${TEST_EXIT}** — W1-T3207 makes this the surviving test harness; lcov/raw coverage were still checked before failing the shard." >> "$GITHUB_STEP_SUMMARY"
