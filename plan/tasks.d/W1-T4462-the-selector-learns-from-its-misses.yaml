@@ -1,0 +1,37 @@
+- id: W1-T4462
+  title: "THE SHADOW SELECTOR'S FIRST DAY FOUND A REAL MISS AND TWO GAPS — a census that imports its walker script (clock-signature) looks like a plain suite to censusSuiteFiles, a new src/ file reaches no symbol callers, and CI never passes --recent-failures, so flakes count as misses; teach the selector each, before W1-T4406 can trust it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: no stuck PRs — automated flow and self-improvement; fix-lane investigation of 65 fix rounds"
+  plan_refs: [W1-T4404, W1-T4406, W1-T4439]
+  files: [scripts/diff-class.mjs, src/lib/affected-suites.ts, .github/workflows/ci.yml, test/the-selector-learns-from-its-misses.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24: the W1-T4404 shadow selector's first day of records (see the rationale below).
+    MEASURED 2026-09-24 over 159 shadow records from 40 PR runs: floor median 1,702 / 1,876 suites (~9% saved), narrow
+    median 458 (~75% saved); 20 distinct real failures, 3 missed by narrow: clock-signature-census on #6967 (a real regression
+    — sre-lane.ts added new Date( calls; the census imports scripts/clock-signature-ratchet.mjs, whose walk censusSuiteFiles
+    cannot see), and two flakes (cold-status-reads timing, boot-fetch ref-lock) that --recent-failures would have kept
+    selected.
+  design: |
+    (i) A test that imports a scripts/ module which walks a population (ls-files, readdir, glob) is a census suite
+    too. (ii) A diff that ADDS a src/ file selects every suite that walks src/ unfiltered. (iii) CI passes --recent-failures
+    built from the flake-retry evidence the jobs already write. (iv) A shadow miss on a file that a later push on the same
+    branch passes is labelled a flake, not a miss, in the record W1-T4439's gardener reads.
+  acceptance:
+    - claim: "a census that imports its walker is selected"
+      proof: 'grep: test("W1-T4462: a census that imports its walker is selected" in test/the-selector-learns-from-its-misses.test.ts'
+    - claim: "a new source file selects the suites that walk src"
+      proof: 'grep: test("W1-T4462: a new source file selects the suites that walk src" in test/the-selector-learns-from-its-misses.test.ts'
+    - claim: "a flake is labelled apart from a real miss"
+      proof: 'grep: test("W1-T4462: a flake is labelled apart from a real miss" in test/the-selector-learns-from-its-misses.test.ts'
+  falsifier: |
+    Leave censusSuiteFiles reading the test file alone and the first test misses the clock-signature census.
