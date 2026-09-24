@@ -691,6 +691,7 @@ import {
   parseProposalRegistry,
   parseSupersedesExpr,
   approveRunBranch,
+  approvedSkillRelPath,
   priorApproveRunBranch,
   pruneRatifiedProposals,
   proposalsNeedingDraft,
@@ -719,6 +720,7 @@ import {
   type ReframeResult,
   type SkillLifecycleAction,
   writeRatificationShards,
+  writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import {
   buildFeedbackDocket,
@@ -41198,6 +41200,31 @@ export function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction,
   ].join("\n");
 }
 
+/** W1-T4338: the commit that writes an approved skill draft. Carries NO `Remudero-Task:` trailer — it files a skill,
+ *  it implements no task. */
+export function skillFileApproveCommitMessage(proposalId: string, relPath: string): string {
+  return [
+    "chore(skill): add approved skill via rmd approve",
+    "",
+    `Proposal ${proposalId} staged a skill-workshop draft; the operator's one-bit approve writes it.`,
+    `This commit adds exactly ${relPath}, verbatim from the staged draft.`,
+  ].join("\n");
+}
+
+/** W1-T4338: the PR body for an approved skill draft — an executable Acceptance proof on the file this PR adds. */
+export function skillFileApprovePrBody(proposalId: string, name: string, relPath: string): string {
+  return buildPlanPrBody({
+    intro: [
+      `Proposal ${proposalId} adds approved skill \`${name}\`.`,
+      "",
+      "The operator's one-bit approve initiated this PR. The gate still reviews it; nothing",
+      "auto-merges without that review.",
+    ].join("\n"),
+    criteria: [{ claim: `${relPath} is the approved skill draft ${name}`, proof: `grep: name: ${name} in ${relPath}` }],
+    changedFiles: [relPath],
+  });
+}
+
 export function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: string): string {
   return [
     `Proposal ${proposalId} retires approved skill \`${action.skillName}\`.`,
@@ -42228,7 +42255,33 @@ export async function approveCommand(
       gitPushRunBranch(worktreePath);
       return branch;
     },
+    // W1-T4338: the skill-draft twin of createRatificationBranch — one SKILL.md, verbatim, on a fresh branch.
+    writeSkillFile(id, skillFile) {
+      const dir = ensureRepoDir();
+      const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+      if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+      const branch = approveRunBranch(runId);
+      worktreePath = join(worktreesDir(config), branch);
+      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
+      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      const relPath = writeApprovedSkillFile(worktreePath, skillFile, { mkdirSync, writeFileSync }, join);
+      log("approve.skill_written", { proposal_id: id, path: relPath });
+      execFileSync("git", ["-C", worktreePath, "add", "--", relPath], { stdio: "inherit" });
+      execFileSync("git", ["-C", worktreePath, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
+      return branch;
+    },
     openPlanPr(branch, id) {
+      const skillRelPath = classification.skillFile ? approvedSkillRelPath(classification.skillFile.name) : null;
+      if (classification.skillFile && skillRelPath) {
+        assertLiveWriteAllowed("gh-pr-create", `opening a skill PR against ${owner}/${repo}`);
+        return createPlanPrRest(ghJson, owner, repo, {
+          title: `chore(skill): add approved skill ${classification.skillFile.name} via rmd approve`,
+          body: skillFileApprovePrBody(id, classification.skillFile.name, skillRelPath),
+          head: branch,
+          base: "main",
+        }).prUrl;
+      }
       const intro = [
         classification.draft?.stampLine ?? "",
         "",
