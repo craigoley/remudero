@@ -330,6 +330,7 @@ test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly th
     "learnings-budget-ratchet",
     "lint-plan:fast",
     "no-hand-rolled-fetch:check",
+    "rule-checks:population",
     "source-size-signal",
     "worker-branch-shape:check",
   ]);

@@ -374,11 +374,18 @@ test("runPreflightFast: mocked end-to-end over all FAST_GATE_STEPS, no spawn cal
   const { spawn, calls } = recordingSpawn();
   runPreflightFast(REPO_ROOT, { spawn, packageJsonText });
   assert.equal(calls.length, FAST_GATE_STEPS.length, "exactly one spawn per curated step, no extras");
-  for (const call of calls) {
+  for (const [index, call] of calls.entries()) {
     const key = [call.file, ...call.args].join(" ");
     assert.doesNotMatch(key, /test:ci/);
     assert.doesNotMatch(key, /test\/\*\*/);
-    assert.equal(call.file, "npm", "every FAST_GATE_STEPS spawn is an `npm run --silent <script>` call, never a direct node invocation");
+    const step = FAST_GATE_STEPS[index];
+    if (step.runner === "rule-checks") {
+      assert.equal(call.file, process.execPath, "the rule-checks entry uses its exact per-suite Node runner");
+      assert.deepEqual(call.args, ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"]);
+    } else {
+      assert.equal(call.file, "npm", "every package-script FAST_GATE_STEPS spawn is an `npm run --silent <script>` call");
+      assert.deepEqual(call.args, ["run", "--silent", step.script]);
+    }
   }
 });
 
