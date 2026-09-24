@@ -45,9 +45,11 @@ function fixturePlan(): Plan {
 interface Row { step: string; extra: Record<string, unknown> }
 interface Pass { scope: LightPassScope | undefined; drainOpen: boolean; fixPending: boolean; detached: number }
 
+interface HeldFixOpts { holdReviewPass?: Promise<void>; releaseReviewPass?: () => void; failReviewPass?: boolean }
+
 /** One stale exit whose drain waits on a held detached fix. `holdReviewPass`, when given, parks every
- *  review-only pass on that promise so a pass can be caught mid-flight. */
-function staleExitWithHeldFix(holdReviewPass?: Promise<void>) {
+ *  review-only pass on that promise so a pass can be caught mid-flight; `failReviewPass` makes it throw. */
+function staleExitWithHeldFix({ holdReviewPass, failReviewPass }: HeldFixOpts = {}) {
   assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
   const rows: Row[] = [];
   const passes: Pass[] = [];
@@ -83,6 +85,7 @@ function staleExitWithHeldFix(holdReviewPass?: Promise<void>) {
     sweepLight: async (scope?: LightPassScope) => {
       passes.push({ scope, drainOpen: drainOpen(), fixPending: !fixSettled, detached: detachedSweepActionCount() });
       if (holdReviewPass && scope?.reviewOnly) await holdReviewPass;
+      if (failReviewPass && scope?.reviewOnly) throw new Error("gh: rate limited");
     },
   });
   return { daemon, rows, passes, releaseFix };
@@ -92,9 +95,9 @@ function staleExitWithHeldFix(holdReviewPass?: Promise<void>) {
  *  so a failing assertion reports its own reason instead of leaking a held action into the next test. */
 async function withHeldFix(
   body: (run: ReturnType<typeof staleExitWithHeldFix>) => Promise<void>,
-  opts: { holdReviewPass?: Promise<void>; releaseReviewPass?: () => void } = {},
+  opts: HeldFixOpts = {},
 ): Promise<void> {
-  const run = staleExitWithHeldFix(opts.holdReviewPass);
+  const run = staleExitWithHeldFix(opts);
   try {
     await body(run);
   } finally {
@@ -187,6 +190,26 @@ test("W1-T4053: a drain admits nothing but reviews", async () => {
     assert.deepEqual(sweepRows.filter((i) => i > started), [], "no full sweep was admitted during or after the drain");
     assert.ok(completed > started);
   });
+});
+
+test("W1-T4053: a failed pass during a drain is ledgered as one and the drain still ends", async () => {
+  await withHeldFix(async (run) => {
+    await waitFor(() => drainPasses(run.passes).length > 0, "the drain's clock never attempted a pass");
+    run.releaseFix();
+    const summary = await run.daemon;
+
+    assert.equal(summary.stopReason, "stale", "a throwing review pass never costs the restart");
+    const failures = run.rows.filter((r) => r.step === "daemon.sweep_light.failed");
+    assert.ok(failures.length >= 1, "the failed pass is ledgered");
+    for (const failure of failures) {
+      assert.equal(failure.extra.phase, "freshness_drain");
+      assert.equal(failure.extra.during_drain, true);
+      assert.equal(failure.extra.error, "gh: rate limited");
+    }
+    assert.equal(run.rows.filter((r) => r.step === "daemon.review_clock.pass").length, 0, "no failed pass reads as a delivered one");
+    const completed = run.rows.find((r) => r.step === "daemon.freshness_drain.completed");
+    assert.equal(completed?.extra.review_passes, failures.length, "review_passes counts every admitted attempt");
+  }, { failReviewPass: true });
 });
 
 // ── the production hook honours the scope ─────────────────────────────────────────────────────────
