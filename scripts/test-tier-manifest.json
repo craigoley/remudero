@@ -1580,6 +1580,7 @@
     "test/the-changed-files-block-has-no-production-caller.test.ts": 1053,
     "test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts": 2141,
     "test/the-ci-entry-shells-the-argv-ci-runs.test.ts": 0,
+    "test/the-ci-gate-does-not-hold-a-runner.test.ts": 0,
     "test/the-citation-miner-has-a-producer.test.ts": 798,
     "test/the-cli-on-path-resolves-to-the-live-tree.test.ts": 0,
     "test/the-clock-census-records-its-own-baseline.test.ts": 67,

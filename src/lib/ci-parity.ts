@@ -1536,6 +1536,7 @@ export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
  *  this ci.yml-only registry remains independently inspectable. */
 export const CI_PARITY_TABLE: CiParityEntry[] = [
   { job: "ci-required", mirrored: false, reason: "GitHub-only stable-name aggregator; the ci entry below runs the equivalent complete test surface locally" },
+  { job: "ci-gate", mirrored: false, reason: "GitHub-only required aggregate over the live check-runs API (W1-T4400: ci-gate.yml's own step, run as ci.yml's last job); it has no local subject to evaluate" },
   {
     job: "squash-trailer-gate",
     mirrored: false,
