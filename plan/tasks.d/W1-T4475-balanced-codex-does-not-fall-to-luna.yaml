@@ -15,6 +15,11 @@
     - .remudero/mounts.yaml
     - DECISIONS.md
     - docs/model-routing.md
+    - src/lib/routing-experiments.ts
+    - test/codex-spark-economy-routing.test.ts
+    - test/frontier-work-prefers-opus-and-gpt-6-leads-codex.test.ts
+    - test/mounts-wiring.test.ts
+    - test/sol-and-sonnet-split-mid-tier-work-as-an-ab-test.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -28,11 +33,12 @@
   design: |
     (i) Codex balanced low, medium, and high offer Sol-class candidates, with no Luna fallback.
     Economy rows retain Luna and frontier retains the existing Claude Opus preference.
-    (ii) Preserve the balanced-high Sol-versus-Sonnet A/B tag and its 2026-10-08 revisit;
-    lower-effort balanced assignments do not join it.
+    (ii) Preserve the balanced-high GPT-6 Sol-versus-Sonnet A/B tag and its 2026-10-08
+    revisit; lower-effort balanced assignments and older Sol fallback assignments do not join it.
     (iii) Document the external evidence limits, list-price versus subscription distinction,
-    and a telemetry-based rollback condition. Do not change cash routes, Astra approvals, or
-    the subscription-only frontier rule.
+    and a telemetry-based rollback condition. Name the residual balanced cash-squeeze path,
+    which can still promote Luna, rather than claiming an end-to-end ban. Do not change cash
+    routes, Astra approvals, or the subscription-only frontier rule.
   acceptance:
     - claim: "the committed Codex ladder keeps Luna in economy and never offers it as a balanced worker fallback"
       proof: "unit test: the committed Codex ladder keeps Luna on economy work and out of every balanced chain"
@@ -43,4 +49,4 @@
   falsifier: |
     Restore a Luna candidate to any Codex balanced row and the first proof fails. Restore Luna
     after Sol in the medium row and the second proof fails when GPT-6 Sol is unavailable. Tag
-    lower-effort balanced assignments as part of the A/B and the third proof fails.
+    lower-effort or older-Sol balanced assignments as part of the A/B and the third proof fails.

@@ -29,11 +29,21 @@ const MODELS: CodexModelInfo[] = ["gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"].map
 }));
 const SHARED = { rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 40, windowDurationMins: 10080 } } } };
 
-test("high-effort sonnet work reaches Sol on Codex while lower efforts stay on Luna", () => {
+test("all sonnet efforts reach Sol on Codex while the high-effort A/B stays scoped", () => {
   const ladder = loadMounts(mountsPath(REPO_ROOT)).capabilities!;
   assert.equal(ladder.codex.balanced.high[0], "gpt-6-sol");
-  assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "sonnet", "high", ladder).model, "gpt-6-sol");
-  assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "sonnet", "medium", ladder).model, "gpt-6-luna");
+  for (const effort of ["low", "medium", "high"] as const) {
+    assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "sonnet", effort, ladder).model, "gpt-6-sol", `sonnet/${effort}`);
+  }
+  assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "haiku", "medium", ladder).model, "gpt-6-luna");
+  const considered = [
+    { provider: "claude" as const, model: "claude-sonnet-5", eligible: true },
+    { provider: "codex" as const, model: "gpt-6-sol", eligible: true },
+  ];
+  assert.equal(routingExperimentFor({ capability: "balanced", effort: "high", considered }), "sol-vs-sonnet");
+  assert.equal(routingExperimentFor({ capability: "balanced", effort: "medium", considered }), undefined);
+  assert.equal(routingExperimentFor({ capability: "balanced", effort: "high", considered: [considered[0]!, { ...considered[1]!, model: "gpt-5.6-sol" }] }), undefined,
+    "the older Sol fallback is not pooled into the GPT-6 experiment arm");
   assert.equal(SOL_VS_SONNET.revisitOn, "2026-10-08", "the ruling fixes the revisit two weeks out");
 });
 
