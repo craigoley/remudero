@@ -42389,7 +42389,7 @@ export async function approveCommand(
     // W1-T4338: the skill-draft twin of createRatificationBranch — one SKILL.md, verbatim, on a fresh branch.
     writeSkillFile(id, skillFile) {
       const { branch, path } = freshSkillApproveWorktree();
-      const relPath = writeApprovedSkillFile(path, skillFile, { mkdirSync, writeFileSync }, join);
+      const relPath = writeApprovedSkillFile(path, skillFile, { mkdirSync, writeFileSync, existsSync }, join);
       log("approve.skill_written", { proposal_id: id, path: relPath });
       execFileSync("git", ["-C", path, "add", "--", relPath], { stdio: "inherit" });
       execFileSync("git", ["-C", path, "commit", "-m", skillFileApproveCommitMessage(id, relPath)], { stdio: "inherit" });
