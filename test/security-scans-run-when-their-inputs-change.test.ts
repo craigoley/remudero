@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+
 // ── W1-T4401 — SECURITY SCANS RUN IN FULL ON EVERY PR/PUSH WHATEVER CHANGED ─────────────────
 //
 // MEASURED 2026-09-23 over 30 days: PR security scans (CodeQL x2, Semgrep, OSV-Scanner (PR),
@@ -202,7 +204,7 @@ test("W1-T4401: the required OSV PR scan keeps comparison outputs outside the un
 });
 
 test("W1-T4401: a PR-controlled result-name symlink cannot overwrite the isolated baseline", () => {
-  const root = mkdtempSync(join(tmpdir(), "w1t4401-osv-symlink-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4401-osv-symlink-`));
   try {
     const source = join(root, "source");
     const results = join(root, "results");
