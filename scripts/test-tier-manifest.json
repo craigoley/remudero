@@ -274,6 +274,7 @@
     "test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts": 4098,
     "test/a-silent-daemon-is-noticed-by-another.test.ts": 0,
     "test/a-size-ledger-is-not-a-score-floor.test.ts": 1036,
+    "test/a-skill-draft-approval-only-ever-writes-the-skill.test.ts": 0,
     "test/a-slow-tier-suite-is-never-re-measured.test.ts": 0,
     "test/a-source-file-cannot-outgrow-its-baseline.test.ts": 2145,
     "test/a-source-text-assertion-cannot-survive-instrumentation.test.ts": 261,
