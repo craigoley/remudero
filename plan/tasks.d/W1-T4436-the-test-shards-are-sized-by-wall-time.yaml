@@ -22,6 +22,7 @@
     - test/ci-sharding.test.ts
     - test/plan-reading-fast-lane-sharding.test.ts
     - test/push-ci-on-main.test.ts
+    - test/test-with-retry.test.ts
     - test/the-test-shards-are-sized-by-wall-time.test.ts
     - test/workflow-single-suite-run.test.ts
   status: queued

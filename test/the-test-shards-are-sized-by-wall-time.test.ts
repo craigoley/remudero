@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -70,7 +71,7 @@ const SHARD_LIST = Array.from({ length: CANONICAL_SHARD_COUNT }, (_unused, i) =>
 
 // ── acceptance 1: every shard consumer derives one shard count ─────────────────────────────────
 
-test('W1-T4436: every shard consumer derives one shard count', () => {
+test("W1-T4436: every shard consumer derives one shard count", () => {
   const doc = loadCiDoc();
 
   // The two GitHub Actions matrices this task's rationale names ("both lanes").
@@ -162,7 +163,7 @@ test('W1-T4436: every shard consumer derives one shard count', () => {
 
 // ── acceptance 2: the coverage aggregator requires exactly that many shard artifacts ───────────
 
-test('W1-T4436: the coverage aggregator requires exactly that many shard artifacts', () => {
+test("W1-T4436: the coverage aggregator requires exactly that many shard artifacts", () => {
   const doc = loadCiDoc();
   const coverageRequired = doc.jobs["coverage-ratchet-required"];
   assert.ok(coverageRequired, "expected ci.yml to still define coverage-ratchet-required");
@@ -205,4 +206,25 @@ test('W1-T4436: the coverage aggregator requires exactly that many shard artifac
   // stages exactly one directory at a time) is untouched — this guard is additive, not a new
   // requirement on every caller.
   assert.doesNotThrow(() => assertExpectedShardCount(["coverage/raw"], undefined));
+});
+
+test("W1-T4436: the coverage merge CLI refuses a shard-directory count its --shard-count does not name", () => {
+  // Through the real CLI, so the flag is proved WIRED into main, not only declared: four raw
+  // directories against `--shard-count 8` exit 1 before any merge is attempted.
+  const fourDirs = SHARD_LIST.slice(0, 4).map((n) => `coverage-shards/coverage-shard-${n}/raw`);
+  const cli = spawnSync(
+    process.execPath,
+    ["scripts/coverage-merge-ratchet.mjs", "--output", "never-written.info", "--shard-count", "8", ...fourDirs],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+  );
+  assert.equal(cli.status, 1, cli.stdout + cli.stderr);
+  assert.match(cli.stderr, /coverage-merge-ratchet: expected exactly 8 shard director\(y\/ies\), got 4/);
+
+  for (const bad of ["eight", "0", "-8", "2.5"]) {
+    assert.throws(
+      () => assertExpectedShardCount(fourDirs, bad),
+      /--shard-count must be a positive integer/,
+      `--shard-count ${bad} must be refused, never read as a count`,
+    );
+  }
 });

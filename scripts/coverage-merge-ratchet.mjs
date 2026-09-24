@@ -136,11 +136,10 @@ function withStagedRawCoverage(directories, collect) {
 }
 
 /**
- * Deduplicate repeated source maps without changing process-report boundaries or V8 ranges.
- * Node's source-map translation mutates line-hit state in report order, so even a mathematically
- * plausible pre-merge can change LCOV line totals. The final pass reconstructs the original
- * retained process reports from this bundle without changing their ranges, then lets pinned Node
- * map and merge them exactly once.
+ * Deduplicate repeated source maps without changing process-report boundaries or V8 ranges. Node's
+ * source-map translation mutates line-hit state in report order, so even a plausible pre-merge can
+ * change LCOV totals: the final pass rebuilds the retained reports unchanged, then pinned Node maps
+ * and merges them exactly once.
  */
 export function compactRawCoverageDirectories(directories) {
   if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
@@ -202,14 +201,7 @@ export function mergeRawCoverageDirectories(directories) {
   });
 }
 
-/**
- * W1-T4436: the ONE shard count this run expects, passed by ci.yml's own canonical value (8, at
- * time of writing — the `coverage-ratchet` matrix's own `strategy.matrix.shard` length) rather
- * than guessed here. When given, this is the aggregator's own "did every shard produce an
- * artifact" check: a caller that still only assembled 4 directories while claiming 8 shards ran
- * is refused before any merge happens, rather than silently folding a partial set and leaving
- * shards 5-8 uncounted.
- */
+// W1-T4436: refuse a merge whose shard-directory count differs from ci.yml's `--shard-count`.
 export function assertExpectedShardCount(directories, expectedShardCount) {
   if (expectedShardCount === undefined) return;
   const expected = Number(expectedShardCount);

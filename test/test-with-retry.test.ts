@@ -234,9 +234,11 @@ test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option bef
     .join("\n");
 
   assert.match(executable, /npm run test:ci/, "the plan/docs fail-closed fallback must still reach the retry wrapper through package.json");
+  const shardCount = executable.match(/name: ci-shard \(\$\{\{ matrix\.shard \}\}\/(\d+)\)/)?.[1];
+  assert.ok(shardCount, "the `ci` job must still be named ci-shard (<shard>/<count>)");
   assert.match(
     executable,
-    /node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/4 --base "\$TIER_BASE"/,
+    new RegExp(String.raw`node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/${shardCount} --base "\$TIER_BASE"`),
     "the SOURCE matrix must invoke the retry wrapper around the duration-balanced fast-tier shard",
   );
   // W1-T4396 added the slow tier's push lane and W1-T4398 the coverage lane as direct callers.

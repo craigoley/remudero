@@ -35,6 +35,7 @@
   "scripts/clock-sweep.mjs": 153,
   "scripts/comment-load-baseline.json": 0,
   "scripts/coverage-baseline.json": 0,
+  "scripts/coverage-merge-ratchet.mjs": 13,
   "scripts/coverage-ratchet.mjs": 126,
   "scripts/coverage-session-blanking-check.mjs": 60,
   "scripts/credential-reach-baseline.json": 0,

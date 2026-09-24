@@ -561,7 +561,7 @@ jobs:
     runs-on: ubuntu-latest
     # W1-T4396: no job-level if — the push lane runs the slow tier too. W1-T3207 skips it on a
     # SOURCE pull request, so without this the 107 slowest files ran on main nowhere at all. It is
-    # its own job, so it never lengthens the four fast shards' critical path.
+    # its own job, so it never lengthens the fast shards' critical path.
     timeout-minutes: 35
     # W1-T2904 HEAVY BAND. `test-slow` carries a `playwright install` step because 9 of the 106
     # files at or over the manifest's 5000ms threshold are the Playwright-driven serve.* suites,
@@ -1192,7 +1192,7 @@ jobs:
             # The raw process reports were 514 MB for ONE shard on this PR's first live run.
             # Deduplicate repeated source maps locally while retaining every process boundary and
             # V8 range. The aggregator reconstructs those reports, then pinned Node maps and merges
-            # all four bundles before assigning LCOV line/branch IDs.
+            # every shard's bundle before assigning LCOV line/branch IDs.
             mkdir -p coverage/compact
             mkdir -p coverage-artifact/raw
             node --expose-internals scripts/coverage-merge-ratchet.mjs --compact-output coverage/compact coverage/raw
