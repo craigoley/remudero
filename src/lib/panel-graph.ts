@@ -53,7 +53,6 @@ import {
   expandFeedbackDraft,
   FEEDBACK_STATUSES,
   findFeedbackBySubmissionKey,
-  listFeedback,
   readFeedbackEntry,
   recentFeedbackFewShot,
   setFeedbackStatus,
@@ -65,13 +64,15 @@ import {
 } from "./feedback.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
 import {
-  feedbackDischargeState,
+  feedbackDischargeStateForTasks,
+  feedbackOriginTag,
   renderTraceChain,
   traceForward,
   traceReverse,
   type TraceChain,
   type TraceGithub,
 } from "./trace.js";
+import { computeFeedbackProjectionSync, indexedDischargeGithub, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
@@ -123,6 +124,9 @@ import {
 
 export interface PanelGraphDeps {
   /** Repo root — where plan/feedback/ lives. */
+  /** Computes the feedback inbox's entries and filed tasks off serve's thread (W1-T4454); absent, the route reads them inline. */
+  projectFeedback?: (input: FeedbackProjectionInput) => Promise<FeedbackProjectionOutcome>;
+  logProjection?: (step: string, extra: Record<string, unknown>) => void;
   root: string;
   /** `plan/tasks.yaml`'s authoritative path. Write routes load it fresh or at-ref; narrow
    *  path-based rendering helpers may also consult it independently. */
@@ -214,8 +218,19 @@ export function decorateFeedbackDischarge(
   plan: Plan,
   statusGithub: GitHub,
 ): ReconciledFeedbackEntry[] {
+  const filed = new Map(entries.map((entry) => [entry.id, plan.tasks.filter((t) => t.origin === feedbackOriginTag(entry.id)).map((t) => t.id)]));
+  return decorateFeedbackDischargeByTasks(entries, filed, statusGithub);
+}
+
+/** {@link decorateFeedbackDischarge} over each entry's already-resolved filed task ids, answered from one merged index. */
+export function decorateFeedbackDischargeByTasks(
+  entries: ReconciledFeedbackEntry[],
+  filedTasks: ReadonlyMap<string, string[]>,
+  statusGithub: GitHub,
+): ReconciledFeedbackEntry[] {
+  const github = indexedDischargeGithub(statusGithub);
   return entries.map((entry) => {
-    const { state } = feedbackDischargeState(entry, plan, statusGithub);
+    const { state } = feedbackDischargeStateForTasks(filedTasks.get(entry.id) ?? [], github);
     if (state === "discharged") return { ...entry, discharged: true };
     if (state === "undecidable") return { ...entry, dischargeUndecidable: true };
     return entry;
@@ -228,22 +243,24 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
     method: "GET",
     path: "/v1/feedback",
     scope: "read",
-    handler: (req, res) => {
+    handler: async (req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       const statusParam = url.searchParams.get("status");
       if (statusParam !== null && !(FEEDBACK_STATUSES as readonly string[]).includes(statusParam)) {
         sendJson(res, 400, { error: "invalid_request", detail: `status must be one of ${FEEDBACK_STATUSES.join(", ")}` });
         return;
       }
-      const reconciled = reconcileFeedbackEntries(deps.root, listFeedback(deps.root, {}), deps.statusGithub, deps.feedbackLand);
-      // Plan reloaded fresh, never cached (never-stale). Fail-soft: an unreadable plan degrades
-      // to no discharge flags, never a 500 over a decoration.
-      let decorated: ReconciledFeedbackEntry[] = reconciled;
-      try {
-        decorated = decorateFeedbackDischarge(reconciled, loadPlan(deps.planPath), deps.statusGithub);
-      } catch {
-        // plan unreadable this tick -- serve the reconciled list undecorated.
+      // The entries and a fresh plan parse come off-thread when serve wired a worker (W1-T4454). Fail-soft:
+      // an unreadable plan degrades to no discharge flags, never a 500 over a decoration.
+      const input = { root: deps.root, planPath: deps.planPath };
+      let projected = deps.projectFeedback ? await deps.projectFeedback(input) : computeFeedbackProjectionSync(input);
+      if (!projected.ok) {
+        deps.logProjection?.("serve.projection_worker_fallback", { route: "/v1/feedback", reason: projected.reason });
+        projected = computeFeedbackProjectionSync(input);
       }
+      const { entries: listed, filedTasks } = projected as Extract<FeedbackProjectionOutcome, { ok: true }>;
+      const reconciled = reconcileFeedbackEntries(deps.root, listed, deps.statusGithub, deps.feedbackLand);
+      const decorated = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
       const entries = statusParam ? decorated.filter((e) => e.status === statusParam) : decorated;
       sendJson(res, 200, { entries });
     },

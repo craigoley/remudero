@@ -195,6 +195,7 @@
   "src/lib/config.ts": 250,
   "src/lib/consequence-policy.ts": 250,
   "src/lib/console-freshness.ts": 48,
+  "src/lib/console-projection-worker.ts": 250,
   "src/lib/console-shell-client.ts": 1500,
   "src/lib/console-shell-script.ts": 250,
   "src/lib/console-snapshot-cache.ts": 250,
