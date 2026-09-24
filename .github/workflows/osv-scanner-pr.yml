@@ -18,6 +18,7 @@ jobs:
     # Preserve the required context and run for every PR, including Dependabot.
     name: scan-pr / osv-scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20 # R-50: observed PR runs finish in ~30s; 20m bounds a genuine hang.
     permissions:
       security-events: write
       contents: read
