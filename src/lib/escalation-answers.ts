@@ -10,7 +10,9 @@
  * unread, forever. This module is the read side that closes that: it polls OPEN needs-question
  * issues the fleet itself opened, and lands an accepted reply in the SAME store
  * `appendQuestionAnswer` (lib/worker.ts) already writes — one sink, whichever channel answered.
- *
+ */
+
+/**
  * OWNER-ONLY, BY DESIGN (G-6). remudero's own public repo is deliberately excluded from the
  * issues-intake lane (lib/managed-repos.ts) — the public's issue text stays off this fleet's
  * prompts. A needs-question issue is opened on the SAME public repo, so this reader accepts only
@@ -24,12 +26,8 @@
  * answer text is that option's LABEL, never a route or a kind, so nothing here can execute
  * anything. Any other reply is recorded verbatim as the constraint the next fix round
  * re-dispatches with. Acknowledgement is a `+1` reaction on the accepted comment (design iv) —
- * this module never posts a comment on the public issue.
- *
- * IDEMPOTENT PER COMMENT (design ii). `plan/questions.ndjson`'s own `origin` field
- * (`issue#<n>:comment:<id>`) is the dedup key — a re-poll of an already-recorded comment creates
- * nothing new, mirroring lib/issues-intake.ts's existsSync-is-the-dedup-check discipline rather
- * than inventing a second store.
+ * this module never posts a comment on the public issue. IDEMPOTENT PER COMMENT (design ii):
+ * `plan/questions.ndjson`'s own `origin` field (`issue#<n>:comment:<id>`) is the dedup key.
  */
 
 import { existsSync, readFileSync } from "node:fs";
