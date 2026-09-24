@@ -938,6 +938,8 @@ import {
   assertRunnable,
   loadPlan,
   loadPlanQuarantiningDuplicates,
+  mergePlanBlobsQuarantiningDuplicates,
+  type QuarantinedTask,
   selectTask,
   visibleCriteria,
   type AcceptanceCriterion,
@@ -3214,7 +3216,7 @@ export interface SyncedPlan {
 export function syncPlanFromOrigin(
   repoDir: string,
   relPath: string,
-  opts: { allowStale?: boolean } = {},
+  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void } = {},
 ): SyncedPlan {
   let staleDispatch = false;
   try {
@@ -3255,10 +3257,14 @@ export function syncPlanFromOrigin(
   // round trip produced; only the LABEL in an error message changes, from a temp path nobody
   // could look up to the `origin/main:<path>` the bytes actually came from.
   const shards = readOriginShardsAtRef(repoDir, dirname(relPath));
-  const plan = mergePlanBlobs([
+  const blobs = [
     { label: `origin/main:${relPath}`, text: blob },
     ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
-  ]);
+  ];
+  if (!opts.quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
+  // W1-T4421: the core daemon's boot degrades on a duplicate id instead of exiting.
+  const { plan, quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs);
+  opts.quarantine(quarantined);
   return { plan, staleDispatch };
 }
 
@@ -3373,6 +3379,7 @@ export function syncPlanOrRefuse(
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
+    quarantine?: (quarantined: QuarantinedTask[]) => void;
   },
 ): SyncedPlan | { error: string } {
   const repoDir = dirname(dirname(planPath));
@@ -3380,7 +3387,7 @@ export function syncPlanOrRefuse(
   try {
     const synced = opts.planSnapshot
       ? opts.planSnapshot({ allowStale: opts.allowStale })
-      : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale });
+      : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale, quarantine: opts.quarantine });
     if (synced.staleDispatch) {
       opts.log("git.stale_dispatch", { stale_dispatch: true });
       opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
@@ -30262,25 +30269,19 @@ export function plainInboxWriter(
   }
 }
 
-/**
- * W1-T4409 — the daemon's boot-time plan read. A task id declared by two plan files is quarantined
- * (with every task that depends on it) instead of thrown, ledgered, and escalated to a human ONCE per
- * duplicated id (escalate's own open-issue dedup covers later boots). Everything else still throws.
- */
-export function loadDaemonPlan(
-  planPath: string,
+/** W1-T4409/W1-T4421 — ledger every quarantined task and escalate each duplicated id once (escalate dedups). */
+export function reportQuarantined(
+  quarantined: QuarantinedTask[],
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
-  load: (path: string) => ReturnType<typeof loadPlanQuarantiningDuplicates> = (path) => loadPlanQuarantiningDuplicates(path),
-): Plan {
-  const { plan, quarantined } = load(planPath);
+): void {
   for (const q of quarantined) {
     log("plan.duplicate_quarantined", { id: q.id, files: q.files, reason: q.reason });
     if (q.reason !== "duplicate_id") continue;
     const escalation: Escalation = {
       class: "BLOCKED",
       taskId: q.id,
-      summary: `task id ${q.id} is declared by ${q.files.length} plan files — the daemon quarantined it and keeps running`,
+      summary: `task id ${q.id} is declared more than once (${q.files.length} file(s)) — the daemon quarantined it and keeps running`,
       detail:
         `The daemon held ${q.id} (and every task depending on it) out of its plan instead of exiting at boot. ` +
         `Declared in:\n${q.files.map((f) => `- ${f}`).join("\n")}\n\nNothing can dispatch or credit ${q.id} until one declaration remains.`,
@@ -30294,6 +30295,21 @@ export function loadDaemonPlan(
       log("plan.duplicate_escalation_failed", { id: q.id, reason: e instanceof Error ? e.message : String(e) });
     }
   }
+}
+
+/**
+ * W1-T4409 — the daemon's boot-time plan read. A task id declared by two plan files is quarantined
+ * (with every task that depends on it) instead of thrown, ledgered, and escalated to a human ONCE per
+ * duplicated id (escalate's own open-issue dedup covers later boots). Everything else still throws.
+ */
+export function loadDaemonPlan(
+  planPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  raise: (escalation: Escalation) => string,
+  load: (path: string) => ReturnType<typeof loadPlanQuarantiningDuplicates> = (path) => loadPlanQuarantiningDuplicates(path),
+): Plan {
+  const { plan, quarantined } = load(planPath);
+  reportQuarantined(quarantined, log, raise);
   return plan;
 }
 
@@ -30587,6 +30603,7 @@ export async function daemonCommand(
       allowStale,
       log,
       say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
+      quarantine: (quarantined) => reportQuarantined(quarantined, log, raiseDuplicate),
     });
     if ("error" in synced) return 1;
     plan = synced.plan;

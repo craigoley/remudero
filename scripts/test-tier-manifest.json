@@ -1604,6 +1604,7 @@
     "test/the-console-request-path-does-not-block.test.ts": 0,
     "test/the-console-serves-its-own-assets.test.ts": 0,
     "test/the-contract-covers-its-own-console.test.ts": 0,
+    "test/the-core-daemon-survives-a-duplicate-task-id-too.test.ts": 0,
     "test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts": 1047,
     "test/the-coverage-entry-shards-the-way-ci-does.test.ts": 0,
     "test/the-coverage-lane-retries-a-flake.test.ts": 0,
