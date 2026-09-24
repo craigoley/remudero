@@ -189,9 +189,9 @@ export function writeRefusalStreak(path: string, streak: RefusalStreak): void {
 /**
  * Fold ONE outcome into the persisted consecutive-refusal streak: `refused` extends it (or starts
  * it, stamping `refusingSinceIso` with `nowIso` the first time), anything else resets it to zero.
- * So a refusal records how long the rung has been refusing — the CONSECUTIVE REFUSALS streak and
- * the moment it began — turning "refused once" and "has refused every tick for three weeks" into
- * two different, readable numbers instead of the same bare fact.
+ * So a refusal records how long the rung has been refusing: it persists consecutive refusals and
+ * the moment the streak began, turning "refused once" and "has refused every tick for three
+ * weeks" into two different, readable numbers instead of the same bare fact.
  */
 export function recordRefusalStreak(path: string, refused: boolean, nowIso: string): RefusalStreak {
   const prior = readRefusalStreak(path);
