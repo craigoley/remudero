@@ -1008,6 +1008,7 @@ export interface BuildSweepEffectsDeps {
    *  wrapper around one network call, so without a seam the only way to cover it is to make a real
    *  one. Production supplies the entrypoint's GitHub body writer. */
   updatePrBodyImpl?: (prUrl: string, body: string) => Promise<void>;
+  repairMetadataImpl?: (pr: OpenPrView, checks: readonly string[]) => Promise<{ repaired: boolean; reason: string }>;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
   depReviewCommandImpl?: (prArg: string, rest?: string[]) => Promise<number>;
@@ -1306,6 +1307,7 @@ export const SWEEP_EFFECT_SURFACE = [
   // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
   // position is free — it is listed last because it is the newest, not because order matters.
   "repairMissingTaskTrailer",
+  "repairMetadata",
   "rebaseDirtyFleetBranch",
   // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
   // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
@@ -1347,6 +1349,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "selectAdaptiveReviewWidth"
   | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
+  | "repairMetadata"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -1814,6 +1817,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         refire_event: repair.refireEvent,
         rerun_failed_jobs: repair.rerunFailedJobs,
       });
+    },
+    repairMetadata: async (pr, checks) => {
+      if (!deps.repairMetadataImpl) return { repaired: false, reason: "metadata repair implementation is not wired" };
+      return deps.repairMetadataImpl(pr, checks);
     },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
@@ -7632,6 +7639,11 @@ export interface SweepDeps {
     pr: OpenPrView,
     repair: MissingTaskTrailerRepair,
   ) => boolean | void | Promise<boolean | void>;
+  /** Repair title/body-only required reds through a pull-request metadata edit. */
+  repairMetadata?: (
+    pr: OpenPrView,
+    checks: readonly string[],
+  ) => { repaired: boolean; reason: string } | Promise<{ repaired: boolean; reason: string }>;
   /** Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
    *  {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses `escalate()`
    *  as the notification transport, carrying the same two resolutions as its options. */
@@ -8239,8 +8251,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
     } else if (line.step === "fix.commit_refused") {
-      // W1-T3868: the fix lane ran, but the harness refused to create a commit. The row is the
-      // positive outcome that releases the same-head claim for the next sweep pass.
+      // The rung ended without a commit. The outer sweep compares its attempted head and red
+      // set before deciding whether this stalled outcome may re-enter dispatch.
       stalled = true;
     } else if (line.step === "fix.review") {
       stalled = line.state !== "success";
@@ -8250,6 +8262,46 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
   return stalled || !dispatched;
+}
+
+const METADATA_RED_CHECKS = new Set(["commitlint", "acceptance-author-gate", "proof-discrimination"]);
+
+export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
+  if (!isBlockedCi(pr) || pr.reviewState === "failure") return undefined;
+  const checks = redCheckNames(pr);
+  return checks.length > 0 && checks.every((name) => METADATA_RED_CHECKS.has(name)) ? checks : undefined;
+}
+
+/** Use the required-check rollup when available; ciFailures is the older producer's fallback. */
+export function redCheckNames(pr: OpenPrView): string[] {
+  const names = pr.redRequiredChecks?.length ? [...pr.redRequiredChecks] : pr.ciFailures?.map((failure) => failure.name) ?? [];
+  if (pr.reviewState === "failure") {
+    names.push(...pr.unmetCriteria.map((criterion) => `review:${criterion.claim}:${criterion.proof}`));
+  }
+  return [...new Set(names)].sort();
+}
+
+/** A refusal blocks only the exact attempted head and red set, never a newly observed defect. */
+export function sameHeadRedFixRefusal(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView,
+): { reason: string; scopeAmendment?: string } | undefined {
+  const signature = JSON.stringify(redCheckNames(pr));
+  let attempt: Record<string, unknown> | undefined;
+  let refusal: { reason: string; scopeAmendment?: string } | undefined;
+  for (const line of lines) {
+    if (line.task_id !== pr.taskId || line.head_sha !== pr.headSha) continue;
+    if (line.step === "sweep.fix_attempt" && line.pr_number === pr.prNumber) {
+      attempt = line;
+      refusal = undefined;
+    } else if (line.step === "fix.commit_refused" && attempt) {
+      refusal = {
+        reason: typeof line.reason === "string" ? line.reason : "fix commit refused",
+        ...(typeof line.scope_amendment_detail === "string" ? { scopeAmendment: line.scope_amendment_detail } : {}),
+      };
+    }
+  }
+  return attempt && JSON.stringify(attempt.red_checks) === signature ? refusal : undefined;
 }
 
 // ── W1-T905 — "repair the instance, FILE THE CLASS" ──────────────────────────────────────────
@@ -9367,11 +9419,28 @@ export async function runSweep(
         // DISPATCHED, never that it succeeded. When the ledger shows that rung already ENDED
         // without landing a new head, treating it as "already done" would dedup this PR against a
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
-        alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
+        const refusal = disposition === "blocked-fixable" && !metadataOnlyRed(pr)
+          ? sameHeadRedFixRefusal(ledgerLines, pr)
+          : undefined;
+        alreadyDone = disposition === "blocked-fixable" && metadataOnlyRed(pr)
+          ? false
+          : refusal !== undefined && !refusal.scopeAmendment
+            ? true
+            : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
           dedupStandDownReason =
-            `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
-            `before spending another strike`;
+            refusal
+              ? `fix refused at head ${pr.headSha.slice(0, 7)} with unchanged red checks: ${refusal.reason}`
+              : `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
+                `before spending another strike`;
+          if (refusal && !deps.dryRun && !ledgerLines.some((line) =>
+            line.step === "sweep.fix_refusal_stand_down" && line.pr_number === pr.prNumber &&
+            line.head_sha === pr.headSha && JSON.stringify(line.red_checks) === JSON.stringify(redCheckNames(pr)))) {
+            appendLine(deps.ledgerPath, {
+              run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.fix_refusal_stand_down",
+              pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: redCheckNames(pr), reason: refusal.reason,
+            });
+          }
         }
         break;
       }
@@ -9590,6 +9659,55 @@ export async function runSweep(
               if (missingTrailerRepair.handled) {
                 acted = false;
                 standDownReason = missingTrailerRepair.standDownReason;
+                break;
+              }
+              const metadataChecks = metadataOnlyRed(pr);
+              if (metadataChecks) {
+                const priorRepair = ledgerLines.find((line) =>
+                  line.step === "sweep.metadata_repair" && line.pr_number === pr.prNumber &&
+                  line.head_sha === pr.headSha && JSON.stringify(line.red_checks) === JSON.stringify(metadataChecks) &&
+                  (line.outcome === "repaired" || line.outcome === "escalated"));
+                if (priorRepair) {
+                  acted = false;
+                  standDownReason = `metadata red already ${priorRepair.outcome} at this head and red set; awaiting a fresh edited-event verdict`;
+                  break;
+                }
+                const result = deps.repairMetadata
+                  ? await deps.repairMetadata(pr, metadataChecks)
+                  : { repaired: false, reason: "metadata repair effect is not wired" };
+                const outcome = result.repaired ? "repaired" : "escalated";
+                if (!result.repaired) {
+                  await deps.escalate(
+                    pr,
+                    `metadata-only required checks ${metadataChecks.join(", ")} need title/body repair: ${result.reason}`,
+                    renderClarificationQuestion(pr, result.reason, pr.strikeHistory ?? []),
+                  );
+                }
+                if (!deps.dryRun) appendLine(deps.ledgerPath, {
+                  run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.metadata_repair",
+                  pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: metadataChecks,
+                  outcome, reason: result.reason,
+                });
+                acted = false;
+                standDownReason = `metadata-only red ${outcome}: ${result.reason}; no fix worker dispatched`;
+                break;
+              }
+              const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
+              if (refusedSameRed?.scopeAmendment) {
+                const reason = `fix report requests a scope amendment: ${refusedSameRed.scopeAmendment}`;
+                const alreadyEscalated = ledgerLines.some((line) =>
+                  line.step === "sweep.scope_amendment_escalated" && line.pr_number === pr.prNumber &&
+                  line.head_sha === pr.headSha && JSON.stringify(line.red_checks) === JSON.stringify(redCheckNames(pr)));
+                if (!alreadyEscalated) {
+                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                  if (!deps.dryRun) appendLine(deps.ledgerPath, {
+                    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.scope_amendment_escalated",
+                    pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: redCheckNames(pr),
+                    reason,
+                  });
+                }
+                acted = false;
+                standDownReason = reason;
                 break;
               }
               // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and
@@ -9915,6 +10033,10 @@ export async function runSweep(
                 break;
               }
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
+              if (!deps.dryRun) appendLine(deps.ledgerPath, {
+                run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.fix_attempt",
+                pr_number: pr.prNumber, head_sha: pr.headSha, red_checks: redCheckNames(pr),
+              });
               if (deps.detachFixWait) {
                 detachSweepAction(
                   fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)),
