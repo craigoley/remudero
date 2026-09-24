@@ -551,7 +551,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { defaultPreflightSpawn, runPreflight, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { defaultPreflightSpawn, runPreflight, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -41609,11 +41609,15 @@ export function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction,
   return [
     "chore(skill): retire approved skill via rmd approve",
     "",
-    `Proposal ${proposalId} carried measured negative lifecycle evidence for ${action.skillName}.`,
-    `Evidence fingerprint: ${action.evidenceFingerprint}`,
-    "",
-    "The operator's one-bit approve initiated this PR; staging the proposal did not alter the",
-    "approved skill tree. This commit removes exactly the approved SKILL.md named by the action.",
+    ...wrapBodyLines(
+      [
+        `Proposal ${proposalId} carried measured negative lifecycle evidence for ${action.skillName}.`,
+        `Evidence fingerprint: ${action.evidenceFingerprint}`,
+        "",
+        "The operator's one-bit approve initiated this PR; staging the proposal did not alter the " +
+          "approved skill tree. This commit removes exactly the approved SKILL.md named by the action.",
+      ].join("\n"),
+    ),
   ].join("\n");
 }
 
@@ -41623,8 +41627,12 @@ export function skillFileApproveCommitMessage(proposalId: string, relPath: strin
   return [
     "chore(skill): add approved skill via rmd approve",
     "",
-    `Proposal ${proposalId} staged a skill-workshop draft; the operator's one-bit approve writes it.`,
-    `This commit adds exactly ${relPath}, verbatim from the staged draft.`,
+    ...wrapBodyLines(
+      [
+        `Proposal ${proposalId} staged a skill-workshop draft; the operator's one-bit approve writes it.`,
+        `This commit adds exactly ${relPath}, verbatim from the staged draft.`,
+      ].join("\n"),
+    ),
   ].join("\n");
 }
 
