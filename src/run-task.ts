@@ -551,7 +551,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { checkCommitMessage, defaultPreflightSpawn, runPreflight, shapeCommitMessage, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { checkCommitMessage, defaultPreflightSpawn, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
   callerReachableSuites,
@@ -3727,6 +3727,68 @@ export function ghPrCreateFillCommand(
 }
 
 /**
+ * True iff `err` is the REST create's 422 for "a branch whose pull request already exists" —
+ * `gh api --method POST .../pulls` returning `Validation Failed (HTTP 422)` with a `PullRequest`
+ * resource error naming an existing head (W1-T4466 design i). Checked over the joined
+ * message+stderr text, mirroring {@link isGhRateLimitError}'s own shape — never `e.status`, which
+ * on a `gh` CLI failure is the process EXIT code (always 1), not the HTTP status the API replied
+ * with.
+ */
+function isGhPrAlreadyExistsError(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer; message?: string };
+  const text = [String(e?.message ?? ""), e?.stderr != null ? String(e.stderr) : ""].join("\n");
+  return /\b422\b/.test(text) && /pull request already exists/i.test(text);
+}
+
+/** The `repos/{owner}/{repo}/pulls` create argv's own target, read back out of the argv itself —
+ *  no owner/repo threading needed through {@link runGhPrCreate}'s signature. */
+function ownerRepoFromPrCreateArgs(args: string[]): { owner: string; repo: string } | undefined {
+  const target = args.find((a) => /^repos\/[^/]+\/[^/]+\/pulls$/.test(a));
+  const m = target?.match(/^repos\/([^/]+)\/([^/]+)\/pulls$/);
+  return m ? { owner: m[1], repo: m[2] } : undefined;
+}
+
+/**
+ * W1-T4466 design (i): on a "pull request already exists" 422, read the OPEN pull request for
+ * this exact head back (`GET pulls?head=<owner>:<branch>&state=open`) and adopt it as the create's
+ * own result, rather than rethrowing a duplicate-create failure that a sibling lane's earlier
+ * create already made moot. `/` is legal, unescaped, in a query-string value (RFC 3986) — encoded
+ * then restored, mirroring `perHeadPrState`'s identical branch-name handling above.
+ *
+ * Returns `undefined` on ANY failure to confirm the adoption (unreadable list call, unparsable
+ * body, or an empty result) — the caller then rethrows the original 422 unchanged, so a failed
+ * adoption attempt never invents a PR that was never actually confirmed open.
+ */
+function adoptExistingPrForHead(
+  prCreate: { args: string[]; options: { cwd: string; encoding: "utf8" } },
+  branch: string,
+  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string,
+): { prUrl?: string; prNumber?: number } | undefined {
+  const ownerRepo = ownerRepoFromPrCreateArgs(prCreate.args);
+  if (!ownerRepo) return undefined;
+  const head = encodeURIComponent(`${ownerRepo.owner}:${branch}`).replace(/%2F/g, "/");
+  let out: string;
+  try {
+    out = exec("gh", ["api", `repos/${ownerRepo.owner}/${ownerRepo.repo}/pulls?head=${head}&state=open`], prCreate.options);
+  } catch {
+    // the head lookup itself failed — the ORIGINAL 422 is what the caller rethrows next (W1-T4466)
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(out) as Array<{ html_url?: string; number?: number }>;
+    const first = Array.isArray(parsed) ? parsed[0] : undefined;
+    if (!first) return undefined;
+    return {
+      prUrl: typeof first.html_url === "string" ? first.html_url : undefined,
+      prNumber: typeof first.number === "number" ? first.number : undefined,
+    };
+  } catch {
+    // an unparsable open-PR list response confirms nothing — the 422 rethrows (W1-T4466)
+    return undefined;
+  }
+}
+
+/**
  * Execute a {@link ghPrCreateFillCommand}-built REST create argv and read `html_url`
  * (and `number`) back off the parsed response — design (v): the four call sites stop
  * scraping a `gh pr create --fill` regex out of human-readable stdout and take the url
@@ -3742,6 +3804,13 @@ export function ghPrCreateFillCommand(
  * lists it explicitly out of scope). This is legibility only: a throttled create must
  * read as THROTTLED, not surface as a bare `Command failed: gh ...` that reads as
  * "nothing happened".
+ *
+ * W1-T4466 adds a SECOND classified 422 case: a duplicate create for a branch whose PR another
+ * lane (or an earlier step in this same run) already opened. That is adopted rather than
+ * rethrown — see {@link adoptExistingPrForHead} — and the adoption is ledgered under
+ * `pr_create.adopted_existing`, carrying the ORIGINAL 422 error alongside the adopted PR's own
+ * number/url, so the double create stays visible instead of silently absorbed (design ii). Any
+ * OTHER 422 (a validation failure unrelated to an existing PR) still rethrows unchanged.
  */
 export function runGhPrCreate(
   prCreate: { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } },
@@ -3760,6 +3829,27 @@ export function runGhPrCreate(
         `PR create (REST) is RATE LIMITED — branch ${branch} is already pushed but no PR was opened; ` +
           `not retried here (W1-T1202; retry/backoff is W1-T529's)`,
       );
+    }
+    if (isGhPrAlreadyExistsError(e)) {
+      const adopted = adoptExistingPrForHead(prCreate, branch, exec);
+      if (adopted?.prUrl !== undefined) {
+        const ghErr = e as NodeJS.ErrnoException & { stderr?: string | Buffer };
+        log("pr_create.adopted_existing", {
+          branch,
+          prUrl: adopted.prUrl,
+          prNumber: adopted.prNumber,
+          // design (ii): the ORIGINAL 422 rides along, naming the duplicate create the adoption
+          // replaced — visible, never silently absorbed.
+          error: [String(ghErr?.message ?? e), ghErr?.stderr != null ? String(ghErr.stderr) : ""]
+            .filter((part) => part.length > 0)
+            .join("\n"),
+        });
+        say(
+          `PR create (REST) found branch ${branch} ALREADY has an open pull request (#${adopted.prNumber ?? "?"}) ` +
+            `— adopting it instead of failing on the duplicate create (W1-T4466)`,
+        );
+        return adopted;
+      }
     }
     throw e;
   }
@@ -41596,11 +41686,15 @@ export function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction,
   return [
     "chore(skill): retire approved skill via rmd approve",
     "",
-    `Proposal ${proposalId} carried measured negative lifecycle evidence for ${action.skillName}.`,
-    `Evidence fingerprint: ${action.evidenceFingerprint}`,
-    "",
-    "The operator's one-bit approve initiated this PR; staging the proposal did not alter the",
-    "approved skill tree. This commit removes exactly the approved SKILL.md named by the action.",
+    ...wrapBodyLines(
+      [
+        `Proposal ${proposalId} carried measured negative lifecycle evidence for ${action.skillName}.`,
+        `Evidence fingerprint: ${action.evidenceFingerprint}`,
+        "",
+        "The operator's one-bit approve initiated this PR; staging the proposal did not alter the " +
+          "approved skill tree. This commit removes exactly the approved SKILL.md named by the action.",
+      ].join("\n"),
+    ),
   ].join("\n");
 }
 
@@ -41610,8 +41704,12 @@ export function skillFileApproveCommitMessage(proposalId: string, relPath: strin
   return [
     "chore(skill): add approved skill via rmd approve",
     "",
-    `Proposal ${proposalId} staged a skill-workshop draft; the operator's one-bit approve writes it.`,
-    `This commit adds exactly ${relPath}, verbatim from the staged draft.`,
+    ...wrapBodyLines(
+      [
+        `Proposal ${proposalId} staged a skill-workshop draft; the operator's one-bit approve writes it.`,
+        `This commit adds exactly ${relPath}, verbatim from the staged draft.`,
+      ].join("\n"),
+    ),
   ].join("\n");
 }
 
