@@ -423,11 +423,11 @@ test("acceptance 2: a custom maxAttempts is honored", async () => {
   assert.equal(calls, 1);
 });
 
-// ── Acceptance 3: exactly one draft PR; zero writes outside its branch ─────────────────────
+// ── Acceptance 3: exactly one PR (never a draft); zero writes outside its branch ────────────
 // proof: "unit test over injected git/gh deps: one branch, one PR call, write-spy clean
 // elsewhere; drafted tasks carry provenance to answers/candidates"
 
-test("acceptance 3: the complete-answers fixture flow opens exactly one branch and one draft PR, writes land ONLY under <target-dir> (never plan/onboarding/), and the drafted task carries provenance to its answer", async (t) => {
+test("acceptance 3: the complete-answers fixture flow opens exactly one branch and one PR (never a draft), writes land ONLY under <target-dir> (never plan/onboarding/), and the drafted task carries provenance to its answer", async (t) => {
   const targetDir = tmpRoot("rmd-onboard-synth-happy-");
   writeOnboardingArtifacts(targetDir, { answers: completeAnswers() });
   const onboardingPrefix = join(targetDir, "plan", "onboarding");
@@ -452,7 +452,7 @@ test("acceptance 3: the complete-answers fixture flow opens exactly one branch a
   assert.equal(checkoutCalls[0]!.args[2], "onboard/widget-fixture-plan");
   assert.equal(result.branch, "onboard/widget-fixture-plan");
 
-  // Exactly one draft PR.
+  // Exactly one PR.
   assert.equal(gh.calls.length, 1, "exactly one gh pr create call");
   assert.equal(gh.calls[0]!.branch, "onboard/widget-fixture-plan");
   assert.equal(result.prUrl, "https://github.com/acme-corp/widget-fixture/pull/42");
@@ -568,7 +568,7 @@ test("realSynthesizeGitGateway delegates to the injected exec verbatim", () => {
   assert.deepEqual(calls, [{ args: ["checkout", "-b", "onboard/x-plan"], cwd: "/some/target" }]);
 });
 
-test("realSynthesizeGhGateway.openPr builds a `gh pr create --draft` call naming repo/head/title/body, trimming the result", () => {
+test("realSynthesizeGhGateway.openPr builds a `gh pr create` call naming repo/head/title/body — never `--draft` — trimming the result", () => {
   let seenArgs: string[] = [];
   const gateway = realSynthesizeGhGateway({
     exec: (args) => {
@@ -583,7 +583,6 @@ test("realSynthesizeGhGateway.openPr builds a `gh pr create --draft` call naming
     "create",
     "--repo",
     "acme-corp/widget-fixture",
-    "--draft",
     "--head",
     "onboard/widget-fixture-plan",
     "--title",
