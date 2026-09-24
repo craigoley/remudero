@@ -23,7 +23,12 @@
 //      a recognized Node test command, or emitted no trustworthy file location, it fails safe to
 //      the identical whole command. The final exit code is the SECOND run's.
 //
-// Coverage deliberately does not use this wrapper: its lcov artifact must stay one coherent run.
+// W1-T4398: the coverage lane uses it as `--coverage-first-pass <raw-dir>`. Pass 1 is the instrumented
+// run, the only process given NODE_V8_COVERAGE=<raw-dir> (not this wrapper, which would otherwise
+// write its own raw report), and the ONLY source of coverage figures; a failed file is re-run once
+// UNINSTRUMENTED (no coverage flags, no reporter files), so a retry can never move the lcov. A failure
+// no file can be named for is not retried at all — re-running the whole instrumented suite is what
+// the 2026-08-28 ruling removed. A pass on retry prints FLAKE-RETRY-RECOVERED, never a clean pass.
 //
 // A deterministic failure fails BOTH attempts -- red is unchanged, the retry cannot mask a real
 // break. TEST_RETRY=0 disables the retry entirely (the first attempt's exit code is final) -- a
@@ -196,9 +201,41 @@ export function retryInvocationForFailedFiles(cmd, args, failedFiles) {
   return { cmd, args: [...args], scoped: false };
 }
 
-function runOnce(cmd, args) {
+/** Flags that make a Node test run write coverage or reporter files; a value-taking one also
+ *  owns the argument after it when it is not written `--flag=value`. */
+const COVERAGE_FLAGS = new Set(["--experimental-test-coverage"]);
+const COVERAGE_VALUE_FLAGS = new Set([
+  "--test-coverage-exclude",
+  "--test-coverage-include",
+  "--test-reporter",
+  "--test-reporter-destination",
+]);
+
+/** W1-T4398 — pass two of the coverage lane: the same Node test command narrowed to the failed files,
+ *  with every coverage and reporter flag removed and NODE_V8_COVERAGE emptied in the environment,
+ *  so the retry writes nothing the coverage gates read. `null` when there is no file to retry or
+ *  the command is not a Node test run: the coverage lane then keeps pass one's verdict. */
+export function coverageRetryInvocation(cmd, args, failedFiles, env = process.env) {
+  if (failedFiles.length === 0 || !isNodeCommand(cmd) || !args.includes("--test")) return null;
+  const retained = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    const flag = arg.split("=")[0];
+    if (COVERAGE_FLAGS.has(arg) || isTestFileSelector(arg)) continue;
+    if (COVERAGE_VALUE_FLAGS.has(flag)) {
+      if (!arg.includes("=")) i += 1;
+      continue;
+    }
+    retained.push(arg);
+  }
+  // EMPTY, NOT DELETED: Node copies its own NODE_V8_COVERAGE into any child whose env lacks the
+  // key, so a deleted key still hands an enclosing coverage run's directory to the retry.
+  return { cmd, args: [...retained, ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
+}
+
+function runOnce(cmd, args, env = process.env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ["inherit", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { stdio: ["inherit", "pipe", "pipe"], env });
     let combined = "";
     child.stdout.on("data", (chunk) => {
       process.stdout.write(chunk);
@@ -258,9 +295,12 @@ function recordFlakeEvidence(headline, names) {
 }
 
 export async function main(argv) {
-  const [cmd, ...args] = argv;
-  if (!cmd) {
+  const coverageFirstPass = argv[0] === "--coverage-first-pass";
+  const rawCoverageDir = coverageFirstPass ? argv[1] : undefined;
+  const [cmd, ...args] = coverageFirstPass ? argv.slice(2) : argv;
+  if (!cmd || (coverageFirstPass && !rawCoverageDir)) {
     console.error("usage: test-with-retry.mjs <command> [args...]");
+    console.error("       test-with-retry.mjs --coverage-first-pass <raw-coverage-dir> <command> [args...]");
     return 2;
   }
 
@@ -270,7 +310,7 @@ export async function main(argv) {
   const treeBefore = readTrackedTreeState();
 
   const startedAt = Date.now();
-  const first = await runOnce(cmd, args);
+  const first = await runOnce(cmd, args, coverageFirstPass ? { ...process.env, NODE_V8_COVERAGE: rawCoverageDir } : process.env);
   if (first.code === 0) {
     return reportTrackedTreeDirt(treeBefore, 0);
   }
@@ -296,6 +336,8 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
+  if (coverageFirstPass) return coverageRetry(treeBefore, first.code, coverageRetryInvocation(cmd, args, failedFiles), failedFiles, firstNames);
+
   const retry = retryInvocationForFailedFiles(cmd, args, failedFiles);
   if (retry.scoped) {
     console.log(`FLAKE-RETRY-FILES: retrying ${failedFiles.length} failed file(s) — ${failedFiles.join(", ")}`);
@@ -306,6 +348,24 @@ export async function main(argv) {
   // break the retry did NOT paper over is just as countable as one it did.
   if (second.code !== 0) {
     recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
+  }
+  return reportTrackedTreeDirt(treeBefore, second.code);
+}
+
+/** W1-T4398 — the coverage lane's pass two. Pass one's code stands when nothing can be retried. */
+async function coverageRetry(treeBefore, firstCode, retry, failedFiles, firstNames) {
+  if (retry === null) {
+    console.log("FLAKE-RETRY-FILES: no failed test file could be named — the instrumented run is not repeated, and its verdict stands");
+    return reportTrackedTreeDirt(treeBefore, firstCode);
+  }
+  console.log(`FLAKE-RETRY-FILES: retrying ${failedFiles.length} failed file(s) uninstrumented — ${failedFiles.join(", ")}`);
+  const second = await runOnce(retry.cmd, retry.args, retry.env);
+  if (second.code !== 0) {
+    recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
+  } else {
+    const line = `FLAKE-RETRY-RECOVERED: a flake, not a pass — coverage figures are pass one's — ${firstNames.join(", ") || "(no test name parsed from output)"}`;
+    console.log(line);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
   }
   return reportTrackedTreeDirt(treeBefore, second.code);
 }

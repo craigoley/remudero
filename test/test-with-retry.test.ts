@@ -224,7 +224,7 @@ test("test-with-retry: a real failing Node test is retried by exact file and emi
 // option can precede the test glob; the plan/docs fallback still reaches it through `npm run
 // test:ci`; and coverage-ratchet must not gain a retry. Dropping either ci route or adding a second
 // direct wrapper invocation turns this red.
-test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option before the glob, the fast-lane fallback retains npm test:ci, and coverage does not retry", async () => {
+test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option before the glob, the fast-lane fallback retains npm test:ci, and coverage retries only in its uninstrumented mode", async () => {
   const ciYaml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   // A `#` line comment is the only comment form a YAML workflow has, and every surviving mention of
   // the wrapper in this file sits on one. Dropping those lines leaves the executable content.
@@ -241,9 +241,14 @@ test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option bef
   );
   assert.equal(
     executable.match(/node scripts\/test-with-retry\.mjs/g)?.length,
-    1,
-    "only ci's SOURCE lane may name the wrapper directly; coverage-ratchet must not retry (2026-08-28 ruling)",
+    2,
+    "only ci's SOURCE lane and the coverage lane may name the wrapper directly",
   );
+  // W1-T4398: the coverage lane's call is the uninstrumented-retry mode — never a whole-suite
+  // re-run of the instrumented command (the 2026-08-28 ruling).
+  const coverageJob = executable.slice(executable.indexOf("\n  coverage-ratchet:\n"), executable.indexOf("\n  coverage-ratchet-required:\n"));
+  assert.match(coverageJob, /node scripts\/test-with-retry\.mjs --coverage-first-pass coverage\/raw \\/);
+  assert.equal(coverageJob.match(/test-with-retry\.mjs/g)?.length, 1);
 
   const pkg = JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8"));
   assert.doesNotMatch(pkg.scripts.test, /test-with-retry/, "`npm test` must stay retry-free -- Stryker re-runs it once per mutant, where a retry would blur the kill signal");
