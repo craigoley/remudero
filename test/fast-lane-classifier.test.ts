@@ -352,6 +352,9 @@ test("acceptance 6: job-level conditions are only PR guards or stable-name aggre
     if (job.if === undefined) continue;
     if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must run even when a shard fails`);
+    } else if (jobId === "ci-gate") {
+      // W1-T4400: the required aggregate — always() on every pull_request, never on a push.
+      assert.equal(job.if, "${{ always() && github.event_name == 'pull_request' }}");
     } else {
       assert.match(job.if, /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);
     }
