@@ -6164,8 +6164,6 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // (.github/workflows/acceptance-author-gate.yml, already covered by the workflows entry above; this line is the
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
-  // W1-T4400: the runner that executes ci-gate.yml's aggregation step as ci.yml's last job — the
-  // REQUIRED ci-gate context comes through it, so a change to it changes what CI refuses.
   "^scripts/ci-gate-from-contract\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.
