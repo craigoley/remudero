@@ -20,7 +20,7 @@ usage:
   rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm   # Engage or release an attributable, durable PR or fleet auto-merge hold.
   rmd feedback-reconcile --root <name>=<path> [--root <name>=<path> ...] [--checkout <path>] [--apply]   # Report (or repair) feedback records an enrolled root holds that origin/main lacks.
   rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
-  rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
+  rmd lint-plan [--plan <path>] [--base <git-ref>] [--merge-base]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
   rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
@@ -166,10 +166,10 @@ deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge;
 Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
 
 ```
-rmd lint-plan [--plan <path>] [--base <git-ref>]
+rmd lint-plan [--plan <path>] [--base <git-ref>] [--merge-base]
 ```
 
-§5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
+§5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; --merge-base (W1-T4381) scopes to the merge-base of that ref and HEAD, so a record the ref changed after the fork is not this branch's change; exits non-zero on any blocking violation, spawns nothing
 
 ### `rmd plan-reconcile`
 
