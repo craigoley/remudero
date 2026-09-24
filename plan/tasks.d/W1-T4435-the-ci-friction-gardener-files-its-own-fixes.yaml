@@ -1,0 +1,36 @@
+- id: W1-T4435
+  title: "THE FLEET CANNOT SEE ITS OWN SLOWEST GATE — the analysis that found 77% of PR time in repair rounds was done by hand; a gardener should rank checks and causes by the PR time they cost (red rounds x cycle minutes, main merged in, conflicts on shared files) and file a task for the costliest each week"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: [W1-T4110, W1-T4116]
+  files: [src/lib/ci-friction-gardener.ts, src/run-task.ts, test/the-ci-friction-gardener-files-its-own-fixes.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    The 2026-09-24 study (150 merged PRs, 1,000 CI runs, 45 failing shard logs) found the top causes of PR latency:
+    hot shared files forcing main merges, late rule-check reds, and an ownerless pause. None of it was visible to the fleet.
+    gate-gardener (W1-T4116) already measures per-check fire rates; it does not price them in PR time.
+  design: |
+    (i) A gardener spec over lib/gardener.ts computes, over the last N merged PRs: open-to-merge split (repair / final CI /
+    review / merge), extra-head causes (red check by name, main merged in, conflicts by file), and per-check repair cost.
+    (ii) It ranks causes by minutes lost and, for the costliest cause without an open task, drafts a plan task (operator-
+    reviewed draft, like the other gardeners) naming the measurement. (iii) It writes a weekly trend row so an improvement is
+    visible as the metric moving.
+  acceptance:
+    - claim: "the gardener prices each cause in PR minutes"
+      proof: 'grep: test("W1-T4435: the gardener prices each cause in PR minutes" in test/the-ci-friction-gardener-files-its-own-fixes.test.ts'
+    - claim: "the costliest untracked cause becomes a drafted task"
+      proof: 'grep: test("W1-T4435: the costliest untracked cause becomes a drafted task" in test/the-ci-friction-gardener-files-its-own-fixes.test.ts'
+    - claim: "the daemon runs the ci-friction gardener"
+      proof: "grep: startCiFrictionGardener( in src/run-task.ts"
+  falsifier: |
+    Rank by fire count instead of minutes lost and the first test ranks a frequent one-minute check above a rare 25-minute one.

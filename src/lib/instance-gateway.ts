@@ -22,6 +22,11 @@ import { readFileSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { buildRecentRoute, buildStatusRoute, type BoardDeps } from "./board.js";
+import { systemClock, type Clock } from "./clock.js";
+import { escalate, ghIssueGateway, type IssueGateway } from "./escalate.js";
+import { evaluateFleetLiveness, livenessEscalation, readLivenessRows, type InstanceLiveness, type LivenessInstance, type ReadLastRows } from "./fleet-liveness.js";
+import { ghExec } from "./github-transport.js";
+import { appendLedger } from "./ledger.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
@@ -70,6 +75,11 @@ export interface InstanceGatewayOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Applied to each instance's raw read routes — serve.ts's per-route read cache and projection. */
   bound?: (routes: Route[], board: BoardDeps) => Route[];
+  /** W1-T4418 liveness seams: the row reader, the `gh` runner behind its escalation, the clock, the timer. */
+  readLastRows?: ReadLastRows;
+  gh?: (args: string[]) => string;
+  clock?: Clock;
+  every?: (run: () => void, ms: number) => () => void;
 }
 
 export function instanceStateRoot(instance: RegistryInstance, stateBase: string): InstanceStateRoot {
@@ -190,4 +200,105 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
     out.push(...routes.map((route) => guardInstanceRoute(route, instance.name, availability)));
   }
   return out;
+}
+
+/** W1-T4418 — how often the gateway judges the fleet: once per daemon poll interval (60 s), the
+ *  finest cadence at which a sweep can be missed. */
+export const LIVENESS_CHECK_MS = 60_000;
+
+/** Every live registry instance except core, at its gateway mount. The core is watched per HOST. */
+export function livenessInstances(opts: InstanceGatewayOptions): LivenessInstance[] {
+  const core = opts.coreInstance ?? CORE_INSTANCE;
+  const stateBase = opts.stateBase ?? DEFAULT_INSTANCE_STATE_BASE;
+  return registryInstances({ ...opts, log: undefined })
+    .filter((instance) => instance.name !== core)
+    .map((instance) => ({ name: instance.name, repo: instance.repo, stateDir: join(stateBase, instance.name, "state") }));
+}
+
+const realGh = (args: string[]): string => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+/** The escalation's issue transport, assigning each issue it opens to the repo's owner — the operator. */
+function operatorIssues(repo: string, gh: (args: string[]) => string, log: InstanceGatewayOptions["log"]): IssueGateway {
+  const [owner, name] = repo.split("/");
+  return ghIssueGateway(owner, name, {
+    exec: (args) => {
+      const out = gh(args);
+      if (args[0] !== "issue" || args[1] !== "create") return out;
+      try {
+        gh(["issue", "edit", out.trim(), "--repo", repo, "--add-assignee", owner]);
+      } catch (error) {
+        log?.("fleet.liveness_assign_failed", { repo, issue_url: out.trim(), reason: String((error as Error).message ?? error) });
+      }
+      return out;
+    },
+  });
+}
+
+/**
+ * One judgement of every watched instance. A DOWN instance escalates ONCE — `down` remembers it
+ * across ticks, and escalate()'s open-issue dedup covers a gateway restart. Coming back up ledgers
+ * `fleet.instance_recovered`. An unreadable ledger is logged and judged nothing.
+ */
+export function checkInstanceLiveness(
+  roots: readonly LivenessInstance[],
+  deps: InstanceGatewayOptions & { ledgerPath: string; down: Set<string> },
+): InstanceLiveness[] {
+  const clock = deps.clock ?? systemClock;
+  const read = deps.readLastRows ?? ((instance, sinceMs) => readLivenessRows(instance, sinceMs));
+  const unreadable = new Set<string>();
+  const guardedRead: ReadLastRows = (instance, sinceMs) => {
+    try {
+      return read(instance, sinceMs);
+    } catch (error) {
+      unreadable.add(instance.name);
+      deps.log?.("fleet.instance_unreadable", { instance: instance.name, reason: String((error as Error).message ?? error) });
+      return [];
+    }
+  };
+  const results = evaluateFleetLiveness(roots, guardedRead, clock.now()).filter((r) => !unreadable.has(r.instance));
+  for (const r of results) {
+    if (r.state === "down" && !deps.down.has(r.instance)) {
+      const issues = operatorIssues(r.repo, deps.gh ?? realGh, deps.log);
+      let url = "";
+      try {
+        url = escalate(livenessEscalation(r), { issues, ledgerPath: deps.ledgerPath, runId: `LIVENESS-${clock.now()}` });
+      } catch (error) {
+        deps.log?.("fleet.liveness_escalation_failed", { instance: r.instance, reason: String((error as Error).message ?? error) });
+      }
+      // An empty url opened nothing (an unreadable dedup read): judge it again next tick.
+      if (url !== "") deps.down.add(r.instance);
+    } else if (r.state === "up" && deps.down.delete(r.instance)) {
+      appendLedger(deps.ledgerPath, {
+        run_id: `LIVENESS-${clock.now()}`,
+        task_id: `FLEET-${r.instance}`,
+        step: "fleet.instance_recovered",
+        instance: r.instance,
+        last_sweep_age_ms: r.lastSweepAgeMs,
+        boots_last_hour: r.bootsLastHour,
+      });
+    }
+  }
+  return results;
+}
+
+/** Start the gateway's liveness watch; returns its stop. A registry naming no other instance starts nothing. */
+export function watchInstanceLiveness(opts: InstanceGatewayOptions & { ledgerPath: string }): () => void {
+  const roots = livenessInstances(opts);
+  if (roots.length === 0) return () => {};
+  const down = new Set<string>();
+  const every =
+    opts.every ??
+    ((run: () => void, ms: number) => {
+      const timer = setInterval(run, ms);
+      timer.unref();
+      return () => clearInterval(timer);
+    });
+  return every(() => {
+    try {
+      checkInstanceLiveness(roots, { ...opts, down });
+    } catch (error) {
+      // A timer callback that throws would take the whole gateway down with it.
+      opts.log?.("fleet.liveness_check_failed", { reason: String((error as Error).message ?? error) });
+    }
+  }, LIVENESS_CHECK_MS);
 }

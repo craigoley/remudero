@@ -1,0 +1,37 @@
+- id: W1-T4444
+  title: "/v1/operator-activity NEVER SHOWS A WORKSTREAM OR AN ARTIFACT — buildOperatorActivityProjection concatenates activities first and slices to OPERATOR_ACTIVITY_MAX_ITEMS, and the ledger always holds 200+ recent activities, so the two sections W1-T3852 added are always truncated away; give each kind its own share of the cap"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "2026-09-24 console/daemon incident follow-up: the console operator-activity view showed only ledger activity rows"
+  plan_refs: ["W1-T3852"]
+  files:
+    - src/lib/panel-graph.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Read at main: buildOperatorActivityProjection (src/lib/panel-graph.ts) builds `activities` (itself already
+    sliced to OPERATOR_ACTIVITY_MAX_ITEMS = 200), then `workstreams`, then `artifacts`, and returns
+    `[...activities, ...workstreams, ...artifacts].slice(0, OPERATOR_ACTIVITY_MAX_ITEMS)`. On any live ledger
+    there are at least 200 activity rows, so the result is 200 activities, zero workstreams and zero artifacts,
+    with `truncated: true`. The workstream and artifact projection W1-T3852 shipped has no visible output.
+    Open PR #6953 (run-unfiled-1790233744063, a performance fix for this route) keeps this behaviour. It skips
+    computing workstreams entirely once activities reach the cap. This task is against the COMPOSITION, not
+    the route's speed, and whichever lands second must keep workstreams computed.
+  design: |
+    The item cap is shared by kind. Workstreams and artifacts are bounded, plan-derived sets, so they are
+    included first, each under its own bound. Activities fill the remainder, newest first. `truncated` stays
+    true when any kind was cut, and the envelope says which kind was cut (sparse, additive). Keep the total
+    cap and contract version unless a field is added, in which case bump the version the way W1-T3852 set
+    it. If #6953's workstream short-circuit has landed, remove it, because the cap no longer implies there is
+    no room.
+  acceptance:
+    - claim: "operator activity keeps workstream and artifact rows when the ledger holds more activities than the cap"
+      proof: "unit test: operator activity keeps workstream and artifact rows when activities exceed the cap"
+  falsifier: |
+    CLOSE IF /v1/operator-activity already returns workstream rows while the ledger holds 200+ activities.

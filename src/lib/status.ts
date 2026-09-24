@@ -12,7 +12,7 @@ import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
@@ -879,6 +879,8 @@ export function readLedgerUnionBounded(
     readdirSync?: (dir: string) => string[];
     gunzipSync?: (buf: Buffer) => Buffer;
     readFileBuffer?: (p: string) => Buffer;
+    /** A memoizing rotation reader, e.g. {@link createLedgerRotationMemo}'s pass; omitted ⇒ every rotation is parsed. */
+    rotationRecords?: LedgerRotationHook;
   } = {},
 ): LedgerLines {
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
@@ -894,11 +896,32 @@ export function readLedgerUnionBounded(
       dedupe: false,
       readLiveRecords: () => live,
       satisfied: opts.satisfied,
+      rotationRecords: opts.rotationRecords,
       onTorn: opts.onTorn,
     },
     statusLedgerUnionFsDeps(ledgerFs, opts),
   );
   return withReadMeta(read.rows, (live.torn ?? 0) + read.torn, live.present);
+}
+
+/** {@link readLedgerUnionBounded} through a rotation memo: a request re-parses only the live file, and a rotation
+ *  the memo lacks is loaded off the event loop before the union is read again. */
+export async function readLedgerUnionMemoized(path: string, memo: LedgerRotationMemo, onTorn?: (raw: string) => void): Promise<LedgerLines> {
+  // Only the complete pass's torn lines reach `onTorn`; an incomplete pass is discarded, so it must not count.
+  let tornLines: string[] = [];
+  const readPass = (pass: LedgerRotationMemoPass): LedgerLines => {
+    tornLines = [];
+    return readLedgerUnionBounded(path, { rotationRecords: pass.rotationRecords, onTorn: (raw) => tornLines.push(raw) });
+  };
+  let pass = memo.pass();
+  let read = readPass(pass);
+  while (!pass.complete()) {
+    await memo.load(pass.missing());
+    pass = memo.pass();
+    read = readPass(pass);
+  }
+  for (const raw of tornLines) onTorn?.(raw);
+  return read;
 }
 
 /**

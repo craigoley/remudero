@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { systemClock } from "./clock.js";
 import { repoScopedTaskKey } from "./ledger.js";
+import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
 /**
  * Fleet control set (MASTER-PLAN §4A/§4B) — `rmd stop|pause|resume`, plus the
@@ -263,6 +264,9 @@ export const SHARED_PAUSE_GIT_TIMEOUT_MS = 10_000;
  */
 export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
   const run = (args: string[]): { status: number; stdout: string } => {
+    // `repoRoot` follows the cwd, so a test driving `rmd pause`/`resume` from a fleet worktree
+    // targets the LIVE origin; 2026-09-24 a worker's test run held every daemon for 32 minutes.
+    if (args[0] === "push") assertLiveWriteAllowed("git-push", `${args.at(-1)} on ${repoRoot}'s origin`);
     try {
       const stdout = execFileSync("git", ["-C", repoRoot, ...args], {
         encoding: "utf8",

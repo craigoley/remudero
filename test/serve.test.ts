@@ -1683,13 +1683,13 @@ test("resolveServeHost: a following FLAG is rejected rather than bound as an add
 // credential to a world-readable file that outlives the process. Both tokens
 // were printed, and the console URL carried the WRITE one. A source-level
 // guard because the banner is the regression surface and it is one line long.
-test("serveCommand's startup banner prints the READ token only — never the write token", () => {
+test("serveCommand's startup banner prints no token — the bookmark comes from rmd console-url", () => {
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   const banner = src.slice(src.indexOf("### rmd serve — listening on"));
   const printed = banner.slice(0, banner.indexOf("await new Promise"));
   assert.ok(
-    printed.includes("?token=${tokens.read}"),
-    "the console URL carries the read token, so a bookmark grants VIEW rather than control",
+    !printed.includes("${tokens.read}") && printed.includes("rmd console-url"),
+    "a container's stdout is docker logs, so the banner points at `rmd console-url` instead of printing the read token",
   );
   assert.ok(
     !printed.includes("${tokens.write}"),

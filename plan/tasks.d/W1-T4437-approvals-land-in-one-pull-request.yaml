@@ -1,0 +1,31 @@
+- id: W1-T4437
+  title: "EACH `rmd approve` OPENS ITS OWN PLAN PR AND THEY CONFLICT WITH EACH OTHER — six ratify PRs opened together each took ~139 min and merged origin/main into themselves 8 times; batch every approval of one pass into a single PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: []
+  files: [src/lib/inbox.ts, src/run-task.ts, test/approvals-land-in-one-pull-request.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    MEASURED: `chore(plan): ratify ...` PRs #6776-#6784 each took 139-144 min with 3 heads; 8 of the 79 main-merge
+    commits in the 150-PR window are `Merge remote-tracking branch 'origin/main' into run-APPROVE-...`.
+  design: |
+    (i) Approvals queued in one pass are written to one run-APPROVE branch and one PR. (ii) An approval arriving while that
+    PR is open joins it (a new commit), unless the PR is already queued to merge. (iii) Each approval stays individually
+    ledgered and revertible by its own commit.
+  acceptance:
+    - claim: "approvals in one pass open one pull request"
+      proof: 'grep: test("W1-T4437: approvals in one pass open one pull request" in test/approvals-land-in-one-pull-request.test.ts'
+    - claim: "a later approval joins the open approval pull request"
+      proof: 'grep: test("W1-T4437: a later approval joins the open approval pull request" in test/approvals-land-in-one-pull-request.test.ts'
+  falsifier: |
+    Open one PR per approval and the first test finds more than one approval PR for a single pass.

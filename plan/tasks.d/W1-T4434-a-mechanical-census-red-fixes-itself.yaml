@@ -1,0 +1,35 @@
+- id: W1-T4434
+  title: "MOST CENSUS REDS HAVE ONE MECHANICAL REMEDY THE WORKER STILL SPENDS A REPAIR ROUND ON — a baseline row for a new file, a CENSUS_POPULATION entry for a new tree-walking suite, the shared gh/git fixture helper instead of a hand-rolled one; `rmd census fix` should apply each named remedy before push and say what it changed"
+  repo: remudero
+  depends_on: [W1-T4433]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: []
+  files: [src/lib/census-fix.ts, src/run-task.ts, test/a-mechanical-census-red-fixes-itself.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    OBSERVED 2026-09-24 across #6922, #6925 and #6928: every census red had a remedy the failing test itself names
+    (add the new file's row; register the suite; use test/helpers/gh-shim.ts or git-repo.ts; use lib/clock.ts). None needed
+    judgement, and each cost a CI cycle.
+  design: |
+    (i) `rmd census fix` runs the rule-check population (W1-T4433), and for each failure with a registered MECHANICAL
+    remedy applies it: record a new file's baseline row at its measured value, never raise an existing row. Anything else is
+    reported, not changed. (ii) The implement worker runs it before its final commit and ledgers census.fixed rows naming each
+    remedy. (iii) A remedy never raises an existing ceiling or deletes a gate entry.
+  acceptance:
+    - claim: "a new file''s missing baseline row is added at its measured value"
+      proof: 'grep: test("W1-T4434: a new file''s missing baseline row is added at its measured value" in test/a-mechanical-census-red-fixes-itself.test.ts'
+    - claim: "an existing ceiling is never raised by census fix"
+      proof: 'grep: test("W1-T4434: an existing ceiling is never raised by census fix" in test/a-mechanical-census-red-fixes-itself.test.ts'
+    - claim: "the implement worker runs census fix before committing"
+      proof: "grep: runCensusFix( in src/run-task.ts"
+  falsifier: |
+    Let census fix raise an existing row and the second test finds a ceiling moved upward.

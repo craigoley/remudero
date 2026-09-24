@@ -1,0 +1,32 @@
+- id: W1-T4431
+  title: "EVERY NEW SOURCE FILE MUST ADD A ROW TO THE COMMENT-LOAD BASELINE — a new file gets the default 250-line bucket anyway, yet the census test refuses it without a row, so new files turn comment-load-baseline.json into a shared merge surface; an absent file must mean the default bucket"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: []
+  files: [scripts/comment-load-ratchet.mjs, scripts/comment-load-baseline.json, test/a-new-file-needs-no-comment-load-row.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    MEASURED: scripts/comment-load-baseline.json is changed by 17 of 150 merged PRs; "CENSUS: the shipped baseline covers
+    every measured file, and no other" is among the most frequent red tests in PR coverage shards. OBSERVED 2026-09-24 on #6922
+    and #6925: new files needed rows whose value was the default bucket (250).
+  design: |
+    (i) A file with no row is held to the default bucket (CEILING_BUCKET_COMMENTS). (ii) The census requires rows only
+    for files above the default bucket, and refuses a row equal to the default as redundant. (iii) Rows at the default are
+    removed in the same PR.
+  acceptance:
+    - claim: "a new file under the default bucket needs no baseline row"
+      proof: 'grep: test("W1-T4431: a new file under the default bucket needs no baseline row" in test/a-new-file-needs-no-comment-load-row.test.ts'
+    - claim: "a row equal to the default is refused as redundant"
+      proof: 'grep: test("W1-T4431: a row equal to the default is refused as redundant" in test/a-new-file-needs-no-comment-load-row.test.ts'
+  falsifier: |
+    Require a row for every measured file and the first test fails on a new file with a single comment.
