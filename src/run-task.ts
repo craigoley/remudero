@@ -31030,7 +31030,7 @@ export async function daemonCommand(
     boardOpenPrCount.reset();
     const proj = projectPlan(
       planOverride,
-      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
+      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe, skipUncreditedBuildWarning: true },
       statusPath,
     );
     lastProj = proj;
