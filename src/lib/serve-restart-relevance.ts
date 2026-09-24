@@ -8,12 +8,15 @@
  * (empty, blank and unreadable are all relevant) and adds the trees only serve reads.
  */
 import { execFile } from "node:child_process";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { advanceIsMaterial } from "./self-sync.js";
 
+const HOUSE_LAYOUT = resolveRepoLayout("", () => undefined);
+
 /** Read by serve at boot or by its entrypoint, beyond the daemon's {@link advanceIsMaterial} list.
- *  `.remudero/` is W1-T4229's outage: serve loads managed-repos.json once, at boot. `plan/` is
- *  loaded once too (boardDeps.plan); skipping it waits on serve reloading its plan. */
-export const SERVE_ONLY_RESTART_PATHS = ["hooks/", "settings/", "deploy/", ".remudero/", "plan/"] as const;
+ *  The state dir is W1-T4229's outage: serve loads managed-repos.json once, at boot. The plan dir
+ *  is loaded once too (boardDeps.plan); skipping it waits on serve reloading its plan. */
+export const SERVE_ONLY_RESTART_PATHS: readonly string[] = ["hooks/", "settings/", "deploy/", `${HOUSE_LAYOUT.stateDir}/`, `${HOUSE_LAYOUT.planDir}/`];
 
 export function serveRestartRelevant(changedPaths: readonly string[] | undefined): boolean {
   if (advanceIsMaterial(changedPaths)) return true;
