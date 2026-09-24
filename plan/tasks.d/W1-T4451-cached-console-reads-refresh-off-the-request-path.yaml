@@ -1,0 +1,54 @@
+- id: W1-T4451
+  title: "THE GATEWAY'S READ CACHE RECOMPUTES ON EVERY REQUEST — boundConsoleReadRoute calls refresh(req) unconditionally, so compute rate equals request rate and a synchronous handler runs on the request's own stack where the 750 ms budget cannot fire; answer from the buffer at once and refresh off the request path only once the buffer is older than a per-path interval"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 console data-architecture design (console dropouts): layer C1, sequence step 2"
+  plan_refs: ["W1-T3925", "W1-T4261", "W1-T3710", "W1-T4452"]
+  files:
+    - src/lib/console-snapshot-cache.ts
+    - src/lib/serve.ts
+  note: |
+    HELD FROM FLEET DISPATCH (operator, 2026-09-24): a dedicated build agent is building this task now.
+    `verify: human` is the hold; isDispatchEligible parks it until an operator releases it. Release it only
+    if that build is abandoned. Its PR carries this id as its Remudero-Task trailer.
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at main 6a04d2f18: boundConsoleReadRoute (src/lib/serve.ts) wraps CONSOLE_CACHED_READ_PATHS
+    (/v1/status, /v1/recent, /v1/inbox, /v1/daemon-health, /v1/repos) with a single-flight refresh and a
+    CONSOLE_READ_ROUTE_BUDGET_MS = 750 race, but its handler calls `refresh(req)` on EVERY request. There is no
+    minimum age and no timer, so the cache is a fallback for a slow refresh, not stale-while-revalidate. The
+    W1-T3925 comment in the same function admits that a synchronous route.handler (buildStatusRoute,
+    buildRecentRoute are synchronous) "runs to completion ... entirely inside this call to refresh(req)", so while
+    it runs the budget timer and every other request on serve's one thread wait. The console polls /v1/status and
+    /v1/recent every 5 s per open tab (console design finding 1), so compute rate tracks tab count and a slow
+    refresh freezes every route. W1-T4261 (merged) made the inbox classification incremental; it did not change
+    this wrapper.
+  design: |
+    New module src/lib/console-snapshot-cache.ts exports createConsoleSnapshotCache and owns the buffer, single-flight and freshness logic;
+    boundConsoleReadRoute delegates to it (serve.ts is over its comment-load ceiling: add ZERO net comment lines
+    there). Each cached path gets a `minRefreshMs` (status and recent 2 s, inbox 10 s, daemon-health 5 s, repos
+    10 s), held as data in the new module. A request with a buffer answers it IMMEDIATELY with the existing
+    `x-rmd-cache-state` / `x-rmd-cache-age-ms` headers and JSON `staleness` field. It schedules a refresh only when
+    the buffer is older than its interval, and that refresh starts via setImmediate AFTER the response is written,
+    never on the request's stack. Only a path with no buffer yet (cold) waits on compute, still under the existing
+    750 ms race and fallbackBodyForCachedRead. Single-flight is kept, so N concurrent requests start at most one
+    refresh. The response contract (status codes, headers, staleness field) is unchanged byte for byte. Use the
+    Clock port for ages, never Date.now(). Another agent is separately fixing the gateway stall from
+    watchInstanceLiveness's synchronous ledger read; do not touch instance-gateway.ts or fleet-liveness.ts.
+  acceptance:
+    - claim: "a buffered read younger than its interval is answered without running the route handler"
+      proof: "unit test: a fresh console buffer is served without running the route handler"
+    - claim: "an older buffer is answered at once and its refresh starts only after the response is written"
+      proof: "unit test: a stale buffer is answered first and its refresh runs after the response"
+    - claim: "serve builds its cached console reads through the new snapshot cache"
+      proof: "grep: createConsoleSnapshotCache( in src/lib/serve.ts"
+  falsifier: |
+    CLOSE IF boundConsoleReadRoute on main already skips refresh(req) for a buffer younger than a per-path interval.

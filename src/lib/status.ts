@@ -3926,6 +3926,17 @@ export interface BatchedIssue {
  *  run-task.ts, because lib/review.ts imports `readLedgerLines` from HERE and the reverse would be circular. */
 const REVIEW_STATUS_CONTEXT = "remudero-review";
 
+type ReviewStateValue = "success" | "failure" | "pending" | "none";
+
+/** Only a REAL status row becomes an entry: the top-level roll-up reports pending for a commit with zero statuses. */
+function reviewStateFromCombinedStatus(raw: { statuses?: Array<{ context?: string; state?: string }> }): ReviewStateValue {
+  const entry = (raw.statuses ?? []).find((s) => s.context === REVIEW_STATUS_CONTEXT);
+  if (!entry) return "none";
+  const state = (entry.state ?? "").toLowerCase();
+  if (state === "success") return "success";
+  return state === "failure" || state === "error" ? "failure" : "pending";
+}
+
 /**
  * W1-T1005: the process-lifetime {@link GhCallPacer} every gateway shares when its caller omits `opts.pacer`.
  * Module scope, not function scope, is what makes "shared" true — a pacer per construction gives each gateway
@@ -3965,6 +3976,8 @@ interface PrewarmWorkerRequest {
   fetchIssues: boolean;
   knownBoardPrs?: Map<number, BoardPrRest>;
   knownIssues?: Map<number, BoardIssueRest>;
+  /** Open PRs whose review state the walk refreshes, so a board recompute never shells one per row. */
+  reviewRefs?: Array<{ url: string; headRef: string }>;
 }
 
 function isPrewarmWorkerRequest(v: unknown): v is PrewarmWorkerRequest {
@@ -3981,6 +3994,8 @@ interface PrewarmWorkerResponse {
   open?: PrewarmChannelOutcome<BoardPrRest>;
   merged?: PrewarmChannelOutcome<BoardPrRest>;
   issues?: PrewarmChannelOutcome<BoardIssueRest>;
+  /** One `[url, state]` per readable ref; an unreadable one is absent, as the synchronous read caches nothing. */
+  reviews?: Array<[string, ReviewStateValue]>;
 }
 
 /** Runs one channel's fetch inside the worker and NEVER throws out of this function — a failure becomes data in
@@ -4038,6 +4053,17 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
       () => fetchLabelledIssuesRest(req.owner, req.repo, NEEDS_HUMAN_LABEL, fetchJson, req.knownIssues),
       bytes,
     );
+  }
+  if (req.reviewRefs && req.reviewRefs.length > 0) {
+    const reviews: Array<[string, ReviewStateValue]> = [];
+    for (const ref of req.reviewRefs) {
+      try {
+        reviews.push([ref.url, reviewStateFromCombinedStatus(JSON.parse(runSync(combinedStatusRestArgs(req.owner, req.repo, ref.headRef))))]);
+      } catch {
+        // deliberate: an unreadable status stays uncached, so the row reads undetermined exactly as a synchronous miss does.
+      }
+    }
+    response.reviews = reviews;
   }
   return response;
 }
@@ -4107,6 +4133,9 @@ export function buildBatchedGithub(
     snapshotCache?: BoardSnapshotCache;
     /** The BOARD's non-blocking, durable `changedFiles` (lib/changed-files-cache.ts). Omitted ⇒ the synchronous memo below. */
     changedFilesCache?: ChangedFilesCache;
+    /** How far AHEAD of expiry `warm()` refreshes: a warm on the TTL's own cadence must pass that cadence, or the
+     *  cache expires between two warms and the next request walks GitHub on the serving thread. Omitted ⇒ 0. */
+    prewarmLeadMs?: number;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -4193,7 +4222,8 @@ export function buildBatchedGithub(
    * keyed on a branch name GitHub deletes on merge — a 404 the catch never cached. The fix: a MERGED or CLOSED
    * row never reaches this cache at all.
    */
-  const reviewStateCache = new Map<string, { at: number; state: "success" | "failure" | "pending" | "none" }>();
+  const reviewStateCache = new Map<string, { at: number; state: ReviewStateValue }>();
+  const reviewsWarmInFlight = new Set<string>();
   /** ONE HALF OF THE BOARD, OVER REST — W1-T2323 option C's whole mechanism. The body is byte-for-byte what the
    *  single combined fetch always did, parameterised by WHICH half it walks. A gateway built with an injected
    *  `opts.fetchAll` never reaches it. Why: welded together, `listOpenHeadBranches` paid a 26-request closed
@@ -4634,16 +4664,26 @@ export function buildBatchedGithub(
     log("board_gateway.issue_fetch_ok", { issueCount: all.length });
   };
 
+  const applyReviews = (reviews: Array<[string, ReviewStateValue]> | undefined): void => {
+    for (const [url, state] of reviews ?? []) reviewStateCache.set(url, { at: now(), state });
+  };
+
   /** W1-T2440 — `warm()`'S REAL-DEFAULT PATH. See the module-scope doc above {@link BOARD_PREWARM_WORKER_KIND}
    *  for why a `Worker` rather than an async rewrite. Computes "is a refresh due" per channel EXACTLY as the
-   *  three read paths do, so a `warm()` faster than the TTL is still a no-op, and at most ONE worker is ever in
-   *  flight. */
+   *  three read paths do, less `prewarmLeadMs`, so a `warm()` faster than that is a no-op, and at most ONE worker
+   *  is ever in flight. */
   const runPrewarmWorker = (): void => {
     if (prewarmWorker) return;
-    const fetchOpen = !openHalf || now() - openHalf.at >= effectiveOpenTtlMs();
-    const fetchMerged = !mergedHalf || now() - mergedHalf.at >= effectiveMergedTtlMs();
-    const fetchIssues = !issueCache || now() - issueCache.at >= ttlMs;
-    if (!fetchOpen && !fetchMerged && !fetchIssues) return;
+    const lead = opts.prewarmLeadMs ?? 0;
+    const fetchOpen = !openHalf || now() - openHalf.at + lead >= effectiveOpenTtlMs();
+    const fetchMerged = !mergedHalf || now() - mergedHalf.at + lead >= effectiveMergedTtlMs();
+    const fetchIssues = !issueCache || now() - issueCache.at + lead >= ttlMs;
+    const reviewRefs: Array<{ url: string; headRef: string }> = [];
+    for (const pr of openHalf?.rows ?? []) {
+      const held = reviewStateCache.get(pr.url);
+      if (pr.state === "OPEN" && pr.headRefName && (!held || now() - held.at + lead >= ttlMs)) reviewRefs.push({ url: pr.url, headRef: pr.headRefName });
+    }
+    if (!fetchOpen && !fetchMerged && !fetchIssues && reviewRefs.length === 0) return;
     // Captured BEFORE the walk starts, exactly like `openRows`'s own snapshot — the set this compares against
     // must be the pre-refresh one, not whatever the half becomes by the time the message arrives.
     const previouslyOpen = fetchOpen && openHalf ? new Set(openHalf.rows.map((p) => p.number)) : undefined;
@@ -4651,12 +4691,14 @@ export function buildBatchedGithub(
     if (fetchOpen) openWarmInFlight = true;
     if (fetchMerged) mergedWarmInFlight = true;
     if (fetchIssues) issuesWarmInFlight = true;
+    for (const ref of reviewRefs) reviewsWarmInFlight.add(ref.url);
     fetchInFlight = true;
     const finish = (): void => {
       prewarmWorker = undefined;
       openWarmInFlight = false;
       mergedWarmInFlight = false;
       issuesWarmInFlight = false;
+      reviewsWarmInFlight.clear();
       fetchInFlight = false;
     };
     const req: PrewarmWorkerRequest = {
@@ -4669,6 +4711,7 @@ export function buildBatchedGithub(
       fetchIssues,
       knownBoardPrs,
       knownIssues,
+      reviewRefs,
     };
     let worker: Worker;
     try {
@@ -4685,6 +4728,7 @@ export function buildBatchedGithub(
       if (response.open) applyOpenOutcome(response.open, elapsedMs, previouslyOpen);
       if (response.merged) applyMergedOutcome(response.merged, elapsedMs);
       if (response.issues) applyIssuesOutcome(response.issues);
+      applyReviews(response.reviews);
       return;
     }
     prewarmWorker = worker;
@@ -4718,6 +4762,7 @@ export function buildBatchedGithub(
         if (msg.open) applyOpenOutcome(msg.open, elapsedMs, previouslyOpen);
         if (msg.merged) applyMergedOutcome(msg.merged, elapsedMs);
         if (msg.issues) applyIssuesOutcome(msg.issues);
+        applyReviews(msg.reviews);
       });
       void worker.terminate();
     });
@@ -4829,22 +4874,9 @@ export function buildBatchedGithub(
       const headRef = entry.headRefName;
       if (!headRef) return undefined; // open PR with no resolvable head ref -> undetermined
       const cached = reviewStateCache.get(prUrl);
-      if (cached && now() - cached.at < ttlMs) return cached.state;
+      if (cached && (now() - cached.at < ttlMs || reviewsWarmInFlight.has(prUrl))) return cached.state;
       try {
-        const raw = JSON.parse(run(combinedStatusRestArgs(owner, repo, headRef))) as {
-          statuses?: Array<{ context?: string; state?: string }>;
-        };
-        // Only a REAL status row becomes an entry — the endpoint's top-level state is a roll-up-of-a-rollup that
-        // reports pending for a commit with zero statuses, and synthesising from it would invent a review.
-        const entry = (raw.statuses ?? []).find((s) => s.context === REVIEW_STATUS_CONTEXT);
-        const raw_state = (entry?.state ?? "").toLowerCase();
-        const state: "success" | "failure" | "pending" | "none" = !entry
-          ? "none"
-          : raw_state === "success"
-            ? "success"
-            : raw_state === "failure" || raw_state === "error"
-              ? "failure"
-              : "pending";
+        const state = reviewStateFromCombinedStatus(JSON.parse(run(combinedStatusRestArgs(owner, repo, headRef))));
         reviewStateCache.set(prUrl, { at: now(), state });
         return state;
       } catch {
