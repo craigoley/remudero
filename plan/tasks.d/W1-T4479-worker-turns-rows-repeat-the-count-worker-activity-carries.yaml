@@ -1,0 +1,54 @@
+- id: W1-T4479
+  title: "`worker.turns` ROWS REPEAT A COUNT EVERY `worker.activity` ROW ALREADY CARRIES — ~5.6% of core ledger bytes restate `turns_so_far` and nothing in src reads the step; stop writing it and keep the count on `worker.activity`"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  band_meaning: span
+  origin: "2026-09-24 operator session: core ledger volume census"
+  plan_refs: ["W1-T2557", "W1-T942", "W1-T4393", "W1-T4394"]
+  files:
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24: `worker.turns` rows are about 5.6% of the core ledger's bytes.
+    WHAT THE STEP DOES (W1-T2557). buildWorkerStateSensor's observeTurns (src/run-task.ts) appends a
+    `worker.turns` row with `turns_so_far` every time WorkerStateTracker.turnsSoFar changes. W1-T2557 added it so
+    a worker's turn count is visible while it runs, not only at `implement.done`.
+    WHY IT IS NOW REDUNDANT. The same observer appends a `worker.activity` row for EVERY stream event, and that
+    row carries `turns_so_far` whenever the event does. The tracker only changes its count from an event's
+    `turnsSoFar`, so every value a `worker.turns` row records has already been written on the `worker.activity`
+    row for the same event. The mid-flight visibility W1-T2557 asked for is kept by `worker.activity`.
+    THE READERS, SWEPT ON MAIN (9aa0dd61e) OVER src/, scripts/, docs/ AND the remudero-console checkout:
+      - src/: none. `WORKER_TURNS_LEDGER_STEP` is referenced only by its own emitter in run-task.ts. No reader
+        matches on `worker.turns` or reads `turns_so_far` off it. status.ts and board.ts read `worker.state`
+        and `worker.activity`, never `worker.turns`.
+      - remudero-console, scripts/, docs/: none.
+      - test/: test/a-runaway-worker-is-visible-before-it-finishes.test.ts pins the row (W1-T2557's own tests).
+        test/operator-activity.test.ts and test/action-results-route.test.ts use the string only as a filler
+        step in synthetic ledgers, and a filler row needs no emitter.
+    Every reader can use `worker.activity`, so this task removes the step rather than emitting it only on change.
+    It already is emitted only on change.
+  design: |
+    (i) observeTurns stops appending `worker.turns`. It keeps the running count and still appends
+    `worker.runaway_turns` at most once per run when the count first clears the bound. That row stays.
+    (ii) Remove WORKER_TURNS_LEDGER_STEP and its doc, and fix the `worker.activity` doc that names it.
+    (iii) Amend W1-T2557's tests (test/a-runaway-worker-is-visible-before-it-finishes.test.ts) so they assert the same facts from `worker.activity`: the latest in-flight row
+    carries the running count, each distinct count appears, and a sensor whose observer never fires writes no
+    count. Every W1-T2557 claim must still hold. Only the step it is read from changes.
+    (iv) Leave the filler rows in operator-activity.test.ts and action-results-route.test.ts alone.
+  acceptance:
+    - claim: "a worker's running turn count is read from worker.activity rows while the spawn is in flight"
+      proof: "unit test: the in-flight turn count is carried on worker activity rows"
+    - claim: "the sensor writes no worker.turns row"
+      proof: "unit test: the worker state sensor writes no separate turn count row"
+    - claim: "the runaway turn row is still appended once when the bound is crossed"
+      proof: "unit test: the runaway turn row still fires once without a separate turn count row"
+  falsifier: |
+    CLOSE IF a reader of `worker.turns` turns up in src/ or the console that `worker.activity` cannot serve, or
+    if `worker.turns` is already under 1% of ledger bytes.

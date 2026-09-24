@@ -1156,6 +1156,32 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
   return classifyFailure({ text: detail }) === "transient" ? { detail } : undefined;
 }
 
+/**
+ * W1-T4466 — a failed GitHub READ, scoped to the KNOWN read endpoints the rationale's two
+ * pass-ending errors actually named: `gh api repos/.../commits/<sha>/check-runs` and
+ * `commits/<sha>/status` (open-prs-rest.ts's `checkRunsRestArgs`/`combinedStatusRestArgs`). One lane
+ * reading CI state off a head it does not even own must not end the whole pass — the daemon
+ * container's own 30-hour window charged two of six pass-ending errors to exactly this read.
+ *
+ * DELIBERATELY NARROWER than "any `gh api` call with no `--method`": a bare `gh api
+ * repos/.../pulls` is ALSO how the PR-create endpoint is spelled in the auth/rate-limit fixtures
+ * the fatal path must still cover (test/daemon.test.ts, "W1-T3165 ... auth refusals ... remain
+ * fatal"), so a blanket read/write split by `--method` presence alone would silently swallow those
+ * too. Matching the two named endpoints keeps a WRITE failure (create, merge, comment) on today's
+ * fatal path unchanged, per design (iii).
+ */
+function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+  const message = String(failure.message ?? "");
+  if (!/(?:^|\s)gh(?:\s|$)/i.test(message)) return undefined;
+  if (!/commits\/[^/\s]+\/(?:check-runs|status)\b/i.test(message)) return undefined;
+  const detail = [message, failure.stderr == null ? "" : String(failure.stderr), failure.code ?? ""]
+    .filter((part) => part.length > 0)
+    .join("\n");
+  return { detail };
+}
+
 /** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for an idle wait to notice its phase
  * ended. The wait seam is deliberately promise-only with no cancellation handle, so waiting out the whole poll
  * interval would add up to 60 seconds to every phase transition. The clock therefore subdivides only its in-process
@@ -4139,10 +4165,26 @@ export async function runDaemon(
           continue;
         }
         const transientTransport = transientGhDispatchFailure(err);
-        if (!isSpawnInfraBlocked(err) && transientTransport === undefined) {
+        const spawnInfra = isSpawnInfraBlocked(err);
+        // W1-T4466: a failed GitHub READ inside one lane ends only that lane — named and logged,
+        // the PASS continues — instead of reaching `fatalError` below. Checked only once transient/
+        // spawn-infra are ruled out, so it never shadows their own richer handling (backoff,
+        // escalation) — e.g. the SAME check-runs endpoint failing on a RATE LIMIT still takes the
+        // transient path's bounded backoff, not this one. Scoped to the KNOWN read endpoints the
+        // rationale's two pass-ending errors actually named (`commits/<sha>/check-runs`,
+        // `commits/<sha>/status`) rather than "no --method", which would also swallow the bare
+        // `gh api repos/.../pulls` auth/rate-limit fixtures the fatal path already covers
+        // (test/daemon.test.ts "W1-T3165 ... remain fatal"). A WRITE failure — a create, a merge, a
+        // comment — keeps today's fatal behaviour unchanged (design iii).
+        const ghRead = !spawnInfra && transientTransport === undefined ? ghLaneReadFailure(err) : undefined;
+        if (!spawnInfra && transientTransport === undefined && ghRead === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
           // already-settled lane is still classified and processed before this tick returns.
           if (!fatalError) fatalError = { taskId: t.id, message: String((err as Error)?.message ?? err) };
+          continue;
+        }
+        if (ghRead !== undefined) {
+          log("daemon.gh_read_failed", { task: t.id, error: ghRead.detail });
           continue;
         }
         if (transientTransport !== undefined) {
