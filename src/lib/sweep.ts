@@ -378,6 +378,8 @@ export function fixRungTaskWithPlanReload(
     try {
       fresh = reloadPlan();
     } catch {
+      // An unreadable plan on this ONE opportunistic re-read is not this dispatch's reason to
+      // throw — falling through to the stale `plan` below reproduces exactly today's behaviour.
       fresh = undefined;
     }
     if (fresh) {
@@ -1448,6 +1450,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       try {
         return loadPlan(join(repoDir, "plan", "tasks.yaml"));
       } catch {
+        // A torn read, a missing checkout or a duplicate-id refusal on this ONE opportunistic
+        // re-read is never this dispatch's problem to raise — the caller degrades to its stale
+        // snapshot on `undefined`, exactly as if no reloader had been wired at all.
         return undefined;
       }
     });
