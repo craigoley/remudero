@@ -395,7 +395,7 @@
   "src/lib/supersession.ts": 50,
   "src/lib/sweep.ts": 3750,
   "src/lib/task-card.ts": 54,
-  "src/lib/task-class.ts": 38,
+  "src/lib/task-class.ts": 39,
   "src/lib/task-id-reservation.ts": 256,
   "src/lib/task-id.ts": 500,
   "src/lib/task-linter.ts": 1300,

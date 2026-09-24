@@ -1053,7 +1053,7 @@ import { reapGitObjects } from "./lib/object-reaper.js";
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. */
 export const OBJECT_REAP_CONTRACT_VERSION = "1";
-import { deriveTaskClass } from "./lib/task-class.js";
+import { deriveTaskClass, implementRouteClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord, type ClassClosure } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
@@ -12892,7 +12892,7 @@ export function softBudgetWarning(
  * every branch, including the fallback a complete committed table cannot reach. */
 export function resolveRunMounts(
   repoRootDir: string,
-  task: Pick<Task, "type" | "risk" | "files">,
+  task: Pick<Task, "type" | "risk" | "files" | "band_meaning">,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): {
   mount: Mount;
@@ -12924,7 +12924,7 @@ export function resolveRunMounts(
 } {
   const mountsTable = loadMounts(mountsPath(repoRootDir));
   const taskClass = deriveTaskClass(task);
-  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
+  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, implementRouteClass(task, taskClass));
   if (mountResolution.fellBackToDefault) {
     // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
     // a ledger line NAMING the missing class, never a silent number swap.

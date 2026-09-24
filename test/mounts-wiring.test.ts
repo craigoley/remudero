@@ -144,9 +144,10 @@ test("the retro Architect's turn budget, resolved from the real mounts.yaml, is 
 // ── W1-T167: the class axis is WIRED into the spawn path, and a class miss ledgers LOUD ─
 
 test("the spawn path derives the task's class and resolves its mount THROUGH resolveMountForClass, not the class-blind resolveMount", () => {
-  assert.match(runTaskSrc, /import \{ deriveTaskClass \} from "\.\/lib\/task-class\.js";/);
+  assert.match(runTaskSrc, /import \{ deriveTaskClass, implementRouteClass \} from "\.\/lib\/task-class\.js";/);
   assert.match(runTaskSrc, /const taskClass = deriveTaskClass\(task\)/);
-  assert.match(runTaskSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, taskClass\)/);
+  // Ruling 2026-09-24: the implement route splits a high-risk span task onto the mid tier.
+  assert.match(runTaskSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, implementRouteClass\(task, taskClass\)\)/);
 });
 
 test("a class-miss fallback ledgers a LOUD `mount.class_fallback` line naming the unmatched class — never silent", () => {
