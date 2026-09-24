@@ -91,6 +91,15 @@ test("W1-T4404: a config or lockfile change selects the full suite", () => {
   const broken = selectAffectedSuitesSafely(["src/a.ts"], deps({ listFiles: () => { throw new Error("git ls-files failed"); } }));
   assert.equal(broken.fullRun, true);
   assert.match(broken.reasons[0]!, /could not list its inputs — git ls-files failed/);
+  // A file listed but gone (ENOENT) imports nothing; any other read failure is real and forces a full run.
+  const gone = (code: string) => (p: string) => {
+    if (p === "src/b.ts") throw Object.assign(new Error(`${code} src/b.ts`), { code });
+    return TREE[p]!;
+  };
+  assert.deepEqual(selectAffectedSuites(["src/a.ts"], deps({ readFile: gone("ENOENT") })).suites, ["test/census.test.ts"]);
+  assert.match(selectAffectedSuitesSafely(["src/a.ts"], deps({ readFile: gone("EACCES") })).reasons[0]!, /EACCES src\/b\.ts/);
+  assert.deepEqual(changedSymbols("+++ b/src/b.ts\n@@ -1 +1 @@\n", gone("ENOENT")), []);
+  assert.throws(() => changedSymbols("+++ b/src/b.ts\n@@ -1 +1 @@\n", gone("EACCES")), /EACCES/);
 });
 
 test("W1-T4404: shadow mode records each real failure as selected or missed and skips nothing", () => {

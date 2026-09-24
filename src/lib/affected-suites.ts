@@ -115,8 +115,10 @@ export function selectAffectedSuites(changed: readonly string[], deps: AffectedS
     let content: string;
     try {
       content = deps.readFile(file);
-    } catch {
-      continue; // listed but gone (a concurrent delete): it imports nothing now
+    } catch (err) {
+      // Listed but gone (a concurrent delete) imports nothing now; any other read failure is real.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      continue;
     }
     const deps_ = [
       ...specifiers(content).map((s) => resolve(file, s, known)),
@@ -166,8 +168,10 @@ export function changedSymbols(diffText: string, readFile: (path: string) => str
       file = CODE_FILE.test(header[1]!) ? header[1] : undefined;
       try {
         lines = file ? readFile(file).split("\n") : [];
-      } catch {
-        lines = []; // deleted in the new tree: its importers are the graph's business
+      } catch (err) {
+        // Deleted in the new tree: it declares nothing now, and its importers are the graph's business.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        lines = [];
       }
       continue;
     }
@@ -218,6 +222,7 @@ export function selectAffectedSuitesSafely(changed: readonly string[], deps: Aff
   try {
     return selectAffectedSuites(changed, deps);
   } catch (err) {
+    // A failed listing is a FULL run that names its cause — never an empty selection.
     return { suites: [], fullRun: true, reasons: [`full run: the selector could not list its inputs — ${(err as Error).message}`] };
   }
 }

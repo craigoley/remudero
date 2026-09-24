@@ -2389,6 +2389,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "exit-status-0 check, never a per-file loop/assert inside the test file itself",
   ),
   refusedForPredicate(
+    "test/the-affected-suite-selector-runs-in-shadow.test.ts",
+    "b",
+    "W1-T4404's selector suite. It runs the selector's production deps once against the real tree (`git ls-files` over src/, " +
+      "scripts/, bin/ and test/, read as an import graph) and asserts properties of the SELECTION — one suite reached, many " +
+      "selected — never a property every walked file must hold, and it carries no baseline table",
+  ),
+  refusedForPredicate(
     "test/tracked-source-write-guard.test.ts",
     "a",
     "listTrackedTestFiles shells `git ls-files -- test` — test/ only; src/ is the PROTECTED target this suite guards, not the " +
