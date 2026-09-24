@@ -11,7 +11,7 @@
  * fake interval to elapse.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,7 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { detachSweepAction, detachedSweepActionCount, drainDetachedSweepActions } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildSweepLightHook, type RunResult } from "../src/run-task.js";
+import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 
 const OLD_SHA = "a".repeat(40);
 const NEW_SHA = "b".repeat(40);
@@ -214,44 +215,36 @@ test("W1-T4053: a failed pass during a drain is ledgered as one and the drain st
 
 // ── the production hook honours the scope ─────────────────────────────────────────────────────────
 
+const HEAD = { ref: "run-W1-T4053-1", sha: "d4053000000000000000000000000000000000d0" };
+const PR = { number: 4053, html_url: "https://github.com/o/r/pull/4053", state: "open" };
+
 /** One open PR whose whole red verdict is a cancelled required check: the ordinary light pass
- *  re-queues that job (W1-T2430), which makes it a live control for "the hook acted on something". */
-function ghStubForCancelledCheck(callsFile: string): string {
-  return `#!/usr/bin/env node
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-const command = args.join(" ");
-fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(args) + "\\n");
-const head = { ref: "run-W1-T4053-1", sha: "d4053000000000000000000000000000000000d0" };
-if (command.includes("required_status_checks")) {
-  process.stdout.write(JSON.stringify({ contexts: ["ci-gate", "remudero-review"] }));
-} else if (command.includes("pulls?state=open")) {
-  process.stdout.write(JSON.stringify([{ number: 4053, html_url: "https://github.com/o/r/pull/4053", state: "open",
-    body: "Remudero-Task: W1-T4053\\n", updated_at: "2026-09-22T12:00:00Z", head, auto_merge: null }]));
-} else if (command.includes("/pulls/4053/files")) {
-  process.stdout.write("[]");
-} else if (command.includes("/pulls/4053")) {
-  process.stdout.write(JSON.stringify({ number: 4053, html_url: "https://github.com/o/r/pull/4053", state: "open", merged_at: null, head }));
-} else if (command.includes("d4053") && command.includes("check-runs")) {
-  process.stdout.write(JSON.stringify({ check_runs: [
-    { name: "ci-gate", status: "completed", conclusion: "failure" },
-    { name: "coverage-ratchet", status: "completed", conclusion: "cancelled", details_url: "https://github.com/o/r/actions/runs/1/job/405300" },
-  ] }));
-} else if (command.includes("/status")) {
-  process.stdout.write(JSON.stringify({ statuses: [{ context: "remudero-review", state: "success" }] }));
-} else {
-  process.stdout.write("{}");
-}
-`;
+ *  re-queues that job (W1-T2430), which makes it a live control for "the hook acted on something".
+ *  Routes are first-match substrings, so the more specific `/pulls/4053/files` precedes `/pulls/4053`. */
+function cancelledCheckRoutes(): GhShimRoute[] {
+  const json = (value: unknown) => JSON.stringify(value);
+  return [
+    { when: "required_status_checks", stdout: json({ contexts: ["ci-gate", "remudero-review"] }) },
+    { when: "pulls?state=open", stdout: json([{ ...PR, body: "Remudero-Task: W1-T4053", updated_at: "2026-09-22T12:00:00Z", head: HEAD, auto_merge: null }]) },
+    { when: "/pulls/4053/files", stdout: "[]" },
+    { when: "/pulls/4053", stdout: json({ ...PR, merged_at: null, head: HEAD }) },
+    {
+      when: "check-runs",
+      stdout: json({ check_runs: [
+        { name: "ci-gate", status: "completed", conclusion: "failure" },
+        { name: "coverage-ratchet", status: "completed", conclusion: "cancelled", details_url: "https://github.com/o/r/actions/runs/1/job/405300" },
+      ] }),
+    },
+    { when: "/status", stdout: json({ statuses: [{ context: "remudero-review", state: "success" }] }) },
+    { when: "", stdout: "{}" },
+  ];
 }
 
 async function runLightHook(scope: LightPassScope | undefined) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4053-hook-`));
-  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4053-gh-`));
-  const callsFile = join(root, "gh-calls.ndjson");
-  writeFileSync(join(bin, "gh"), ghStubForCancelledCheck(callsFile), { mode: 0o755 });
+  const shim = ghShim(cancelledCheckRoutes(), { kind: "t4053-gh" });
   const oldPath = process.env.PATH;
-  process.env.PATH = `${bin}:${oldPath}`;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   try {
     const hook = buildSweepLightHook(
@@ -260,11 +253,10 @@ async function runLightHook(scope: LightPassScope | undefined) {
       { loadedCodeSha: "boot-loaded-sha", isLoadedCodeAtOrAfter: () => false },
     );
     await (scope === undefined ? hook() : hook(scope));
-    const calls = readFileSync(callsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]);
-    return { logs, calls };
+    return { logs, calls: shim.calls() };
   } finally {
     process.env.PATH = oldPath;
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -274,12 +266,12 @@ test("W1-T4053: the review-only light pass leaves the fix and requeue lanes clos
   const ordinary = await runLightHook(undefined);
   assert.ok(!ordinary.logs.some((l) => l.step === "sweep_light.error"), JSON.stringify(ordinary.logs));
   assert.ok(ordinary.logs.some((l) => l.step === "sweep.check_requeue.dispatched"), "control: the ordinary pass re-queues");
-  assert.ok(ordinary.calls.some((args) => args.includes("repos/o/r/actions/jobs/405300/rerun")));
+  assert.ok(ordinary.calls.some((call) => call.includes("actions/jobs/405300/rerun")));
 
   const reviewOnly = await runLightHook({ reviewOnly: true });
   assert.ok(!reviewOnly.logs.some((l) => l.step === "sweep_light.error"), JSON.stringify(reviewOnly.logs));
   assert.equal(reviewOnly.logs.filter((l) => l.step === "sweep.summary").length, 1, "no second, requeue-only batch forms");
   assert.ok(!reviewOnly.logs.some((l) => l.step === "sweep.check_requeue.dispatched"), JSON.stringify(reviewOnly.logs));
-  assert.ok(!reviewOnly.calls.some((args) => args.some((a) => a.endsWith("/rerun"))), "no job was re-run");
+  assert.ok(!reviewOnly.calls.some((call) => call.includes("/rerun")), "no job was re-run");
   assert.ok(!reviewOnly.logs.some((l) => l.step === "sweep.fix.dispatched"));
 });
