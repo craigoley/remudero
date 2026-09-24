@@ -12,7 +12,9 @@
   plan_refs: [W1-T4095]
   files: [src/lib/narrative-fold.ts, src/run-task.ts, scripts/decisions-status.mjs, scripts/forensics-split.mjs, test/a-settled-record-moves-out-of-the-way.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4096 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     READ 2026-09-22 ON origin/main.

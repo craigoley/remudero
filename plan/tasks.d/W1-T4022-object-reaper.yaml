@@ -12,7 +12,9 @@
   origin: "measured 2026-09-22 on both hosts while clearing worktrees by hand — 1.51 GiB of loose objects on Azure, and the reaper had never been able to run"
   plan_refs: [W1-T3092]
   files: [src/lib/object-reaper.ts, src/run-task.ts, test/the-object-reaper-rung-runs.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4022 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t4016-7-janitor-space-leaks
