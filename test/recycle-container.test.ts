@@ -58,6 +58,8 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   // distinctive so the never-printed assertion below can search for it verbatim rather than
   // matching a substring some unrelated output happens to contain.
   RMD_OPENWEIGHT_API_KEY: "openweight-key-fixture-3f9c1d",
+  RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic",
+  RMD_FOUNDRY_CLAUDE_API_KEY: "foundry-key-fixture-6b84d2",
 };
 
 /** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
@@ -913,6 +915,25 @@ test("the openweight API key is declared on every recycle surface", () => {
   assert.doesNotMatch(sharedSrc, /RMD_OPENWEIGHT_API_KEY\s*=/, "the shared list must name the key, never assign it a value");
 });
 
+test("Foundry endpoint and key survive every daemon recycle surface without printing the key", () => {
+  const sharedSrc = readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8");
+  const recycleSrc = readFileSync(SCRIPT, "utf8");
+  const hostUpdateSrc = readFileSync(HOST_UPDATE_SCRIPT, "utf8");
+  for (const name of ["RMD_FOUNDRY_CLAUDE_ENDPOINT", "RMD_FOUNDRY_CLAUDE_API_KEY"]) {
+    assert.ok(extractBashArray(sharedSrc, "RMD_DAEMON_RUNTIME_ENV_VARS").includes(name));
+    assert.ok(extractBashArray(recycleSrc, "RMD_DAEMON_RUNTIME_ENV_VARS").includes(name));
+    assert.ok(extractBashArray(hostUpdateSrc, "RMD_DAEMON_RUNTIME_ENV_VARS").includes(name));
+    assert.ok(printDaemonRunEnvNames().includes(name));
+  }
+  const run = runRecycle("happy");
+  assert.equal(run.status, 0, run.stderr);
+  const runCall = run.calls.filter(isRun)[0];
+  assert.ok(runCall);
+  assert.ok(runCall.argv.includes("RMD_FOUNDRY_CLAUDE_ENDPOINT=https://foundry.example.test/anthropic"));
+  assert.ok(runCall.argv.includes("RMD_FOUNDRY_CLAUDE_API_KEY=foundry-key-fixture-6b84d2"));
+  assert.doesNotMatch(run.stdout + run.stderr, /foundry-key-fixture-6b84d2/);
+});
+
 test("the openweight API key value never reaches recycle output", () => {
   // W1-T3728. The durable host key must reach the replacement without ever entering an
   // operator's scrollback or journald. The fixture value is distinctive for a verbatim check.
@@ -965,7 +986,7 @@ test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");

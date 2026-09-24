@@ -19,9 +19,8 @@ import {
 } from "../src/lib/worker-provider.js";
 import { runOpenWeightWalkingLadder, type WorkerResult } from "../src/lib/worker.js";
 
-// W1-T4079 (operator ruling 2026-09-22): stay on gpt-5.6 for the Azure cash ladder, switch to GPT-6
-// automatically once it is available, forwards- and backwards-compatible. MEASURED that day: Azure
-// lists gpt-6-luna but a request to that deployment answers 404; the gpt-5.6-luna deployment exists.
+// W1-T4079 (operator ruling 2026-09-22): stay on gpt-5.6 until GPT-6 is priced and shaped,
+// then select it automatically. A measured 404 still drops the unavailable deployment briefly.
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-09-23T01:00:00.000Z");
@@ -47,15 +46,14 @@ test("W1-T4079: an undeployed successor is skipped, not selected", () => {
   }
 });
 
-test("W1-T4079: an unpriced successor is skipped", () => {
+test("W1-T4079: the now-priced successor leads frontier and squeeze, while cheap work stays cheap", () => {
   clearOpenWeightAbsence();
-  assert.equal(openWeightDeploymentReady("gpt-6-luna", NOW), false, "no price, temperature or context row yet");
+  assert.equal(openWeightDeploymentReady("gpt-6-luna", NOW), true);
   assert.equal(openWeightDeploymentReady("gpt-5.6-luna", NOW), true);
-  // The committed table lists gpt-6-luna first, and every lane still resolves exactly as before.
   const rows = ladder().cash!;
   assert.equal(rows.frontier.high[0], "gpt-6-luna");
-  assert.equal(selectOpenWeightModel(ladder(), "opus", "high").model, "gpt-5.6-luna");
-  assert.equal(selectOpenWeightModel(ladder(), "opus", "high", undefined, { cashSqueezed: true }).model, "gpt-5.6-luna");
+  assert.equal(selectOpenWeightModel(ladder(), "opus", "high").model, "gpt-6-luna");
+  assert.equal(selectOpenWeightModel(ladder(), "opus", "high", undefined, { cashSqueezed: true }).model, "gpt-6-luna");
   assert.equal(selectOpenWeightModel(ladder(), "haiku", "low").model, "gpt-oss-120b");
 });
 
