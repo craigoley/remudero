@@ -11,7 +11,7 @@
   files: [src/lib/inbox.ts, src/lib/skill-workshop.ts, src/run-task.ts, test/skill-draft-ratification.test.ts]
   origin: architect
   plan_refs: ["P25", "§7B"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Verified at this checkout. `stageSkillDraft` (src/lib/skill-workshop.ts) stages a skill-draft

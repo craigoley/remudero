@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - scripts/no-draft-pull-request-census.mjs
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: the plan gardener (W1-T4111) opened #6912 as a draft at 00:31Z ("a retirement is a person's
