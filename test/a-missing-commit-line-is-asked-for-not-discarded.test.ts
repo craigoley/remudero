@@ -56,8 +56,6 @@ test("W1-T4052: a missing commit line is asked for and the edits are committed",
         declaredPaths: ["src"],
         log: (step, extra) => lines.push({ step, extra }),
         say: (msg) => said.push(msg),
-      },
-      {
         resume: async () => {
           resumeCalls += 1;
           return {
@@ -68,6 +66,8 @@ test("W1-T4052: a missing commit line is asked for and the edits are committed",
             subtype: "success",
           };
         },
+      },
+      {
         // A real `commitsAhead` needs `origin/main`, which this bare fixture never gets — the
         // count itself is `harnessCommitForShellLessWorker`'s own concern (already proven in
         // test/the-harness-commits-for-a-worker-with-no-shell.test.ts); this only needs it
@@ -119,8 +119,6 @@ test("W1-T4052: a second missing line is still refused", async () => {
         declaredPaths: ["src"],
         log: (step, extra) => lines.push({ step, extra }),
         say: () => {},
-      },
-      {
         resume: async () => {
           resumeCalls += 1;
           return { text: "REPORT\nstill no anchored line in this reply either" };
@@ -150,40 +148,52 @@ test("W1-T4052: no edits means no resume", async () => {
     return { text: "REPORT\nCOMMIT_MESSAGE: feat(a): b" };
   };
 
-  // A clean worktree: the missing-line reason is present, but there is nothing to commit even if
-  // the worker did name a subject — resuming it would only relearn what committing already knows.
-  const clean = await resumeForMissingCommitLine(
-    {
+  // A REAL clean worktree, read by the real `git status`: the missing-line reason is present, but
+  // there is nothing to commit even if the worker did name a subject — resuming it would only
+  // relearn what committing already knows.
+  const clean = harnessFixture("missing-commit-line-clean");
+  try {
+    const recovery = await resumeForMissingCommitLine({
       commitCount: 0,
       refusalReason: MISSING_LINE_REASON,
       report: "REPORT\nnothing changed",
-      worktreePath: "/does/not/matter/for/this/deps",
+      worktreePath: clean.root,
       declaredPaths: ["src"],
       log: () => {},
       say: () => {},
-    },
-    { resume, hasChanges: () => false },
-  );
-  assert.equal(resumeCalls, 0, "a clean worktree must never be resumed");
-  assert.equal(clean.resumed, false);
-  assert.equal(clean.commitCount, 0);
+      resume,
+    });
+    assert.equal(resumeCalls, 0, "a clean worktree must never be resumed");
+    assert.equal(recovery.resumed, false);
+    assert.equal(recovery.commitCount, 0);
+    assert.equal(clean.head(), clean.before, "a clean worktree is never committed");
+  } finally {
+    clean.handle.cleanup();
+  }
 
   // AND THE CONTROL: a DIFFERENT refusal reason (the pre-existing "changed nothing" case, which
-  // this task leaves untouched) must never resume either, regardless of what `hasChanges` says.
-  const otherReason = await resumeForMissingCommitLine(
-    {
+  // this task leaves untouched) must never resume either, even over a worktree that DOES hold
+  // uncommitted edits — the reason alone gates the resume.
+  const dirty = harnessFixture("missing-commit-line-other-reason");
+  try {
+    mkdirSync(`${dirty.root}/src`, { recursive: true });
+    writeFileSync(`${dirty.root}/src/a.ts`, "export const a = 1;\n");
+    const otherReason = await resumeForMissingCommitLine({
       commitCount: 0,
       refusalReason: "the worker changed nothing",
       report: "REPORT\nCOMMIT_MESSAGE: feat(a): b",
-      worktreePath: "/does/not/matter/for/this/deps",
+      worktreePath: dirty.root,
       declaredPaths: ["src"],
       log: () => {},
       say: () => {},
-    },
-    { resume, hasChanges: () => true },
-  );
-  assert.equal(resumeCalls, 0, "only the exact missing-line reason ever triggers a resume");
-  assert.equal(otherReason.resumed, false);
+      resume,
+    });
+    assert.equal(resumeCalls, 0, "only the exact missing-line reason ever triggers a resume");
+    assert.equal(otherReason.resumed, false);
+    assert.equal(dirty.head(), dirty.before, "a non-missing-line refusal is left exactly as it was");
+  } finally {
+    dirty.handle.cleanup();
+  }
 });
 
 test("W1-T4052: the harness never invents a subject", async () => {
@@ -202,9 +212,9 @@ test("W1-T4052: the harness never invents a subject", async () => {
         declaredPaths: ["src"],
         log: () => {},
         say: () => {},
+        resume: async () => ({ text: "REPORT\nstill nothing anchored" }),
       },
       {
-        resume: async () => ({ text: "REPORT\nstill nothing anchored" }),
         // If the recovery ever synthesized a subject, this spy would see it.
         commit: (_worktreePath, _declaredPaths, message) => {
           committedWith = message;
