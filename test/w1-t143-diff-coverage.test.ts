@@ -23,6 +23,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { daemonCommand, depReviewCommand, main } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
@@ -101,7 +102,29 @@ async function callMain(t: import("node:test").TestContext, argv: string[]): Pro
   }
 }
 
-// ── rmd stop / pause / resume — plain fleet-control flag flips, no network at all ──
+// ── rmd stop / pause / resume — fleet-control flag flips; the shared-hold push goes to a stub ──
+
+/** Run `fn` with a `git` on PATH that records each `push` and exits 0, and passes every other call to
+ *  the real git — `main()` resolves the shared-pause repo from the cwd, so an unstubbed push reached
+ *  the LIVE origin and held the whole fleet (2026-09-24). The exemption covers only the stub. */
+async function withPushRecorded<T>(fn: (pushes: () => string[]) => Promise<T>): Promise<T> {
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const log = join(mkdtempSync(join(tmpdir(), "rmd-t143-push-")), "pushes");
+  writeFileSync(log, "");
+  const binDir = fakeBin("git", `#!/bin/sh
+case " $* " in *" push "*) echo "$*" >> "${log}"; exit 0;; esac
+exec "${realGit}" "$@"
+`);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${oldPath}`;
+  try {
+    return await withLiveWritesAllowed(() => fn(() => readFileSync(log, "utf8").split("\n").filter(Boolean)));
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(binDir, { recursive: true, force: true });
+    rmSync(dirname(log), { recursive: true, force: true });
+  }
+}
 
 test("main(): `rmd stop` with nothing running is a warned no-op (ledgers fleet.stop.noop, exits 0)", async (t) => {
   const { home, root } = instance("rmd-t143-stop-");
@@ -123,10 +146,14 @@ test("main(): `rmd pause` writes the PAUSE flag + ledgers fleet.pause, exits 0",
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
-    const code = await callMain(t, ["node", "run-task.js", "pause"]);
-    assert.equal(code, 0);
-    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
-    assert.match(ledger, /"step":"fleet\.pause"/);
+    await withPushRecorded(async (pushes) => {
+      const code = await callMain(t, ["node", "run-task.js", "pause"]);
+      assert.equal(code, 0);
+      const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+      assert.match(ledger, /"step":"fleet\.pause"/);
+      assert.equal(pushes().length, 1, "the shared-hold push reached the stub, not an origin");
+      assert.match(pushes()[0]!, /refs\/rmd-pause\/hold$/);
+    });
   } finally {
     process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
@@ -138,10 +165,14 @@ test("main(): `rmd resume` clears stop+pause + ledgers fleet.resume, exits 0", a
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
-    const code = await callMain(t, ["node", "run-task.js", "resume"]);
-    assert.equal(code, 0);
-    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
-    assert.match(ledger, /"step":"fleet\.resume"/);
+    await withPushRecorded(async (pushes) => {
+      const code = await callMain(t, ["node", "run-task.js", "resume"]);
+      assert.equal(code, 0);
+      const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+      assert.match(ledger, /"step":"fleet\.resume"/);
+      assert.equal(pushes().length, 1, "the shared-hold push reached the stub, not an origin");
+      assert.match(pushes()[0]!, /:refs\/rmd-pause\/hold$/);
+    });
   } finally {
     process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
