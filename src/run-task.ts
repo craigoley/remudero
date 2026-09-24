@@ -1046,7 +1046,13 @@ import {
   emissionsReport,
   EMISSIONS_ALLOWLIST,
 } from "./lib/emissions.js";
-import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
+import {
+  cloneReapRoots,
+  defaultOpenFileCount,
+  reapStaleClones,
+  tallyDispositions,
+  type CloneReapSummary,
+} from "./lib/clone-reaper.js";
 import { reapGitObjects } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
@@ -29779,6 +29785,12 @@ export function logDiskReclaimRung(
     objectInflightDir?: () => string;
     objectPolicy?: () => { enabled: boolean };
     ratifications?: Ratifications;
+    /** W1-T4022: the real `lsof`-backed probe (src/lib/clone-reaper.ts) — a test can still inject
+     *  its own; production leaves this unset and gets {@link defaultOpenFileCount}, never the
+     *  fail-closed `() => 1` object-reaper.ts falls back to when NOTHING supplies a counter. */
+    objectOpenFileCount?: (dir: string) => number;
+    /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
+    objectStreakPath?: () => string;
   } = {},
 ): {
   tempDirsRemoved: number;
@@ -29828,19 +29840,46 @@ export function logDiskReclaimRung(
   let objectsPruned = 0;
   let objectsWouldPrune = 0;
   let objectRefusal: string | undefined;
+  let objectConsecutiveRefusals: number | undefined;
+  let objectRefusingSinceIso: string | undefined;
   try {
-    const readPolicy = deps.objectPolicy ?? (() => loadPolicy(policyPath(config.root)).values.objectReap);
-    const policyBlock = readPolicy();
+    // W1-T4022: `loadDefaultPolicy()` — resolved from THIS MODULE'S OWN install location
+    // (src/lib/policy.ts#installPolicyPath), never `config.root` — the SAME seam
+    // `runAdhocLaneReapRung` already uses above. The prior default, `loadPolicy(policyPath(
+    // config.root))`, read the DAEMON's `config.root`, which is not a plan-bearing checkout and
+    // has no `plan/policy.yaml` at all: that read THREW on every tick and was silently swallowed
+    // by the generic catch below, so this rung never once reached its reaper in production
+    // (measured: 0 `objects_declined` rows in four days).
+    let policyBlock: { enabled: boolean };
+    try {
+      policyBlock = (deps.objectPolicy ?? (() => loadDefaultPolicy().values.objectReap))();
+    } catch (err) {
+      // Named and logged HERE, not folded silently into the generic "a sweep threw" catch below
+      // — a policy this rung cannot load is a different failure than a worktree it cannot list,
+      // and the note this task amends from asked for it logged rather than swallowed.
+      log("run.disk_reclaim.policy_error", { error: String((err as Error)?.message ?? err) });
+      throw err;
+    }
     const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
     const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
     if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
     const enabled = pin.fire && policyBlock.enabled;
     const repoDir = (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))();
     const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
-    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, { dryRun: !enabled });
+    const streakPath = (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))();
+    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, {
+      dryRun: !enabled,
+      // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
+      // falls back to when nothing supplies a counter — production wired nothing before this, so
+      // the open-handle refusal fired unconditionally and the other two conditions were moot.
+      openFileCount: deps.objectOpenFileCount ?? defaultOpenFileCount,
+      streakPath,
+    });
     objectsPruned = r.pruned;
     objectsWouldPrune = r.wouldPrune ?? 0;
     objectRefusal = r.refusedBecause;
+    objectConsecutiveRefusals = r.consecutiveRefusals;
+    objectRefusingSinceIso = r.refusingSinceIso;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other three sweeps
   }
@@ -29858,8 +29897,15 @@ export function logDiskReclaimRung(
   }
   // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
   // that decides whether arming this rung is worth anything at all, and it is unreadable unless
-  // the declines are ledgered too.
-  if (objectRefusal !== undefined) log("run.disk_reclaim.objects_declined", { reason: objectRefusal });
+  // the declines are ledgered too. W1-T4022 adds the CONSECUTIVE REFUSAL streak and when it began,
+  // so a single busy tick and a three-week-long block stop reading as the same one-line fact.
+  if (objectRefusal !== undefined) {
+    log("run.disk_reclaim.objects_declined", {
+      reason: objectRefusal,
+      consecutive_refusals: objectConsecutiveRefusals,
+      refusing_since: objectRefusingSinceIso,
+    });
+  }
 
   return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
 }

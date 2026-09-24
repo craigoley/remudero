@@ -1693,6 +1693,7 @@
     "test/the-mount-recommender-re-scans-the-whole-ledger-every-poll.test.ts": 0,
     "test/the-newest-boot-row-outlives-the-health-window.test.ts": 0,
     "test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts": 505,
+    "test/the-object-reaper-rung-runs.test.ts": 0,
     "test/the-offline-plan-lint-names-its-omissions.test.ts": 0,
     "test/the-one-concern-arm-never-adopted-the-shared-table.test.ts": 1101,
     "test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts": 1791,
