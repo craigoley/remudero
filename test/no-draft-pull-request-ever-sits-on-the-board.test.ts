@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -6,6 +9,7 @@ import { test } from "node:test";
 // declaration output (TS7016). The seam is typed below, the idiom the acceptance-author-gate tests use.
 import * as census from "../scripts/no-draft-pull-request-census.mjs";
 import { readyDraftViaGh } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 
 type DraftHit = { path: string; line: number; pattern: string; text: string };
@@ -118,4 +122,21 @@ test("no tracked source opens a draft pull request", () => {
   assert.deepEqual(findDraftPullRequestCreators(REPO_ROOT, files), []);
   for (const [path, reason] of EXEMPTIONS) assert.ok(String(reason).trim().length > 0, `${path}: an exemption needs a reason`);
   assert.equal(DRAFT_CREATOR_PATTERNS.length, 3);
+});
+
+test("the census CLI reports OK on a clean tree and refuses a tree that opens a draft", () => {
+  const script = join(REPO_ROOT, "scripts", "no-draft-pull-request-census.mjs");
+  const clean = spawnSync(process.execPath, [script, "--root", REPO_ROOT], { encoding: "utf8" });
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+  assert.match(clean.stdout, /no-draft-pull-request-census: OK/);
+
+  const repo = gitRepo({ kind: "w1-t4415-census" });
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  writeFileSync(join(repo.dir, "src", "opens-draft.ts"), 'ghExec(["pr", "create", "--draft"]);\n');
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "a draft creator");
+  const dirty = spawnSync(process.execPath, [script, "--root", repo.dir], { encoding: "utf8" });
+  assert.equal(dirty.status, 1);
+  assert.match(dirty.stdout, /REFUSED — 1 draft-creating PR call/);
+  assert.match(dirty.stdout, /src\/opens-draft\.ts:1 \[--draft flag\]/);
 });
