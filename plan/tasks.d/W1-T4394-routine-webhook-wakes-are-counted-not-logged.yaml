@@ -14,7 +14,7 @@
   files:
     - src/lib/github-event-wake.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 21:11:13-21:13:24Z on the fleet host: of 419 rows written between two rotations,

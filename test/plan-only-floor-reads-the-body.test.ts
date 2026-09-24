@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { judgeReview } from "../src/lib/review.js";
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 // R-15 (docs/audits/recon-2026-09-05.md) — W1-T2713 shipped its plan-only arm as
 // `floorTokens = tokenize(claim + proof)`, drawing the mechanical floor from THE VERY CRITERION IT
 // WAS JUDGING. A criterion trivially contains its own proof, so `proofKeywords(proof)` was a subset
@@ -41,7 +44,7 @@ function planShardDiff(): string {
 const DECLARED = ["src/lib/example.ts", "test/xylophone-zebra-quokka.test.ts"];
 
 test("(i) an EMPTY body cannot meet a resolved-shard criterion, and the reason names the floor", () => {
-  const verdict = judgeReview([CRITERION], {
+  const verdict = judgeReview([CRITERION], { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report: "",
     taskDeclaredFiles: DECLARED,
@@ -62,7 +65,7 @@ test("(i) an EMPTY body cannot meet a resolved-shard criterion, and the reason n
 });
 
 test("(ii) a body that carries the claim's keywords meets the same criterion", () => {
-  const verdict = judgeReview([CRITERION], {
+  const verdict = judgeReview([CRITERION], { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     report:
       "The recycle supervisor observes readiness on the host and acts only on a fresh signed " +
@@ -83,7 +86,7 @@ test("(iii) an executed_fail still OVERRIDES a body that covers every claim keyw
     // carve-out cannot swallow the failure and the executed outcome is what is under test.
     proof: "grep: supervisor in src/lib/untouched-by-this-shard.ts",
   };
-  const verdict = judgeReview([executable], {
+  const verdict = judgeReview([executable], { planLint: CLEAN_PLAN_LINT,
     diff: planShardDiff(),
     // Pastes the claim verbatim, so the keyword floor is a full 1.0 and only execution can fail it.
     report: "the recycle supervisor observes readiness before acting on a confirmation",
@@ -99,7 +102,7 @@ test("(iii) an executed_fail still OVERRIDES a body that covers every claim keyw
 });
 
 test("(iv) GOLDEN — a non-plan-only diff's floor reason is byte-identical to the pre-fix text", () => {
-  const verdict = judgeReview([CRITERION], {
+  const verdict = judgeReview([CRITERION], { planLint: CLEAN_PLAN_LINT,
     diff:
       planShardDiff() +
       "\n" +

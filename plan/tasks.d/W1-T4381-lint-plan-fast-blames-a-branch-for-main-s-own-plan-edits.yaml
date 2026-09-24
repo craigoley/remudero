@@ -11,7 +11,7 @@
   origin: "session: 2026-09-23 backlog triage — ci-parity red twice on plan-only PR #6737"
   plan_refs: ["W1-T4003"]
   files: [src/run-task.ts, test/lint-plan-fast-scopes-to-the-merge-base.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-23 at origin/main. Names are symbols; re-verify at your head.

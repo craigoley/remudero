@@ -12,15 +12,20 @@ name: CI gate
 # INVARIANT 2: it aggregates across workflow FILES. `needs:` + `join(needs.*.result)` resolves
 # only within one workflow, and this repo's required checks live in separate files, so the step
 # below reads the check-runs REST API (`checks: read`) and applies the same rule.
+# W1-T4400: this file is the CONTRACT (REQUIRED/IGNORE/ADVISORY and the step below). ci.yml's last
+# job runs this same step via scripts/ci-gate-from-contract.mjs once every ci.yml job has finished,
+# so no runner waits out the CI run; the job here re-aggregates only on an `edited` event.
 # Why: the synthwatch #102 replay, the class-bug argument and the branch-protection flip are in
 # docs/forensics/ci-gate-yml.md (W1-T24).
 
 on:
   pull_request:
-    # The two acceptance-body gates can change their result after a body-only repair.  Re-run the
-    # lightweight aggregate on `edited` so its required ci-gate context observes that new result
-    # without re-running ci.yml's expensive test jobs.
-    types: [opened, synchronize, reopened, edited]
+    # W1-T4400: `edited` ONLY. On opened/synchronize/reopened the required ci-gate context comes from
+    # ci.yml's last job, which runs THIS file's aggregation step (scripts/ci-gate-from-contract.mjs)
+    # once every ci.yml job has finished, instead of a job here polling for the whole CI run. The
+    # acceptance-body gates can still change their result after a body-only repair, so an edit
+    # re-runs the aggregate here without re-running ci.yml's expensive test jobs.
+    types: [edited]
 
 permissions:
   checks: read
@@ -115,6 +120,20 @@ jobs:
       # W1-T3519: `gate-monotonic` starts ADVISORY per this block's own rule that a name joins
       # REQUIRED "once it is live on main". It refuses a REQUIRED context demoted with no reviewed
       # GATE_RATIONALE; promoting it is a one-line follow-up after it has run clean on main.
+      #
+      # W1-T4399: ~17 one-runner gates (commitlint, lint-plan, depcruise, containment-probe,
+      # jscpd-gate, claims, learnings-budget-ratchet, api-client-drift, no-hand-rolled-fetch,
+      # prompt-surface-gate, leak-grep, assertion-discrimination, task-id-existence,
+      # comment-load-ratchet, source-size, baseline-monotonic, dashboard) now run as STEPS of one
+      # job in ci.yml (the former `commitlint` job, expanded in place — see its own header comment
+      # there for why it keeps that key rather than a new one), which posts each gate's result
+      # under its OWN unchanged name via the checks API. No name here changes and no name is added:
+      # every one of the sixteen OTHER gates keeps its own ci.yml job key, registered but
+      # permanently `if: false`, under its ORIGINAL `name:` (never renamed — this file's REQUIRED/
+      # ADVISORY entries derive from a real job's `name:`, and a rename would leave the original
+      # stale). So a skipped stub and the consolidated job's real post SHARE one name on every PR;
+      # this file's own read already groups by name and keeps only the latest `started_at`
+      # (W1-T123), unmodified, which is what resolves that duplicate.
       ADVISORY: >-
         [
         "squash-trailer-gate",

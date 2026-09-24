@@ -1,0 +1,47 @@
+- id: W1-T4442
+  title: "EVERY INBOX DRAFT RELINT FAILS TO PARSE BECAUSE THE DRAFT PROMPT NEVER SHOWS THE SHAPE IT PARSES — the prompt names `acceptance` but not its list-of-{claim, proof} shape, so the drafting model emits a string or claim-less items, and the redraft prompt names the FRAGMENT/STAMP markers without printing them, so every second attempt answers in prose; the drafts are wasted spend"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "2026-09-24 console/daemon incident follow-up: core ledger inbox.draft_relint rows 07:10Z-07:25Z"
+  plan_refs: ["W1-T3567", "W1-T512", "W1-T3621"]
+  files:
+    - src/lib/inbox.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED on the core daemon ledger (live file plus the 07:07Z and 07:23Z rotations, 2026-09-24): all 6
+    `inbox.draft_relint` rows fail at `draft-parse`, and nothing is cached. The three
+    adoption:symbol-no-caller proposals (project-init.ts:KNOWN_PROFILES, sweep.ts:REQUIRED_CHECK_OK,
+    project-init.ts:captureBaselines) failed with "acceptance[0]: 'claim' must be a non-empty string, got
+    undefined" (2) and "'acceptance' must be a list of criteria, got string" (1). The other three failed the same
+    way: a string acceptance, an invalid type 'ratify', and an unquoted colon in a title. The drafting model is
+    gpt-5-nano on the cash lane. inboxDraftPrompt lists the required keys ("id/title/repo/depends_on/type/verify/
+    risk/status/attempts/acceptance/origin/files at minimum"), but it never shows that `acceptance` is a LIST
+    OF {claim, proof} MAPPINGS or that `type` is a closed enum. The model guesses, and parseTasksFromYaml rejects
+    the guess. The redraft is worse: the 3 attempt-2 rows (~1.1K input tokens each) all ended in
+    `inbox.draft_error` "NEITHER marker — it answered in prose". inboxDraftRelintPrompt says "in the same
+    FRAGMENT/STAMP marker format" but never prints the `=== FRAGMENT START ===` / `=== FRAGMENT END ===` /
+    `STAMP:` lines. A redraft carries no copy of the first prompt, so it has no marker to copy.
+  design: |
+    ONE CONCERN: the draft rung's two prompts must state the contract their output is parsed against.
+    (i) inboxDraftPrompt prints ONE complete minimal example task mapping between the markers. It uses a
+    NEW-1 id, double-quoted title and proof, a `type:` from the closed enum, `files:` as a list, and
+    `acceptance:` as a list of `- claim: "..."` / `  proof: "unit test: ..."` items. It also lists the `type`
+    values. Derive the example from the plan schema's own constants where they exist, so the example cannot
+    drift from the parser. (ii) inboxDraftRelintPrompt restates the literal marker lines and the STAMP line
+    shape that inboxDraftPrompt prints, and ends with them, so a redraft has the whole contract in hand.
+    (iii) The example fragment itself must pass lintDraftedFragment, and a test asserts it. Out of scope: the
+    model choice for the lane, the relint attempt bound, and the adapter preamble (W1-T3567).
+  acceptance:
+    - claim: "the example fragment the draft prompt prints parses and lints clean"
+      proof: "unit test: the example fragment the draft prompt prints parses and lints clean"
+    - claim: "the redraft prompt prints the literal FRAGMENT markers and the STAMP line"
+      proof: "unit test: the redraft prompt prints the literal fragment markers and the stamp line"
+  falsifier: |
+    CLOSE IF inbox.draft_relint rows on the core ledger no longer fail at draft-parse on the acceptance shape.

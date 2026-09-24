@@ -86,6 +86,7 @@ export type AuthorityBoundary =
   | "gh-pr-comment"
   | "gh-pr-review"
   | "gh-pr-close"
+  | "gh-pr-ready"
   | "gh-pr-body-patch"
   | "gh-issue-create"
   | "gh-issue-close"
@@ -256,6 +257,17 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     ledgerSteps: [],
     verb: "rmd drain (sweep supersession disposition)",
     note: "Gated on sweep.supersessionDisposal (default off in policy.ts's type doc). W1-T921: never carries --delete-branch, unlike the merge paths beside it.",
+  },
+  {
+    id: "sweep-ready-draft-pr",
+    action: "mark an open draft PR ready for review",
+    module: "src/lib/sweep.ts",
+    symbol: "buildSweepEffects(...).readyDraft",
+    boundary: "gh-pr-ready",
+    gate: "always",
+    ledgerSteps: ["sweep.draft_readied", "sweep.draft_ready_failed"],
+    verb: "rmd drain (sweep draft rung)",
+    note: "W1-T4415: operator ruling 2026-09-24, no drafts. Every open draft is readied whatever its checks; it never merges or closes.",
   },
   {
     id: "sweep-ci-job-rerun",

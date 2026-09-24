@@ -9,7 +9,8 @@ import {
   buildActionResultsRoute,
 } from "../src/lib/action-results.js";
 import type { ExternalEffectResult } from "../src/lib/action-reconciliation.js";
-import type { LedgerLines } from "../src/lib/status.js";
+import { readLedgerUnionBounded, type LedgerLines } from "../src/lib/status.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 import { buildPanelReadRoutes } from "../src/lib/panel-graph.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -114,12 +115,12 @@ test("unit test: action-results route is mounted as a read-scoped route", () => 
   assert.equal(route?.scope, "read");
 });
 
-test("unit test: action-results route reports an unavailable source instead of a healthy empty list", () => {
+test("unit test: action-results route reports an unavailable source instead of a healthy empty list", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}action-results-route-`));
   const missingLedger = join(root, "state", "ledger.ndjson");
   try {
     const captured = responseCapture();
-    buildActionResultsRoute(missingLedger).handler({ url: "/v1/action-results" } as never, captured.response, { params: {} });
+    await buildActionResultsRoute(missingLedger).handler({ url: "/v1/action-results" } as never, captured.response, { params: {} });
     assert.equal(captured.status(), 200);
     assert.equal(captured.json().state, "unavailable");
     assert.equal(captured.json().reason, "ledger-unavailable");
@@ -127,16 +128,46 @@ test("unit test: action-results route reports an unavailable source instead of a
     const directoryPath = join(root, "ledger-directory");
     mkdirSync(directoryPath, { recursive: true });
     const failedRead = responseCapture();
-    buildActionResultsRoute(directoryPath).handler({ url: "/v1/action-results" } as never, failedRead.response, { params: {} });
+    await buildActionResultsRoute(directoryPath).handler({ url: "/v1/action-results" } as never, failedRead.response, { params: {} });
     assert.equal(failedRead.json().state, "unavailable");
     assert.equal(failedRead.json().reason, "ledger-unavailable");
 
     mkdirSync(join(root, "state"), { recursive: true });
     writeFileSync(missingLedger, "{not-json}\n");
     const partial = responseCapture();
-    buildActionResultsRoute(missingLedger).handler({ url: "/v1/action-results" } as never, partial.response, { params: {} });
+    await buildActionResultsRoute(missingLedger).handler({ url: "/v1/action-results" } as never, partial.response, { params: {} });
     assert.equal(partial.json().state, "unavailable");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unit test: action-results served from memoized rotations matches the whole-union projection", async () => {
+  const reconciled = (id: string, minute: number) => ({ step: "external_effect.reconciled", task_id: "W1-T3899", ts: `2026-09-22T18:${String(minute).padStart(2, "0")}:00.000Z`, external_effect: result("applied", id) });
+  const fx = writeLedger([reconciled("live", 30), { step: "run.start", ts: "2026-09-22T18:31:00.000Z" }], {
+    rotations: [
+      { at: "2026-09-22T18:20:00.000Z", rows: [reconciled("gz", 10), { step: "worker.turns", ts: "2026-09-22T18:11:00.000Z" }], gz: true },
+      { at: "2026-09-22T18:10:00.000Z", rows: [reconciled("plain", 5)] },
+    ],
+  });
+  const expected = () => {
+    const { generatedAt: _generatedAt, ...rest } = buildActionResultsProjection(readLedgerUnionBounded(fx.path)) as unknown as Record<string, unknown>;
+    return rest;
+  };
+  try {
+    const route = buildActionResultsRoute(fx.path);
+    for (const pass of ["cold", "warm"]) {
+      const captured = responseCapture();
+      await route.handler({ url: "/v1/action-results" } as never, captured.response, { params: {} });
+      const { generatedAt: _generatedAt, ...body } = captured.json();
+      assert.deepEqual(body, expected(), pass);
+      assert.deepEqual((body.results as Array<{ originatingActionId: string }>).map((r) => r.originatingActionId), ["live", "gz", "plain"], pass);
+    }
+    writeFileSync(join(fx.dir, "ledger.2026-09-22T18-25-00-000Z.ndjson"), "{torn\n");
+    const partial = responseCapture();
+    await route.handler({ url: "/v1/action-results" } as never, partial.response, { params: {} });
+    assert.equal(partial.json().reason, "ledger-partial", "a torn row inside a rotation still reports a partial ledger");
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
   }
 });

@@ -158,6 +158,29 @@ test("W1-T2868: the Claude semantic reviewer receives a disposable exact-head ch
   });
 });
 
+test("a source checkout named by a directory BELOW its work-tree top level still materializes the exact head (the Stryker sandbox shape)", async () => {
+  await withFixture(async (fixture) => {
+    const logs: LogRow[] = [];
+    let spawns = 0;
+    // A Stryker sandbox is a copy of the tree with no `.git` of its own, nested under the real
+    // checkout: `rev-parse HEAD` ascends to the enclosing repository, `git clone <dir>` does not.
+    const verdict = await review(fixture, {
+      headCheckoutDir: join(fixture.sourceDir, "src"),
+      logs,
+      spawn: async (args) => {
+        spawns += 1;
+        assert.equal(git(args.cwd, "rev-parse", "HEAD"), fixture.headSha);
+        assert.ok(existsSync(join(args.cwd, "src", "example.ts")), "the clone is the whole repository, not the subdirectory");
+        return reviewerResult("claude", "REVIEW_VERDICT 1: PASS");
+      },
+    });
+    assert.equal(logs.find((row) => row.step === "review.reviewer.materialization_error"), undefined);
+    assert.equal(spawns, 1, "the reviewer is reached, not refused as clone-failed");
+    assert.equal(verdict.reviewerOutcome, "success");
+    assert.equal(git(fixture.sourceDir, "status", "--porcelain", "--untracked-files=all"), "");
+  });
+});
+
 test("W1-T2868: a missing or wrong source checkout is a named advisory failure and never spawns", async () => {
   for (const scenario of ["missing", "wrong-head"] as const) {
     await withFixture(async (fixture) => {

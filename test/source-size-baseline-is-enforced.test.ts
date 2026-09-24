@@ -78,26 +78,31 @@ test("W1-T3140: the stable required PR check runs the source-size signal, never 
   // version of this test failed because the job's own comment explains why `source-size-signal` is
   // a different thing, and the scan counted that mention as the job running it. Parsing sees only
   // what the runner sees.
+  //
+  // W1-T4399: source-size now runs as a STEP (id: source-size) of the consolidated `commitlint`
+  // job — its own ci.yml job key stays registered but permanently skipped (if: false), so the real
+  // wiring is checked on the job that actually runs it.
   const ci = parseYaml(readFileSync(CI_YML, "utf8")) as {
-    jobs: Record<string, { if?: string; steps: Array<{ name?: string; run?: string }> }>;
+    jobs: Record<string, { if?: string | boolean; steps: Array<{ id?: string; name?: string; run?: string }> }>;
   };
-  const job = ci.jobs["source-size"];
-  assert.ok(job, "the job key must exist so the ci-parity registration that already names it is true");
+  const runnerJob = ci.jobs["commitlint"];
+  assert.ok(runnerJob, "the commitlint job (the shared runner for ~17 gates) must exist");
+  const step = runnerJob.steps.find((s) => s.id === "source-size");
+  assert.ok(step, "the commitlint job must carry a source-size step");
 
-  const runs = job.steps.map((step) => step.run ?? "").filter(Boolean);
-  assert.ok(
-    runs.some((r) => /npm run --silent source-size-signal/.test(r)),
-    `the job must RUN the PR-relative signal; saw ${JSON.stringify(runs)}`,
-  );
-  assert.equal(
-    runs.some((r) => /source-size-ratchet/.test(r)),
-    false,
-    "line growth is a maintainability signal with a durable follow-up, not a correctness failure",
-  );
+  const run = step!.run ?? "";
+  assert.match(run, /npm run --silent source-size-signal/, `the step must RUN the PR-relative signal; saw ${JSON.stringify(run)}`);
+  assert.doesNotMatch(run, /source-size-ratchet/, "line growth is a maintainability signal with a durable follow-up, not a correctness failure");
+
   // PR-only, and unconditional within that — the fail-closed shape the jobs around it use. A
-  // path-filtered required check that can go silently absent is the #102 deadlock class.
-  assert.match(job.if ?? "", /github\.event_name == 'pull_request'/);
-  assert.equal(JSON.stringify(job).includes('"paths"'), false, "no path filter — a required check must never be conditionally absent");
+  // path-filtered required check that can go silently absent is the #102 deadlock class. The
+  // source-size step itself only ever narrows to `class == 'SOURCE'` (the W1-T3512 fast lane),
+  // never a workflow path filter, and the JOB it lives in carries the plain PR guard.
+  assert.match(String(runnerJob.if ?? ""), /github\.event_name == 'pull_request'/);
+  assert.equal(JSON.stringify(runnerJob).includes('"paths"'), false, "no path filter — a required check must never be conditionally absent");
+  const stubJob = ci.jobs["source-size"];
+  assert.ok(stubJob, "the job key must exist so the ci-parity registration that already names it is true");
+  assert.equal(stubJob.if, false, "the superseded source-size job key must be permanently skipped, not path-filtered");
 
   // Positive control: the parse found the real corpus, so an absent job could never read as present.
   assert.ok(Object.keys(ci.jobs).length >= 15, `sanity: ci.yml must carry its real job set, saw ${Object.keys(ci.jobs).length}`);

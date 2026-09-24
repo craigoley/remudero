@@ -116,16 +116,15 @@ test("W1-T3177: the two runners cannot collect each other's files, which is what
   assert.ok(!/^\s*"test\//.test(includeLine), "the dashboard runner must not glob the repo's test/ root");
 });
 
-test("W1-T3177: the dashboard runs as its OWN ci job, typechecking separately from the build", () => {
+test("W1-T3177: the dashboard's typecheck, test and build run separately, as steps of the consolidated commitlint job", () => {
+  // W1-T4399: dashboard now runs as steps of the `commitlint` job (one shared runner for ~17
+  // one-minute gates) instead of its own job; its own ci.yml job key stays registered but
+  // permanently skipped (if: false) — see that stub's own comment.
   const ci = read(".github/workflows/ci.yml");
-  const job = ci.slice(ci.indexOf("\n  dashboard:\n"));
-  assert.ok(job.length > 0, "no `dashboard:` job in ci.yml");
-  const body = job.slice(0, job.indexOf("\n  claims:"));
-  assert.match(body, /run: npm run --silent test:dashboard/);
-  // SEPARATE FROM THE BUILD ON PURPOSE: `vite build` transpiles per-file and does not typecheck, so
-  // a build-only job goes green on a type error.
-  assert.match(body, /run: npm run --silent typecheck:dashboard/);
-  assert.match(body, /run: npm run --silent build:console/);
+  const job = ci.slice(ci.indexOf("\n  commitlint:\n"));
+  assert.ok(job.length > 0, "no `commitlint:` job in ci.yml");
+  const body = job.slice(0, job.indexOf("\n  leak-grep:"));
+  assert.match(body, /run: \|\s*\n\s*npm run --silent typecheck:dashboard\s*\n\s*npm run --silent test:dashboard\s*\n\s*npm run --silent build:console/);
   const scripts = json("package.json").scripts as Record<string, string>;
   assert.equal(scripts["test:dashboard"], "npm --prefix apps/dashboard run test");
   assert.equal(scripts["typecheck:dashboard"], "npm --prefix apps/dashboard run typecheck");
@@ -149,9 +148,13 @@ test("W1-T3177: the existing node --test invocation is unchanged — this task a
     .map((l) => l.trim())
     .filter((l) => /npm run test:ci|node --test/.test(l))
     .sort();
+  // W1-T4399: containment-probe's invocation now lives inside a multi-line `run: |` block (a step
+  // of the consolidated commitlint job, conditional on the trigger script's own verdict rather
+  // than its own top-level job), so the matching line no longer carries the `run: ` YAML-scalar
+  // prefix the single-line form had.
   assert.deepEqual(invocations, [
+    "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts",
     "npm run test:ci",
-    "run: node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts",
   ]);
   // AND THE DASHBOARD'S RUNNER IS NOT AMONG THEM — it is invoked through npm scripts, never by
   // extending the repo's own `node --test` line, which is the whole "second runner" claim.

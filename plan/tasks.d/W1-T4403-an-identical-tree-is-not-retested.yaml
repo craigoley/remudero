@@ -12,7 +12,8 @@
   origin: "operator ask 2026-09-23: CI redesign — same assurance at lower cost and latency; research over origin/main 50cfc350"
   plan_refs: []
   files: [.github/workflows/ci.yml, scripts/tree-pass-cache.mjs, test/an-identical-tree-is-not-retested.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     MEASURED 2026-09-23 over 30 days (origin/main 50cfc350): 11,297 CI runs and ~110k runs of other

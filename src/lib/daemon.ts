@@ -1086,8 +1086,9 @@ export interface DaemonDeps {
    *  iterations, so a PR that went green-but-review-absent sat invisible for the dispatch's whole
    *  remaining duration — #707 swept at 13:12 and never swept the new head again (W1-T254). Trap: the
    *  real wiring restricts it to the sha-pinned, mutex-serialized post-review re-post only; every other
-   *  lane must stay single-threaded and never runs from here. Forensics: docs/forensics/daemon.md. */
-  sweepLight?: () => Promise<void> | void;
+   *  lane must stay single-threaded and never runs from here. Forensics: docs/forensics/daemon.md.
+   *  W1-T4053: only a freshness drain passes a {@link LightPassScope}; every other caller passes nothing. */
+  sweepLight?: (scope?: LightPassScope) => Promise<void> | void;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -1154,10 +1155,18 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
  * reconciliation runs on the quantum itself (W1-T2852). */
 export const INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS = 1_000;
 
+/** W1-T4053 — what one light pass may act on. The ordinary pass opens its fix rung whenever nothing is in
+ * flight (W1-T1211), and a freshness drain has nothing in flight by construction, so a fix admitted there
+ * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review. */
+export interface LightPassScope {
+  readonly reviewOnly: boolean;
+}
+
 interface InterphaseReviewClock {
   /** Stops new admission, lets an already-started pass settle, and reports whether this clock
-   * consumed an event edge that the ordinary full-sweep gate still needs to reconcile. */
-  stop(): Promise<{ eventWakeSeen: boolean }>;
+   * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
+   * many passes it admitted. */
+  stop(): Promise<{ eventWakeSeen: boolean; passes: number }>;
 }
 
 /**
@@ -1200,18 +1209,25 @@ export function reportLoopLag(
 
 /** The review-only clock for the part of an iteration that previously had none: after the full
  *  reconciliation await returns and before a phase ticker or an idle wait takes over. It owns only
- *  the light pass, so no fix, merge, close, escalation or dispatch action is introduced here. A wake
+ *  the light pass, so it adds no action that pass does not already take — which, with nothing in
+ *  flight, includes a fix (W1-T1211); `duringDrain` is the scope that closes that lane. A wake
  *  observed during an active pass stays pending and makes the next wait resolve immediately, which
- *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md. */
+ *  serializes one coalesced follow-up instead of overlapping passes (W1-T2852). Forensics: docs/forensics/daemon.md.
+ *  W1-T4053: `duringDrain` runs the same clock beside a freshness drain, over the review-only pass, and
+ *  ledgers every pass it admits with `during_drain: true`. */
 export function startInterphaseReviewClock(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  duringDrain = false,
 ): InterphaseReviewClock {
   let active = true;
   let eventWakeSeen = false;
   let eventWakePending = false;
   let elapsedMs = 0;
+  let passes = 0;
+  const phase = duringDrain ? "freshness_drain" : "interphase";
+  const drainTag = duringDrain ? { during_drain: true } : {};
   const wait = deps.sleepUntilSweepWake;
   const quantumMs = Math.max(1, Math.min(pollIntervalMs, INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS));
   // W1-T2897 Clock port: the same instant source as `deps.now`, never a second bare `new Date()`
@@ -1228,7 +1244,7 @@ export function startInterphaseReviewClock(
           const clockDueAtMs = interphaseClock.now() + quantumMs;
           const result = await wait(quantumMs);
           reportLoopLag(
-            { phase: "interphase", dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs },
+            { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs },
             log,
           );
           if (result === "wake") {
@@ -1252,11 +1268,13 @@ export function startInterphaseReviewClock(
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
+          passes += 1;
           try {
-            await deps.sweepLight!();
-            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger });
+            await (duringDrain ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
+            if (duringDrain) log("daemon.review_clock.pass", { trigger, ...drainTag });
+            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...drainTag });
           } catch (e) {
-            log("daemon.sweep_light.failed", { phase: "interphase", error: String((e as Error)?.message ?? e) });
+            log("daemon.sweep_light.failed", { phase, ...drainTag, error: String((e as Error)?.message ?? e) });
           }
         }
       })()
@@ -1266,7 +1284,7 @@ export function startInterphaseReviewClock(
     stop: async () => {
       active = false;
       if (runner) await runner;
-      return { eventWakeSeen };
+      return { eventWakeSeen, passes };
     },
   };
 }
@@ -2312,12 +2330,22 @@ export async function runDaemon(
     // A freshness restart is the process-lifetime boundary the detached-action registry was built for.
     // The final pass above may have admitted a fix and detached only its long CI wait; returning before
     // that settles lets the entrypoint replace this process and kill a useful worker. The caller stops
-    // its interphase clock before entering here, so nothing races in behind the drain (W1-T2865).
+    // its interphase clock before the final pass, so nothing races in behind it (W1-T2865).
     const detachedAtFreshness = detachedSweepActionCount();
     if (detachedAtFreshness > 0) {
       const drainStartedAtMs = daemonClock.now();
       log("daemon.freshness_drain.started", { detached_sweep_actions: detachedAtFreshness });
-      const abandoned = await drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs });
+      // W1-T4053 — REVIEWS KEEP FLOWING THROUGH THE DRAIN. With the clock stopped, 42 drains in three days
+      // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
+      // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
+      const drainReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, true);
+      let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
+      let reviewPasses = 0;
+      try {
+        abandoned = await drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs });
+      } finally {
+        reviewPasses = (await drainReviewClock.stop()).passes;
+      }
       for (const action of abandoned) {
         log("daemon.detached_action_abandoned", {
           action_kind: action.actionKind,
@@ -2330,6 +2358,7 @@ export async function runDaemon(
         detached_sweep_actions: detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
         abandoned_detached_sweep_actions: abandoned.length,
+        review_passes: reviewPasses,
         duration_ms: Math.max(0, daemonClock.now() - drainStartedAtMs),
       });
     }
@@ -3852,8 +3881,9 @@ export async function runDaemon(
         : { stale: true, oldSha: reviewerCodeStale.oldSha, newSha: reviewerCodeStale.newSha };
     if (refetchedFreshness?.stale && dispatchSet.length === 0) {
       // This is the only freshness boundary reached while the interphase review clock exists. Close
-      // admission before the shared final-pass and drain path; do not move the drain into the clock itself,
-      // where W1-T2744 proved it can freeze ordinary phase transitions (W1-T2865).
+      // admission before the shared final pass; do not move the drain into the clock itself, where W1-T2744
+      // proved it can freeze ordinary phase transitions (W1-T2865). The drain runs its own review-only clock
+      // beside it (W1-T4053).
       await stopInterphaseReviewClock();
       return stopForFreshness(refetchedFreshness);
     }

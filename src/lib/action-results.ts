@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readLedgerUnionBounded, type LedgerLines } from "./status.js";
+import { createLedgerRotationMemo } from "./ledger-union.js";
+import { readLedgerUnionMemoized, type LedgerLines } from "./status.js";
 import type { ExternalEffectResult, ExternalEffectState } from "./action-reconciliation.js";
 import type { Route } from "./service.js";
 import { redactConnectorEvidence } from "./action-reconciliation.js";
@@ -201,6 +202,22 @@ function externalRows(lines: LedgerLines): { rows: ActionResultRow[]; malformed:
   return { rows, malformed };
 }
 
+/** Text only an external-effect row writes: its step, its payload key, or one of its top-level fields. */
+const EXTERNAL_EFFECT_ROW_TEXT = /external_effect|reconciliation_state|evidence_reference|capability_grant_id/;
+/** Every appended row begins here, so a torn line holding two interleaved rows holds two of these. */
+const LEDGER_ROW_START = '{"ts":"';
+const STEP_MARKER = /"step":"[^"]*"/;
+
+/**
+ * Whether a torn ledger row's raw text COULD have been an external-effect row. False only when the text proves
+ * otherwise: no external-effect field anywhere, and every row start in it reaches a complete step marker (the
+ * step sits before the payload, so a row cut before its step could still be one). Anything unprovable is true.
+ */
+export function tornRowCouldBeExternalEffect(raw: string): boolean {
+  if (EXTERNAL_EFFECT_ROW_TEXT.test(raw) || !STEP_MARKER.test(raw)) return true;
+  return raw.split(LEDGER_ROW_START).slice(1).some((row) => !STEP_MARKER.test(row));
+}
+
 function unavailable(generatedAt: string, reason: string, detail?: string): ActionResultsEnvelope {
   return {
     version: ACTION_RESULTS_CONTRACT_VERSION,
@@ -212,14 +229,18 @@ function unavailable(generatedAt: string, reason: string, detail?: string): Acti
   };
 }
 
+/** `tornExternal` counts the torn rows {@link tornRowCouldBeExternalEffect} could not rule out. Omitted, every
+ *  torn row counts, so a caller that never classified its torn rows still fails closed. */
 export function buildActionResultsProjection(
   lines: LedgerLines,
   filter: ActionResultsFilter = {},
   now: () => number = Date.now,
+  tornExternal?: number,
 ): ActionResultsEnvelope {
   const generatedAt = new Date(now()).toISOString();
   if (lines.present === false) return unavailable(generatedAt, "ledger-unavailable", "The external-effect ledger was not present.");
-  if ((lines.torn ?? 0) > 0) return unavailable(generatedAt, "ledger-partial", "The external-effect ledger contained unreadable rows.");
+  const torn = lines.torn ?? 0;
+  if ((tornExternal ?? torn) > 0) return unavailable(generatedAt, "ledger-partial", "The external-effect ledger contained unreadable rows.");
   const { rows, malformed } = externalRows(lines);
   if (malformed) return unavailable(generatedAt, "malformed-external-effect", "An external-effect row failed validation and was not projected.");
   const changedSinceMs = filter.changedSince ? Date.parse(filter.changedSince) : undefined;
@@ -259,6 +280,7 @@ export function buildActionResultsProjection(
     ...(cursor ? { cursor } : {}),
     results: resultRows,
     truncated,
+    ...(torn > 0 ? { detail: `${torn} unreadable ledger row(s) skipped; none could be an external-effect row.` } : {}),
   };
 }
 
@@ -282,11 +304,13 @@ function parseFilter(url: URL): { filter: ActionResultsFilter } | { error: strin
 
 /** GET /v1/action-results — bounded, read-only projection of redacted external-effect receipts. */
 export function buildActionResultsRoute(ledgerPath: string): Route {
+  // Only reconciled rows reach the projection; the memo keeps each rotation's torn count for `ledger-partial`.
+  const rotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "external_effect.reconciled"));
   return {
     method: "GET",
     path: "/v1/action-results",
     scope: "read",
-    handler: (req: IncomingMessage, res: ServerResponse) => {
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       const parsed = parseFilter(url);
       if ("error" in parsed) {
@@ -294,7 +318,12 @@ export function buildActionResultsRoute(ledgerPath: string): Route {
         return;
       }
       try {
-        sendJson(res, 200, buildActionResultsProjection(readLedgerUnionBounded(ledgerPath), parsed.filter));
+        let tornExternal = 0;
+        const onTorn = (raw: string): void => {
+          if (tornRowCouldBeExternalEffect(raw)) tornExternal += 1;
+        };
+        const lines = await readLedgerUnionMemoized(ledgerPath, rotations, onTorn);
+        sendJson(res, 200, buildActionResultsProjection(lines, parsed.filter, undefined, tornExternal));
       } catch (error) {
         // Reason: a ledger read failure is an explicit unavailable result, never an empty success.
         sendJson(res, 200, unavailable(new Date().toISOString(), "ledger-unavailable", error instanceof Error ? error.message : "The ledger could not be read."));

@@ -1,0 +1,35 @@
+- id: W1-T4421
+  title: "W1-T4409 KEEPS CONSUMER DAEMONS ALIVE ON A DUPLICATE TASK ID, BUT THE CORE DAEMON LOADS ITS OWN PLAN THROUGH mergePlanBlobs, WHICH STILL THROWS — and a duplicate inside one file still throws everywhere; quarantine both"
+  repo: remudero
+  depends_on: [W1-T4409]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "W1-T4409 build (#6915) scope cut"
+  plan_refs: ["W1-T4409", "W1-T60"]
+  files:
+    - src/lib/plan.ts
+    - src/run-task.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    W1-T4409 (#6915) routes daemonCommand's consumer-repo and --plan loads through loadPlanQuarantiningDuplicates. The
+    core daemon's self-target path does not use loadPlan: syncPlanOrRefuse -> syncPlanFromOrigin builds the plan
+    from origin/main blobs via mergePlanBlobs (src/lib/plan.ts), which throws `duplicate task id` exactly as
+    loadPlan did. A duplicate on core main would crash-loop the core daemon, which is the fleet's reviewer for every
+    repo. Separately, parseTasksFromYaml throws on an id declared twice in ONE file, for every loader.
+  design: |
+    mergePlanBlobs gains the same quarantining mode (an onDuplicate callback, strict by default), and the self-target
+    daemon path uses it with loadDaemonPlan's ledger and escalation. parseTasksFromYaml's in-file duplicate joins the same
+    quarantine in that mode: both entries are held out. lint-plan and CI stay strict.
+  acceptance:
+    - claim: "the core daemon's origin-blob plan load quarantines a duplicate id instead of throwing"
+      proof: "unit test: the core daemon's origin-blob plan load quarantines a duplicate id instead of throwing"
+    - claim: "an id declared twice in one file is quarantined in daemon mode"
+      proof: "unit test: an id declared twice in one file is quarantined in daemon mode"
+  falsifier: |
+    CLOSE IF the core daemon already survives a duplicate task id on its own plan.

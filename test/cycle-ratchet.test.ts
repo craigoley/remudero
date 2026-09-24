@@ -138,11 +138,14 @@ test("no-circular is `error` as of W1-T2895 — the tolerated count reached 0, s
       "structure — see the falsifier below for the case that must actually fail");
 });
 
-test("the ratchet is wired into CI's depcruise job and into package.json", () => {
+test("the ratchet is wired into CI's depcruise step and into package.json", () => {
   assert.match(readFileSync(join(REPO_ROOT, "package.json"), "utf8"), /"cycle-ratchet":\s*"node scripts\/cycle-ratchet\.mjs"/);
   const ci = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
-    jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+    jobs?: Record<string, { steps?: Array<{ id?: string; name?: string; run?: string }> }>;
   };
-  const step = ci.jobs?.depcruise?.steps?.find((candidate) => candidate.name?.startsWith("Cycle-count ratchet"));
+  // W1-T4399: the cycle-count ratchet now runs as its own STEP (id: cycle-ratchet) of the
+  // `commitlint` job, alongside depcruise — one of ~17 gates consolidated onto one shared runner.
+  // The `depcruise` ci.yml job key stays registered but permanently skipped (if: false).
+  const step = ci.jobs?.commitlint?.steps?.find((candidate) => candidate.id === "cycle-ratchet");
   assert.match(step?.run ?? "", /npm run --silent cycle-ratchet/, "an unwired gate proves nothing");
 });

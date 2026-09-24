@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
@@ -24,7 +24,15 @@ import {
   GENERATED_LEDGER_CLASSES,
   isCompanionPath,
 } from "./companion-paths.js";
-import { taskIdCollisions, type TaskIdCollision, type TaskIdDeclaration } from "./task-id-reservation.js";
+import {
+  parsePrefixedTaskId,
+  readReservationAnchors,
+  reservationHolderBranch,
+  taskIdCollisions,
+  type ReservationAnchorRead,
+  type TaskIdCollision,
+  type TaskIdDeclaration,
+} from "./task-id-reservation.js";
 
 /** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
  * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
@@ -386,6 +394,8 @@ export interface ReviewEvidence {
   diff: string;
   /** The implement worker's REPORT text (where proofs are pasted). */
   report: string;
+  /** W1-T4414: the PR's head branch. Absent ⇒ the reservation-ownership check cannot compare a holder and does not run. */
+  headRefName?: string;
   /** The implementation worker's full report. Kept distinct from the PR body: body integrity
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
@@ -443,7 +453,12 @@ export interface ReviewEvidence {
    *  UNRESOLVED diff overlaps. "Unresolved" is read off {@link taskDeclaredFiles} being empty, NEVER off whether a
    *  `Remudero-Task:` trailer appears — keyed on the trailer it misfired on #1731. Absent ⇒ never fires. */
   openTaskDeclaredFiles?: ReadonlyMap<string, readonly string[]>;
+  planLint?: PlanLintOutcome; // W1-T4423: lint-plan over the TARGET plan at the head; absent withholds a plan-only PASS
 }
+
+export type PlanLintOutcome =
+  | { ran: true; label: string; checked: number; violations: string[]; skipped?: string }
+  | { ran: false; reason: string };
 
 /** See {@link ReviewVerdict.unwiredAdvisories}'s doc for what each code means and why
  *  `net_state_claim` never appears here (retro-time only). */
@@ -557,6 +572,10 @@ export interface ReviewVerdict {
   unprovenancedDecisionsEntries?: string[];
   /** W1-T4389: ids this diff ADDS that `origin/main` declares in ANOTHER plan file; non-empty FORCES failure. */
   taskIdCollisions?: TaskIdCollision[];
+  /** W1-T4414: added ids whose reservation is absent, held by another branch, or unreadable; non-empty FORCES failure. */
+  taskIdOwnership?: TaskIdOwnershipFinding[];
+  /** W1-T4414: set when an UNREADABLE reservation is the only reason this verdict fails — the caller withholds it. */
+  taskIdOwnershipWithheld?: string;
   /** Visible-pass-rate minus holdout-pass-rate over this verdict's criteria (W1-T166). A worker that can see, and so
    *  optimise toward, only the visible criteria should pass them at a higher rate than the holdout ones it never saw,
    *  so a large positive gap is the signal SpecBench names. `null` when not MEASURABLE, never forces `state`, and
@@ -578,6 +597,7 @@ export interface ReviewVerdict {
   /** W1-T305: how many criteria COULD have executed (every criterion except `satisfied_by`) — the SAME set `capped`
    *  counts against, exposed here so `passSummary`'s partial annotation reads it rather than re-deriving it. */
   executableProofCount?: number;
+  planLint?: PlanLintOutcome; // W1-T4423: ledgered in full through `decision_verdict`
   /** W1-T3704 (design i) — a content hash of the pull request's OWN diff (base...head) at the moment this verdict was
    *  judged. Recorded on the `review.posted` ledger line as `own_diff_digest` so a LATER push can compare against it
    *  without re-deriving a verdict that did not change. `undefined` when the caller could not compute one (an
@@ -3721,14 +3741,17 @@ export function judgeReview(
   const criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff);
 
   const idDecls = taskIdDeclarationsInDiff(evidence.diff);
-  const idCollisions =
+  const baseIdDecls =
     idDecls.added.length > 0 && evidence.headCheckoutDir
-      ? taskIdCollisions(
-          idDecls.added,
-          taskIdDeclarationsAtRef(evidence.headCheckoutDir, "origin/main"), // the TIP: #1699 merged after #1695 branched
-          idDecls.removed,
-        )
+      ? taskIdDeclarationsAtRef(evidence.headCheckoutDir, "origin/main") // the TIP: #1699 merged after #1695 branched
       : [];
+  const idCollisions = baseIdDecls.length > 0 ? taskIdCollisions(idDecls.added, baseIdDecls, idDecls.removed) : [];
+  const idOwnership =
+    idDecls.added.length > 0 && evidence.headCheckoutDir && evidence.headRefName
+      ? taskIdOwnershipFindings(evidence.diff, idDecls.added, baseIdDecls, evidence.headRefName, evidence.headCheckoutDir)
+      : [];
+  const idOwnershipFails = idOwnership.some((f) => f.kind !== "unknown");
+  const idOwnershipUnknown = idOwnership.some((f) => f.kind === "unknown");
 
   // A pure comparison of two values already computed above — no new fetch, no new gateway (W1-T274). W1-T1100 design
   // (ii): a detector comparing the BODY's claims against the diff must REFUSE on a substitute rather than judge one
@@ -3776,17 +3799,20 @@ export function judgeReview(
   // happened not to execute" — the same shape `criteriaTampered` uses. A code diff is byte-identical: `unmetForState
   // === unmet`.
   const unmetForState = planOnly ? floorUnmet : unmet;
-  const state: ReviewState =
+  const planLintRefusal = planOnly ? planLintRefusalText(evidence.planLint) : undefined;
+  const failsWithoutUnknown =
+    planLintRefusal !== undefined ||
     noCriteria ||
     unmetForState.length > 0 ||
     testTheater ||
     criteriaTampered ||
     idCollisions.length > 0 ||
+    idOwnershipFails ||
     changesetContradictions.length > 0 ||
     refusalContradictions.length > 0 ||
-    unprovenancedDecisionsEntries.length > 0
-      ? "failure"
-      : "success";
+    unprovenancedDecisionsEntries.length > 0;
+  // W1-T4414: an unreadable reservation is never a pass; alone, it is WITHHELD rather than posted.
+  const state: ReviewState = failsWithoutUnknown || idOwnershipUnknown ? "failure" : "success";
 
   // The reward-hacking measurement, over ALL criteria (W1-T166): visible and holdout fold into `state` identically
   // above, and this is a SEPARATE per-run measurement of the gap, never a gate. `null` when either side is empty.
@@ -3801,11 +3827,13 @@ export function judgeReview(
   // exactly as they bind `state`: a tampering or contradiction failure can never be suppressed by verdict stability,
   // which only ever forgives a SEMANTIC downgrade. The anchor a re-review of an unchanged head checks.
   const floorState: ReviewState =
+    planLintRefusal !== undefined ||
     noCriteria ||
     floorUnmet.length > 0 ||
     testTheater ||
     criteriaTampered ||
     idCollisions.length > 0 ||
+    idOwnership.length > 0 ||
     changesetContradictions.length > 0 ||
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
@@ -3845,10 +3873,13 @@ export function judgeReview(
   // measured. A PLAN-ONLY success renders via {@link planOnlySummary}, because "0 proofs executed" is not a
   // degradation for a PR with nothing executable to point at. W1-T2221: `planOnly` is consulted BEFORE `capped`, so a
   // plan-only diff whose declared proof path happened to resolve and RUN still reaches that summary.
+  const onlyPlanLintFailed =
+    unmetForState.length === 0 && !testTheater && !noCriteria && !criteriaTampered && idCollisions.length === 0 && idOwnership.length === 0 &&
+    changesetContradictions.length === 0 && refusalContradictions.length === 0 && unprovenancedDecisionsEntries.length === 0;
   const summary =
     state === "success"
       ? planOnly
-        ? planOnlySummary(verdicts.length)
+        ? planOnlySummary(verdicts.length, evidence.planLint)
         : capped
           ? cappedSummary(verdicts.length, keywordOnly, enforcementData)
           : passSummary(
@@ -3858,7 +3889,9 @@ export function judgeReview(
     // observed one — the fraction actually executed rides on the same commit-status text.
               partiallyExecuted ? { executed: executedCount, executable: executableCriteria.length } : undefined,
             )
-      : failSummary(
+      : planLintRefusal !== undefined && onlyPlanLintFailed
+        ? planLintRefusal
+        : failSummary(
     // Only VISIBLE unmet claims name themselves in the posted summary (W1-T166); a holdout
     // claim never reaches this text, which becomes both the commit-status description and the
     // ledger's failure text, each worker-readable. W1-T2221 uses `unmetForState`, not `unmet`,
@@ -3874,6 +3907,7 @@ export function judgeReview(
           unprovenancedDecisionsEntries,
           refusalContradictions,
           idCollisions,
+          idOwnership,
         );
 
   return {
@@ -3902,6 +3936,8 @@ export function judgeReview(
       : undefined,
     unprovenancedDecisionsEntries,
     taskIdCollisions: idCollisions,
+    taskIdOwnership: idOwnership,
+    ...(idOwnershipUnknown && !failsWithoutUnknown ? { taskIdOwnershipWithheld: summary } : {}),
     unwiredAdvisories,
     reachabilityScanned,
     rewardHackingGap,
@@ -3910,7 +3946,22 @@ export function judgeReview(
     partiallyExecuted,
     executedProofCount: executedCount,
     executableProofCount: executableCriteria.length,
+    planLint: planOnly ? evidence.planLint : undefined,
   };
+}
+
+/** W1-T4423: why a plan-only PASS is refused, or `undefined` when lint-plan RAN clean; a lint that never ran is no pass. */
+function planLintRefusalText(lint: PlanLintOutcome | undefined): string | undefined {
+  const clip = (text: string): string => (text.length > STATUS_DESC_MAX ? `${text.slice(0, STATUS_DESC_MAX - 1)}…` : text);
+  if (lint === undefined || !lint.ran) {
+    return clip(`${FAIL_PREFIX}plan-only PASS withheld, lint-plan could not run: ${lint?.reason ?? "no lint was run"}`);
+  }
+  if (lint.violations.length === 0) return undefined;
+  const more = lint.violations.length > 1 ? ` (+${lint.violations.length - 1} more)` : "";
+  const head = `${FAIL_PREFIX}lint-plan: `;
+  const budget = STATUS_DESC_MAX - head.length - more.length;
+  const first = lint.violations[0];
+  return `${head}${first.length > budget ? `${first.slice(0, budget - 1)}…` : first}${more}`;
 }
 
 /** The exact PASS status-description text, shared by {@link judgeReview} and a verdict-stability suppression so a
@@ -3950,14 +4001,10 @@ function cappedSummary(criteriaCount: number, keywordOnly = false, enforcementDa
 
 /** The PLAN-ONLY status-description text (W1-T205), posted in place of {@link cappedSummary} whenever a capped
  *  success's diff is plan-only. Deliberately never says "CAPPED" or "not certified": those read as something going
- *  wrong, and nothing did — filing a task has no code to run a proof against. Names what actually gated the PR, so an
- *  operator is told the truth (standing rule 22). */
-function planOnlySummary(criteriaCount: number): string {
-  return (
-    `remudero-review: PASS — plan-only PR (${criteriaCount} criteria), gated deterministically ` +
-    `(lint-plan + the plan-PR emitter + plan-index checks); no proof execution attempted, ` +
-    `by design (W1-T205)`
-  );
+ *  wrong, and nothing did. Names only the lint THIS review ran (W1-T4423; standing rule 22). */
+function planOnlySummary(criteriaCount: number, lint?: PlanLintOutcome): string {
+  const checked = lint?.ran ? `${lint.checked} checked, 0 failing${lint.skipped ? ", shard rule n/a" : ""}` : "not run";
+  return `remudero-review: PASS — plan-only PR (${criteriaCount} criteria); lint-plan ran on its changed tasks (${checked}); no proof run`;
 }
 
 // ── VERDICT STABILITY (W1-T178) ─────────────────────────────────────────────
@@ -4842,6 +4889,7 @@ export function failSummary(
   unprovenancedDecisionsEntries: string[] = [],
   refusalContradictions: RefusalContradiction[] = [],
   idCollisions: TaskIdCollision[] = [], // W1-T4389: LAST so positional callers are unchanged
+  idOwnership: TaskIdOwnershipFinding[] = [], // W1-T4414: after it, for the same reason
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
@@ -4861,6 +4909,18 @@ export function failSummary(
       return b.length > each ? `${b.slice(0, each - 1)}…` : b;
     };
     return `${head}${clip(addedFile)} (base: ${clip(baseFile)})${more}`;
+  }
+  const owned = idOwnership.find((f) => f.kind !== "unknown") ?? idOwnership[0];
+  if (owned) {
+    const more = idOwnership.length > 1 ? ` (+${idOwnership.length - 1} more)` : "";
+    if (owned.kind !== "foreign") {
+      const why = owned.kind === "unreserved" ? "is not reserved — mint it with rmd next-task-id --prefix" : "reservation unreadable (UNKNOWN) — verdict withheld";
+      return `${FAIL_PREFIX}id ${owned.id} ${why}${more}`.slice(0, STATUS_DESC_MAX);
+    }
+    const tail = `, not this PR — renumber${more}`;
+    const room = STATUS_DESC_MAX - `${FAIL_PREFIX}id ${owned.id} is reserved by ${tail}`.length;
+    const holder = owned.holder.length > room ? `${owned.holder.slice(0, Math.max(1, room - 1))}…` : owned.holder;
+    return `${FAIL_PREFIX}id ${owned.id} is reserved by ${holder}${tail}`;
   }
   if (refusalContradictions.length > 0) {
     const first = refusalContradictions[0];
@@ -5829,6 +5889,68 @@ export function taskIdDeclarationsAtRef(
   );
 }
 
+/** W1-T4414: an added id whose reservation does not name this PR's head as its holder. */
+export type TaskIdOwnershipFinding =
+  | { id: string; file: string; kind: "unreserved" }
+  | { id: string; file: string; kind: "foreign"; holder: string }
+  | { id: string; file: string; kind: "unknown"; reason: string };
+
+/** Base-committed, so a PR can never exempt its own ids: `[{ "id": ..., "reason": ... }]`, reasonless rows ignored. */
+export const TASK_ID_RESERVATION_BASELINE = "plan/task-id-reservation-baseline.json";
+
+function reservationBaselineIds(repoDir: string): Set<string> {
+  let rows: unknown;
+  try {
+    rows = JSON.parse(execFileSync("git", ["-C", repoDir, "show", `origin/main:${TASK_ID_RESERVATION_BASELINE}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+  } catch {
+    return new Set(); // no baseline (or an unparseable one) exempts nothing — the strict direction
+  }
+  const ok = (r: unknown): r is { id: string; reason: string } =>
+    typeof (r as { id?: unknown })?.id === "string" && typeof (r as { reason?: unknown }).reason === "string" && (r as { reason: string }).reason.trim() !== "";
+  return new Set((Array.isArray(rows) ? rows : []).filter(ok).map((r) => r.id));
+}
+
+/** `reservation hand-off: <holder> -> <head>` on an ADDED line of the shard that declares the id —
+ *  the same escape scripts/task-id-existence-check.mjs honours, so the two gates never disagree. */
+function recordsHandoff(diff: string, file: string, holder: string, head: string): boolean {
+  return walkDiff(diff).some((l) => {
+    const m = l.kind === "add" && l.file === file ? /reservation hand-?off:\s*(.*?)\s*->\s*(.*?)\s*$/i.exec(l.text.trim()) : null;
+    const clean = (v: string): string => v.trim().replace(/^['"]|['"]$/g, "");
+    return m !== null && clean(m[1]) === holder && clean(m[2]) === head;
+  });
+}
+
+/** Every id this diff ADDS to plan/ that the base does not declare, judged against refs/rmd-id/<id> on
+ *  `repoDir`'s origin: absent, or held by a branch other than `headRef`, fails; unreadable is UNKNOWN. */
+export function taskIdOwnershipFindings(
+  diff: string,
+  added: readonly TaskIdDeclaration[],
+  baseDecls: readonly TaskIdDeclaration[],
+  headRef: string,
+  repoDir: string,
+  read: (ids: string[]) => Map<string, ReservationAnchorRead> = (ids) =>
+    readReservationAnchors(ids, (args) => {
+      const r = spawnSync("git", ["-C", repoDir, ...args], { encoding: "utf8" });
+      return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? String(r.error ?? "") };
+    }),
+): TaskIdOwnershipFinding[] {
+  const exempt = new Set([...baseDecls.map((d) => d.id), ...reservationBaselineIds(repoDir)]);
+  const filed = new Map<string, string>();
+  for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
+  const reads = read([...filed.keys()]);
+  const findings: TaskIdOwnershipFinding[] = [];
+  for (const [id, file] of filed) {
+    const r = reads.get(id) ?? { status: "unknown", reason: "no read" };
+    if (r.status === "absent") findings.push({ id, file, kind: "unreserved" });
+    else if (r.status === "unknown") findings.push({ id, file, kind: "unknown", reason: r.reason });
+    else {
+      const holder = reservationHolderBranch(r.message) ?? "unknown";
+      if (holder !== headRef && !recordsHandoff(diff, file, holder, headRef)) findings.push({ id, file, kind: "foreign", holder });
+    }
+  }
+  return findings;
+}
+
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────
 
 /** The concern a changed file belongs to, keyed by its source STEM: `src/lib/foo.ts` and its co-located
@@ -6164,6 +6286,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // (.github/workflows/acceptance-author-gate.yml, already covered by the workflows entry above; this line is the
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
+  "^scripts/ci-gate-from-contract\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.
   "^scripts/proof-discrimination-gate\\.mjs$",
@@ -6212,6 +6335,10 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "The gate is the rule and is tracked on INSTRUMENT_SURFACE above; this file is what it measures, " +
     "the same shape as openapi/daemon.yaml directly above.",
   "plan/claims.yaml": "claim DATA the claims gate validates, not the checker's rule logic",
+  "scripts/select-affected-suites.mjs":
+    "W1-T4404's affected-suite selector in SHADOW: it prints what it WOULD run and exits 0 whatever it finds, after the " +
+    "full suite has run, so no edit to it can change what a CI gate measures. Promote it to INSTRUMENT_SURFACE when " +
+    "W1-T4406 lets a selection skip suites.",
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
   "package-lock.json": "a dependency lockfile, not gate logic",

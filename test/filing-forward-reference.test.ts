@@ -7,6 +7,9 @@ import { judgeCriterion, judgeReview, shardDeclaredFilesInDiff } from "../src/li
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
 import { buildOpenPrViews } from "../src/run-task.js";
 
+/** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
+const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
+
 /**
  * W1-T456 — "a filing PR fails review for one reason and cannot be repaired for a second,
  * unrelated one". TWO INDEPENDENT DEFECTS, proved separately, plus the honest boundary between
@@ -101,7 +104,7 @@ test("acceptance 1 — end-to-end through judgeReview: the SAME diff that adds t
   // shard's acceptance — so the keyword floor is trivially satisfied once the hard override
   // is withdrawn.
   const report = "Filed W1-T999. Its acceptance proof: unit test: test/filing-forward-reference.test.ts";
-  const verdict = judgeReview(criteria, { diff, report, headCheckoutDir: dir });
+  const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT, diff, report, headCheckoutDir: dir });
   assert.equal(verdict.criteria[0].proof_exec, "not_yet_built");
   assert.equal(
     verdict.state,
@@ -154,7 +157,7 @@ test("acceptance 2 — judgeReview end-to-end: a filing PR whose OTHER criterion
   ];
   const report =
     "Filed W1-T999. unit test: test/filing-forward-reference.test.ts. unit test: test/some-other-genuinely-fabricated-name.test.ts";
-  const verdict = judgeReview(criteria, {
+  const verdict = judgeReview(criteria, { planLint: CLEAN_PLAN_LINT,
     diff,
     report,
     headCheckoutDir: dir,

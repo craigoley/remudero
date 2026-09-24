@@ -12,6 +12,7 @@ import { REPO_ROOT } from "./lib/repo-root.mjs";
 
 export const PROMPT_SURFACE_FUNCTIONS = new Set([
   "implementPromptParts",
+  "outputContractLines",
   "renderDoctrinePreamble",
   "renderFixPrompt",
   "renderImplementPrompt",
@@ -20,7 +21,8 @@ export const PROMPT_SURFACE_FUNCTIONS = new Set([
   "renderReconPrompt",
 ]);
 
-const FUNCTION_SOURCE_RE = /^(?:src\/lib\/prompt-render\.ts|src\/lib\/learnings\.ts)$/;
+// compaction.ts holds `outputContractLines`, spread verbatim into every implement prompt.
+const FUNCTION_SOURCE_RE = /^(?:src\/lib\/prompt-render\.ts|src\/lib\/learnings\.ts|src\/lib\/compaction\.ts)$/;
 const LEARNINGS_SHARD_RE = /^learnings\/[^/]+\.ya?ml$/;
 const GOLDEN_FIXTURE_RE = /^test\/fixtures\/golden-verdicts\//;
 const TEST_FILE_RE = /^test\/.*\.test\.ts$/;

@@ -1,0 +1,34 @@
+- id: W1-T4439
+  title: "W1-T4406 MAY ONLY NARROW PR CI ONCE THE SHADOW RECORD PROVES IT SAFE — nothing aggregates the AFFECTED-SUITES-SHADOW lines W1-T4404 prints on every coverage shard; a gardener should report the narrow selection's miss rate and size saving and say when the evidence clears the bar"
+  repo: remudero
+  depends_on: [W1-T4404]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; research over the 150 most recent merged PRs"
+  plan_refs: [W1-T4404, W1-T4406]
+  files: [src/lib/selector-shadow-gardener.ts, src/run-task.ts, test/the-selector-earns-its-narrowing.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the 150 most recent merged PRs: median open-to-merge 37 min (p75 82, p90 131). 77% of all PR time is spent before the final head's CI starts (repair and re-push rounds), 16% in that final CI, 7% waiting for review, ~0% waiting to merge. Only 62 of 150 merged on their first head. Runner queueing is not a factor (job start p50 3 s, p90 41 s).
+    W1-T4404 (#6925) records, for every real failure in a coverage shard, whether the floor and the narrow (symbol-
+    level) selections had it. MEASURED 2026-09-24: the module-level floor reaches ~1,680 of ~1,850 suites (582 suites import
+    src/run-task.ts); the narrow selection chose 86 on a sample diff. Whether narrow is safe is exactly what the record answers.
+  design: |
+    (i) Read AFFECTED-SUITES-SHADOW lines from coverage-shard logs of the last N PR runs. (ii) Report per selection:
+    failures seen, selected, missed, median size. (iii) The verdict is TIERED, not a single cutoff: enough failures observed and
+    zero misses recommends enabling W1-T4406; any miss files a task naming the missed file and the edge the selector lacked.
+  acceptance:
+    - claim: "the gardener reports each selection''s miss rate from the shadow lines"
+      proof: 'grep: test("W1-T4439: the gardener reports each selection''s miss rate from the shadow lines" in test/the-selector-earns-its-narrowing.test.ts'
+    - claim: "a missed failure files a task naming the missing edge"
+      proof: 'grep: test("W1-T4439: a missed failure files a task naming the missing edge" in test/the-selector-earns-its-narrowing.test.ts'
+    - claim: "the daemon runs the selector-shadow gardener"
+      proof: "grep: startSelectorShadowGardener( in src/run-task.ts"
+  falsifier: |
+    Count only selected failures and the first test reports a zero miss rate over a record that contains a miss.
