@@ -136,6 +136,16 @@ export interface Config {
      *  rung divertible to cash — which is what a squeeze needs most, since a red pull request is
      *  exactly what cannot be repaired while every subscription is exhausted. */
     harnessCommitsFix?: boolean;
+    /** The cash-simple trial's policy (operator ruling 2026-09-24); see src/lib/cash-trial.ts for each default. */
+    cashTrial?: {
+      enabled?: boolean;
+      sharePercent?: number;
+      budgetShareOfDailyCap?: number;
+      minSample?: number;
+      minRelativeSuccess?: number;
+      windowDays?: number;
+      models?: string[];
+    };
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -227,6 +237,18 @@ const workerProvidersShape: ValueSchema = {
       "Harness owns the CI-log fix rung's commit, which is what makes that lane divertible to cash (W1-T3727).",
       booleanShape,
     ),
+    configField("cashTrial", "object", true, undefined, "config.json", "Cash-simple trial policy; defaults in src/lib/cash-trial.ts (ruling 2026-09-24).", {
+      kind: "object",
+      fields: [
+        configField("enabled", "boolean", true, true, "config.json", "Run the trial at all.", booleanShape),
+        configField("sharePercent", "number", true, 50, "config.json", "Share of eligible tasks put on cash.", numberShape),
+        configField("budgetShareOfDailyCap", "number", true, 0.1, "config.json", "Fraction of dailyCapUsd the trial may spend per day.", numberShape),
+        configField("minSample", "number", true, 20, "config.json", "Runs per arm before a relative verdict.", numberShape),
+        configField("minRelativeSuccess", "number", true, 0.8, "config.json", "Stop below this fraction of the control's PR rate.", numberShape),
+        configField("windowDays", "number", true, 7, "config.json", "Rolling evidence window; a stop expires with it.", numberShape),
+        configField("models", "string[]", true, ["gpt-oss-120b"], "config.json", "Cash deployments the trial may use.", stringArrayShape),
+      ],
+    }),
     configField(
       "cashFallbackWhenBlocked",
       "boolean",

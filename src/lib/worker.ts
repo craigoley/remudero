@@ -370,7 +370,8 @@ export type RoutingRule =
   | "operator-preference"
   | "preference-bypassed"
   | "cash-fallback"
-  | "overflow-fallback";
+  | "overflow-fallback"
+  | "cash-trial";
 
 export interface RoutingDecision {
   rule: RoutingRule;
@@ -378,6 +379,10 @@ export interface RoutingDecision {
   capability?: CodexModelTier;
   /** The live routing experiment this assignment belongs to (src/lib/routing-experiments.ts). */
   ab?: string;
+  /** The cash trial this run belongs to, its arm, and why (src/lib/cash-trial.ts). */
+  trial?: string;
+  trialArm?: string;
+  trialReason?: string;
   considered: Array<{
     provider: WorkerProviderId;
     model?: string;
@@ -942,6 +947,8 @@ export interface SpawnWorkerArgs {
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
   routingFallback?: { rule: "cash-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+  /** The cash-simple trial's decision for this run; the cash arm also restricts the cash ladder. */
+  routingTrial?: { id: string; arm: string; reason: string; models?: readonly string[] };
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
   effort?: string;
   maxTurns?: number;
@@ -1448,6 +1455,7 @@ export function workerSelectionAssignment(
 
 function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelectionAssignment>[1]): RoutingRule {
   if (args.routingFallback) return args.routingFallback.rule;
+  if (args.routingTrial?.arm === "cash" && input.provider === "cash") return "cash-trial";
   if (input.mode !== "multi-provider") return input.mode;
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.capabilityPreference) return "capability-preference";
@@ -1484,6 +1492,9 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
     rule,
     ...(input.capability ? { capability: input.capability } : {}),
     ...(ab ? { ab } : {}),
+    ...(args.routingTrial
+      ? { trial: args.routingTrial.id, trialArm: args.routingTrial.arm, trialReason: args.routingTrial.reason }
+      : {}),
     considered,
     headroomPercent,
   };
@@ -2262,7 +2273,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       args.model,
       args.effort,
       Buffer.byteLength(args.prompt ?? "", "utf8"),
-      { cashSqueezed: args.cashSqueezed === true, modelApprovals: config.modelApprovals },
+      {
+        cashSqueezed: args.cashSqueezed === true,
+        modelApprovals: config.modelApprovals,
+        ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
+      },
     );
     assertModelAllowed(openWeight.model, config);
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
