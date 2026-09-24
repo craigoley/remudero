@@ -5975,7 +5975,7 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
 export type ReviewRunResult = ReviewVerdict & {
   headSha: string;
   reviewerOutcome: string;
-  codeFreshnessWithheld?: string;
+  verdictWithheld?: string;
   reviewDecisionDigest?: string;
   decisionDisposition?: "computed" | "replayed" | "in_flight" | "conflict";
   evaluatorProvenance?: ReviewEvaluatorProvenance;
@@ -6514,7 +6514,7 @@ async function runReview(args: {
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
     log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld });
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
-    return { ...verdict, headSha, reviewerOutcome: outcome, codeFreshnessWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
   try {
@@ -6570,7 +6570,7 @@ async function runReview(args: {
       headSha,
       reviewerOutcome: outcome,
       ...(reviewerCodeFreshness !== undefined && reviewerCodeFreshness.status !== "fresh"
-        ? { codeFreshnessWithheld: posted.reason ?? "reviewer code freshness withheld the terminal verdict" }
+        ? { verdictWithheld: posted.reason ?? "reviewer code freshness withheld the terminal verdict" }
         : {}),
       reviewDecisionDigest: decisionDigest,
       decisionDisposition,
@@ -10957,9 +10957,9 @@ export async function runFixRung(opts: {
       runId: opts.runId,
       openTaskIds: opts.openTaskIds,
     });
-    if (review.codeFreshnessWithheld) {
-      deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.codeFreshnessWithheld });
-      return { outcome: "stood_down", review, strikes, retriggers, reason: review.codeFreshnessWithheld, standDownReason: review.codeFreshnessWithheld };
+    if (review.verdictWithheld) {
+      deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.verdictWithheld });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: review.verdictWithheld, standDownReason: review.verdictWithheld };
     }
     // W1-T100: a real review verdict now exists for THIS head — the CURRENT
     // strike stays review-mode from here. W1-T138: this can still flip back
@@ -15906,11 +15906,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       openTaskIds,
     });
 
-    if (review.codeFreshnessWithheld) {
+    if (review.verdictWithheld) {
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
-        reason: review.codeFreshnessWithheld,
+        reason: review.verdictWithheld,
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
@@ -18057,14 +18057,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   );
 
   console.log(
-    `\nremudero-review=${verdict.state} ${verdict.codeFreshnessWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
-      (verdict.codeFreshnessWithheld ? ` — ${verdict.codeFreshnessWithheld}` : "") +
+    `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+      (verdict.verdictWithheld ? ` — ${verdict.verdictWithheld}` : "") +
       (reviewVerdictAnnotation(verdict) ? ` — ${reviewVerdictAnnotation(verdict)}` : "") +
       // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
-  if (verdict.codeFreshnessWithheld) return 2;
+  if (verdict.verdictWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, subjectRepoDir)) {
     console.log(
@@ -33083,6 +33083,7 @@ export async function serveCommand(
     log,
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
+    prewarmLeadMs: DEFAULT_BOARD_POLL_TTL_MS,
     snapshotCache: serveBoardSnapshot,
     // A merged PR's file list survives the restart on disk, and a miss never blocks the first snapshot.
     changedFilesCache: createChangedFilesCache(config.root, self.owner, self.repo, { log }),
