@@ -316,3 +316,27 @@ test("an install whose mounts table resolves no route boots UNCHANGED: preview s
   process.emit("SIGTERM");
   assert.equal(await running, 0);
 });
+
+test("serve's banner never prints the read token, which a container writes to docker logs", async (t) => {
+  const port = await freePort();
+  const { home, root } = instance({ host: "127.0.0.1", port });
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  const stdout: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void stdout.push(a.join(" "));
+  const running = serveCommand([], { branch: () => "main", buildBatchedGithub: () => fakeGitHub(BOARD_BRANCH_LISTS) });
+  t.after(async () => {
+    process.emit("SIGTERM");
+    await running;
+    console.log = realLog;
+    process.env.HOME = oldHome;
+  });
+
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline && !stdout.some((l) => l.includes("console:"))) await sleep(100);
+  const banner = stdout.join("\n");
+  const tokens = JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { read: string };
+  assert.match(banner, /console: {5}http:\/\/127\.0\.0\.1:\d+\/ \(tokened bookmark: rmd console-url\)/);
+  assert.ok(!banner.includes(tokens.read), "the read token never reaches stdout");
+});
