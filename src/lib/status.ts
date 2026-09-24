@@ -873,6 +873,8 @@ export function readLedgerUnionBounded(
     satisfied?: (stepsSeen: ReadonlySet<string>) => boolean;
     /** How far back to read; defaults to {@link STATUS_BOARD_WINDOW_MS}. */
     windowMs?: number;
+    /** Receives the raw text of every torn row, live or rotated, that `.torn` counts. */
+    onTorn?: (raw: string) => void;
     ledgerFs?: LedgerFsDeps;
     readdirSync?: (dir: string) => string[];
     gunzipSync?: (buf: Buffer) => Buffer;
@@ -881,7 +883,7 @@ export function readLedgerUnionBounded(
 ): LedgerLines {
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
-  const live = readLedgerLines(path, ledgerFs);
+  const live = readLedgerLines(path, ledgerFs, opts.onTorn);
   const read = readLedgerUnionRecordsSync(
     dirname(path),
     {
@@ -892,6 +894,7 @@ export function readLedgerUnionBounded(
       dedupe: false,
       readLiveRecords: () => live,
       satisfied: opts.satisfied,
+      onTorn: opts.onTorn,
     },
     statusLedgerUnionFsDeps(ledgerFs, opts),
   );
@@ -905,7 +908,7 @@ export function readLedgerUnionBounded(
  * or `ledger-read-intent: union` on the same line or the one above. A torn line is LOUD in TWO ways (W1-T206):
  * stderr for a human, and `.torn` for a consumer with no stderr, where the old fabricated-`{}` told neither.
  */
-export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): LedgerLines {
+export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs, onTorn?: (raw: string) => void): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
   // `present: false` is the whole point of this early return carrying metadata at all. The empty array itself
   // is unchanged, so no existing consumer moves.
@@ -918,6 +921,7 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
       out.push(JSON.parse(l) as Record<string, unknown>);
     } catch {
       torn++;
+      onTorn?.(l);
       console.error(`ledger: dropping unparseable line in ${path}: ${l}`);
     }
   }
