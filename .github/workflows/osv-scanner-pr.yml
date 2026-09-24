@@ -15,8 +15,7 @@ permissions:
 
 jobs:
   scan-pr:
-    # Preserve the context ci-gate has required since W1-T211, and never exempt Dependabot: those
-    # are precisely the PRs that change dependency manifests and need this awaited verdict.
+    # Preserve the required context and run for every PR, including Dependabot.
     name: scan-pr / osv-scan
     runs-on: ubuntu-latest
     permissions:

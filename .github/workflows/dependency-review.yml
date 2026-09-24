@@ -1,9 +1,7 @@
 name: Dependency Review
 
-# Inspects dependency changes in a PR diff and comments a summary.
-# Warn-only — catches a bad dep without walling merges; MAJOR-bump
-# exclusion from auto-merge is a separate dep-review-lane job (W1-T54),
-# not this workflow.
+# Inspects a PR's dependency changes and comments a summary. Warn-only; MAJOR-bump exclusion from
+# auto-merge is the dep-review lane's job (W1-T54), not this workflow's.
 on:
   pull_request:
     branches: [main]
@@ -16,25 +14,9 @@ concurrency:
   group: dependency-review-${{ github.ref }}
   cancel-in-progress: true
 
-# W1-T4401: BOTH jobs below only ever run their SUBSTANTIVE step when a manifest or lockfile
-# actually changed — a doc/plan-only PR (the common case) now costs one checkout instead of a
-# full dependency-graph diff or licence scan. Deliberately a STEP-level `if:`, computed inline in
-# EACH job from its own `git diff` against the PR's real base/head SHAs, never a job-level `if:`
-# and never a separate upfront job the other two `needs:`: `license-review` is REQUIRED by
-# ci-gate.yml, and this repo's own doctrine (ci.yml's header, test/a-shipped-detector-exits-one-
-# and-is-wired-to-nothing.test.ts) is that a REQUIRED job carries no job-level `if:` at all — a
-# skipped job is fine (GitHub still posts its check-run as "skipped", which ci-gate treats as a
-# pass), but a `needs:` on a job that can itself fail (e.g. checkout flaking) would silently skip
-# the required check too, and a `uses:`-only job (unlike this one) never posts a nested check-run
-# at all when skipped. A step-level guard inside an UNCONDITIONAL job sidesteps both failure
-# modes: the job (and its check-run) always runs, and only the expensive part inside it is
-# skipped. FAIL-OPEN, deliberately: an unreadable diff (`git diff` erroring, or `CHANGED` coming
-# back empty) leaves `changed=true`, so a broken diff read costs a redundant scan, never a missed
-# one. The match itself is intentionally broad — `package.json` or `package-lock.json` at ANY
-# depth, not just the root — because a nested manifest changing is still a dependency change,
-# even though `license-review`'s own script (below) only ever reads the ROOT lockfile; matching
-# wider than that script's own blast radius costs an occasional harmless no-op run, never a missed
-# licence check.
+# W1-T4401: each job's scan steps run only when a package.json or package-lock.json (any depth) changed.
+# A STEP-level `if:` inside an unconditional job, never a job-level `if:` or a `needs:` — `license-review`
+# is REQUIRED, and a skipped or needs-blocked required job can strand ci-gate. Fail-open on an unreadable diff.
 jobs:
   dependency-review:
     name: Review
@@ -95,10 +77,8 @@ jobs:
   # for entangling a NEW `scripts/*.mjs` gate script with the `.github/workflows/` change wiring
   # it in, in the same PR).
   #
-  # `allow-licenses`, NEVER a deny-list (design (ii)): a deny-list fails OPEN on every licence
-  # nobody thought to enumerate — the wrong shape for an ALLOWED-list with copyleft flagged as the
-  # consequence, not the enumeration. `test/helpers/check-dependency-licences.mjs` only ever takes
-  # an allow-list (`ALLOW_LICENSES`), mirroring that choice; there is no deny-list input to misuse.
+  # `allow-licenses`, NEVER a deny-list (design (ii)): a deny-list fails OPEN on every licence nobody
+  # enumerated; `test/helpers/check-dependency-licences.mjs` takes only an allow-list (`ALLOW_LICENSES`).
   #
   # THE ALLOW-LIST, seeded exactly from the permissive family the originating feedback names
   # (MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / ISC) and NOT silently widened (design (vi)).
@@ -130,11 +110,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # W1-T4401: same inline, fail-open detection as the `dependency-review` job above (kept
-      # duplicated rather than shared via a `needs:` job — see this file's own header). This job
-      # stays UNCONDITIONAL (no job-level `if:`) because it is REQUIRED by ci-gate.yml; only the
-      # two steps below it are gated, so a doc/plan-only PR still posts a green "License Review"
-      # check-run, in seconds, without installing Node or running the licence scan at all.
+      # W1-T4401: the same fail-open detector as `dependency-review` (see this file's header).
       - name: Detect whether a manifest or lockfile changed
         id: deps-changed
         env:
