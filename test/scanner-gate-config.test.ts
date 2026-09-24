@@ -45,20 +45,24 @@ test("scanner-gate-config: ci-gate REQUIRED lists the PR-time OSV scan's actual 
   assert.ok(
     required.includes("scan-pr / osv-scan"),
     `ci-gate REQUIRED is ${JSON.stringify(required)} — missing "scan-pr / osv-scan" ` +
-      `(osv-scanner-pr.yml's check-run name, verified against a live PR's check-runs API ` +
-      `response since a \`uses:\` reusable-workflow call is namespaced "<caller job> / ` +
-      `<reusable job>" by GitHub). Without it, ci-gate never waits for or fails on this check, ` +
+      `(osv-scanner-pr.yml's preserved check-run name). Without it, ci-gate never waits for or fails on this check, ` +
       `so a real OSV finding can turn it red and still merge.`,
   );
 });
 
-test("scanner-gate-config: osv-scanner-pr.yml's scan-pr job keeps fail-on-vuln: true (the check ci-gate now awaits must actually be able to fail)", async () => {
+test("scanner-gate-config: osv-scanner-pr.yml keeps fail-on-vuln: true in the blocking comparison (the check ci-gate awaits must actually fail on a new CVE)", async () => {
   const doc = await loadWorkflow("osv-scanner-pr.yml");
   const job = doc.jobs["scan-pr"];
+  const reporter = (job?.steps ?? []).find((s: any) => String(s?.uses ?? "").includes("osv-reporter-action"));
   assert.equal(
-    job?.with?.["fail-on-vuln"],
-    true,
-    "scan-pr must be configured fail-on-vuln: true — awaiting a scanner that can never fail on " +
+    job?.name,
+    "scan-pr / osv-scan",
+    "the native, locally hardened job must preserve the exact check-run name ci-gate awaits",
+  );
+  assert.match(
+    reporter?.with?.["scan-args"] ?? "",
+    /--fail-on-vuln=true/,
+    "scan-pr must compare results with fail-on-vuln: true — awaiting a scanner that can never fail on " +
       "a real CVE would make ci-gate's new REQUIRED entry a no-op gate.",
   );
 });
@@ -80,7 +84,7 @@ test("scanner-gate-config: osv-scanner-pr.yml's scan-pr job keeps fail-on-vuln: 
 // below verifies the compensation it claims is real rather than trusting the exemption blindly.
 const KNOWN_COMPENSATED_CONTINUE_ON_ERROR_JOBS: ReadonlySet<string> = new Set(["ci.yml:commitlint"]);
 
-test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured continue-on-error: true anywhere in its steps, except a job on the narrow, verified compensation list", async () => {
+test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured continue-on-error: true, except the verified commitlint compensation and OSV scanner steps a blocking reporter follows", async () => {
   const { required } = await loadCiGateRequired();
   const files = (await readdir(WORKFLOWS_DIR)).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"));
 
@@ -102,6 +106,20 @@ test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured cont
       const jobLevelCoE = job?.["continue-on-error"] === true;
       const steps: any[] = Array.isArray(job?.steps) ? job.steps : [];
       const stepLevelCoE = steps.some((s) => s && s["continue-on-error"] === true);
+
+      // REVIEW-RATIFIED SCOPE WIDENING (W1-T4401): the upstream reusable workflow's
+      // checkout/result-file symlink vulnerability requires exposing its two scanner steps here.
+      // Scanner exits are tolerated because findings are expected to be compared; only these two
+      // steps may continue, and a missing-results check plus a non-tolerated reporter must follow.
+      if (file === "osv-scanner-pr.yml" && jobId === "scan-pr") {
+        const tolerated = steps.filter((s) => s && s["continue-on-error"] === true).map((s) => s.name);
+        assert.deepEqual(tolerated, ["Run scanner on existing code", "Run scanner on proposed code"]);
+        assert.ok(steps.some((s) => s.name === "Check that both scans produced results"), "incomplete scans must fail closed");
+        const reporter = steps.find((s) => String(s?.uses ?? "").includes("osv-reporter-action"));
+        assert.ok(reporter, "the retained scan comparison must run");
+        assert.notEqual(reporter["continue-on-error"], true, "new vulnerability findings must fail the required job");
+        continue;
+      }
 
       if (jobLevelCoE || stepLevelCoE) {
         offenders.push(`${file}:${jobId} (required via ${JSON.stringify(matched)})`);

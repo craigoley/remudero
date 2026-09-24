@@ -23,6 +23,13 @@ on:
 # repo level (code-scanning/default-setup) because running both conflicts
 # and leaves each unreliable (fleet lesson, MASTER-PLAN §5).
 #
+# W1-T4401 RE-VERIFIED THIS, rather than assuming the comment above still holds: `gh api
+# repos/{owner}/{repo}/code-scanning/default-setup` reads `{"state":"not-configured", ...}` on
+# 2026-09-24 — the default setup really is off, so there is no live second CodeQL analysis to
+# retire today. Nothing here changes: ONE explicit workflow, ZERO default-setup duplicates,
+# matching design (ii)'s "one CodeQL analysis, not two." If default-setup is ever turned back on,
+# THAT is the moment to retire one of the two via gate-monotonic + a GATE_RATIONALE, not this PR.
+#
 # Least privilege at the top level (Scorecard TokenPermissions: a topLevel write
 # permission scores worse than the identical permission scoped to job level, even
 # though this workflow has only one job — W1-T66); the job below elevates only

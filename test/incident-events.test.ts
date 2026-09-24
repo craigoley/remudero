@@ -21,7 +21,7 @@ import {
   type IncidentEventInput,
 } from "../src/lib/incident-events.js";
 import { createService, type Route } from "../src/lib/service.js";
-import { buildServeServer, buildServeRoutes, INGEST_TOKEN_ENV, type ServeDeps } from "../src/lib/serve.js";
+import { buildServeServer, buildServeRoutes, INGEST_TOKEN_ENV, INGEST_TOKEN_FILE_ENV, type ServeDeps } from "../src/lib/serve.js";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
@@ -354,4 +354,88 @@ test("the ingest token defaults to RMD_SERVE_INGEST_TOKEN and is refused when un
     if (saved === undefined) delete process.env[INGEST_TOKEN_ENV];
     else process.env[INGEST_TOKEN_ENV] = saved;
   }
+});
+
+// ── W1-T4412: the ingest token reaches the gateway as a mounted file (RMD_SERVE_INGEST_TOKEN_FILE)
+
+async function withIngestEnv<T>(file: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const saved = { token: process.env[INGEST_TOKEN_ENV], file: process.env[INGEST_TOKEN_FILE_ENV] };
+  delete process.env[INGEST_TOKEN_ENV];
+  if (file === undefined) delete process.env[INGEST_TOKEN_FILE_ENV];
+  else process.env[INGEST_TOKEN_FILE_ENV] = file;
+  try {
+    return await fn();
+  } finally {
+    for (const [name, value] of [[INGEST_TOKEN_ENV, saved.token], [INGEST_TOKEN_FILE_ENV, saved.file]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+function recordingLog(): { log: NonNullable<ServeDeps["log"]>; lines: Array<{ step: string; extra?: Record<string, unknown> }> } {
+  const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  return { lines, log: (step, extra) => void lines.push({ step, extra }) };
+}
+
+test("an ingest token supplied as a file grants the incident route and nothing else", async () => {
+  const root = tmpRoot();
+  const tokenFile = join(root, "incident-ingest-token");
+  const fileToken = "file-sourced-ingest-token-W1-T4412";
+  writeFileSync(tokenFile, `${fileToken}\n`);
+  const { log, lines } = recordingLog();
+  await withIngestEnv(tokenFile, () =>
+    withListening(buildServeServer({ ...depsFor(root), log }), async (base) => {
+      const ok = await fetch(`${base}${INCIDENT_INGEST_ROUTE_PATH}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${fileToken}`, "content-type": "application/json" },
+        body: JSON.stringify(baseInput({ message: "file-token-can-post" })),
+      });
+      assert.equal(ok.status, 200, "the trimmed file content is the ingest token");
+      assert.equal(((await ok.json()) as { accepted: boolean }).accepted, true);
+      for (const probe of [{ method: "GET", path: "/v1/status" }, { method: "POST", path: "/v1/control/pause" }]) {
+        const res = await fetch(`${base}${probe.path}`, { method: probe.method, headers: { authorization: `Bearer ${fileToken}` } });
+        await res.arrayBuffer();
+        assert.equal(res.status, 401, `${probe.method} ${probe.path} with the file-sourced ingest token must be refused`);
+      }
+    }),
+  );
+  assert.ok(lines.length > 0, "control: the recording log saw the server's own lines");
+  assert.ok(!JSON.stringify(lines).includes(fileToken), "the token value is never logged");
+  assert.ok(!lines.some((l) => l.step === "serve.ingest_token_refused"), "a good file is not refused");
+});
+
+test("an empty or unreadable ingest token file is refused with a logged reason", async () => {
+  const root = tmpRoot();
+  const emptyFile = join(root, "empty-token");
+  writeFileSync(emptyFile, "  \n");
+  const unreadable = join(root, "a-directory-not-a-file");
+  mkdirSync(unreadable);
+  const cases = [
+    { file: emptyFile, reason: /^empty$/ },
+    { file: unreadable, reason: /^unreadable: EISDIR$/ },
+  ];
+  for (const { file, reason } of cases) {
+    const { log, lines } = recordingLog();
+    await withIngestEnv(file, () =>
+      withListening(buildServeServer({ ...depsFor(tmpRoot()), log }), async (base) => {
+        const res = await fetch(`${base}${INCIDENT_INGEST_ROUTE_PATH}`, {
+          method: "POST",
+          headers: { authorization: "Bearer anything-at-all" },
+          body: JSON.stringify(baseInput()),
+        });
+        await res.arrayBuffer();
+        assert.equal(res.status, 401, "a refused file grants nothing");
+      }),
+    );
+    const refusals = lines.filter((l) => l.step === "serve.ingest_token_refused");
+    assert.equal(refusals.length, 1, `exactly one logged refusal for ${file}`);
+    assert.equal(refusals[0]?.extra?.file, file);
+    assert.match(String(refusals[0]?.extra?.reason), reason);
+  }
+  const { log, lines } = recordingLog();
+  await withIngestEnv(undefined, async () => {
+    buildServeServer({ ...depsFor(tmpRoot()), log }).close();
+  });
+  assert.ok(!lines.some((l) => l.step === "serve.ingest_token_refused"), "no file configured is shipped-dark, not a refusal");
 });

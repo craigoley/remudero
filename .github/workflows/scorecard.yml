@@ -3,10 +3,8 @@ name: OpenSSF Scorecard
 on:
   branch_protection_rule:
   schedule:
-    # Weekly, off-peak (Mondays 02:23 UTC).
+    # Weekly, Mondays 02:23 UTC. W1-T4401 dropped push-to-main: branch_protection_rule catches posture changes.
     - cron: "23 2 * * 1"
-  push:
-    branches: [main]
   workflow_dispatch:
 
 # Least privilege at the top level; the job below elevates only what it needs.

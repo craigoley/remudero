@@ -1,15 +1,13 @@
 name: OSV-Scanner
 
-# Full dependency-tree scan on push to main and on a weekly schedule —
-# catches advisories cut AFTER a dependency was already merged in, which
-# the PR-time diff scan (osv-scanner-pr.yml) can't see. Reports to the
+# Full dependency-tree scan, nightly (W1-T4401: was every push to main plus weekly) — catches
+# advisories cut AFTER a dependency merged, which the PR-time diff scan (osv-scanner-pr.yml)
+# can't see, within 24h. No pull_request trigger, so no PR check-run moves. Reports to the
 # Security tab via SARIF; warn-only so it never blocks main/schedule.
 on:
-  push:
-    branches: [main]
   schedule:
-    # Weekly, off-peak (Mondays 04:43 UTC — staggered from CodeQL).
-    - cron: "43 4 * * 1"
+    # Nightly, off-peak (03:14 UTC — staggered from mutation-nightly's 03:31).
+    - cron: "14 3 * * *"
   workflow_dispatch:
 
 # Least privilege at the top level (Scorecard TokenPermissions: a topLevel write

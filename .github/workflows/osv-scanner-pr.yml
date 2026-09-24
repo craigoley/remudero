@@ -1,44 +1,124 @@
 name: OSV-Scanner (PR)
 
-# Diff-aware scan of the dependency tree, using Google's official reusable
-# PR workflow. fail-on-vuln: true — deliberately stricter than the fleet's
-# warn-only default, because W1-T23's acceptance proof is a planted
-# known-CVE dependency turning THIS job red and AWAITABLE in the PR run
-# (Dependabot's own alert is async and not awaitable there).
+# Diff-aware scan of the dependency tree, using Google's pinned scanner and reporter actions with
+# an isolated checkout. fail-on-vuln: true — deliberately stricter than the fleet's warn-only
+# default, because W1-T23's acceptance proof is a planted known-CVE dependency turning THIS job
+# red and AWAITABLE in the PR run (Dependabot's own alert is async and not awaitable there).
 on:
   pull_request:
     branches: [main]
 
 # Least privilege at the top level (Scorecard TokenPermissions: a topLevel write
-# permission scores worse than the same permission scoped to job level — W1-T66);
-# the job below passes its own, full permissions block to the reusable workflow.
+# permission scores worse than the same permission scoped to job level — W1-T66).
 permissions:
   contents: read
 
 jobs:
   scan-pr:
-    # R-50: NOT bounded with a job-level `timeout-minutes` here, deliberately -- this job's body
-    # is `uses:` (a reusable-workflow call), and GitHub Actions accepts only
-    # name/uses/with/secrets/needs/if/permissions/strategy on such a job; `timeout-minutes` is
-    # not part of that allowed set and would be a schema violation, not a stricter bound. The
-    # reusable workflow's own job (google/osv-scanner-action) carries whatever timeout its
-    # author set; that is out of this repo's control.
-    #
-    # No actor exemption: a Dependabot PR is exactly the shape of PR that changes dependencies,
-    # so it is exactly the PR this scanner must run on, not skip (W1-T211). Skipping it here was
-    # doubly wrong: it exempted the highest-risk PRs from the dependency scanner, AND (once this
-    # check-run's name is REQUIRED by ci-gate.yml) a skipped `uses:` reusable-workflow caller
-    # registers NO check run under that nested name at all -- ci-gate.yml's own header documents
-    # this as the synthwatch #102 deadlock class -- so exempting the actor would have permanently
-    # blocked every Dependabot PR once ci-gate started awaiting this check instead of racing it.
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
-    with:
-      # Recursively scan the repo (picks up package-lock.json at the root).
-      scan-args: |-
-        -r
-        ./
-      fail-on-vuln: true
+    # Preserve the required context and run for every PR, including Dependabot.
+    name: scan-pr / osv-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # R-50: observed PR runs finish in ~30s; 20m bounds a genuine hang.
     permissions:
       security-events: write
       contents: read
       actions: read
+    steps:
+      # W1-T4401 security hardening: both trees live under source/, while results stay in the
+      # workspace root's results/. A PR controls every path below source/; it cannot add a tracked
+      # symlink at results/new-results.json to overwrite the baseline. Google's upstream v2.6.0
+      # reusable workflow checks out untrusted PR files at workspace root after writing the old
+      # result there; upstream issue #136 documents how a PR symlink can make both results equal.
+      - name: Checkout target branch into isolated source directory
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          path: source
+
+      - name: Prepare isolated scanner result directory
+        run: mkdir -p results
+
+      - name: Run scanner on existing code
+        id: scan-old
+        uses: google/osv-scanner-action/osv-scanner-action@7f58dd6750d78fc29a900ba64b1a0f946f62fba4 # v2.6.0
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=json
+            --output=results/old-results.json
+            -r
+            source
+
+      - name: Checkout pull-request merge commit into isolated source directory
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: source
+
+      - name: Run scanner on proposed code
+        id: scan-new
+        uses: google/osv-scanner-action/osv-scanner-action@7f58dd6750d78fc29a900ba64b1a0f946f62fba4 # v2.6.0
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=json
+            --output=results/new-results.json
+            -r
+            source
+
+      - name: Check that both scans produced results
+        if: always()
+        run: |
+          status=0
+          for result in results/old-results.json results/new-results.json; do
+            if [ ! -s "$result" ]; then
+              echo "::error::OSV-Scanner did not produce $result; refusing to treat an incomplete comparison as clean."
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Compare results and fail on newly introduced vulnerabilities
+        uses: google/osv-scanner-action/osv-reporter-action@7f58dd6750d78fc29a900ba64b1a0f946f62fba4 # v2.6.0
+        with:
+          scan-args: |-
+            --output=results/results.sarif
+            --old=results/old-results.json
+            --new=results/new-results.json
+            --gh-annotations=true
+            --fail-on-vuln=true
+
+      - name: Upload SARIF artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: OSV Scanner SARIF file
+          path: results/results.sarif
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Upload baseline scan results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-old-json-results
+          path: results/old-results.json
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Upload proposed scan results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-new-json-results
+          path: results/new-results.json
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Print Code Scanning PR URL
+        if: ${{ !cancelled() }}
+        run: |
+          echo "View the OSV-Scanner results for this PR in the 'Security' tab:"
+          echo "${{ github.server_url }}/${{ github.repository }}/security/code-scanning?query=pr%3A${{ github.event.pull_request.number }}"
