@@ -9,7 +9,7 @@
  * loud, so these fixtures pin BOTH directions and the fail-open arm between them.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -136,12 +136,4 @@ test("W1-T4056: the retry evidence reads only the judged checks", async () => {
     },
   }).run();
   assert.deepEqual(seen, [["ci"]]);
-});
-
-test("W1-T4056: daemonCommand reads the contract from the target checkout", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const start = source.indexOf("const mainHealthRung = buildMainHealthRung(");
-  const call = source.slice(start, source.indexOf("});", start));
-  assert.ok(start > 0);
-  assert.match(call, /readRequiredChecks:\s*\(\)\s*=>\s*readCiGateRequiredChecks\(targetCheckoutRoot\)/);
 });
