@@ -217,6 +217,18 @@ test("an approved draft with any other lint violation is refused before a PR ope
   assert.equal(missingBand.prCalls(), 0);
 });
 
+test("an approved draft whose sizing repair leaves unparseable YAML is refused as draft-parse before a PR opens", () => {
+  // No `risk:` key but an authored `band_meaning:` — the missing-risk repair appends a second band_meaning,
+  // so the re-parse after repair throws (duplicate map key) and must refuse, not file a broken shard.
+  const approval = approveThroughShardWriter([
+    "- id: W1-T904", "  title: broad task with a meaning but no risk", "  repo: remudero", "  type: implement",
+    "  origin: architect", "  band_meaning: span", "  files: [src/lib/inbox.ts, src/lib/plan.ts]", "",
+  ].join("\n"));
+  assert.throws(() => approval.run(), /refusing to file .* draft-parse: .*unique/i);
+  assert.equal(approval.prCalls(), 0);
+  assert.deepEqual(approval.written, []);
+});
+
 test("W1-T190 (acceptance 1): after approveProposal succeeds — the exact call `rmd approve` makes — a FRESH classification of the SAME proposal, off the SAME ledger, reports it as ratified, never READY again (the registry's own copy of the proposal is UNCHANGED here, exactly the 'write never happened' drift the P19 incident hit)", () => {
   const gateway = fakeGateway();
   const path = ledgerPath();
