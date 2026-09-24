@@ -730,6 +730,12 @@ function runHasConcluded(conclusion: unknown): boolean {
   return typeof conclusion === "string" && conclusion.trim() !== "";
 }
 
+export const CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES = 2_048; // BACKSTOP: a concluded attempt's jobs are immutable
+
+export type ConcludedRunJobsCache = Map<string, ReadonlyArray<{ status?: string }>>;
+
+const concludedRunJobs: ConcludedRunJobsCache = new Map();
+
 /** Observations for one head: every workflow run on it, with jobs attached to the runs that have
  *  already concluded. A run still in progress is reported without jobs, since the predicate cannot
  *  fire on it. Throws only if the run listing itself fails; a per-run jobs failure leaves that run's
@@ -739,9 +745,10 @@ export function fetchWorkflowRunObservations(
   repo: string,
   headSha: string,
   fetch: GhApiFetcher,
+  jobsCache: ConcludedRunJobsCache = concludedRunJobs,
 ): WorkflowRunObservation[] {
   const listing = fetch(runsForHeadRestArgs(owner, repo, headSha)) as {
-    workflow_runs?: ReadonlyArray<{ id?: number; conclusion?: string | null }>;
+    workflow_runs?: ReadonlyArray<{ id?: number; run_attempt?: number; conclusion?: string | null }>;
   };
   const runs = listing?.workflow_runs ?? [];
   const out: WorkflowRunObservation[] = [];
@@ -751,12 +758,21 @@ export function fetchWorkflowRunObservations(
       out.push({ conclusion });
       continue;
     }
-    let jobs: ReadonlyArray<{ status?: string }> | undefined;
+    const key = typeof run.run_attempt === "number" ? `${owner}/${repo}#${run.id}@${run.run_attempt}` : undefined;
+    let jobs: ReadonlyArray<{ status?: string }> | undefined = key === undefined ? undefined : jobsCache.get(key);
+    if (jobs) {
+      out.push({ conclusion, jobs });
+      continue;
+    }
     try {
       const j = fetch(jobsForRunRestArgs(owner, repo, run.id)) as {
         jobs?: ReadonlyArray<{ status?: string | null }>;
       };
       jobs = (j?.jobs ?? []).map((x) => ({ status: typeof x.status === "string" ? x.status : undefined }));
+      if (key !== undefined) {
+        jobsCache.set(key, jobs);
+        if (jobsCache.size > CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES) jobsCache.delete(jobsCache.keys().next().value as string);
+      }
     } catch {
       /* leave `jobs` undefined: "could not check", never "nothing was scheduled" */
     }
