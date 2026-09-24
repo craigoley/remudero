@@ -21,7 +21,7 @@ import { buildWipeTestCadenceDaemonHooks, daemonCommand } from "../src/run-task.
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const NOW = new Date("2026-09-06T12:00:00Z");
-const ON = { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1 };
+const ON = { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1, baseShare: 1, settledHalfWidthTurns: 2 };
 
 function tmp(prefix: string): string {
   // RMD_TMP_PREFIX so src/lib/tmp.ts's sweepStaleTempDirs can reap these on boot — the hook

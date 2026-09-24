@@ -1216,26 +1216,39 @@ ciLearningCadence:
 # (state/last-wipe-test-cadence.json), not folded into measurementCadence, digestCadence,
 # boardReview or ciLearningCadence, so a short interval on one rung never drags another.
 #
-# DEFAULT OFF: one fire dispatches a real sandbox subject twice through the wipe-test pair core.
-# That is real budget spend, so it follows the opt-in posture of machine-writing/spending rungs,
-# not the safe-on posture of read-only report rows.
+# ON since W1-T4092. Off, it had written one `wipetest.pair` row ever, so every usefulness signal
+# was a worker's own claim. One fire still dispatches a sandbox subject twice, so the rate is a
+# SHARE, not a count: every minIntervalMinutes slot is ablated with the chosen factor's share —
+# baseShare x2 while its effect interval is wide, x1/2 once settled, x2 again when the measured
+# effect disagrees with the claimed use (measurement-cadence.ts's wipeTestFactorShares). Only a
+# risk: low subject is eligible. maxPerDay stays the hard ceiling on top.
 #
-# 1440 / 1 matches the intended daily falsifier pulse while leaving the operator one switch to
-# enable it deliberately.
+# 120 / 0.05: 12 slots a day; an unmeasured factor at 0.10 is ~1.2 pairs/day, a settled one at
+# 0.025 is ~0.3/day, a disagreeing uncertain one at 0.20 is ~2.4/day.
 wipeTestCadence:
   enabled:
-    value: false
-    origin: "net-new"   # NOT safe-on: one fire spends two worker dispatches
+    value: true
+    origin: "net-new"   # spends two sandbox dispatches per fire, bounded by baseShare below
   minIntervalMinutes:
-    value: 1440
+    value: 120
     origin: "net-new"
     min: 15
     max: 1440
   maxPerDay:
-    value: 1
+    value: 12
     origin: "net-new"
     min: 1
     max: 24
+  baseShare:
+    value: 0.05
+    origin: "net-new"
+    min: 0
+    max: 1
+  settledHalfWidthTurns:
+    value: 2
+    origin: "net-new"
+    min: 0
+    max: 50
 
 retro:
   mergesThreshold:

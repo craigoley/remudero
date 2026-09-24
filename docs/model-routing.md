@@ -2,16 +2,46 @@
 
 ## Decision
 
-**2026-09-22 model change.** Opus 5.5 replaces Opus 5, GPT-6 Luna replaces GPT-5.6 Luna, and Terra
-is phased out:
+**2026-09-24 balanced-lane guard.** Codex `balanced.low`, `.medium`, and `.high` now offer
+`gpt-6-sol`, then `gpt-5.6-sol`. They do not offer Luna or the retiring `gpt-5.5`. A Sonnet mount
+can execute a multi-turn worker chain at any effort, and its high-effort Sol fallback previously
+dropped to Luna if Sol was unavailable. The high-effort GPT-6 Sol-versus-Sonnet A/B remains tagged
+only when GPT-6 Sol serves the Codex arm, and is scheduled for review on 2026-10-08. The older Sol
+fallback and lower-effort balanced work remain in the headroom auction without that A/B tag.
+Codex economy rows retain Luna for lower-risk work, and frontier work still prefers Claude Opus 5.5.
+Some economy mounts still run multi-turn docs, plan, review, or manual workers; their deterministic
+checks and human review remain necessary. This policy does not claim that every Luna call is a
+single-call classification, or that an unvalidated Luna worker chain is reliable.
+The separate cash ladder still includes Luna on balanced rows and can promote it when both
+subscriptions are blocked. That path is governed by the existing cash cap and tool eligibility;
+this Codex subscription change does not establish an end-to-end ban on balanced Luna spawns.
+
+This change is a safety boundary, not a measured claim that one model fails at a specific rate on
+Remudero tasks. The motivating external test reported four malformed or incorrect Luna outputs in
+50 structured calls and one missed failure in a six-step chain. Four of 50 is 8%, not the 4%
+retry rate claimed in the test summary. Those small, harness-specific samples should prompt a
+fleet comparison, not a claimed production error rate. Remudero has no DeepSeek V4 Flash route to
+replace, and its heartbeat is a script rather than a model call.
+The [Anthropic Terminal-Bench table](https://www.anthropic.com/claude-opus-5-5) compares Opus 5.5
+with GPT-5.6 Sol, not GPT-6 Sol; it cannot by itself establish the quoted 23-point gap for the
+model this router serves.
+OpenAI describes [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) as intended for
+focused, high-volume tasks and [Sol](https://developers.openai.com/api/docs/models/gpt-6-sol) as
+built for complex coding and agentic workflows. The provider's [Structured Outputs guidance](https://developers.openai.com/api/docs/guides/structured-outputs)
+also favors strict schemas and validation over trusting prompt-only JSON formatting. The Codex CLI
+worker route uses model-selected tool calls rather than an API JSON-schema response, so a parser
+retry alone cannot prove a multi-step task completed correctly.
+
+**2026-09-22 model change.** Opus 5.5 replaced Opus 5, GPT-6 Luna replaced GPT-5.6 Luna in
+economy rows, and Terra was phased out:
 
 - Frontier work (`opus`, `claude-opus-5-5`) **prefers Claude**: it runs on Opus 5.5 whenever the
   Claude subscription has headroom, and reaches Codex `gpt-6-sol` only when Claude is below
   reserve or unreadable (`capabilities.provider_preference` in `.remudero/mounts.yaml`). Before
   this, the auction split frontier work by headroom alone, and 84 of 127 Opus-requested runs went
   to `gpt-5.6-sol`.
-- Codex economy and balanced work leads with `gpt-6-luna`; `gpt-5.6-luna` trails as a fallback.
-  Terra is in no Codex row, and Sol is deliberately not added to the balanced rows.
+- Codex economy work leads with `gpt-6-luna` when Spark is unavailable; `gpt-5.6-luna` trails as
+  a fallback. Terra is in no Codex row. The original balanced Luna policy was superseded above.
 - Every assignment an automatic auction decided under that preference records
   `routing.capabilityPreference`; a Sol fallback also records `routing.preferenceBypass`.
 - The cash (Azure) ladder is unchanged: GPT-6 models reach the Codex subscription before Azure.
@@ -21,9 +51,9 @@ The earlier decision follows. Codex balanced work preferred `gpt-5.6-luna`, then
 Frontier work still preferred Sol. The cash provider keeps its own ordered deployments because that ordering is based on
 measured task shapes, context limits, and per-request receipts rather than subscription capacity.
 
-This is a policy experiment, not a claim that Luna is universally the strongest reasoning model.
-Luna is preferred where the current subscription policy asks for balanced capability. Terra remains
-the immediate fallback. A frontier task is not silently lowered to Luna.
+The earlier Luna-first balanced policy was a subscription-capacity experiment. Its task mix and
+terminal receipts remain useful when comparing the new balanced ladder. Neither a subscription
+assignment nor an API list price is an invoice for this fleet.
 
 ## What is measured
 
@@ -72,14 +102,20 @@ The first 30 days after deployment are the comparison window. Compare like-for-l
 risk, routing rule, and provider before promoting or rolling back a model. A raw across-model total
 is not a quality or cost measurement because the task populations can differ.
 
-Official OpenAI model documentation describes GPT-5.6 Luna as cost-sensitive and high-volume. That
-supports testing it in balanced lanes; it does not justify moving frontier work without outcome
-evidence. Source checked 2026-09-18: <https://developers.openai.com/api/docs/models/gpt-5.6-luna>.
+The [current OpenAI list prices](https://developers.openai.com/api/docs/models/gpt-6-sol) put Sol
+at $2 input, $0.20 cached input, and $10 output per million tokens; the corresponding
+[Luna prices](https://developers.openai.com/api/docs/models/gpt-6-luna) are $0.10, $0.01, and
+$0.50. Both apply higher rates above 272K input tokens. Anthropic lists Opus 5.5 at $4 input,
+$0.20 cache reads, and $20 output per million tokens in its
+[launch announcement](https://www.anthropic.com/claude-opus-5-5). These are API list prices,
+while the Codex and Claude routing auction here spends subscriptions. The quoted $4–10 monthly
+personal-agent estimate does not establish Remudero savings.
 
 ## Rollback
 
-The policy switch is the order of `capabilities.codex.balanced` in `.remudero/mounts.yaml`.
-Revert that order through the normal reviewed PR path if the routing aggregate shows a material
-quality, terminal-success, capacity, or latency regression for comparable work. Do not restart or
-recycle a daemon merely to change a mount policy; deployment remains governed by the established
-graceful lifecycle scripts.
+The policy switch is the candidate membership and order of `capabilities.codex.balanced` in
+`.remudero/mounts.yaml`. Review joined terminal receipts by comparable task type, risk, routing
+rule, and provider. Revert through the normal reviewed PR path if the routing aggregate shows a
+material quality, terminal-success, capacity, or latency regression. Do not restart or recycle a
+daemon merely to change a mount policy; deployment remains governed by the established graceful
+lifecycle scripts.

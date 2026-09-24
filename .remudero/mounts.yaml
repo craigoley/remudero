@@ -155,7 +155,7 @@ capabilities:
   # (terra), never a cross-band promotion (W1-T2842 forbids promoting beyond a band without
   # measured task outcomes).
   #
-  # W1-T3762: Luna now LEADS eligible Codex balanced rows, with Terra retained as the immediate
+  # HISTORICAL W1-T3762: Luna led eligible Codex balanced rows, with Terra retained as the immediate
   # same-capability fallback and the existing terminal telemetry as the rollback signal. This is
   # a subscription-capacity policy experiment, not a claim that the non-cash subscription has a
   # per-request dollar price: the aggregate exposes assignment, receipt, success, tokens and
@@ -170,38 +170,41 @@ capabilities:
   # merged ruling to buy nothing. ONLY `balanced.low` changes here, because only it was BROKEN:
   # a single non-visible candidate leaves the row with no eligible model at all.
   #
-  # 2026-09-22 MODEL CHANGE (operator direction): GPT-6 Luna replaces GPT-5.6 Luna, Terra is being
+  # HISTORICAL 2026-09-22 MODEL CHANGE (operator direction): GPT-6 Luna replaces GPT-5.6 Luna, Terra is being
   # phased out, and Sol 6 is used "only if absolutely necessary". MEASURED the same day against this
   # account's `model/list` from the daemon container: gpt-6-luna, gpt-6-sol and gpt-6-astra (the
   # account default) are visible, beside gpt-5.6-sol/terra/luna and gpt-5.5. Every model shares ONE
   # quota bucket (`codex`), so headroom ties and ROW ORDER decides -- a trailing entry really is
   # reached only when the ones ahead are absent or cannot serve the effort.
-  # - gpt-6-luna LEADS every row gpt-5.6-luna led; gpt-5.6-luna TRAILS it (demoted, not deleted --
+  # - gpt-6-luna LED every row gpt-5.6-luna led; gpt-5.6-luna TRAILED it (demoted, not deleted --
   #   the gpt-5.5 lesson: a row whose only candidate vanishes silently moves the lane to Claude).
   # - TERRA IS REMOVED from every Codex row. It was last SELECTED on 2026-09-14; every Codex pick
-  #   since 2026-09-19 was Luna. A balanced lane with no eligible Luna now falls to Claude.
-  # - SOL IS NOT ADDED TO balanced: with no Luna, a trailing Sol would win the auction against Claude
-  #   by headroom, which is the opposite of "only if absolutely necessary".
+  #   since 2026-09-19 was Luna. At that time, a balanced lane with no eligible Luna fell to Claude.
+  # - Sol was initially absent from balanced; the 2026-09-24 follow-up below supersedes this.
   # - frontier leads with gpt-6-sol, but `provider_preference` below sends frontier work to Claude
   #   (Opus 5.5) whenever Claude has headroom, so this row is reached only when Claude is blocked.
   # gpt-6-astra is deliberately NOT routed: no operator ruling places it yet.
   #
-  # 2026-09-24 (operator ruling, DECISIONS.md): SOL vs SONNET IS AN A/B. `balanced.high` -- every
-  # sonnet/high mount (medium-risk implement, fix, diagnose, reviewer) -- leads with gpt-6-sol, so the
-  # headroom auction splits that work between Claude Sonnet and Codex Sol independently of the task.
-  # Each such assignment carries routing.decision.ab "sol-vs-sonnet"; `rmd routing-ab` compares the
-  # arms. Same list price ($2/$10 per 1M); Artificial Analysis index 47.5 vs 38.2; no shared coding
-  # benchmark and no in-house Sol implement record, hence a test rather than a switch. REVISIT
-  # 2026-10-08. This supersedes the "no Sol in balanced" line above for the high row only.
+  # 2026-09-24 (operator ruling, DECISIONS.md): SOL vs SONNET IS AN A/B on `balanced.high`.
+  # Every sonnet/high assignment that could use either arm carries routing.decision.ab
+  # "sol-vs-sonnet"; `rmd routing-ab` compares them. REVISIT 2026-10-08.
+  #
+  # 2026-09-24 follow-up: every balanced Codex row now has Sol-class candidates only. A Sonnet
+  # mount can perform a multi-turn worker chain, even at low or medium effort. Luna's low price
+  # and focused-task design do not establish that it can safely finish such a chain, and a
+  # fallback from Sol to Luna would silently lower a high-effort worker when Sol is unavailable.
+  # Luna remains on economy rows. This is a capability boundary,
+  # not a claim that the anecdotal failure rates generalize to this fleet. The existing high-effort
+  # A/B remains live; low/medium balanced work also remains a headroom auction, without an A/B tag.
   codex:
     economy:
       low:    [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
       medium: [gpt-6-luna, gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
       high:   [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
     balanced:
-      low:    [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
-      medium: [gpt-6-luna, gpt-5.6-luna, gpt-5.5]
-      high:   [gpt-6-sol, gpt-6-luna, gpt-5.6-luna, gpt-5.5]
+      low:    [gpt-6-sol, gpt-5.6-sol]
+      medium: [gpt-6-sol, gpt-5.6-sol]
+      high:   [gpt-6-sol, gpt-5.6-sol]
     frontier:
       low:    [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
       medium: [gpt-6-sol, gpt-5.6-sol, gpt-5.5]

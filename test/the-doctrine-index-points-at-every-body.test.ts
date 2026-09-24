@@ -15,6 +15,7 @@ import {
   resolveRuleBodyPointer,
 } from "../src/lib/learnings.js";
 import { buildRuleHeadlinesPart, followRuleBodyPointer } from "../src/run-task.js";
+import { computeMeaningHash, verifyDoctrineReword } from "../src/lib/doctrine-lifecycle.js";
 
 // ── W1-T3323: CLAUDE.md is an INDEX and doctrine/ holds the evidence ─────────────────────────────
 //
@@ -49,9 +50,13 @@ const MANIFEST = join(REPO_ROOT, "test", "fixtures", "doctrine-pre-migration-W1-
 const DOCTRINE_DIR = join(REPO_ROOT, "doctrine");
 
 interface FrozenRule {
+  id: string;
   headline: string;
   bodyBytes: number;
   bodySha256: string;
+  meaningHash: string;
+  refrozenAt?: string;
+  refrozenReason?: string;
 }
 
 const manifest = JSON.parse(readFileSync(MANIFEST, "utf8")) as {
@@ -188,7 +193,12 @@ test("W1-T3323 (2): every rule the pre-migration file carried is still resolvabl
   assert.deepEqual(lost, [], "rules present before the migration and absent after it");
 });
 
-test("W1-T3323 (3): each body is byte-identical to the one frozen before the move", () => {
+test("W1-T3323 (3): each body is byte-identical to the one frozen before the move, OR its row records why (W1-T4097)", () => {
+  // W1-T4097: doctrine now freezes each row's ID and MEANING, not its wording — a body MAY drift
+  // from `bodySha256` when the row's own `refrozenReason` says why and its `meaningHash` still
+  // matches its own headline (verifyDoctrineReword, lib/doctrine-lifecycle.ts). An UNREASONED
+  // drift is still refused exactly as before; this only adds the reviewed-edit escape hatch the
+  // fixture's own `_comment` has always described.
   const resolved = parseRuleHeadlines(resolveDoctrineForReader(readIndex));
   const byHeadline = new Map(resolved.map((r) => [r.headline, r.body.replace(/\n+$/, "")]));
 
@@ -197,11 +207,59 @@ test("W1-T3323 (3): each body is byte-identical to the one frozen before the mov
     const body = byHeadline.get(frozen.headline);
     if (body === undefined) continue; // (2) owns absence; this test owns CONTENT
     const sha = createHash("sha256").update(body, "utf8").digest("hex");
+    const verdict = verifyDoctrineReword(frozen, sha);
+    if (!verdict.ok) {
+      drifted.push(`${frozen.headline.slice(0, 60)} (${frozen.bodyBytes} -> ${Buffer.byteLength(body)} bytes): ${verdict.reason}`);
+      continue;
+    }
+    // Even a JUSTIFIED reword must still match its OWN recorded bodyBytes/bodySha256 — those two
+    // fields describe THIS row's live body, not an older one; only the PERMISSION to have moved
+    // comes from verifyDoctrineReword, never a licence to also drift from what the row itself claims.
     if (sha !== frozen.bodySha256 || Buffer.byteLength(body) !== frozen.bodyBytes) {
-      drifted.push(`${frozen.headline.slice(0, 60)} (${frozen.bodyBytes} -> ${Buffer.byteLength(body)} bytes)`);
+      drifted.push(`${frozen.headline.slice(0, 60)} (${frozen.bodyBytes} -> ${Buffer.byteLength(body)} bytes): row's own bodySha256/bodyBytes is stale`);
     }
   }
-  assert.deepEqual(drifted, [], "a rule body was REWRITTEN by the move, not moved");
+  assert.deepEqual(drifted, [], "a rule body was REWRITTEN by the move, not moved (or reworded with no reason recorded)");
+});
+
+test("W1-T3323 (3) CONTROL — verifyDoctrineReword really refuses an unreasoned drift, and really permits a reasoned one", () => {
+  // UNHEALTHY arm: bytes moved, no refrozenReason — refused.
+  const unreasoned = verifyDoctrineReword(
+    { id: "x", headline: "A RULE", bodyBytes: 1, bodySha256: "aaa", meaningHash: computeMeaningHash("A RULE") },
+    "bbb",
+  );
+  assert.equal(unreasoned.ok, false);
+  assert.match((unreasoned as { ok: false; reason: string }).reason, /no refrozenReason recorded/);
+
+  // HEALTHY arm: bytes moved, reason recorded, meaning intact — permitted.
+  const reasoned = verifyDoctrineReword(
+    {
+      id: "x",
+      headline: "A RULE",
+      bodyBytes: 1,
+      bodySha256: "aaa",
+      meaningHash: computeMeaningHash("A RULE"),
+      refrozenReason: "typo fixed",
+    },
+    "bbb",
+  );
+  assert.equal(reasoned.ok, true);
+
+  // UNHEALTHY arm: the row's own meaningHash does not match its own headline — refused regardless
+  // of a reason, because the row's bookkeeping cannot be trusted.
+  const inconsistent = verifyDoctrineReword(
+    { id: "x", headline: "A RULE", bodyBytes: 1, bodySha256: "aaa", meaningHash: "not-a-real-hash", refrozenReason: "typo fixed" },
+    "bbb",
+  );
+  assert.equal(inconsistent.ok, false);
+  assert.match((inconsistent as { ok: false; reason: string }).reason, /meaningHash does not match its own headline/);
+
+  // Untouched bytes are always fine, reason or not.
+  assert.equal(
+    verifyDoctrineReword({ id: "x", headline: "A RULE", bodyBytes: 1, bodySha256: "aaa", meaningHash: computeMeaningHash("A RULE") }, "aaa")
+      .ok,
+    true,
+  );
 });
 
 test("W1-T3323 (3): CONTROL — the digest comparison really discriminates; one added character reddens it", () => {
