@@ -63,15 +63,12 @@ test("an implement task resolves its max_turns FROM .remudero/mounts.yaml (the f
   assert.equal(typeof hi.effort, "string");
 });
 
-// The Terra fallback W1-T3762 kept was retired by the 2026-09-22 model change (Terra phased out);
-// the balanced row keeps a same-capability Luna fallback instead.
-test("W1-T3762 criterion 3: the committed Codex balanced ladder is Luna-first with a Luna fallback, while frontier stays Sol-first", () => {
+test("the committed Codex ladder keeps Luna on economy work and out of every balanced chain", () => {
   const capabilities = loadMounts(mountsPath(repoRoot)).capabilities;
   assert.ok(capabilities, "the committed provider-neutral capability ladder must load");
   for (const effort of ["low", "medium", "high"] as const) {
-    // Operator ruling 2026-09-24 (the Sol-vs-Sonnet A/B) puts gpt-6-sol ahead of the Luna pair on high only.
-    const lunaPair: string[] = effort === "high" ? capabilities.codex.balanced[effort].slice(1, 3) : capabilities.codex.balanced[effort].slice(0, 2);
-    assert.deepEqual(lunaPair, ["gpt-6-luna", "gpt-5.6-luna"], `balanced/${effort} must keep GPT-6 Luna with GPT-5.6 Luna as its immediate fallback`);
+    assert.ok(capabilities.codex.economy[effort].includes("gpt-6-luna"), `economy/${effort} must retain Luna`);
+    assert.deepEqual(capabilities.codex.balanced[effort], ["gpt-6-sol", "gpt-5.6-sol"], `balanced/${effort} must have only Sol candidates`);
     assert.equal(capabilities.codex.frontier[effort][0], "gpt-6-sol", `frontier/${effort} must not be silently demoted`);
   }
 });

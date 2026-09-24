@@ -11,7 +11,7 @@
   origin: "oper#review-latency-research-2026-09-22"
   plan_refs: [W1-T2865, W1-T2964, W1-T4045, W1-T2852]
   files: [src/lib/daemon.ts, test/a-freshness-drain-keeps-reviewing.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 FROM THE LEDGER UNION over 2026-09-19..22 (`daemon.freshness_drain.*`,

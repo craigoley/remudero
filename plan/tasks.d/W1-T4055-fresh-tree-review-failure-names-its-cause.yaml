@@ -11,7 +11,7 @@
   origin: "oper#review-latency-research-2026-09-22"
   plan_refs: [W1-T3697, W1-T3691, W1-T3618]
   files: [src/run-task.ts, test/a-fresh-tree-review-failure-names-its-cause.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 FROM THE LEDGER UNION. On 2026-09-20 and 2026-09-21 the fresh-tree review path

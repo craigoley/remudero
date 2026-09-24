@@ -14,7 +14,7 @@
   files:
     - src/lib/provider-routing-status.ts
     - src/lib/live-analytics-snapshot-cache.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24 on the fleet host: state/provider-routing-status.json (the same file in remudero-daemon

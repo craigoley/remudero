@@ -81,18 +81,17 @@ test("an absent, unsupported, or below-reserve Spark is bypassed for eligible Lu
   assert.equal(select([SPARK, LUNA], limits(96, 35)).model, "gpt-5.6-luna", "below reserve");
 });
 
-test("Spark stays in economy while balanced rows are Luna-first and frontier remains Sol-first", () => {
-  // gpt-5.5 is being decommissioned (2026-09-14), so it is a TRAILING fallback in every row and
-  // leads none. `frontier.low` no longer names it alone: a single-candidate row whose only model
+test("Spark and Luna stay in economy while balanced and frontier rows remain Sol-first", () => {
+  // gpt-5.5 is being decommissioned (2026-09-14), so it remains only as a trailing frontier
+  // fallback and leads no row. `frontier.low` no longer names it alone: a single-candidate row whose only model
   // stops being offered makes Codex read `readable:false`, which silently migrates that lane onto
   // Claude rather than failing loudly. Spark's economy containment below is unchanged.
-  // 2026-09-22 model change: GPT-6 Luna leads balanced with GPT-5.6 Luna behind it, Terra is
-  // phased out of every Codex row, and frontier is Sol 6 first. The exact shape below is a
-  // regression guard against a future stale assertion reverting the committed mount policy.
+  // The balanced worker can run a multi-turn chain, so its Codex ladder must not fall to Luna.
+  // The exact shape below guards the 2026-09-24 operator follow-up.
   assert.deepEqual(CAPABILITIES.codex.balanced, {
-    low: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
-    medium: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
-    high: ["gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
+    low: ["gpt-6-sol", "gpt-5.6-sol"],
+    medium: ["gpt-6-sol", "gpt-5.6-sol"],
+    high: ["gpt-6-sol", "gpt-5.6-sol"],
   });
   assert.deepEqual(CAPABILITIES.codex.frontier, {
     low: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
