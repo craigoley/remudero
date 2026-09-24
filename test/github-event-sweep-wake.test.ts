@@ -68,19 +68,19 @@ test("pull-request review changes that alter merge eligibility all wake reconcil
   assert.equal(isAllowlistedGithubEvent("pull_request_review", "dismissed"), true);
 });
 
-test("the bounded delivery set survives a serve-process restart", () => {
+test("the bounded delivery set survives a serve-process restart", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-dedup-"));
   const path = join(root, "state", "github-webhook-deliveries.json");
   try {
     const first = createPersistentDeliveryDedupStore(path, 2);
     assert.equal(first.has("delivery-a"), false);
-    first.record("delivery-a");
-    first.record("delivery-b");
+    await first.record("delivery-a");
+    await first.record("delivery-b");
 
     const restarted = createPersistentDeliveryDedupStore(path, 2);
     assert.equal(restarted.has("delivery-a"), true);
     assert.equal(restarted.has("delivery-b"), true);
-    restarted.record("delivery-c");
+    await restarted.record("delivery-c");
 
     const bounded = createPersistentDeliveryDedupStore(path, 2);
     assert.equal(bounded.has("delivery-a"), false);
@@ -99,13 +99,13 @@ test("the in-memory delivery window evicts its oldest accepted id at capacity", 
   assert.equal(store.has("delivery-c"), true);
 });
 
-test("persistent delivery writes remove a staged temp after rename failure without poisoning memory", () => {
+test("persistent delivery writes remove a staged temp after rename failure without poisoning memory", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-dedup-rename-failure-"));
   const path = join(root, "state", "deliveries.json");
   mkdirSync(path, { recursive: true });
   const store = createPersistentDeliveryDedupStore(path, 2);
   try {
-    assert.throws(() => store.record("delivery-a"));
+    await assert.rejects(async () => store.record("delivery-a"));
     assert.equal(store.has("delivery-a"), false);
     assert.deepEqual(readdirSync(dirname(path)).sort(), ["deliveries.json"], "the failed atomic write leaves no temp file");
   } finally {
@@ -113,12 +113,12 @@ test("persistent delivery writes remove a staged temp after rename failure witho
   }
 });
 
-test("persistent delivery cleanup preserves the original write error when no temp file exists", () => {
+test("persistent delivery cleanup preserves the original write error when no temp file exists", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-dedup-write-failure-"));
   const path = join(root, "x".repeat(300));
   const store = createPersistentDeliveryDedupStore(path, 2);
   try {
-    assert.throws(() => store.record("delivery-a"));
+    await assert.rejects(async () => store.record("delivery-a"));
     assert.equal(store.has("delivery-a"), false);
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -1,0 +1,45 @@
+- id: W1-T4450
+  title: "62 OF 65 FIX ROUNDS IN A DAY LANDED NOTHING — the harness commit refuses the regenerable baseline edits the fix prompt and scope guard allow, the fix lane never re-asks for a missing COMMIT_MESSAGE line the way implement does (W1-T4052), and every round's transcript is archived as fix-1 so the evidence overwrites itself; land the work a fix round actually did"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-24: get PRs through the process quicker — automated flow and self-improvement; follow-up found in the fix lane"
+  plan_refs: [W1-T4052, W1-T3015, W1-T4207, W1-T3079]
+  files: [src/run-task.ts, test/a-fix-round-that-did-the-work-lands-it.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 over the fix.done rows since 2026-09-23T15:59Z: 65 fix rounds, 62 ended commit_refused
+    and 3 succeeded; the refused rounds cost $73.51 and 16 of them ended at $0. fix.commit_refused reasons over the same
+    window: 37 "no anchored COMMIT_MESSAGE line in the report", 12 "the worker changed nothing", 9 "every change the
+    worker made is outside its declared files", 8 "the task declares no files".
+    OBSERVED: the W1-T4385 round refused at 10:56:48Z as "outside its declared files" had done exactly what the failing
+    census asked, adding the missing scripts/comment-load-baseline.json row, which its REPORT cites as the
+    REGENERABLE_ARTIFACT_GENERATORS exception. renderFixPrompt and scopeGuardOutOfScopeFiles honour that registry, but
+    commitWorkerEdits stages only pathIsUnderDeclaredSurface paths, so the one edit the gate demands can never land
+    (the W1-T3015 trap, still open in the commit path).
+    OBSERVED: the fix lane calls harnessCommitForShellLessWorker but never resumeForMissingCommitLine, so W1-T4052's single
+    re-ask reaches implement only. Archived fix transcripts are named fix-${attempt}, so every fix invocation within one
+    daemon run writes fix-1.md and the missing-line rounds' own transcripts are lost; the surviving archives parse cleanly.
+  design: |
+    (i) commitWorkerEdits also stages a changed path registered in REGENERABLE_ARTIFACT_GENERATORS, the same exception the
+    prompt and scope guard already grant, and ledgers which registered paths it staged. (ii) The fix lane runs
+    resumeForMissingCommitLine after its harness commit exactly as implement does: one re-ask, same session, the same
+    refusal if still absent. (iii) A missing-line refusal ledgers a bounded tail of the report it parsed, so the next
+    diagnosis has evidence. (iv) Fix transcripts are archived under a per-round name (strike and time), never overwriting
+    an earlier round of the same run.
+  acceptance:
+    - claim: "a fix round's regenerable baseline edit is committed"
+      proof: 'grep: test("W1-T4450: a fix round''s regenerable baseline edit is committed" in test/a-fix-round-that-did-the-work-lands-it.test.ts'
+    - claim: "the fix lane re-asks once for a missing commit line"
+      proof: 'grep: test("W1-T4450: the fix lane re-asks once for a missing commit line" in test/a-fix-round-that-did-the-work-lands-it.test.ts'
+    - claim: "each fix round keeps its own transcript"
+      proof: 'grep: test("W1-T4450: each fix round keeps its own transcript" in test/a-fix-round-that-did-the-work-lands-it.test.ts'
+  falsifier: |
+    Stage only declared paths and the first test finds the comment-load baseline row left uncommitted.

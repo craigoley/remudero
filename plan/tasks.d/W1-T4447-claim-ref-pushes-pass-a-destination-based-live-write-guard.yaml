@@ -9,7 +9,7 @@
   budget_usd: 25.00
   risk: high
   band_meaning: span
-  origin: "2026-09-24 console/daemon incident follow-up: the refs/rmd-pause/hold leak and stray fixture reservations on the live origin"
+  origin: "2026-09-24 console/daemon incident follow-up: the shared pause hold leaked by a worker's test run"
   plan_refs: ["W1-T143"]
   files:
     - src/lib/live-write-guard.ts
@@ -19,12 +19,11 @@
   status: queued
   attempts: 0
   rationale: |
-    OBSERVED 2026-09-24: `git ls-remote origin 'refs/rmd-id/W1-T100000*'` on the live repo returns
-    refs/rmd-id/W1-T1000002 (2e465efa) and refs/rmd-id/W1-T1000003 (3f5e60cf). Their anchors read "rmd-id
-    reservation 170677@b79658d95089 2026-08-19T15:15:4x", which are fixture-range ids leaked by a test run.
-    On the same day the same class of leak pushed refs/rmd-pause/hold from a worker worktree's test run and held
-    the fleet for about 4h. PR #6949 (open at filing) guards ONLY that pause push, through assertLiveWriteAllowed
-    in realSharedPauseGitDeps.run.
+    OBSERVED 2026-09-24: a worker worktree's test run wrote the shared pause hold to the live origin and held
+    the fleet for about 4h. PR #6949 guards ONLY that pause write, through assertLiveWriteAllowed in
+    realSharedPauseGitDeps.run. No leaked claim ref has been found: a sweep of all 2,210 refs/rmd-id/* anchors
+    found only well-formed ids, and W1-T1000002/W1-T1000003 (first read as fixtures) are real triage-filed
+    tasks (#2227). This task closes the same class before a claim ref leaks, rather than repairing one that did.
     Read at main: gitRemoteRefReserver (src/lib/task-id-reservation.ts), gitTriageClaimReserver
     (src/lib/auto-triage.ts), and gitDispatchClaimReserver / gitRepairClaimReserver (src/lib/dispatch-claim.ts)
     each push a claim ref through their injected git run to the checkout's origin. None of these files imports
@@ -40,9 +39,6 @@
     those suites keep working unchanged. LIVE_WRITE_OVERRIDE_ENV and withLiveWritesAllowed still apply.
     (ii) The four reservers call it immediately before their push. They resolve the origin URL through the same
     injected git run (`remote get-url origin`) so it stays testable.
-    (iii) OPERATOR STEP, NOT CODE: delete the two stray refs once this merges:
-    `git push origin :refs/rmd-id/W1-T1000002 :refs/rmd-id/W1-T1000003`. First confirm that no plan task holds
-    either id.
     Out of scope: the pause push (#6949), and gh-API writes, which are already guarded.
   acceptance:
     - claim: "a claim-ref push to a network origin is refused under the test runner"

@@ -9028,9 +9028,10 @@ export async function runSweep(
     // classified the PR base-caused AND a main tip was actually read.
     baseCausedMainTipSha: string | undefined = undefined,
   ): void {
-    if (standDownReason) {
-      // The site the TASK names ("a sweep disposition"), naming the state — never silent: a caller
-      // diffing the ledger sees exactly why a blocked-fixable disposition spent nothing this pass.
+    // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
+    // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
+    // under --dry-run, where that row is skipped and they are the pass's sole trace.
+    if (standDownReason && deps.dryRun) {
       log("sweep.dispose.not_open", { pr_number: pr.prNumber, reason: standDownReason });
     }
 
@@ -9046,19 +9047,18 @@ export async function runSweep(
       ...(spent !== undefined ? { spent } : {}),
     };
 
-    log("sweep.dispose", {
-      pr_number: pr.prNumber,
-      disposition,
-      acted,
-      reason,
-      deduped,
-      ...(actionError ? { action_error: actionError } : {}),
-      // W1-T254: THIS line fires unconditionally through the injected `log`, which the real wiring
-      // persists to the SAME ledger regardless of `--dry-run`. Tagged so a preview pass is never
-      // mistaken for a daemon action — the exact ambiguity that misread one during the #707
-      // diagnosis.
-      ...(deps.dryRun ? { dry_run: true } : {}),
-    });
+    // W1-T254: tagged so a preview pass is never mistaken for a daemon action (the #707 misread).
+    if (deps.dryRun) {
+      log("sweep.dispose", {
+        pr_number: pr.prNumber,
+        disposition,
+        acted,
+        reason,
+        deduped,
+        ...(actionError ? { action_error: actionError } : {}),
+        dry_run: true,
+      });
+    }
 
     // One ledger line per disposition (the INVARIANT). Skipped under --dry-run, because a preview
     // must leave no trace. The rendered question rides along whenever one exists: an UNANSWERED
@@ -9077,6 +9077,7 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        ...(deduped ? { deduped: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason ? { stand_down_reason: standDownReason } : {}),

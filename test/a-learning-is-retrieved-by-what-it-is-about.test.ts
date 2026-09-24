@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +95,27 @@ test("W1-T4093: collectSourceSymbols reads real declarations from a source tree,
 test("W1-T4093: collectSourceSymbols against a missing root is a non-fatal empty set", () => {
   const missing = join(tmpdir(), `${RMD_TMP_PREFIX}does-not-exist-src-${Date.now()}`);
   assert.deepEqual([...collectSourceSymbols(missing)], []);
+});
+
+test("W1-T4093: collectSourceSymbols against a root that is not a directory throws instead of reading as empty", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}knowledge-symbols-notdir-`));
+  const file = join(dir, "not-a-dir.ts");
+  writeFileSync(file, "export function hiddenInAFile() {}\n");
+  assert.throws(() => collectSourceSymbols(file), (err: NodeJS.ErrnoException) => err.code === "ENOTDIR");
+});
+
+test("W1-T4093: collectSourceSymbols skips a source file that is gone by read time and still reads its siblings", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}knowledge-symbols-gone-`));
+  writeFileSync(join(root, "kept.ts"), "export function stillDeclared() {}\n");
+  symlinkSync(join(root, "no-such-target.ts"), join(root, "gone.ts"));
+  assert.deepEqual([...collectSourceSymbols(root)], ["stillDeclared"]);
+});
+
+test("W1-T4093: collectSourceSymbols throws on a source file that exists but cannot be read, never a partial tree", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}knowledge-symbols-loop-`));
+  writeFileSync(join(root, "kept.ts"), "export function stillDeclared() {}\n");
+  symlinkSync(join(root, "loop.ts"), join(root, "loop.ts"));
+  assert.throws(() => collectSourceSymbols(root), (err: NodeJS.ErrnoException) => err.code === "ELOOP");
 });
 
 // ── (ii) A TASK TOUCHING ONE FUNCTION MATCHES ONLY FACTS ABOUT THAT FUNCTION ─────────────────────

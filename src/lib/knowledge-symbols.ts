@@ -77,15 +77,17 @@ function fileSymbols(text: string): string[] {
 }
 
 /**
- * Recursively list source files under `root` this module reads declarations from. A missing
- * `root` yields `[]` rather than throwing — the same non-fatal-absence discipline
- * {@link loadLearningsCorpus} uses for a missing learnings directory.
+ * Recursively list source files under `root` this module reads declarations from. A MISSING
+ * `root` (ENOENT) yields `[]` — the same non-fatal-absence discipline {@link loadLearningsCorpus}
+ * uses for a missing learnings directory. Any other failure rethrows: an unreadable root is not an
+ * empty one.
  */
 function listSourceFiles(root: string): string[] {
   let entries: string[];
   try {
     entries = readdirSync(root, { recursive: true }) as string[];
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return [];
   }
   return entries
@@ -97,8 +99,9 @@ function listSourceFiles(root: string): string[] {
 /**
  * The known-symbol "tree" a derived candidate is checked against (design note (i): "checked
  * against the tree, like `assertion:` is"): every identifier declared anywhere under `root`
- * (default `src/`). A file that fails to read is skipped, never fatal — one unreadable file must
- * not blank out the whole known-symbol set.
+ * (default `src/`). A file that is GONE by read time (ENOENT, e.g. a dangling symlink) declares
+ * nothing and is skipped; any other read failure rethrows, because a silently partial tree makes
+ * scripts/learnings-derive-symbols.mjs strip symbols that still exist.
  */
 export function collectSourceSymbols(root: string): Set<string> {
   const symbols = new Set<string>();
@@ -106,7 +109,8 @@ export function collectSourceSymbols(root: string): Set<string> {
     let text: string;
     try {
       text = readFileSync(path, "utf8");
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       continue;
     }
     for (const symbol of fileSymbols(text)) symbols.add(symbol);
