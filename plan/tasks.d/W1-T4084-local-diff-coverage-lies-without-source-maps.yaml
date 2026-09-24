@@ -15,7 +15,9 @@
     - scripts/diff-coverage-local.mjs
     - package.json
     - test/local-diff-coverage-matches-ci.test.ts
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4084 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 in one session, both directions: a hand-rolled `node --experimental-test-coverage`
