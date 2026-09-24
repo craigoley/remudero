@@ -24,6 +24,8 @@ import { test } from "node:test";
 import { collectSourceSymbols, deriveFactSymbols, extractIdentifierCandidates } from "../src/lib/knowledge-symbols.js";
 import { selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+// @ts-expect-error -- plain .mjs script, no type declarations
+import { loadShardEntries, writeSymbolsInText } from "../scripts/learnings-derive-symbols.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -249,4 +251,32 @@ test("learnings-derive-symbols derives symbols additively, drops a stale one, an
   const check = runScript(["--dir", dir, "--src", srcDir, "--check"]);
   assert.equal(check.status, 0, check.out);
   assert.match(check.out, /OK/);
+});
+
+test("learnings-derive-symbols loadShardEntries reads an empty shard as no entries and refuses each malformed shape by name", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}derive-symbols-load-`));
+  const shard = (name: string, body: string) => {
+    const path = join(dir, name);
+    writeFileSync(path, body);
+    return path;
+  };
+  assert.deepEqual(loadShardEntries(shard("empty.yaml", "")), []);
+  assert.throws(() => loadShardEntries(shard("map.yaml", "id: x\n")), /must be a YAML list of entries/);
+  assert.throws(() => loadShardEntries(shard("scalar.yaml", "- just-a-string\n")), /entry 0 must be a mapping/);
+  assert.throws(() => loadShardEntries(shard("noid.yaml", "- fact: f\n")), /entry 0 missing required non-empty 'id'/);
+  assert.throws(() => loadShardEntries(shard("nofact.yaml", "- id: a\n")), /entry "a" missing required non-empty 'fact'/);
+  assert.throws(
+    () => loadShardEntries(shard("badsym.yaml", "- id: a\n  fact: f\n  symbols: [1]\n")),
+    /entry "a": 'symbols' must be a list of strings/,
+  );
+});
+
+test("learnings-derive-symbols writeSymbolsInText removes an emptied symbols: line and inserts a new one after files:, else after the id", () => {
+  const withLine = "- id: a\n  files: [x]\n  symbols: [gone]\n  fact: f\n- id: b\n  fact: g\n";
+  assert.equal(writeSymbolsInText(withLine, "a", []), "- id: a\n  files: [x]\n  fact: f\n- id: b\n  fact: g\n");
+  const withFiles = "- id: a\n  files: [x]\n  fact: f\n";
+  assert.equal(writeSymbolsInText(withFiles, "a", ["newSym"]), "- id: a\n  files: [x]\n  symbols: [newSym]\n  fact: f\n");
+  const bare = "- id: a\n  fact: f\n";
+  assert.equal(writeSymbolsInText(bare, "a", ["newSym"]), "- id: a\n  symbols: [newSym]\n  fact: f\n");
+  assert.throws(() => writeSymbolsInText(bare, "missing", ["x"]), /entry 'missing' not found/);
 });
