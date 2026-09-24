@@ -1,0 +1,61 @@
+- id: W1-T4477
+  title: "worktreeAdd RUNS ITS GIT FETCH AND WORKTREE ADD SYNCHRONOUSLY INSIDE THE DAEMON — a dispatch runs in-process, so every `worktree.add` is followed by a `daemon.loop_lag` row; give the daemon-resident callers an async worktreeAdd with the same steps, rows and refusals"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 core daemon CPU-profile session (follow-up to #7011, #7016, #7017)"
+  plan_refs: ["W1-T4380", "W1-T4075", "W1-T2621", "W1-T405", "W1-T4356"]
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-24 in the same live CPU profile of the core daemon that led to #7011, #7016 and #7017: the
+    `daemon.loop_lag` rows that follow a `worktree.add` row are worktreeAdd's own git work, run on the event loop.
+    OBSERVED ON MAIN. worktreeAdd (src/lib/worker.ts) is synchronous. It runs `git fetch origin` and `git worktree
+    add` through execFileSync, then `rev-parse`, a fresh `git ls-remote` (defaultReadRemoteHead) for the currency
+    check, `rev-list --count` and `git config --worktree`. Only worktreeAdd emits the `worktree.add` row. The daemon
+    dispatches a task in-process (`runOne` -> runTask, as W1-T4380 recorded), and runTaskBody calls worktreeAdd on
+    the implement and fix path. The alert-fix lane (dispatchAlertFixRun) calls it through
+    AlertFixDispatchDeps.worktreeAdd. While any of those git calls runs, the sweep, the PR pump and every timer in
+    the container wait.
+    THERE IS NO TIMEOUT TODAY. worktreeAdd passes none to its git calls. This task keeps that. Adding a bound would
+    change what a slow fetch does and is a separate decision.
+    NOT THIS TASK. W1-T4380 owns the satellite `npm ci` inside worktreeAdd. createFixRungWorktree (the sweep's
+    dispatchFix checkout) runs its own synchronous fetch and `worktree add` but writes no `worktree.add` row, so it
+    is not the measured site. It is a follow-up if a profile names it.
+  design: |
+    (i) src/lib/worker.ts: add `worktreeAddAsync` with worktreeAdd's signature and deps, returning a Promise. It runs
+    the SAME steps in the SAME order through a promisified execFile: fetch, the local ref read, `worktree add -b
+    --no-track`, the base read and recordWorktreeBase, assertWorktreeBaseCurrent with an async remote-head read,
+    the `worktree.add` row, hooksPath, the node_modules exclude and links, and the drift record. The ledger rows,
+    their fields, WorktreeBaseStaleError and the lockfile refusal are byte-identical. Output that the sync form
+    inherits (fetch and `worktree add`) is forwarded to stderr. Share the non-git steps with worktreeAdd rather than
+    copy them. The sync form stays for the CLI callers.
+    (ii) src/run-task.ts: runTaskBody's worktree creation and dispatchAlertFixRun await the async form. In
+    runTaskBody it runs while the managed-checkout lock is held (W1-T4356), and it must still release on every path
+    it releases on today. Once the loop is free, another tick can run during the add, so a claim or lock that
+    the sync call used to cover by blocking must be held explicitly.
+    (iii) Several tests locate the first `worktreeAdd(` in src/run-task.ts to prove guard order (task-linter-wiring,
+    containment-wiring, dispatch-claim, worktree-reap-boot-rung, one-shot-disk-reclaim-rung), and
+    src/lib/worktree-sites.ts registers every creation site. Keep each scan pointing at the real call and keep its
+    order assertion. Do not loosen any of them.
+  acceptance:
+    - claim: "a timer fires while the async worktree add is waiting on git"
+      proof: "unit test: a timer fires while an async worktree add waits on git"
+    - claim: "the async add ledgers the same worktree.add row as the sync add"
+      proof: "unit test: the async worktree add ledgers the same row as the sync add"
+    - claim: "the async add still refuses a stale base"
+      proof: "unit test: the async worktree add still refuses a stale base"
+    - claim: "runTaskBody awaits the async add"
+      proof: "grep: await worktreeAddAsync( in src/run-task.ts"
+  falsifier: |
+    CLOSE IF a week of core ledger shows no `daemon.loop_lag` row within 60 s after a `worktree.add` row, or if
+    W1-T4075's read plane has already moved dispatch off the main thread.

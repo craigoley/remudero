@@ -16,17 +16,23 @@ const workflow = parse(readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'),
   }>;
 };
 
+const CI_SHARD_COUNT = workflow.jobs.ci?.strategy?.matrix?.shard?.length ?? 0;
+assert.ok(CI_SHARD_COUNT > 0, "ci.yml must declare at least one shard");
+
 function runBodies(jobId: string): string {
   return (workflow.jobs[jobId].steps ?? []).map((step) => step.run ?? '').join('\n');
 }
 
-test('ci sharding: all four shards run through the retry harness and collapse to the existing ci check name', () => {
+test('ci sharding: every declared shard runs through the retry harness and collapses to the existing ci check name', () => {
   const shards = workflow.jobs.ci;
-  assert.deepEqual(shards.strategy?.matrix?.shard, [1, 2, 3, 4]);
+  assert.deepEqual(shards.strategy?.matrix?.shard, Array.from({ length: CI_SHARD_COUNT }, (_unused, index) => index + 1));
   assert.equal(shards.strategy?.['fail-fast'], false, 'one red shard must not cancel evidence from its siblings');
-  assert.equal(shards.name, 'ci-shard (${{ matrix.shard }}/4)');
+  assert.equal(shards.name, `ci-shard (\${{ matrix.shard }}/${CI_SHARD_COUNT})`);
   const ciRuns = runBodies('ci');
-  assert.match(ciRuns, /node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/4 --base "\$TIER_BASE"/);
+  assert.match(
+    ciRuns,
+    new RegExp(String.raw`node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/${CI_SHARD_COUNT} --base "\$TIER_BASE"`),
+  );
   assert.doesNotMatch(
     ciRuns,
     /"test\/\*\*\/\*\.test\.ts"[^\n]*--test-shard/,
@@ -41,7 +47,7 @@ test('ci sharding: all four shards run through the retry harness and collapse to
   assert.match(runBodies('ci-required'), /exit 1/);
 });
 
-test('the slow tier is required before duration sharding removes it from the four fast shards', () => {
+test('the slow tier is required before duration sharding removes it from the fast shard matrix', () => {
   const gate = parse(readFileSync(join(REPO_ROOT, '.github/workflows/ci-gate.yml'), 'utf8')) as {
     jobs: Record<string, { env?: { REQUIRED?: string; ADVISORY?: string } }>;
   };
@@ -82,12 +88,15 @@ test('duration sharding learns from structured per-file evidence without writing
   assert.ok(firstDownloadIndex > checkoutIndex, 'checkout clean deletes artifacts, so downloads must happen after checkout');
 });
 
-test('coverage sharding: four lossless V8 bundles are required before Node-range merge and both gates', () => {
+test('coverage sharding: every declared lossless V8 bundle is required before Node-range merge and both gates', () => {
   const shards = workflow.jobs['coverage-ratchet'];
-  assert.deepEqual(shards.strategy?.matrix?.shard, [1, 2, 3, 4]);
+  assert.deepEqual(shards.strategy?.matrix?.shard, Array.from({ length: CI_SHARD_COUNT }, (_unused, index) => index + 1));
   assert.equal(shards.strategy?.['fail-fast'], false);
-  assert.equal(shards.name, 'coverage-shard (${{ matrix.shard }}/4)');
-  assert.match(runBodies('coverage-ratchet'), /test-tier-manifest\.mjs --select-all --shard \$\{\{ matrix\.shard \}\}\/4 --base HEAD\^1/);
+  assert.equal(shards.name, `coverage-shard (\${{ matrix.shard }}/${CI_SHARD_COUNT})`);
+  assert.match(
+    runBodies('coverage-ratchet'),
+    new RegExp(String.raw`test-tier-manifest\.mjs --select-all --shard \$\{\{ matrix\.shard \}\}\/${CI_SHARD_COUNT} --base HEAD\^1`),
+  );
   assert.match(runBodies('coverage-ratchet'), /mapfile -t COVERAGE_TEST_FILES < coverage-test-files\.txt/);
   assert.doesNotMatch(runBodies('coverage-ratchet'), /--test-shard=/, 'coverage must use the recorded-duration selector rather than Node\'s opaque shard assignment');
   // W1-T4398: the retry wrapper hands coverage/raw to the instrumented first pass alone.

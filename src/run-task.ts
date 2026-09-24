@@ -858,6 +858,7 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -2233,7 +2234,7 @@ import {
   sweepStaleWorkerHomes,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
-import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
+import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
   checkCliFreshness,
@@ -9033,6 +9034,10 @@ export async function runFixRung(opts: {
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
     worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
+    /** W1-T4458 (i): test seam; production runs `git merge --no-commit --no-ff origin/main`. */
+    startShellLessMergeConflictMerge?: typeof startShellLessMergeConflictMerge;
+    /** W1-T4458 (ii): test seam; production reads `git rev-list --count <roundStart>..HEAD`. */
+    commitsAhead?: (worktreePath: string, base: string) => number;
     /**
      * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
      * for, or the bare verdict every pre-existing stub already returns. Read it through
@@ -10389,7 +10394,7 @@ export async function runFixRung(opts: {
           // through to a review-shaped mode despite `noReviewYet` being true, the
           // exact regression `runFixRung`'s own "fetchCiFailures is optional" test
           // (below) locks against.
-          { ciFailures: currentCiFailures ?? [], constraint: opts.constraint }
+          { ciFailures: ciFailurePromptEvidence(currentCiFailures ?? []), constraint: opts.constraint }
         : // W1-T2236: `gateFailuresNow` — computed above, alongside the guard this evidence
           // shape already passed — is this round's structured gate-failure remedy (undefined for
           // a ci-log/merge-conflict round, which never reaches this branch anyway). Carried
@@ -10458,37 +10463,45 @@ export async function runFixRung(opts: {
       config: opts.config,
       prompt,
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
-      // W1-T210: ci-log mode's prompt carries an untrusted CI log tail
-      // (renderFixPrompt, above) — restrict this worker to the tools its
-      // fix-and-push job actually needs (FIX_WORKER_TOOLS) so a
-      // prompt-injection payload riding in that log can't reach the
-      // network via WebFetch/WebSearch.
-      tools: FIX_WORKER_TOOLS,
+      // W1-T210: ci-log mode's prompt carries an untrusted CI log tail, so no WebFetch/WebSearch.
+      // W1-T4458 (iii): a round the harness commits loses Bash too, so its prompt and tools agree.
+      tools: fixHarnessOwnsGit ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
       // W1-T3727: the surface a BLOCKED auction would divert this round to. Offered only when the
       // prompt above already said the harness commits — otherwise a retry hands a shell-less
       // worker a contract asking for `git push`.
       ...(fixCashTools === undefined ? {} : { cashTools: fixCashTools }),
-      // W1-T2261: the attribution markers `reclaimAbandonedWorker` later matches an abandoned
-      // spawn's live process against (worker.ts's `workerMarkerEnv` merges these into the
-      // child's env as REMUDERO_RUN_ID/REMUDERO_TASK_ID). Omitting them — the defect this
-      // closes — left `defaultReadMarkers` reading `undefined` for every candidate, so
-      // `markers?.runId === info.runId` could never match and the reclaim kill never fired on
-      // the one process it exists to stop.
+      // W1-T2261: the markers `reclaimAbandonedWorker` matches an abandoned spawn's live process
+      // against (`workerMarkerEnv` sets REMUDERO_RUN_ID/REMUDERO_TASK_ID). Without them every
+      // candidate read `undefined` and the reclaim kill never fired on the process it exists to stop.
       runId: opts.runId,
       taskId: opts.taskId,
     };
 
+    // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
+    // resolves the conflict markers it leaves.
+    if (fixHarnessOwnsGit && currentMergeConflict !== undefined) {
+      const merged = (deps.startShellLessMergeConflictMerge ?? startShellLessMergeConflictMerge)(opts.worktreePath);
+      deps.log(merged.started ? "fix.merge_started" : "fix.merge_start_failed", {
+        strike: attempt,
+        ...(merged.reason ? { reason: merged.reason } : {}),
+      });
+    }
+
     const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
+    // W1-T4458 (ii): this round's own starting head; whatever lands ahead of it is this round's work.
+    let roundStartSha: string | undefined;
+    try {
+      roundStartSha = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    } catch {
+      // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
+    }
     const fixRoundStartedAtMs = systemClock.now();
     let fixResult: WorkerResult;
-    // W1-T1219: the spawn's own elapsed milliseconds on the SUCCESS path — the same field
-    // `fix.spawn_abandoned` already carries on the failure path (below), folded into
-    // `fix.dispatch` so a completed spawn's duration is measurable at all (see design note
-    // (iii) of this task's own rationale for why the ledger could not measure it before).
+    // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
+    // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
     let spawnElapsedMs: number | undefined;
     try {
-      // W1-T1044: bounds this ONE spawn by wall-clock elapsed time — see
-      // spawnFixWorkerBounded's own doc for the measured incident this closes.
+      // W1-T1044: bounds this ONE spawn by wall-clock time (spawnFixWorkerBounded's doc: why).
       const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, {
         runId: opts.runId,
         taskId: opts.taskId,
@@ -10514,15 +10527,11 @@ export async function runFixRung(opts: {
       fixResult = deps.account(spawnOutcome.result);
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
-      // No subprocess ever launched — nothing ran, nothing was billed. Log this as
-      // an INFRA-tagged $0 line — deliberately NEVER a `fix.dispatch` line, the
-      // ONLY step `priorStrikesFor` counts as a strike — so budget forensics can
-      // separate "the task was expensive" from "the host was broken" (W1-T127
-      // design note iii), then propagate the refusal unchanged: `strikes` and
-      // attempts-toward-escalation never move, and no escalate() ever fires for it
-      // here — the caller's existing spawn-infra degrade-don't-die handling
-      // (daemon.ts's `isSpawnInfraBlocked`) decides what happens next, exactly
-      // like the initial implement dispatch already does.
+      // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
+      // `fix.dispatch` line (the only step `priorStrikesFor` counts), so forensics can separate "the
+      // task was expensive" from "the host was broken" (W1-T127 iii). The refusal propagates
+      // unchanged — strikes never move, nothing escalates here; daemon.ts's `isSpawnInfraBlocked`
+      // decides what happens next, exactly as for the initial implement dispatch.
       deps.log("fix.spawn_infra_blocked", {
         attempt,
         reason: e.message,
@@ -10538,21 +10547,18 @@ export async function runFixRung(opts: {
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
-    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, and HERE — before `readRoundCommits`
-    // decides what this round produced and what `deps.push` then carries. A cash worker cannot
-    // have committed, so its count is 0 by construction. The helper is implement's, reused: it
-    // owns its own precondition, so a Claude round passes through untouched.
-    // CALLED UNCONDITIONALLY, and the guard is the helper's own: `!harnessOwnsGit || commitCount
-    // !== 0` returns the count untouched, so a Claude round passes straight through. Wrapping this
-    // in `if (fixHarnessOwnsGit)` would only duplicate that precondition — and would put eight
-    // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
-    // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
+    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
+    // what this round produced and `deps.push` carries. CALLED UNCONDITIONALLY: the helper's own
+    // guard (`!harnessOwnsGit || commitCount !== 0`) passes a Claude round through, and an `if` here
+    // would be a branch no default-config test reaches, which `diff-coverage` refuses by name.
+    // W1-T4458 (ii): `commitCount` is the REAL commits-ahead of `roundStartSha`, never a hardcoded 0,
+    // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
     const harnessCommit = (report: string) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
-        commitCount: 0,
+        commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         report,
         worktreePath: opts.worktreePath,
         declaredPaths: opts.task.files ?? [],
@@ -14298,6 +14304,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
   // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
   const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
+  const cashTrial = decideCashTrial({
+    task,
+    taskClass,
+    config,
+    harnessCommits: implementCashTools !== undefined,
+    stateDir: dirname(ledgerPath),
+  });
+  if (cashTrial) log("cash_trial.decided", { arm: cashTrial.arm, reason: cashTrial.reason });
+  const cashTrialSpawn = cashTrialSpawnFields(cashTrial, implementCashTools, cashTrialPolicy(config).models);
 
   /**
    * The subscription probes are intentionally shell-backed, so a blocked auction cannot run
@@ -15210,6 +15225,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
           tools: implementTools === undefined ? undefined : [...implementTools],
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          ...(attemptMount === implementMount ? cashTrialSpawn : {}),
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
           // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
           // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
@@ -15475,6 +15491,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // still the SAME lane, so it must not regain unrestricted tools on resume.
           tools: implementTools === undefined ? undefined : [...implementTools],
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          ...cashTrialSpawn,
           // W1-T3696: the RESUMED turn must restate the SAME contract the initial spawn was given.
           // A shell-less worker told here to `git push` would spend its remaining turns failing at
           // a tool it does not have, which is the one place this lane cannot recover from.
@@ -15590,6 +15607,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         config: implementConfig,
         tools: implementTools === undefined ? undefined : [...implementTools],
         ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+        ...cashTrialSpawn,
       }),
     });
     commitCount = commitLineRecovery.commitCount;
@@ -33980,6 +33998,23 @@ export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string)
 
 export function extractCiFailureRegion(log: string, tailLines: number): string {
   const lines = log.split("\n");
+  const kept = new Set<number>();
+  let inTapFailure = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*not ok \d+ - /.test(line)) inTapFailure = true;
+    if (inTapFailure) kept.add(index);
+    if (inTapFailure && /^\s*\.\.\.\s*$/.test(line)) inTapFailure = false;
+    if (/FLAKE-RETRY(?:-RECOVERED)?\s*:/.test(line)) kept.add(index);
+  }
+  if (kept.size > 0) {
+    return [...kept]
+      .sort((a, b) => a - b)
+      .slice(-Math.max(1, tailLines))
+      .map((index) => lines[index])
+      .join("\n")
+      .trim();
+  }
   const failingTestsAt = lines.findIndex((line) => /(?:✖|✕|✗|x)\s+failing tests:/i.test(line.trim()));
   if (failingTestsAt >= 0) {
     const summaryAt = lines.findIndex(
@@ -33990,6 +34025,14 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
     return lines.slice(failingTestsAt, Math.min(end, failingTestsAt + tailLines)).join("\n").trim();
   }
   return lines.slice(-tailLines).join("\n").trim();
+}
+
+export function ciFailurePromptEvidence(failures: readonly CiFailure[]): CiFailure[] {
+  return failures.map((failure) =>
+    failure.tailSource
+      ? { ...failure, logTail: `failure detail source: ${failure.tailSource}\n${failure.logTail}` }
+      : { ...failure },
+  );
 }
 
 function retainGeneratorRemediesForRegion(fullLog: string, region: string): string {
@@ -36390,6 +36433,41 @@ export function commitWorkerEdits(
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
   };
+}
+
+/** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
+function mergeHeadPresent(runGit: GitRunner): boolean {
+  try {
+    runGit(["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
+    return true;
+  } catch {
+    // No MERGE_HEAD: nothing is mid-merge.
+    return false;
+  }
+}
+
+/**
+ * W1-T4458 design (i): starts a shell-less merge-conflict round's merge FOR the worker, whose prompt
+ * says it has no shell. `--no-commit --no-ff` leaves MERGE_HEAD and conflict markers for a
+ * Read/Write/Edit resolve; the harness's own commit ({@link commitWorkerEdits}) then records a real
+ * two-parent merge. IDEMPOTENT: a live MERGE_HEAD (a resumed strike) is left alone.
+ */
+export function startShellLessMergeConflictMerge(
+  worktreePath: string,
+  runGit: GitRunner = (args) =>
+    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+): { started: boolean; reason?: string } {
+  if (mergeHeadPresent(runGit)) return { started: true };
+  try {
+    runGit(["merge", "--no-commit", "--no-ff", "origin/main"]);
+  } catch (e) {
+    // A real conflict exits non-zero WITH MERGE_HEAD set: the success case. Only a merge that never
+    // started (an unfetched origin/main, a dirty tree) is a failure, and it keeps its reason.
+    if (!mergeHeadPresent(runGit)) {
+      return { started: false, reason: String((e as Error)?.message ?? e) };
+    }
+  }
+  return { started: true };
 }
 
 /**
@@ -41232,6 +41310,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
+      isDeclined: (id) => declinedReasonInLedger(ledgerLinesForRatify, id),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -41285,7 +41364,6 @@ function loadProposalForRatify(
   owner: string,
   repo: string,
   config: Config,
-  withDeclines = false,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -41310,7 +41388,7 @@ function loadProposalForRatify(
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    ...(withDeclines ? { isDeclined: (id: string) => declinedReasonInLedger(ledgerLines, id) } : {}),
+    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -41350,6 +41428,7 @@ function loadProposalsForRatify(
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
@@ -42207,7 +42286,7 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
     kind,
     rest,
     (id) => {
-      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config, true);
+      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),

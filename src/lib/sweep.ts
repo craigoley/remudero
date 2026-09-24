@@ -8620,6 +8620,42 @@ export function detachedSweepActionCount(): number {
   return detachedSweepActions.size;
 }
 
+/** Reviews in flight in this process. A freshness exit used to wait only for detached actions, so a
+ *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
+const inFlightReviewRuns = new Set<Promise<void>>();
+
+/** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */
+export function trackInFlightReview(work: Promise<void>): Promise<void> {
+  const held: Promise<void> = work.then(
+    () => undefined,
+    () => undefined,
+  );
+  inFlightReviewRuns.add(held);
+  void held.finally(() => inFlightReviewRuns.delete(held));
+  return work;
+}
+
+export function inFlightReviewCount(): number {
+  return inFlightReviewRuns.size;
+}
+
+/** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
+ *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
+export async function drainInFlightReviews(opts: { boundMs: number }): Promise<number> {
+  const running = [...inFlightReviewRuns];
+  if (running.length === 0) return 0;
+  const settled = new Set<Promise<void>>();
+  for (const review of running) void review.then(() => settled.add(review));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, opts.boundMs)); });
+  try {
+    await Promise.race([Promise.all(running), bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+  return running.filter((review) => !settled.has(review)).length;
+}
+
 /** W1-T2981 — is an action of this kind already detached? A second concurrent retro would race the
  *  same marker file, so the rung refuses rather than stacking. A KIND query, not a separate boolean,
  *  so the registry stays the one source of truth about what is in flight. */
@@ -10725,7 +10761,7 @@ export async function runSweep(
       while (true) {
         const job = takeNextReview();
         if (job === undefined) return;
-        await runReview(job);
+        await trackInFlightReview(runReview(job));
       }
     }),
   );

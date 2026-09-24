@@ -85,6 +85,8 @@ import {
   buildUsageProjection,
   USAGE_PROJECTION_VERSION,
   usageTelemetryState,
+  claudeModelAliasesAt,
+  withCanonicalModels,
   withLiveProviderWindows,
   type UsageProjection,
   type UsageTelemetryState,
@@ -2055,6 +2057,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
 export function buildAnalyticsRoute(deps: {
   currentSnapshot: () => AnalyticsSnapshot;
   currentLiveMetrics?: () => LiveAnalyticsMetrics;
+  mountsRoot?: string;
 }): Route {
   return {
     method: "GET",
@@ -2080,7 +2083,8 @@ export function buildAnalyticsRoute(deps: {
         return;
       }
       if (requestedVersion === USAGE_PROJECTION_VERSION) {
-        sendJson(res, 200, withLiveProviderWindows(base.usage ?? buildUsageProjection(usageTelemetryState(), null), live.provider.accounts));
+        const usage = withLiveProviderWindows(base.usage ?? buildUsageProjection(usageTelemetryState(), null), live.provider.accounts);
+        sendJson(res, 200, deps.mountsRoot === undefined ? usage : withCanonicalModels(usage, claudeModelAliasesAt(deps.mountsRoot)));
         return;
       }
       const spend = base.spend ?? { cash: notCollectedCashSpend("snapshot predates cash collection; awaiting first refresh") };
