@@ -263,6 +263,7 @@
   "src/lib/inbox-thread.ts": 84,
   "src/lib/inbox.ts": 1000,
   "src/lib/incident-events.ts": 250,
+  "src/lib/incident-invariants.ts": 250,
   "src/lib/inflight-lock.ts": 93,
   "src/lib/init.ts": 98,
   "src/lib/install-hash.ts": 30,
