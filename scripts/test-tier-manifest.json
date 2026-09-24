@@ -312,6 +312,7 @@
     "test/a-withdrawn-credit-never-latches-a-task-blocked.test.ts": 0,
     "test/a-withdrawn-record-sizing-warning.test.ts": 0,
     "test/a-worker-branch-must-be-shaped-for-dispatch.test.ts": 1853,
+    "test/a-worker-is-taught-the-question-contract.test.ts": 0,
     "test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts": 1018,
     "test/a-worker-report-of-used-learnings-is-ledgered.test.ts": 0,
     "test/a-worker-runs-one-test-suite-at-a-time.test.ts": 0,

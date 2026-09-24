@@ -420,6 +420,10 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  `ALREADY_SATISFIED: <the PR number or url that already merged and satisfies this task>`.",
     `  That PR must actually be MERGED and its body must carry \`Remudero-Task: ${taskId}\` for`,
     "  THIS task, or the claim is refused and treated as if you had opened no PR at all.",
+    // The QUESTION contract parseQuestion (worker.ts) reads and run-task.ts logs without blocking.
+    "- A fact you cannot settle from the repo, and that is not worth a DECISION_REQUEST: look it up",
+    "  first; if it is still unknown, state it as three lines and proceed on the assumption —",
+    "  `QUESTION: <what you do not know>` `CURRENT_ASSUMPTION: <what you proceed on>` `IMPACT_IF_WRONG: low|med`.",
     ...(harnessCommits
       ? [
         "- Otherwise: just SAVE YOUR EDITS TO THE FILES. Do NOT run git or gh — you have no shell,",
