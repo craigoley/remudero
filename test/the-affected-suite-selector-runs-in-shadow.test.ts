@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -15,13 +15,13 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import {
+  affectedSelectionOrFull,
   changedSymbols,
-  defaultAffectedSuitesDeps,
   fullRunTrigger,
+  readAffectedSuitesInput,
   selectAffectedSuites,
-  selectAffectedSuitesSafely,
   shadowRecord,
-  type AffectedSuitesDeps,
+  type AffectedSuitesInput,
 } from "../src/lib/affected-suites.js";
 import { affectedSuitesStep } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -40,30 +40,31 @@ const TREE: Record<string, string> = {
   "test/unrelated.test.ts": "export {};\n",
 };
 
-function deps(over: Partial<AffectedSuitesDeps> = {}): AffectedSuitesDeps {
+/** The selector's input for the fixture tree and `changed`. */
+function input(changed: string[], over: Partial<AffectedSuitesInput> = {}): AffectedSuitesInput {
   return {
-    listFiles: () => Object.keys(TREE),
-    readFile: (p) => TREE[p]!,
+    files: new Map(Object.entries(TREE)),
     // The census's own rule, applied to the fixture: a suite that reads the changed path as text.
-    pathReaders: (changed) => Object.keys(TREE).filter((f) => f.endsWith(".test.ts") && changed.some((c) => TREE[f]!.includes(`../${c}"`))),
+    pathReaders: Object.keys(TREE).filter((f) => f.endsWith(".test.ts") && changed.some((c) => TREE[f]!.includes(`../${c}"`))),
     ...over,
   };
 }
+const select = (changed: string[], over: Partial<AffectedSuitesInput> = {}) => selectAffectedSuites(changed, input(changed, over));
 
 test("W1-T4404: the selector includes callers and path-reading suites of a changed module", () => {
-  const sel = selectAffectedSuites(["src/a.ts"], deps());
+  const sel = select(["src/a.ts"]);
   assert.equal(sel.fullRun, false);
   // b.test.ts reaches src/a.ts through src/b.ts (and TS's ".js" specifier); census.test.ts reads it.
   assert.deepEqual(sel.suites, ["test/b.test.ts", "test/census.test.ts"]);
   assert.ok(sel.reasons.includes("test/b.test.ts: reaches src/a.ts"));
   assert.ok(sel.reasons.includes("test/census.test.ts: reads a changed file by path"));
   // Falsifier: the import graph alone misses the census suite that greps the changed file.
-  assert.deepEqual(selectAffectedSuites(["src/a.ts"], deps({ pathReaders: () => [] })).suites, ["test/b.test.ts"]);
+  assert.deepEqual(select(["src/a.ts"], { pathReaders: [] }).suites, ["test/b.test.ts"]);
   // A script a suite spawns by a joined path is an edge too; a changed suite selects itself.
-  assert.deepEqual(selectAffectedSuites(["scripts/tool.mjs"], deps()).suites, ["test/tool.test.ts"]);
-  assert.deepEqual(selectAffectedSuites(["test/unrelated.test.ts"], deps()).suites, ["test/unrelated.test.ts"]);
+  assert.deepEqual(select(["scripts/tool.mjs"]).suites, ["test/tool.test.ts"]);
+  assert.deepEqual(select(["test/unrelated.test.ts"]).suites, ["test/unrelated.test.ts"]);
   // Recent failures stay selected; the narrow candidate swaps the graph for symbol reach.
-  const narrow = selectAffectedSuites(["src/a.ts"], deps({ recentFailures: () => ["test/unrelated.test.ts"], symbolSuites: () => ["test/b.test.ts"] }));
+  const narrow = select(["src/a.ts"], { recentFailures: ["test/unrelated.test.ts"], symbolSuites: ["test/b.test.ts"] });
   assert.ok(narrow.suites.includes("test/unrelated.test.ts"));
   assert.deepEqual(narrow.narrow, ["test/b.test.ts", "test/census.test.ts", "test/unrelated.test.ts"]);
   // Changed symbols come from the declarations a -U0 diff touches in the new tree.
@@ -71,14 +72,14 @@ test("W1-T4404: the selector includes callers and path-reading suites of a chang
   assert.deepEqual(changedSymbols(diff, (p) => TREE[p]!), ["b"]);
 
   // On the REAL tree, with the production deps: a change to src/lib/tmp.ts reaches this very suite.
-  const real = selectAffectedSuites(["src/lib/tmp.ts"], defaultAffectedSuitesDeps(REPO_ROOT));
+  const real = selectAffectedSuites(["src/lib/tmp.ts"], readAffectedSuitesInput(REPO_ROOT, ["src/lib/tmp.ts"]));
   assert.ok(real.suites.includes("test/the-affected-suite-selector-runs-in-shadow.test.ts"));
   assert.ok(real.suites.length > 100, "a module every suite's tmp helper imports reaches many suites");
 });
 
 test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml", "test/helpers/git-repo.ts", "test/fixtures/x.json", ".nvmrc"]) {
-    const sel = selectAffectedSuites(["src/a.ts", file], deps());
+    const sel = select(["src/a.ts", file]);
     assert.equal(sel.fullRun, true, file);
     assert.deepEqual(sel.suites, []);
     assert.match(sel.reasons[0]!, new RegExp(`full run: ${file.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
@@ -87,30 +88,48 @@ test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["src/a.ts", "scripts/tool.mjs", "test/b.test.ts", "docs/x.md", "plan/tasks.d/x.yaml", "README.md", "bin/rmd"]) {
     assert.equal(fullRunTrigger([file]), undefined, file);
   }
-  // A selector that cannot list its inputs runs everything rather than guessing narrower.
-  const broken = selectAffectedSuitesSafely(["src/a.ts"], deps({ listFiles: () => { throw new Error("git ls-files failed"); } }));
+  // A selector that cannot read its input runs everything rather than guessing narrower.
+  const broken = affectedSelectionOrFull(["src/a.ts"], () => { throw new Error("git ls-files failed"); });
   assert.equal(broken.fullRun, true);
-  assert.match(broken.reasons[0]!, /could not list its inputs — git ls-files failed/);
-  // A file listed but gone (ENOENT) imports nothing; any other read failure is real and forces a full run.
+  assert.match(broken.reasons[0]!, /could not read its input — git ls-files failed/);
+  // Reading a real repo: a tracked file gone from disk (ENOENT) imports nothing and is skipped, while
+  // any other read failure (EACCES) is real and becomes a named full run.
+  const repo = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4404-repo-`));
+  mkdirSync(join(repo, "src"));
+  for (const f of ["src/a.ts", "src/b.ts"]) writeFileSync(join(repo, f), TREE[f]!);
+  symlinkSync(join(REPO_ROOT, "scripts"), join(repo, "scripts"));
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(repo, "node_modules"));
+  const git = (...args: string[]) => spawnSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" });
+  git("init", "-q");
+  git("add", "src");
+  git("commit", "-qm", "fixture");
+  rmSync(join(repo, "src/a.ts"));
+  assert.deepEqual([...readAffectedSuitesInput(repo, ["src/b.ts"]).files.keys()], ["src/b.ts"]);
+  chmodSync(join(repo, "src/b.ts"), 0o000);
+  try {
+    const denied = affectedSelectionOrFull(["src/b.ts"], () => readAffectedSuitesInput(repo, ["src/b.ts"]));
+    assert.equal(denied.fullRun, true);
+    assert.match(denied.reasons[0]!, /EACCES/);
+  } finally {
+    chmodSync(join(repo, "src/b.ts"), 0o644);
+  }
   const gone = (code: string) => (p: string) => {
     if (p === "src/b.ts") throw Object.assign(new Error(`${code} src/b.ts`), { code });
     return TREE[p]!;
   };
-  assert.deepEqual(selectAffectedSuites(["src/a.ts"], deps({ readFile: gone("ENOENT") })).suites, ["test/census.test.ts"]);
-  assert.match(selectAffectedSuitesSafely(["src/a.ts"], deps({ readFile: gone("EACCES") })).reasons[0]!, /EACCES src\/b\.ts/);
   assert.deepEqual(changedSymbols("+++ b/src/b.ts\n@@ -1 +1 @@\n", gone("ENOENT")), []);
   assert.throws(() => changedSymbols("+++ b/src/b.ts\n@@ -1 +1 @@\n", gone("EACCES")), /EACCES/);
 });
 
 test("W1-T4404: shadow mode records each real failure as selected or missed and skips nothing", () => {
-  const sel = selectAffectedSuites(["src/a.ts"], deps({ symbolSuites: () => ["test/b.test.ts"] }));
+  const sel = select(["src/a.ts"], { symbolSuites: ["test/b.test.ts"] });
   const record = shadowRecord(sel, ["test/census.test.ts", "test/unrelated.test.ts", "test/census.test.ts"]);
   assert.deepEqual(record.failures, [
     { file: "test/census.test.ts", floor: "selected", narrow: "selected" },
     { file: "test/unrelated.test.ts", floor: "missed", narrow: "missed" },
   ]);
   // A full-run selection misses nothing.
-  const full = shadowRecord(selectAffectedSuites(["package.json"], deps()), ["test/unrelated.test.ts"]);
+  const full = shadowRecord(select(["package.json"]), ["test/unrelated.test.ts"]);
   assert.deepEqual(full.failures, [{ file: "test/unrelated.test.ts", floor: "selected" }]);
 
   // The real CLI, on the real tree: reads failures from a TAP log and prints the record; exit 0.
@@ -171,8 +190,8 @@ esac
   const pf = affectedSuitesStep(REPO_ROOT, ["package.json"]);
   assert.equal(pf.ok, true);
   assert.match(pf.detail, /would run the FULL suite \(full run: package\.json/);
-  const pfBroken = affectedSuitesStep(REPO_ROOT, ["src/a.ts"], deps({ listFiles: () => { throw new Error("no git"); } }));
+  const pfBroken = affectedSuitesStep(REPO_ROOT, ["src/a.ts"], () => { throw new Error("no git"); });
   assert.equal(pfBroken.ok, true);
-  assert.match(pfBroken.detail, /could not list its inputs \(no git\); it would run the FULL suite/);
-  assert.match(affectedSuitesStep(REPO_ROOT, ["src/a.ts"], deps()).detail, /would run 2 suite\(s\); this mode still runs everything/);
+  assert.match(pfBroken.detail, /could not read its input \(no git\); it would run the FULL suite/);
+  assert.match(affectedSuitesStep(REPO_ROOT, ["src/a.ts"], () => input(["src/a.ts"])).detail, /would run 2 suite\(s\); this mode still runs everything/);
 });

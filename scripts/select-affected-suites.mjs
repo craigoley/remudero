@@ -16,8 +16,8 @@ import { REPO_ROOT } from "./lib/repo-root.mjs";
 import { parseFailingTestFiles } from "./test-with-retry.mjs";
 import {
   changedSymbols,
-  defaultAffectedSuitesDeps,
-  selectAffectedSuitesSafely,
+  affectedSelectionOrFull,
+  readAffectedSuitesInput,
   shadowRecord,
 } from "../src/lib/affected-suites.ts";
 import { callerReachableSuites } from "../src/lib/ci-parity.ts";
@@ -37,13 +37,15 @@ export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_
     return 2;
   }
   const changed = lines(values["changed-files"]);
-  const deps = defaultAffectedSuitesDeps(root);
-  if (values["recent-failures"]) deps.recentFailures = () => lines(values["recent-failures"]);
-  if (values.diff) {
-    const symbols = changedSymbols(readFileSync(values.diff, "utf8"), deps.readFile);
-    deps.symbolSuites = () => callerReachableSuites(symbols, root, defaultPreflightSpawn).suites;
-  }
-  const selection = selectAffectedSuitesSafely(changed, deps);
+  const selection = affectedSelectionOrFull(changed, () => {
+    const extra = {};
+    if (values["recent-failures"]) extra.recentFailures = lines(values["recent-failures"]);
+    if (values.diff) {
+      const symbols = changedSymbols(readFileSync(values.diff, "utf8"), (p) => readFileSync(join(root, p), "utf8"));
+      extra.symbolSuites = callerReachableSuites(symbols, root, defaultPreflightSpawn).suites;
+    }
+    return readAffectedSuitesInput(root, changed, extra);
+  });
   const failed = values["failed-from"] ? parseFailingTestFiles(readFileSync(values["failed-from"], "utf8"), root) : [];
   const record = shadowRecord(selection, failed);
 

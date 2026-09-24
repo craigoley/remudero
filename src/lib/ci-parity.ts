@@ -5,7 +5,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-import { defaultAffectedSuitesDeps, selectAffectedSuites, type AffectedSuitesDeps } from "./affected-suites.js";
+import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
@@ -3375,15 +3375,15 @@ function isChangedSourceFile(path: string): boolean {
 export function affectedSuitesStep(
   repoRoot: string,
   changedFiles: readonly string[],
-  deps: AffectedSuitesDeps = defaultAffectedSuitesDeps(repoRoot),
+  readInput: () => AffectedSuitesInput = () => readAffectedSuitesInput(repoRoot, changedFiles),
 ): CiParityStepResult {
   const name = "coverage-mode:affected-suites";
   try {
-    const selection = selectAffectedSuites(changedFiles, deps);
+    const selection = selectAffectedSuites(changedFiles, readInput());
     const what = selection.fullRun ? `the FULL suite (${selection.reasons[0]})` : `${selection.suites.length} suite(s)`;
     return { name, ok: true, detail: `${name}: REPORT — the shadow selector would run ${what}; this mode still runs everything` };
   } catch (e) {
-    return { name, ok: true, detail: `${name}: REPORT — the selector could not list its inputs (${(e as Error).message}); it would run the FULL suite` };
+    return { name, ok: true, detail: `${name}: REPORT — the selector could not read its input (${(e as Error).message}); it would run the FULL suite` };
   }
 }
 

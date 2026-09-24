@@ -38,16 +38,16 @@ export interface AffectedSelection {
   narrow?: string[];
 }
 
-export interface AffectedSuitesDeps {
-  /** Every tracked code file under src/, scripts/, bin/ and test/. */
-  listFiles: () => string[];
-  readFile: (path: string) => string;
+/** Everything the selector decides from, as plain DATA — the selector itself reads nothing. */
+export interface AffectedSuitesInput {
+  /** Every tracked code file under src/, scripts/, bin/ and test/, with its content. */
+  files: ReadonlyMap<string, string>;
   /** Suites that read a changed file by path (diff-class's census and plan-reading sets). */
-  pathReaders: (changed: string[]) => string[];
+  pathReaders: readonly string[];
   /** Suites that failed in recent runs. */
-  recentFailures?: () => string[];
+  recentFailures?: readonly string[];
   /** Suites naming a changed symbol or one of its src/ callers (ci-parity's callerReachableSuites). */
-  symbolSuites?: (changed: string[]) => string[];
+  symbolSuites?: readonly string[];
 }
 
 const CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
@@ -93,8 +93,8 @@ function resolve(from: string, spec: string, known: ReadonlySet<string>): string
   return candidates.find((c) => known.has(c));
 }
 
-/** THE SELECTOR — see the file header. Pure: every read goes through `deps`. */
-export function selectAffectedSuites(changed: readonly string[], deps: AffectedSuitesDeps): AffectedSelection {
+/** THE SELECTOR — see the file header. Pure: it decides from `input` alone. */
+export function selectAffectedSuites(changed: readonly string[], input: AffectedSuitesInput): AffectedSelection {
   const files = changed.filter((f) => f.length > 0);
   const trigger = fullRunTrigger(files);
   if (trigger !== undefined) {
@@ -108,18 +108,11 @@ export function selectAffectedSuites(changed: readonly string[], deps: AffectedS
   for (const f of files) if (SUITE.test(f)) pick(f, "changed test");
 
   // The reverse import graph, walked breadth-first from every changed module.
-  const all = deps.listFiles().filter((f) => CODE_FILE.test(f));
+  const all = [...input.files.keys()].filter((f) => CODE_FILE.test(f));
   const known = new Set([...all, ...files]);
   const importers = new Map<string, Set<string>>();
   for (const file of all) {
-    let content: string;
-    try {
-      content = deps.readFile(file);
-    } catch (err) {
-      // Listed but gone (a concurrent delete) imports nothing now; any other read failure is real.
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-      continue;
-    }
+    const content = input.files.get(file)!;
     const deps_ = [
       ...specifiers(content).map((s) => resolve(file, s, known)),
       ...namedPaths(content).filter((p) => known.has(p)),
@@ -140,16 +133,16 @@ export function selectAffectedSuites(changed: readonly string[], deps: AffectedS
     for (const next of importers.get(file) ?? []) queue.push({ file: next, root });
   }
 
-  const pathReaders = deps.pathReaders(files);
-  const recent = deps.recentFailures?.() ?? [];
+  const pathReaders = input.pathReaders;
+  const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   for (const s of recent) pick(s, "failed recently");
 
   const suites = [...reasons.keys()].filter((s) => SUITE.test(s)).sort();
   const selection: AffectedSelection = { suites, fullRun: false, reasons: suites.map((s) => `${s}: ${reasons.get(s)}`) };
-  if (deps.symbolSuites) {
+  if (input.symbolSuites) {
     const changedTests = files.filter((f) => SUITE.test(f));
-    const narrow = new Set([...changedTests, ...deps.symbolSuites(files), ...pathReaders, ...recent]);
+    const narrow = new Set([...changedTests, ...input.symbolSuites, ...pathReaders, ...recent]);
     selection.narrow = [...narrow].filter((s) => SUITE.test(s)).sort();
   }
   return selection;
@@ -192,38 +185,47 @@ export function changedSymbols(diffText: string, readFile: (path: string) => str
   return [...symbols].sort();
 }
 
-/** The production deps: git's tracked files, the working tree, and diff-class's own census and
- *  plan-reading listings (spawned, as src/ always reaches scripts/). A listing that fails selects
- *  the full suite rather than silently selecting less. */
-export function defaultAffectedSuitesDeps(repoRoot: string): AffectedSuitesDeps {
+/** Reads the selector's input from `repoRoot`: git's tracked code files and their contents, and
+ *  diff-class's own census and plan-reading listings (spawned, as src/ always reaches scripts/). A
+ *  tracked file missing from disk (a concurrent delete) imports nothing and is left out; any other
+ *  failure THROWS, and {@link affectedSelectionOrFull} turns that into a named full run. */
+export function readAffectedSuitesInput(
+  repoRoot: string,
+  changed: readonly string[],
+  extra: { recentFailures?: readonly string[]; symbolSuites?: readonly string[] } = {},
+): AffectedSuitesInput {
   const run = (cmd: string, args: string[]) => {
     const r = spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" });
     if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")} exited ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}`);
     return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   };
-  return {
-    listFiles: () => run("git", ["ls-files", "--", "src", "scripts", "bin", "test"]),
-    readFile: (path) => readFileSync(join(repoRoot, path), "utf8"),
-    pathReaders: (changed) => {
-      const list = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`)), "changed.txt");
-      writeFileSync(list, changed.join("\n") + "\n");
-      const diffClass = join(repoRoot, "scripts", "diff-class.mjs");
-      const census = run(process.execPath, ["--import", "tsx", diffClass, "--list-census-suites", "--changed-files", list]);
-      const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f))
-        ? run(process.execPath, ["--import", "tsx", diffClass, "--list-plan-reading-suites", "--changed-files", list])
-        : [];
-      return [...census, ...prose];
-    },
-  };
+  const files = new Map<string, string>();
+  for (const path of run("git", ["ls-files", "--", "src", "scripts", "bin", "test"])) {
+    if (!CODE_FILE.test(path)) continue;
+    try {
+      files.set(path, readFileSync(join(repoRoot, path), "utf8"));
+    } catch (err) {
+      // Tracked but gone from disk imports nothing now; any other read failure is real.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  const list = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`)), "changed.txt");
+  writeFileSync(list, changed.join("\n") + "\n");
+  const diffClass = join(repoRoot, "scripts", "diff-class.mjs");
+  const census = run(process.execPath, ["--import", "tsx", diffClass, "--list-census-suites", "--changed-files", list]);
+  const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f))
+    ? run(process.execPath, ["--import", "tsx", diffClass, "--list-plan-reading-suites", "--changed-files", list])
+    : [];
+  return { files, pathReaders: [...census, ...prose], ...extra };
 }
 
-/** The selection, or a full run naming the listing that failed — never a narrower guess. */
-export function selectAffectedSuitesSafely(changed: readonly string[], deps: AffectedSuitesDeps): AffectedSelection {
+/** The selection, or a FULL run naming why its input could not be read — never a narrower guess. */
+export function affectedSelectionOrFull(changed: readonly string[], readInput: () => AffectedSuitesInput): AffectedSelection {
   try {
-    return selectAffectedSuites(changed, deps);
+    return selectAffectedSuites(changed, readInput());
   } catch (err) {
-    // A failed listing is a FULL run that names its cause — never an empty selection.
-    return { suites: [], fullRun: true, reasons: [`full run: the selector could not list its inputs — ${(err as Error).message}`] };
+    // A failed read is a FULL run that names its cause — never an empty selection.
+    return { suites: [], fullRun: true, reasons: [`full run: the selector could not read its input — ${(err as Error).message}`] };
   }
 }
 
