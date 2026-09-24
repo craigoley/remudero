@@ -8,6 +8,7 @@ import {
   draftExclusionForProposal,
   draftsDueOnDaemon,
   proposalsNeedingDraft,
+  readOriginMainSha,
   type BoardReferentRead,
   type BoardReferentState,
   type DraftCache,
@@ -19,6 +20,7 @@ import {
 import type { Config } from "../src/lib/config.js";
 import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
 import { buildInboxDraftHook } from "../src/run-task.js";
+import { repoRoot } from "../src/lib/repo-location.js";
 
 const BASE_PLAN_YAML = `
 - id: W1-T1
@@ -217,4 +219,59 @@ test("daemon draft selection ranks stale cached drafts before brand-new drafts w
     draftsDueOnDaemon(candidates, drafts, {}, 3, ctx()).map((p) => p.id),
     ["P-STALE-A", "P-STALE-Z", "P-NEW-A"],
   );
+});
+
+test("the daemon draft rung greps each evidence anchor once per main commit across passes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-draft-anchor-grep-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const shared: EvidenceAnchor = { description: "shared", pattern: "sharedAnchorPattern" };
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [proposal("P-GREP-A", { evidenceAnchors: [shared] }), proposal("P-GREP-B", { evidenceAnchors: [shared] })] }),
+  );
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const greps: string[] = [];
+  let sha = "a".repeat(40);
+  const hook = buildInboxDraftHook(
+    "owner",
+    "repo",
+    { root } as Config,
+    "RUN-GREP",
+    () => {},
+    async (due) => due.map((p) => ({ proposalId: p.id, ok: false as const, error: "ordinary failure" })),
+    (ref) => {
+      greps.push(ref);
+      return false;
+    },
+    () => sha,
+  );
+
+  await hook();
+  await hook();
+  assert.deepEqual(greps, ["a".repeat(40)], "two proposals over two passes share one grep at the main commit");
+  sha = "b".repeat(40);
+  await hook();
+  assert.deepEqual(greps, ["a".repeat(40), "b".repeat(40)], "a new main commit asks the question again");
+});
+
+test("the daemon draft rung's default anchor grep reads this checkout at its main commit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-draft-anchor-default-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const present: EvidenceAnchor = { description: "present", pattern: "export function buildInboxDraftHook", path: "src/run-task.ts" };
+  const absent: EvidenceAnchor = { description: "absent", pattern: "zqxNoSuchAnchorTextAnywhere", path: "src/run-task.ts" };
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [proposal("P-PRESENT", { evidenceAnchors: [present] }), proposal("P-ABSENT", { evidenceAnchors: [absent] })] }),
+  );
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  let drafted: string[] = [];
+  const hook = buildInboxDraftHook("owner", "repo", { root } as Config, "RUN-DEFAULT", () => {}, async (due) => {
+    drafted = due.map((p) => p.id);
+    return due.map((p) => ({ proposalId: p.id, ok: false as const, error: "ordinary failure" }));
+  });
+  await hook();
+  assert.ok(drafted.includes("P-PRESENT"), "an anchor true at main keeps its proposal draftable");
+  if (readOriginMainSha(repoRoot) !== undefined) {
+    assert.ok(!drafted.includes("P-ABSENT"), "an anchor absent at main is evidence-drifted");
+  }
 });

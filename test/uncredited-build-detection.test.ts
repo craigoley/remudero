@@ -332,3 +332,16 @@ test("nothing added paces or throttles or sleeps a call", () => {
   }
   assert.equal(timers, 0, "the derivation schedules no timer of its own");
 });
+
+test("a consumer that opts out of the uncredited-build warning reads no changed files and gets no warning", () => {
+  let reads = 0;
+  const g = gateway([PR_3095], {});
+  (g as unknown as { changedFiles: (u: string) => string[] | undefined }).changedFiles = () => {
+    reads++;
+    return SRC;
+  };
+  const proj = project(["W1-T2379"], { ledgerPath: ledgerFile([]), github: g, skipUncreditedBuildWarning: true }).get("W1-T2379")!;
+  assert.equal(reads, 0, "the opt-out spends no changed-files read — each one is a blocking GitHub call");
+  assert.equal(proj.uncreditedBuild, undefined, "and the report it opted out of is absent");
+  assert.equal(proj.merged, false, "credit is untouched");
+});

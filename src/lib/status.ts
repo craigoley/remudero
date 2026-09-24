@@ -433,6 +433,9 @@ export interface DeriveDeps {
   /** A whole-plan consumer that already owns its task scope can suppress the independent
    *  taskless-escalation projection. Omitted preserves the normal board projection. */
   skipTasklessEscalations?: boolean;
+  /** A consumer that never reads `uncreditedBuild` skips its per-PR changed-files reads — each one a blocking
+   *  GitHub read on the caller's thread (measured: the daemon credit rung, 62-140 s per cold pass). */
+  skipUncreditedBuildWarning?: boolean;
   /** W1-T2970 — path to the credit override record. Defaults to {@link defaultCreditOverridePath}
    *  off `ledgerPath`, so no caller must supply it for the rung to be live. */
   creditOverridePath?: string;
@@ -3147,7 +3150,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // for this land anyway?". The index is SUPPLIED by `projectPlan` off the merged list it already fetched —
   // W1-T257's guard counts batched calls and a second one would break it. A declared file scope prevents prose
   // mentions in unrelated PRs from becoming warnings; an unscoped task preserves the historical fail-open path.
-  if (task.repo !== "none" && task.status !== "blocked") {
+  if (task.repo !== "none" && task.status !== "blocked" && !deps.skipUncreditedBuildWarning) {
     const uncredited = uncreditedBuildWarning(
       task.id,
       deps.proseNamedTaskIds,
