@@ -36,8 +36,10 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
   return failed ? 1 : 0;
 }
 
-function main(argv) {
-  if (argv.includes("--run")) return runRuleSuites();
+/** `run` defaults to {@link runRuleSuites} but is injectable so a falsifier test can drive every
+ * branch here without spawning the full rule-check population. */
+export function main(argv, run = runRuleSuites) {
+  if (argv.includes("--run")) return run();
   if (argv.length > 0 && !argv.includes("--list")) {
     console.error("usage: node --import tsx scripts/list-rule-suites.mjs [--list|--run]");
     return 2;
