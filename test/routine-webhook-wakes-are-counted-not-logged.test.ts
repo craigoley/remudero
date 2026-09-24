@@ -25,6 +25,7 @@ import {
   wakeSummaryRow,
   type WakeCounters,
 } from "../src/lib/github-event-wake.js";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -116,7 +117,7 @@ test("ignored and duplicate deliveries flush as one summary row per minute with 
   mock.timers.enable({ apis: ["setInterval"] });
   const stop = startWakeSummaryFlush({
     counters,
-    now: () => new Date(clockMs).toISOString(),
+    clock: clockFromMillisFn(() => clockMs),
     write: (window) => {
       if (failNext) {
         failNext = false;

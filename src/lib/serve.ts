@@ -4291,7 +4291,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const wakeCounters = createWakeCounters();
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
-    now: () => systemClock.iso(),
+    clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
   const staleExit = gateStaleCodeExit({

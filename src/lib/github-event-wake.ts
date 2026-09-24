@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
+import type { Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
 
@@ -376,12 +377,12 @@ export function acceptedWakeCount(line: Record<string, unknown>): number | undef
 export function startWakeSummaryFlush(opts: {
   counters: WakeCounters;
   write: (window: { start: string; end: string }) => void;
-  now: () => string;
+  clock: Clock;
   intervalMs?: number;
 }): () => void {
-  let start = opts.now();
+  let start = opts.clock.iso();
   const flush = (): void => {
-    const end = opts.now();
+    const end = opts.clock.iso();
     const { counters } = opts;
     if (counters.accepted_coalesced + counters.ignored + counters.duplicate > 0) {
       try {
