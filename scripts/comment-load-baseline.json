@@ -224,7 +224,6 @@
   "src/lib/source-size-followup.ts": 4,
   "src/lib/spawn-guard.ts": 59,
   "src/lib/specialist-panel.ts": 193,
-  "src/lib/sre-lane.ts": 250,
   "src/lib/status-board.ts": 750,
   "src/lib/status.ts": 1750,
   "src/lib/supersession.ts": 50,
@@ -239,7 +238,6 @@
   "src/lib/triage.ts": 169,
   "src/lib/tty.ts": 70,
   "src/lib/untrusted-envelope.ts": 69,
-  "src/lib/usage-telemetry.ts": 250,
   "src/lib/verdict-calibration.ts": 500,
   "src/lib/verify-human-release.ts": 39,
   "src/lib/wipe-test.ts": 156,
@@ -250,6 +248,6 @@
   "src/lib/worker.ts": 1750,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 17000,
+  "src/run-task.ts": 17250,
   "src/spike.ts": 18
 }

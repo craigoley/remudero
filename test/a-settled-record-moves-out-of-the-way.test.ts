@@ -223,6 +223,23 @@ test("W1-T4096: every Why pointer resolves after a forensics split", () => {
   }
 });
 
+test("W1-T4096: forensics fold reports a named page that does not exist as missing, never as a crash", () => {
+  const root = tempRoot("forensics-missing");
+  try {
+    mkdirSync(join(root, "docs", "forensics"), { recursive: true });
+    const report = foldNarrativeStore({
+      root,
+      kind: "forensics",
+      forensicsPages: ["docs/forensics/does-not-exist.md"],
+      readingSizeBytes: 1,
+    });
+    assert.equal(report.changed, false);
+    assert.deepEqual(report.notes, ["missing: docs/forensics/does-not-exist.md"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4096: splitForensicsPage slugs and rewriteWhyPointers agree on the same anchor", () => {
   const { pointerRewrites } = splitForensicsPage(FORENSICS_FIXTURE, { pageRelPath: "docs/forensics/review.md" });
   assert.equal(slugifyHeading("Second pass (2026-09-06)"), "second-pass-2026-09-06");
@@ -291,9 +308,10 @@ test("W1-T4096: rmd knowledge fold (the CLI verb) drives foldNarrativeStore end 
     writeFileSync(join(root, "DECISIONS.md"), DECISIONS_FIXTURE);
     writeFileSync(join(root, "MASTER-PLAN.md"), MASTER_PLAN_FIXTURE);
 
-    // Unknown subcommand/store fails loud, spawning nothing.
+    // Unknown subcommand/store/flag all fail loud, spawning nothing.
     assert.equal(knowledgeCommand(["prune"], { root }), 2);
     assert.equal(knowledgeCommand(["fold", "--store", "bogus"], { root }), 2);
+    assert.equal(knowledgeCommand(["fold", "--bogus-flag"], { root }), 2);
 
     // --dry-run reports what would change and writes nothing.
     const before = readFileSync(join(root, "DECISIONS.md"), "utf8");
