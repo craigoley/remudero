@@ -1,0 +1,58 @@
+- id: W1-T4478
+  title: "THE ROUTER RECORDS A BARE ALIAS AS THE MODEL IT SELECTED — a Claude worker spawned with `sonnet` writes `worker_assignment.selected.model: \"sonnet\"`, so every ledger reader sees `sonnet` and `claude-sonnet-5` as two models; record the canonical id the mounts table resolves the alias to, and keep the alias in `requested`"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-24 operator session: follow-up to #7053 (usage-v1 By model alias fold)"
+  plan_refs: ["W1-T2573", "W1-T3158"]
+  files:
+    - src/lib/worker.ts
+    - src/lib/mounts.ts
+    - src/lib/usage-telemetry.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CODE PATH, CHECKED FIRST ON MAIN (9aa0dd61e). workerSelectionAssignment (src/lib/worker.ts) builds
+    `selected.model` as `input.model ?? selected?.model ?? args.model ?? DEFAULT_MODEL_LABEL`. On the Claude
+    path the caller passes `model: routedClaudeModel`, which is `claudeHealthRoute?.routedModel ?? args.model ??
+    workerModel(config)`. When the health route does not pick a concrete id, that is the mount's requested alias,
+    so the row reads `selected.model: "sonnet"`. `requested.model` already carries the same alias, so the
+    `selected` field adds nothing and hides the model that ran.
+    WHY #7053 IS NOT ENOUGH. #7053 folds alias rows into their concrete id only inside the usage-v1 route
+    (withCanonicalModels and claudeModelAliases in src/lib/usage-telemetry.ts). Every other reader of the
+    `worker.assignment` row still counts the alias as its own model: routing-experiments.ts (the routing A/B
+    evaluation), cash-trial.ts (the cash-trial fold), and analytics-route.ts. Fixing each reader repeats the
+    fold four times. Fixing the writer fixes all of them for new rows.
+    THE CANONICAL ID. `.remudero/mounts.yaml` maps `sonnet` to capability `balanced` in `capabilities.claude`,
+    and `claude_candidates.balanced` starts at `claude-sonnet-5`. That first candidate is the id #7053 already
+    treats as canonical. This task uses the same mapping, so the display fold and the recorded value agree.
+  design: |
+    (i) Move the alias mapping next to the table it reads. Export a resolver from src/lib/mounts.ts that maps a
+    Claude model name to the first `claudeCandidates` entry of its capability when the name is an alias (the rule
+    claudeModelAliases uses today: no hyphen, not itself a concrete candidate). usage-telemetry.ts's
+    claudeModelAliases keeps its signature and delegates to it, so #7053's fold still works for historical rows.
+    (ii) On the Claude path only, workerSelectionAssignment records the resolved id in `selected.model` and in the
+    chosen `routing.decision.considered` entry. `requested.model` keeps the alias exactly as asked. A concrete id,
+    or a name the table does not map, is recorded unchanged. A missing or malformed mounts table records the
+    name unchanged, which is today's behaviour.
+    (iii) Only the recorded value changes. The model string handed to the SDK (`options.model`) is not changed by
+    this task, and Codex and cash rows are untouched.
+    Add no new `interface XxxDeps`.
+  acceptance:
+    - claim: "a claude worker spawned with a bare alias records the canonical model id as its selected model"
+      proof: "unit test: a claude worker spawned with a bare alias records the canonical selected model"
+    - claim: "the requested alias is kept in the requested model"
+      proof: "unit test: a canonicalized assignment keeps the alias as its requested model"
+    - claim: "a concrete model id or an unmapped name is recorded unchanged"
+      proof: "unit test: an unmapped claude model name is recorded unchanged"
+    - claim: "an unreadable mounts table records the requested name unchanged"
+      proof: "unit test: an unreadable mounts table leaves the selected model as requested"
+  falsifier: |
+    CLOSE IF a `worker.assignment` row written on main after this date with provider claude and requested model
+    `sonnet` already carries a hyphenated `selected.model`.
