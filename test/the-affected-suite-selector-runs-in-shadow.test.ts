@@ -35,7 +35,7 @@ const TREE: Record<string, string> = {
   "src/b.ts": 'import { a } from "./a.js";\nexport const b = a + 1;\n',
   "scripts/tool.mjs": "console.log(1);\n",
   "test/b.test.ts": 'import { b } from "../src/b.js";\n',
-  "test/census.test.ts": 'readFileSync(new URL("../src/a.ts", import.meta.url), "utf8");\n',
+  "test/census.test.ts": 'await readFile(new URL("../src/a.ts", import.meta.url), "utf8");\n',
   "test/tool.test.ts": 'spawnSync(process.execPath, [join(ROOT, "scripts", "tool.mjs")]);\n',
   "test/unrelated.test.ts": "export {};\n",
 };
