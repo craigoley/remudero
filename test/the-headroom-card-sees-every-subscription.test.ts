@@ -187,7 +187,7 @@ test("W1-T4024: the console-signals-v1 projection carries headroom spend and ser
   const { res, body } = fakeResponse();
   await route.handler({ url: "/v1/analytics?projectionVersion=console-signals-v1" } as never, res, { params: {} });
   const got = JSON.parse(body()) as Record<string, any>;
-  assert.deepEqual(Object.keys(got).sort(), ["asOf", "provider", "queue", "spend", "timeSeries", "version"],
+  assert.deepEqual(Object.keys(got).sort(), ["asOf", "provider", "queue", "routingTelemetry", "spend", "timeSeries", "version"],
     "exactly the signals the console lacks — nothing from the operator-agent block, no per-run arrays");
   assert.equal(got.version, "console-signals-v1");
   assert.ok(got.provider.accounts.accounts.some((a: { provider: string }) => a.provider === "codex"), "codex reaches the console");
