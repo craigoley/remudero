@@ -17209,10 +17209,9 @@ export function normalizeRunPrAcceptanceFromPlan(
   taskId: string,
   planCriteria: readonly AcceptanceCriterion[],
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: {
-    fetchBody?: (url: string) => string;
-    editBody?: (url: string, body: string) => void;
-  } = {},
+  // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
+  // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
+  deps: Omit<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "diff"> = {},
 ): "rewritten" | "healthy" | "no-block" | "error" {
   if (planCriteria.length === 0) return "no-block";
   const { fetchBody, editBody } = { fetchBody: defaultRetroFetchBody, editBody: defaultRetroEditBody, ...deps };

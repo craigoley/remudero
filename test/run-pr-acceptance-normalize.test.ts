@@ -14,13 +14,11 @@
  * intermittently crashes at FILE level under --experimental-test-coverage.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { test } from "node:test";
 import { normalizeRunPrAcceptanceFromPlan } from "../src/run-task.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/6888";
 const TASK_ID = "W1-T4356";
@@ -171,32 +169,26 @@ test("a failed EDIT is also contained — the read succeeded, the write did not"
 // ── THE DEFAULT LEAVES — really shelling out, per CLAUDE.md's #977/#978 rule ─────────────────
 
 test("the DEFAULT leaves really shell out to gh — argv, JSON parse and the edit are all exercised", () => {
-  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-run-pr-normalize-`));
-  const argvLog = join(bin, "argv.txt");
-  // printf (inside the SINGLE-quoted format string below) interprets its own backslash escapes, so
-  // a real newline must survive as the 4-source-character `\\\\n` — two literal backslashes plus
-  // `n` — for printf to collapse them to the single `\n` JSON itself needs. Mirrors the identical
-  // double-escape test/retro-acceptance-repair.test.ts's own default-leaves test already relies on.
-  const escapedBody = DIVERGING_BODY.replace(/\\/g, "\\\\\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\\\n");
-  writeFileSync(
-    join(bin, "gh"),
-    `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}\n` +
-      `case "$*" in\n  *"--json body"*) printf '{"body":"${escapedBody}"}' ;;\n  *) : ;;\nesac\n`,
-    { mode: 0o755 },
+  // The shared PATH-shim `gh` (test/helpers/gh-shim.ts). Its routes `echo` their stdout, and dash's
+  // echo turns a `\\n` escape into a raw newline — illegal inside a JSON string — so every newline
+  // in the body travels as the JSON escape `\\u000a` instead, which echo passes through untouched.
+  const gh = ghShim(
+    [{ when: "--json body", stdout: JSON.stringify({ body: DIVERGING_BODY }).replace(/\\n/g, "\\u000a") }],
+    { kind: "gh-run-pr-normalize" },
   );
   const oldPath = process.env.PATH;
-  process.env.PATH = `${bin}:${oldPath}`;
+  process.env.PATH = `${gh.dir}:${oldPath}`;
   try {
     const logged: string[] = [];
     // NO deps object at all — the spread defaults are what run.
     const outcome = normalizeRunPrAcceptanceFromPlan(PR, TASK_ID, PLAN_CRITERIA, (s) => logged.push(s));
     assert.equal(outcome, "rewritten", "the real default read + comparison + real default edit all ran");
-    const argv = readFileSync(argvLog, "utf8");
+    const argv = gh.calls().join("\n");
     assert.match(argv, /pr view .*--json body/, "the real default fetch issued the real view argv");
     assert.match(argv, /api -X PATCH repos\/[^/]+\/[^/]+\/pulls\/\d+ -f body=/, "and the real REST edit argv");
     assert.ok(logged.includes("pr.body_normalized"));
   } finally {
     process.env.PATH = oldPath;
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(gh.dir, { recursive: true, force: true });
   }
 });
