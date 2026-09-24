@@ -388,3 +388,71 @@ test("W1-T4429: a bare STOP still wins outright over a pause's own review clock"
   assert.equal(rows.filter((r) => r.step === "daemon.pause").length, 0, "STOP is checked first — the pause branch never even ran");
   assert.equal(passes.length, 0, "no review-only pass ran either — STOP halts everything, PAUSE halts only dispatch");
 });
+
+test("W1-T4429: a throwing needs-human page is ledgered and never costs the tick", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const tier = await stepPauseHoldGovernor(
+    {
+      holdId: "hold-page-fails",
+      setAt: "2026-09-24T02:42:32.000Z",
+      expiresAt: "2026-09-24T04:42:32.000Z",
+      indefinite: false,
+      setterAlive: "unknown",
+      owner: OWNER,
+      now: new Date("2026-09-24T03:50:00.000Z"),
+    },
+    {},
+    {
+      onPauseNeedsHuman: () => {
+        throw new Error("issue tracker unreachable");
+      },
+    },
+    (step, extra = {}) => rows.push({ step, extra }),
+  );
+  assert.equal(tier, "needs_human", "the tier is still reported — the page's failure does not change it");
+  const failed = rows.find((r) => r.step === "pause.needs_human_failed");
+  assert.ok(failed, `the failed page is ledgered (saw ${JSON.stringify(rows.map((r) => r.step))})`);
+  assert.equal(failed.extra.error, "issue tracker unreachable");
+  assert.equal(failed.extra.reason, OWNER.reason, "the failure row still names the hold's reason");
+});
+
+test("W1-T4429: runDaemon governs a wired pause hold once per transition, clearing it at lapse", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let cleared = 0;
+  const summary = await runDaemon(fixturePlan(), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => {
+      throw new Error(`runOne must never be called for ${id}`);
+    },
+    checkPause: () => "PAUSE held",
+    checkPauseHold: () => ({
+      holdId: "anchor-sha-1",
+      setAt: "2026-09-24T02:42:32.000Z",
+      expiresAt: "2026-09-24T04:42:32.000Z",
+      indefinite: false,
+      setterAlive: false,
+      owner: OWNER,
+      now: new Date("2026-09-24T05:00:00.000Z"),
+    }),
+    clearPauseHold: () => {
+      cleared += 1;
+    },
+    checkStop: () => (rows.filter((r) => r.step === "daemon.pause").length >= 3 ? "test done" : undefined),
+    sleepUntilSweepWake: async () => {
+      await settle();
+      return "wake";
+    },
+    sweepLight: async () => {},
+    sleep: async () => {
+      await settle();
+    },
+    log: (step, extra = {}) => rows.push({ step, extra }),
+  });
+
+  assert.equal(summary.stopReason, "stopped");
+  assert.ok(rows.filter((r) => r.step === "daemon.pause").length >= 3, "the hold spanned several paused ticks");
+  const lapsed = rows.filter((r) => r.step === "pause.lapsed");
+  assert.equal(lapsed.length, 1, "one hold, one lapse row — never one per tick");
+  assert.equal(lapsed[0]!.extra.hold_id, "anchor-sha-1");
+  assert.equal(cleared, 1, "the lapsed hold is cleared exactly once");
+});
