@@ -748,6 +748,7 @@
     "test/ops-alert-cadence.test.ts": 1315,
     "test/ops-alert-reconcile.test.ts": 985,
     "test/ops.test.ts": 1158,
+    "test/opus-takes-high-risk-and-design-work-on-subscription-only.test.ts": 0,
     "test/orientation-preserves-the-line-structure-a-gate-reads.test.ts": 1278,
     "test/orientation.test.ts": 1757,
     "test/orphan-sweep-instance-scope.test.ts": 261,
