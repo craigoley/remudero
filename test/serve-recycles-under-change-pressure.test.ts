@@ -31,6 +31,8 @@ import type { SseRoute, SseSend } from "../src/lib/service.js";
 const BOOT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SEND: SseSend = () => {};
+/** W1-T4463: every move in this suite touches code serve loads. */
+const SRC_MOVED = () => ({ changedPaths: ["src/lib/serve.ts"] });
 
 function fakeSseRoute(): SseRoute {
   return { path: "/v1/status/stream", scope: "read", subscribe: () => () => {} };
@@ -50,6 +52,7 @@ function harness(over: Partial<StaleCodeExitDeps> & { commitsBehind?: number | u
   let recheck: (() => void) | undefined;
   const gate = gateStaleCodeExit({
     bootSha: BOOT,
+    changedPathsSince: SRC_MOVED,
     resolveCurrentSha: () => NEW,
     resolveCommitsBehind: () => ("commitsBehind" in over ? over.commitsBehind : 1),
     clock: clockFromMillisFn(() => clock),
@@ -117,6 +120,7 @@ test("the re-check is armed at construction, because a tab left open fires no ed
   const exits: number[] = [];
   gateStaleCodeExit({
     bootSha: BOOT,
+    changedPathsSince: SRC_MOVED,
     resolveCurrentSha: () => NEW,
     resolveCommitsBehind: () => 1,
     exit: (code) => exits.push(code),
@@ -142,6 +146,7 @@ test("pressure never buys an in-flight write: the largest backlog imaginable sti
   let recheck: (() => void) | undefined;
   const gate = gateStaleCodeExit({
     bootSha: BOOT,
+    changedPathsSince: SRC_MOVED,
     resolveCurrentSha: () => NEW,
     resolveCommitsBehind: () => 100_000,
     clock: clockFromMillisFn(() => 0),
@@ -182,6 +187,7 @@ test("code that reads fresh again clears the stale clock rather than banking the
   let clock = 0;
   gateStaleCodeExit({
     bootSha: BOOT,
+    changedPathsSince: SRC_MOVED,
     resolveCurrentSha: () => sha,
     resolveCommitsBehind: () => 2,
     clock: clockFromMillisFn(() => clock),
