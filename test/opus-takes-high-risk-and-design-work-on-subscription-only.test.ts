@@ -76,9 +76,17 @@ test("a high-risk span task does not start on Opus and a danger or design task d
   assert.equal(route({ risk: "high", band_meaning: "span", files: ["src/lib/a.ts", "src/lib/b.ts"] }), "sonnet", "large but routine: mid tier");
   assert.equal(route({ risk: "high", band_meaning: "span", files: ["docs/a.md"] }), "sonnet", "a span docs task does not fall back onto Opus");
   assert.equal(route({ risk: "high", band_meaning: "blast-radius", files: ["src/lib/a.ts"] }), "opus");
-  assert.equal(route({ risk: "high", files: ["src/lib/a.ts"] }), "opus", "an undeclared band is not excluded by this ruling");
   assert.equal(route({ risk: "high", band_meaning: "span", files: ["docs/adr/0001.md"] }), "opus", "design work starts on Opus whatever its band");
   assert.equal(implementRouteClass({ type: "review", risk: "high", band_meaning: "span" }, "src"), "src", "only the implement route splits on band");
+});
+
+test("an unbanded high-risk task does not start on Opus", () => {
+  const route = (files: string[], band_meaning?: string) =>
+    resolveRunMounts(REPO_ROOT, { type: "implement", risk: "high", files, ...(band_meaning ? { band_meaning } : {}) } as never, () => {}).mount.model;
+  assert.equal(route(["src/lib/a.ts"]), "sonnet", "no declared band is routine: mid tier");
+  assert.equal(route(["docs/a.md"]), "sonnet", "nor does an unbanded docs task fall back onto Opus");
+  assert.equal(route(["src/lib/a.ts"], "blast-radius"), "opus", "only a declared danger band starts on Opus");
+  assert.equal(route(["MASTER-PLAN.md"]), "opus", "design work starts on Opus without any band");
   assert.equal(loadMounts(mountsPath(REPO_ROOT)).step_up?.model, "opus", "repeated failures still step up to Opus");
 });
 
